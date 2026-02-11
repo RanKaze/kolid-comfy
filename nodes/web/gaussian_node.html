@@ -1,0 +1,1530 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Snapshot Gaussian</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #viewerContainer {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: #ff6b6b;
+            padding: 20px;
+            max-width: 80%;
+        }
+
+        .error.hidden {
+            display: none;
+        }
+
+        #controlsBar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            background: #252525;
+            padding: 8px 12px;
+            border-top: 1px solid #333;
+            flex-shrink: 0;
+        }
+
+        #controlsBar button {
+            background: #444;
+            border: none;
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        #controlsBar button:hover {
+            background: #555;
+        }
+
+        .scale-control {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .scale-control span {
+            color: #888;
+            font-size: 11px;
+        }
+
+        .scale-control input[type="number"] {
+            width: 60px;
+            background: #333;
+            border: 1px solid #555;
+            color: #fff;
+            font-size: 11px;
+            padding: 4px 6px;
+            border-radius: 3px;
+        }
+
+        .info-panel {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+            color: #aaa;
+            font-size: 11px;
+            font-family: monospace;
+            z-index: 50;
+        }
+
+        .info-panel.hidden {
+            display: none;
+        }
+
+        .instructions {
+            position: absolute;
+            bottom: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+
+        .screenshot-area-indicator {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 40;
+        }
+
+        .screenshot-area-indicator .indicator-border {
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.3);
+            position: relative;
+        }
+
+        .screenshot-area-indicator .indicator-label {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 122, 255, 0.8);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            white-space: nowrap;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .screenshot-area-indicator .reset-button {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            border-radius: 2px;
+            padding: 2px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            pointer-events: auto !important;
+            position: relative;
+            z-index: 100;
+        }
+        
+        .screenshot-area-indicator .reset-button:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        
+        .screenshot-area-indicator .reset-button:active {
+            background: rgba(255, 255, 255, 0.4);
+        }
+
+        .screenshot-area-indicator .indicator-label::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 4px solid transparent;
+            border-top-color: rgba(0, 122, 255, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <div id="viewerContainer">
+        <canvas id="canvas"></canvas>
+
+        <div id="error" class="error hidden"></div>
+
+        <div id="infoPanel" class="info-panel hidden">
+            <div id="infoContent"></div>
+        </div>
+
+        <div class="instructions">
+            Press <strong>Enter</strong> to take snapshot and close window
+        </div>
+
+        <!-- Screenshot area indicator -->
+        <div id="screenshotAreaIndicator" class="screenshot-area-indicator">
+            <div class="indicator-border"></div>
+            <div class="indicator-label">
+                <span class="label-text"></span>
+                <button class="reset-button" title="Reset screenshot area">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M6 1L7.5 3.5H9.5V5.5H7.5V3.5L6 1Z" fill="white"/>
+                        <path d="M6 11L4.5 8.5H2.5V6.5H4.5V8.5L6 11Z" fill="white"/>
+                        <path d="M1 6L3.5 4.5V2.5H5.5V4.5H3.5L1 6Z" fill="white"/>
+                        <path d="M11 6L8.5 7.5V9.5H6.5V7.5H8.5L11 6Z" fill="white"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="controlsBar">
+            <div class="scale-control">
+                <span>Scale:</span>
+                <input type="range" id="scaleSlider" min="0.01" max="100" step="1" value="2" title="Gaussian scale multiplier">
+                <input type="number" id="scaleInput" min="0.01" max="100" step="0.1" value="2" title="Gaussian scale multiplier">
+            </div>
+            <div class="scale-control">
+                <span>Focal:</span>
+                <input type="range" id="focalSlider" min="5" max="500" step="1" value="30" title="Focal length in mm">
+                <input type="number" id="focalInput" min="5" max="500" step="1" value="30" title="Focal length in mm">
+            </div>
+            <button id="resetCamera" title="Reset camera view">Reset View</button>
+            <button id="screenshot" title="Take screenshot">Screenshot</button>
+        </div>
+
+    <!-- Load bundled gsplat.js -->
+    <script src="./js/gsplat-bundle.js"></script>
+
+    <script type="module">
+        // Use the globally exported GSPLAT
+        const SPLAT = window.GSPLAT;
+
+        // DOM elements
+        const canvas = document.getElementById('canvas');
+        const errorEl = document.getElementById('error');
+        const infoPanel = document.getElementById('infoPanel');
+        const infoContent = document.getElementById('infoContent');
+
+        // Make canvas focusable so keyboard controls (WASD/arrows) work after clicking the viewer
+        canvas.tabIndex = 0;
+        canvas.style.outline = "none";
+        const focusCanvas = () => canvas.focus({ preventScroll: true });
+        canvas.addEventListener('pointerdown', focusCanvas);
+
+        // gsplat.js components
+        let scene = null;
+        let camera = null;
+        let renderer = null;
+        let controls = null;
+        let animationId = null;
+        let currentSplat = null;
+        let originalScales = null;  // Store original scales for dynamic adjustment
+        const SCALE_CHUNK_SIZE = 200000; // Number of float entries processed per animation frame
+        const DEFAULT_SCALE_MULTIPLIER = 1.0; // Default visual scale applied after loading
+        let scaleUpdateJob = null; // Tracks incremental scale updates to avoid UI stalls
+
+        // Default focal length
+        const DEFAULT_FOCAL_LENGTH = 30;
+
+        // Initialize the viewer
+        function initViewer() {
+            try {
+                scene = new SPLAT.Scene();
+                camera = new SPLAT.Camera();
+                // WebGLRenderer - preserveDrawingBuffer enabled in gsplat-bundle.js
+                renderer = new SPLAT.WebGLRenderer(canvas);
+                controls = new SPLAT.OrbitControls(camera, canvas);
+
+                // Handle resize
+                const resize = () => {
+                    renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+                };
+                window.addEventListener('resize', resize);
+                resize();
+
+                // Set default focal length - reference setCameraFromExtrinsics design
+                const canvasWidth = canvas.clientWidth || 512;
+                const canvasHeight = canvas.clientHeight || 512;
+                
+                // Convert default focal length from mm to pixel units
+                // Based on the ratio between known real focal length and pixel focal length
+                // When real focal length is 30mm, pixel focal length is around 2911
+                const pixelFocal = (2911 * DEFAULT_FOCAL_LENGTH) / 30;
+                camera.data.fx = pixelFocal;
+                camera.data.fy = pixelFocal;
+                currentFocalLength = DEFAULT_FOCAL_LENGTH;
+                
+                // Initialize focal length input and display
+                if (focalInput) {
+                    focalInput.value = DEFAULT_FOCAL_LENGTH;
+                    const focalDisplay = document.getElementById('focalLengthDisplay');
+                    if (focalDisplay) {
+                        focalDisplay.textContent = DEFAULT_FOCAL_LENGTH;
+                    }
+                }
+                
+                console.log('[SnapshotGaussian] Initialized with default focal length:', DEFAULT_FOCAL_LENGTH);
+                console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
+
+                // Start render loop
+                const frame = () => {
+                    // Update camera to apply new focal length
+                if (camera.update) {
+                    camera.update();
+                }
+                controls.update();
+                    renderer.render(scene, camera);
+                    animationId = requestAnimationFrame(frame);
+                };
+                frame();
+
+                console.log('[SnapshotGaussian] Initialized successfully');
+            } catch (err) {
+                console.error('[SnapshotGaussian] Init error:', err);
+                showError('Failed to initialize WebGL viewer: ' + err.message);
+            }
+        }
+
+        // Show error
+        function showError(message) {
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+        }
+
+        // Store initial camera params for reset
+        let initialCameraData = null;
+
+        // Scale compensation: when focal length is scaled down for canvas size,
+        // gaussian scales need to be multiplied by this factor to maintain correct screen-space size
+        let gaussianScaleCompensation = 1.0;
+
+        // Set camera from extrinsics and intrinsics
+        // extrinsics: 4x4 matrix (identity for SHARP = camera at origin looking down +Z)
+        // intrinsics: 3x3 matrix [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
+        // splat: the loaded Gaussian splat object (optional, used for bounds)
+        function setCameraFromExtrinsics(extrinsics, intrinsics, splat) {
+            if (!camera || !controls) return;
+
+            console.log('[GaussianViewer] Setting camera from extrinsics/intrinsics');
+            console.log('[GaussianViewer] Extrinsics:', JSON.stringify(extrinsics));
+            console.log('[GaussianViewer] Intrinsics:', JSON.stringify(intrinsics));
+
+            // Parse extrinsics to get camera position
+            // For a 4x4 extrinsics matrix [R|t], camera position in world space is -R^T * t
+            // But for identity matrix, camera is simply at origin
+            let camPosX = 0, camPosY = 0, camPosZ = 0;
+
+            if (extrinsics && Array.isArray(extrinsics) && extrinsics.length === 4) {
+                // Extract rotation and translation from 4x4 extrinsics
+                const R = [
+                    [extrinsics[0][0], extrinsics[0][1], extrinsics[0][2]],
+                    [extrinsics[1][0], extrinsics[1][1], extrinsics[1][2]],
+                    [extrinsics[2][0], extrinsics[2][1], extrinsics[2][2]]
+                ];
+                const t = [extrinsics[0][3], extrinsics[1][3], extrinsics[2][3]];
+
+                // Camera position = -R^T * t
+                camPosX = -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]);
+                camPosY = -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]);
+                camPosZ = -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]);
+
+                console.log('[GaussianViewer] Computed camera position from extrinsics:', camPosX, camPosY, camPosZ);
+            }
+
+            // Calculate FOV and set camera focal length from intrinsics
+            // intrinsics[0][0] = fx (focal length in pixels)
+            // intrinsics[1][1] = fy (focal length in pixels)
+            // intrinsics[1][2] = cy (principal point y = image_height / 2)
+            let targetZ = 2; // default
+            if (intrinsics && Array.isArray(intrinsics) && intrinsics.length >= 2) {
+                const fx = intrinsics[0][0];
+                const fy = intrinsics[1][1];
+                const cx = intrinsics[0][2];
+                const cy = intrinsics[1][2];
+                const imageWidth = cx * 2;  // cx is typically image_width / 2
+                const imageHeight = cy * 2; // cy is typically image_height / 2
+
+                console.log('[GaussianViewer] Intrinsics: fx=', fx, 'fy=', fy, 'cx=', cx, 'cy=', cy);
+                console.log('[GaussianViewer] Image dimensions (from intrinsics):', imageWidth, 'x', imageHeight);
+
+                // Set camera focal length to match the original camera
+                // gsplat.js uses fx/fy in screen pixels, need to scale by canvas size
+                const canvasWidth = canvas.clientWidth || 512;
+                const canvasHeight = canvas.clientHeight || 512;
+
+                // Use uniform scale factor (canvas should have same aspect ratio as image)
+                // This keeps fx = fy for undistorted view
+                const scale = canvasWidth / imageWidth;
+                const scaledF = fx * scale;  // fx and fy are equal in SHARP
+
+                camera.data.fx = scaledF;
+                camera.data.fy = scaledF;
+                // Update camera to apply new focal length
+                if (camera.update) {
+                    camera.update();
+                }
+
+                // Calculate real focal length in mm from intrinsics
+                // Based on the ratio between known real focal length and pixel focal length
+                // When real focal length is 30mm, pixel focal length is around 2911
+                const focalLengthMM = (30 * scaledF) / 2911;
+                const roundedFocal = Math.round(focalLengthMM);
+                
+                // Update current focal length and UI
+                currentFocalLength = roundedFocal;
+                focalInput.value = roundedFocal;
+                const focalDisplay = document.getElementById('focalLengthDisplay');
+                if (focalDisplay) {
+                    focalDisplay.textContent = roundedFocal;
+                }
+
+                // IMPORTANT: Compensate gaussian scales for the focal length scaling
+                // Screen-space size = world_scale * fx / depth
+                // When we scale fx down, gaussians appear smaller. Multiply scales by inverse.
+                gaussianScaleCompensation = imageWidth / canvasWidth;
+
+                console.log('[GaussianViewer] Canvas size:', canvasWidth, 'x', canvasHeight);
+                console.log('[GaussianViewer] Uniform scale:', scale, 'scaled focal length:', scaledF);
+                console.log('[GaussianViewer] Gaussian scale compensation:', gaussianScaleCompensation.toFixed(2), 'x');
+
+                // Calculate vertical FOV in radians for logging
+                const fovY = 2 * Math.atan(imageHeight / (2 * fy));
+                const fovYDeg = fovY * 180 / Math.PI;
+                console.log('[GaussianViewer] Calculated FOV:', fovYDeg, 'degrees');
+
+                // For SHARP, the scene is in front of the camera
+                // Use focal length to estimate a reasonable target distance
+                // The disparity range in metadata can help estimate scene depth
+                // For now, use a simple heuristic based on typical SHARP output
+                targetZ = Math.max(1, fy / imageHeight * 2);
+                console.log('[GaussianViewer] Target Z distance:', targetZ);
+            }
+
+            // Determine the target position (what the camera looks at)
+            // For the INITIAL view (matching original image), look STRAIGHT AHEAD along Z axis
+            // NOT at the scene center - that would tilt the camera
+            let targetX = 0, targetY = 0;
+            let orbitZ = targetZ;  // For orbiting, use a closer point
+            if (splat && splat.bounds) {
+                const center = splat.bounds.center();
+                const size = splat.bounds.size();
+
+                // Use scene center Z for the view direction
+                targetZ = center.z;
+
+                // For orbit center, use distance to closest object + 50%
+                // Camera is at origin, so minZ is the distance to closest point
+                const minZ = center.z - size.z / 2;
+                orbitZ = minZ * 1.5;  // 50% past the closest point
+
+                console.log('[GaussianViewer] Scene center:', center.x, -center.y, center.z);
+                console.log('[GaussianViewer] Closest point Z:', minZ.toFixed(1));
+                console.log('[GaussianViewer] Orbit center Z:', orbitZ.toFixed(1), '(closest + 50%)');
+            }
+
+            // SHARP uses Y-down coordinate system, so flip camera Y as well
+            camPosY = -camPosY;
+
+            // For SHARP: camera is at origin, scene is at positive Z
+            // The orbit controls work by having the camera orbit around a target point.
+            // To get the "original image view", we set camera at the computed position
+            // and look at the scene center.
+
+            const camPos = new SPLAT.Vector3(camPosX, camPosY, camPosZ);
+            // Use orbitZ for the target - closer to camera for better orbit feel
+            const targetPos = new SPLAT.Vector3(targetX, targetY, orbitZ);
+
+            // Store for reset
+            initialCameraData = {
+                position: camPos,
+                target: targetPos,
+                fx: camera.data.fx,
+                fy: camera.data.fy
+            };
+
+            // Set camera position - IMPORTANT: must set camera.position, not camera.data.position
+            // camera.position is used by OrbitControls
+            // camera.data.position is used for rendering
+            camera.position.x = camPosX;
+            camera.position.y = camPosY;
+            camera.position.z = camPosZ;
+
+            // Update orbit controls to orbit around the target point
+            // This recalculates the internal orbit state from current camera.position
+            controls.setCameraTarget(targetPos);
+
+            console.log('[GaussianViewer] Camera set to position:', camPosX, camPosY, camPosZ);
+            console.log('[GaussianViewer] Looking at target:', targetX, targetY, targetZ);
+            console.log('[GaussianViewer] This should match the original input image view');
+        }
+
+        // Load a PLY file from ArrayBuffer data
+        async function loadPLYFromData(arrayBuffer, filename, extrinsics, intrinsics) {
+            try {
+                // Clear ALL existing objects from scene
+                if (scene.objects && scene.objects.length > 0) {
+                    console.log('[SnapshotGaussian] Clearing', scene.objects.length, 'existing objects from scene');
+                    // Remove all objects (iterate backwards to avoid index issues)
+                    while (scene.objects.length > 0) {
+                        scene.removeObject(scene.objects[0]);
+                    }
+                }
+                currentSplat = null;
+                if (scaleUpdateJob) {
+                    scaleUpdateJob.cancelled = true;
+                    scaleUpdateJob = null;
+                }
+
+                // Pre-calculate scale compensation from intrinsics BEFORE loading
+                // This ensures gaussian scales are correct from the start
+                gaussianScaleCompensation = 1.0;  // Default if no intrinsics
+                if (intrinsics && Array.isArray(intrinsics) && intrinsics.length >= 2) {
+                    const fx = intrinsics[0][0];
+                    const cx = intrinsics[0][2];
+                    const imageWidth = cx * 2;
+                    const canvasWidth = canvas.clientWidth || 512;
+                    // Compensation = original_size / canvas_size
+                    // This makes gaussians appear at their correct world-space size
+                    gaussianScaleCompensation = imageWidth / canvasWidth;
+                    console.log('[SnapshotGaussian] Pre-calculated scale compensation:', gaussianScaleCompensation.toFixed(2), 'x');
+                    console.log('[SnapshotGaussian] (Image:', imageWidth, 'px -> Canvas:', canvasWidth, 'px)');
+                }
+
+                console.log('[SnapshotGaussian] Loading from data, size:', arrayBuffer.byteLength);
+
+                // Create a blob URL from the data
+                const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
+                const blobUrl = URL.createObjectURL(blob);
+
+                // Load the PLY file from blob URL using PLYLoader
+                await SPLAT.PLYLoader.LoadAsync(blobUrl, scene);
+
+                // Clean up blob URL
+                URL.revokeObjectURL(blobUrl);
+
+                // Get the loaded splat (last object in scene)
+                if (scene.objects && scene.objects.length > 0) {
+                    currentSplat = scene.objects[scene.objects.length - 1];
+
+                    // Log bounds info for debugging
+                    if (currentSplat.bounds) {
+                        const center = currentSplat.bounds.center();
+                        const size = currentSplat.bounds.size();
+                        console.log('[SnapshotGaussian] Scene bounds center:', center.x, center.y, center.z);
+                        console.log('[SnapshotGaussian] Scene bounds size:', size.x, size.y, size.z);
+                    }
+
+                    // Store original scales and log statistics
+                    if (currentSplat.data && currentSplat.data.scales) {
+                        const scales = currentSplat.data.scales;
+                        const numGaussians = scales.length / 3;
+                        let minScale = Infinity, maxScale = -Infinity, sumScale = 0;
+
+                        // Store a copy of original scales (BEFORE compensation) for dynamic adjustment
+                        // The stored scales include the compensation factor so user scale=1 shows correct size
+                        originalScales = new Float32Array(scales.length);
+                        for (let i = 0; i < scales.length; i++) {
+                            // Apply compensation: gaussians need to be larger when focal length is scaled down
+                            originalScales[i] = scales[i] * gaussianScaleCompensation;
+                        }
+                        console.log('[SnapshotGaussian] Stored compensated scales (factor:', gaussianScaleCompensation.toFixed(2), 'x)');
+
+                        // Apply compensated scales immediately
+                        for (let i = 0; i < scales.length; i++) {
+                            scales[i] = originalScales[i];
+                        }
+
+                        // Mark data as changed so gsplat.js re-uploads to GPU
+                        currentSplat.data.changed = true;
+
+                        for (let i = 0; i < scales.length; i++) {
+                            const s = scales[i];
+                            minScale = Math.min(minScale, s);
+                            maxScale = Math.max(maxScale, s);
+                            sumScale += s;
+                        }
+
+                        const avgScale = sumScale / scales.length;
+                        console.log('[SnapshotGaussian] === GAUSSIAN SCALE DEBUG (after compensation) ===');
+                        console.log('[SnapshotGaussian] Number of Gaussians:', numGaussians);
+                        console.log('[SnapshotGaussian] Compensated scale min:', minScale.toFixed(6));
+                        console.log('[SnapshotGaussian] Compensated scale max:', maxScale.toFixed(6));
+                        console.log('[SnapshotGaussian] Compensated scale avg:', avgScale.toFixed(6));
+                        console.log('[SnapshotGaussian] =================================================');
+                    } else {
+                        console.log('[SnapshotGaussian] No scales data found on splat object');
+                        console.log('[SnapshotGaussian] Splat properties:', Object.keys(currentSplat));
+                        if (currentSplat.data) {
+                            console.log('[SnapshotGaussian] Splat.data properties:', Object.keys(currentSplat.data));
+                        }
+                        originalScales = null;
+                    }
+
+                    // Reset scale when loading new splat and apply default multiplier
+                    currentScale = 2.0;
+                    scaleSlider.value = 2.0;
+                    scaleInput.value = 2.0;
+                    scheduleScaleUpdate(2.0);
+                }
+
+                // Set camera from extrinsics and intrinsics if provided
+                if (extrinsics || intrinsics) {
+                    setCameraFromExtrinsics(extrinsics, intrinsics, currentSplat);
+                    if (controls) controls.update();
+                }
+
+                // Show info panel
+                infoPanel.classList.remove('hidden');
+                infoContent.innerHTML = `<span style="color:#6cc;">Gaussian Splat Loaded</span><br><span style="color:#888;">${filename}</span>`;
+
+                console.log('[SnapshotGaussian] Loaded successfully');
+
+            } catch (err) {
+                console.error('[SnapshotGaussian] Load error:', err);
+                showError('Failed to load PLY: ' + err.message);
+            }
+        }
+
+        // Reset camera to initial position
+        function resetCamera() {
+            if (camera && controls) {
+                // Get canvas size - reference setCameraFromExtrinsics design
+                const canvasWidth = canvas.clientWidth || 512;
+                const canvasHeight = canvas.clientHeight || 512;
+                
+                if (initialCameraData) {
+                    // Set camera.position (used by OrbitControls), not camera.data.position
+                    const pos = initialCameraData.position;
+                    camera.position.x = pos.x;
+                    camera.position.y = pos.y;
+                    camera.position.z = pos.z;
+
+                    // Restore focal lengths
+                    if (initialCameraData.fx) {
+                        camera.data.fx = initialCameraData.fx;
+                        camera.data.fy = initialCameraData.fy;
+                        // Calculate real focal length in mm from pixel focal length
+                        // Based on the ratio between known real focal length and pixel focal length
+                        // When real focal length is 30mm, pixel focal length is around 2911
+                        const focalLengthMM = (30 * initialCameraData.fx) / 2911;
+                        const roundedFocal = Math.round(focalLengthMM);
+                        // Update focal length input and display
+                        currentFocalLength = roundedFocal;
+                        focalInput.value = roundedFocal;
+                        const focalDisplay = document.getElementById('focalLengthDisplay');
+                        if (focalDisplay) {
+                            focalDisplay.textContent = roundedFocal;
+                        }
+                    }
+
+                    // Set the target - this recalculates orbit state from current camera.position
+                    if (initialCameraData.target) {
+                        controls.setCameraTarget(initialCameraData.target);
+                    }
+
+                    console.log('[SnapshotGaussian] Reset camera to position:', pos.x, pos.y, pos.z);
+                    console.log('[SnapshotGaussian] Reset camera target:', initialCameraData.target?.x, initialCameraData.target?.y, initialCameraData.target?.z);
+                    console.log('[SnapshotGaussian] Reset focal length:', initialCameraData.fx);
+                    console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
+                } else {
+                    // Default fallback
+                    camera.position.x = 0;
+                    camera.position.y = 0;
+                    camera.position.z = 5;
+                    // Reset focal length to default
+                    // Convert default focal length from mm to pixel units
+                    // Based on the ratio between known real focal length and pixel focal length
+                    // When real focal length is 30mm, pixel focal length is around 2911
+                    const pixelFocal = (2911 * DEFAULT_FOCAL_LENGTH) / 30;
+                    camera.data.fx = pixelFocal;
+                    camera.data.fy = pixelFocal;
+                    currentFocalLength = DEFAULT_FOCAL_LENGTH;
+                    focalInput.value = DEFAULT_FOCAL_LENGTH;
+                    const focalDisplay = document.getElementById('focalLengthDisplay');
+                    if (focalDisplay) {
+                        focalDisplay.textContent = DEFAULT_FOCAL_LENGTH;
+                    }
+                    console.log('[SnapshotGaussian] Reset camera to default position (0, 0, 5)');
+                    console.log('[SnapshotGaussian] Reset focal length to default:', DEFAULT_FOCAL_LENGTH);
+                    console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
+                }
+                // Update camera to apply new focal length
+                if (camera.update) {
+                    camera.update();
+                }
+                controls.update();
+            }
+        }
+
+        // Take screenshot and close window
+        function takeScreenshotAndClose() {
+            if (!renderer) return;
+
+            try {
+                // Create a temporary canvas with the specified size
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = screenshotWidth;
+                tempCanvas.height = screenshotHeight;
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                // Get the actual position of the screenshot area indicator
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                const rect = indicator.getBoundingClientRect();
+                const canvasRect = canvas.getBoundingClientRect();
+                
+                // Calculate the region to capture based on the indicator's actual position
+                const sourceX = rect.left - canvasRect.left;
+                const sourceY = rect.top - canvasRect.top;
+                
+                // Ensure the source region is within bounds
+                const safeSourceX = Math.max(0, sourceX);
+                const safeSourceY = Math.max(0, sourceY);
+                const safeWidth = Math.min(screenshotWidth, canvas.width - safeSourceX);
+                const safeHeight = Math.min(screenshotHeight, canvas.height - safeSourceY);
+                
+                // Draw only the specified region of the original canvas to the temporary canvas
+                tempCtx.drawImage(
+                    canvas, 
+                    safeSourceX, 
+                    safeSourceY, 
+                    safeWidth, 
+                    safeHeight, 
+                    0, 
+                    0, 
+                    safeWidth, 
+                    safeHeight
+                );
+                
+                // Get the data URL from the temporary canvas
+                const dataUrl = tempCanvas.toDataURL('image/png');
+                console.log('[SnapshotGaussian] Screenshot captured, sending to parent');
+                console.log('[SnapshotGaussian] Captured region:', safeWidth, 'x', safeHeight, 'from position:', safeSourceX, safeSourceY);
+                
+                // Send screenshot to the same origin (for server-side capture)
+                fetch('/screenshot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        image: dataUrl
+                    })
+                }).then(() => {
+                    console.log('[SnapshotGaussian] Screenshot sent to server');
+                });
+
+                // Close the window after a short delay
+                setTimeout(() => {
+                    window.close();
+                }, 500);
+
+            } catch (err) {
+                console.error('[SnapshotGaussian] Screenshot error:', err);
+            }
+        }
+
+        // Gaussian scale control
+        const scaleSlider = document.getElementById('scaleSlider');
+        const scaleInput = document.getElementById('scaleInput');
+        let currentScale = 2.0;
+
+        // Focal length control
+        const focalSlider = document.getElementById('focalSlider');
+        const focalInput = document.getElementById('focalInput');
+        let currentFocalLength = DEFAULT_FOCAL_LENGTH;
+
+        function finalizeScaleUpdate(job) {
+            if (!job || job.cancelled || scaleUpdateJob !== job) {
+                return;
+            }
+
+            if (!(currentSplat && currentSplat.data)) {
+                scaleUpdateJob = null;
+                return;
+            }
+
+            currentSplat.data.changed = true;
+            currentSplat.data.detached = false;
+
+            const renderData = renderer?._renderData || renderer?.renderData;
+            if (renderData?.markDirty) {
+                renderData.markDirty(currentSplat);
+            }
+            if (renderData) {
+                renderData.dataChanged = true;
+            }
+
+            if (currentSplat.dispatchEvent && currentSplat._changeEvent) {
+                currentSplat.dispatchEvent(currentSplat._changeEvent);
+            }
+
+            console.log('[SnapshotGaussian] Finished gaussian scale update');
+            scaleUpdateJob = null;
+        }
+
+        function scheduleScaleUpdate(targetScale) {
+            if (!(currentSplat && currentSplat.data && currentSplat.data.scales && originalScales)) {
+                console.log('[SnapshotGaussian] Cannot schedule scale update - missing data');
+                return;
+            }
+
+            // Cancel any in-flight job so we only apply the latest value
+            if (scaleUpdateJob) {
+                scaleUpdateJob.cancelled = true;
+            }
+
+            const job = {
+                targetScale,
+                index: 0,
+                cancelled: false,
+                splat: currentSplat,
+                scales: currentSplat.data.scales,
+                originals: originalScales
+            };
+            scaleUpdateJob = job;
+
+            const total = job.originals.length;
+            console.log('[SnapshotGaussian] Scaling gaussians in chunks. Factor:', targetScale, 'Total entries:', total);
+
+            const processChunk = () => {
+                if (job.cancelled || scaleUpdateJob !== job || job.splat !== currentSplat) {
+                    return;
+                }
+
+                const start = job.index;
+                const end = Math.min(total, start + SCALE_CHUNK_SIZE);
+
+                for (let i = start; i < end; i++) {
+                    job.scales[i] = job.originals[i] * job.targetScale;
+                }
+
+                job.index = end;
+
+                if (job.index < total) {
+                    requestAnimationFrame(processChunk);
+                } else {
+                    finalizeScaleUpdate(job);
+                }
+            };
+
+            requestAnimationFrame(processChunk);
+        }
+
+        function updateGaussianScale(newScale) {
+            newScale = Math.max(0.01, Math.min(100, parseFloat(newScale) || 2.0));
+            currentScale = newScale;
+
+            // Update slider and input
+            scaleSlider.value = newScale;
+            scaleInput.value = newScale;
+
+            // Apply scale to current splat by modifying the underlying scale data
+            // gsplat.js applies Math.exp() during PLY loading, so data.scales contains LINEAR values
+            // To multiply visual size by factor f, we multiply the scale values directly
+            if (currentSplat && currentSplat.data && currentSplat.data.scales && originalScales) {
+                scheduleScaleUpdate(newScale);
+            } else if (currentSplat) {
+                console.log('[SnapshotGaussian] Cannot update scales - missing data or originalScales');
+                console.log('[SnapshotGaussian] currentSplat.data:', !!currentSplat.data);
+                console.log('[SnapshotGaussian] currentSplat.data.scales:', !!(currentSplat.data && currentSplat.data.scales));
+                console.log('[SnapshotGaussian] originalScales:', !!originalScales);
+            }
+        }
+
+        function updateFocalLength(newFocal) {
+            newFocal = Math.max(5, Math.min(500, parseFloat(newFocal) || DEFAULT_FOCAL_LENGTH));
+            currentFocalLength = newFocal;
+
+            // Update slider and input
+            focalSlider.value = newFocal;
+            focalInput.value = newFocal;
+
+            // Update camera focal length - reference setCameraFromExtrinsics design
+            if (camera) {
+                // Get canvas size
+                const canvasWidth = canvas.clientWidth || 512;
+                const canvasHeight = canvas.clientHeight || 512;
+
+                // Convert mm focal length to pixel focal length
+                // Based on the ratio between known real focal length and pixel focal length
+                // When real focal length is 30mm, pixel focal length is around 2911
+                const pixelFocal = (2911 * newFocal) / 30;
+
+                // Use the converted pixel focal length
+                camera.data.fx = pixelFocal;
+                camera.data.fy = pixelFocal;
+                // Update camera to apply new focal length
+                if (camera.update) {
+                    camera.update();
+                }
+
+                console.log('[SnapshotGaussian] Updated focal length:', newFocal, 'mm ->', pixelFocal.toFixed(2), 'pixels');
+                console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
+            }
+        }
+
+        // Use input event for real-time updates
+        scaleSlider.addEventListener('input', (e) => updateGaussianScale(e.target.value));
+        scaleInput.addEventListener('input', (e) => updateGaussianScale(e.target.value));
+        focalSlider.addEventListener('input', (e) => updateFocalLength(e.target.value));
+        focalInput.addEventListener('input', (e) => updateFocalLength(e.target.value));
+        
+        // Also keep change event for compatibility
+        scaleSlider.addEventListener('change', (e) => updateGaussianScale(e.target.value));
+        scaleInput.addEventListener('change', (e) => updateGaussianScale(e.target.value));
+        focalSlider.addEventListener('change', (e) => updateFocalLength(e.target.value));
+        focalInput.addEventListener('change', (e) => updateFocalLength(e.target.value));
+
+        // Event listeners
+        document.getElementById('resetCamera').addEventListener('click', resetCamera);
+        document.getElementById('screenshot').addEventListener('click', takeScreenshotAndClose);
+
+        // Listen for Enter key to take screenshot and close
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                takeScreenshotAndClose();
+            }
+        });
+
+        let screenshotWidth = 512;
+        let screenshotHeight = 512;
+        let initialScreenshotWidth = 512;
+        let initialScreenshotHeight = 512;
+        let isScreenshotAreaModified = false;
+        let isDragging = false;
+        let isResizing = false;
+
+        // Update screenshot area indicator
+        function updateScreenshotAreaIndicator() {
+            const indicator = document.getElementById('screenshotAreaIndicator');
+            if (!indicator) return;
+            
+            // Calculate the position: center of the canvas
+            const canvasWidth = canvas.clientWidth;
+            const canvasHeight = canvas.clientHeight;
+            const left = (canvasWidth - screenshotWidth) / 2;
+            const top = (canvasHeight - screenshotHeight) / 2;
+            
+            // Update indicator position and size
+            indicator.style.left = `${left}px`;
+            indicator.style.top = `${top}px`;
+            
+            const border = indicator.querySelector('.indicator-border');
+            if (border) {
+                border.style.width = `${screenshotWidth}px`;
+                border.style.height = `${screenshotHeight}px`;
+            }
+            
+            const labelText = indicator.querySelector('.label-text');
+            if (labelText) {
+                labelText.textContent = `${screenshotWidth} x ${screenshotHeight}`;
+            }
+            
+            // Check if the screenshot area has been modified
+            // Only update this if we're not in the middle of a drag or resize operation
+            if (!isDragging && !isResizing) {
+                isScreenshotAreaModified = screenshotWidth !== initialScreenshotWidth || screenshotHeight !== initialScreenshotHeight;
+            }
+            
+            // Update reset button visibility
+            updateResetButtonVisibility();
+            
+            console.log('[SnapshotGaussian] Updated screenshot area indicator:', screenshotWidth, 'x', screenshotHeight, 'at', left, 'x', top);
+        }
+        
+        // Reset screenshot area to initial position and size
+        function resetScreenshotArea() {
+            // Reset to initial size
+            screenshotWidth = initialScreenshotWidth;
+            screenshotHeight = initialScreenshotHeight;
+            isScreenshotAreaModified = false;
+            
+            // Update the indicator
+            updateScreenshotAreaIndicator();
+            
+            console.log('[SnapshotGaussian] Reset screenshot area to initial size and position');
+        }
+        
+        // Update reset button visibility
+        function updateResetButtonVisibility() {
+            const resetButton = document.querySelector('.reset-button');
+            if (resetButton) {
+                // Show reset button only when Ctrl is pressed and screenshot area has been modified
+                if (ctrlKeyPressed && isScreenshotAreaModified) {
+                    resetButton.style.display = 'flex';
+                    resetButton.style.pointerEvents = 'auto';
+                } else {
+                    resetButton.style.display = 'none';
+                    resetButton.style.pointerEvents = 'none';
+                }
+            }
+        }
+        
+        // Force update reset button visibility for debugging
+        function forceUpdateResetButton() {
+            const resetButton = document.querySelector('.reset-button');
+            if (resetButton) {
+                console.log('[SnapshotGaussian] Reset button visibility debug:');
+                console.log('[SnapshotGaussian] - ctrlKeyPressed:', ctrlKeyPressed);
+                console.log('[SnapshotGaussian] - isScreenshotAreaModified:', isScreenshotAreaModified);
+                console.log('[SnapshotGaussian] - Button display:', resetButton.style.display);
+            }
+        }
+
+        // Add drag and resize functionality to screenshot area indicator
+        function initScreenshotAreaDrag() {
+            const indicator = document.getElementById('screenshotAreaIndicator');
+            if (!indicator) return;
+            
+            const border = indicator.querySelector('.indicator-border');
+            if (!border) return;
+            
+            // Declare variables at the top of the function
+            let startX = 0;
+            let startY = 0;
+            let startWidth = 0;
+            let startHeight = 0;
+            let startLeft = 0;
+            let startTop = 0;
+            let resizeMode = ''; // 'corner' or 'edge'
+            
+            // Change cursor when hovering over indicator
+            indicator.addEventListener('pointerenter', (e) => {
+                // Only update cursor when Ctrl key is pressed
+                if (e.ctrlKey) {
+                    updateCursor(e);
+                } else {
+                    indicator.style.cursor = 'default';
+                }
+            });
+            
+            indicator.addEventListener('pointermove', (e) => {
+                if (!isDragging && !isResizing) {
+                    // Only update cursor when Ctrl key is pressed
+                    if (e.ctrlKey) {
+                        updateCursor(e);
+                    } else {
+                        indicator.style.cursor = 'default';
+                    }
+                }
+            });
+            
+            // Prevent the indicator from interfering with mouse events when Ctrl is not pressed
+            indicator.addEventListener('pointerdown', (e) => {
+                if (!e.ctrlKey && !e.target.classList.contains('reset-button')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Let the event pass through to the canvas
+                    const canvasEvent = new PointerEvent('pointerdown', e);
+                    canvas.dispatchEvent(canvasEvent);
+                }
+            });
+            
+            indicator.addEventListener('pointerleave', () => {
+                indicator.style.cursor = 'default';
+            });
+            
+            // Update cursor based on mouse position
+            function updateCursor(e) {
+                const rect = indicator.getBoundingClientRect();
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
+                
+                // Check if mouse is near the edges or corners
+                const edgeThreshold = 10;
+                const isNearLeft = mouseX < rect.left + edgeThreshold;
+                const isNearRight = mouseX > rect.right - edgeThreshold;
+                const isNearTop = mouseY < rect.top + edgeThreshold;
+                const isNearBottom = mouseY > rect.bottom - edgeThreshold;
+                
+                if (isNearLeft && isNearTop) {
+                    // Top-left corner
+                    indicator.style.cursor = 'nwse-resize';
+                    resizeMode = 'topleft';
+                } else if (isNearRight && isNearTop) {
+                    // Top-right corner
+                    indicator.style.cursor = 'nesw-resize';
+                    resizeMode = 'topright';
+                } else if (isNearLeft && isNearBottom) {
+                    // Bottom-left corner
+                    indicator.style.cursor = 'nesw-resize';
+                    resizeMode = 'bottomleft';
+                } else if (isNearRight && isNearBottom) {
+                    // Bottom-right corner
+                    indicator.style.cursor = 'nwse-resize';
+                    resizeMode = 'bottomright';
+                } else if (isNearLeft) {
+                    // Left edge
+                    indicator.style.cursor = 'ew-resize';
+                    resizeMode = 'left';
+                } else if (isNearRight) {
+                    // Right edge
+                    indicator.style.cursor = 'ew-resize';
+                    resizeMode = 'right';
+                } else if (isNearTop) {
+                    // Top edge
+                    indicator.style.cursor = 'ns-resize';
+                    resizeMode = 'top';
+                } else if (isNearBottom) {
+                    // Bottom edge
+                    indicator.style.cursor = 'ns-resize';
+                    resizeMode = 'bottom';
+                } else {
+                    // Center
+                    indicator.style.cursor = 'move';
+                    resizeMode = '';
+                }
+            }
+            
+            // Start dragging or resizing
+            indicator.addEventListener('pointerdown', (e) => {
+                // Only allow dragging/resizing when Ctrl key is pressed
+                if (!e.ctrlKey) {
+                    return;
+                }
+                
+                if (resizeMode) {
+                    isResizing = true;
+                } else {
+                    isDragging = true;
+                }
+                
+                startX = e.clientX;
+                startY = e.clientY;
+                startWidth = screenshotWidth;
+                startHeight = screenshotHeight;
+                
+                // Get current position
+                const rect = indicator.getBoundingClientRect();
+                const canvasRect = canvas.getBoundingClientRect();
+                startLeft = rect.left - canvasRect.left;
+                startTop = rect.top - canvasRect.top;
+                
+                // Make the indicator brighter when dragging
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.8)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.6)';
+                }
+                
+                // Set pointer capture to ensure we get all pointer events even if the pointer leaves the window
+                if (e.target.setPointerCapture) {
+                    e.target.setPointerCapture(e.pointerId);
+                }
+                
+                // Prevent default behavior to avoid interfering with camera controls
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            // Drag or resize movement
+            window.addEventListener('pointermove', (e) => {
+                if (isDragging) {
+                    handleDrag(e);
+                } else if (isResizing) {
+                    handleResize(e);
+                }
+            });
+            
+            // Handle drag movement
+            function handleDrag(e) {
+                // Calculate delta
+                const deltaX = e.clientX - startX;
+                const deltaY = e.clientY - startY;
+                
+                // Calculate new position
+                const newLeft = startLeft + deltaX;
+                const newTop = startTop + deltaY;
+                
+                // Ensure the indicator stays within bounds
+                const canvasWidth = canvas.clientWidth;
+                const canvasHeight = canvas.clientHeight;
+                const boundedLeft = Math.max(0, Math.min(canvasWidth - screenshotWidth, newLeft));
+                const boundedTop = Math.max(0, Math.min(canvasHeight - screenshotHeight, newTop));
+                
+                // Update the indicator position directly
+                indicator.style.left = `${boundedLeft}px`;
+                indicator.style.top = `${boundedTop}px`;
+                
+                // Mark as modified since position has changed
+                isScreenshotAreaModified = true;
+                // Update reset button visibility
+                updateResetButtonVisibility();
+            }
+            
+            // Handle resize movement
+            function handleResize(e) {
+                // Calculate delta
+                const deltaX = e.clientX - startX;
+                const deltaY = e.clientY - startY;
+                
+                // Calculate new size and position
+                let newWidth = startWidth;
+                let newHeight = startHeight;
+                let newLeft = startLeft;
+                let newTop = startTop;
+                
+                // Get canvas dimensions for bounds checking
+                const canvasWidth = canvas.clientWidth;
+                const canvasHeight = canvas.clientHeight;
+                
+                // Handle different resize modes
+                switch (resizeMode) {
+                    case 'topleft':
+                        // Top-left corner - adjust width, height, and position
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth - deltaX));
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight - deltaY));
+                        newLeft = startLeft + (startWidth - newWidth);
+                        newTop = startTop + (startHeight - newHeight);
+                        break;
+                    case 'topright':
+                        // Top-right corner - adjust width, height, and position
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth + deltaX));
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight - deltaY));
+                        newTop = startTop + (startHeight - newHeight);
+                        break;
+                    case 'bottomleft':
+                        // Bottom-left corner - adjust width, height, and position
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth - deltaX));
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight + deltaY));
+                        newLeft = startLeft + (startWidth - newWidth);
+                        break;
+                    case 'bottomright':
+                        // Bottom-right corner - adjust width and height
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth + deltaX));
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight + deltaY));
+                        break;
+                    case 'left':
+                        // Left edge - adjust width and position
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth - deltaX));
+                        newLeft = startLeft + (startWidth - newWidth);
+                        newHeight = startHeight;
+                        break;
+                    case 'right':
+                        // Right edge - adjust width
+                        newWidth = Math.max(64, Math.min(canvasWidth, startWidth + deltaX));
+                        newHeight = startHeight;
+                        break;
+                    case 'top':
+                        // Top edge - adjust height and position
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight - deltaY));
+                        newTop = startTop + (startHeight - newHeight);
+                        newWidth = startWidth;
+                        break;
+                    case 'bottom':
+                        // Bottom edge - adjust height
+                        newHeight = Math.max(64, Math.min(canvasHeight, startHeight + deltaY));
+                        newWidth = startWidth;
+                        break;
+                }
+                
+                // Ensure the indicator stays within bounds
+                newLeft = Math.max(0, newLeft);
+                newTop = Math.max(0, newTop);
+                newWidth = Math.min(canvasWidth - newLeft, newWidth);
+                newHeight = Math.min(canvasHeight - newTop, newHeight);
+                newWidth = Math.max(64, newWidth);
+                newHeight = Math.max(64, newHeight);
+                
+                // Update screenshot dimensions
+                screenshotWidth = newWidth;
+                screenshotHeight = newHeight;
+                
+                // Mark as modified since size has changed
+                isScreenshotAreaModified = true;
+                
+                // Update indicator position and size directly
+                indicator.style.left = `${newLeft}px`;
+                indicator.style.top = `${newTop}px`;
+                
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.width = `${newWidth}px`;
+                    border.style.height = `${newHeight}px`;
+                }
+                
+                // Update label text
+                const labelText = indicator.querySelector('.label-text');
+                if (labelText) {
+                    labelText.textContent = `${screenshotWidth} x ${screenshotHeight}`;
+                }
+                
+                // Update reset button visibility
+                updateResetButtonVisibility();
+            }
+            
+            // End dragging or resizing
+            window.addEventListener('pointerup', (e) => {
+                // Release pointer capture
+                if (e.target.releasePointerCapture) {
+                    e.target.releasePointerCapture(e.pointerId);
+                }
+                
+                // Restore the indicator's normal brightness
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.3)';
+                }
+                
+                isDragging = false;
+                isResizing = false;
+                resizeMode = '';
+            });
+            
+            // Handle pointer cancel event
+            window.addEventListener('pointercancel', (e) => {
+                // Release pointer capture
+                if (e.target.releasePointerCapture) {
+                    e.target.releasePointerCapture(e.pointerId);
+                }
+                
+                // Restore the indicator's normal brightness
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.3)';
+                }
+                
+                isDragging = false;
+                isResizing = false;
+                resizeMode = '';
+            });
+        }
+
+        // Initialize screenshot area drag functionality
+        initScreenshotAreaDrag();
+        
+        // Add global keyboard event listeners for Ctrl key
+        let ctrlKeyPressed = false;
+        
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Control') {
+                ctrlKeyPressed = true;
+                // Make the indicator brighter when Ctrl is pressed
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.7)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.5)';
+                }
+                // Enable pointer events when Ctrl is pressed
+                indicator.style.pointerEvents = 'auto';
+                // Update reset button visibility
+                updateResetButtonVisibility();
+            }
+        });
+        
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'Control') {
+                ctrlKeyPressed = false;
+                // Restore the indicator's normal brightness when Ctrl is released
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                const border = indicator.querySelector('.indicator-border');
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.3)';
+                }
+                // Disable pointer events when Ctrl is not pressed
+                // This prevents the indicator from interfering with mouse operations
+                indicator.style.pointerEvents = 'none';
+                // Update reset button visibility
+                updateResetButtonVisibility();
+            }
+        });
+        
+        // Initialize pointer events state
+        const indicator = document.getElementById('screenshotAreaIndicator');
+        // Disable pointer events by default to prevent interference
+        indicator.style.pointerEvents = 'none';
+        
+        // Initialize reset button visibility
+        updateResetButtonVisibility();
+        
+        // Debug: Log initial state
+        console.log('[SnapshotGaussian] Initial state:');
+        console.log('[SnapshotGaussian] - screenshotWidth:', screenshotWidth);
+        console.log('[SnapshotGaussian] - screenshotHeight:', screenshotHeight);
+        console.log('[SnapshotGaussian] - initialScreenshotWidth:', initialScreenshotWidth);
+        console.log('[SnapshotGaussian] - initialScreenshotHeight:', initialScreenshotHeight);
+        console.log('[SnapshotGaussian] - isScreenshotAreaModified:', isScreenshotAreaModified);
+        
+        // Add click event listener for reset button
+        const resetButton = indicator.querySelector('.reset-button');
+        if (resetButton) {
+            // Ensure the reset button always has pointer events enabled
+            resetButton.style.pointerEvents = 'auto';
+            
+            // Add click event listener
+            resetButton.addEventListener('click', (e) => {
+                resetScreenshotArea();
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            // Add pointerdown event listener to ensure it works even when indicator has pointer-events: none
+            resetButton.addEventListener('pointerdown', (e) => {
+                resetScreenshotArea();
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        }
+
+        // Load PLY data from server on startup
+        async function loadDataFromServer() {
+            try {
+                console.log('[SnapshotGaussian] Loading data from server...');
+                
+                // Add timeout to fetch
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 seconds timeout
+                
+                try {
+                    const response = await fetch('/contents', {
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    
+                    const data = await response.json();
+                    
+                    // Validate data
+                    if (!data.contents) {
+                        throw new Error('Missing PLY data in response');
+                    }
+                    
+                    // Store screenshot size
+                    screenshotWidth = data.width || 512;
+                    screenshotHeight = data.height || 512;
+                    // Store initial screenshot size for reset functionality
+                    initialScreenshotWidth = screenshotWidth;
+                    initialScreenshotHeight = screenshotHeight;
+                    console.log('[SnapshotGaussian] Screenshot size:', screenshotWidth, 'x', screenshotHeight);
+                    console.log('[SnapshotGaussian] Initial screenshot size set for reset:', initialScreenshotWidth, 'x', initialScreenshotHeight);
+                    
+                    // Decode base64 PLY data with error handling
+                    try {
+                        const plyData = atob(data.contents);
+                        const arrayBuffer = new ArrayBuffer(plyData.length);
+                        const uint8Array = new Uint8Array(arrayBuffer);
+                        for (let i = 0; i < plyData.length; i++) {
+                            uint8Array[i] = plyData.charCodeAt(i);
+                        }
+                        
+                        console.log('[SnapshotGaussian] Loaded PLY data, size:', arrayBuffer.byteLength);
+                        console.log('[SnapshotGaussian] Extrinsics:', data.extrinsics);
+                        console.log('[SnapshotGaussian] Intrinsics:', data.intrinsics);
+                        
+                        // Check if data is valid
+                        if (arrayBuffer.byteLength === 0) {
+                            throw new Error('Empty PLY data');
+                        }
+                        
+                        // Load the PLY data with timeout
+                        const loadPromise = loadPLYFromData(arrayBuffer, 'gaussian.ply', data.extrinsics, data.intrinsics);
+                        const timeoutPromise = new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('PLY loading timeout')), 60000)
+                        );
+                        
+                        await Promise.race([loadPromise, timeoutPromise]);
+                        
+                        // Update screenshot area indicator after loading
+                        updateScreenshotAreaIndicator();
+                        
+                    } catch (decodeError) {
+                        console.error('[SnapshotGaussian] Base64 decode error:', decodeError);
+                        showError('Failed to decode PLY data: ' + decodeError.message);
+                    }
+                    
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    if (fetchError.name === 'AbortError') {
+                        throw new Error('Request timeout: Failed to load data within 30 seconds');
+                    }
+                    throw fetchError;
+                }
+                
+            } catch (err) {
+                console.error('[SnapshotGaussian] Error loading data from server:', err);
+                showError('Failed to load PLY data: ' + err.message);
+            }
+        }
+
+        // Initialize on load
+        initViewer();
+        loadDataFromServer();
+
+        // Update indicator when window is resized
+        window.addEventListener('resize', updateScreenshotAreaIndicator);
+
+        console.log('[SnapshotGaussian] Ready - loading data from server');
+
+        // Listen for messages from parent (for backward compatibility)
+        window.addEventListener('message', (event) => {
+            const { type, data, filename, extrinsics, intrinsics } = event.data;
+
+            if (type === 'LOAD_MESH_DATA' && data) {
+                console.log('[SnapshotGaussian] Received LOAD_MESH_DATA, size:', data.byteLength);
+                console.log('[SnapshotGaussian] Extrinsics:', extrinsics);
+                console.log('[SnapshotGaussian] Intrinsics:', intrinsics);
+                loadPLYFromData(data, filename || 'gaussian.ply', extrinsics, intrinsics);
+            }
+        });
+
+        // Notify server when window is closed - use synchronous request
+        window.addEventListener('beforeunload', () => {
+            const data = JSON.stringify({ closed: true });
+            const blob = new Blob([data], { type: 'application/json' });
+            
+            navigator.sendBeacon('/window_closed', blob);
+            console.log('[SnapshotGaussian] Sent beacon: window closing');
+        });
+    </script>
+</body>
+</html>
