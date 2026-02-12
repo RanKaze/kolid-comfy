@@ -1,6 +1,6 @@
 
 
-### SnapshotGaussianNode:
+### SnapshotGaussianNode(SuperSplat模式需要安装node.js):
 <img width="529" height="389" alt="image" src="https://github.com/user-attachments/assets/b00765b0-978a-41d1-98db-1da97fe10eaf" />
 
 ###### GSplat : 效果一般,从PlyPreview里扒拉来的代码.由于它的效果不是很好(好像有far clip,但是有混淆,不是很想碰,不如直接集成SuperSplat.)
