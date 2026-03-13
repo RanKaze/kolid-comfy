@@ -20,22 +20,6 @@ from .nodes.pixiv_node import *
 from .nodes.gaussian_node import *
 from .nodes.open_node import *
 
-class SDPPPLayout:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": {
-                "comment": ("STRING", {"default": "", "multiline": True}),
-            }
-        }
-
-    INPUT_IS_LIST = True
-    RETURN_TYPES = ()
-    RETURN_NAMES = ()
-    FUNCTION = "excute"
-    CATEGORY = "Kolid-Toolkit"
-
-    def excute(self, comment):  
-        return ()
     
     
 
@@ -68,9 +52,6 @@ NODE_CONFIG = {
     "ListRegexPackMergeNode" : {"class": ListRegexPackMergeNode, "name": "ListRegexPackMergeNode"},
     
     "BranchNoneNode" : {"class": BranchNoneNode, "name": "BranchNoneNode"},
-    "BranchToggleNode" : {"class": BranchToggleNode, "name": "BranchToggleNode"},
-    "BranchBooleanNode" : {"class": BranchBooleanNode, "name": "BranchBooleanNode"},
-    
     "TypeDebugNode" : {"class": TypeDebugNode, "name": "TypeDebugNode"},
     
     "SmartJoinStringNode" : {"class": SmartJoinStringNode, "name": "SmartJoinStringNode"},
@@ -93,14 +74,15 @@ NODE_CONFIG = {
     "TextEncodeFromPackNode" : {"class": TextEncodeFromPackNode, "name": "TextEncodeFromPackNode"},
     
     "AnyPassNode" : {"class": AnyPassNode, "name": "AnyPassNode"},
+    "TextFormatNode" : {"class": TextFormatNode, "name": "TextFormatNode"},
     
-    "SDPPPLayout" : {"class": SDPPPLayout, "name": "SDPPPLayout"},
     "EHentaiRandomNode" : {"class": EHentaiRandomNode, "name": "EHentaiRandomNode"},
     "EHentaiURLNode" : {"class": EHentaiURLNode, "name": "EHentaiURLNode"},
     "LocalImageLoaderNode" : {"class": LocalImageLoaderNode, "name": "LocalImageLoaderNode"},
     "PixivImageLoaderNode" : {"class": PixivImageLoaderNode, "name": "PixivImageLoaderNode"},
     
     "SnapshotGaussianNode" : {"class": SnapshotGaussianNode, "name": "SnapshotGaussianNode"},
+    "ExtrinsicsCompareNode" : {"class": ExtrinsicsCompareNode, "name": "ExtrinsicsCompareNode"},
     
     "OpenNode" : {"class": OpenNode, "name": "OpenNode"},
 }
