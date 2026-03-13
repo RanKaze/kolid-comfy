@@ -151,7 +151,7 @@ def checkPort(port, host='localhost'):
     except Exception:
         return False
 
-def handleSnapShot(severHandler):
+def handleSnapShot(severHandler, set_event):
     # Handle screenshot data
     content_length = int(severHandler.headers['Content-Length'])
     post_data = severHandler.rfile.read(content_length)
@@ -194,18 +194,39 @@ def handleSnapShot(severHandler):
             f.write(image_data)
             
         # Signal that screenshot is ready
-        severHandler.server_instance.screenshot_event.set()
+        if set_event: severHandler.server_instance.screenshot_event.set()
     else:
         severHandler.send_error(500, "Server error")
 
-def handleWindowClosed(severHandler):
-    # Handle window closed notification
+def handleExtrinsics(severHandler, set_event):
+    # Handle extrinsics data
+    print("[SnapshotGaussian] Received POST request: /extrinsics")
+    content_length = int(severHandler.headers['Content-Length'])
+    post_data = severHandler.rfile.read(content_length)
+    data = json.loads(post_data)
+
     if severHandler.server_instance:
+        # 获取相机外参
+        extrinsics = data.get('extrinsics')
+        # 处理base64编码的extrinsics数据
+        if isinstance(extrinsics, str):
+            try:
+                # 解码base64
+                decoded_data = base64.b64decode(extrinsics)
+                # 解析JSON
+                extrinsics = json.loads(decoded_data)
+            except Exception as e:
+                print(f"[SnapshotGaussian] Error decoding extrinsics: {e}")
+        # 转换为numpy数组
+        severHandler.server_instance.out_extrinsics = np.array(extrinsics).reshape(4, 4)
+        
         severHandler.send_response(200)
         severHandler.send_header('Content-type', 'application/json')
         severHandler.send_header("Access-Control-Allow-Origin", "*")
         severHandler.end_headers()
         severHandler.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+        
+        if set_event: severHandler.server_instance.screenshot_event.set()
     else:
         severHandler.send_error(500, "Server error")
 
@@ -252,6 +273,7 @@ class GSplatServer:
         self.screenshot_event = threading.Event()
         self.window_closed = False
         self.bowser_url = None
+        self.out_extrinsics = None
 
     def start(self):
         # Find an available port
@@ -345,7 +367,7 @@ class GSplatServer:
 
         def do_POST(self):
             if self.path == '/screenshot':
-                handleSnapShot(self)
+                handleSnapShot(self, True)
             elif self.path == '/window_closed':
                 handleWindowClosed(self)
             else:
@@ -373,6 +395,7 @@ class SuperSplatServer:
         self.window_closed = False
         self.bowser_url = None
         self.serve_subprocess = None
+        self.out_extrinsics = None
 
     def start(self):
         success = False
@@ -401,8 +424,8 @@ class SuperSplatServer:
             "snapshot": "true",
             "width": str(int(self.width)),
             "height": str(int(self.height)),
-            "extrinsics": json.dumps(self.extrinsics.tolist() if hasattr(self.extrinsics, 'tolist') else self.extrinsics),
-            "intrinsics": json.dumps(self.intrinsics.tolist() if hasattr(self.intrinsics, 'tolist') else self.intrinsics),
+            "extrinsics": json.dumps(self.extrinsics.tolist() if self.extrinsics is not None and hasattr(self.extrinsics, 'tolist') else (self.extrinsics if self.extrinsics is not None else None)),
+            "intrinsics": json.dumps(self.intrinsics.tolist() if self.intrinsics is not None and hasattr(self.intrinsics, 'tolist') else (self.intrinsics if self.intrinsics is not None else None)),
             "server": tempUrl,
         }
         
@@ -547,7 +570,9 @@ class SuperSplatServer:
         def do_POST(self):
             print(f"[SnapshotGaussian] Received POST request: {self.path}")
             if self.path == '/screenshot':
-                handleSnapShot(self)
+                handleSnapShot(self, False)
+            elif self.path == '/extrinsics':
+                handleExtrinsics(self, True)
             elif self.path == '/window_closed':
                 handleWindowClosed(self)
             else:
@@ -575,12 +600,6 @@ class SnapshotGaussianNode:
                     "forceInput": True,
                     "tooltip": "PLY file path from upstream node",
                 }),
-                "extrinsics": ("EXTRINSICS", {
-                    "tooltip": "Extrinsics from upstream node",
-                }),
-                "intrinsics": ("INTRINSICS", {
-                    "tooltip": "Intrinsics from upstream node",
-                }),
                 "method": ("COMBO", {
                     "default": "GSplat",
                     "options": ["GSplat", "SuperSplat"],
@@ -601,10 +620,18 @@ class SnapshotGaussianNode:
                     "tooltip": "Height of the screenshot",
                 }),
             },
+            "optional": {
+                "extrinsics": ("EXTRINSICS", {
+                    "tooltip": "Extrinsics from upstream node",
+                }),
+                "intrinsics": ("INTRINSICS", {
+                    "tooltip": "Intrinsics from upstream node",
+                }),
+            },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("snapshot", "snapshot_path")
+    RETURN_TYPES = ("IMAGE", "STRING", "EXTRINSICS")
+    RETURN_NAMES = ("snapshot", "snapshot_path", "extrinsics")
     FUNCTION = "take_snapshot"
     CATEGORY = "Kolid-Toolkit"
     
@@ -663,6 +690,121 @@ class SnapshotGaussianNode:
         if server.window_closed or server.image is None:
             raise ValueError("Window closed without taking screenshot")
         
-        return (server.image, server.image_path)
+        return (server.image, server.image_path, server.out_extrinsics if server.out_extrinsics is not None else None)
+
+def normalize_angle(angle, range_type='±180'):
+    """
+    将角度规范化到标准范围
+    
+    参数:
+        angle: 输入角度（度）
+        range_type: '±180' → [-180, 180]
+                    '0-360' → [0, 360)
+                    '±90'   → [-90, 90]
+    
+    返回:
+        规范化后的角度
+    """
+    # 先确保在 [0, 360) 范围内
+    angle = angle % 360
+    
+    if range_type == '±180':
+        # 转换到 [-180, 180]
+        if angle > 180:
+            angle -= 360
+    elif range_type == '±90':
+        # 转换到 [-90, 90]
+        if angle > 180:
+            angle -= 360
+        # 注意：±90 范围可能需要特殊处理，取决于应用场景
+    elif range_type == '0-360':
+        pass  # 已经是 [0, 360)
+    
+    return angle
+
+def rotationMatrixToEulerAngles(R, output_angle = True):
+    """
+    从旋转矩阵计算欧拉角 (ZYX 顺序)
+    结合 arctan2 的四象限优势 + clip 的数值保护
+    """
+    sy = np.sqrt(R[0,0] * R[0,0] + R[1,0] * R[1,0])
+    singular = sy < 1e-6
+    
+    if not singular:
+        pitch = np.arctan2(R[2,1], R[2,2])
+        yaw   = np.arctan2(-R[2,0], sy)  # 用 arctan2 保持四象限
+        roll  = np.arctan2(R[1,0], R[0,0])
+    else:
+        pitch = np.arctan2(-R[1,2], R[1,1])
+        yaw   = np.arctan2(-R[2,0], sy)  # 奇异点时 sy≈0，但仍可用
+        roll  = 0
+        
+    if output_angle:
+        pitch = np.degrees(pitch)
+        yaw   = np.degrees(yaw)
+        roll  = np.degrees(roll)
+        
+        # 可选: 规范化到 [-180, 180]
+        pitch = normalize_angle(pitch, '±180')
+        yaw = normalize_angle(yaw, '±180')
+        roll = normalize_angle(roll, '±180')
+    
+    return pitch, yaw, roll
+
+class ExtrinsicsCompareNode:
+    """Compare two extrinsics matrices and output relative translation (x,y,z) and rotation (pitch,yaw,roll)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "current": ("EXTRINSICS", {
+                    "tooltip": "Current extrinsics matrix",
+                }),
+                "next": ("EXTRINSICS", {
+                    "tooltip": "Next extrinsics matrix",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("x", "y", "z", "pitch", "yaw", "roll")
+    FUNCTION = "compare_extrinsics"
+    CATEGORY = "Kolid-Toolkit"
+
+    
+    
+    def compare_extrinsics(self, current, next):
+        """
+        Calculate relative transform between two extrinsics matrices.
+        OpenCV坐标系: X-right, Y-down, Z-forward (右手系)
+        欧拉角: XYZ旋转顺序
+        """
+        # Convert inputs to numpy arrays if needed
+        if current is None:
+            current = np.eye(4)
+        elif not isinstance(current, np.ndarray):
+            current = np.array(current).reshape(4, 4)
+        
+        if next is None:
+            next = np.eye(4)
+        elif not isinstance(next, np.ndarray):
+            next = np.array(next).reshape(4, 4)
+        
+        # ✅ 修正: 从 current 到 next 的变换
+        current_inv = np.linalg.inv(current)
+        relative_transform = np.dot(next, current_inv)
+        
+        # Extract translation
+        translation = relative_transform[:3, 3]
+        x, y, z = translation
+        
+        # Extract rotation matrix
+        R = relative_transform[:3, :3]
+        
+        pitch, yaw, roll = rotationMatrixToEulerAngles(R)
+        
+        return (x, y, z, pitch, yaw, roll)
+
 
 
