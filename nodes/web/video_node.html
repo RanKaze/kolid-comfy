@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Snapshot</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0a0a0a;
+            color: #f5f5f7;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1280px;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 28px;
+        }
+
+        .video-wrapper {
+            background: #000;
+            border-radius: 18px;
+            overflow: hidden;
+            width: 100%;
+            max-height: 82vh;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+        }
+
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .prompt {
+            font-size: 17px;
+            font-weight: 500;
+            color: #8e8e93;
+            text-align: center;
+            letter-spacing: -0.01em;
+        }
+
+        .prompt strong {
+            color: #f5f5f7;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="video-wrapper">
+            <video id="video" controls autoplay></video>
+        </div>
+        
+        <div class="prompt">
+            Play the video and press <strong>Enter</strong> to capture current frame
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+
+        async function loadVideo() {
+            try {
+                const res = await fetch('/video_data');
+                const data = await res.json();
+                video.src = '/video/' + encodeURIComponent(data.video_path);
+                window.fps = data.fps || 30;
+                
+                // Jump to initial timestamp and frame offset
+                if (data.initial_timestamp && data.initial_frame_offset !== undefined) {
+                    const [hours, minutes, seconds] = data.initial_timestamp.split(':').map(Number);
+                    const initialTime = hours * 3600 + minutes * 60 + seconds;
+                    const frameOffsetSeconds = data.initial_frame_offset / window.fps;
+                    const totalTime = initialTime + frameOffsetSeconds;
+                    
+                    video.addEventListener('loadedmetadata', () => {
+                        video.currentTime = totalTime;
+                    });
+                }
+            } catch (e) {
+                console.error('Failed to load video', e);
+            }
+        }
+
+        async function capture() {
+            const currentTime = video.currentTime;
+            const timestamp = new Date(currentTime * 1000)
+                .toISOString().substr(11, 8);
+
+            const fractional = currentTime % 1;
+            const frame_offset = Math.round(fractional * window.fps);
+
+            try {
+                await fetch('/timestamp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ timestamp, frame_offset })
+                });
+
+                const promptEl = document.querySelector('.prompt');
+                const originalHTML = promptEl.innerHTML;
+                
+                promptEl.style.color = '#30d158';
+                promptEl.innerHTML = '✓ Captured successfully';
+
+                setTimeout(() => window.close(), 700);
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                capture();
+            }
+        });
+
+        window.addEventListener('beforeunload', () => {
+            fetch('/window_closed', { method: 'POST' }).catch(() => {});
+        });
+
+        loadVideo();
+    </script>
+</body>
+</html>

@@ -18,9 +18,12 @@ from .nodes.ehentai_node import *
 from .nodes.disk_node import *
 from .nodes.pixiv_node import *
 from .nodes.gaussian_node import *
+from .nodes.image_node import *
 from .nodes.open_node import *
 from .nodes.branch_node import * 
-    
+from .nodes.video_node import *
+from .nodes.timestamp_node import *
+from .nodes.audio_node import *
     
 
 NODE_CONFIG = {
@@ -52,6 +55,9 @@ NODE_CONFIG = {
     "ListRegexPackMergeNode" : {"class": ListRegexPackMergeNode, "name": "ListRegexPackMergeNode"},
     
     "BranchNoneNode" : {"class": BranchNoneNode, "name": "BranchNoneNode"},
+    "IsOptionalNoneNode" : {"class": IsOptionalNoneNode, "name": "IsOptionalNoneNode"},
+    "BranchOptionalRequiredNode" : {"class": BranchOptionalRequiredNode, "name": "BranchOptionalRequiredNode"},
+    
     "TypeDebugNode" : {"class": TypeDebugNode, "name": "TypeDebugNode"},
     
     "SmartJoinStringNode" : {"class": SmartJoinStringNode, "name": "SmartJoinStringNode"},
@@ -83,8 +89,38 @@ NODE_CONFIG = {
     
     "SnapshotGaussianNode" : {"class": SnapshotGaussianNode, "name": "SnapshotGaussianNode"},
     "ExtrinsicsCompareNode" : {"class": ExtrinsicsCompareNode, "name": "ExtrinsicsCompareNode"},
-    
+    "SnapshotImageNode" : {"class": SnapshotImageNode, "name": "SnapshotImageNode"},
+    "SnapshotImagePointsNode" : {"class": SnapshotImagePointsNode, "name": "SnapshotImagePointsNode"},
+    "SnapshotCaptureNode" : {"class": SnapshotCaptureNode, "name": "SnapshotCaptureNode"},
     "OpenNode" : {"class": OpenNode, "name": "OpenNode"},
+    "VideoManagerNode": {"class": VideoManagerNode, "name": "VideoManagerNode"},
+    "UrlVideoNode": {"class": UrlVideoNode, "name": "UrlVideoNode"},
+    "GetVideoImageNode": {"class": GetVideoImageNode, "name": "GetVideoImageNode"},
+    "GetVideoImagesNode": {"class": GetVideoImagesNode, "name": "GetVideoImagesNode"},
+    "GetVideoInfoNode": {"class": GetVideoInfoNode, "name": "GetVideoInfoNode"},
+    "SnapshotVideoNode": {"class": SnapshotVideoNode, "name": "SnapshotVideoNode"},
+    
+    "Preview Video": {"class": PreviewVideo, "name": "Preview Video"},
+    
+    "TimestampDurationNode": {"class": TimestampDurationNode, "name": "TimestampDurationNode"},
+    "TimestampForLengthNode": {"class": TimestampForLengthNode, "name": "TimestampForLengthNode"},
+    
+    "GetVideoAudioNode": {"class": GetVideoAudioNode, "name": "GetVideoAudioNode"},
+    "GetAudioSegmentNode": {"class": GetAudioSegmentNode, "name": "GetAudioSegmentNode"},
+    "GetVideoSegmentNode": {"class": GetVideoSegmentNode, "name": "GetVideoSegmentNode"},
+    "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
+    
+    "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
+    "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
+    "ImageCropMaskNode": {"class": ImageCropMaskNode, "name": "ImageCropMaskNode"},
+    "ImageRecoverCropNode": {"class": ImageRecoverCropNode, "name": "ImageRecoverCropNode"},
+    "ImageBatchNode": {"class": ImageBatchNode, "name": "ImageBatchNode"},
+    "ImageRecoverBatchNode": {"class": ImageRecoverBatchNode, "name": "ImageRecoverBatchNode"},
+    "ImageDetectContentNode": {"class": ImageDetectContentNode, "name": "ImageDetectContentNode"},
+    
+    "ImageToBase64Node": {"class": ImageToBase64Node, "name": "ImageToBase64Node"},
+    "Base64ToImageNode": {"class": Base64ToImageNode, "name": "Base64ToImageNode"},
+    
 }
 
 def generate_node_mappings(node_config):

@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Points Selection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #imageContainer {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px;
+        }
+        #image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+            cursor: crosshair;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+        .instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+        .controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px;
+            border-radius: 4px;
+            z-index: 50;
+        }
+        .control-button {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            margin: 2px;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .control-button:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .control-button.active {
+            background: rgba(0, 122, 255, 0.8);
+        }
+        .point {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 40;
+            cursor: pointer;
+        }
+        .point.positive {
+            background: rgba(0, 255, 0, 0.7);
+            border: 2px solid rgba(0, 255, 0, 1);
+        }
+        .point.negative {
+            background: rgba(255, 0, 0, 0.7);
+            border: 2px solid rgba(255, 0, 0, 1);
+        }
+    </style>
+</head>
+<body>
+    <div id="imageContainer">
+        <img id="image" src="" alt="Image">
+        <div id="status">Loading...</div>
+        <div class="instructions">
+            Click to add points: <strong>Left</strong> for positive, <strong>Right</strong> for negative, <strong>Enter</strong> to confirm
+        </div>
+        <div class="controls">
+            <button class="control-button active" id="positiveMode">Positive</button>
+            <button class="control-button" id="negativeMode">Negative</button>
+            <button class="control-button" id="clearButton">Clear</button>
+        </div>
+    </div>
+
+    <script>
+        let image = document.getElementById('image');
+        let imageContainer = document.getElementById('imageContainer');
+        let status = document.getElementById('status');
+        let positiveMode = true;
+        let positivePoints = [];
+        let negativePoints = [];
+
+        // Load image data from server
+        async function loadImage() {
+            try {
+                const response = await fetch('/image_data');
+                const data = await response.json();
+                
+                // Wait for image to load before processing points
+                image.onload = function() {
+                    // Load initial points if provided
+                    if (data.initial_positive_points && data.initial_positive_points.length > 0) {
+                        data.initial_positive_points.forEach(point => {
+                            addPointFromData(point.x, point.y, true);
+                        });
+                    }
+                    
+                    if (data.initial_negative_points && data.initial_negative_points.length > 0) {
+                        data.initial_negative_points.forEach(point => {
+                            addPointFromData(point.x, point.y, false);
+                        });
+                    }
+                    
+                    status.textContent = 'Ready: Left click for positive, Right click for negative, Enter to confirm';
+                };
+                
+                image.src = data.image;
+            } catch (error) {
+                console.error('Error loading image:', error);
+                status.textContent = 'Error loading image';
+            }
+        }
+
+        // Add point from data (already in pixel coordinates)
+        function addPointFromData(x, y, isPositive) {
+            // Convert pixel coordinates to display coordinates
+            const imageRect = image.getBoundingClientRect();
+            const containerRect = imageContainer.getBoundingClientRect();
+            const scaleX = imageRect.width / image.naturalWidth;
+            const scaleY = imageRect.height / image.naturalHeight;
+            const displayX = (imageRect.left - containerRect.left) + (x * scaleX);
+            const displayY = (imageRect.top - containerRect.top) + (y * scaleY);
+            
+            // Create point element
+            const point = document.createElement('div');
+            point.className = `point ${isPositive ? 'positive' : 'negative'}`;
+            point.style.left = `${displayX}px`;
+            point.style.top = `${displayY}px`;
+            
+            // Add to points array (using original pixel coordinates)
+            if (isPositive) {
+                positivePoints.push({ x: x, y: y });
+            } else {
+                negativePoints.push({ x: x, y: y });
+            }
+            
+            // Add click event to remove point
+            point.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Remove from array
+                if (isPositive) {
+                    positivePoints = positivePoints.filter(p => !(p.x === x && p.y === y));
+                } else {
+                    negativePoints = negativePoints.filter(p => !(p.x === x && p.y === y));
+                }
+                // Remove from DOM
+                point.remove();
+                updateStatus();
+            });
+            
+            // Add to container
+            imageContainer.appendChild(point);
+            updateStatus();
+        }
+
+        // Add point to the image
+        function addPoint(x, y, isPositive) {
+            // Store coordinates relative to image
+            const imageRect = image.getBoundingClientRect();
+            const containerRect = imageContainer.getBoundingClientRect();
+            const relativeX = Math.round((x - (imageRect.left - containerRect.left)) * (image.naturalWidth / imageRect.width));
+            const relativeY = Math.round((y - (imageRect.top - containerRect.top)) * (image.naturalHeight / imageRect.height));
+            
+            // Create point element
+            const point = document.createElement('div');
+            point.className = `point ${isPositive ? 'positive' : 'negative'}`;
+            point.style.left = `${x}px`;
+            point.style.top = `${y}px`;
+            
+            // Add to points array
+            if (isPositive) {
+                positivePoints.push({ x: relativeX, y: relativeY });
+            } else {
+                negativePoints.push({ x: relativeX, y: relativeY });
+            }
+            
+            // Add click event to remove point
+            point.addEventListener('click', (e) => {
+                e.stopPropagation();
+                // Remove from array
+                if (isPositive) {
+                    positivePoints = positivePoints.filter(p => !(p.x === relativeX && p.y === relativeY));
+                } else {
+                    negativePoints = negativePoints.filter(p => !(p.x === relativeX && p.y === relativeY));
+                }
+                // Remove from DOM
+                point.remove();
+                updateStatus();
+            });
+            
+            // Add to container
+            imageContainer.appendChild(point);
+            updateStatus();
+        }
+
+        // Update status with point counts
+        function updateStatus() {
+            status.textContent = `Positive: ${positivePoints.length}, Negative: ${negativePoints.length} | Left click for positive, Right click for negative, Enter to confirm`;
+        }
+
+        // Clear all points
+        function clearPoints() {
+            // Remove all point elements
+            const points = document.querySelectorAll('.point');
+            points.forEach(point => point.remove());
+            
+            // Clear arrays
+            positivePoints = [];
+            negativePoints = [];
+            updateStatus();
+        }
+
+        // Send points to server
+        async function sendPoints() {
+            try {
+                const response = await fetch('/points', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        positivePoints: positivePoints,
+                        negativePoints: negativePoints 
+                    })
+                });
+                
+                if (response.ok) {
+                    status.textContent = 'Points sent successfully';
+                    // Close window after a short delay
+                    setTimeout(() => {
+                        window.close();
+                    }, 1000);
+                } else {
+                    status.textContent = 'Error sending points';
+                }
+            } catch (error) {
+                console.error('Error sending points:', error);
+                status.textContent = 'Error sending points';
+            }
+        }
+
+        // Handle image click
+        image.addEventListener('click', (e) => {
+            if (e.button === 0) {
+                // Left click - positive point
+                const rect = imageContainer.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                addPoint(x, y, true);
+            }
+        });
+
+        // Handle right click - negative point
+        image.addEventListener('contextmenu', (e) => {
+            e.preventDefault(); // Prevent context menu
+            const rect = imageContainer.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            addPoint(x, y, false);
+        });
+
+        // Handle control buttons
+        document.getElementById('positiveMode').addEventListener('click', () => {
+            positiveMode = true;
+            document.getElementById('positiveMode').classList.add('active');
+            document.getElementById('negativeMode').classList.remove('active');
+        });
+
+        document.getElementById('negativeMode').addEventListener('click', () => {
+            positiveMode = false;
+            document.getElementById('negativeMode').classList.add('active');
+            document.getElementById('positiveMode').classList.remove('active');
+        });
+
+        document.getElementById('clearButton').addEventListener('click', clearPoints);
+
+        // Handle Enter key to confirm
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                sendPoints();
+            }
+        });
+
+        // Handle window close
+        window.addEventListener('beforeunload', async () => {
+            try {
+                await fetch('/window_closed', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ closed: true })
+                });
+            } catch (error) {
+                console.error('Error notifying window close:', error);
+            }
+        });
+
+        // Load image when page loads
+        window.addEventListener('load', loadImage);
+    </script>
+</body>
+</html>

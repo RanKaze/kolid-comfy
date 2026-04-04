@@ -7,6 +7,7 @@ import base64
 import torch
 import comfy.utils
 from server import PromptServer
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 
 
 def get_page(gallery_url, headers, page_index):
@@ -83,8 +84,8 @@ class EHentaiRandomNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "INT", "INT", "INT")
-    RETURN_NAMES = ("image", "gallery_url", "new_seed", "new_page", "node_id")
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "gallery_url")
     FUNCTION = "get_random_image"
     CATEGORY = "Kolid-Toolkit"
 
@@ -186,8 +187,32 @@ class EHentaiRandomNode:
                 next_seed = random.randint(0, 0xffffffffffffffff)
                 next_page_index = 0
             
-            # 返回结果，包括下一次的seed和page_index
-            return (image_tensor, random_gallery, next_seed, next_page_index, int(unique_id) if unique_id else 0)
+            # 更新输入端的seed和page_index
+            if unique_id is not None:
+                try:
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "random_seed",
+                            "type": "INT",
+                            "value": next_seed
+                        }
+                    )
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "page_index",
+                            "type": "INT",
+                            "value": next_page_index
+                        }
+                    )
+                except Exception as e:
+                    print(f"[EHentaiRandomNode] Warning: Failed to update widgets: {e}")
+            
+            # 返回结果
+            return (image_tensor, random_gallery)
             
         except Exception as e:
             # 如果出错，返回默认图片
@@ -199,11 +224,35 @@ class EHentaiRandomNode:
             # 添加batch维度并调整为BHWC格式
             error_array = np.expand_dims(error_array, axis=0)
             error_tensor = torch.from_numpy(error_array)
-            # 返回错误结果，包括下一次的seed和page_index
             # 出错时保持原seed不变，页码加1
             error_next_seed = random_seed
             error_next_page = page_index + 1
-            return (error_tensor, "", error_next_seed, error_next_page, int(unique_id) if unique_id else 0)
+            
+            # 更新输入端的seed和page_index
+            if unique_id is not None:
+                try:
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "random_seed",
+                            "type": "INT",
+                            "value": error_next_seed
+                        }
+                    )
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "page_index",
+                            "type": "INT",
+                            "value": error_next_page
+                        }
+                    )
+                except Exception as e:
+                    print(f"[EHentaiRandomNode] Warning: Failed to update widgets: {e}")
+            
+            return (error_tensor, "")
 
 
 

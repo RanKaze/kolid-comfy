@@ -7,6 +7,7 @@ import base64
 import torch
 import comfy.utils
 import re
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 
 class PixivImageLoaderNode:
     @classmethod

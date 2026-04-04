@@ -1,1 +1,9 @@
 selenium
+yt-dlp
+requests
+yt-dlp[default,curl-cffi]
+opencv-python
+pyautogui
+PySide6
+seleniumbase
+psutil  

@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Selection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1a1a1a;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #imageContainer {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px;
+        }
+        #image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+        .instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.7);
+            padding: 8px 16px;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 12px;
+            text-align: center;
+            z-index: 50;
+        }
+        .screenshot-area-indicator {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 40;
+        }
+        .screenshot-area-indicator .indicator-border {
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.3);
+            position: relative;
+        }
+        .screenshot-area-indicator .indicator-label {
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 122, 255, 0.8);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            white-space: nowrap;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .screenshot-area-indicator .reset-button {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            border-radius: 2px;
+            padding: 2px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            pointer-events: auto !important;
+            position: relative;
+            z-index: 100;
+        }
+        .screenshot-area-indicator .reset-button:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        .screenshot-area-indicator .reset-button:active {
+            background: rgba(255, 255, 255, 0.4);
+        }
+        .screenshot-area-indicator .indicator-label::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 4px solid transparent;
+            border-top-color: rgba(0, 122, 255, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <div id="imageContainer">
+        <img id="image" src="" alt="Image">
+        <div id="status">Loading...</div>
+        <div class="instructions">
+            Press <strong>Ctrl</strong> to drag/resize selection, then press <strong>Enter</strong> to confirm
+        </div>
+        <!-- Screenshot area indicator -->
+        <div id="screenshotAreaIndicator" class="screenshot-area-indicator">
+            <div class="indicator-border"></div>
+            <div class="indicator-label">
+                <span class="label-text"></span>
+                <button class="reset-button" title="Reset selection area">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M6 1L7.5 3.5H9.5V5.5H7.5V3.5L6 1Z" fill="white"/>
+                        <path d="M6 11L4.5 8.5H2.5V6.5H4.5V8.5L6 11Z" fill="white"/>
+                        <path d="M1 6L3.5 4.5V2.5H5.5V4.5H3.5L1 6Z" fill="white"/>
+                        <path d="M11 6L8.5 7.5V9.5H6.5V7.5H8.5L11 6Z" fill="white"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let image = document.getElementById('image');
+        let imageContainer = document.getElementById('imageContainer');
+        let status = document.getElementById('status');
+        let screenshotWidth = 512;
+        let screenshotHeight = 512;
+        let initialScreenshotWidth = 512;
+        let initialScreenshotHeight = 512;
+        let isScreenshotAreaModified = false;
+        let isDragging = false;
+        let isResizing = false;
+        let ctrlKeyPressed = false;
+
+        // Load image data from server
+        async function loadImage() {
+            try {
+                const response = await fetch('/image_data');
+                const data = await response.json();
+                image.src = data.image;
+                screenshotWidth = data.width;
+                screenshotHeight = data.height;
+                initialScreenshotWidth = data.width;
+                initialScreenshotHeight = data.height;
+                status.textContent = 'Ready: Press Ctrl to drag/resize, Enter to confirm';
+                // Update screenshot area indicator after image loads
+                setTimeout(updateScreenshotAreaIndicator, 100);
+            } catch (error) {
+                console.error('Error loading image:', error);
+                status.textContent = 'Error loading image';
+            }
+        }
+
+        // Update screenshot area indicator
+        function updateScreenshotAreaIndicator() {
+            const indicator = document.getElementById('screenshotAreaIndicator');
+            if (!indicator) return;
+            
+            // Calculate the position: center of the image
+            const imageRect = image.getBoundingClientRect();
+            const containerRect = imageContainer.getBoundingClientRect();
+            const left = (imageRect.left + (imageRect.width - screenshotWidth) / 2) - containerRect.left;
+            const top = (imageRect.top + (imageRect.height - screenshotHeight) / 2) - containerRect.top;
+            
+            // Update indicator position and size
+            indicator.style.left = `${left}px`;
+            indicator.style.top = `${top}px`;
+            
+            const border = indicator.querySelector('.indicator-border');
+            if (border) {
+                border.style.width = `${screenshotWidth}px`;
+                border.style.height = `${screenshotHeight}px`;
+            }
+            
+            const labelText = indicator.querySelector('.label-text');
+            if (labelText) {
+                labelText.textContent = `${screenshotWidth} x ${screenshotHeight}`;
+            }
+            
+            // Check if the screenshot area has been modified
+            if (!isDragging && !isResizing) {
+                isScreenshotAreaModified = screenshotWidth !== initialScreenshotWidth || screenshotHeight !== initialScreenshotHeight;
+            }
+            
+            // Update reset button visibility
+            updateResetButtonVisibility();
+        }
+        
+        // Reset screenshot area to initial position and size
+        function resetScreenshotArea() {
+            // Reset to initial size
+            screenshotWidth = initialScreenshotWidth;
+            screenshotHeight = initialScreenshotHeight;
+            isScreenshotAreaModified = false;
+            
+            // Update the indicator
+            updateScreenshotAreaIndicator();
+        }
+        
+        // Update reset button visibility
+        function updateResetButtonVisibility() {
+            const resetButton = document.querySelector('.reset-button');
+            if (resetButton) {
+                // Show reset button only when Ctrl is pressed and screenshot area has been modified
+                if (ctrlKeyPressed && isScreenshotAreaModified) {
+                    resetButton.style.display = 'flex';
+                    resetButton.style.pointerEvents = 'auto';
+                } else {
+                    resetButton.style.display = 'none';
+                    resetButton.style.pointerEvents = 'none';
+                }
+            }
+        }
+
+        // Capture and send selected region
+        async function captureSelection() {
+            const indicator = document.getElementById('screenshotAreaIndicator');
+            const border = indicator.querySelector('.indicator-border');
+            const imageRect = image.getBoundingClientRect();
+            const borderRect = border.getBoundingClientRect();
+            
+            // Create canvas for cropping
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size to selection
+            canvas.width = screenshotWidth;
+            canvas.height = screenshotHeight;
+            
+            // Calculate the scale factor between displayed image and original image
+            // Use naturalWidth/naturalHeight for original image dimensions
+            const scaleX = image.naturalWidth / imageRect.width;
+            const scaleY = image.naturalHeight / imageRect.height;
+            
+            // Calculate source coordinates based on border position relative to image
+            const srcX = Math.round((borderRect.left - imageRect.left) * scaleX);
+            const srcY = Math.round((borderRect.top - imageRect.top) * scaleY);
+            const srcWidth = Math.round(borderRect.width * scaleX);
+            const srcHeight = Math.round(borderRect.height * scaleY);
+            
+            // Ensure coordinates are within bounds
+            const clampedSrcX = Math.max(0, Math.min(srcX, image.naturalWidth - 1));
+            const clampedSrcY = Math.max(0, Math.min(srcY, image.naturalHeight - 1));
+            const clampedSrcWidth = Math.min(srcWidth, image.naturalWidth - clampedSrcX);
+            const clampedSrcHeight = Math.min(srcHeight, image.naturalHeight - clampedSrcY);
+            
+            // Draw selected region to canvas
+            ctx.drawImage(
+                image, 
+                clampedSrcX, 
+                clampedSrcY, 
+                clampedSrcWidth, 
+                clampedSrcHeight, 
+                0, 
+                0, 
+                canvas.width, 
+                canvas.height
+            );
+            
+            // Convert canvas to base64
+            const base64 = canvas.toDataURL('image/png');
+            
+            // Send to server
+            try {
+                const response = await fetch('/screenshot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ image: base64 })
+                });
+                
+                if (response.ok) {
+                    status.textContent = 'Selection sent successfully';
+                    // Close window after a short delay
+                    setTimeout(() => {
+                        window.close();
+                    }, 1000);
+                } else {
+                    status.textContent = 'Error sending selection';
+                }
+            } catch (error) {
+                console.error('Error sending selection:', error);
+                status.textContent = 'Error sending selection';
+            }
+        }
+
+        // Add drag and resize functionality to screenshot area indicator
+        function initScreenshotAreaDrag() {
+            const indicator = document.getElementById('screenshotAreaIndicator');
+            if (!indicator) return;
+            
+            const border = indicator.querySelector('.indicator-border');
+            if (!border) return;
+            
+            // Declare variables
+            let startX = 0;
+            let startY = 0;
+            let startWidth = 0;
+            let startHeight = 0;
+            let startLeft = 0;
+            let startTop = 0;
+            let resizeMode = '';
+            
+            // Update cursor based on mouse position
+            function updateCursor(e) {
+                const rect = indicator.getBoundingClientRect();
+                const mouseX = e.clientX;
+                const mouseY = e.clientY;
+                
+                // Check if mouse is near the edges or corners
+                const edgeThreshold = 10;
+                const isNearLeft = mouseX < rect.left + edgeThreshold;
+                const isNearRight = mouseX > rect.right - edgeThreshold;
+                const isNearTop = mouseY < rect.top + edgeThreshold;
+                const isNearBottom = mouseY > rect.bottom - edgeThreshold;
+                
+                if (isNearLeft && isNearTop) {
+                    // Top-left corner
+                    indicator.style.cursor = 'nwse-resize';
+                    resizeMode = 'topleft';
+                } else if (isNearRight && isNearTop) {
+                    // Top-right corner
+                    indicator.style.cursor = 'nesw-resize';
+                    resizeMode = 'topright';
+                } else if (isNearLeft && isNearBottom) {
+                    // Bottom-left corner
+                    indicator.style.cursor = 'nesw-resize';
+                    resizeMode = 'bottomleft';
+                } else if (isNearRight && isNearBottom) {
+                    // Bottom-right corner
+                    indicator.style.cursor = 'nwse-resize';
+                    resizeMode = 'bottomright';
+                } else if (isNearLeft) {
+                    // Left edge
+                    indicator.style.cursor = 'ew-resize';
+                    resizeMode = 'left';
+                } else if (isNearRight) {
+                    // Right edge
+                    indicator.style.cursor = 'ew-resize';
+                    resizeMode = 'right';
+                } else if (isNearTop) {
+                    // Top edge
+                    indicator.style.cursor = 'ns-resize';
+                    resizeMode = 'top';
+                } else if (isNearBottom) {
+                    // Bottom edge
+                    indicator.style.cursor = 'ns-resize';
+                    resizeMode = 'bottom';
+                } else {
+                    // Center
+                    indicator.style.cursor = 'move';
+                    resizeMode = '';
+                }
+            }
+            
+            // Start dragging or resizing
+            indicator.addEventListener('mousedown', (e) => {
+                // Only allow dragging/resizing when Ctrl key is pressed
+                if (!e.ctrlKey) {
+                    return;
+                }
+                
+                updateCursor(e);
+                
+                if (resizeMode) {
+                    isResizing = true;
+                } else {
+                    isDragging = true;
+                }
+                
+                startX = e.clientX;
+                startY = e.clientY;
+                startWidth = screenshotWidth;
+                startHeight = screenshotHeight;
+                
+                // Get current position
+                const rect = indicator.getBoundingClientRect();
+                const containerRect = imageContainer.getBoundingClientRect();
+                startLeft = rect.left - containerRect.left;
+                startTop = rect.top - containerRect.top;
+                
+                // Make the indicator brighter when dragging
+                if (border) {
+                    border.style.borderColor = 'rgba(255, 255, 255, 0.8)';
+                    border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.6)';
+                }
+                
+                // Prevent default behavior
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            
+            // Handle mouse move for dragging and resizing
+            document.addEventListener('mousemove', (e) => {
+                // Update cursor when Ctrl is pressed
+                if (e.ctrlKey && !isDragging && !isResizing) {
+                    updateCursor(e);
+                } else if (!e.ctrlKey && !isDragging && !isResizing) {
+                    indicator.style.cursor = 'default';
+                }
+                
+                if (!isDragging && !isResizing) {
+                    return;
+                }
+                
+                const deltaX = e.clientX - startX;
+                const deltaY = e.clientY - startY;
+                
+                if (isDragging) {
+                    // Calculate new position
+                    const newLeft = startLeft + deltaX;
+                    const newTop = startTop + deltaY;
+                    
+                    // Update indicator position
+                    indicator.style.left = `${newLeft}px`;
+                    indicator.style.top = `${newTop}px`;
+                } else if (isResizing) {
+                    // Handle resizing based on mode
+                    switch (resizeMode) {
+                        case 'topleft':
+                            screenshotWidth = Math.max(10, startWidth - deltaX);
+                            screenshotHeight = Math.max(10, startHeight - deltaY);
+                            indicator.style.left = `${startLeft + deltaX}px`;
+                            indicator.style.top = `${startTop + deltaY}px`;
+                            break;
+                        case 'topright':
+                            screenshotWidth = Math.max(10, startWidth + deltaX);
+                            screenshotHeight = Math.max(10, startHeight - deltaY);
+                            indicator.style.top = `${startTop + deltaY}px`;
+                            break;
+                        case 'bottomleft':
+                            screenshotWidth = Math.max(10, startWidth - deltaX);
+                            screenshotHeight = Math.max(10, startHeight + deltaY);
+                            indicator.style.left = `${startLeft + deltaX}px`;
+                            break;
+                        case 'bottomright':
+                            screenshotWidth = Math.max(10, startWidth + deltaX);
+                            screenshotHeight = Math.max(10, startHeight + deltaY);
+                            break;
+                        case 'left':
+                            screenshotWidth = Math.max(10, startWidth - deltaX);
+                            indicator.style.left = `${startLeft + deltaX}px`;
+                            break;
+                        case 'right':
+                            screenshotWidth = Math.max(10, startWidth + deltaX);
+                            break;
+                        case 'top':
+                            screenshotHeight = Math.max(10, startHeight - deltaY);
+                            indicator.style.top = `${startTop + deltaY}px`;
+                            break;
+                        case 'bottom':
+                            screenshotHeight = Math.max(10, startHeight + deltaY);
+                            break;
+                    }
+                    
+                    // Update border size
+                    if (border) {
+                        border.style.width = `${screenshotWidth}px`;
+                        border.style.height = `${screenshotHeight}px`;
+                    }
+                    
+                    // Update label text
+                    const labelText = indicator.querySelector('.label-text');
+                    if (labelText) {
+                        labelText.textContent = `${screenshotWidth} x ${screenshotHeight}`;
+                    }
+                }
+            });
+            
+            // Handle mouse up
+            document.addEventListener('mouseup', () => {
+                if (isDragging || isResizing) {
+                    // Reset indicator appearance
+                    if (border) {
+                        border.style.borderColor = 'rgba(255, 255, 255, 0.5)';
+                        border.style.boxShadow = '0 0 0 2px rgba(0, 122, 255, 0.3)';
+                    }
+                    
+                    isDragging = false;
+                    isResizing = false;
+                    resizeMode = '';
+                    indicator.style.cursor = 'default';
+                    
+                    // Update modified status
+                    isScreenshotAreaModified = screenshotWidth !== initialScreenshotWidth || screenshotHeight !== initialScreenshotHeight;
+                    updateResetButtonVisibility();
+                }
+            });
+        }
+
+        // Handle Ctrl key press
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Control') {
+                ctrlKeyPressed = true;
+                updateResetButtonVisibility();
+            }
+        });
+
+        // Handle Ctrl key release
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'Control') {
+                ctrlKeyPressed = false;
+                updateResetButtonVisibility();
+                // Reset cursor
+                const indicator = document.getElementById('screenshotAreaIndicator');
+                if (indicator) {
+                    indicator.style.cursor = 'default';
+                }
+            }
+        });
+
+        // Handle Enter key to confirm selection
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                captureSelection();
+            }
+        });
+
+        // Handle reset button click
+        document.querySelector('.reset-button').addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            resetScreenshotArea();
+        });
+
+        // Handle window close
+        window.addEventListener('beforeunload', async () => {
+            try {
+                await fetch('/window_closed', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ closed: true })
+                });
+            } catch (error) {
+                console.error('Error notifying window close:', error);
+            }
+        });
+
+        // Load image when page loads
+        window.addEventListener('load', () => {
+            loadImage();
+            initScreenshotAreaDrag();
+        });
+
+        // Update indicator when window resizes
+        window.addEventListener('resize', updateScreenshotAreaIndicator);
+    </script>
+</body>
+</html>

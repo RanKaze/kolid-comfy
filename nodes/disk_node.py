@@ -6,6 +6,8 @@ from PIL import Image
 import io
 import torch
 import comfy.utils
+from server import PromptServer
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 
 class LocalImageLoaderNode:
     @classmethod
@@ -22,8 +24,8 @@ class LocalImageLoaderNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT")
-    RETURN_NAMES = ("image", "new_seed", "new_index", "node_id")
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "load_image"
     CATEGORY = "Kolid-Toolkit"
 
@@ -93,7 +95,31 @@ class LocalImageLoaderNode:
                 next_seed = random.randint(0, 0xffffffffffffffff)
                 next_index = 0
             
-            return (image_tensor, next_seed, next_index, int(unique_id))
+            # 更新输入端的seed和index
+            if unique_id is not None:
+                try:
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "random_seed",
+                            "type": "INT",
+                            "value": next_seed
+                        }
+                    )
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "index",
+                            "type": "INT",
+                            "value": next_index
+                        }
+                    )
+                except Exception as e:
+                    print(f"[LocalImageLoaderNode] Warning: Failed to update widgets: {e}")
+            
+            return (image_tensor,)
             
         except Exception as e:
             # 如果出错，返回默认图片
@@ -109,4 +135,29 @@ class LocalImageLoaderNode:
             # 出错时保持原seed不变，index加1
             error_next_seed = random_seed
             error_next_index = index + 1
-            return (error_tensor, error_next_seed, error_next_index, int(unique_id))
+            
+            # 更新输入端的seed和index
+            if unique_id is not None:
+                try:
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "random_seed",
+                            "type": "INT",
+                            "value": error_next_seed
+                        }
+                    )
+                    PromptServer.instance.send_sync(
+                        "kolid-comfy-widget-set",
+                        {
+                            "node_id": unique_id,
+                            "widget_name": "index",
+                            "type": "INT",
+                            "value": error_next_index
+                        }
+                    )
+                except Exception as e:
+                    print(f"[LocalImageLoaderNode] Warning: Failed to update widgets: {e}")
+            
+            return (error_tensor,)

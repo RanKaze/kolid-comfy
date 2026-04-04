@@ -24,3 +24,51 @@ class BranchNoneNode:
 
     def execute(self, *args, **kwargs):
         return (kwargs['on_none'] if kwargs['check'] is None else kwargs['check'],)
+    
+class IsOptionalNoneNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "optional": {
+                "check": ("*",),
+            },
+        }
+        
+    # 建議加上這段，明確告訴後端不要做嚴格類型檢查
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # kwargs 會收到所有實際傳進來的輸入，例如 {'check': some_value} 或空 dict
+        # 我們什麼都不用檢查，直接放行
+        return True
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("is_none",)
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def execute(self, check = None):
+        return (check is None,)
+    
+class BranchOptionalRequiredNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "optional": {
+                "required": ("*",),
+            },
+        }
+        
+    # 建議加上這段，明確告訴後端不要做嚴格類型檢查
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # kwargs 會收到所有實際傳進來的輸入，例如 {'check': some_value} 或空 dict
+        # 我們什麼都不用檢查，直接放行
+        return True
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("required",)
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def execute(self, required = None):
+        return (required,)
