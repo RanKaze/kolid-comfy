@@ -24,6 +24,7 @@ from .nodes.branch_node import *
 from .nodes.video_node import *
 from .nodes.timestamp_node import *
 from .nodes.audio_node import *
+from .nodes.sampler_node import *
     
 
 NODE_CONFIG = {
@@ -120,6 +121,18 @@ NODE_CONFIG = {
     
     "ImageToBase64Node": {"class": ImageToBase64Node, "name": "ImageToBase64Node"},
     "Base64ToImageNode": {"class": Base64ToImageNode, "name": "Base64ToImageNode"},
+    
+    "ParseLoRAConfigsNode": {"class": ParseLoRAConfigsNode, "name": "ParseLoRAConfigsNode"},
+    "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},
+    "PipelineSamplerNode": {"class": PipelineSamplerNode, "name": "PipelineSamplerNode"},
+    "PipelineSamplerAdvancedNode": {"class": PipelineSamplerAdvancedNode, "name": "PipelineSamplerAdvancedNode"},
+    "PipelineDecodeNode": {"class": PipelineDecodeNode, "name": "PipelineDecodeNode"},
+    "PipelineLimitPixelNode": {"class": PipelineLimitPixelNode, "name": "PipelineLimitPixelNode"},
+    "PipelineRecoverResizeNode": {"class": PipelineRecoverResizeNode, "name": "PipelineRecoverResizeNode"},
+    "PipelineAddNoiseNode": {"class": PipelineAddNoiseNode, "name": "PipelineAddNoiseNode"},
+    "PipelineToggleMaskInpaintNode": {"class": PipelineToggleMaskInpaintNode, "name": "PipelineToggleMaskInpaintNode"},
+    "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
+    "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
     
 }
 

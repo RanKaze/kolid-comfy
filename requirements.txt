@@ -6,4 +6,6 @@ opencv-python
 pyautogui
 PySide6
 seleniumbase
-psutil  
+psutil
+pywebview
+onnxruntime

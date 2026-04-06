@@ -1,5 +1,22 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
+from PIL import Image, ImageFilter, ImageChops, ImageDraw, ImageOps, ImageEnhance, ImageFont
+
+def tensor2pil(t_image: torch.Tensor)  -> Image:
+    return Image.fromarray(np.clip(255.0 * t_image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8))
+
+def pil2tensor(image:Image) -> torch.Tensor:
+    return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
+
+def image_to_base64(image_tensor):
+    """将 ComfyUI 的 IMAGE tensor 转为 base64（假设是 torch tensor，shape [B,H,W,C]）"""
+    # 根据你的实际 IMAGE 格式调整（这里假设是 [1, H, W, 3] float32 0-1）
+    img = (image_tensor[0] * 255).clamp(0, 255).byte().cpu().numpy()
+    pil_img = Image.fromarray(img)
+    buffer = io.BytesIO()
+    pil_img.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 def hex_to_rgb(hex_color: str):
     """将 #RRGGBB 或 #RGB 转为 torch tensor [3]"""
@@ -497,3 +514,193 @@ def recover_batch(image, batch_info, mask=None):
             recovered_masks.append(zero_mask)
 
     return (recovered_images, recovered_masks)
+
+
+def limit_pixels(image, pixels, mask=None):
+    """
+    Limit image pixel count by resizing if needed.
+    - 如果当前像素 ≤ pixels → 放大到接近 pixels
+    - 如果当前像素 > pixels → 缩小到不超过 pixels
+    
+    Args:
+        image: (B, H, W, C) tensor
+        pixels: int, target pixel count (maximum when downscaling, approximate when upscaling)
+        mask: (B, H, W) tensor, optional
+    
+    Returns:
+        resized_image: (B, new_h, new_w, C) tensor
+        resized_mask: (B, new_h, new_w) tensor
+        resize_info: dict with resize information
+    """
+    try:
+        B, H, W, C = image.shape
+        current_pixels = H * W
+
+        print(f"[ImageUtil] Original: {W}x{H} = {current_pixels} pixels | Target: {pixels}")
+
+        # 如果当前像素数已经等于目标（允许少量误差），直接返回
+        if abs(current_pixels - pixels) < 100:   # 允许很小的误差
+            print("[ImageUtil] Already close to target pixels, no resizing needed.")
+            resize_info = {
+                "original_width": W,
+                "original_height": H,
+                "resized_width": W,
+                "resized_height": H,
+                "aspect_ratio": W / H if H != 0 else 1.0,
+                "scale_factor": 1.0
+            }
+            return (image, mask, resize_info)
+
+        aspect_ratio = W / H
+
+        if current_pixels < pixels:
+            # ==================== 需要放大 ====================
+            print("[ImageUtil] Upscaling to reach target pixel count...")
+            
+            # 计算目标尺寸（保持宽高比）
+            new_width = int((pixels * aspect_ratio) ** 0.5)
+            new_height = int(new_width / aspect_ratio)
+
+            # 确保不超过目标像素（轻微调整）
+            while new_width * new_height > pixels:
+                new_width = max(16, int(new_width * 0.99))
+                new_height = max(16, int(new_width / aspect_ratio))
+
+            # 防止尺寸过小（理论上不会发生）
+            new_width = max(64, new_width)   # 放大时最小也给大一点
+            new_height = max(64, new_height)
+
+            direction = "Upscaling"
+
+        else:
+            # ==================== 需要缩小 ====================
+            print("[ImageUtil] Downscaling to stay under pixel limit...")
+            
+            new_width = int((pixels * aspect_ratio) ** 0.5)
+            new_height = int(new_width / aspect_ratio)
+
+            # 确保不超过像素限制
+            while new_width * new_height > pixels:
+                new_width = max(16, int(new_width * 0.99))
+                new_height = max(16, int(new_width / aspect_ratio))
+
+            new_width = max(16, new_width)
+            new_height = max(16, new_height)
+            direction = "Downscaling"
+
+        actual_pixels = new_width * new_height
+        print(f"[ImageUtil] {direction} to: {new_width}x{new_height} ≈ {actual_pixels} pixels "
+              f"({actual_pixels / pixels * 100:.1f}% of target)")
+
+        # ---------- 纯 PyTorch 批量缩放 ----------
+        img_tensor = image.permute(0, 3, 1, 2).contiguous()
+
+        resized_img = F.interpolate(
+            img_tensor,
+            size=(new_height, new_width),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        )
+
+        resized_image = resized_img.permute(0, 2, 3, 1).contiguous()
+
+        # ---------- 处理 mask（如果有） ----------
+        resized_mask = mask
+        if mask is not None:
+            mask_tensor = mask.unsqueeze(1)
+            resized_m = F.interpolate(
+                mask_tensor,
+                size=(new_height, new_width),
+                mode='bicubic',
+                align_corners=False,
+                antialias=True
+            )
+            resized_mask = resized_m.squeeze(1).clamp(0.0, 1.0)
+
+        # 创建 resize_info
+        resize_info = {
+            "original_width": W,
+            "original_height": H,
+            "resized_width": new_width,
+            "resized_height": new_height,
+            "aspect_ratio": aspect_ratio,
+            "scale_factor": new_width / W,
+            "was_upscaled": current_pixels < pixels
+        }
+
+        return (resized_image, resized_mask, resize_info)
+
+    except Exception as e:
+        raise Exception(f"Failed to limit pixels: {e}")
+
+
+def recover_size(image, resize_info, mask=None):
+    """
+    Recover image to original size using resize info.
+    
+    Args:
+        image: (B, H, W, C) tensor
+        resize_info: dict with resize information
+        mask: (B, H, W) tensor, optional
+    
+    Returns:
+        recovered_image: (B, original_h, original_w, C) tensor
+        recovered_mask: (B, original_h, original_w) tensor
+    """
+    try:
+        # 提取原始尺寸
+        original_width = resize_info.get("original_width")
+        original_height = resize_info.get("original_height")
+
+        if original_width is None or original_height is None:
+            raise ValueError("Resize info missing original dimensions")
+
+        # 当前图像尺寸
+        B, current_height, current_width, C = image.shape
+
+        print(f"[ImageUtil] Current: {current_width}x{current_height} → Target: {original_width}x{original_height}")
+
+        # 无需恢复，直接返回
+        if current_width == original_width and current_height == original_height:
+            print("[ImageUtil] No recovery needed, already at original size")
+            return (image, mask)
+
+        # ---------- 纯 PyTorch 批量上采样（最快） ----------
+        # image: (B, H, W, C) → (B, C, H, W)
+        img_tensor = image.permute(0, 3, 1, 2).contiguous()
+
+        # 使用 bicubic + antialias（质量接近 LANCZOS，速度快很多）
+        recovered_img = F.interpolate(
+            img_tensor,
+            size=(original_height, original_width),
+            mode='bicubic',
+            align_corners=False,
+            antialias=True
+        )
+
+        # 转回 ComfyUI 格式 (B, H, W, C)
+        recovered_image = recovered_img.permute(0, 2, 3, 1).contiguous()
+
+        # ---------- 处理 mask（如果提供） ----------
+        recovered_mask = mask
+        if mask is not None:
+            Bm, Hm, Wm = mask.shape
+            # mask: (B, H, W) → (B, 1, H, W)
+            mask_tensor = mask.unsqueeze(1)
+
+            recovered_m = F.interpolate(
+                mask_tensor,
+                size=(original_height, original_width),
+                mode='bicubic',          # mask 上采样 bicubic 通常比 nearest 更自然
+                align_corners=False,
+                antialias=True
+            )
+
+            # 限制在 [0,1] 范围内
+            recovered_mask = recovered_m.squeeze(1).clamp_(0.0, 1.0)
+
+        return (recovered_image, recovered_mask)
+
+    except Exception as e:
+        raise Exception(f"Failed to recover image size: {e}")

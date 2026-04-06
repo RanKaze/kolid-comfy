@@ -28,7 +28,7 @@ import shutil
 import torch.nn.functional as F
 import pyautogui
 from PySide6.QtCore import Qt, QRect, QPoint, QPropertyAnimation, QEasingCurve
-from ..libs.image_utils import crop_mask, recover_crop, hex_to_rgb, batch_images, recover_batch
+from ..libs.image_utils import crop_mask, recover_crop, hex_to_rgb, batch_images, recover_batch, limit_pixels, recover_size
 from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QPixmap, QImage, QPainterPath
 from PySide6.QtWidgets import (QApplication, QWidget, QPushButton, QHBoxLayout, QVBoxLayout)
 from server import PromptServer
@@ -252,7 +252,7 @@ def handlePointsSelection(severHandler, set_event):
         severHandler.send_error(500, "Server error")
 
 
-class ImageServer:
+class SnapshotImageNodeServer:
     """Temporary HTTP server to serve the snapshot page and handle image selection."""
 
     def __init__(self, image, width, height):
@@ -271,7 +271,7 @@ class ImageServer:
         # Find an available port
         for port in range(8080, 9000):
             try:
-                self.server = socketserver.TCPServer(('localhost', port), self.ImageHandler)
+                self.server = socketserver.TCPServer(('localhost', port), self.SnapshotImageNodeHandler)
                 self.started = True
                 print(f"[SnapshotImage] Server started on port {port}")
                 break
@@ -286,7 +286,7 @@ class ImageServer:
             return
 
         # Store reference to self in the handler class
-        self.ImageHandler.server_instance = self
+        self.SnapshotImageNodeHandler.server_instance = self
 
         # Serve forever
         try:
@@ -305,7 +305,7 @@ class ImageServer:
         if( not waitSnapShot(self.screenshot_event)):
             raise Exception("Canceled")
 
-    class ImageHandler(http.server.SimpleHTTPRequestHandler):
+    class SnapshotImageNodeHandler(http.server.SimpleHTTPRequestHandler):
         server_instance = None
 
         def do_GET(self):
@@ -423,7 +423,7 @@ class SnapshotImageNode:
             focused_window = win32gui.GetForegroundWindow()
 
         # Start a temporary HTTP server to serve the image selection page
-        server = ImageServer(image, width, height)
+        server = SnapshotImageNodeServer(image, width, height)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -456,7 +456,7 @@ class SnapshotImageNode:
         return (server.image, server.image_path)
 
 
-class ImagePointsServer:
+class SnapshotImagePointsNodeServer:
     """Temporary HTTP server to serve the image points selection page and handle points selection."""
 
     def __init__(self, image, initial_positive=None, initial_negative=None):
@@ -473,7 +473,7 @@ class ImagePointsServer:
         # Find an available port
         for port in range(8080, 9000):
             try:
-                self.server = socketserver.TCPServer(('localhost', port), self.PointsHandler)
+                self.server = socketserver.TCPServer(('localhost', port), self.SnapshotImagePointsNodeHandler)
                 self.started = True
                 print(f"[SnapshotImagePoints] Server started on port {port}")
                 break
@@ -488,7 +488,7 @@ class ImagePointsServer:
             return
 
         # Store reference to self in the handler class
-        self.PointsHandler.server_instance = self
+        self.SnapshotImagePointsNodeHandler.server_instance = self
 
         # Serve forever
         try:
@@ -507,7 +507,7 @@ class ImagePointsServer:
         if( not waitSnapShot(self.screenshot_event)):
             raise Exception("Canceled")
 
-    class PointsHandler(http.server.SimpleHTTPRequestHandler):
+    class SnapshotImagePointsNodeHandler(http.server.SimpleHTTPRequestHandler):
         server_instance = None
 
         def do_GET(self):
@@ -716,7 +716,7 @@ class SnapshotImagePointsNode:
                 focused_window = win32gui.GetForegroundWindow()
 
             # Start a temporary HTTP server to serve the image points selection page
-            server = ImagePointsServer(image, initial_positive, initial_negative)
+            server = SnapshotImagePointsNodeServer(image, initial_positive, initial_negative)
             server_thread = threading.Thread(target=server.start)
             server_thread.daemon = True
             server_thread.start()
@@ -816,84 +816,8 @@ class ImageLimitPixelNode:
     def limit_pixels(self, image, pixels, mask=None):
         """Limit image pixel count by resizing if needed."""
         try:
-            B, H, W, C = image.shape
-            current_pixels = H * W
-
-            print(f"[ImageLimitPixelNode] Original: {W}x{H} = {current_pixels} pixels | Limit: {pixels}")
-
-            # 无需缩放，直接返回
-            if current_pixels <= pixels:
-                print("[ImageLimitPixelNode] No resizing needed.")
-                resize_info = {
-                    "original_width": W,
-                    "original_height": H,
-                    "resized_width": W,
-                    "resized_height": H,
-                    "aspect_ratio": W / H if H != 0 else 1.0
-                }
-                return (image, mask, resize_info)
-
-            # 计算保持宽高比的新尺寸
-            aspect_ratio = W / H
-            # new_width = sqrt(pixels * aspect_ratio)
-            new_width = int((pixels * aspect_ratio) ** 0.5)
-            new_height = int(new_width / aspect_ratio)
-
-            # 确保不超过像素限制
-            while new_width * new_height > pixels:
-                new_width = max(16, int(new_width * 0.99))
-                new_height = max(16, int(new_width / aspect_ratio))
-
-            new_width = max(16, new_width)
-            new_height = max(16, new_height)
-
-            print(f"[ImageLimitPixelNode] Resizing to: {new_width}x{new_height} ≈ {new_width * new_height} pixels")
-
-            # ---------- 纯 PyTorch 批量缩放（最快方式） ----------
-            # image: (B, H, W, C) → (B, C, H, W)
-            img_tensor = image.permute(0, 3, 1, 2).contiguous()
-
-            # 使用 bicubic（质量与 LANCZOS 接近，速度快很多；支持 GPU）
-            resized_img = F.interpolate(
-                img_tensor,
-                size=(new_height, new_width),
-                mode='bicubic',
-                align_corners=False,
-                antialias=True   # PyTorch 1.11+ 支持，降采样效果更好
-            )
-
-            # 转回 ComfyUI 格式 (B, H, W, C)
-            resized_image = resized_img.permute(0, 2, 3, 1).contiguous()
-
-            # ---------- 处理 mask（如果有） ----------
-            resized_mask = mask
-            if mask is not None:
-                Bm, Hm, Wm = mask.shape
-                # mask: (B, H, W) → (B, 1, H, W)
-                mask_tensor = mask.unsqueeze(1)
-
-                resized_m = F.interpolate(
-                    mask_tensor,
-                    size=(new_height, new_width),
-                    mode='bicubic',      # mask 用 bicubic 通常比 nearest 更平滑
-                    align_corners=False,
-                    antialias=True
-                )
-
-                # 裁剪回 [0,1] 范围并转回 (B, H, W)
-                resized_mask = resized_m.squeeze(1).clamp(0.0, 1.0)
-
-            # 创建 resize_info（与原节点一致）
-            resize_info = {
-                "original_width": W,
-                "original_height": H,
-                "resized_width": new_width,
-                "resized_height": new_height,
-                "aspect_ratio": aspect_ratio
-            }
-
-            return (resized_image, resized_mask, resize_info)
-
+            print("[ImageLimitPixelNode] Calling limit_pixels from image_utils")
+            return limit_pixels(image, pixels, mask)
         except Exception as e:
             raise Exception(f"Failed to limit pixels: {e}")
         
@@ -926,59 +850,8 @@ class ImageRecoverResizeNode:
     def recover_size(self, image, resize_info, mask=None):
         """Recover image to original size using resize info."""
         try:
-            # 提取原始尺寸
-            original_width = resize_info.get("original_width")
-            original_height = resize_info.get("original_height")
-
-            if original_width is None or original_height is None:
-                raise ValueError("Resize info missing original dimensions")
-
-            # 当前图像尺寸
-            B, current_height, current_width, C = image.shape
-
-            print(f"[ImageRecoverResizeNode] Current: {current_width}x{current_height} → Target: {original_width}x{original_height}")
-
-            # 无需恢复，直接返回
-            if current_width == original_width and current_height == original_height:
-                print("[ImageRecoverResizeNode] No recovery needed, already at original size")
-                return (image, mask)
-
-            # ---------- 纯 PyTorch 批量上采样（最快） ----------
-            # image: (B, H, W, C) → (B, C, H, W)
-            img_tensor = image.permute(0, 3, 1, 2).contiguous()
-
-            # 使用 bicubic + antialias（质量接近 LANCZOS，速度快很多）
-            recovered_img = F.interpolate(
-                img_tensor,
-                size=(original_height, original_width),
-                mode='bicubic',
-                align_corners=False,
-                antialias=True
-            )
-
-            # 转回 ComfyUI 格式 (B, H, W, C)
-            recovered_image = recovered_img.permute(0, 2, 3, 1).contiguous()
-
-            # ---------- 处理 mask（如果提供） ----------
-            recovered_mask = mask
-            if mask is not None:
-                Bm, Hm, Wm = mask.shape
-                # mask: (B, H, W) → (B, 1, H, W)
-                mask_tensor = mask.unsqueeze(1)
-
-                recovered_m = F.interpolate(
-                    mask_tensor,
-                    size=(original_height, original_width),
-                    mode='bicubic',          # mask 上采样 bicubic 通常比 nearest 更自然
-                    align_corners=False,
-                    antialias=True
-                )
-
-                # 限制在 [0,1] 范围内
-                recovered_mask = recovered_m.squeeze(1).clamp_(0.0, 1.0)
-
-            return (recovered_image, recovered_mask)
-
+            print("[ImageRecoverResizeNode] Calling recover_size from image_utils")
+            return recover_size(image, resize_info, mask)
         except Exception as e:
             raise Exception(f"Failed to recover image size: {e}")
         
@@ -1049,16 +922,6 @@ class ImageRecoverCropNode:
         except Exception as e:
             raise Exception(f"Failed to recover cropped image: {e}")
 
-
-def hex_to_rgb(hex_color: str):
-    """将 #RRGGBB 或 #RGB 转为 torch tensor [3]"""
-    hex_color = hex_color.lstrip('#').strip()
-    if len(hex_color) == 3:
-        hex_color = ''.join(c * 2 for c in hex_color)
-    if len(hex_color) != 6:
-        raise ValueError("Invalid hex color")
-    rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    return torch.tensor(rgb, dtype=torch.float32) / 255.0
 
 
 class ImageBatchNode:
