@@ -46,3 +46,6 @@ Thumbs.db
 nodes/supersplat/node_modules/
 nodes/supersplat/dist/
 nodes/supersplat/build/
+
+# 产生的cookies
+cookies/

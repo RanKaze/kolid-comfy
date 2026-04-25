@@ -9,6 +9,14 @@ from seleniumbase import Driver
 import folder_paths
 import random
 import time
+import torch
+import numpy as np
+from decord import VideoReader, cpu
+import decord
+from .timestamp import parse_timestamp
+import cv2
+from PIL import Image
+import hashlib
 
 try:
     import yt_dlp
@@ -16,14 +24,10 @@ try:
 except ImportError:
     YT_DLP_AVAILABLE = False
 
-try:
-    import cv2
-    CV2_AVAILABLE = True
-except ImportError:
-    CV2_AVAILABLE = False
 
-FFMPEG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins", "ffmpeg", "bin", "ffmpeg.exe")
-FFPROBE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins", "ffmpeg", "bin", "ffprobe.exe")
+FFMPEG_BIN_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "plugins", "ffmpeg", "bin")
+FFMPEG_PATH = os.path.join(FFMPEG_BIN_PATH, "ffmpeg.exe")
+FFPROBE_PATH = os.path.join(FFMPEG_BIN_PATH, "ffprobe.exe")
 
 # Cookie file path for hanime1
 COOKIES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies")
@@ -331,8 +335,6 @@ def remux_to_mp4(input_path):
 
 def get_video_fps(video_path):
     """Get video real FPS, returns 30 on failure."""
-    if not CV2_AVAILABLE:
-        return 30.0
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise Exception(f"Failed to open video: {video_path}")
@@ -725,130 +727,204 @@ def download_hanime1(url: str, clear_cache: bool = False):
     return cache_path
 
 
-def extract_images_segment(video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps=None):
-    """Extract multiple frames from a video based on start and end timestamps with offsets.
-    
-    Args:
-        video: Video object
-        start_timestamp: Start timestamp string
-        start_frame_offset: Offset for start frame
-        end_timestamp: End timestamp string
-        end_frame_offset: Offset for end frame
-        fps: Target FPS for extraction. If None, extract all frames.
-    """
-    import cv2
-    import numpy as np
-    import torch
-    from .timestamp import parse_timestamp
-    
+def extract_images_segment(video, start_timestamp, start_frame_offset,
+                           end_timestamp, end_frame_offset, fps=None):
+    """Extract multiple frames from a video - decord 版（按你想要的逻辑修复）"""
     try:
         video_path = video.get_stream_source()
-        print(f"[VideoUtils] Video path: {video_path}")
 
         start_time = 0
         if hasattr(video, '_VideoFromFile__start_time'):
             start_time = video._VideoFromFile__start_time
-            print(f"[VideoUtils] Video start time: {start_time}s")
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise Exception(f"Failed to open video: {video_path}")
+        decord.bridge.set_bridge('torch')
+        vr = VideoReader(video_path, ctx=cpu(0))
 
-        video_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        video_frame_count = len(vr)
+        original_fps = vr.get_avg_fps()
+
+        # 时间戳转基础帧号
+        start_ts_sec = parse_timestamp(start_timestamp)
+        end_ts_sec = parse_timestamp(end_timestamp)
+
+        base_start = int((start_time + start_ts_sec) * original_fps)
+        base_end = int((start_time + end_ts_sec) * original_fps)
+
         print(f"[VideoUtils] Video info - frame_count: {video_frame_count}, original fps: {original_fps}")
 
-        # Parse start timestamp
-        start_timestamp_seconds = parse_timestamp(start_timestamp)
-        print(f"[VideoUtils] Start timestamp: {start_timestamp_seconds}s")
-        base_start_time = start_time + start_timestamp_seconds
-        base_start_frame = int(base_start_time * original_fps)
-        print(f"[VideoUtils] Base start frame index: {base_start_frame}")
-
-        # Calculate actual start frame with offset
-        actual_start_frame = base_start_frame + start_frame_offset
-        print(f"[VideoUtils] Start frame with offset: {actual_start_frame}")
-
-        # Parse end timestamp
-        end_timestamp_seconds = parse_timestamp(end_timestamp)
-        print(f"[VideoUtils] End timestamp: {end_timestamp_seconds}s")
-        base_end_time = start_time + end_timestamp_seconds
-        base_end_frame = int(base_end_time * original_fps)
-        print(f"[VideoUtils] Base end frame index: {base_end_frame}")
-
-        # Calculate actual end frame with offset
-        actual_end_frame = base_end_frame + end_frame_offset
-        print(f"[VideoUtils] End frame with offset: {actual_end_frame}")
-
-        # Ensure frames are within bounds
-        if actual_start_frame >= video_frame_count:
-            print(f"[VideoUtils] Warning: Start frame {actual_start_frame} exceeds frame count {video_frame_count}")
-            actual_start_frame = video_frame_count - 1
-        if actual_start_frame < 0:
-            print(f"[VideoUtils] Warning: Start frame {actual_start_frame} is negative, using 0")
-            actual_start_frame = 0
-        if actual_end_frame >= video_frame_count:
-            print(f"[VideoUtils] Warning: End frame {actual_end_frame} exceeds frame count {video_frame_count}")
-            actual_end_frame = video_frame_count - 1
-        if actual_end_frame < 0:
-            print(f"[VideoUtils] Warning: End frame {actual_end_frame} is negative, using 0")
-            actual_end_frame = 0
-        if actual_end_frame < actual_start_frame:
-            print(f"[VideoUtils] Warning: End frame {actual_end_frame} is before start frame {actual_start_frame}, swapping")
-            actual_start_frame, actual_end_frame = actual_end_frame, actual_start_frame
-
-        # Calculate frames to extract
-        if fps is None or fps <= 0:
-            # Extract all frames
-            total_target_frames = actual_end_frame - actual_start_frame + 1
-            print(f"[VideoUtils] Extracting all frames: {total_target_frames}")
-            target_frames = list(range(actual_start_frame, actual_end_frame + 1))
+        if fps is None or fps <= 0 or abs(fps - original_fps) < 0.001:  # 接近 original_fps 时
+            # 直接使用原始偏移量，取全部帧
+            actual_start = max(0, base_start + start_frame_offset)
+            actual_end = min(video_frame_count - 1, base_end + end_frame_offset)
+            if actual_end < actual_start:
+                actual_start, actual_end = actual_end, actual_start
+            target_frames = list(range(actual_start, actual_end))
+            print(f"[VideoUtils] Using direct offset mode (fps=None or same as original)")
         else:
-            # Calculate based on specified fps
-            duration = (actual_end_frame - actual_start_frame) / original_fps
-            print(f"[VideoUtils] Segment duration: {duration:.2f} seconds")
-            target_frame_count = int(duration * fps)
-            print(f"[VideoUtils] Target frames based on fps {fps}: {target_frame_count}")
-            
-            if target_frame_count <= 0:
-                # Fall back to extracting all frames
-                print(f"[VideoUtils] Target frame count is {target_frame_count}, falling back to extracting all frames")
-                total_target_frames = actual_end_frame - actual_start_frame + 1
-                target_frames = list(range(actual_start_frame, actual_end_frame + 1))
-            else:
-                # Generate frame indices to extract
-                if target_frame_count == 1:
-                    # Just take the middle frame
-                    target_frames = [actual_start_frame + (actual_end_frame - actual_start_frame) // 2]
-                else:
-                    # Uniformly sample frames
-                    step = (actual_end_frame - actual_start_frame) / (target_frame_count - 1)
-                    target_frames = [int(actual_start_frame + i * step) for i in range(target_frame_count)]
-                    # Ensure we don't exceed end frame
-                    target_frames[-1] = min(target_frames[-1], actual_end_frame)
+            # 你想要的逻辑：把 offset 视为 “目标 fps 下的偏移”，转换为实际帧
+            start_frame_offset_actual = int(start_frame_offset / fps * original_fps)
+            end_frame_offset_actual = int(end_frame_offset / fps * original_fps)
 
-        images = []
-        for target_frame in target_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
-            ret, frame_data = cap.read()
-            if not ret:
-                print(f"[VideoUtils] Warning: Failed to read frame {target_frame}, skipping")
-                continue
+            actual_start = max(0, base_start + start_frame_offset_actual)
+            actual_end = min(video_frame_count - 1, base_end + end_frame_offset_actual)
+            if actual_end < actual_start:
+                actual_start, actual_end = actual_end, actual_start
 
-            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-            img_array = frame_rgb.astype(np.float32) / 255.0
-            images.append(img_array)
+            # 关键修复：步长必须是整数 + 正确生成 target_frames
+            step = original_fps / fps
+            target_frames = []
+            i = float(actual_start)   # 用 float 避免累积误差
+            while i <= actual_end + 1e-6:   # 加一点容差
+                frame_idx = int(round(i))   # round 让帧号更准确
+                if 0 <= frame_idx < video_frame_count:
+                    target_frames.append(frame_idx)
+                i += step
 
-        cap.release()
+            print(f"[VideoUtils] Scaled offset mode: actual offset {start_frame_offset_actual} ~ {end_frame_offset_actual}")
 
-        if not images:
-            raise Exception("No frames were extracted from video")
+        print(f"[VideoUtils] Extracting from frame {actual_start} to {actual_end} "
+              f"(original offset: {start_frame_offset} ~ {end_frame_offset})")
+        print(f"[VideoUtils] Extracting {len(target_frames)} frames @ {fps} fps (step ≈ {original_fps/fps if fps else 1:.2f})")
 
-        images_array = np.stack(images, axis=0)
-        image_tensor = torch.from_numpy(images_array)
-        print(f"[VideoUtils] Successfully extracted {len(images)} frames, shape: {images_array.shape}")
+        if not target_frames:
+            raise Exception("No frames to extract")
+
+        # 批量解码
+        frames_tensor = vr.get_batch(target_frames)
+        image_tensor = frames_tensor.float() / 255.0
+
+        print(f"[VideoUtils] Successfully extracted {len(target_frames)} frames, shape: {image_tensor.shape}")
 
         return image_tensor, original_fps
 
     except Exception as e:
         raise Exception(f"Failed to extract image segment: {e}")
+    
+def disk_images_to_video(
+    folder_name: str,
+    file_name: str,
+    fps: float = 24.0,      # ← 这里改为 float，默认 24.0
+    crf: int = 18,
+    audio: dict = None
+) -> str:
+    """
+    低内存版：图像序列转视频
+    """
+    output_dir = os.path.join(folder_paths.output_directory, "Images", folder_name)
+    if not os.path.exists(output_dir):
+        print(f"[disk_images_to_video] Folder not found: {output_dir}")
+        return ""
+
+    # 扫描 PNG 文件
+    png_files = []
+    for f in os.listdir(output_dir):
+        if f.lower().endswith(".png"):
+            try:
+                num = int(os.path.splitext(f)[0])
+                png_files.append((num, f))
+            except ValueError:
+                continue
+
+    if not png_files:
+        print(f"[disk_images_to_video] No PNG files in {output_dir}")
+        return ""
+
+    png_files.sort(key=lambda x: x[0])
+    total_frames = len(png_files)
+
+    # 获取图像尺寸
+    first_img_path = os.path.join(output_dir, png_files[0][1])
+    with Image.open(first_img_path) as pil_img:
+        if pil_img.mode not in ("RGB", "RGBA"):
+            pil_img = pil_img.convert("RGB")
+        width, height = pil_img.size
+
+    if not file_name.lower().endswith(".mp4"):
+        file_name += ".mp4"
+
+    temp_video_path = os.path.join(output_dir, f"temp_{file_name}")
+    final_video_path = os.path.join(output_dir, file_name)
+
+    # 使用 float 类型的 fps
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+    video_writer = cv2.VideoWriter(
+        temp_video_path, 
+        fourcc, 
+        fps,                                   # ← 现在已经是 float
+        (int(width), int(height))
+    )
+
+    if not video_writer.isOpened():
+        print(f"[disk_images_to_video] Failed to open VideoWriter: {temp_video_path}")
+        return ""
+
+    print(f"[disk_images_to_video] Creating video: {final_video_path}")
+    print(f"    Frames: {total_frames} | FPS: {fps} | Resolution: {width}x{height}")
+
+    for idx, (_, png_name) in enumerate(png_files):
+        img_path = os.path.join(output_dir, png_name)
+        
+        with Image.open(img_path) as pil_img:
+            if pil_img.mode not in ("RGB", "RGBA"):
+                pil_img = pil_img.convert("RGB")
+            frame = np.array(pil_img)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            video_writer.write(frame)
+
+        if (idx + 1) % 100 == 0 or (idx + 1) == total_frames:
+            print(f"    Progress: {idx + 1}/{total_frames} frames")
+
+    video_writer.release()
+    print(f"[disk_images_to_video] Silent video created: {temp_video_path}")
+
+    # ==================== 音频合并 ====================
+    if audio is not None and isinstance(audio, dict) and "waveform" in audio:
+        try:
+            temp_audio_path = os.path.join(output_dir, f"temp_audio_{hashlib.md5(str(folder_name).encode()).hexdigest()[:8]}.wav")
+            
+            waveform = audio["waveform"]
+            sample_rate = audio.get("sample_rate", 44100)
+            
+            if len(waveform.shape) == 3:
+                waveform = waveform[0]
+
+            import soundfile as sf
+            sf.write(temp_audio_path, waveform.cpu().numpy().T, sample_rate)
+
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-i", temp_video_path,
+                "-i", temp_audio_path,
+                "-c:v", "libx264",
+                "-crf", str(crf),
+                "-c:a", "aac",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                final_video_path
+            ]
+
+            print(f"[disk_images_to_video] Merging audio...")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                os.remove(temp_video_path)
+                if os.path.exists(temp_audio_path):
+                    os.remove(temp_audio_path)
+                print(f"[disk_images_to_video] Final video saved: {final_video_path}")
+                return final_video_path
+            else:
+                print(f"[disk_images_to_video] FFmpeg merge failed: {result.stderr}")
+                os.rename(temp_video_path, final_video_path)
+                return final_video_path
+
+        except Exception as e:
+            print(f"[disk_images_to_video] Audio merge error: {e}")
+            if os.path.exists(temp_video_path):
+                os.rename(temp_video_path, final_video_path)
+            return final_video_path
+    else:
+        os.rename(temp_video_path, final_video_path)
+        print(f"[disk_images_to_video] Video saved (no audio): {final_video_path}")
+        return final_video_path

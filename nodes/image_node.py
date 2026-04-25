@@ -28,7 +28,8 @@ import shutil
 import torch.nn.functional as F
 import pyautogui
 from PySide6.QtCore import Qt, QRect, QPoint, QPropertyAnimation, QEasingCurve
-from ..libs.image_utils import crop_mask, recover_crop, hex_to_rgb, batch_images, recover_batch, limit_pixels, recover_size
+from ..libs.image_utils import crop_mask, recover_crop, hex_to_rgb, batch_images, recover_batch, limit_pixels, recover_size, batch_image_mask_list
+from ..libs.mask_utils import combine_masks, create_empty_mask
 from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QPixmap, QImage, QPainterPath
 from PySide6.QtWidgets import (QApplication, QWidget, QPushButton, QHBoxLayout, QVBoxLayout)
 from server import PromptServer
@@ -795,10 +796,15 @@ class ImageLimitPixelNode:
                 }),
                 "pixels": ("INT", {
                     "default": 1024 * 1024,  # 1MP
-                    "min": 1000,
-                    "max": 100000000,
-                    "step": 1000,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
                     "tooltip": "Maximum allowed pixel count"
+                }),
+                "align": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Align the resized image to the nearest pixel grid"
                 }),
             },
             "optional": {
@@ -813,11 +819,11 @@ class ImageLimitPixelNode:
     FUNCTION = "limit_pixels"
     CATEGORY = "Kolid-Toolkit"
 
-    def limit_pixels(self, image, pixels, mask=None):
+    def limit_pixels(self, image, pixels, align, mask=None):
         """Limit image pixel count by resizing if needed."""
         try:
             print("[ImageLimitPixelNode] Calling limit_pixels from image_utils")
-            return limit_pixels(image, pixels, mask)
+            return limit_pixels(image, pixels, mask, align)
         except Exception as e:
             raise Exception(f"Failed to limit pixels: {e}")
         
@@ -912,17 +918,72 @@ class ImageRecoverCropNode:
 
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("image", "mask")
-    FUNCTION = "recover_crop"
+    FUNCTION = "recover"
     CATEGORY = "Kolid-Toolkit"
+    
+    INPUT_IS_LIST = True
 
-    def recover_crop(self, background, image, crop_info, recover_method, mask=None):
-        try:
-            print(f"[ImageRecoverCropNode] Calling recover_crop from image_util")
-            return recover_crop(background, image, crop_info, recover_method, mask)
-        except Exception as e:
-            raise Exception(f"Failed to recover cropped image: {e}")
+    def recover(self, background, image, crop_info, recover_method, mask=None):
+        size = len(image)
+        recover_method = recover_method[0]
 
+        if len(background) == 1:
+            # ==================== 单张 background：累积粘贴 ====================
+            new_background = background[0].clone()
 
+            collected_masks = []   # 用于收集所有 tmp_mask
+
+            for i in range(size):
+                curr_mask = mask[i] if (mask is not None and i < len(mask)) else None
+
+                (tmp_background, tmp_mask) = recover_crop(
+                    new_background, 
+                    image[i], 
+                    crop_info[i], 
+                    recover_method, 
+                    curr_mask
+                )
+
+                new_background = tmp_background   # 必须更新，让下一次在已修改的图上继续粘贴
+
+                if tmp_mask is not None:
+                    collected_masks.append(tmp_mask)
+
+            # ==================== mask 统一合并（修复形状问题） ====================
+            if collected_masks:
+                # 关键修复：强制转为 [N, H, W]
+                all_masks = torch.stack(collected_masks, dim=0)   # 当前很可能是 [6, 1, H, W]
+                
+                if all_masks.dim() == 4:
+                    all_masks = all_masks.squeeze(1)   # [6, 1, H, W] → [6, H, W]
+                elif all_masks.dim() == 2:
+                    all_masks = all_masks.unsqueeze(0) # [H, W] → [1, H, W]
+                
+                # 现在形状一定是 [N, H, W]，可以安全传入
+                new_mask = combine_masks(all_masks, mode="max")
+            else:
+                new_mask = None
+
+            return (new_background, new_mask)
+
+        else:
+            # 多张 background 的情况保持你原来的代码（或改成 list 返回）
+            if len(background) != size:
+                raise ValueError(f"Background image count ({len(background)}) must match image count ({size})")
+            
+            backgrounds = []
+            masks = [] if mask is not None else None
+
+            for i in range(size):
+                (tmp_background, tmp_mask) = recover_crop(
+                    background[i], image[i], crop_info[i], recover_method, 
+                    mask[i] if mask is not None else None
+                )
+                backgrounds.append(tmp_background)
+                if tmp_mask is not None:
+                    masks.append(tmp_mask)
+
+            return (backgrounds, masks if masks is not None else None)
 
 class ImageBatchNode:
     """将多个不同尺寸的 IMAGE 和 MASK 转为统一尺寸的 Batch，居中填充。
@@ -982,7 +1043,7 @@ class ImageBatchNode:
     CATEGORY = "image/batch"
 
     def batch_images(self, images, align=16, width=0, height=0, masks=None, fill_image="#000000", fill_mask=0.0):
-        return batch_images(images, align, width, height, masks, fill_image, fill_mask)
+        return batch_image_mask_list(images, align, width, height, masks, fill_image, fill_mask)
 
 
 

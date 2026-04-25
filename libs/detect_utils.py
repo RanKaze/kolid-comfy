@@ -4,6 +4,8 @@ from collections import namedtuple
 import torchvision.transforms.functional as F
 from PIL import Image, ImageDraw
 import comfy.model_management as mm
+from .mask_utils import combine_masks, mask_batch_to_list
+from typing import List, Optional, Tuple
 
 def detect_mask(detector, image, threshold=0.5, dilation=4,
                 crop_factor=1.5, drop_size=0, prompt="",
@@ -11,13 +13,99 @@ def detect_mask(detector, image, threshold=0.5, dilation=4,
                 max_new_tokens=512,
                 num_beams=3,
                 do_sample=False,
-                fill_mask=True):
+                fill_mask=True) -> List[torch.Tensor]:
     """
     Florence-2 detect_mask - 最终干净版
     支持 fill_mask 参数（参考 Florence2Run 逻辑）
     """
-    if isinstance(detector, dict) and all(k in detector for k in ("model", "processor", "dtype")):
-        # Florence-2 分支
+    # SAM3
+    if isinstance(detector, dict) and all(k in detector for k in ("checkpoint_path", "bpe_path", "dtype")):
+        try:
+            import importlib
+            import sys
+            import os
+
+            # ==================== 定位 SAM3 目录 ====================
+            current_dir = os.path.dirname(os.path.abspath(__file__))          # .../kolid-comfy/libs
+            custom_nodes_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))  # .../custom_nodes
+            sam3_root = os.path.join(custom_nodes_dir, "ComfyUI-SAM3")
+
+            if not os.path.exists(sam3_root):
+                raise ImportError(f"未找到 ComfyUI-SAM3 目录\n路径: {sam3_root}\n请确认已安装。")
+
+            # 把 SAM3 根目录加入 sys.path
+            if sam3_root not in sys.path:
+                sys.path.insert(0, sam3_root)
+
+            # ==================== 尝试多种导入方式 ====================
+            sam3_module = None
+
+            # 方式1（最推荐）：直接导入 __init__.py 中注册的模块
+            try:
+                sam3_module = importlib.import_module("ComfyUI-SAM3")
+            except ImportError:
+                pass
+
+            # 方式2：尝试 nodes
+            if sam3_module is None:
+                try:
+                    sam3_module = importlib.import_module("nodes")
+                except ImportError:
+                    pass
+
+            # 方式3：直接导入 segmentation.py（不作为 package）
+            if sam3_module is None:
+                try:
+                    # 动态导入单个文件
+                    spec = importlib.util.spec_from_file_location(
+                        "sam3_segmentation",
+                        os.path.join(sam3_root, "nodes", "segmentation.py")
+                    )
+                    sam3_module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(sam3_module)
+                except Exception as e:
+                    raise ImportError(f"无法加载 segmentation.py: {e}") from e
+
+            # 从模块中获取 SAM3Grounding 类
+            if hasattr(sam3_module, "SAM3Grounding"):
+                SAM3Grounding = sam3_module.SAM3Grounding
+            elif hasattr(sam3_module, "nodes") and hasattr(sam3_module.nodes, "segmentation"):
+                SAM3Grounding = sam3_module.nodes.segmentation.SAM3Grounding
+            else:
+                # 最后尝试直接从 segmentation
+                if hasattr(sam3_module, "SAM3Grounding"):
+                    SAM3Grounding = sam3_module.SAM3Grounding
+                else:
+                    raise AttributeError("在 SAM3 模块中未找到 SAM3Grounding 类。请检查 ComfyUI-SAM3 是否正确安装。")
+
+            print(f"✅ SAM3Grounding 加载成功 | prompt: '{prompt}' | threshold: {threshold}")
+
+            # ====================== 执行 SAM3 ======================
+            result = SAM3Grounding.execute(
+                sam3_model_config=detector,
+                image=image,
+                confidence_threshold=float(threshold),
+                text_prompt=str(prompt).strip(),
+                positive_boxes=None,
+                negative_boxes=None,
+                max_detections=-1
+            )
+
+            masks = result[0]   # io.NodeOutput 的第一个输出是 masks
+
+            if masks is None or masks.numel() == 0:
+                raise RuntimeError(f"SAM3 未检测到任何对象。\nprompt: '{prompt}'\nthreshold: {threshold}\n建议尝试降低 threshold 到 0.15-0.3")
+
+            print(f"✅ SAM3 Grounding 执行成功，检测到 {masks.shape[0]} 个对象")
+            mask_list = mask_batch_to_list(masks)
+            return mask_list
+
+        except Exception as e:
+            # 直接抛出，让 ComfyUI 显示完整错误
+            raise RuntimeError(f"SAM3 detect_mask 执行失败: {e}") from e
+    # Florence-2
+    elif isinstance(detector, dict) and all(k in detector for k in ("model", "processor", "dtype")):
+        
         florence_model = detector
         model = florence_model['model']
         processor = florence_model['processor']
@@ -138,14 +226,14 @@ def detect_mask(detector, image, threshold=0.5, dilation=4,
             )
             mask_tensor = mask_tensor.squeeze(0)
 
-        return mask_tensor.contiguous().cpu()
+        return [mask_tensor.contiguous().cpu()]
 
     # 其他 detector（如 YOLO）兼容
     elif hasattr(detector, "detect_combined"):
         mask = detector.detect_combined(image, threshold, dilation)
         if mask is None:
             return None
-        return mask.unsqueeze(0) if mask.dim() == 2 else mask
+        return [mask.unsqueeze(0) if mask.dim() == 2 else mask]
 
     raise ValueError(f"不支持的 detector 类型: {type(detector)}")
 

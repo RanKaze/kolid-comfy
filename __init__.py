@@ -58,6 +58,9 @@ NODE_CONFIG = {
     "BranchNoneNode" : {"class": BranchNoneNode, "name": "BranchNoneNode"},
     "IsOptionalNoneNode" : {"class": IsOptionalNoneNode, "name": "IsOptionalNoneNode"},
     "BranchOptionalRequiredNode" : {"class": BranchOptionalRequiredNode, "name": "BranchOptionalRequiredNode"},
+    "BranchGroupNode" : {"class": BranchGroupNode, "name": "BranchGroupNode"},
+    "BranchSwitchNode" : {"class": BranchSwitchNode, "name": "BranchSwitchNode"},
+    "BranchBooleanNode" : {"class": BranchBooleanNode, "name": "BranchBooleanNode"},
     
     "TypeDebugNode" : {"class": TypeDebugNode, "name": "TypeDebugNode"},
     
@@ -80,12 +83,17 @@ NODE_CONFIG = {
     "LoadLoraFromPackNode" : {"class": LoadLoraFromPackNode, "name": "LoadLoraFromPackNode"},
     "TextEncodeFromPackNode" : {"class": TextEncodeFromPackNode, "name": "TextEncodeFromPackNode"},
     
+    "NeedNode" : {"class": NeedNode, "name": "NeedNode"},   
     "AnyPassNode" : {"class": AnyPassNode, "name": "AnyPassNode"},
     "TextFormatNode" : {"class": TextFormatNode, "name": "TextFormatNode"},
     
     "EHentaiRandomNode" : {"class": EHentaiRandomNode, "name": "EHentaiRandomNode"},
     "EHentaiURLNode" : {"class": EHentaiURLNode, "name": "EHentaiURLNode"},
     "LocalImageLoaderNode" : {"class": LocalImageLoaderNode, "name": "LocalImageLoaderNode"},
+    "DiskSaveImagesNode" : {"class": DiskSaveImagesNode, "name": "DiskSaveImagesNode"},
+    "DiskLoadImagesNode" : {"class": DiskLoadImagesNode, "name": "DiskLoadImagesNode"},
+    "DiskLoadImageCountNode" : {"class": DiskLoadImageCountNode, "name": "DiskLoadImageCountNode"},
+    "DiskImagesToVideoNode" : {"class": DiskImagesToVideoNode, "name": "DiskImagesToVideoNode"},
     "PixivImageLoaderNode" : {"class": PixivImageLoaderNode, "name": "PixivImageLoaderNode"},
     
     "SnapshotGaussianNode" : {"class": SnapshotGaussianNode, "name": "SnapshotGaussianNode"},
@@ -110,6 +118,8 @@ NODE_CONFIG = {
     "GetAudioSegmentNode": {"class": GetAudioSegmentNode, "name": "GetAudioSegmentNode"},
     "GetVideoSegmentNode": {"class": GetVideoSegmentNode, "name": "GetVideoSegmentNode"},
     "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
+    "VideoFolderLoaderNode": {"class": VideoFolderLoaderNode, "name": "VideoFolderLoaderNode"},
+    "VideoGetFileInfoNode": {"class": VideoGetFileInfoNode, "name": "VideoGetFileInfoNode"},
     
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
@@ -122,7 +132,14 @@ NODE_CONFIG = {
     "ImageToBase64Node": {"class": ImageToBase64Node, "name": "ImageToBase64Node"},
     "Base64ToImageNode": {"class": Base64ToImageNode, "name": "Base64ToImageNode"},
     
-    "ParseLoRAConfigsNode": {"class": ParseLoRAConfigsNode, "name": "ParseLoRAConfigsNode"},
+    "ReferenceLatentNode": {"class": ReferenceLatentNode, "name": "ReferenceLatentNode"},
+    "ReferenceContolNetNode": {"class": ReferenceContolNetNode, "name": "ReferenceContolNetNode"},
+    "ReferenceGuidanceNode": {"class": ReferenceGuidanceNode, "name": "ReferenceGuidanceNode"}, 
+    
+    "ConfigNode": {"class": ConfigNode, "name": "ConfigNode"},
+    "ContextNode": {"class": ContextNode, "name": "ContextNode"},
+    "ContextPromptNeedNode": {"class": ContextPromptNeedNode, "name": "ContextPromptNeedNode"},
+    "ContextSimilarityNeedNode": {"class": ContextSimilarityNeedNode, "name": "ContextSimilarityNeedNode"},
     "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},
     "PipelineSamplerNode": {"class": PipelineSamplerNode, "name": "PipelineSamplerNode"},
     "PipelineSamplerAdvancedNode": {"class": PipelineSamplerAdvancedNode, "name": "PipelineSamplerAdvancedNode"},
@@ -133,6 +150,8 @@ NODE_CONFIG = {
     "PipelineToggleMaskInpaintNode": {"class": PipelineToggleMaskInpaintNode, "name": "PipelineToggleMaskInpaintNode"},
     "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
     "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
+    "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},
+    "PipelineVideoSamplerAdvancedNode": {"class": PipelineVideoSamplerAdvancedNode, "name": "PipelineVideoSamplerAdvancedNode"},
     
 }
 

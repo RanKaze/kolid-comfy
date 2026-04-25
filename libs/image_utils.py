@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import cv2
 from PIL import Image, ImageFilter, ImageChops, ImageDraw, ImageOps, ImageEnhance, ImageFont
 
 def tensor2pil(t_image: torch.Tensor)  -> Image:
@@ -31,16 +32,6 @@ def hex_to_rgb(hex_color: str):
 def crop_mask(image, mask, reserve):
     """
     Crop image and mask based on mask bounds with reserve
-    
-    Args:
-        image: (B, H, W, C) tensor
-        mask: (B, H, W) tensor
-        reserve: int, number of pixels to reserve around the mask
-    
-    Returns:
-        cropped_image: (B, crop_h, crop_w, C) tensor
-        cropped_mask: (B, crop_h, crop_w) tensor
-        crop_info: dict with original and crop dimensions
     """
     try:
         B, H, W, C = image.shape
@@ -49,29 +40,24 @@ def crop_mask(image, mask, reserve):
         if H != Hm or W != Wm:
             raise ValueError("Image and mask must have the same spatial dimensions")
 
+        # ==================== 关键修复：统一设备 ====================
         device = image.device
-        dtype = image.dtype
+        if mask.device != device:
+            mask = mask.to(device, non_blocking=True)
 
-        print(f"[ImageUtil] Image: {W}x{H}, Batch: {B}, Reserve: {reserve}")
+        print(f"[crop_mask] {W}x{H} | reserve={reserve} | batch={B} | device={device}")
 
         # ------------------- 向量化计算 bounding box -------------------
-        # mask -> (B, 1, H, W)
-        m = mask.unsqueeze(1).float()  # 确保是 float
+        m = mask.unsqueeze(1).float()
 
-        # 找到每张 mask 的非零区域（向量化）
-        # row 投影
-        row_sum = m.sum(dim=(1, 3))          # (B, H)
-        col_sum = m.sum(dim=(1, 2))          # (B, W)
+        row_sum = m.sum(dim=(1, 3))
+        col_sum = m.sum(dim=(1, 2))
 
-        # 找出每张图的最小/最大索引（支持空 mask）
         def get_bounds(proj):
-            # proj shape: (B, size)
             valid = proj > 0
             indices = torch.arange(proj.shape[1], device=device, dtype=torch.long).unsqueeze(0).expand_as(proj)
-            
             min_idx = torch.where(valid, indices, torch.full_like(indices, H + 1))
             max_idx = torch.where(valid, indices, torch.full_like(indices, -1))
-            
             min_val = min_idx.min(dim=1)[0]
             max_val = max_idx.max(dim=1)[0]
             return min_val, max_val
@@ -79,10 +65,7 @@ def crop_mask(image, mask, reserve):
         min_y, max_y = get_bounds(row_sum)
         min_x, max_x = get_bounds(col_sum)
 
-        # 处理完全空的 mask（没有非零像素）
         empty_mask = (min_y > max_y) | (min_x > max_x)
-        if empty_mask.any():
-            print(f"[ImageUtil] {empty_mask.sum().item()} empty masks detected, returning original")
 
         # 加上 reserve 并 clamp
         min_x = torch.clamp(min_x - reserve, min=0)
@@ -90,13 +73,9 @@ def crop_mask(image, mask, reserve):
         max_x = torch.clamp(max_x + reserve, max=W - 1)
         max_y = torch.clamp(max_y + reserve, max=H - 1)
 
-        # 计算 crop 大小（对空 mask 使用原始尺寸）
         crop_w = torch.where(empty_mask, torch.tensor(W, device=device), max_x - min_x + 1)
         crop_h = torch.where(empty_mask, torch.tensor(H, device=device), max_y - min_y + 1)
 
-        # ------------------- 准备输出 -------------------
-        # 我们需要把不同大小的 crop 放进 tensor，通常 ComfyUI 期望 batch 内尺寸一致
-        # 这里取 batch 中最大的 crop 尺寸做 padding（最稳妥的方式）
         max_crop_h = int(crop_h.max().item())
         max_crop_w = int(crop_w.max().item())
 
@@ -104,129 +83,129 @@ def crop_mask(image, mask, reserve):
         cropped_masks_list = []
         crop_infos = []
 
+        original_area = W * H
+
         for i in range(B):
             if empty_mask[i]:
-                # 空 mask：返回原始
                 cropped_images.append(image[i])
                 cropped_masks_list.append(mask[i])
+                crop_area = W * H
                 crop_info = {
                     "original_width": W,
                     "original_height": H,
                     "crop_x": 0,
                     "crop_y": 0,
                     "crop_width": W,
-                    "crop_height": H
+                    "crop_height": H,
+                    "spatial_rate": 1.0
                 }
             else:
-                # 正常 crop
                 x1, y1 = int(min_x[i]), int(min_y[i])
                 x2, y2 = int(max_x[i]) + 1, int(max_y[i]) + 1
 
                 cropped_img = image[i, y1:y2, x1:x2, :]
                 cropped_msk = mask[i, y1:y2, x1:x2]
 
-                # 如果 batch 内 crop 大小不一致，需要 padding 到最大尺寸
+                # Padding 到最大尺寸
                 if cropped_img.shape[0] < max_crop_h or cropped_img.shape[1] < max_crop_w:
                     pad_h = max_crop_h - cropped_img.shape[0]
                     pad_w = max_crop_w - cropped_img.shape[1]
-                    cropped_img = F.pad(cropped_img.permute(2,0,1), (0, pad_w, 0, pad_h)).permute(1,2,0)
+                    cropped_img = F.pad(cropped_img.permute(2, 0, 1), (0, pad_w, 0, pad_h)).permute(1, 2, 0)
                     cropped_msk = F.pad(cropped_msk.unsqueeze(0), (0, pad_w, 0, pad_h)).squeeze(0)
 
                 cropped_images.append(cropped_img)
                 cropped_masks_list.append(cropped_msk)
 
+                crop_width = x2 - x1
+                crop_height = y2 - y1
+                crop_area = crop_width * crop_height
+                spatial_rate = crop_area / original_area if original_area > 0 else 0.0
                 crop_info = {
                     "original_width": W,
                     "original_height": H,
                     "crop_x": x1,
                     "crop_y": y1,
-                    "crop_width": x2 - x1,
-                    "crop_height": y2 - y1
+                    "crop_width": crop_width,
+                    "crop_height": crop_height,
+                    "spatial_rate": spatial_rate
                 }
 
             crop_infos.append(crop_info)
 
-        # 堆叠成 batch tensor
         cropped_image_tensor = torch.stack(cropped_images, dim=0)
         cropped_mask_tensor = torch.stack(cropped_masks_list, dim=0)
 
-        # 返回第一个 crop_info（与原节点保持一致，假设 batch 内 crop 大小接近）
         final_crop_info = crop_infos[0]
-
-        print(f"[ImageUtil] Final cropped size: {max_crop_w}x{max_crop_h}")
 
         return (cropped_image_tensor, cropped_mask_tensor, final_crop_info)
 
     except Exception as e:
         raise Exception(f"Failed to crop image by mask: {e}")
 
-
 def recover_crop(background, image, crop_info, recover_method, mask=None):
     """
     Recover cropped image to original size using crop info
-    
-    Args:
-        background: (B, original_h, original_w, C) tensor
-        image: (B, crop_h, crop_w, C) tensor
-        crop_info: dict with original and crop dimensions
-        recover_method: str, one of "mask_blend", "mask_only", "bounds_only"
-        mask: (B, crop_h, crop_w) tensor, optional
-    
-    Returns:
-        recovered: (B, original_h, original_w, C) tensor
-        recovered_mask: (B, original_h, original_w) tensor, optional
     """
     try:
-        # 提取 crop_info
         ow = crop_info.get("original_width")
         oh = crop_info.get("original_height")
         cx = crop_info.get("crop_x")
         cy = crop_info.get("crop_y")
-        # crop_w/h 可以不强制检查（用 image 的实际尺寸）
 
         if None in (ow, oh, cx, cy):
             raise ValueError("Crop info missing required fields")
 
-        # 确保 background 尺寸正确
-        if background.shape[2] != ow or background.shape[1] != oh:
-            raise ValueError(f"Background must be {ow}x{oh}, got {background.shape[2]}x{background.shape[1]}")
+        B, H, W, C = image.shape
 
+        # ==================== 仅保留一行 print ====================
+        print(f"[recover_crop] {W}x{H} → {ow}x{oh} | method={recover_method}")
+
+        # ==================== 统一设备 ====================
         device = background.device
-        dtype = background.dtype
-        B, H, W, C = image.shape  # 当前 cropped image 的 batch, height, width, channels
+        if image.device != device:
+            image = image.to(device, non_blocking=True)
+        if mask is not None and mask.device != device:
+            mask = mask.to(device, non_blocking=True)
 
-        # 输出图像直接从 background 克隆（更快且节省内存）
+        # 从 background 克隆开始
         recovered = background.clone()
 
-        # 准备 cropped 区域
+        # 准备要粘贴的区域
         crop_region = recovered[:, cy:cy + H, cx:cx + W, :]
 
         if recover_method == "bounds_only":
-            # 最简单也最快：直接覆盖
+            # 直接硬覆盖（不需要 mask）
             crop_region.copy_(image)
 
-        else:
-            # 需要 mask 的情况
+        elif recover_method in ["mask_blend", "mask_only"]:
             if mask is None:
                 raise ValueError(f"{recover_method} requires mask input")
 
-            # mask 转成 (B, 1, H, W) 并扩展到 3 通道
-            m = mask.unsqueeze(1)  # (B, 1, mask_h, mask_w)
-            m = m[:, :, :H, :W]    # 防止 mask 尺寸比 image 大
+            # mask 转为 (B, 1, H, W)
+            m = mask.unsqueeze(1)[:, :, :H, :W].float()   # (B, 1, H, W)
             m3 = m.expand(-1, C, -1, -1).permute(0, 2, 3, 1)  # (B, H, W, C)
 
-            if recover_method in ["mask_blend", "mask_only"]:
-                # 统一用 alpha blending 公式（mask_only 时相当于 mask > 0 的硬 blend）
+            if recover_method == "mask_blend":
+                # 柔和混合（推荐，大多数情况使用这个）
                 blended = crop_region * (1 - m3) + image * m3
                 crop_region.copy_(blended)
 
-        # ------------------- 处理 mask 输出 -------------------
+            elif recover_method == "mask_only":
+                # 只保留 mask 区域的内容（硬抠图，不混合背景）
+                # 等价于：background * (1 - mask) + image * mask，但只在 mask 区域替换
+                crop_region.copy_(image * m3 + crop_region * (1 - m3))  # 或者更直接：
+                # crop_region.copy_(torch.where(m3 > 0.5, image, crop_region))
+
+        else:
+            raise ValueError(f"Unknown recover_method: {recover_method}. "
+                           f"Supported: bounds_only, mask_blend, mask_only")
+
+        # ------------------- 处理 recovered_mask 输出 -------------------
         recovered_mask = None
         if mask is not None:
             Bm, Hm, Wm = mask.shape
-            recovered_mask = torch.zeros((Bm, oh, ow), dtype=dtype, device=device)
-
-            # 把 cropped mask 放回原位置（支持 batch）
+            recovered_mask = torch.zeros((Bm, oh, ow), dtype=background.dtype, device=device)
+            # 把 cropped mask 放回原始位置
             recovered_mask[:, cy:cy + Hm, cx:cx + Wm] = mask[:, :Hm, :Wm]
 
         return (recovered, recovered_mask)
@@ -234,7 +213,7 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
     except Exception as e:
         raise Exception(f"Failed to recover cropped image: {e}")
 
-def batch_images(images, align=16, width=0, height=0, masks=None, fill_image="#000000", fill_mask=0.0):
+def batch_image_mask_list(images, align=16, width=0, height=0, masks=None, fill_image="#000000", fill_mask=0.0):
     """
     将多个不同尺寸的 IMAGE 和 MASK 转为统一尺寸的 Batch，居中填充
     
@@ -516,81 +495,62 @@ def recover_batch(image, batch_info, mask=None):
     return (recovered_images, recovered_masks)
 
 
-def limit_pixels(image, pixels, mask=None):
+def limit_pixels(image, pixels, mask=None, align=1):
     """
-    Limit image pixel count by resizing if needed.
-    - 如果当前像素 ≤ pixels → 放大到接近 pixels
-    - 如果当前像素 > pixels → 缩小到不超过 pixels
-    
-    Args:
-        image: (B, H, W, C) tensor
-        pixels: int, target pixel count (maximum when downscaling, approximate when upscaling)
-        mask: (B, H, W) tensor, optional
-    
-    Returns:
-        resized_image: (B, new_h, new_w, C) tensor
-        resized_mask: (B, new_h, new_w) tensor
-        resize_info: dict with resize information
+    Limit image pixel count by resizing if needed, with optional dimension alignment.
     """
     try:
         B, H, W, C = image.shape
         current_pixels = H * W
 
-        print(f"[ImageUtil] Original: {W}x{H} = {current_pixels} pixels | Target: {pixels}")
+        # ==================== 仅保留这一行 print ====================
+        print(f"[limit_pixels] {W}x{H} ({current_pixels:,} px) → target {pixels:,} px | align={align}")
 
-        # 如果当前像素数已经等于目标（允许少量误差），直接返回
-        if abs(current_pixels - pixels) < 100:   # 允许很小的误差
-            print("[ImageUtil] Already close to target pixels, no resizing needed.")
+        # 如果当前像素数已经接近目标（允许少量误差），直接返回
+        if abs(current_pixels - pixels) < 100:
             resize_info = {
                 "original_width": W,
                 "original_height": H,
                 "resized_width": W,
                 "resized_height": H,
                 "aspect_ratio": W / H if H != 0 else 1.0,
-                "scale_factor": 1.0
+                "scale_factor": 1.0,
+                "align": align,
+                "was_upscaled": False
             }
             return (image, mask, resize_info)
 
-        aspect_ratio = W / H
+        aspect_ratio = W / H if H != 0 else 1.0
 
         if current_pixels < pixels:
             # ==================== 需要放大 ====================
-            print("[ImageUtil] Upscaling to reach target pixel count...")
-            
-            # 计算目标尺寸（保持宽高比）
-            new_width = int((pixels * aspect_ratio) ** 0.5)
-            new_height = int(new_width / aspect_ratio)
+            ideal_width = (pixels * aspect_ratio) ** 0.5
+            ideal_height = ideal_width / aspect_ratio
 
-            # 确保不超过目标像素（轻微调整）
-            while new_width * new_height > pixels:
-                new_width = max(16, int(new_width * 0.99))
-                new_height = max(16, int(new_width / aspect_ratio))
+            new_width = max(align, round(ideal_width / align) * align)
+            new_height = max(align, round(ideal_height / align) * align)
 
-            # 防止尺寸过小（理论上不会发生）
-            new_width = max(64, new_width)   # 放大时最小也给大一点
+            while new_width * new_height > pixels + 100:
+                new_width = max(align, new_width - align)
+                new_height = max(align, new_height - align)
+
+            new_width = max(64, new_width)
             new_height = max(64, new_height)
-
-            direction = "Upscaling"
 
         else:
             # ==================== 需要缩小 ====================
-            print("[ImageUtil] Downscaling to stay under pixel limit...")
-            
-            new_width = int((pixels * aspect_ratio) ** 0.5)
-            new_height = int(new_width / aspect_ratio)
+            ideal_width = (pixels * aspect_ratio) ** 0.5
+            ideal_height = ideal_width / aspect_ratio
 
-            # 确保不超过像素限制
+            new_width = max(align, round(ideal_width / align) * align)
+            new_height = max(align, round(ideal_height / align) * align)
+
             while new_width * new_height > pixels:
-                new_width = max(16, int(new_width * 0.99))
-                new_height = max(16, int(new_width / aspect_ratio))
+                new_width = max(align, new_width - align)
+                new_height = max(align, new_height - align)
 
             new_width = max(16, new_width)
             new_height = max(16, new_height)
-            direction = "Downscaling"
-
-        actual_pixels = new_width * new_height
-        print(f"[ImageUtil] {direction} to: {new_width}x{new_height} ≈ {actual_pixels} pixels "
-              f"({actual_pixels / pixels * 100:.1f}% of target)")
 
         # ---------- 纯 PyTorch 批量缩放 ----------
         img_tensor = image.permute(0, 3, 1, 2).contiguous()
@@ -605,7 +565,7 @@ def limit_pixels(image, pixels, mask=None):
 
         resized_image = resized_img.permute(0, 2, 3, 1).contiguous()
 
-        # ---------- 处理 mask（如果有） ----------
+        # ---------- 处理 mask ----------
         resized_mask = mask
         if mask is not None:
             mask_tensor = mask.unsqueeze(1)
@@ -626,6 +586,7 @@ def limit_pixels(image, pixels, mask=None):
             "resized_height": new_height,
             "aspect_ratio": aspect_ratio,
             "scale_factor": new_width / W,
+            "align": align,
             "was_upscaled": current_pixels < pixels
         }
 
@@ -637,40 +598,29 @@ def limit_pixels(image, pixels, mask=None):
 
 def recover_size(image, resize_info, mask=None):
     """
-    Recover image to original size using resize info.
-    
-    Args:
-        image: (B, H, W, C) tensor
-        resize_info: dict with resize information
-        mask: (B, H, W) tensor, optional
-    
-    Returns:
-        recovered_image: (B, original_h, original_w, C) tensor
-        recovered_mask: (B, original_h, original_w) tensor
+    Recover image and mask back to original size using resize_info.
     """
     try:
-        # 提取原始尺寸
         original_width = resize_info.get("original_width")
         original_height = resize_info.get("original_height")
 
         if original_width is None or original_height is None:
             raise ValueError("Resize info missing original dimensions")
 
-        # 当前图像尺寸
-        B, current_height, current_width, C = image.shape
+        B, current_h, current_w, C = image.shape
 
-        print(f"[ImageUtil] Current: {current_width}x{current_height} → Target: {original_width}x{original_height}")
+        print(f"[recover_size] {current_w}x{current_h} → {original_width}x{original_height}")
 
-        # 无需恢复，直接返回
-        if current_width == original_width and current_height == original_height:
-            print("[ImageUtil] No recovery needed, already at original size")
+        # ==================== 统一设备 ====================
+        device = image.device
+        if mask is not None and mask.device != device:
+            mask = mask.to(device, non_blocking=True)
+
+        if current_w == original_width and current_h == original_height:
             return (image, mask)
 
-        # ---------- 纯 PyTorch 批量上采样（最快） ----------
-        # image: (B, H, W, C) → (B, C, H, W)
+        # 恢复图像
         img_tensor = image.permute(0, 3, 1, 2).contiguous()
-
-        # 使用 bicubic + antialias（质量接近 LANCZOS，速度快很多）
         recovered_img = F.interpolate(
             img_tensor,
             size=(original_height, original_width),
@@ -678,29 +628,157 @@ def recover_size(image, resize_info, mask=None):
             align_corners=False,
             antialias=True
         )
-
-        # 转回 ComfyUI 格式 (B, H, W, C)
         recovered_image = recovered_img.permute(0, 2, 3, 1).contiguous()
 
-        # ---------- 处理 mask（如果提供） ----------
+        # 恢复 mask
         recovered_mask = mask
         if mask is not None:
-            Bm, Hm, Wm = mask.shape
-            # mask: (B, H, W) → (B, 1, H, W)
-            mask_tensor = mask.unsqueeze(1)
-
-            recovered_m = F.interpolate(
-                mask_tensor,
-                size=(original_height, original_width),
-                mode='bicubic',          # mask 上采样 bicubic 通常比 nearest 更自然
-                align_corners=False,
-                antialias=True
-            )
-
-            # 限制在 [0,1] 范围内
-            recovered_mask = recovered_m.squeeze(1).clamp_(0.0, 1.0)
+            if len(mask.shape) == 3:
+                mask_tensor = mask.unsqueeze(1)
+                recovered_m = F.interpolate(
+                    mask_tensor,
+                    size=(original_height, original_width),
+                    mode='bicubic',
+                    align_corners=False,
+                    antialias=True
+                )
+                recovered_mask = recovered_m.squeeze(1).clamp_(0.0, 1.0)
 
         return (recovered_image, recovered_mask)
 
     except Exception as e:
         raise Exception(f"Failed to recover image size: {e}")
+    
+def draw_mask_on_image(image, mask, color=(0, 255, 0, 128)):
+    """
+    将 mask 绘制到 image 上，返回适合 ui.PreviewImage 的 Tensor
+    输出格式: torch.Tensor (B, H, W, 3)，值范围 0.0~1.0
+    """
+    # 转为 numpy float32
+    image = np.asarray(image, dtype=np.float32)
+    mask = np.asarray(mask, dtype=np.float32)
+
+    # ====================== 处理 image ======================
+    if len(image.shape) == 3:           # (H, W, C) → 加 batch
+        image = image[None, ...]
+    
+    B, H, W, C = image.shape
+
+    if C == 4:
+        image = image[..., :3]          # 丢弃 alpha 通道，只保留 RGB 用于预览
+    elif C != 3:
+        raise ValueError(f"Unsupported image channels: {C}")
+
+    # ====================== 处理 mask ======================
+    if len(mask.shape) == 3:
+        if mask.shape[0] != B:          # 单张 mask (H, W)
+            mask = mask[None, ...]
+    elif len(mask.shape) == 4:
+        mask = mask[..., 0]
+
+    # mask 统一到 0~1
+    if mask.max() > 1.0:
+        mask = mask / 255.0
+
+    # ====================== 颜色混合 ======================
+    r, g, b, a = [x / 255.0 for x in color]   # 转 0~1
+
+    overlay = np.full((B, H, W, 3), [r, g, b], dtype=np.float32)
+    effective_alpha = (a * mask)[..., None]   # (B, H, W, 1)
+
+    # 混合
+    result = image * (1 - effective_alpha) + overlay * effective_alpha
+
+    result = np.clip(result, 0.0, 1.0)
+
+    # ====================== 转 Tensor ======================
+    tensor = torch.from_numpy(result).float()   # (B, H, W, 3)
+
+    return tensor
+
+def draw_mask(mask, color=(0, 255, 0, 128)):
+    """
+    根据 mask 生成预览图像
+    - 输出尺寸完全跟随 mask 的尺寸
+    - 有 mask 的地方显示指定颜色（带 alpha 透明度）
+    - 没有 mask 的地方为纯黑色
+    
+    参数:
+        mask:  mask，可以是 (H, W), (B, H, W), (H, W, 1), (B, H, W, 1)
+        color: RGBA 颜色，例如 (0, 255, 0, 128) 绿色半透明
+    
+    返回:
+        torch.Tensor 形状 (B, H, W, 3)，值范围 0.0 ~ 1.0，适合 ui.PreviewImage
+    """
+    # 转为 numpy float32
+    mask = np.asarray(mask, dtype=np.float32)
+
+    # ====================== 统一 mask 形状为 (B, H, W) ======================
+    if len(mask.shape) == 2:                    # (H, W)
+        mask = mask[None, ...]                  # → (1, H, W)
+    elif len(mask.shape) == 4:                  # (B, H, W, 1)
+        mask = mask[..., 0]                     # → (B, H, W)
+    # 否则已经是 (B, H, W) 则不需要处理
+
+    B, H, W = mask.shape
+
+    # mask 值统一到 0~1
+    if mask.max() > 1.0:
+        mask = mask / 255.0
+
+    # ====================== 生成图像 ======================
+    r, g, b, a = [c / 255.0 for c in color]
+
+    # 创建全黑背景
+    result = np.zeros((B, H, W, 3), dtype=np.float32)
+
+    # 在 mask 区域填充颜色（应用 alpha）
+    effective_alpha = a * mask[..., None]       # (B, H, W, 1)
+
+    result = result * (1 - effective_alpha) + np.array([r, g, b], dtype=np.float32) * effective_alpha
+
+    # ====================== 转 Tensor ======================
+    tensor = torch.from_numpy(result).float().contiguous()   # (B, H, W, 3)
+
+    return tensor
+
+def batch_images(image0, image1):
+    """
+    将两张图片合并成 batch（形状从单张变成 B=2）
+    
+    输入:
+        image0, image1: 可以是以下任意格式：
+                        - torch.Tensor (H, W, C) 或 (1, H, W, C)
+                        - numpy.ndarray (H, W, C) 或 (1, H, W, C)
+    
+    输出:
+        torch.Tensor，形状 (2, H, W, C)，值范围保持原样（推荐 0~1）
+    """
+    # 统一转为 numpy
+    def to_numpy(img):
+        if isinstance(img, torch.Tensor):
+            img = img.cpu().numpy()
+        else:
+            img = np.asarray(img)
+        return img
+
+    img0 = to_numpy(image0)
+    img1 = to_numpy(image1)
+
+    # 如果是 (1, H, W, C) 这种带 batch 的，先去掉 batch 维度
+    if len(img0.shape) == 4 and img0.shape[0] == 1:
+        img0 = img0[0]
+    if len(img1.shape) == 4 and img1.shape[0] == 1:
+        img1 = img1[0]
+
+    # 检查尺寸是否一致
+    if img0.shape != img1.shape:
+        raise ValueError(f"Two images must have the same shape. Got {img0.shape} and {img1.shape}")
+
+    # 合并成 batch: (2, H, W, C)
+    batched = np.stack([img0, img1], axis=0)
+
+    # 转成 torch.Tensor
+    tensor = torch.from_numpy(batched).float().contiguous()
+
+    return tensor

@@ -17,11 +17,12 @@ class ScriptNode:
         }
 
     INPUT_IS_LIST = True
-    RETURN_TYPES = (any_type,)
-    RETURN_NAMES = ("*",)
+    OUTPUT_IS_LIST = (False, True,)
+    RETURN_TYPES = (any_type, any_type,)
+    RETURN_NAMES = ("result", "list")
     FUNCTION = "execute"
     CATEGORY = "Kolid-Toolkit"
-    DESCRIPTION = "Execute custom Python script. Use 'result' variable to return output. Example: result = x + y"
+    DESCRIPTION = "Execute custom Python script. Use 'result' variable to return output. Example: result = x[0] + y[0]"
     
     @classmethod
     def VALIDATE_INPUTS(s, input_types):
@@ -36,7 +37,8 @@ class ScriptNode:
             'x': x,
             'y': y,
             'z': z,
-            'result': None
+            'result': None,
+            'list': [],
         }
         
         try:
@@ -44,7 +46,7 @@ class ScriptNode:
             exec(script[0], globals(), local_vars)
             
             # Return the result variable
-            return (local_vars['result'],)
+            return (local_vars['result'], local_vars['list'],)
                 
         except Exception as e:
             raise ValueError(f"Script execution error: {str(e)}")

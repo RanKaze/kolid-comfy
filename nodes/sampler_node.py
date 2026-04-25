@@ -1,11 +1,23 @@
+from pickle import DICT
+import re
 import comfy
 import folder_paths
 import os
 import torch
-from nodes import common_ksampler, VAEEncode, VAEEncodeForInpaint, KSamplerAdvanced, VAEDecode, SetLatentNoiseMask   
+import gc
+import json
+import time
+from PIL import Image
+from nodes import common_ksampler, VAEEncode, VAEEncodeForInpaint, KSamplerAdvanced, VAEDecode, SetLatentNoiseMask, CLIPTextEncode
+from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
+import comfy.model_management as mm
 from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop
 from ..libs.detect_utils import detect_mask
-from ..libs.mask_utils import expand_mask
+from ..libs.mask_utils import combine_masks, create_empty_mask, expand_mask, invert_mask
+from ..libs.caption_utils import get_tag, get_similarity
+from decord import VideoReader, cpu
+from ..libs.image_utils import draw_mask_on_image, draw_mask, batch_images
+
 
 # ====================== 全局 LoRA 路径缓存（脚本加载时自动构建） ======================
 _lora_path_cache = {}  # key: lora_name, value: full file path
@@ -40,52 +52,85 @@ def _build_lora_cache():
     if len(_lora_path_cache) == 0:
         print("警告：未找到任何 LoRA 文件，请检查 ComfyUI/models/loras 目录下是否有 .safetensors 文件")
 
-_build_lora_cache()   # 脚本加载时立即执行
 
-# ====================== ParseLoRAConfigsNode ======================
-class ParseLoRAConfigsNode:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "lora_string": ("STRING", {
-                    "default": "<lora:高分辨率修正:0.2>, <lora:hiten:1.0>",
-                    "multiline": True,
-                    "placeholder": "仅支持 <lora:name:weight> 格式（支持子文件夹）\n示例：\n<lora:高分辨率修正:0.2> <lora:hiten:1.0>"
-                }),
-            }
-        }
+def set_inpaint_mask(resized_image: torch.Tensor, resized_mask: torch.Tensor, vae, grow_mask_by: int = 0):
+    """
+    【新增独立函数】处理 inpaint_mode 下的 mask 与 image 预处理
+    对应原 PipelineDetailerAdvancedNode 中的 inpaint_mode 逻辑
+    
+    返回: (processed_image, noise_mask_latent)
+    """
+    import torch
+    import math
+    
+    # 获取 VAE 压缩率（通常是 8）
+    downscale_ratio = vae.spacial_compression_encode() if hasattr(vae, 'spacial_compression_encode') else 8
+    
+    # 计算对齐后的尺寸
+    x = (resized_image.shape[1] // downscale_ratio) * downscale_ratio
+    y = (resized_image.shape[2] // downscale_ratio) * downscale_ratio
+    
+    # 插值调整 mask 到图像尺寸
+    resized_mask = torch.nn.functional.interpolate(
+        resized_mask.reshape((-1, 1, resized_mask.shape[-2], resized_mask.shape[-1])),
+        size=(resized_image.shape[1], resized_image.shape[2]),
+        mode="bilinear"
+    )
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("loras",)
-    FUNCTION = "parse"
-    CATEGORY = "sampling/custom"
+    resized_image = resized_image.clone()
+    
+    # 裁剪到 VAE 对齐尺寸
+    if resized_image.shape[1] != x or resized_image.shape[2] != y:
+        x_offset = (resized_image.shape[1] % downscale_ratio) // 2
+        y_offset = (resized_image.shape[2] % downscale_ratio) // 2
+        resized_image = resized_image[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
+        resized_mask = resized_mask[:, :, x_offset:x + x_offset, y_offset:y + y_offset]
 
-    def parse(self, lora_string: str):
-        if not lora_string or not lora_string.strip():
-            return ("",)
+    # 根据 grow_mask_by 扩展 mask（用于 latent 空间无缝过渡）
+    if grow_mask_by == 0:
+        mask_erosion = resized_mask
+    else:
+        kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
+        padding = math.ceil((grow_mask_by - 1) / 2)
+        mask_erosion = torch.clamp(
+            torch.nn.functional.conv2d(resized_mask.round(), kernel_tensor, padding=padding),
+            0, 1
+        )
 
-        cleaned = lora_string.replace("\n", " ").replace(",", " ")
-        parts = [p.strip() for p in cleaned.split() if p.strip()]
+    # 将 mask 区域的图像内容置为灰色（0.5）
+    m = (1.0 - resized_mask.round()).squeeze(1)
+    for i in range(3):
+        resized_image[:, :, :, i] -= 0.5
+        resized_image[:, :, :, i] *= m
+        resized_image[:, :, :, i] += 0.5
 
-        items = []
-        for part in parts:
-            if part.startswith("<lora:") and part.endswith(">"):
-                inner = part[1:-1].strip()
-                if inner.startswith("lora:"):
-                    items.append(inner)
-            elif part.startswith("<") and part.endswith(">"):
-                print(f"Warning: 格式必须为 <lora:name:weight>: {part}")
+    # 编码为 latent 并附加 noise_mask
+    t = vae.encode(resized_image)
+    tmp_latent = {
+        "samples": t,
+        "noise_mask": mask_erosion[:, :, :x, :y].round()
+    }
+    
+    return resized_image, tmp_latent
 
-        result = "\n".join(items)
-        if items:
-            print(f"Parsed {len(items)} LoRA configs: {items}")
-        return (result,)
+def conditioning_set_values(conditioning, values={}, append=False):
+    c = []
+    for t in conditioning:
+        n = [t[0], t[1].copy()]
+        for k in values:
+            val = values[k]
+            if append:
+                old_val = n[1].get(k, None)
+                if old_val is not None:
+                    val = old_val + val
 
+            n[1][k] = val
+        c.append(n)
+
+    return c
 
 class SamplerContext:
     def __init__(self):
-        self.name = None
         self.positive = None
         self.negative = None
         self.loras = None
@@ -96,7 +141,97 @@ class SamplerContext:
         new.loras = self.loras
         return new
 
-# ====================== SamplerCache 类（最终修复版） ======================
+class ContextData:
+    def __init__(self):
+        self.contexts = {}
+        self.prompt_need_context = []
+        self.similarity_need_context = []
+    
+    def copy(self):
+        new = ContextData()
+        new.contexts = self.contexts.copy()
+        new.prompt_need_context = self.prompt_need_context.copy()
+        new.similarity_need_context = self.similarity_need_context.copy()
+        return new
+    
+    def get_context(self, regex_pattern: str) -> (str, str, list[str]):
+        if self.contexts is None:
+            raise ValueError("PipelineData 中 contexts 为空")
+        positive_parts = []
+        negative_parts = []
+        loras = []
+
+        for name, context in self.contexts.items():
+            if re.match(regex_pattern, name):
+                if context.positive:
+                    positive_parts.append(context.positive.strip())
+                if context.negative:
+                    negative_parts.append(context.negative.strip())
+                if context.loras:
+                    loras.extend(context.loras)
+
+        positive = ",".join(positive_parts).strip(",")
+        negative = ",".join(negative_parts).strip(",")
+        return (positive, negative, loras, )
+    
+    def get_prompt_context(self, prompt: str | None, image: torch.Tensor | None) -> (str, str, list[str]):
+        if self.contexts is None:
+            raise ValueError("PipelineData 中 contexts 为空")
+        
+        positive_parts = []
+        negative_parts = []
+        loras = []
+        if prompt is not None and prompt != '':  
+            for need_regex, need_context_regex in self.prompt_need_context:
+                if re.match(prompt, need_regex):
+                    for name, context in self.contexts.items():
+                        if re.match(need_context_regex, name):
+                            if context.positive:
+                                positive_parts.append(context.positive.strip())
+                            if context.negative:
+                                negative_parts.append(context.negative.strip())
+                            if context.loras:
+                                loras.extend(context.loras)
+        if image is not None:
+            for similarity_data, need_context_regex in self.similarity_need_context:
+                model = similarity_data["model"]
+                original_image = similarity_data["image"]
+                threshold = similarity_data["threshold"]
+                similarity = get_similarity(model, original_image, image)
+                if similarity > threshold:
+                    for name, context in self.contexts.items():
+                        if re.match(need_context_regex, name):
+                            if context.positive:
+                                positive_parts.append(context.positive.strip())
+                            if context.negative:
+                                negative_parts.append(context.negative.strip())
+                            if context.loras:
+                                loras.extend(context.loras)
+                                
+        positive = ",".join(positive_parts).strip(",")
+        negative = ",".join(negative_parts).strip(",")
+        return (positive, negative, loras, )
+
+
+class ReferenceData:
+    def __init__(self):
+        self.reference_latents = []
+        self.reference_controls = []
+        self.positive_guidance = None
+        self.negative_guidance = None
+    
+    def copy(self):
+        new = ReferenceData()
+        new.reference_latents = self.reference_latents.copy()
+        new.reference_controls = self.reference_controls.copy()
+        new.positive_guidance = self.positive_guidance
+        new.negative_guidance = self.negative_guidance
+        return new
+    
+
+class ConfigData(dict):
+    pass
+
 class SamplerCache:
     def __init__(self):
         self._cache = {}
@@ -196,9 +331,9 @@ class PipelineData:
                  scheduler=None,
                  steps=None,
                  cfg=None,
-                 loras=None,
-                 positive=None,
-                 negative=None):
+                 context=None,
+                 reference=None,
+                 config=None):
         
         self.cache = cache
         self.model = model
@@ -211,14 +346,13 @@ class PipelineData:
         self.scheduler = scheduler
         self.steps = steps
         self.cfg = cfg
-        self.loras = loras
-        self.positive = positive
-        self.negative = negative
+        self.context = context if context else ContextData()
+        self.reference = reference if reference else ReferenceData()
+        self.config = config if config else ConfigData()
         self.resize_info_stack = []  # 使用栈来存储 resize_info
         
         # Conditioning 缓存: key = (clip_id, prompt, frozenset(loras)) → condition
         self._conditioning_cache = {}
-
     def copy(self):
         new = PipelineData(
             cache=self.cache.copy() if self.cache else None,
@@ -232,14 +366,13 @@ class PipelineData:
             scheduler=self.scheduler,
             steps=self.steps,
             cfg=self.cfg,
-            loras=self.loras,
-            positive=self.positive,
-            negative=self.negative
+            context=self.context.copy() if self.context else None,
+            reference=self.reference.copy() if self.reference else None,
+            config=self.config.copy() if self.config else None,
         )
         new.resize_info_stack = self.resize_info_stack.copy()  # 复制栈
         new._conditioning_cache = self._conditioning_cache.copy()
         return new
-
     # ==================== 获取 Latent ====================
     def get_latent(self):
         if self.latent is not None:
@@ -258,7 +391,6 @@ class PipelineData:
         self.image = None
         self.latent = latent_out
         return self.latent
-
     # ==================== 获取 Image ====================
     def get_image(self):
         if self.image is not None:
@@ -275,42 +407,317 @@ class PipelineData:
         self.image = decoded_image
         self.latent = None  # 解码后将 latent 设置为 None
         return self.image
-
     # ==================== 获取 Conditioning（只返回 condition，带缓存） ====================
-    def get_conditioning(self, clip, prompt: str):
-        """
-        使用 cache.get_model_clip 获取打过 LoRA 的 clip，
-        生成并返回单个 condition (positive conditioning)
-        """
+    def get_conditioning(self, mode, clip, vae, prompt: str, reference_latent = None, reference_image = None, reference = None):
+        if clip is None:
+            raise ValueError("无法获取有效的 clip")
         if self.cache is None:
             raise ValueError("PipelineData 中 cache 为空")
-
         if prompt is None:
             prompt = ""
-
-        # 生成缓存 key
         cache_key = (
             id(clip),
             prompt
         )
-
-        # 检查缓存
+        
         if cache_key in self._conditioning_cache:
             print(f"✓ Conditioning cache hit")
-            return self._conditioning_cache[cache_key]
+            condition = self._conditioning_cache[cache_key]
+        else:
+            print(f"x Conditioning cache miss")
+            condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]  
+            self._conditioning_cache[cache_key] = condition
+        
+        if reference_latent is not None:
+            condition = conditioning_set_values(condition, {"reference_latents": [reference_latent["samples"]]}, append=True)
 
-        if clip is None:
-            raise ValueError("无法获取有效的 clip")
+        if reference.reference_latents is not None:
+            for lat in reference.reference_latents:
+                condition = conditioning_set_values(condition, {"reference_latents": [lat["samples"]]}, append=True)
+        
+        if reference.reference_controls is not None:
+            for control in reference.reference_controls:
+                control_net = control["control_net"]
+                image = control["image"]
+                if image is None:
+                    image = reference_image
+                strength = control["strength"]
+                start_percent = control["start_percent"]
+                end_percent = control["end_percent"]
 
-        # 生成 conditioning
-        from nodes import CLIPTextEncode
-        condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
+                # ==================== 应用 ControlNet 到 conditioning ====================
+                if strength <= 0:
+                    continue  # strength 为 0 时跳过
 
-        # 存入缓存
-        self._conditioning_cache[cache_key] = condition
+                # 准备 control_hint (ComfyUI 标准做法：从 HWC -> CHW)
+                control_hint = image.movedim(-1, 1)  # [B, H, W, C] -> [B, C, H, W]
 
+                # 对 positive 和 negative 都应用（如果你只想应用到 positive，可只处理 condition）
+                # 这里因为你的函数只返回一个 condition（通常是 positive），我们只处理当前 condition
+                c = []  # 新的 conditioning list
+                for t in condition:  # condition 通常是 list of [tensor, dict]
+                    d = t[1].copy()   # 复制 metadata dict
+
+                    # 处理 controlnet 链（防止重复 apply 同一个 controlnet）
+                    prev_cnet = d.get('control', None)
+                    
+                    # 这里我们简化处理：每次都新建一个 controlnet 实例（推荐做法）
+                    c_net = control_net.copy().set_cond_hint(
+                        control_hint, 
+                        strength, 
+                        (start_percent, end_percent),
+                        vae=vae, 
+                        extra_concat=[]  # 如果有 extra_concat 可以在这里传入
+                    )
+                    
+                    if prev_cnet is not None:
+                        c_net.set_previous_controlnet(prev_cnet)
+
+                    d['control'] = c_net
+                    d['control_apply_to_uncond'] = False  # 通常设为 False，避免影响 negative
+
+                    n = [t[0], d]
+                    c.append(n)
+
+                condition = c  # 更新 condition
+        
+        if mode == "positive":
+            if reference.positive_guidance is not None:
+                condition = conditioning_set_values(condition, {"guidance": reference.positive_guidance})   
+        elif mode == "negative":
+            if reference.negative_guidance is not None:
+                condition = conditioning_set_values(condition, {"guidance": reference.negative_guidance})   
+                
         return condition
 
+
+class ContextNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        _build_lora_cache()
+        return{
+            "required": {
+                "name": ("STRING", {"default": ""}),    
+            },
+            "optional": {
+                "context": ("CONTEXT_DATA",),
+                "loras": ("STRING", {"forceInput": True}),
+                "positive": ("STRING", {"forceInput": True}),
+                "negative": ("STRING", {"forceInput": True}),
+            }
+        }
+        
+    RETURN_TYPES = ("CONTEXT_DATA",)
+    RETURN_NAMES = ("context",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                name="",
+                context : ContextData = None,
+                loras=None,
+                positive=None,
+                negative=None):
+        if context is None:
+            context = ContextData()
+        else:
+            context = context.copy()
+        
+        if name in context.contexts:
+            sampler_context = context.contexts[name]
+            if sampler_context.positive is None:
+                sampler_context.positive = positive
+            elif positive is not None:
+                sampler_context.positive += ',' + positive
+                
+            if sampler_context.negative is None:
+                sampler_context.negative = negative
+            elif negative is not None:
+                sampler_context.negative += ',' + negative
+                
+            if sampler_context.loras is None:
+                sampler_context.loras = re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras)
+            elif loras is not None:
+                sampler_context.loras.extend(re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras))
+                
+        else:
+            sampler_context = SamplerContext()
+            sampler_context.positive = positive
+            sampler_context.negative = negative
+            if loras is not None:
+                sampler_context.loras = re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras)
+            else:
+                sampler_context.loras = None
+            context.contexts[name] = sampler_context
+
+        return (context,)
+    
+class ContextSimilarityNeedNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return{
+            "required": {
+                "image": ("IMAGE",),  
+                "threshold": ("FLOAT", {"default": 0.8}),  
+                "similarity_model": ("*",),
+                "need_context_regex": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "context": ("CONTEXT_DATA",),
+            }
+        }
+        
+    RETURN_TYPES = ("CONTEXT_DATA",)
+    RETURN_NAMES = ("context",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self, image, threshold, similarity_model, need_context_regex,
+                context : ContextData = None):
+        if context is None:
+            context = ContextData()
+        else:
+            context = context.copy()
+            
+        context.similarity_need_context.append(({
+            "image": image,
+            "threshold": threshold,
+            "model": similarity_model
+        },need_context_regex))
+        
+        
+        return (context,)
+    
+class ContextPromptNeedNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return{
+            "required": {
+                "prompt": ("STRING", {"default": ""}),
+                "need_context_regex": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "context": ("CONTEXT_DATA",),
+            }
+        }
+        
+    RETURN_TYPES = ("CONTEXT_DATA",)
+    RETURN_NAMES = ("context",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self, prompt, need_context_regex,
+                context : ContextData = None):
+        if context is None:
+            context = ContextData()
+        else:
+            context = context.copy()
+            
+        context.prompt_need_context.append((prompt, need_context_regex))
+        
+        return (context,)
+
+class ReferenceLatentNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        _build_lora_cache()
+        return{
+            "required": {
+            },
+            "optional": {
+                "reference": ("REFERENCE_DATA",),
+                "latent": ("LATENT",),
+            }
+        }
+        
+    RETURN_TYPES = ("REFERENCE_DATA",)
+    RETURN_NAMES = ("reference",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                reference : ReferenceData = None,
+                latent=None):
+        if reference is None:
+            reference = ReferenceData()
+        else:
+            reference = reference.copy()
+        
+        if latent is not None:
+            reference.reference_latents.append(latent)
+        return (reference,)
+
+class ReferenceContolNetNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        _build_lora_cache()
+        return{
+            "required": {
+            },
+            "optional": {
+                "reference": ("REFERENCE_DATA",),
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "strength": ("FLOAT", {"default": 1.0}),
+                "start_percent": ("FLOAT", {"default": 0.0}),
+                "end_percent": ("FLOAT", {"default": 1.0}),
+            }
+        }
+        
+    RETURN_TYPES = ("REFERENCE_DATA",)
+    RETURN_NAMES = ("reference",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                reference : ReferenceData = None,
+                control_net=None, 
+                image=None,
+                strength=None,
+                start_percent=None,
+                end_percent=None):
+        if reference is None:
+            reference = ReferenceData()
+        else:
+            reference = reference.copy()
+        
+        if control_net is not None:
+            reference.reference_controls.append({"control_net": control_net, "image": image, "strength": strength, "start_percent": start_percent, "end_percent": end_percent})
+        return (reference,)
+
+class ReferenceGuidanceNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return{
+            "required": {
+            },
+            "optional": {
+                "reference": ("REFERENCE_DATA",),
+                "positive_guidance": ("FLOAT", {"forceInput": True}),
+                "negative_guidance": ("FLOAT", {"forceInput": True}),
+            }
+        }
+        
+    RETURN_TYPES = ("REFERENCE_DATA",)
+    RETURN_NAMES = ("reference",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                reference : ReferenceData = None,
+                positive_guidance=None,
+                negative_guidance=None):
+        if reference is None:
+            reference = ReferenceData()
+        else:
+            reference = reference.copy()
+        
+        if positive_guidance is not None:
+            reference.positive_guidance = positive_guidance
+        if negative_guidance is not None:
+            reference.negative_guidance = negative_guidance 
+            
+        return (reference,)
 
 # ====================== PipelineDataNode ======================
 class PipelineNode:
@@ -331,17 +738,17 @@ class PipelineNode:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "normal", "forceInput": True}),
                 "steps": ("INT", {"forceInput": True}),
                 "cfg": ("FLOAT", {"forceInput": True}),
-                "loras": ("STRING", {"forceInput": True}),
-                "positive": ("STRING", {"forceInput": True}),
-                "negative": ("STRING", {"forceInput": True}),
+                "context": ("CONTEXT_DATA",),
+                "reference": ("REFERENCE_DATA",),   
+                "config": ("CONFIG_DATA",),
             }
         }
 
     RETURN_TYPES = ("PIPELINE_DATA", "SAMPLER_CACHE", "MODEL", "CLIP", "VAE", 
-                    "IMAGE", "LATENT", "MASK", comfy.samplers.KSampler.SAMPLERS, comfy.samplers.KSampler.SCHEDULERS, "INT", "FLOAT", "STRING", "STRING", "STRING",)
+                    "IMAGE", "LATENT", "MASK", comfy.samplers.KSampler.SAMPLERS, comfy.samplers.KSampler.SCHEDULERS, "INT", "FLOAT", "CONTEXT_DATA", "REFERENCE_DATA", "CONFIG_DATA",)
     
     RETURN_NAMES = ("pipeline", "cache", "model", "clip", "vae", 
-                    "image", "latent", "mask", "sampler_name", "scheduler", "steps", "cfg", "loras", "positive", "negative",)
+                    "image", "latent", "mask", "sampler_name", "scheduler", "steps", "cfg", "context", "reference", "config",)
     
     FUNCTION = "process"
     CATEGORY = "sampling/custom"
@@ -359,65 +766,105 @@ class PipelineNode:
                 scheduler="normal",
                 steps=None,
                 cfg=None,
-                loras=None,
-                positive=None,
-                negative=None):
+                context : ContextData = None,
+                reference : ReferenceData = None,
+                config : ConfigData = None
+                ):
         
         if pipeline is not None:
-            config = pipeline.copy()
+            next_pipeline = pipeline.copy()
         else:
-            config = PipelineData()
+            next_pipeline = PipelineData()
 
         # 更新字段
         if cache is not None:
-            config.cache = cache
-        if config.cache is None:
-            config.cache = SamplerCache()
+            next_pipeline.cache = cache
+        if next_pipeline.cache is None:
+            next_pipeline.cache = SamplerCache()
             
         if model is not None:
-            config.model = model
+            next_pipeline.model = model
         if clip is not None:
-            config.clip = clip
+            next_pipeline.clip = clip
         if vae is not None:
-            config.vae = vae
+            next_pipeline.vae = vae
         if image is not None:
-            config.image = image
+            next_pipeline.image = image
         if latent is not None:
-            config.latent = latent
+            next_pipeline.latent = latent
         if mask is not None:
-            config.mask = mask
+            next_pipeline.mask = mask
         if sampler_name is not None:
-            config.sampler_name = sampler_name
+            next_pipeline.sampler_name = sampler_name
         if scheduler is not None:
-            config.scheduler = scheduler
+            next_pipeline.scheduler = scheduler
         if steps is not None:
-            config.steps = steps
+            next_pipeline.steps = steps
         if cfg is not None:
-            config.cfg = cfg
-        if loras is not None:
-            config.loras = loras
-        if positive is not None:
-            config.positive = positive
-        if negative is not None:
-            config.negative = negative
+            next_pipeline.cfg = cfg
+            
+            
+        if context is not None:
+            next_pipeline.context = context.copy()
+        elif next_pipeline.context is None:
+            next_pipeline.context = ContextData()
+            
+        if reference is not None:
+            next_pipeline.reference = reference.copy()
+        elif next_pipeline.reference is None:
+            next_pipeline.reference = ReferenceData()
+            
+        if config is not None:
+            next_pipeline.config = config.copy()
+        elif next_pipeline.config is None:
+            next_pipeline.config = ConfigData()
+
 
         return (
-            config,
-            config.cache,
-            config.model,
-            config.clip,
-            config.vae,
-            config.image,
-            config.latent,
-            config.mask,
-            config.sampler_name,
-            config.scheduler,
-            config.steps,
-            config.cfg,
-            config.loras,
-            config.positive,
-            config.negative
+            next_pipeline,
+            next_pipeline.cache,
+            next_pipeline.model,
+            next_pipeline.clip,
+            next_pipeline.vae,
+            next_pipeline.image,
+            next_pipeline.latent,
+            next_pipeline.mask,
+            next_pipeline.sampler_name,
+            next_pipeline.scheduler,
+            next_pipeline.steps,
+            next_pipeline.cfg,
+            next_pipeline.context,
+            next_pipeline.reference,
+            next_pipeline.config,
         )
+        
+class ConfigNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return{
+            "optional": {
+                "config": ("CONFIG_DATA",),
+                "key": ("STRING", {"default": ""}),
+                "value": ("*"),
+            }
+        }
+        
+    RETURN_TYPES = ("CONFIG_DATA",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                config : ConfigData = None,
+                key="",
+                value= None):
+        if config is None:
+            config = ConfigData()
+        else:
+            config = config.copy()
+        
+        config[key] = value
+        return (config,)
 
 # ====================== SamplerNode ======================
 class PipelineSamplerNode:
@@ -426,70 +873,93 @@ class PipelineSamplerNode:
         return {
             "required": {
                 "pipeline": ("PIPELINE_DATA",),
+                "bypass": ("BOOLEAN", {"default": False}),
+                "need_reference_latent": ("BOOLEAN", {"default": False}),
+                "context_regex": ("STRING", {"default": ".+"}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "step_rate": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
             },
             "optional": {
-                "loras": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
-                "positive": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
-                "negative": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
+                "tagger": ("*",),
             }
         }
 
-    RETURN_TYPES = ("PIPELINE_DATA",)
-    RETURN_NAMES = ("pipeline",)
+    RETURN_TYPES = ("PIPELINE_DATA", "STRING",)
+    RETURN_NAMES = ("pipeline", "tag",)
     FUNCTION = "sample"
     CATEGORY = "sampling/custom"
 
-    def sample(self, pipeline: PipelineData, denoise, seed, step_rate,
-               loras=None, positive=None, negative=None):
+    def sample(self, pipeline: PipelineData, bypass, need_reference_latent, context_regex, denoise, seed, step_rate, tagger=None):
+        if bypass:
+            return (pipeline,)
         
         if step_rate <= 0:
             return (pipeline,)
         
-        config = pipeline.copy()
+        next_pipeline = pipeline.copy()
 
-        if config.cache is None:
+        if next_pipeline.cache is None:
             raise ValueError("PipelineData 中 cache 为空")
 
-        if config.model is None:
+        if next_pipeline.model is None:
             raise ValueError("PipelineData 中 model 为空，无法采样")
-
-        if loras is None:
-            loras = config.loras
-        if positive is None:
-            positive = config.positive
-        if negative is None:
-            negative = config.negative
-        
-        # 解析 lora_configs（支持多行输入）
-        lora_list = [line.strip() for line in loras.split("\n") if line.strip()]
-
-        # 获取打过 LoRA 的 model 和 clip
-        model_to_use, clip_to_use = config.cache.get_model_clip(
-            model=config.model,
-            clip=config.clip,
-            loras=lora_list
-        )
-
+  
+        image = next_pipeline.image
         # 获取 latent（支持 mask inpaint）
-        latent = config.get_latent()
+        latent = next_pipeline.get_latent()
+        
+        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
 
+        if tagger is not None:
+            if image is None:
+                image = VAEDecode().decode(vae=next_pipeline.vae, samples=latent)[0]
+            tagger_positive = get_tag(tagger, image)
+            if next_pipeline.config.get("print_tag") is True:
+                print(f"[TAG]: {tagger_positive}")
+            context_positive = context_positive + ',' + tagger_positive
+        else:
+            tagger_positive = ''
+            
+        tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, image)
+        if tmp_positive is not None:
+            context_positive = tmp_positive
+        if tmp_negative is not None:
+            context_negative = tmp_negative
+        if tmp_loras is not None:
+            context_loras.extend(tmp_loras)
+            
+        # 获取打过 LoRA 的 model 和 clip
+        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model=next_pipeline.model,
+            clip=next_pipeline.clip,
+            loras=context_loras
+        )
+            
         # 获取 condition（使用新的 get_conditioning）
-        positive_condition = config.get_conditioning(
+        positive_condition = next_pipeline.get_conditioning(
+            mode="positive",
             clip=clip_to_use,
-            prompt=positive
+            vae=next_pipeline.vae,
+            prompt=context_positive,
+            reference_latent=latent if need_reference_latent else None,
+            reference_image=image,
+            reference=next_pipeline.reference
         )
-        negative_condition = config.get_conditioning(
+        negative_condition = next_pipeline.get_conditioning(
+            mode="negative",
             clip=clip_to_use,
-            prompt=negative
+            vae=next_pipeline.vae,
+            prompt=context_negative,
+            reference_latent=latent if need_reference_latent else None,
+            reference_image=image,
+            reference=next_pipeline.reference
         )
 
-        sampler_name = config.sampler_name if config.sampler_name is not None else "euler"
-        scheduler    = config.scheduler    if config.scheduler    is not None else "normal"
-        steps        = config.steps       if config.steps         is not None else 20
-        cfg          = config.cfg          if config.cfg          is not None else 8.0
+        sampler_name = next_pipeline.sampler_name if next_pipeline.sampler_name is not None else "euler"
+        scheduler    = next_pipeline.scheduler    if next_pipeline.scheduler    is not None else "normal"
+        steps        = next_pipeline.steps        if next_pipeline.steps         is not None else 20
+        cfg          = next_pipeline.cfg          if next_pipeline.cfg          is not None else 8.0
         
         steps = int(step_rate * steps)
         
@@ -507,8 +977,12 @@ class PipelineSamplerNode:
             denoise=denoise
         )[0]
 
-        config.latent = sampled_latent
-        return (config,)
+        next_pipeline.latent = sampled_latent
+        
+        if next_pipeline.config.get("preview_image") is True:
+            preview_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+            return io.NodeOutput(next_pipeline, context_positive, ui=ui.PreviewImage(preview_image))
+        return (next_pipeline, context_positive,)
 
 
 # ====================== SamplerAdvancedNode ======================
@@ -518,6 +992,9 @@ class PipelineSamplerAdvancedNode:
         return {
             "required": {
                 "pipeline": ("PIPELINE_DATA",),
+                "bypass": ("BOOLEAN", {"default": False}),
+                "need_reference_latent": ("BOOLEAN", {"default": False}),
+                "context_regex": ("STRING", {"default": ".+"}),
                 "add_noise": (["enable", "disable"], {"default": "enable"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "start_step_rate": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
@@ -525,72 +1002,91 @@ class PipelineSamplerAdvancedNode:
                 "return_with_leftover_noise": (["disable", "enable"], {"default": "disable"}),
             },
             "optional": {
-                "loras": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
-                "positive": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
-                "negative": ("STRING", {"forceInput": True, "multiline": False}),  # 新增
+                "tagger": ("*",),
             }   
         }
 
-    RETURN_TYPES = ("PIPELINE_DATA",)
-    RETURN_NAMES = ("pipeline",)
+    RETURN_TYPES = ("PIPELINE_DATA", "STRING",)
+    RETURN_NAMES = ("pipeline", "tag",)
     FUNCTION = "sample_advanced"
     CATEGORY = "sampling/custom"
 
-    def sample_advanced(self, pipeline: PipelineData, add_noise,
-                        seed, start_step_rate, end_step_rate, return_with_leftover_noise,
-                        loras=None, positive=None, negative=None):
+    def sample_advanced(self, pipeline: PipelineData, bypass, need_reference_latent, context_regex, add_noise,
+                        seed, start_step_rate, end_step_rate, return_with_leftover_noise, tagger=None):
+        if bypass:
+            return (pipeline,)
         
         if end_step_rate <= 0 or end_step_rate < start_step_rate:
             return (pipeline,)
     
-        config = pipeline.copy()
+        next_pipeline = pipeline.copy()
 
-        if config.cache is None:
+        if next_pipeline.cache is None:
             raise ValueError("PipelineData 中 cache 为空")
-
-        if config.model is None:
+        
+        if next_pipeline.model is None:
             raise ValueError("PipelineData 中 model 为空，无法采样")
         
-        if loras is None:
-            loras = config.loras
-        if positive is None:
-            positive = config.positive
-        if negative is None:
-            negative = config.negative
+        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
 
-        # 解析 lora_configs（支持多行输入）
-        lora_list = [line.strip() for line in loras.split("\n") if line.strip()]
-
-        # 获取打过 LoRA 的 model 和 clip
-        model_to_use, clip_to_use = config.cache.get_model_clip(
-            model=config.model,
-            clip=config.clip,
-            loras=lora_list
-        )
-
+        image = next_pipeline.image
         # 获取 latent（支持 mask inpaint）
-        latent = config.get_latent()
+        latent = next_pipeline.get_latent()
         
-        # 获取 condition（使用新的 get_conditioning）
-        positive_condition = config.get_conditioning(
-            clip=clip_to_use,
-            prompt=positive
-        )
-        negative_condition = config.get_conditioning(
-            clip=clip_to_use,
-            prompt=negative
-        )
-
-        sampler_name = config.sampler_name if config.sampler_name is not None else "euler"
-        scheduler    = config.scheduler    if config.scheduler    is not None else "normal"
-        steps        = config.steps       if config.steps         is not None else 20
-        cfg          = config.cfg          if config.cfg          is not None else 8.0
+        if tagger is not None:
+            if image is None:
+                image = VAEDecode().decode(vae=next_pipeline.vae, samples=latent)[0]
+            tagger_positive = get_tag(tagger, image)
+            if next_pipeline.config.get("print_tag") is True:
+                print(f"[TAG]: {tagger_positive}")
+            context_positive = context_positive + ',' + tagger_positive
+        else:
+            tagger_positive = ''
+            
+        tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, image)
+        if tmp_positive is not None:
+            context_positive = tmp_positive
+        if tmp_negative is not None:
+            context_negative = tmp_negative
+        if tmp_loras is not None:
+            context_loras.extend(tmp_loras)
+            
+        sampler_name = next_pipeline.sampler_name if next_pipeline.sampler_name is not None else "euler"
+        scheduler    = next_pipeline.scheduler    if next_pipeline.scheduler    is not None else "normal"
+        steps        = next_pipeline.steps        if next_pipeline.steps        is not None else 20
+        cfg          = next_pipeline.cfg          if next_pipeline.cfg          is not None else 8.0
         
         start_at_step = int(start_step_rate * steps)
         end_at_step = int(end_step_rate * steps)
         if end_at_step < start_at_step:
             end_at_step = start_at_step
+            
+        # 获取打过 LoRA 的 model 和 clip
+        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model=next_pipeline.model,
+            clip=next_pipeline.clip,
+            loras=context_loras
+        )
         
+        # 获取 condition（使用新的 get_conditioning）
+        positive_condition = next_pipeline.get_conditioning(
+            mode="positive",
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=context_positive,
+            reference_latent=latent if need_reference_latent else None,
+            reference_image=image,
+            reference=next_pipeline.reference
+        )
+        negative_condition = next_pipeline.get_conditioning(
+            mode="negative",
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=context_negative,
+            reference_latent=latent if need_reference_latent else None,
+            reference_image=image,
+            reference=next_pipeline.reference
+        )
 
         sampled_latent = KSamplerAdvanced().sample(
             model=model_to_use,
@@ -608,10 +1104,13 @@ class PipelineSamplerAdvancedNode:
             return_with_leftover_noise=return_with_leftover_noise
         )[0]
 
-        config.latent = sampled_latent
-        return (config,)
+        next_pipeline.latent = sampled_latent
+        
+        if next_pipeline.config.get("preview_image") is True:
+            preview_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+            return io.NodeOutput(next_pipeline, context_positive, ui=ui.PreviewImage(preview_image))
+        return (next_pipeline, context_positive,)
 
-# ====================== PipelineDetailerAdvancedNode ======================
 class PipelineDetailerAdvancedNode:
     """
     高级 Detailer 节点（支持 Crop + Resize + Recover）
@@ -623,6 +1122,9 @@ class PipelineDetailerAdvancedNode:
         return {
             "required": {
                 "pipeline": ("PIPELINE_DATA",),
+                "bypass": ("BOOLEAN", {"default": False}),
+                "need_reference_latent": ("BOOLEAN", {"default": False}),
+                "context_regex": ("STRING", {"default": ".+"}),
                 # Sampling 参数
                 "add_noise": (["enable", "disable"], {"default": "enable"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
@@ -631,157 +1133,396 @@ class PipelineDetailerAdvancedNode:
                 "return_with_leftover_noise": (["disable", "enable"], {"default": "disable"}),
 
                 # Detailer 参数
-                "detector_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "detector_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "detector_prompt": ("STRING", {"default": "", "multiline": False}),
                 "detector_dilation": ("INT", {"default": 4}),
                 "detector_crop_factor": ("FLOAT", {"default": 1.5}),
                 "detector_drop_size": ("INT", {"default": 0}),
                 "detector_grow": ("INT", {"default": 32}),
                 "detector_blur": ("INT", {"default": 32}),
-
+               
                 # Crop & Resize 参数
-                "pixels": ("INT", {"default": 1024*1024}),
+                "pixels": ("INT", {"default": 1024*1024, "min": 1, "max": 1024*1024*1024}),
+                "align": ("INT", {"default": 8, "min": 1, "max": 1024*1024*1024}),
                 "crop_reserve": ("INT", {"default": 32}),
 
                 # Recover 参数
                 "recover_method": (["bounds_only", "mask_blend", "mask_only"], {"default": "mask_blend"}),
+                "inpaint_mode": ("BOOLEAN", {"default": False}),
+                "foreach_mask": ("BOOLEAN", {"default": False}),
+                "tagger_mask": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "detector": ("*",),        # 通配符
-                "mask": ("MASK",),         # 可选外部 mask（优先级更高）
-                # LoRA & Prompt
-                "loras": ("STRING", {"forceInput": True, "multiline": False}),
-                "positive": ("STRING", {"forceInput": True, "multiline": False}),
-                "negative": ("STRING", {"forceInput": True, "multiline": False}),
+                "tagger": ("*",),         # 通配符
+                "image": ("IMAGE",),      
+                "mask": ("MASK",),        
             }
         }
 
-    RETURN_TYPES = ("PIPELINE_DATA", "MASK", "IMAGE", "MASK",)
-    RETURN_NAMES = ("pipeline", "detailer_mask", "draw_image", "draw_mask",)
+    RETURN_TYPES = ("PIPELINE_DATA", "IMAGE", "MASK", "STRING",)
+    RETURN_NAMES = ("pipeline", "image", "mask", "generated_prompt",)
     FUNCTION = "detailer"
     CATEGORY = "sampling/custom"
+    
+    OUTPUT_IS_LIST = (False, True, True, True,)
+    INPUT_IS_LIST = True
 
-    def detailer(self, pipeline: PipelineData,
+    def detailer(self, pipeline, bypass, need_reference_latent, context_regex,
                  add_noise, seed, start_step_rate, end_step_rate, return_with_leftover_noise,
                  detector_threshold, detector_prompt,
                  detector_dilation, detector_crop_factor, detector_drop_size, detector_grow, detector_blur,
-                 pixels, crop_reserve,
-                 recover_method,
-                 detector=None, mask=None, loras=None, positive=None, negative=None):
+                 pixels, align, crop_reserve,
+                 recover_method, inpaint_mode, foreach_mask, tagger_mask,
+                 detector=None, tagger=None, image=None, mask=None):
+        
+        # ==================== 统一处理 INPUT_IS_LIST ====================
+        pipeline = pipeline[0]
+        bypass = bypass[0]
+        context_regex = context_regex[0]
+        add_noise = add_noise[0]
+        seed = seed[0]
+        start_step_rate = start_step_rate[0]
+        end_step_rate = end_step_rate[0]
+        return_with_leftover_noise = return_with_leftover_noise[0]
+        
+        detector_threshold = detector_threshold[0]
+        detector_prompt = detector_prompt[0]
+        detector_dilation = detector_dilation[0]
+        detector_crop_factor = detector_crop_factor[0]
+        detector_drop_size = detector_drop_size[0]
+        detector_grow = detector_grow[0]
+        detector_blur = detector_blur[0]
+        
+        pixels = pixels[0]
+        align = align[0]
+        crop_reserve = crop_reserve[0]
+        recover_method = recover_method[0]
+        inpaint_mode = inpaint_mode[0]
+        foreach_mask = foreach_mask[0]
+        tagger_mask = tagger_mask[0]    
+        
+        detector = None if detector is None else detector[0]
+        tagger = None if tagger is None else tagger[0]
+
+        # ==================== Bypass 与早期返回 ====================
+        if bypass:
+            return (pipeline, None, None, "")
 
         if end_step_rate <= 0 or end_step_rate < start_step_rate:
-            return (pipeline, None, None, None,)
+            return (pipeline, None, None, "")
 
-        config = pipeline.copy()
+        # ==================== 复制 pipeline 并进行检查 ====================
+        next_pipeline = pipeline.copy()   # 必须先复制
 
-        if config.cache is None:
+        if next_pipeline.cache is None:
             raise ValueError("PipelineData 中 cache 为空")
-        if config.model is None:
+        if next_pipeline.model is None:
             raise ValueError("PipelineData 中 model 为空，无法 Detailer")
 
-        original_image = config.get_image()          # (B, H, W, C) tensor
+        # ==================== 公共项 ====================
+        
+        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
 
-        detailer_mask = None
+        # ==================== 准备原始图像和 mask ====================
+        if image is not None:
+            original_images = image if isinstance(image, list) else [image]
+        else:
+            original_images = [next_pipeline.get_image()] if hasattr(next_pipeline, 'get_image') else []
+
+        image_size = len(original_images)
+        
+        detailer_mask_start = []
+        detailer_mask_count = []
 
         if mask is not None:
-            detailer_mask = mask
-            print("使用外部输入的 mask 进行 Detailer")
+            if foreach_mask:
+                detailer_masks = []
+                index = 0
+                for img in original_images:
+                    detailer_masks.extend(mask)
+                    count = len(mask)
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(count)
+                    index += count     
+            else:  
+                if len(mask) != len(original_images):
+                    raise ValueError("mask 数量必须与 image 数量相同")
+                detailer_masks = mask
+                for index in range(image_size):
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(1)
         elif detector is not None:
-            detailer_mask = detect_mask(
-                detector=detector,
-                image=original_image,
-                threshold=detector_threshold,
-                dilation=detector_dilation,
-                crop_factor=detector_crop_factor,
-                drop_size=detector_drop_size,
-                prompt=detector_prompt
-            )
-            if detailer_mask is None:
-                return (pipeline, None, None, None,)
+            detailer_masks = []
+            index = 0
+            
+            for img in original_images:
+                mask_list = detect_mask(
+                    detector=detector,
+                    image=img,
+                    threshold=detector_threshold,
+                    dilation=detector_dilation,
+                    crop_factor=detector_crop_factor,
+                    drop_size=detector_drop_size,
+                    prompt=detector_prompt
+                )
+                if foreach_mask:
+                    if mask_list is None:
+                        detailer_mask_start.append(index)
+                        detailer_mask_count.append(0)
+                    else:
+                        detailer_masks.extend(mask_list)
+                        count = len(mask_list)
+                        detailer_mask_start.append(index)
+                        detailer_mask_count.append(count)
+                        index += count
+                else:
+                    if mask_list is None:
+                        detailer_mask_start.append(index)
+                        detailer_mask_count.append(0)
+                    else:
+                        detailer_masks.append(combine_masks(mask_list))
+                        count = 1
+                        detailer_mask_start.append(index)
+                        detailer_mask_count.append(count)
+                        index += count
         else:
             raise ValueError("detector 或 mask 必须提供")
 
-        detailer_mask = expand_mask(detailer_mask, grow=detector_grow, blur=detector_blur)
-        
-        if loras is None:
-            loras = config.loras
-        if positive is None:
-            positive = config.positive
-        if negative is None:
-            negative = config.negative
-        
-        lora_list = [line.strip() for line in loras.split("\n") if line.strip()]
-        
-        model_to_use, clip_to_use = config.cache.get_model_clip(
-            model=config.model,
-            clip=config.clip,
-            loras=lora_list
-        )
+        mask_size = len(detailer_masks)
 
-        positive_condition = config.get_conditioning(clip=clip_to_use, prompt=positive)
-        negative_condition = config.get_conditioning(clip=clip_to_use, prompt=negative)
+        # 扩展 mask
+        for mask_index in range(mask_size):
+            detailer_masks[mask_index] = expand_mask(detailer_masks[mask_index], grow=detector_grow, blur=detector_blur)
         
-        cropped_image, cropped_mask, crop_info = crop_mask(
-            image=original_image,
-            mask=detailer_mask,
-            reserve=crop_reserve
-        )
-
-        resized_image, resized_mask, resize_info = limit_pixels(
-            image=cropped_image,
-            pixels=pixels,
-            mask=cropped_mask
-        )
+        # ==================== Crop ====================
+        cropped_images = []
+        cropped_masks = []
+        crop_infos = []
+        processing_mapping = []
         
-        tmp_latent = VAEEncode().encode(
-            vae=config.vae, 
-            pixels=resized_image
-        )[0]
-
-        sampler_name = config.sampler_name or "euler"
-        scheduler = config.scheduler or "normal"
-        steps = config.steps or 20
-        cfg = config.cfg or 8.0
+        for image_index in range(image_size):
+            mask_start = detailer_mask_start[image_index]
+            mask_count = detailer_mask_count[image_index]
+            for mask_index in range(mask_start, mask_start + mask_count):
+                cropped_image, cropped_mask, crop_info = crop_mask(
+                    image=original_images[image_index],
+                    mask=detailer_masks[mask_index],
+                    reserve=crop_reserve
+                )
+                processing_mapping.append(image_index)
+                cropped_images.append(cropped_image)
+                cropped_masks.append(cropped_mask)
+                crop_infos.append(crop_info)
+                
+        processing_size = len(cropped_images)
+        # ==================== Resize + Encode + Conditioning ====================
+        resized_images = []
+        resized_masks = []
+        resize_infos = []
+        tmp_latents = []
+        
+        # ==================== Sampling 参数 ====================
+        sampler_name = next_pipeline.sampler_name or "euler"
+        scheduler = next_pipeline.scheduler or "normal"
+        steps = next_pipeline.steps or 20
+        cfg = next_pipeline.cfg or 8.0
 
         start_at_step = int(start_step_rate * steps)
         end_at_step = int(end_step_rate * steps)
-
-        tmp_latent = KSamplerAdvanced().sample(
-            model=model_to_use,
-            add_noise=add_noise,
-            noise_seed=seed,
-            steps=steps,
-            cfg=cfg,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            positive=positive_condition,
-            negative=negative_condition,
-            latent_image=tmp_latent,
-            start_at_step=start_at_step,
-            end_at_step=end_at_step,
-            return_with_leftover_noise=return_with_leftover_noise
-        )[0]
         
-        detailed_image = VAEDecode().decode(vae=config.vae, samples=tmp_latent)[0]
+        for processing_index in range(processing_size):
+            resized_image, resized_mask, resize_info = limit_pixels(
+                image=cropped_images[processing_index],
+                pixels=pixels,
+                mask=cropped_masks[processing_index],
+                align=align,
+            )
+            
+            resized_images.append(resized_image)
+            resized_masks.append(resized_mask)
+            resize_infos.append(resize_info)
+            
+            # 提前编码 latent，避免在 conditioning 计算时 tmp_latent 未定义
+            if inpaint_mode:
+                 _, tmp_latent = set_inpaint_mask(
+                    resized_image=resized_images[processing_index],
+                    resized_mask=resized_masks[processing_index],
+                    vae=next_pipeline.vae,
+                    grow_mask_by=0
+                )
+            else:
+                tmp_latent = VAEEncode().encode(
+                    vae=next_pipeline.vae, 
+                    pixels=resized_images[processing_index]
+                )[0]
+            tmp_latents.append(tmp_latent)
+    
+    
+        tagger_positives = []
+        # ==================== KSamplerAdvanced ====================
+        for processing_index in range(processing_size):    
+            # Tagger
+            if tagger is not None:
+                if tagger_mask:
+                    tagger_image = draw_mask_on_image(resized_images[processing_index], invert_mask(resized_masks[processing_index]), (255, 255, 255, 255))
+                else:
+                    tagger_image = resized_images[processing_index]
+                tagger_positive = get_tag(tagger, tagger_image)
+                if next_pipeline.config.get("print_tag") is True:
+                    print(f"[TAG]: {tagger_positive}")
+            else:
+                tagger_image = resized_images[processing_index]
+                tagger_positive = ''
+            tagger_positives.append(tagger_positive)
+            
+            # 使用局部 prompt，避免累加
+            current_positive = context_positive + (',' + tagger_positive if tagger_positive else '')
+            current_negative = context_negative
+            current_loras = context_loras.copy()
+            
+            #spatial_rate = crop_infos[processing_index].get("spatial_rate", 1.0)
+            
+            tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, tagger_image)
+            if tmp_positive is not None:
+                current_positive += ',' + tmp_positive
+            if tmp_negative is not None:
+                current_negative += ',' + tmp_negative
+            if tmp_loras is not None:
+                current_loras.extend(tmp_loras)
+            
+            model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+                model=next_pipeline.model,
+                clip=next_pipeline.clip,
+                loras=current_loras
+            )
+            
+            tmp_latent = tmp_latents[processing_index]
+            
+            positive_condition = next_pipeline.get_conditioning(
+                mode="positive",
+                clip=clip_to_use, 
+                vae=next_pipeline.vae,
+                prompt=current_positive, 
+                reference_latent=tmp_latent if need_reference_latent else None,
+                reference_image=resized_images[processing_index],
+                reference=next_pipeline.reference
+            )
+            
+            negative_condition = next_pipeline.get_conditioning(
+                mode="negative",
+                clip=clip_to_use, 
+                vae=next_pipeline.vae,
+                prompt=current_negative, 
+                reference_latent=tmp_latent if need_reference_latent else None,
+                reference_image=resized_images[processing_index],
+                reference=next_pipeline.reference
+            )
+            
+            tmp_latents[processing_index] = KSamplerAdvanced().sample(
+                model=model_to_use,
+                add_noise=add_noise,
+                noise_seed=seed,
+                steps=steps,
+                cfg=cfg,
+                sampler_name=sampler_name,
+                scheduler=scheduler,
+                positive=positive_condition,
+                negative=negative_condition,
+                latent_image=tmp_latent,
+                start_at_step=start_at_step,
+                end_at_step=end_at_step,
+                return_with_leftover_noise=return_with_leftover_noise
+            )[0]
+        
+        # ==================== Decode ====================
+        detailed_images = []
+        for processing_index in range(processing_size):
+            detailed_images.append(
+                VAEDecode().decode(vae=next_pipeline.vae, samples=tmp_latents[processing_index])[0]
+            )
 
-        recovered_image, recovered_mask = recover_size(
-            image=detailed_image,
-            resize_info=resize_info,
-            mask=resized_mask
-        )
+        # ==================== Recover Size ====================
+        recovered_images = []
+        recovered_masks = []
+        for processing_index in range(processing_size):
+            recovered_image, recovered_mask = recover_size(
+                image=detailed_images[processing_index],
+                resize_info=resize_infos[processing_index],
+                mask=resized_masks[processing_index]
+            )
+            recovered_images.append(recovered_image)
+            recovered_masks.append(recovered_mask)
 
-        final_image, final_mask = recover_crop(
-            background=original_image,
-            image=recovered_image,
-            crop_info=crop_info,
-            recover_method=recover_method,
-            mask=recovered_mask
-        )
+        # ==================== Recover Crop ====================
+        final_images = []
+        final_masks = []
+        
+        for image_index in range(image_size):
+            if detailer_mask_count[image_index] == 0:
+                final_images.append(original_images[image_index])
+                final_masks.append(None)
+            elif detailer_mask_count[image_index] == 1:
+                final_images.append(None)
+                final_masks.append(None)
+            else:
+                final_images.append(original_images[image_index].clone())
+                final_masks.append(create_empty_mask(original_images[image_index]))
+        
+        for processing_index in range(processing_size):
+            image_index = processing_mapping[processing_index]
+            if detailer_mask_count[image_index] == 0:
+                raise ValueError("image_index 为 %d 的图像没有 mask" % image_index)
+            elif detailer_mask_count[image_index] == 1:
+                final_images[image_index], final_masks[image_index] = recover_crop(
+                    background=original_images[image_index],
+                    image=recovered_images[processing_index],
+                    crop_info=crop_infos[processing_index],
+                    recover_method=recover_method,
+                    mask=recovered_masks[processing_index]
+                )
+            else:
+                tmp_image, tmp_mask = recover_crop(
+                    background=final_images[image_index],
+                    image=recovered_images[processing_index],
+                    crop_info=crop_infos[processing_index],
+                    recover_method=recover_method,
+                    mask=recovered_masks[processing_index]
+                )
+                final_images[image_index] = tmp_image
+                final_masks[image_index] = combine_masks([final_masks[image_index], tmp_mask])
 
-        config.image = final_image
-        config.latent = None
+        # ==================== 更新 pipeline 并返回 ====================
+        next_pipeline.image = final_images[0]
+        next_pipeline.latent = None
 
-        return (config, final_mask, resized_image, resized_mask)
+        del cropped_images, cropped_masks, crop_infos
+        del resized_images, resized_masks, resize_infos
+        del tmp_latents
+        del detailed_images, recovered_images, recovered_masks
+
+        gc.collect()
+        mm.soft_empty_cache()
+
+        has_preview = False
+        if next_pipeline.config.get("preview_image") is True:
+            preview_image = final_images[0]
+            has_preview = True
+        if next_pipeline.config.get("preview_mask") is True:
+            preview_mask = draw_mask(final_masks[0])
+            has_preview = True
+        
+        if has_preview:
+            if preview_image is not None and preview_mask is not None:
+                final_preview_image = batch_images(preview_image, preview_mask)
+            elif preview_image is not None:
+                final_preview_image = preview_image
+            elif preview_mask is not None:
+                final_preview_image = preview_mask
+            return io.NodeOutput(next_pipeline, final_images, final_masks, tagger_positives, ui=ui.PreviewImage(final_preview_image))
+        
+        
+        return (next_pipeline, final_images, final_masks, tagger_positives)
 
 
 # ====================== SamplerDecodeNode ======================
@@ -800,8 +1541,8 @@ class PipelineDecodeNode:
     CATEGORY = "sampling/custom"
 
     def decode(self, pipeline: PipelineData):
-        config = pipeline.copy()
-        return (config, config.get_image())
+        next_pipeline = pipeline.copy()
+        return (next_pipeline, next_pipeline.get_image())
     
 
 # ====================== PipelineLimitPixelNode ======================
@@ -815,7 +1556,15 @@ class PipelineLimitPixelNode:
                 "pipeline": ("PIPELINE_DATA",),
                 "pixels": ("INT", {
                     "default": 1024 * 1024,  # 1MP
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
                     "tooltip": "Maximum allowed pixel count"
+                }),
+                "align": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Align the resized image to the nearest pixel grid"
                 }),
             },
         }
@@ -825,24 +1574,24 @@ class PipelineLimitPixelNode:
     FUNCTION = "limit_pixels"
     CATEGORY = "sampling/custom"
 
-    def limit_pixels(self, pipeline, pixels):
+    def limit_pixels(self, pipeline, pixels, align):
         """Limit image pixel count in pipeline by resizing if needed."""
         try:
-            config = pipeline.copy()
+            next_pipeline = pipeline.copy()
             
             # 获取 image（如果不存在则从 latent 解码）
-            config.get_image()
+            next_pipeline.get_image()
 
             # 调用 image_utils 中的 limit_pixels 函数
-            resized_image, resized_mask, resize_info = limit_pixels(config.image, pixels, config.mask)
+            resized_image, resized_mask, resize_info = limit_pixels(next_pipeline.image, pixels, next_pipeline.mask, align)
 
             # 更新 pipeline 中的图像和掩码
-            config.image = resized_image
-            config.mask = resized_mask
+            next_pipeline.image = resized_image
+            next_pipeline.mask = resized_mask
             # 将 resize_info 推入栈中
-            config.resize_info_stack.append(resize_info)
+            next_pipeline.resize_info_stack.append(resize_info)
 
-            return (config,)
+            return (next_pipeline,)
 
         except Exception as e:
             raise Exception(f"Failed to limit pixels: {e}")
@@ -868,24 +1617,24 @@ class PipelineRecoverResizeNode:
     def recover_size(self, pipeline):
         """Recover image to original size in pipeline using resize info."""
         try:
-            config = pipeline.copy()
+            next_pipeline = pipeline.copy()
             
             # 获取 image（如果不存在则从 latent 解码）
-            config.get_image()
+            next_pipeline.get_image()
 
             # 从栈中弹出 resize_info
-            if not config.resize_info_stack:
+            if not next_pipeline.resize_info_stack:
                 raise ValueError("No resize info in stack")
-            resize_info = config.resize_info_stack.pop()
+            resize_info = next_pipeline.resize_info_stack.pop()
 
             # 调用 image_utils 中的 recover_size 函数
-            recovered_image, recovered_mask = recover_size(config.image, resize_info, config.mask)
+            recovered_image, recovered_mask = recover_size(next_pipeline.image, resize_info, next_pipeline.mask)
 
             # 更新 pipeline 中的图像和掩码
-            config.image = recovered_image
-            config.mask = recovered_mask
+            next_pipeline.image = recovered_image
+            next_pipeline.mask = recovered_mask
 
-            return (config,)
+            return (next_pipeline,)
 
         except Exception as e:
             raise Exception(f"Failed to recover image size: {e}")
@@ -913,8 +1662,8 @@ class PipelineAddNoiseNode:
             # 不加噪声（返回原始 latent）
             return (pipeline,)
         
-        config = pipeline.copy()
-        latent = config.get_latent()
+        next_pipeline = pipeline.copy()
+        latent = next_pipeline.get_latent()
         samples = latent["samples"].clone()  # 避免修改原 tensor
 
         # 生成噪声并添加
@@ -927,9 +1676,9 @@ class PipelineAddNoiseNode:
         samples = samples + noise
 
         # 更新 pipeline 中的 latent
-        config.latent = {"samples": samples, **{k: v for k, v in latent.items() if k != "samples"}}
+        next_pipeline.latent = {"samples": samples, **{k: v for k, v in latent.items() if k != "samples"}}
 
-        return (config,)
+        return (next_pipeline,)
     
 class PipelineToggleMaskInpaintNode:
     @classmethod
@@ -951,23 +1700,23 @@ class PipelineToggleMaskInpaintNode:
     CATEGORY = "sampling/custom"
     
     def toggle_mask_inpaint(self, pipeline, grow_mask_by, enable, mask=None):
-        config = pipeline.copy()
-        latent = config.get_latent()
+        next_pipeline = pipeline.copy()
+        latent = next_pipeline.get_latent()
         
         if "noise_mask" in latent:
             del latent["noise_mask"] 
         
         if not enable:
-            return (config,)
+            return (next_pipeline,)
         
-        inpaint_mask = mask if mask is not None else config.mask
+        inpaint_mask = mask if mask is not None else next_pipeline.mask
         latent = SetLatentNoiseMask().set_mask(
             samples=latent,
             mask=inpaint_mask,
             grow_mask_by=grow_mask_by
         )[0]
             
-        return (config,)
+        return (next_pipeline,)
     
     
 # ====================== PipelineDetectNode ======================
@@ -985,11 +1734,14 @@ class PipelineDetectNode:
                 "detector": ("*",),                    # 改为 required
 
                 # Detector 参数
-                "detector_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "detector_prompt": ("STRING", {"default": "face, person", "multiline": False}),
+                "detector_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "detector_prompt": ("STRING", {"default": "", "multiline": False}),
                 "detector_dilation": ("INT", {"default": 4, "min": 0, "max": 64}),
                 "detector_crop_factor": ("FLOAT", {"default": 1.5, "min": 1.0, "max": 4.0, "step": 0.1}),
                 "detector_drop_size": ("INT", {"default": 0, "min": 0, "max": 512}),
+                
+                "detector_grow": ("INT", {"default": 0, "min": 0, "max": 1024 * 1024 * 1024}),
+                "detector_blur": ("INT", {"default": 0, "min": 0, "max": 1024 * 1024 * 1024}),
             }
         }
 
@@ -1000,16 +1752,17 @@ class PipelineDetectNode:
 
     def detect(self, pipeline: PipelineData,
                detector,
-               detector_threshold=0.5, detector_prompt="face, person",
-               detector_dilation=4, detector_crop_factor=1.5, detector_drop_size=0):
+               detector_threshold, detector_prompt,
+               detector_dilation=4, detector_crop_factor=1.5, detector_drop_size=0,
+               detector_grow=0, detector_blur=0):
 
         if detector is None:
             raise ValueError("必须传入 detector 对象（detector 为必填输入）")
 
-        config = pipeline.copy()
+        next_pipeline = pipeline.copy()
 
         # ====================== 1. 获取原始图像 ======================
-        original_image = config.get_image()          # (B, H, W, C) tensor
+        original_image = next_pipeline.get_image()          # (B, H, W, C) tensor
 
         # ====================== 2. 生成 Detection Mask ======================
         detailer_mask = detect_mask(
@@ -1021,6 +1774,546 @@ class PipelineDetectNode:
             drop_size=detector_drop_size,
             prompt=detector_prompt
         )
+        
+        detailer_mask = expand_mask(detailer_mask, grow=detector_grow, blur=detector_blur)
 
         # 原样返回 pipeline（不做任何修改）
-        return (config, detailer_mask,)
+        return (next_pipeline, detailer_mask,)
+
+class PipelineTagNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "tagger": ("*",),                    # 改为 required
+            }
+        }
+        
+    RETURN_TYPES = ("PIPELINE_DATA", "STRING")
+    RETURN_NAMES = ("pipeline", "tag")
+    FUNCTION = "tag"
+    CATEGORY = "sampling/custom"
+    
+    def tag(self, pipeline: PipelineData, tagger):
+        if tagger is None:
+            raise ValueError("必须传入 tagger 对象（tagger 为必填输入）")
+        
+        next_pipeline = pipeline.copy()
+        image = next_pipeline.get_image()
+        tag = get_tag(tagger, image)
+        if next_pipeline.config.get("print_tag") is True:
+            print(f"[TAG]: {tag}")
+        return (next_pipeline, tag,)
+    
+class PipelineVideoSamplerAdvancedNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "video": ("VIDEO",),
+                "sampler_fps": ("FLOAT", {"default": 0, "min": 0, "max": 999999}),
+                "folder_name": ("STRING", {"default": "video_detailer_frames"}),
+
+                "images_per_run": ("INT", {"default": 4, "min": 1, "max": 16, "step": 1}),
+
+                "bypass": ("BOOLEAN", {"default": False}),
+                "need_reference_latent": ("BOOLEAN", {"default": False}),
+                "context_regex": ("STRING", {"default": ".+"}),
+                # Sampling 参数
+                "add_noise": (["enable", "disable"], {"default": "enable"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "start_step_rate": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0}),
+                "end_step_rate": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                "return_with_leftover_noise": (["disable", "enable"], {"default": "disable"}),
+
+                # Detailer 参数
+                "detector_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "detector_prompt": ("STRING", {"default": "", "multiline": False}),
+                "detector_dilation": ("INT", {"default": 4}),
+                "detector_crop_factor": ("FLOAT", {"default": 1.5}),
+                "detector_drop_size": ("INT", {"default": 0}),
+                "detector_grow": ("INT", {"default": 32}),
+                "detector_blur": ("INT", {"default": 32}),
+
+                # Crop & Resize 参数
+                "pixels": ("INT", {"default": 1024*1024, "min": 1, "max": 1024*1024*1024}),
+                "align": ("INT", {"default": 8, "min": 1, "max": 1024*1024*1024}),
+                "crop_reserve": ("INT", {"default": 32}),
+
+                # Recover 参数
+                "recover_method": (["bounds_only", "mask_blend", "mask_only"], {"default": "mask_blend"}),
+                # 【新增】与 DetailerAdvanced 保持一致的参数
+                "inpaint_mode": ("BOOLEAN", {"default": False}),
+                "foreach_mask": ("BOOLEAN", {"default": False}),
+                "tagger_mask": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "detector": ("*",),
+                "tagger": ("*",),
+            }
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA", "FLOAT", "INT")
+    RETURN_NAMES = ("pipeline", "video_fps", "processed_frames")
+    FUNCTION = "sample_advanced_video"
+    CATEGORY = "sampling/custom"
+
+    def sample_advanced_video(self, pipeline, video, sampler_fps, folder_name, images_per_run,
+                              bypass, need_reference_latent, context_regex,
+                              add_noise, seed, start_step_rate, end_step_rate, return_with_leftover_noise,
+                              detector_threshold, detector_prompt, detector_dilation,
+                              detector_crop_factor, detector_drop_size, detector_grow, detector_blur,
+                              pixels, align, crop_reserve, recover_method,
+                              # 【新增】新参数接收
+                              inpaint_mode=False, foreach_mask=False, tagger_mask=False,
+                              detector=None, tagger=None):
+
+        # 【修改】统一处理列表输入（与 DetailerAdvanced 一致）
+        if isinstance(bypass, (list, tuple)) and len(bypass) > 0:
+            bypass = bypass[0]
+        if bypass:
+            return (pipeline, 0.0, 0)
+
+        # ====================== 导入 ======================
+        import decord
+        from decord import VideoReader, cpu
+        import gc
+        import torch
+        import os
+        import json
+        import time
+        from PIL import Image
+
+        decord.bridge.set_bridge('torch')
+
+        next_pipeline = pipeline.copy()
+        if getattr(next_pipeline, 'cache', None) is None or getattr(next_pipeline, 'model', None) is None:
+            raise ValueError("PipelineData 中 cache 或 model 为空")
+
+        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
+
+        # ====================== 视频读取 ======================
+        video_path = video.get_stream_source() if hasattr(video, 'get_stream_source') else str(video)
+        
+        vr = VideoReader(video_path, ctx=cpu(0))
+        video_frame_count = len(vr)
+        original_fps = float(vr.get_avg_fps())
+        del vr
+
+        if sampler_fps <= 0 or abs(sampler_fps - original_fps) < 0.001:
+            sampler_fps = original_fps
+            step = 1.0
+            print(f"[PipelineVideoSampler] Using original FPS: {original_fps:.2f}")
+        else:
+            step = original_fps / sampler_fps
+            print(f"[PipelineVideoSampler] Sampling at {sampler_fps:.2f} FPS (step ≈ {step:.3f})")
+
+        frame_indices = []
+        i = 0.0
+        while i < video_frame_count:
+            idx = int(round(i))
+            if idx < video_frame_count:
+                frame_indices.append(idx)
+            i += step
+
+        print(f"[PipelineVideoSampler] Total frames to process: {len(frame_indices)}")
+
+        # ====================== 输出目录 & Progress JSON ======================
+        output_dir = os.path.join(folder_paths.output_directory, "Images", folder_name)
+        os.makedirs(output_dir, exist_ok=True)
+        progress_path = os.path.join(output_dir, "progress.json")
+
+        start_from_index = 0
+        last_processed_frame = -1
+
+        if os.path.exists(progress_path):
+            try:
+                with open(progress_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                last_processed_frame = data.get("last_processed_frame", -1)
+                
+                if last_processed_frame >= 0:
+                    for idx_pos, frame_idx in enumerate(frame_indices):
+                        if frame_idx > last_processed_frame:
+                            start_from_index = idx_pos
+                            break
+                    else:
+                        start_from_index = len(frame_indices)
+            except Exception as e:
+                print(f"[PipelineVideoSampler] Failed to read progress.json: {e}")
+
+        if start_from_index >= len(frame_indices):
+            print("[PipelineVideoSampler] Nothing to process. All frames completed.")
+            return (next_pipeline, float(sampler_fps), len(frame_indices))
+
+        processed_count = start_from_index
+        current_index = start_from_index + 1
+
+        steps = getattr(next_pipeline, 'steps', 20)
+        actual_start_step = int(steps * float(start_step_rate))
+        actual_end_step = int(steps * float(end_step_rate))
+
+        # ====================== 分批处理 ======================
+        total_to_process = len(frame_indices)
+        i = start_from_index
+
+        while i < total_to_process:
+            batch_indices = frame_indices[i : i + images_per_run]
+            if not batch_indices:
+                break
+
+            print(f"[PipelineVideoSampler] Processing batch frames {batch_indices[0]} ~ {batch_indices[-1]}")
+
+            vr = VideoReader(video_path, ctx=cpu(0))
+            frames_tensor = vr.get_batch(batch_indices).float() / 255.0
+            del vr
+
+            images = [frames_tensor[j:j+1] for j in range(frames_tensor.shape[0])]
+
+            # 【修改】调用时传入新增参数
+            restored_list = self.run_detailer_on_frame(
+                images=images,
+                detector=detector,
+                detector_threshold=detector_threshold,
+                detector_prompt=detector_prompt,
+                detector_dilation=detector_dilation,
+                detector_crop_factor=detector_crop_factor,
+                detector_drop_size=detector_drop_size,
+                detector_grow=detector_grow,
+                detector_blur=detector_blur,
+                pixels=pixels,
+                align=align,
+                crop_reserve=crop_reserve,
+                recover_method=recover_method,
+                inpaint_mode=inpaint_mode,        # 【新增】
+                foreach_mask=foreach_mask,        # 【新增】
+                tagger_mask=tagger_mask,          # 【新增】
+                next_pipeline=next_pipeline,
+                context_positive=context_positive,
+                context_negative=context_negative,
+                context_loras=context_loras,
+                need_reference_latent=need_reference_latent,
+                actual_start_step=actual_start_step,
+                actual_end_step=actual_end_step,
+                return_with_leftover_noise=return_with_leftover_noise,
+                add_noise=add_noise,
+                seed=seed,
+                sampler_name=getattr(next_pipeline, 'sampler_name', "euler"),
+                scheduler=getattr(next_pipeline, 'scheduler', "normal"),
+                steps=steps,
+                cfg=getattr(next_pipeline, 'cfg', 8.0),
+                reference=next_pipeline.reference,
+                tagger=tagger
+            )
+
+            if isinstance(restored_list, list) and restored_list:
+                final_batch = torch.cat(restored_list, dim=0)
+            elif isinstance(restored_list, torch.Tensor):
+                final_batch = restored_list
+            else:
+                final_batch = torch.zeros((0, 3, 8, 8), device="cpu")
+
+            self._save_batch_images(final_batch, output_dir, current_index)
+
+            batch_size = len(restored_list) if isinstance(restored_list, list) else 1
+            current_index += batch_size
+            processed_count += batch_size
+            i += batch_size
+
+            del frames_tensor, images, restored_list, final_batch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+            # 更新进度
+            try:
+                progress_data = {
+                    "current_index": current_index,
+                    "last_processed_frame": batch_indices[-1],
+                    "processed_count": processed_count,
+                    "total_to_process": total_to_process,
+                    "sampler_fps": sampler_fps,
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                with open(progress_path, "w", encoding="utf-8") as f:
+                    json.dump(progress_data, f, indent=4, ensure_ascii=False)
+            except Exception as e:
+                print(f"[PipelineVideoSampler] Failed to write progress.json: {e}")
+
+        print(f"[PipelineVideoSampler] Finished. Saved {processed_count} frames at {sampler_fps} FPS.")
+        return (next_pipeline, float(sampler_fps), processed_count)
+
+
+    # ====================== 核心 Detailer 处理函数（已大幅对齐 DetailerAdvanced） ======================
+    def run_detailer_on_frame(self, images, detector, detector_threshold, detector_prompt,
+                              detector_dilation, detector_crop_factor, detector_drop_size,
+                              detector_grow, detector_blur, pixels, align, crop_reserve,
+                              recover_method, inpaint_mode, foreach_mask, tagger_mask,   # 【新增】两个参数
+                              next_pipeline, context_positive,
+                              context_negative, context_loras, need_reference_latent, 
+                              actual_start_step, actual_end_step,
+                              return_with_leftover_noise, add_noise, seed, 
+                              sampler_name, scheduler, steps, cfg, reference, tagger=None):
+
+        import torch
+        import gc
+        from comfy.model_management import soft_empty_cache as mm_soft_empty_cache
+
+        size = len(images)
+
+        # ==================== 检测 mask（对齐 DetailerAdvanced 逻辑） ====================
+        detailer_masks = []
+        detailer_mask_start = []
+        detailer_mask_count = []
+        index = 0
+
+        for i in range(size):
+            if detector is None:
+                raise ValueError("detector must be provided for video detailer")
+
+            mask_list = detect_mask(
+                detector=detector,
+                image=images[i],
+                threshold=detector_threshold,
+                dilation=detector_dilation,
+                crop_factor=detector_crop_factor,
+                drop_size=detector_drop_size,
+                prompt=detector_prompt
+            )
+
+            if foreach_mask:
+                if mask_list is None or len(mask_list) == 0:
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(0)
+                else:
+                    detailer_masks.extend(mask_list)
+                    count = len(mask_list)
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(count)
+                    index += count
+            else:
+                if mask_list is None or len(mask_list) == 0:
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(0)
+                else:
+                    combined = combine_masks(mask_list) if len(mask_list) > 1 else mask_list[0]
+                    detailer_masks.append(combined)
+                    detailer_mask_start.append(index)
+                    detailer_mask_count.append(1)
+                    index += 1
+
+        # 扩展 mask
+        for m in range(len(detailer_masks)):
+            detailer_masks[m] = expand_mask(detailer_masks[m], grow=detector_grow, blur=detector_blur)
+
+        # ==================== Crop ====================
+        cropped_images = []
+        cropped_masks = []
+        crop_infos = []
+        processing_mapping = []
+
+        for image_index in range(size):
+            mask_start = detailer_mask_start[image_index]
+            mask_count = detailer_mask_count[image_index]
+            for mask_index in range(mask_start, mask_start + mask_count):
+                if mask_count == 0:
+                    cropped_images.append(None)
+                    cropped_masks.append(None)
+                    crop_infos.append(None)
+                    processing_mapping.append(image_index)
+                    continue
+                cropped_image, cropped_mask, crop_info = crop_mask(
+                    image=images[image_index],
+                    mask=detailer_masks[mask_index],
+                    reserve=crop_reserve
+                )
+                cropped_images.append(cropped_image)
+                cropped_masks.append(cropped_mask)
+                crop_infos.append(crop_info)
+                processing_mapping.append(image_index)
+
+        processing_size = len(cropped_images)
+
+        # ==================== Resize + Encode + Conditioning ====================
+        resized_images = []
+        resized_masks = []
+        resize_infos = []
+
+        for processing_index in range(processing_size):
+            if cropped_images[processing_index] is None:
+                resized_images.append(None)
+                resized_masks.append(None)
+                resize_infos.append(None)
+                continue
+
+            resized_image, resized_mask, resize_info = limit_pixels(
+                image=cropped_images[processing_index],
+                pixels=pixels,
+                mask=cropped_masks[processing_index],
+                align=align,
+            )
+            
+            resized_images.append(resized_image)
+            resized_masks.append(resized_mask)
+            resize_infos.append(resize_info)
+
+        tmp_latents = []
+        # ==================== KSamplerAdvanced ====================
+        for processing_index in range(processing_size):
+            if resized_images[processing_index] is None:
+                tmp_latents.append(None)
+                continue
+            if inpaint_mode:
+                _, tmp_latent = set_inpaint_mask(
+                    resized_image=resized_images[processing_index],
+                    resized_mask=resized_masks[processing_index],
+                    vae=next_pipeline.vae,
+                    grow_mask_by=0          # 可改为可配置参数
+                )
+            else:
+                tmp_latent = VAEEncode().encode(
+                    vae=next_pipeline.vae, 
+                    pixels=resized_images[processing_index]
+                )[0]
+
+            
+            if tagger is not None:
+                if tagger_mask:
+                    tagger_image = draw_mask_on_image(resized_images[processing_index], invert_mask(resized_masks[processing_index]), (255, 255, 255, 255))
+                else:
+                    tagger_image = resized_images[processing_index]
+                tagger_positive = get_tag(tagger, tagger_image)
+                if next_pipeline.config.get("print_tag") is True:
+                    print(f"[TAG]: {tagger_positive}")
+            else:
+                tagger_image = resized_images[processing_index]
+                tagger_positive = ''
+                
+            current_positive = context_positive + (',' + tagger_positive if tagger_positive else '')
+            current_negative = context_negative
+            current_loras = context_loras.copy()
+            
+            tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, tagger_image)
+            if tmp_positive is not None:
+                current_positive += (',' + tmp_positive)
+            if tmp_negative is not None:
+                current_negative += (',' + tmp_negative)
+            if tmp_loras is not None:
+                current_loras.extend(tmp_loras)
+                
+                
+            model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+                model=next_pipeline.model, clip=next_pipeline.clip, loras=current_loras
+            )
+            
+            positive_condition = next_pipeline.get_conditioning(
+                mode="positive", clip=clip_to_use, vae=next_pipeline.vae,
+                prompt=current_positive,
+                reference_latent=tmp_latent if need_reference_latent else None,
+                reference_image=resized_images[processing_index],
+                reference=reference
+            )
+            
+            negative_condition = next_pipeline.get_conditioning(
+                mode="negative", clip=clip_to_use, vae=next_pipeline.vae,
+                prompt=current_negative,
+                reference_latent=tmp_latent if need_reference_latent else None,
+                reference_image=resized_images[processing_index],
+                reference=reference
+            )
+            
+            sampled = KSamplerAdvanced().sample(
+                model=model_to_use,
+                add_noise=add_noise,
+                noise_seed=seed,
+                steps=steps,
+                cfg=cfg,
+                sampler_name=sampler_name,
+                scheduler=scheduler,
+                positive=positive_condition,
+                negative=negative_condition,
+                latent_image=tmp_latent,
+                start_at_step=actual_start_step,
+                end_at_step=actual_end_step,
+                return_with_leftover_noise=return_with_leftover_noise
+            )[0]
+            
+            tmp_latents.append(sampled.detach() if hasattr(sampled, 'detach') else sampled)
+
+        # ==================== Decode ====================
+        detailed_images = []
+        for processing_index in range(processing_size):
+            if tmp_latents[processing_index] is None:
+                detailed_images.append(None)
+                continue
+            detailed_images.append(
+                VAEDecode().decode(vae=next_pipeline.vae, samples=tmp_latents[processing_index])[0]
+            )
+
+        # ==================== Recover Size ====================
+        recovered_images = []
+        recovered_masks = []
+        for processing_index in range(processing_size):
+            if detailed_images[processing_index] is None:
+                recovered_images.append(None)
+                recovered_masks.append(None)
+                continue
+            recovered_image, recovered_mask = recover_size(
+                image=detailed_images[processing_index],
+                resize_info=resize_infos[processing_index],
+                mask=resized_masks[processing_index]
+            )
+            recovered_images.append(recovered_image)
+            recovered_masks.append(recovered_mask)
+
+        # ==================== Recover Crop ====================
+        final_images = [img.clone() if img is not None else None for img in images]
+
+        for processing_index in range(processing_size):
+            if cropped_images[processing_index] is None:
+                continue
+            image_index = processing_mapping[processing_index]
+            final_image, _ = recover_crop(
+                background=final_images[image_index],
+                image=recovered_images[processing_index],
+                crop_info=crop_infos[processing_index],
+                recover_method=recover_method,
+                mask=recovered_masks[processing_index]
+            )
+            final_images[image_index] = final_image
+
+        # 彻底清理
+        del (cropped_images, cropped_masks, crop_infos, resized_images, resized_masks,
+             resize_infos, tmp_latents,
+             detailed_images, recovered_images, recovered_masks, detailer_masks)
+
+        gc.collect()
+        mm_soft_empty_cache()
+
+        return final_images
+
+
+    # ====================== 保存函数（保持不变） ======================
+    def _save_batch_images(self, images, output_dir, start_index):
+        if not isinstance(images, torch.Tensor) or images.shape[0] == 0:
+            return
+
+        for idx in range(images.shape[0]):
+            current_num = start_index + idx
+            image_tensor = images[idx]
+
+            np_image = (image_tensor * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+            mode = "RGBA" if np_image.shape[-1] == 4 else "RGB"
+            if np_image.shape[-1] > 3:
+                np_image = np_image[..., :3]
+
+            pil_image = Image.fromarray(np_image, mode=mode)
+            save_path = os.path.join(output_dir, f"{current_num:06d}.png")
+
+            try:
+                pil_image.save(save_path, compress_level=4)
+            except Exception as e:
+                print(f"Error saving frame {save_path}: {e}")

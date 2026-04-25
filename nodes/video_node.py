@@ -22,6 +22,7 @@ from ..libs.video_utils import (
     download_hanime1, is_hanime1_url, download_video_with_ytdlp,
     remux_to_mp4, get_video_correct_ext, get_video_fps, extract_images_segment
 )
+from ..libs.folder_utils import scan_folder, get_video_list_from_input, get_video_dict_from_list, get_file_names_from_dict, get_file_names_list
 from typing import List, Optional
 import psutil
 from ..libs.audio_utils import extract_audio_from_video, extract_audio_segment
@@ -1224,3 +1225,80 @@ class VideoWallpaperEngineNode:
 
         except Exception as e:
             raise Exception(f"加载视频失败 '{video_title}': {e}")
+
+class VideoFolderLoaderNode:
+    """
+    遍历 input/videos 文件夹（支持软链接），生成 mp4 文件 combo，
+    输出完整视频路径（可直接接 VHS_LoadVideoPath）
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        video_list = get_video_list_from_input("videos")
+        video_list = get_file_names_list(video_list)
+        
+        default_video = video_list[0] if video_list else "No mp4 files found"
+        
+        return {
+            "required": {
+                "file_name": (video_list, {"default": default_video}),
+            }
+        }
+    
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    
+    FUNCTION = "load_video"
+    CATEGORY = "Kolid-Toolkit"
+    
+    def __init__(self):
+        # 推荐在这里缓存一次，避免每次执行都重新扫描
+        self.video_list = get_video_list_from_input("videos") or ["No mp4 files found"]
+        self.video_dict = get_video_dict_from_list(self.video_list)
+    
+    def load_video(self, file_name):
+        if file_name not in self.video_dict or file_name == "No mp4 files found":
+            raise FileNotFoundError(f"视频文件不存在: {file_name}")
+        
+        """返回完整路径（支持软链接）"""
+        video_path = self.video_dict[file_name]
+
+        video = InputImpl.VideoFromFile(video_path)
+
+        input_dir = folder_paths.get_input_directory()
+        video_dir = os.path.dirname(video_path)
+        subfolder = os.path.relpath(video_dir, input_dir) if video_dir.startswith(input_dir) else ""
+        
+        return io.NodeOutput(video, ui=ui.PreviewVideo([ui.SavedResult(file_name, subfolder, io.FolderType.input)]))
+
+
+class VideoGetFileInfoNode:
+    """Get video file info (name without extension and full path) from Video object."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO", {
+                    "tooltip": "Input video object",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("file_name", "path")
+    FUNCTION = "get_file_info"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def IS_CHANGED(s, video):
+        video_path = video.get_stream_source() if hasattr(video, 'get_stream_source') else str(video)
+        return video_path
+
+    def get_file_info(self, video):
+        """Get video file name without extension and full path."""
+        video_path = video.get_stream_source()
+        file_name = os.path.splitext(os.path.basename(video_path))[0]
+        print(f"[VideoGetFileInfo] File name: {file_name}, Path: {video_path}")
+        return (file_name, video_path)
+        

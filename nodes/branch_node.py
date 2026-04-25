@@ -72,3 +72,61 @@ class BranchOptionalRequiredNode:
 
     def execute(self, required = None):
         return (required,)
+    
+class BranchGroupNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "excute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def excute(self):  
+        return ()    
+
+class BranchSwitchNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "value": ("*", {"lazy" : True}),
+                "toggle": ("BOOLEAN", {"default": False})
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("*",)
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def check_lazy_status(self, value, toggle):
+        if toggle:
+            return ["value"]
+        return []
+
+    def execute(self, *args, **kwargs):
+        toggleValue = kwargs['toggle']
+        if toggleValue:
+            return (kwargs['value'],)
+        return (None,)
+    
+
+class BranchBooleanNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "toggle": ("BOOLEAN", {"default": False})
+            },
+        }
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("toggle",)
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def execute(self, toggle):
+        return (toggle,)

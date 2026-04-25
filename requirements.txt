@@ -9,3 +9,4 @@ seleniumbase
 psutil
 pywebview
 onnxruntime
+decord
