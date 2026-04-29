@@ -751,6 +751,29 @@
             opacity: 1;
             width: 14px;
         }
+
+        /* 临时模式提示条幅 */
+        .temporary-banner {
+            background: linear-gradient(135deg, #28a745, #20c997);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 15px;
+            font-weight: 500;
+            box-shadow: 0 4px 12px rgba(40, 167, 69, 0.3);
+        }
+        
+        .temporary-banner.hidden {
+            display: none !important;
+        }
+        
+        .temporary-banner span {
+            flex: 1;
+        }
     </style>
 </head>
 <body>
@@ -766,6 +789,14 @@
         <div class="selected-bar">
             <h3>Selected Prompts (<span id="selectedCount">0</span>)</h3>
             <div class="selected-tags" id="selectedTags"></div>
+        </div>
+
+        <!-- 新增：临时模式提示条幅 -->
+        <div id="temporaryBanner" class="temporary-banner hidden">
+            <span id="bannerText"></span>
+            <button class="btn btn-secondary" onclick="endTemporaryContext()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px;">
+                完成选择
+            </button>
         </div>
 
         <div class="categories-container" id="categories"></div>
@@ -922,11 +953,112 @@
         let lastSelected = [];
         let expandedCategories = new Set();
         let searchQuery = '';
+
+        // ==================== 新增：临时上下文相关变量 ====================
+        let isTemporaryContext = false;
+        let temporarySelectedPrompts = [];
+        let originalSelectedPrompts = [];
+        let originalExpandedCategories = new Set();
+        let temporaryMatchFn = null;
+        let temporaryBasePrompt = null;
+        let temporaryTitle = "";                    // 新增：保存标题
+
         let categoryDisplayModes = {};
         let categorySizeModes = {};
         let promptFoldout = false;
         let currentDecorationTarget = null;
         let currentDecorationSelections = [];
+
+        function updateFooterButton() {
+            const confirmBtn = document.querySelector('.footer .btn-primary');
+            if (!confirmBtn) return;
+
+            if (isTemporaryContext) {
+                confirmBtn.textContent = 'Select';
+                confirmBtn.style.background = '#28a745';
+                confirmBtn.style.borderColor = '#28a745';
+                confirmBtn.onclick = endTemporaryContext;
+            } else {
+                confirmBtn.textContent = 'Confirm';
+                confirmBtn.style.background = '';
+                confirmBtn.style.borderColor = '';
+                confirmBtn.onclick = confirmSelection;
+            }
+        }
+
+        function beginTemporaryContext(matchFn, basePrompt, title = "正在选择装饰提示词") {
+            if (isTemporaryContext) return;
+
+            isTemporaryContext = true;
+            temporaryMatchFn = matchFn;
+            temporaryBasePrompt = basePrompt;
+            temporaryTitle = title;
+            
+            originalSelectedPrompts = [...selectedPrompts];
+            originalExpandedCategories = new Set(expandedCategories);
+            
+            temporarySelectedPrompts = [];
+            expandedCategories.clear();
+
+            renderCategories();
+            initDragEvents();
+            updateFooterButton();
+            showTemporaryBanner();        // 显示条幅
+
+            console.log(`✅ 进入临时模式: ${title}`);
+        }
+
+        function endTemporaryContext() {
+            if (!isTemporaryContext) return;
+
+            let combinedPrompt = temporaryBasePrompt || '';
+            if (temporarySelectedPrompts.length > 0) {
+                combinedPrompt = temporarySelectedPrompts.map(p => `[${p}]`).join(' ') + ' ' + combinedPrompt;
+            }
+
+            if (combinedPrompt) {
+                // 清理旧组合后再添加新组合
+                selectedPrompts = selectedPrompts.filter(p => 
+                    !(p.includes(temporaryBasePrompt) && p.startsWith('['))
+                );
+                selectedPrompts.push(combinedPrompt);
+            }
+
+            // 恢复原始状态
+            expandedCategories = new Set(originalExpandedCategories);
+
+            isTemporaryContext = false;
+            temporaryMatchFn = null;
+            temporaryBasePrompt = null;
+            temporaryTitle = "";
+            temporarySelectedPrompts = [];
+            originalSelectedPrompts = [];
+            originalExpandedCategories.clear();
+
+            hideTemporaryBanner();        // 隐藏条幅
+            renderCategories();
+            updateSelectedTags();
+            updateFooterButton();
+
+            console.log("✅ 已退出临时模式");
+        }
+
+        function showTemporaryBanner() {
+            const banner = document.getElementById('temporaryBanner');
+            const textEl = document.getElementById('bannerText');
+            
+            if (banner && textEl) {
+                textEl.textContent = temporaryTitle;
+                banner.classList.remove('hidden');
+            }
+        }
+
+        function hideTemporaryBanner() {
+            const banner = document.getElementById('temporaryBanner');
+            if (banner) {
+                banner.classList.add('hidden');
+            }
+        }
 
         async function loadData() {
             try {
@@ -936,36 +1068,24 @@
                 lastSelected = data.last_selected || [];
                 promptFoldout = data.prompt_foldout || false;
                 
-                // 加载类别显示模式设置
                 categoryDisplayModes = data.category_display_modes || {};
                 categorySizeModes = data.category_size_modes || {};
-                
-                // 清理已不存在的类别的展开状态
-                for (const cat of expandedCategories) {
-                    if (!allPrompts[cat]) {
-                        expandedCategories.delete(cat);
-                    }
-                }
-                
-                // 初始化选中状态
+
                 selectedPrompts = [...lastSelected];
                 updateSelectedTags();
                 
-                // 根据 prompt_foldout 决定展开策略
                 if (promptFoldout) {
-                    // 展开包含上次选中词条的类别
                     for (const [category, catData] of Object.entries(allPrompts)) {
                         const prompts = catData.prompts || catData;
-                        const hasSelected = prompts.some(p => lastSelected.includes(p.prompt));
-                        if (hasSelected) {
+                        if (prompts.some(p => lastSelected.includes(p.prompt))) {
                             expandedCategories.add(category);
                         }
                     }
                 }
-                // 如果 promptFoldout 为 false，保持所有类别折叠
                 
                 renderCategories();
                 initDragEvents();
+                updateFooterButton();
             } catch (e) {
                 console.error('Failed to load data', e);
             }
@@ -976,72 +1096,66 @@
             container.innerHTML = '';
 
             for (const [category, catData] of Object.entries(allPrompts)) {
-                const prompts = catData.prompts || catData;
+                let prompts = catData.prompts || catData;
                 const bgImage = catData.bg_image || '';
-                
-                // 搜索过滤
+
                 let filteredPrompts = prompts;
-                if (searchQuery) {
+
+                if (isTemporaryContext && temporaryMatchFn) {
+                    filteredPrompts = prompts.filter(p => temporaryMatchFn(p, category));
+                } else if (searchQuery) {
                     filteredPrompts = prompts.filter(p => {
                         const tagsMatch = Array.isArray(p.tags) 
                             ? p.tags.some(t => t.toLowerCase().includes(searchQuery))
                             : (p.tags || '').toLowerCase().includes(searchQuery);
                         return p.name.toLowerCase().includes(searchQuery) || 
-                            p.prompt.toLowerCase().includes(searchQuery) ||
-                            tagsMatch;
+                            p.prompt.toLowerCase().includes(searchQuery) || tagsMatch;
                     });
                 }
-                
-                // 检查类别标签是否匹配搜索
-                const categoryTagsMatch = searchQuery && Array.isArray(catData.tags)
-                    ? catData.tags.some(t => t.toLowerCase().includes(searchQuery))
-                    : false;
-                
-                // 如果没有匹配的提示词且类别标签也不匹配，隐藏整个类别
-                if (searchQuery && filteredPrompts.length === 0 && !categoryTagsMatch) {
+
+                if ((searchQuery || isTemporaryContext) && filteredPrompts.length === 0) {
                     continue;
                 }
 
                 const isExpanded = expandedCategories.has(category);
-                
+
                 const categoryDiv = document.createElement('div');
                 categoryDiv.className = `category ${isExpanded ? 'expanded' : 'collapsed'}`;
                 categoryDiv.id = `category-${category}`;
-                
-                // 展开状态下，通过 CSS 变量设置背景图
+
                 if (isExpanded && bgImage) {
                     categoryDiv.style.setProperty('--cat-bg-image', `url(/images/${bgImage})`);
                 }
-                
+
                 const displayMode = categoryDisplayModes[category] || 'horizontal';
                 const sizeMode = categorySizeModes[category] || 'normal';
-                const displayModeIcon = displayMode === 'box' ? '⊞' : '☰';
-                const sizeModeIcon = sizeMode === 'mini' ? '▪' : '▫';
-                
+
                 categoryDiv.innerHTML = `
                     <div class="category-header" onclick="toggleCategory('${category}')">
                         ${!isExpanded && bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
                         <div class="header-content">
                             <div style="display: flex; align-items: center;">
-                                <span class="drag-handle" data-drag-type="category" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                                <span class="drag-handle" data-drag-type="category" data-category="${category}">⋮⋮</span>
                                 <span>${category}</span>
                             </div>
                             <div style="display: flex; align-items: center;">
-                                <button class="display-mode-btn" onclick="event.stopPropagation(); openEditDisplayModeModal('${category}')" title="Display: ${displayMode} | Size: ${sizeMode}">${displayModeIcon}${sizeModeIcon}</button>
+                                <button class="display-mode-btn" onclick="event.stopPropagation(); openEditDisplayModeModal('${category}')">⊞</button>
                                 <button class="edit-category-btn" onclick="event.stopPropagation(); openEditCategoryModal('${category}')">✏️</button>
                                 <span class="toggle">${isExpanded ? '▲' : '▼'}</span>
                             </div>
                         </div>
                     </div>
                     ${isExpanded ? `
-                    <div class="category-content ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}" id="cat-${category}">
+                    <div class="category-content ${displayMode === 'box' ? 'box-mode' : ''} ${categorySizeModes[category] === 'mini' ? 'mini-mode' : ''}" id="cat-${category}">
                         ${filteredPrompts.map(p => `
-                            <div class="prompt-item ${isBasePromptSelected(p.prompt) ? 'selected' : ''}"
-                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
-                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                            <div class="prompt-item ${isTemporaryContext ? 
+                                (temporarySelectedPrompts.includes(p.prompt) ? 'selected' : '') : 
+                                (isBasePromptSelected(p.prompt) ? 'selected' : '')}"
+                                data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
+                                <div class="select-area">
                                     <div class="image-layer">
-                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
                                     </div>
                                     <div class="glass-layer"></div>
                                     <div class="text-layer">
@@ -1056,22 +1170,25 @@
                             </div>
                         `).join('')}
                         ${!searchQuery ? `
-                        <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #44444469; border: 2px dashed #b9b9b9; justify-content: center; min-width: 100px; filter: blur(3px)">
+                        <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
+                            <div style="font-size: 24px; color: #888;">+</div>
                         </div>
                         ` : ''}
-                    </div>
-                    ` : ''}
+                    </div>` : ''}
                 `;
                 container.appendChild(categoryDiv);
             }
-            
-            // 添加 Add Category 卡片
-            const addCategoryDiv = document.createElement('div');
-            addCategoryDiv.className = 'add-category-card';
-            addCategoryDiv.onclick = openAddCategoryModal;
-            addCategoryDiv.innerHTML = '<span>+ Add Category</span>';
-            container.appendChild(addCategoryDiv);
+
+            // 临时模式下隐藏添加类别卡片
+            if (!isTemporaryContext) {
+                const addDiv = document.createElement('div');
+                addDiv.className = 'add-category-card';
+                addDiv.onclick = openAddCategoryModal;
+                addDiv.innerHTML = '<span>+ Add Category</span>';
+                container.appendChild(addDiv);
+            }
         }
+
 
         function toggleCategory(category) {
             const categoryDiv = document.getElementById(`category-${category}`);
@@ -1185,42 +1302,75 @@
             toggle.textContent = expandedCategories.has(category) ? '▲' : '▼';
         }
 
+        // ==================== 修复后的 togglePrompt（支持删除修饰组合提示词） ====================
         function togglePrompt(prompt) {
-            // 先检查是否已作为 base prompt 被选中（包括 decoration 组合）
+            // 情况1：临时模式下选择装饰
+            if (isTemporaryContext) {
+                const index = temporarySelectedPrompts.indexOf(prompt);
+                if (index === -1) {
+                    temporarySelectedPrompts.push(prompt);
+                } else {
+                    temporarySelectedPrompts.splice(index, 1);
+                }
+                updateSelectedTags();
+                renderCategories();
+                return;
+            }
+
+            // 情况2：删除已选中的装饰组合提示词（关键修复）
+            const index = selectedPrompts.indexOf(prompt);
+            if (index !== -1) {
+                selectedPrompts.splice(index, 1);
+                updateSelectedTags();
+                renderCategories();
+                return;
+            }
+
+            // 情况3：尝试作为普通 base prompt 删除装饰组合（兼容旧逻辑）
             const decoIndex = findSelectedDecorationPrompt(prompt);
             if (decoIndex !== -1) {
-                // 取消包含该 base prompt 的 decoration 组合
                 selectedPrompts.splice(decoIndex, 1);
                 updateSelectedTags();
                 renderCategories();
                 return;
             }
-            
-            const index = selectedPrompts.indexOf(prompt);
-            if (index === -1) {
-                // 检查是否需要 decoration 选择
-                const promptData = findPromptData(prompt);
-                const allDecorations = promptData ? getPromptDecorations(promptData) : [];
-                if (allDecorations.length > 0) {
-                    openDecorationModal(promptData);
-                    return;
-                }
+
+            // 情况4：正常进入装饰选择模式
+            const promptData = findPromptData(prompt);
+            if (!promptData) return;
+
+            const allDecorations = getPromptDecorations(promptData);
+
+            if (allDecorations.length > 0) {
+                const matchFn = (p, cat) => {
+                    if (p.prompt === prompt) return false;
+                    const pTags = Array.isArray(p.tags) ? p.tags : [];
+                    const catData = allPrompts[cat] || {};
+                    const catTags = Array.isArray(catData.tags) ? catData.tags : [];
+                    return pTags.some(t => allDecorations.includes(t)) || 
+                        catTags.some(t => allDecorations.includes(t));
+                };
+                beginTemporaryContext(matchFn, prompt);
+                return;
+            }
+
+            // 情况5：普通提示词（无装饰）
+            const normalIndex = selectedPrompts.indexOf(prompt);
+            if (normalIndex === -1) {
                 selectedPrompts.push(prompt);
             } else {
-                selectedPrompts.splice(index, 1);
+                selectedPrompts.splice(normalIndex, 1);
             }
+
             updateSelectedTags();
             renderCategories();
         }
 
         function findSelectedDecorationPrompt(basePrompt) {
-            // 查找 selectedPrompts 中包含 basePrompt 的 decoration 组合项
             for (let i = 0; i < selectedPrompts.length; i++) {
                 const p = selectedPrompts[i];
-                // 检查是否是 [xxx] basePrompt 格式
-                const parts = p.split(' ');
-                const lastPart = parts[parts.length - 1];
-                if (lastPart === basePrompt) {
+                // 如果是装饰组合格式（如 [xxx] [yyy] basePrompt）
+                if (p.endsWith(basePrompt) && p.includes('[')) {
                     return i;
                 }
             }
@@ -1410,14 +1560,22 @@
         }
 
         function updateSelectedTags() {
-            document.getElementById('selectedCount').textContent = selectedPrompts.length;
+            const count = isTemporaryContext ? temporarySelectedPrompts.length : selectedPrompts.length;
+            document.getElementById('selectedCount').textContent = count;
+
             const container = document.getElementById('selectedTags');
-            container.innerHTML = selectedPrompts.map(p => `
-                <span class="tag">
-                    ${p}
-                    <span class="remove" onclick="togglePrompt('${p.replace(/'/g, "\\'")}')">×</span>
-                </span>
-            `).join('');
+            const list = isTemporaryContext ? temporarySelectedPrompts : selectedPrompts;
+
+            container.innerHTML = list.map(p => {
+                // 对包含特殊字符的提示词进行安全转义
+                const escapedPrompt = p.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                return `
+                    <span class="tag">
+                        ${p}
+                        <span class="remove" onclick="togglePrompt('${escapedPrompt}')">×</span>
+                    </span>
+                `;
+            }).join('');
         }
 
         function searchPrompts() {
@@ -1714,42 +1872,21 @@
                 return;
             }
 
-            const confirmBtn = document.querySelector('.footer .btn-primary');
-            const originalText = confirmBtn ? confirmBtn.textContent : 'Confirm';
-            
             try {
-                // 禁用按钮防止重复提交
-                if (confirmBtn) {
-                    confirmBtn.disabled = true;
-                    confirmBtn.textContent = 'Saving...';
-                }
-                
                 const response = await fetch('/select_prompt', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ prompts: selectedPrompts })
                 });
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                
-                const result = await response.json();
-                
-                if (result.success) {
+
+                if (response.ok) {
                     window.close();
                 } else {
-                    throw new Error(result.error || 'Unknown error');
+                    alert('Failed to save selection');
                 }
             } catch (e) {
-                console.error('Failed to confirm', e);
-                alert('Failed to save selection: ' + e.message);
-                
-                // 恢复按钮状态
-                if (confirmBtn) {
-                    confirmBtn.disabled = false;
-                    confirmBtn.textContent = originalText;
-                }
+                console.error(e);
+                alert('Error saving selection');
             }
         }
 
@@ -2196,6 +2333,8 @@
             }
         });
 
+        window.beginTemporaryContext = beginTemporaryContext;
+        window.endTemporaryContext = endTemporaryContext;
         document.addEventListener('DOMContentLoaded', loadData);
     </script>
 </body>
