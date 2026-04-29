@@ -834,12 +834,11 @@
         .footer {
             position: fixed;
             bottom: 0;
-            left: 0;
             right: 0;
             padding: 20px;
             background: linear-gradient(transparent, #1a1a1a 30%);
             display: flex;
-            justify-content: center;
+            justify-content: flex-end;
             gap: 15px;
             z-index: 500;
         }
@@ -849,6 +848,33 @@
             border: none;
             font-size: 15px;
             cursor: pointer;
+        }
+        .custom-input-section {
+            position: fixed;
+            bottom: 80px;
+            left: 20px;
+            right: 20px;
+            background: #2d2d2d;
+            border-radius: 12px;
+            padding: 15px 20px;
+            z-index: 400;
+        }
+        .custom-input-section h3 {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        .custom-input-section textarea {
+            width: 100%;
+            min-height: 60px;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border: 1px solid #444;
+            background: #3a3a3a;
+            color: #fff;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
         }
         .hidden {
             display: none !important;
@@ -955,6 +981,11 @@
         </div>
 
         <div class="categories-container" id="categories"></div>
+    </div>
+
+    <div class="custom-input-section">
+        <h3>Custom Prompts</h3>
+        <textarea id="customPromptInput" placeholder="Enter custom prompts here..."></textarea>
     </div>
 
     <div class="footer">
@@ -1395,6 +1426,10 @@
 
                 selectedPrompts = [...lastSelected];
                 updateSelectedTags();
+                
+                // 加载自定义输入内容
+                const customPrompts = data.custom_prompts || '';
+                document.getElementById('customPromptInput').value = customPrompts;
                 
                 if (promptFoldout) {
                     for (const [category, catData] of Object.entries(allPrompts)) {
@@ -2414,11 +2449,26 @@
                 return;
             }
 
+            // 获取自定义输入内容
+            const customInput = document.getElementById('customPromptInput').value.trim();
+            
+            // 构建要发送的数据
+            const promptsToSend = [...selectedPrompts];
+            
+            // 如果有自定义输入，用<>包裹并添加到结果中
+            if (customInput) {
+                const customWrapped = `<${customInput}>`;
+                promptsToSend.push(customWrapped);
+            }
+
             try {
                 const response = await fetch('/select_prompt', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompts: selectedPrompts })
+                    body: JSON.stringify({ 
+                        prompts: promptsToSend,
+                        custom_prompts: customInput
+                    })
                 });
 
                 if (response.ok) {

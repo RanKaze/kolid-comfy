@@ -67,6 +67,7 @@ class SnapshotPromptServer:
         self.window_closed = False
         self.browser_url = None
         self.selected_prompts = []
+        self.custom_prompts = ''
         self.last_selected = last_selected or []
         self.prompt_foldout = prompt_foldout
         self.should_stop = False
@@ -377,7 +378,8 @@ class SnapshotPromptServer:
                     'last_selected': self.server_instance.last_selected,
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
-                    'prompt_foldout': self.server_instance.prompt_foldout
+                    'prompt_foldout': self.server_instance.prompt_foldout,
+                    'custom_prompts': self.server_instance.custom_prompts
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -416,6 +418,7 @@ class SnapshotPromptServer:
 
                 if self.server_instance:
                     self.server_instance.selected_prompts = data.get('prompts', [])
+                    self.server_instance.custom_prompts = data.get('custom_prompts', '')
                     self.server_instance.prompt_event.set()
 
                     self.send_response(200)
@@ -850,7 +853,7 @@ class SnapshotPromptNode:
         return {
             "required": {
                 "prompt_separator": ("STRING", {"default": ", ", "multiline": False}),
-                "prompt": ("STRING", {"default": "", "multiline": False}),
+                "prompt": ("STRING", {"default": "", "multiline": True}),
                 "prompt_foldout": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
@@ -883,10 +886,18 @@ class SnapshotPromptNode:
             
         # 从 prompt widget 获取上次选中的值
         last_selected = []
+        custom_prompts = ''
         if prompt and prompt.strip():
-            last_selected = [p.strip() for p in prompt.split(",") if p.strip()]
+            parts = [p.strip() for p in prompt.split(",") if p.strip()]
+            for part in parts:
+                # 检查是否是 <> 包裹的自定义输入
+                if part.startswith('<') and part.endswith('>'):
+                    custom_prompts = part[1:-1]
+                else:
+                    last_selected.append(part)
         
         server = SnapshotPromptServer(last_selected=last_selected, prompt_foldout=prompt_foldout)
+        server.custom_prompts = custom_prompts
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -925,10 +936,16 @@ class SnapshotPromptNode:
         if server.window_closed or not server.selected_prompts:
             raise RuntimeError("[SnapshotPrompt] Window closed or no prompts selected")
 
-        # 去掉所有 '[' 和 ']' 字符
+        # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入
         cleaned_prompts = []
         for p in server.selected_prompts:
-            cleaned = p.replace('[', '').replace(']', '')
+            # 检查是否是 <> 包裹的自定义输入
+            if p.startswith('<') and p.endswith('>'):
+                # 去掉 <> 但保留内容
+                cleaned = p[1:-1]
+            else:
+                # 去掉 [ 和 ]
+                cleaned = p.replace('[', '').replace(']', '')
             cleaned_prompts.append(cleaned)
 
         result_prompt = prompt_separator.join(server.selected_prompts)
