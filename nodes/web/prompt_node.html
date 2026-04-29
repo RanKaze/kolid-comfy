@@ -9,6 +9,10 @@
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -481,9 +485,10 @@
         .category-content.mini-mode .prompt-item .drag-handle {
             top: 4px;
             left: 4px;
-            z-index: 10;
+            z-index: 1000;
             font-size: 11px;
-            padding: 3px;
+            padding: 4px 3px;
+            pointer-events: auto !important;
         }
         /* Box + Mini 组合模式 */
         .category-content.box-mode.mini-mode {
@@ -499,19 +504,26 @@
         .prompt-item.drag-over {
             border: 2px dashed #007aff;
         }
+        .category-content.drag-over {
+            outline: 2px dashed #007aff;
+            outline-offset: -2px;
+            border-radius: 8px;
+        }
         .prompt-item .drag-handle {
             position: absolute;
             top: 5px;
             left: 5px;
             cursor: grab;
-            padding: 4px;
-            z-index: 10;
+            padding: 8px 6px;
+            z-index: 1000;
             opacity: 0;
             transition: opacity 0.2s;
-            background: rgba(0,0,0,0.5);
+            background: rgba(0,0,0,0.7);
             border-radius: 4px;
             color: white;
             font-size: 12px;
+            line-height: 1;
+            pointer-events: auto !important;
         }
         .prompt-item:hover .drag-handle {
             opacity: 1;
@@ -931,10 +943,13 @@
         <!-- 新增：临时模式提示条幅 -->
         <div id="temporaryBanner" class="temporary-banner hidden">
             <span id="bannerText"></span>
-            <button class="btn btn-success" onclick="addBasePromptOnly()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px; background: #28a745;">
+            <button class="btn btn-warning" id="backBtn" onclick="endTemporaryContext()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px; background: #ffc107; display: none;">
+                ← 返回上层
+            </button>
+            <button class="btn btn-success" onclick="addBasePromptOnly()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px; background: #28a745;">
                 直接添加
             </button>
-            <button class="btn btn-secondary" onclick="endTemporaryContext()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px;">
+            <button class="btn btn-secondary" onclick="confirmSelection()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px;">
                 完成选择
             </button>
         </div>
@@ -1094,14 +1109,16 @@
         let expandedCategories = new Set();
         let searchQuery = '';
 
-        // ==================== 新增：临时上下文相关变量 ====================
-        let isTemporaryContext = false;
-        let temporarySelectedPrompts = [];
-        let originalSelectedPrompts = [];
-        let originalExpandedCategories = new Set();
-        let temporaryMatchFn = null;
-        let temporaryBasePrompt = null;
-        let temporaryTitle = "";                    // 新增：保存标题
+        // ==================== 新增：临时上下文相关变量（支持嵌套） ====================
+        let temporaryContextStack = [];  // 栈：每一层 {matchFn, basePrompt, title, selectedPrompts}
+        
+        function isTemporaryContext() {
+            return temporaryContextStack.length > 0;
+        }
+        
+        function getCurrentTemporaryContext() {
+            return temporaryContextStack.length > 0 ? temporaryContextStack[temporaryContextStack.length - 1] : null;
+        }
 
         let categoryDisplayModes = {};
         let categorySizeModes = {};
@@ -1113,7 +1130,7 @@
             const confirmBtn = document.querySelector('.footer .btn-primary');
             if (!confirmBtn) return;
 
-            if (isTemporaryContext) {
+            if (isTemporaryContext()) {
                 confirmBtn.textContent = 'Select';
                 confirmBtn.style.background = '#28a745';
                 confirmBtn.style.borderColor = '#28a745';
@@ -1127,93 +1144,233 @@
         }
 
         function beginTemporaryContext(matchFn, basePrompt, title = "正在选择装饰提示词") {
-            if (isTemporaryContext) return;
-
-            isTemporaryContext = true;
-            temporaryMatchFn = matchFn;
-            temporaryBasePrompt = basePrompt;
-            temporaryTitle = title;
+            // 保存当前状态到栈中（如果已经在临时上下文中）
+            if (temporaryContextStack.length > 0) {
+                const currentCtx = getCurrentTemporaryContext();
+                currentCtx.selectedPrompts = [...temporarySelectedPrompts];
+            }
             
-            originalSelectedPrompts = [...selectedPrompts];
-            originalExpandedCategories = new Set(expandedCategories);
+            // 保存当前展开的类别状态
+            const currentExpanded = new Set(expandedCategories);
             
+            // 创建新的临时上下文层
+            temporaryContextStack.push({
+                matchFn: matchFn,
+                basePrompt: basePrompt,
+                title: title,
+                selectedPrompts: [],
+                originalExpandedCategories: currentExpanded,
+                level: temporaryContextStack.length + 1 // 保存当前嵌套层数
+            });
+            
+            // 初始化当前层的状态
             temporarySelectedPrompts = [];
             expandedCategories.clear();
 
             renderCategories();
             initDragEvents();
             updateFooterButton();
-            showTemporaryBanner();        // 显示条幅
+            showTemporaryBanner();
 
-            console.log(`✅ 进入临时模式: ${title}`);
+            console.log(`✅ 进入临时模式 (第${temporaryContextStack.length}层): ${title}`);
+        }
+
+        // 根据层数生成对应数量的方括号
+        function wrapWithBrackets(text, level) {
+            const brackets = '['.repeat(level);
+            const closingBrackets = ']'.repeat(level);
+            return `${brackets}${text}${closingBrackets}`;
+        }
+
+        // 递归组合提示词和它的装饰词，使用正确的层级信息
+        function combinePromptWithDecorations(promptObj) {
+            // 如果没有装饰词，直接返回带正确括号的提示词
+            if (!promptObj.decorations || promptObj.decorations.length === 0) {
+                return wrapWithBrackets(promptObj.text, promptObj.level);
+            }
+            
+            // 递归组合所有装饰词
+            let result = '';
+            for (const deco of promptObj.decorations) {
+                result += combinePromptWithDecorations(deco) + ' ';
+            }
+            
+            // 添加当前层级的提示词
+            result += wrapWithBrackets(promptObj.text, promptObj.level);
+            return result;
+        }
+
+        // 最终组合所有内容，基础提示词不带括号
+        function combineAll(basePrompt, decorations, baseLevel) {
+            let result = '';
+            
+            // 先组合所有装饰词
+            for (const deco of decorations) {
+                result += combinePromptWithDecorations(deco) + ' ';
+            }
+            
+            // 添加基础提示词（不带括号）
+            result += basePrompt;
+            return result;
+        }
+
+        // 检查一个字符串是否是装饰提示对象（有text和level属性）
+        function isDecorationObject(obj) {
+            return typeof obj === 'object' && obj !== null && 'text' in obj && 'level' in obj;
         }
 
         function addBasePromptOnly() {
-            if (!isTemporaryContext || !temporaryBasePrompt) return;
-
-            selectedPrompts.push(temporaryBasePrompt);
-
-            // 恢复原始状态
-            expandedCategories = new Set(originalExpandedCategories);
-
-            isTemporaryContext = false;
-            temporaryMatchFn = null;
-            temporaryBasePrompt = null;
-            temporaryTitle = "";
-            temporarySelectedPrompts = [];
-            originalSelectedPrompts = [];
-            originalExpandedCategories.clear();
-
-            hideTemporaryBanner();
+            if (temporaryContextStack.length === 0) return;
+            
+            const ctx = temporaryContextStack.pop();
+            
+            // 处理当前层的选择 - 新选择的修饰词层级是当前层级
+            const processedSelections = [];
+            for (const p of temporarySelectedPrompts) {
+                if (isDecorationObject(p)) {
+                    // 已经是装饰对象，直接使用
+                    processedSelections.push(p);
+                } else {
+                    // 创建新的装饰对象
+                    processedSelections.push({
+                        text: p,
+                        level: ctx.level,
+                        decorations: []
+                    });
+                }
+            }
+            
+            // basePrompt 作为修饰词时的层级应该是当前层级减1
+            const basePromptLevel = Math.max(1, ctx.level - 1);
+            
+            // 恢复上一层状态或正常状态
+            if (temporaryContextStack.length > 0) {
+                // 有上一层，将当前层选择的对象传递给上一层
+                const prevCtx = getCurrentTemporaryContext();
+                temporarySelectedPrompts = prevCtx.selectedPrompts || [];
+                
+                // 查找上一层中是否已经有与当前 basePrompt 匹配的选择
+                let found = false;
+                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
+                    const item = temporarySelectedPrompts[i];
+                    if (isDecorationObject(item) && item.text === ctx.basePrompt) {
+                        // 找到匹配项，将当前选择添加为它的装饰
+                        item.decorations = item.decorations || [];
+                        item.decorations.push(...processedSelections);
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found) {
+                    // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
+                    temporarySelectedPrompts.push({
+                        text: ctx.basePrompt,
+                        level: basePromptLevel,
+                        decorations: processedSelections
+                    });
+                }
+                
+                expandedCategories = new Set(prevCtx.originalExpandedCategories);
+                showTemporaryBanner();
+            } else {
+                // 没有上一层，最终组合并添加到最终选择列表
+                const finalCombined = combineAll(ctx.basePrompt, processedSelections, basePromptLevel);
+                selectedPrompts.push(finalCombined);
+                temporarySelectedPrompts = [];
+                expandedCategories = new Set(ctx.originalExpandedCategories);
+                hideTemporaryBanner();
+            }
+            
             renderCategories();
             updateSelectedTags();
             updateFooterButton();
-
+            
             console.log("✅ 直接添加基础提示词");
         }
 
         function endTemporaryContext() {
-            if (!isTemporaryContext) return;
-
-            let combinedPrompt = temporaryBasePrompt || '';
-            const selectedDecos = [];
-            if (temporarySelectedPrompts.length > 0) {
-                for (const p of temporarySelectedPrompts) {
-                    const decoPrompt = p.startsWith('[') ? p : `[${p}]`;
-                    combinedPrompt = `${decoPrompt} ${combinedPrompt}`;
-                    selectedDecos.push(p);
+            if (temporaryContextStack.length === 0) return;
+            
+            const ctx = temporaryContextStack.pop();
+            
+            // 处理当前层的选择 - 新选择的修饰词层级是当前层级
+            const processedSelections = [];
+            for (const p of temporarySelectedPrompts) {
+                if (isDecorationObject(p)) {
+                    // 已经是装饰对象，直接使用
+                    processedSelections.push(p);
+                } else {
+                    // 创建新的装饰对象
+                    processedSelections.push({
+                        text: p,
+                        level: ctx.level,
+                        decorations: []
+                    });
                 }
             }
-
-            if (combinedPrompt) {
-                selectedPrompts.push(combinedPrompt);
+            
+            // basePrompt 作为修饰词时的层级应该是当前层级减1
+            const basePromptLevel = Math.max(1, ctx.level - 1);
+            
+            // 恢复上一层状态或正常状态
+            if (temporaryContextStack.length > 0) {
+                // 有上一层，将当前层选择的对象传递给上一层
+                const prevCtx = getCurrentTemporaryContext();
+                temporarySelectedPrompts = prevCtx.selectedPrompts || [];
+                
+                // 查找上一层中是否已经有与当前 basePrompt 匹配的选择
+                let found = false;
+                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
+                    const item = temporarySelectedPrompts[i];
+                    if (isDecorationObject(item) && item.text === ctx.basePrompt) {
+                        // 找到匹配项，将当前选择添加为它的装饰
+                        item.decorations = item.decorations || [];
+                        item.decorations.push(...processedSelections);
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found && (processedSelections.length > 0 || temporarySelectedPrompts.length === 0)) {
+                    // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
+                    temporarySelectedPrompts.push({
+                        text: ctx.basePrompt,
+                        level: basePromptLevel,
+                        decorations: processedSelections
+                    });
+                }
+                
+                expandedCategories = new Set(prevCtx.originalExpandedCategories);
+                showTemporaryBanner();
+            } else {
+                // 没有上一层，最终组合并添加到最终选择列表
+                if (processedSelections.length > 0 || temporarySelectedPrompts.length === 0) {
+                    const finalCombined = combineAll(ctx.basePrompt, processedSelections, basePromptLevel);
+                    selectedPrompts.push(finalCombined);
+                }
+                temporarySelectedPrompts = [];
+                expandedCategories = new Set(ctx.originalExpandedCategories);
+                hideTemporaryBanner();
             }
-
-            // 恢复原始状态
-            expandedCategories = new Set(originalExpandedCategories);
-
-            isTemporaryContext = false;
-            temporaryMatchFn = null;
-            temporaryBasePrompt = null;
-            temporaryTitle = "";
-            temporarySelectedPrompts = [];
-            originalSelectedPrompts = [];
-            originalExpandedCategories.clear();
-
-            hideTemporaryBanner();
+            
             renderCategories();
             updateSelectedTags();
             updateFooterButton();
-
-            console.log("✅ 已退出临时模式");
+            
+            console.log("✅ 完成临时上下文选择");
         }
 
         function showTemporaryBanner() {
             const banner = document.getElementById('temporaryBanner');
             const textEl = document.getElementById('bannerText');
+            const backBtn = document.getElementById('backBtn');
+            const ctx = getCurrentTemporaryContext();
             
-            if (banner && textEl) {
-                textEl.textContent = temporaryTitle;
+            if (banner && textEl && ctx) {
+                const level = temporaryContextStack.length;
+                textEl.textContent = `[${level}层] ${ctx.title}`;
+                backBtn.style.display = level > 1 ? 'inline-block' : 'none';
                 banner.classList.remove('hidden');
             }
         }
@@ -1266,8 +1423,9 @@
 
                 let filteredPrompts = prompts;
 
-                if (isTemporaryContext && temporaryMatchFn) {
-                    filteredPrompts = prompts.filter(p => temporaryMatchFn(p, category));
+                const ctx = getCurrentTemporaryContext();
+                if (ctx && ctx.matchFn) {
+                    filteredPrompts = prompts.filter(p => ctx.matchFn(p, category));
                 } else if (searchQuery) {
                     filteredPrompts = prompts.filter(p => {
                         const tagsMatch = Array.isArray(p.tags) 
@@ -1278,7 +1436,7 @@
                     });
                 }
 
-                if ((searchQuery || isTemporaryContext) && filteredPrompts.length === 0) {
+                if ((searchQuery || isTemporaryContext()) && filteredPrompts.length === 0) {
                     continue;
                 }
 
@@ -1332,20 +1490,33 @@
                                     </div>
                                 ` : '';
                                 
-                                const isSelected = isTemporaryContext ? 
-                                    temporarySelectedPrompts.includes(p.prompt) : 
-                                    isBasePromptSelected(p.prompt);
+                                let isSelected = false;
+                                if (isTemporaryContext()) {
+                                    // 在临时模式下，检查字符串或对象匹配
+                                    isSelected = temporarySelectedPrompts.includes(p.prompt);
+                                    if (!isSelected) {
+                                        for (const item of temporarySelectedPrompts) {
+                                            if (isDecorationObject(item) && item.text === p.prompt) {
+                                                isSelected = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    isSelected = isBasePromptSelected(p.prompt);
+                                }
                                 const combos = getPromptCombinations(p.prompt);
                                 
                                 let selectedCardsHtml = '';
-                                for (const combo of combos) {
-                                    selectedCardsHtml += `
-                                        <div class="selected-card" data-prompt="${combo}">
-                                            <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${combo}')">×</button>
-                                            <div class="selected-card-content">${combo}</div>
-                                        </div>
-                                    `;
-                                }
+                        for (const combo of combos) {
+                            const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                            selectedCardsHtml += `
+                                <div class="selected-card" data-prompt="${escapedCombo}">
+                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
+                                    <div class="selected-card-content">${combo}</div>
+                                </div>
+                            `;
+                        }
                                 
                                 return `
                             <div class="prompt-item-wrapper">
@@ -1383,18 +1554,31 @@
             }
 
             // 临时模式下隐藏添加类别卡片
-            if (!isTemporaryContext) {
+            if (!isTemporaryContext()) {
                 const addDiv = document.createElement('div');
                 addDiv.className = 'add-category-card';
                 addDiv.onclick = openAddCategoryModal;
                 addDiv.innerHTML = '<span>+ Add Category</span>';
                 container.appendChild(addDiv);
             }
+
+            initDragEvents();
         }
 
         function getCategorySelectedCount(category, prompts) {
-            if (isTemporaryContext) {
-                return prompts.filter(p => temporarySelectedPrompts.includes(p.prompt)).length;
+            if (isTemporaryContext()) {
+                // 在临时模式下，检查 prompt 是否被选中（可以是字符串或对象）
+                return prompts.filter(p => {
+                    // 先检查是否是直接的字符串匹配
+                    if (temporarySelectedPrompts.includes(p.prompt)) return true;
+                    // 再检查是否是装饰对象匹配
+                    for (const item of temporarySelectedPrompts) {
+                        if (isDecorationObject(item) && item.text === p.prompt) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }).length;
             }
             return prompts.filter(p => isBasePromptSelected(p.prompt)).length;
         }
@@ -1486,9 +1670,10 @@
                         
                         let selectedCardsHtml = '';
                         for (const combo of combos) {
+                            const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
                             selectedCardsHtml += `
-                                <div class="selected-card" data-prompt="${combo}">
-                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${combo}')">×</button>
+                                <div class="selected-card" data-prompt="${escapedCombo}">
+                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
                                     <div class="selected-card-content">${combo}</div>
                                 </div>
                             `;
@@ -1539,16 +1724,55 @@
             toggle.textContent = expandedCategories.has(category) ? '▲' : '▼';
         }
 
-        // ==================== 修复后的 togglePrompt（支持删除修饰组合提示词） ====================
+        // ==================== 修复后的 togglePrompt（支持嵌套临时上下文） ====================
         function togglePrompt(prompt) {
             // 情况1：临时模式下选择装饰
-            if (isTemporaryContext) {
-                const index = temporarySelectedPrompts.indexOf(prompt);
-                if (index === -1) {
+            if (isTemporaryContext()) {
+                const ctx = getCurrentTemporaryContext();
+                
+                // 检查被点击的提示词是否也有可用的修饰
+                const promptData = findPromptData(prompt);
+                const allDecorations = promptData ? getPromptDecorations(promptData) : [];
+                
+                if (allDecorations.length > 0) {
+                    // 如果被点击的提示词也有修饰，进入嵌套临时上下文
+                    const matchFn = (p, cat) => {
+                        if (p.prompt === prompt) return false;
+                        const pTags = Array.isArray(p.tags) ? p.tags : [];
+                        const catData = allPrompts[cat] || {};
+                        const catTags = Array.isArray(catData.tags) ? catData.tags : [];
+                        return pTags.some(t => allDecorations.includes(t)) || 
+                            catTags.some(t => allDecorations.includes(t));
+                    };
+                    beginTemporaryContext(matchFn, prompt, `选择 "${promptData.name}" 的修饰词`);
+                    return;
+                }
+                
+                // 没有修饰，直接添加到当前层的选择列表
+                // 先检查是否已经作为字符串或对象存在
+                let index = temporarySelectedPrompts.indexOf(prompt);
+                let objIndex = -1;
+                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
+                    const item = temporarySelectedPrompts[i];
+                    if (isDecorationObject(item) && item.text === prompt) {
+                        objIndex = i;
+                        break;
+                    }
+                }
+                
+                if (index === -1 && objIndex === -1) {
+                    // 都不存在，添加新的
                     temporarySelectedPrompts.push(prompt);
                 } else {
-                    temporarySelectedPrompts.splice(index, 1);
+                    // 存在，删除它
+                    if (index !== -1) {
+                        temporarySelectedPrompts.splice(index, 1);
+                    }
+                    if (objIndex !== -1) {
+                        temporarySelectedPrompts.splice(objIndex, 1);
+                    }
                 }
+                
                 updateSelectedTags();
                 renderCategories();
                 return;
@@ -1586,29 +1810,46 @@
             renderCategories();
         }
 
-        function getLastDecorationBase(prompt) {
-            const lastBracketPos = prompt.lastIndexOf('] ');
-            if (lastBracketPos === -1) return null;
-            return prompt.substring(lastBracketPos + 2).trim();
+        // 从组合字符串中提取基础提示词
+        function extractBaseFromCombined(combinedStr, basePrompt) {
+            // 或者字符串正好是 basePrompt
+            if (combinedStr === basePrompt) {
+                return true;
+            }
+            // 如果字符串不包含 '[' 或 ']'，匹配所有
+            if (!combinedStr.includes('[') && !combinedStr.includes(']')) {
+                return combinedStr === basePrompt;
+            }
+            // 如果有 '[' 或 ']'，取最后一个 ']' 后的字符串
+            const lastBracketPos = combinedStr.lastIndexOf(']');
+            if (lastBracketPos !== -1) {
+                const afterLastBracket = combinedStr.substring(lastBracketPos + 1).trim();
+                return afterLastBracket === basePrompt;
+            }
+            return false;
         }
 
-        function findSelectedDecorationPrompt(basePrompt) {
-            for (let i = 0; i < selectedPrompts.length; i++) {
-                const p = selectedPrompts[i];
-                if (p.includes('[')) {
-                    const lastBase = getLastDecorationBase(p);
-                    if (lastBase === basePrompt) {
-                        return i;
-                    }
-                }
-            }
-            return -1;
+        // 检查装饰对象是否以某个提示词为基础
+        function isObjectBaseMatch(obj, basePrompt) {
+            if (!isDecorationObject(obj)) return false;
+            return obj.text === basePrompt;
         }
 
         function isBasePromptSelected(prompt) {
             // 检查 prompt 是否作为 base prompt 被选中（包括 decoration 组合）
             if (selectedPrompts.includes(prompt)) return true;
-            return findSelectedDecorationPrompt(prompt) !== -1;
+            
+            // 检查是否有装饰对象匹配
+            for (const p of selectedPrompts) {
+                if (isDecorationObject(p) && isObjectBaseMatch(p, prompt)) {
+                    return true;
+                }
+                // 检查字符串组合的字符串是否包含该 basePrompt
+                if (typeof p === 'string' && extractBaseFromCombined(p, prompt)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         function getPromptCombinations(basePrompt) {
@@ -1616,11 +1857,12 @@
             for (const p of selectedPrompts) {
                 if (p === basePrompt) {
                     combinations.push(p);
-                } else if (p.includes('[')) {
-                    const lastBase = getLastDecorationBase(p);
-                    if (lastBase === basePrompt) {
-                        combinations.push(p);
-                    }
+                } else if (isDecorationObject(p) && isObjectBaseMatch(p, basePrompt)) {
+                    // 如果是装饰对象，获取它的显示文本
+                    combinations.push(getDisplayText(p));
+                } else if (typeof p === 'string' && extractBaseFromCombined(p, basePrompt)) {
+                    // 如果是组合的字符串，直接使用
+                    combinations.push(p);
                 }
             }
             return combinations;
@@ -1807,20 +2049,39 @@
             currentDecorationSelections = [];
         }
 
+        // 显示装饰对象的字符串表示
+        function getDisplayText(item) {
+            if (isDecorationObject(item)) {
+                // 对于装饰对象，先递归显示装饰，然后显示当前项
+                let result = '';
+                if (item.decorations && item.decorations.length > 0) {
+                    for (const deco of item.decorations) {
+                        result += getDisplayText(deco) + ' ';
+                    }
+                }
+                result += wrapWithBrackets(item.text, item.level);
+                return result;
+            }
+            return item; // 普通字符串直接返回
+        }
+
         function updateSelectedTags() {
-            const count = isTemporaryContext ? temporarySelectedPrompts.length : selectedPrompts.length;
+            const list = isTemporaryContext() ? temporarySelectedPrompts : selectedPrompts;
+            const count = list.length;
             document.getElementById('selectedCount').textContent = count;
 
             const container = document.getElementById('selectedTags');
-            const list = isTemporaryContext ? temporarySelectedPrompts : selectedPrompts;
 
-            container.innerHTML = list.map(p => {
-                // 对包含特殊字符的提示词进行安全转义
-                const escapedPrompt = p.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            container.innerHTML = list.map((p, index) => {
+                const displayText = getDisplayText(p);
+                const escapedDisplayText = displayText.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                const removeFunc = isTemporaryContext() ? 
+                    `event.stopPropagation(); temporarySelectedPrompts.splice(${index}, 1); updateSelectedTags(); renderCategories();` :
+                    `selectedPrompts.splice(${index}, 1); updateSelectedTags(); renderCategories();`;
                 return `
                     <span class="tag">
-                        ${p}
-                        <span class="remove" onclick="togglePrompt('${escapedPrompt}')">×</span>
+                        ${displayText}
+                        <span class="remove" onclick="${removeFunc}">×</span>
                     </span>
                 `;
             }).join('');
@@ -2064,11 +2325,34 @@
 
         function deleteSelectedPrompt(event, promptText) {
             event.stopPropagation();
-            const index = selectedPrompts.indexOf(promptText);
+            removeSelectedPrompt(promptText);
+        }
+
+        function removeSelectedPrompt(promptText) {
+            // 先尝试直接匹配
+            let index = selectedPrompts.indexOf(promptText);
             if (index !== -1) {
                 selectedPrompts.splice(index, 1);
                 updateSelectedTags();
                 renderCategories();
+                return;
+            }
+            
+            // 如果没有直接匹配，尝试匹配装饰对象的显示文本
+            for (let i = 0; i < selectedPrompts.length; i++) {
+                if (isDecorationObject(selectedPrompts[i]) && getDisplayText(selectedPrompts[i]) === promptText) {
+                    selectedPrompts.splice(i, 1);
+                    updateSelectedTags();
+                    renderCategories();
+                    return;
+                }
+                // 如果是组合的字符串，也尝试匹配
+                if (typeof selectedPrompts[i] === 'string' && selectedPrompts[i] === promptText) {
+                    selectedPrompts.splice(i, 1);
+                    updateSelectedTags();
+                    renderCategories();
+                    return;
+                }
             }
         }
 
@@ -2390,7 +2674,14 @@
             // 类别拖拽
             document.querySelectorAll('.category .drag-handle[data-drag-type="category"]').forEach(handle => {
                 handle.draggable = true;
+                handle.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                });
+                handle.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                });
                 handle.addEventListener('dragstart', (e) => {
+                    e.stopPropagation();
                     const category = handle.dataset.category;
                     draggedItem = category;
                     draggedType = 'category';
@@ -2444,7 +2735,14 @@
             // 提示词拖拽
             document.querySelectorAll('.prompt-item .drag-handle[data-drag-type="prompt"]').forEach(handle => {
                 handle.draggable = true;
+                handle.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                });
+                handle.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                });
                 handle.addEventListener('dragstart', (e) => {
+                    e.stopPropagation();
                     const promptId = handle.dataset.id;
                     const category = handle.dataset.category;
                     draggedItem = promptId;
@@ -2462,13 +2760,14 @@
                 handle.addEventListener('dragend', (e) => {
                     document.querySelectorAll('.prompt-item.dragging').forEach(el => el.classList.remove('dragging'));
                     document.querySelectorAll('.prompt-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+                    document.querySelectorAll('.category-content.drag-over').forEach(el => el.classList.remove('drag-over'));
                     draggedItem = null;
                     draggedType = null;
                     draggedCategory = null;
                 });
             });
 
-            // 提示词放置区域
+            // 提示词放置区域 - 支持跨类别
             document.querySelectorAll('.prompt-item').forEach(promptItem => {
                 promptItem.addEventListener('dragover', (e) => {
                     if (draggedType === 'prompt') {
@@ -2485,13 +2784,50 @@
                 promptItem.addEventListener('drop', async (e) => {
                     if (draggedType === 'prompt') {
                         e.preventDefault();
+                        e.stopPropagation();
                         promptItem.classList.remove('drag-over');
                         
                         const targetId = promptItem.dataset.id;
                         const targetCategory = promptItem.dataset.category;
                         
-                        if (draggedItem !== targetId && draggedCategory === targetCategory) {
-                            await reorderPrompts(draggedCategory, draggedItem, targetId);
+                        if (draggedItem !== targetId) {
+                            if (draggedCategory === targetCategory) {
+                                // 同类别内排序
+                                await reorderPrompts(draggedCategory, draggedItem, targetId);
+                            } else {
+                                // 跨类别移动
+                                await movePromptToCategory(draggedCategory, targetCategory, draggedItem, targetId);
+                            }
+                        }
+                    }
+                });
+            });
+
+            // 类别内容放置区域 - 支持拖到空类别或类别末尾
+            document.querySelectorAll('.category-content').forEach(contentDiv => {
+                contentDiv.addEventListener('dragover', (e) => {
+                    if (draggedType === 'prompt') {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        contentDiv.classList.add('drag-over');
+                    }
+                });
+                
+                contentDiv.addEventListener('dragleave', (e) => {
+                    contentDiv.classList.remove('drag-over');
+                });
+                
+                contentDiv.addEventListener('drop', async (e) => {
+                    if (draggedType === 'prompt') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        contentDiv.classList.remove('drag-over');
+                        
+                        const targetCategory = contentDiv.id.replace('cat-', '');
+                        
+                        if (draggedCategory !== targetCategory) {
+                            // 跨类别移动到目标类别末尾
+                            await movePromptToCategory(draggedCategory, targetCategory, draggedItem, 'end');
                         }
                     }
                 });
@@ -2555,8 +2891,45 @@
             }
         }
 
+        async function movePromptToCategory(fromCategory, toCategory, promptId, insertPosition) {
+            try {
+                const response = await fetch('/move_prompt_to_category', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        from_category: fromCategory,
+                        to_category: toCategory,
+                        prompt_id: promptId,
+                        insert_position: insertPosition
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    await loadData();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to move prompt', e);
+                alert('Failed to move prompt: ' + e.message);
+            }
+        }
+
         // 事件委托处理提示词卡片点击
         document.addEventListener('click', (e) => {
+            // 处理 drag-handle 点击（拖拽）- 不做任何事
+            const dragHandle = e.target.closest('.drag-handle');
+            if (dragHandle) {
+                e.stopPropagation();
+                return;
+            }
+
             // 处理 select-area 点击（选择提示词）
             const selectArea = e.target.closest('.select-area');
             if (selectArea) {

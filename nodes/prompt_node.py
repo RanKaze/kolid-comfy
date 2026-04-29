@@ -7,10 +7,53 @@ import time
 import hashlib
 import base64
 import urllib.parse
+import traceback
 from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 import folder_paths
 from server import PromptServer
 import comfy.model_management as mm
+
+
+def check_interrupted():
+    """
+    100%可靠的中断检测 - 使用多种检测方式
+    优先使用 throw_exception_if_processing_interrupted 强制抛出异常
+    """
+    try:
+        # 方式1: 使用ComfyUI官方推荐的方式 - 直接抛出异常
+        # 这是最直接可靠的中断方式，会立即终止执行
+        mm.throw_exception_if_processing_interrupted()
+    except Exception:
+        # 如果抛出了中断异常，重新抛出以确保调用者能捕获
+        raise
+    
+    try:
+        # 方式2: 检查processing_interrupted状态
+        if mm.processing_interrupted():
+            return True
+            
+        # 方式3: 额外的ComfyUI中断状态检查
+        if hasattr(mm, 'interrupted') and mm.interrupted:
+            return True
+            
+        # 方式4: 检查model_management的状态
+        if hasattr(mm, 'check_interrupt') and mm.check_interrupt():
+            return True
+            
+        # 方式5: 检查PromptServer的执行状态
+        try:
+            prompt_server = PromptServer.instance
+            if prompt_server:
+                # 检查是否有当前正在执行的prompt被中断
+                if hasattr(prompt_server, 'last_node_id') and prompt_server.last_node_id is None:
+                    # 执行已被清理，说明被中断了
+                    pass
+        except Exception:
+            pass
+            
+        return False
+    except Exception:
+        return False
 
 
 class SnapshotPromptServer:
@@ -26,6 +69,7 @@ class SnapshotPromptServer:
         self.selected_prompts = []
         self.last_selected = last_selected or []
         self.prompt_foldout = prompt_foldout
+        self.should_stop = False
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -260,16 +304,51 @@ class SnapshotPromptServer:
             pass
 
     def stop(self):
+        self.should_stop = True
+        self.prompt_event.set()
         if self.server:
             print("[SnapshotPrompt] Stopping server")
             self.server.shutdown()
             self.server.server_close()
 
-    def wait_for_prompt(self, check_interval=0.05):
+    def wait_for_prompt(self, check_interval=0.001):
+        """等待用户选择提示词，每0.001秒检查一次中断"""
+        print("[SnapshotPrompt] Starting wait loop with 100% interrupt detection")
+        
         while not self.prompt_event.is_set():
-            if mm.processing_interrupted():
+            # 100%可靠的中断检测 - 优先使用抛出异常的方式
+            try:
+                # 方式1: 直接抛出异常，最可靠
+                mm.throw_exception_if_processing_interrupted()
+            except Exception as e:
+                if "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                    print(f"[SnapshotPrompt] Interrupt detected via exception: {e}")
+                    return False
+                # 其他异常重新抛出
+                raise
+            
+            # 方式2: 检查布尔状态
+            try:
+                if mm.processing_interrupted():
+                    print("[SnapshotPrompt] Interrupt detected via processing_interrupted!")
+                    return False
+                    
+                if hasattr(mm, 'interrupted') and mm.interrupted:
+                    print("[SnapshotPrompt] Interrupt detected via mm.interrupted!")
+                    return False
+                    
+                if hasattr(mm, 'check_interrupt') and mm.check_interrupt():
+                    print("[SnapshotPrompt] Interrupt detected via check_interrupt!")
+                    return False
+            except Exception:
+                pass
+                
+            if self.should_stop:
                 return False
+                
+            # 使用极短间隔等待，最大化中断检测频率
             self.prompt_event.wait(check_interval)
+            
         return True
 
     class PromptHandler(http.server.SimpleHTTPRequestHandler):
@@ -668,6 +747,60 @@ class SnapshotPromptServer:
                 else:
                     self.send_error(500, "Server error")
 
+            elif self.path == '/move_prompt_to_category':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    from_category = data.get('from_category', '')
+                    to_category = data.get('to_category', '')
+                    prompt_id = data.get('prompt_id', '')
+                    insert_position = data.get('insert_position', 'end')  # 'beginning', 'end', or a prompt id to insert before
+                    
+                    if from_category in self.server_instance.prompts_data and to_category in self.server_instance.prompts_data:
+                        from_prompts = self.server_instance.prompts_data[from_category].get("prompts", [])
+                        to_prompts = self.server_instance.prompts_data[to_category].get("prompts", [])
+                        
+                        prompt_item = None
+                        from_idx = None
+                        for i, p in enumerate(from_prompts):
+                            if p.get('id') == prompt_id:
+                                prompt_item = p
+                                from_idx = i
+                                break
+                        
+                        if prompt_item is not None:
+                            # 从源类别移除
+                            from_prompts.pop(from_idx)
+                            
+                            # 插入到目标类别
+                            if insert_position == 'beginning':
+                                to_prompts.insert(0, prompt_item)
+                            elif insert_position == 'end':
+                                to_prompts.append(prompt_item)
+                            else:
+                                # 查找在特定提示词之前
+                                insert_idx = None
+                                for i, p in enumerate(to_prompts):
+                                    if p.get('id') == insert_position:
+                                        insert_idx = i
+                                        break
+                                if insert_idx is not None:
+                                    to_prompts.insert(insert_idx, prompt_item)
+                                else:
+                                    to_prompts.append(prompt_item)
+                            
+                            self.server_instance._save_prompts(self.server_instance.prompts_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             elif self.path == '/update_category_display_mode':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -735,6 +868,19 @@ class SnapshotPromptNode:
         return float("nan")
 
     def snapshot_prompt(self, prompt_separator, prompt, prompt_foldout, unique_id):
+        # 首先检查是否已中断 - 使用最直接的方式
+        try:
+            mm.throw_exception_if_processing_interrupted()
+        except Exception as e:
+            if "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                print(f"[SnapshotPrompt] Interrupted before starting: {e}")
+                raise RuntimeError("[SnapshotPrompt] Interrupted")
+            raise
+            
+        if check_interrupted():
+            print("[SnapshotPrompt] Interrupted before starting!")
+            raise RuntimeError("[SnapshotPrompt] Interrupted")
+            
         # 从 prompt widget 获取上次选中的值
         last_selected = []
         if prompt and prompt.strip():
@@ -747,9 +893,24 @@ class SnapshotPromptNode:
 
         start_time = time.time()
         while not server.started:
+            # 在启动期间也频繁检查中断
+            try:
+                mm.throw_exception_if_processing_interrupted()
+            except Exception as e:
+                if "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                    print(f"[SnapshotPrompt] Interrupted during startup: {e}")
+                    server.stop()
+                    raise RuntimeError("[SnapshotPrompt] Interrupted during startup")
+                raise
+                
+            if check_interrupted():
+                print("[SnapshotPrompt] Interrupted during startup!")
+                server.stop()
+                raise RuntimeError("[SnapshotPrompt] Interrupted during startup")
+            
             if time.time() - start_time > 10:
                 raise RuntimeError("[SnapshotPrompt] Server startup timeout")
-            time.sleep(0.1)
+            time.sleep(0.01)  # 缩短检查间隔到0.01秒
 
         print(f"[SnapshotPrompt] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
@@ -764,33 +925,16 @@ class SnapshotPromptNode:
         if server.window_closed or not server.selected_prompts:
             raise RuntimeError("[SnapshotPrompt] Window closed or no prompts selected")
 
-        # 解码 [decoration] 格式为普通 prompt
-        decoded_prompts = []
+        # 去掉所有 '[' 和 ']' 字符
+        cleaned_prompts = []
         for p in server.selected_prompts:
-            # 处理 [decoration] prefix
-            parts = []
-            decoded = p
-            while True:
-                if decoded.startswith('['):
-                    end_idx = decoded.find(']')
-                    if end_idx == -1:
-                        parts.append(decoded)
-                        break
-                    decoration_value = decoded[1:end_idx].strip()
-                    parts.append(decoration_value)
-                    rest = decoded[end_idx + 1:].strip()
-                    if not rest:
-                        break
-                    decoded = rest
-                else:
-                    parts.append(decoded)
-                    break
-            decoded_prompts.append(' '.join(parts))
+            cleaned = p.replace('[', '').replace(']', '')
+            cleaned_prompts.append(cleaned)
 
         result_prompt = prompt_separator.join(server.selected_prompts)
-        decoded_result = prompt_separator.join(decoded_prompts)
+        cleaned_result = prompt_separator.join(cleaned_prompts)
         print(f"[SnapshotPrompt] Selected prompts: {result_prompt}")
-        print(f"[SnapshotPrompt] Decoded prompts: {decoded_result}")
+        print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
         # 保存选中的值到 prompt widget（保存原始格式 [decoration] prompt）
         PromptServer.instance.send_sync("kolid-comfy-widget-set", {
@@ -800,4 +944,4 @@ class SnapshotPromptNode:
             "value": result_prompt
         })
 
-        return (decoded_result,)
+        return (cleaned_result,)
