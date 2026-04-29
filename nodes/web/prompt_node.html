@@ -273,6 +273,36 @@
         .category-header .display-mode-btn:hover {
             background: #007aff;
         }
+        .category-header .count-badge {
+            position: relative;
+            z-index: 2;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            background: #007aff;
+            color: white;
+            margin-left: 8px;
+            min-width: 24px;
+            text-align: center;
+        }
+        .category-header .decoration-tags {
+            position: relative;
+            z-index: 2;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px;
+            margin-left: 8px;
+            align-items: center;
+        }
+        .category-header .decoration-tag {
+            padding: 2px 6px;
+            background: rgba(40, 167, 69, 0.9);
+            border-radius: 4px;
+            font-size: 10px;
+            color: white;
+            font-weight: 500;
+        }
         /* 展开状态下始终显示编辑按钮 */
         .category.expanded .category-header .edit-category-btn {
             display: inline-block;
@@ -596,6 +626,23 @@
         }
         .prompt-item .action-btn.delete:hover {
             background: #dc3545;
+        }
+        .prompt-item .decoration-tags {
+            position: absolute;
+            top: 5px;
+            left: 35px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px;
+            z-index: 9;
+        }
+        .prompt-item .decoration-tag {
+            padding: 2px 6px;
+            background: rgba(40, 167, 69, 0.9);
+            border-radius: 4px;
+            font-size: 10px;
+            color: white;
+            font-weight: 500;
         }
         
         /* Add Category 卡片 */
@@ -1130,6 +1177,15 @@
                 const displayMode = categoryDisplayModes[category] || 'horizontal';
                 const sizeMode = categorySizeModes[category] || 'normal';
 
+                const selectedCount = getCategorySelectedCount(category, prompts);
+                
+                const catDecorations = Array.isArray(catData.decorations) ? catData.decorations : [];
+                const catDecoTagsHtml = catDecorations.length > 0 ? `
+                    <div class="decoration-tags">
+                        ${catDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
+                    </div>
+                ` : '';
+
                 categoryDiv.innerHTML = `
                     <div class="category-header" onclick="toggleCategory('${category}')">
                         ${!isExpanded && bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
@@ -1139,6 +1195,8 @@
                                 <span>${category}</span>
                             </div>
                             <div style="display: flex; align-items: center;">
+                                ${catDecoTagsHtml}
+                                ${selectedCount > 0 ? `<span class="count-badge">${selectedCount}</span>` : ''}
                                 <button class="display-mode-btn" onclick="event.stopPropagation(); openEditDisplayModeModal('${category}')">⊞</button>
                                 <button class="edit-category-btn" onclick="event.stopPropagation(); openEditCategoryModal('${category}')">✏️</button>
                                 <span class="toggle">${isExpanded ? '▲' : '▼'}</span>
@@ -1147,12 +1205,21 @@
                     </div>
                     ${isExpanded ? `
                     <div class="category-content ${displayMode === 'box' ? 'box-mode' : ''} ${categorySizeModes[category] === 'mini' ? 'mini-mode' : ''}" id="cat-${category}">
-                        ${filteredPrompts.map(p => `
+                        ${filteredPrompts.map(p => {
+                                const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
+                                const uniquePDecorations = pDecorations.filter(d => !catDecorations.includes(d));
+                                const decoTagsHtml = uniquePDecorations.length > 0 ? `
+                                    <div class="decoration-tags">
+                                        ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
+                                    </div>
+                                ` : '';
+                                return `
                             <div class="prompt-item ${isTemporaryContext ? 
                                 (temporarySelectedPrompts.includes(p.prompt) ? 'selected' : '') : 
                                 (isBasePromptSelected(p.prompt) ? 'selected' : '')}"
                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
                                 <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
+                                ${decoTagsHtml}
                                 <div class="select-area">
                                     <div class="image-layer">
                                         ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
@@ -1168,7 +1235,8 @@
                                     <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
                                 </div>
                             </div>
-                        `).join('')}
+                        `;
+                            }).join('')}
                         ${!searchQuery ? `
                         <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
                             <div style="font-size: 24px; color: #888;">+</div>
@@ -1187,6 +1255,13 @@
                 addDiv.innerHTML = '<span>+ Add Category</span>';
                 container.appendChild(addDiv);
             }
+        }
+
+        function getCategorySelectedCount(category, prompts) {
+            if (isTemporaryContext) {
+                return prompts.filter(p => temporarySelectedPrompts.includes(p.prompt)).length;
+            }
+            return prompts.filter(p => isBasePromptSelected(p.prompt)).length;
         }
 
 
@@ -1256,16 +1331,26 @@
                 
                 const displayMode = categoryDisplayModes[category] || 'horizontal';
                 const sizeMode = categorySizeModes[category] || 'normal';
+                const catDecos = Array.isArray(catData.decorations) ? catData.decorations : [];
                 
                 // 创建内容区域并添加动画类
                 const contentDiv = document.createElement('div');
                 contentDiv.className = `category-content animating ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}`;
                 contentDiv.id = `cat-${category}`;
                 contentDiv.innerHTML = `
-                    ${filteredPrompts.map(p => `
+                    ${filteredPrompts.map(p => {
+                        const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
+                        const uniquePDecorations = pDecorations.filter(d => !catDecos.includes(d));
+                        const decoTagsHtml = uniquePDecorations.length > 0 ? `
+                            <div class="decoration-tags">
+                                ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
+                            </div>
+                        ` : '';
+                        return `
                         <div class="prompt-item ${isBasePromptSelected(p.prompt) ? 'selected' : ''}"
                              data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
                             <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                            ${decoTagsHtml}
                             <div class="select-area" style="width: 100%; height: 100%; position: relative;">
                                 <div class="image-layer">
                                     ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
@@ -1281,7 +1366,8 @@
                                 <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
                             </div>
                         </div>
-                    `).join('')}
+                    `;
+                    }).join('')}
                     ${!searchQuery ? `
                     <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
                         <div style="font-size: 24px; color: #888;">+</div>
