@@ -716,7 +716,7 @@ class SnapshotPromptNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt_separator": ("STRING", {"default": ",", "multiline": False}),
+                "prompt_separator": ("STRING", {"default": ", ", "multiline": False}),
                 "prompt": ("STRING", {"default": "", "multiline": False}),
                 "prompt_foldout": ("BOOLEAN", {"default": False}),
             },
@@ -768,15 +768,24 @@ class SnapshotPromptNode:
         decoded_prompts = []
         for p in server.selected_prompts:
             # 处理 [decoration] prefix
+            parts = []
             decoded = p
-            while decoded.startswith('['):
-                end_idx = decoded.find(']')
-                if end_idx == -1:
+            while True:
+                if decoded.startswith('['):
+                    end_idx = decoded.find(']')
+                    if end_idx == -1:
+                        parts.append(decoded)
+                        break
+                    decoration_value = decoded[1:end_idx].strip()
+                    parts.append(decoration_value)
+                    rest = decoded[end_idx + 1:].strip()
+                    if not rest:
+                        break
+                    decoded = rest
+                else:
+                    parts.append(decoded)
                     break
-                decoration_value = decoded[1:end_idx].strip()
-                rest = decoded[end_idx + 1:].strip()
-                decoded = f"{decoration_value} {rest}" if rest else decoration_value
-            decoded_prompts.append(decoded)
+            decoded_prompts.append(' '.join(parts))
 
         result_prompt = prompt_separator.join(server.selected_prompts)
         decoded_result = prompt_separator.join(decoded_prompts)

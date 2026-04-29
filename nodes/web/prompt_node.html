@@ -644,6 +644,96 @@
             color: white;
             font-weight: 500;
         }
+        .prompt-item-wrapper {
+            position: relative;
+            display: flex;
+            flex-direction: row;
+            gap: 0;
+            flex: 0 0 auto;
+            align-items: flex-start;
+        }
+        
+        .category-content.box-mode .prompt-item-wrapper {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+        }
+        .category-content.box-mode .prompt-item-wrapper .selected-card {
+            width: 100%;
+            height: auto;
+            min-height: 60px;
+            margin-left: 0;
+            margin-top: 10px;
+        }
+        .prompt-item-wrapper .selected-card {
+            position: relative;
+            flex: 0 0 auto;
+            width: 250px;
+            height: 350px;
+            background: rgba(0, 122, 255, 0.2);
+            border: 2px solid #007aff;
+            border-radius: 12px;
+            margin-left: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 15px;
+            z-index: 2;
+        }
+        .prompt-item-wrapper .selected-card-content {
+            font-size: 14px;
+            color: white;
+            font-weight: 500;
+            word-break: break-all;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .prompt-item-wrapper .selected-card-delete {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: rgba(220, 53, 69, 0.9);
+            border: none;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+            z-index: 10;
+        }
+        .prompt-item-wrapper .selected-card-delete:hover {
+            background: rgba(220, 53, 69, 1);
+        }
+        .category-content.mini-mode .prompt-item-wrapper {
+            display: flex;
+            flex-direction: row;
+            align-items: flex-start;
+        }
+        .category-content.mini-mode .prompt-item-wrapper .selected-card {
+            width: 240px;
+            height: 80px;
+            padding: 5px 10px;
+        }
+        .category-content.mini-mode .prompt-item-wrapper .selected-card .selected-card-content {
+            font-size: 11px;
+            word-break: break-all;
+        }
+        .category-content.box-mode.mini-mode .prompt-item-wrapper {
+            display: flex;
+            flex-direction: column;
+        }
+        .category-content.box-mode.mini-mode .prompt-item-wrapper .selected-card {
+            width: 100%;
+            height: 80px;
+            margin-left: 0;
+            margin-top: 8px;
+        }
         
         /* Add Category 卡片 */
         .add-category-card {
@@ -841,7 +931,10 @@
         <!-- 新增：临时模式提示条幅 -->
         <div id="temporaryBanner" class="temporary-banner hidden">
             <span id="bannerText"></span>
-            <button class="btn btn-secondary" onclick="endTemporaryContext()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px;">
+            <button class="btn btn-success" onclick="addBasePromptOnly()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px; background: #28a745;">
+                直接添加
+            </button>
+            <button class="btn btn-secondary" onclick="endTemporaryContext()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px;">
                 完成选择
             </button>
         </div>
@@ -1055,19 +1148,44 @@
             console.log(`✅ 进入临时模式: ${title}`);
         }
 
+        function addBasePromptOnly() {
+            if (!isTemporaryContext || !temporaryBasePrompt) return;
+
+            selectedPrompts.push(temporaryBasePrompt);
+
+            // 恢复原始状态
+            expandedCategories = new Set(originalExpandedCategories);
+
+            isTemporaryContext = false;
+            temporaryMatchFn = null;
+            temporaryBasePrompt = null;
+            temporaryTitle = "";
+            temporarySelectedPrompts = [];
+            originalSelectedPrompts = [];
+            originalExpandedCategories.clear();
+
+            hideTemporaryBanner();
+            renderCategories();
+            updateSelectedTags();
+            updateFooterButton();
+
+            console.log("✅ 直接添加基础提示词");
+        }
+
         function endTemporaryContext() {
             if (!isTemporaryContext) return;
 
             let combinedPrompt = temporaryBasePrompt || '';
+            const selectedDecos = [];
             if (temporarySelectedPrompts.length > 0) {
-                combinedPrompt = temporarySelectedPrompts.map(p => `[${p}]`).join(' ') + ' ' + combinedPrompt;
+                for (const p of temporarySelectedPrompts) {
+                    const decoPrompt = p.startsWith('[') ? p : `[${p}]`;
+                    combinedPrompt = `${decoPrompt} ${combinedPrompt}`;
+                    selectedDecos.push(p);
+                }
             }
 
             if (combinedPrompt) {
-                // 清理旧组合后再添加新组合
-                selectedPrompts = selectedPrompts.filter(p => 
-                    !(p.includes(temporaryBasePrompt) && p.startsWith('['))
-                );
                 selectedPrompts.push(combinedPrompt);
             }
 
@@ -1082,7 +1200,7 @@
             originalSelectedPrompts = [];
             originalExpandedCategories.clear();
 
-            hideTemporaryBanner();        // 隐藏条幅
+            hideTemporaryBanner();
             renderCategories();
             updateSelectedTags();
             updateFooterButton();
@@ -1213,27 +1331,44 @@
                                         ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
                                     </div>
                                 ` : '';
+                                
+                                const isSelected = isTemporaryContext ? 
+                                    temporarySelectedPrompts.includes(p.prompt) : 
+                                    isBasePromptSelected(p.prompt);
+                                const combos = getPromptCombinations(p.prompt);
+                                
+                                let selectedCardsHtml = '';
+                                for (const combo of combos) {
+                                    selectedCardsHtml += `
+                                        <div class="selected-card" data-prompt="${combo}">
+                                            <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${combo}')">×</button>
+                                            <div class="selected-card-content">${combo}</div>
+                                        </div>
+                                    `;
+                                }
+                                
                                 return `
-                            <div class="prompt-item ${isTemporaryContext ? 
-                                (temporarySelectedPrompts.includes(p.prompt) ? 'selected' : '') : 
-                                (isBasePromptSelected(p.prompt) ? 'selected' : '')}"
-                                data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
-                                ${decoTagsHtml}
-                                <div class="select-area">
-                                    <div class="image-layer">
-                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
+                            <div class="prompt-item-wrapper">
+                                <div class="prompt-item ${isSelected ? 'selected' : ''}"
+                                    data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                    <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
+                                    ${decoTagsHtml}
+                                    <div class="select-area">
+                                        <div class="image-layer">
+                                            ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
+                                        </div>
+                                        <div class="glass-layer"></div>
+                                        <div class="text-layer">
+                                            <div class="name">${p.name}</div>
+                                            <div class="prompt-text">${p.prompt}</div>
+                                        </div>
                                     </div>
-                                    <div class="glass-layer"></div>
-                                    <div class="text-layer">
-                                        <div class="name">${p.name}</div>
-                                        <div class="prompt-text">${p.prompt}</div>
+                                    <div class="actions">
+                                        <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                        <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
                                     </div>
                                 </div>
-                                <div class="actions">
-                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
-                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
-                                </div>
+                                ${selectedCardsHtml}
                             </div>
                         `;
                             }).join('')}
@@ -1346,25 +1481,41 @@
                                 ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
                             </div>
                         ` : '';
+                        const isSelected = isBasePromptSelected(p.prompt);
+                        const combos = getPromptCombinations(p.prompt);
+                        
+                        let selectedCardsHtml = '';
+                        for (const combo of combos) {
+                            selectedCardsHtml += `
+                                <div class="selected-card" data-prompt="${combo}">
+                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${combo}')">×</button>
+                                    <div class="selected-card-content">${combo}</div>
+                                </div>
+                            `;
+                        }
+                        
                         return `
-                        <div class="prompt-item ${isBasePromptSelected(p.prompt) ? 'selected' : ''}"
-                             data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                            <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
-                            ${decoTagsHtml}
-                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
-                                <div class="image-layer">
-                                    ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                        <div class="prompt-item-wrapper">
+                            <div class="prompt-item ${isSelected ? 'selected' : ''}"
+                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                                ${decoTagsHtml}
+                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                    <div class="image-layer">
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                    </div>
+                                    <div class="glass-layer"></div>
+                                    <div class="text-layer">
+                                        <div class="name">${p.name}</div>
+                                        <div class="prompt-text">${p.prompt}</div>
+                                    </div>
                                 </div>
-                                <div class="glass-layer"></div>
-                                <div class="text-layer">
-                                    <div class="name">${p.name}</div>
-                                    <div class="prompt-text">${p.prompt}</div>
+                                <div class="actions">
+                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
                                 </div>
                             </div>
-                            <div class="actions">
-                                <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
-                                <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
-                            </div>
+                            ${selectedCardsHtml}
                         </div>
                     `;
                     }).join('')}
@@ -1403,30 +1554,12 @@
                 return;
             }
 
-            // 情况2：删除已选中的装饰组合提示词（关键修复）
-            const index = selectedPrompts.indexOf(prompt);
-            if (index !== -1) {
-                selectedPrompts.splice(index, 1);
-                updateSelectedTags();
-                renderCategories();
-                return;
-            }
-
-            // 情况3：尝试作为普通 base prompt 删除装饰组合（兼容旧逻辑）
-            const decoIndex = findSelectedDecorationPrompt(prompt);
-            if (decoIndex !== -1) {
-                selectedPrompts.splice(decoIndex, 1);
-                updateSelectedTags();
-                renderCategories();
-                return;
-            }
-
-            // 情况4：正常进入装饰选择模式
             const promptData = findPromptData(prompt);
             if (!promptData) return;
 
             const allDecorations = getPromptDecorations(promptData);
 
+            // 情况2：有修饰可用 → 总是进入修饰选择模式（不管有没有被选中）
             if (allDecorations.length > 0) {
                 const matchFn = (p, cat) => {
                     if (p.prompt === prompt) return false;
@@ -1436,11 +1569,12 @@
                     return pTags.some(t => allDecorations.includes(t)) || 
                         catTags.some(t => allDecorations.includes(t));
                 };
-                beginTemporaryContext(matchFn, prompt);
+                const title = isBasePromptSelected(prompt) ? `继续选择 "${promptData.name}" 的修饰词` : `选择 "${promptData.name}" 的修饰词`;
+                beginTemporaryContext(matchFn, prompt, title);
                 return;
             }
 
-            // 情况5：普通提示词（无装饰）
+            // 情况3：普通提示词（无装饰）→ 切换选择/删除
             const normalIndex = selectedPrompts.indexOf(prompt);
             if (normalIndex === -1) {
                 selectedPrompts.push(prompt);
@@ -1452,12 +1586,20 @@
             renderCategories();
         }
 
+        function getLastDecorationBase(prompt) {
+            const lastBracketPos = prompt.lastIndexOf('] ');
+            if (lastBracketPos === -1) return null;
+            return prompt.substring(lastBracketPos + 2).trim();
+        }
+
         function findSelectedDecorationPrompt(basePrompt) {
             for (let i = 0; i < selectedPrompts.length; i++) {
                 const p = selectedPrompts[i];
-                // 如果是装饰组合格式（如 [xxx] [yyy] basePrompt）
-                if (p.endsWith(basePrompt) && p.includes('[')) {
-                    return i;
+                if (p.includes('[')) {
+                    const lastBase = getLastDecorationBase(p);
+                    if (lastBase === basePrompt) {
+                        return i;
+                    }
                 }
             }
             return -1;
@@ -1467,6 +1609,21 @@
             // 检查 prompt 是否作为 base prompt 被选中（包括 decoration 组合）
             if (selectedPrompts.includes(prompt)) return true;
             return findSelectedDecorationPrompt(prompt) !== -1;
+        }
+
+        function getPromptCombinations(basePrompt) {
+            const combinations = [];
+            for (const p of selectedPrompts) {
+                if (p === basePrompt) {
+                    combinations.push(p);
+                } else if (p.includes('[')) {
+                    const lastBase = getLastDecorationBase(p);
+                    if (lastBase === basePrompt) {
+                        combinations.push(p);
+                    }
+                }
+            }
+            return combinations;
         }
 
         function findPromptData(prompt) {
@@ -1627,13 +1784,18 @@
         function finishDecorationSelection() {
             if (!currentDecorationTarget) return;
             
+            const basePrompt = currentDecorationTarget.prompt;
+            const baseId = currentDecorationTarget.id;
+            
             // 组合格式: [decoration1] [decoration2] ... originalPrompt
-            let combined = currentDecorationTarget.prompt;
+            let combined = basePrompt;
             for (const s of currentDecorationSelections) {
-                combined = `[${s.prompt}] ${combined}`;
+                const decoPrompt = s.prompt.startsWith('[') ? s.prompt : `[${s.prompt}]`;
+                combined = `${decoPrompt} ${combined}`;
             }
             
             selectedPrompts.push(combined);
+            
             updateSelectedTags();
             closeDecorationModal();
             renderCategories();
@@ -1897,6 +2059,16 @@
                 await loadData();
             } catch (e) {
                 console.error('Failed to update prompt', e);
+            }
+        }
+
+        function deleteSelectedPrompt(event, promptText) {
+            event.stopPropagation();
+            const index = selectedPrompts.indexOf(promptText);
+            if (index !== -1) {
+                selectedPrompts.splice(index, 1);
+                updateSelectedTags();
+                renderCategories();
             }
         }
 
@@ -2421,6 +2593,7 @@
 
         window.beginTemporaryContext = beginTemporaryContext;
         window.endTemporaryContext = endTemporaryContext;
+        window.addBasePromptOnly = addBasePromptOnly;
         document.addEventListener('DOMContentLoaded', loadData);
     </script>
 </body>
