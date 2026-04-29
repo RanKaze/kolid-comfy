@@ -451,69 +451,86 @@ function updateBranchGroupNode(node){
                 updateActiveAndFoldout();
             }, {values: visibleNodeTitles});
         }
-        // MaxOne模式：确保最多只有一个节点被选中
-        else if (layoutBranchMode === 'MaxOne') {
-            if (filteredBranchNodes.length > 0) {
-                // 收集所有节点，包括hide为true的节点
-                let allNodes = filteredBranchNodes;
-                
-                let visibleNodeTitles = [];
+    }
+    // MaxOne模式：确保最多只有一个节点被选中
+    else if (layoutBranchMode === 'MaxOne') {
+        if (filteredBranchNodes.length > 0) {
+            // 收集所有节点，包括hide为true的节点
+            let allNodes = filteredBranchNodes;
+            
+            let visibleNodeTitles = [];
 
-                // 收集仅hide为false的节点标题，用于combo控件
-                visibleNodeTitles.push('[None]');
-                let tempTitles = allNodes
-                    .filter(n => !n.properties.hide)
-                    .map(n => n.title);
-                visibleNodeTitles.push(...tempTitles);
-                
-                // 找出当前选中的节点
-                let selectedNode = allNodes.find(n => n.widgets[0].value);
-                let currentValue = selectedNode ? selectedNode.title : (visibleNodeTitles[0] || '');
-                
-                // 确保currentValue在visibleNodeTitles中
-                if(!visibleNodeTitles.includes(currentValue) && visibleNodeTitles.length > 0){
-                    currentValue = visibleNodeTitles[0];
+            // 收集仅hide为false的节点标题，用于combo控件
+            visibleNodeTitles.push('[None]');
+            let tempTitles = allNodes
+                .filter(n => !n.properties.hide)
+                .map(n => n.title);
+            visibleNodeTitles.push(...tempTitles);
+            
+            // 找出当前选中的节点
+            let selectedNode = allNodes.find(n => n.widgets[0].value);
+            let currentValue = selectedNode ? selectedNode.title : (visibleNodeTitles[0] || '');
+            
+            // 确保currentValue在visibleNodeTitles中
+            if(!visibleNodeTitles.includes(currentValue) && visibleNodeTitles.length > 0){
+                currentValue = visibleNodeTitles[0];
+            }
+
+            for(let n of allNodes){
+                n.widgets[0].value = (n.title === currentValue);
+                if(n.widgets[0].callback){
+                    n.widgets[0].callback(n.widgets[0].value);
                 }
+            }
 
+            // 自动展开选中节点的子节点
+            let expandNode = allNodes.find(n => n.title === currentValue);
+            if(expandNode){
+                // 初始化activeNodes
+                let activeNodes = expandNode.properties.active_nodes;
+                if(activeNodes){
+                    for(let activeNode of getNodes(node, activeNodes)){
+                        activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
+                    }
+                }
+                let foldoutNodes = expandNode.properties.foldout_nodes;
+                if(foldoutNodes){
+                    for(let foldoutNode of getNodes(node, foldoutNodes)){
+                        if(foldoutNode.collapsed == expandNode.widgets[0].value) {
+                            foldoutNode.collapse();
+                        }
+                    }
+                }
+            }
+            
+            node.addWidget("combo",`${node.title}`,currentValue,(value)=>{
                 for(let n of allNodes){
-                    n.widgets[0].value = (n.title === currentValue);
+                    n.widgets[0].value = (n.title === value);
                     if(n.widgets[0].callback){
                         n.widgets[0].callback(n.widgets[0].value);
                     }
                 }
-
-                // 自动展开选中节点的子节点
-                let expandNode = allNodes.find(n => n.title === currentValue);
-                if(expandNode){
-                    // 初始化activeNodes
-                    let activeNodes = expandNode.properties.active_nodes;
-                    if(activeNodes){
-                        for(let activeNode of getNodes(node, activeNodes)){
-                            activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
-                        }
-                    }
-                    let foldoutNodes = expandNode.properties.foldout_nodes;
-                    if(foldoutNodes){
-                        for(let foldoutNode of getNodes(node, foldoutNodes)){
-                            if(foldoutNode.collapsed == expandNode.widgets[0].value) {
-                                foldoutNode.collapse();
-                            }
-                        }
-                    }
-                }
-                
-                node.addWidget("combo",`${node.title}`,currentValue,(value)=>{
-                    for(let n of allNodes){
-                        n.widgets[0].value = (n.title === value);
-                        if(n.widgets[0].callback){
-                            n.widgets[0].callback(n.widgets[0].value);
-                        }
-                    }
-                    updateActiveAndFoldout();
-                }, {values: visibleNodeTitles});
-            }
+                updateActiveAndFoldout();
+            }, {values: visibleNodeTitles});
         }
     }
+}
+
+function wrapOnPropertyChanged(node, updateFn) {
+    const original = node.onPropertyChanged;
+    node.onPropertyChanged = (name, value, old_value) => {
+        if (original) {
+            const result = original(name, value, old_value);
+            if (result) {
+                updateFn();
+                return true;
+            }
+            return false;
+        } else {
+            updateFn();
+            return true;
+        }
+    };
 }
 
 function nodeInit(node, is_create){
@@ -539,52 +556,23 @@ function nodeInit(node, is_create){
             updateRelayGraph();
             node.onConfigure = () => {
                 // Property改变也需要重建
-                let originalOnPropertyChanged = node.onPropertyChanged;
-                if(originalOnPropertyChanged){
-                    node.onPropertyChanged = (name, value, old_value) => {
-                        if(originalOnPropertyChanged(name, value, old_value)){
-                            updateRelayGraph();
-                            return true;
-                        }
-                        return false;
-                    }
-                }else{
-                    node.onPropertyChanged = (name, value, old_value) => {
-                        updateRelayGraph();
-                        return true;
-                    }
-                }
+                wrapOnPropertyChanged(node, updateRelayGraph);
             }
         }else{
-            // Property改变也需要重建
-            let originalOnPropertyChanged = node.onPropertyChanged;
-            if(originalOnPropertyChanged){
-                node.onPropertyChanged = (name, value, old_value) => {
-                    if(originalOnPropertyChanged(name, value, old_value)){
-                        updateRelayGraph();
-                        return true;
-                    }
-                    return false;
-                }
-            }else{
-                node.onPropertyChanged = (name, value, old_value) => {
-                    updateRelayGraph();
-                    return true;
-                }
-            }
+            wrapOnPropertyChanged(node, updateRelayGraph);
         }
-
-        
         
         const originalCallback = node.widgets[0].callback;
         if (originalCallback) {
             node.widgets[0].callback = (value) => {
                 originalCallback(value);
                 updateBranchNode(node);
+                updateActiveAndFoldout();
             }
         }else{
             node.widgets[0].callback = (value) => {
                 updateBranchNode(node);
+                updateActiveAndFoldout();
             }
         }
     }else if (node.comfyClass === "BranchGroupNode") {
@@ -610,39 +598,11 @@ function nodeInit(node, is_create){
         updateBranchGroupNode(node)
         if(is_create){
             node.onConfigure = () => {
-                let originalOnPropertyChanged = node.onPropertyChanged;
-                if(originalOnPropertyChanged){
-                    node.onPropertyChanged = (name, value, old_value) => {
-                        if(originalOnPropertyChanged(name, value, old_value)){
-                            updateBranchGroupNode(node);
-                            return true;
-                        }
-                        return false;
-                    }
-                }else{
-                    node.onPropertyChanged = (name, value, old_value) => {
-                        updateBranchGroupNode(node);
-                        return true;
-                    }
-                }
+                // Property改变也需要重建
+                wrapOnPropertyChanged(node, () => updateBranchGroupNode(node));
             }
         }else{
-            // Property改变也需要重建
-            let originalOnPropertyChanged = node.onPropertyChanged;
-            if(originalOnPropertyChanged){
-                node.onPropertyChanged = (name, value, old_value) => {
-                    if(originalOnPropertyChanged(name, value, old_value)){
-                        updateBranchGroupNode(node);
-                        return true;
-                    }
-                    return false;
-                }
-            }else{
-                node.onPropertyChanged = (name, value, old_value) => {
-                    updateBranchGroupNode(node);
-                    return true;
-                }
-            }
+            wrapOnPropertyChanged(node, () => updateBranchGroupNode(node));
         }
         //颜色好像没有回调啊...
         //node.
@@ -660,19 +620,21 @@ app.registerExtension({
             window.kolid_data.branchBeRelayedMap = new Map();
         }
     },
-
+    async beforeConfigureGraph(){
+        window.kolid_data.OpeningGraph = true;
+    },
     async afterConfigureGraph(){
         updateRelayGraph();
-        if(window.kolid_data.UninitNodes !== undefined){
+        if(window.kolid_data.OpeningGraph){
             for(let node of window.kolid_data.UninitNodes){
                 nodeInit(node, false);
             }
-            window.kolid_data.UninitNodes = undefined;
+            window.kolid_data.UninitNodes.clear();
+            window.kolid_data.OpeningGraph = false;
         }
     },
-    // ✅ NEW: Use the getNodeMenuItems hook
     async nodeCreated(node) {
-        if(window.kolid_data.UninitNodes !== undefined){
+        if(window.kolid_data.OpeningGraph){
             window.kolid_data.UninitNodes.add(node);
             return;
         }
@@ -680,3 +642,174 @@ app.registerExtension({
     }
 })
 
+app.registerExtension({
+    name: "KleinBlue.BranchSwitchesNode",
+
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (nodeData.name !== "BranchSwitchesNode") return;
+
+        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
+
+        nodeType.prototype.onNodeCreated = function () {
+            origOnNodeCreated?.apply(this, arguments);
+            const node = this;
+
+            let currentType = "*";
+            let currentConnected = false;
+
+            // ==================== 修改：显示用的 Combo 改名为 "select" ====================
+            const selectWidget = node.widgets[0];
+
+            // ==================== 隐藏的真实 select_input ====================
+            // 先尝试查找是否已存在（防止重复添加）
+            let selectInputWidget = node.widgets.find(w => w.name === "select_input");
+            if (!selectInputWidget) {
+                selectInputWidget = node.addWidget("number", "select_input", 0);
+            }
+
+            function addDynamicInput() {
+                let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                const idx = dynamicInputs.length + 1;
+                node.addInput(`input${idx}`, currentType);
+            }
+
+            function updateInputsType() {
+                node.inputs.forEach(inp => {
+                    if (inp.name.startsWith("input")) inp.type = currentType;
+                });
+            }
+
+            function updateOutputsType() {
+                if (node.outputs && node.outputs.length > 0) {
+                    node.outputs[0].type = currentType;
+                    node.setDirtyCanvas(true, true);
+                }
+            }
+
+            // 更新 Combo（只显示已连接的输入）
+            function updateComboOptions() {
+                const options = [];
+                let connectedCount = 0;
+                let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                dynamicInputs.forEach((input, idx) => {
+                    if (input.link != null) {
+                        connectedCount++;
+                        const link = node.graph.links[input.link];
+                        const upstream = link ? node.graph.getNodeById(link.origin_id) : null;
+                        const name = upstream ? (upstream.title || upstream.type || "未知节点") : "未知节点";
+                        options.push(`[${idx + 1}] ${name}`);
+                    }
+                });
+
+                selectWidget.options.values = connectedCount > 0 ? options : ["[None]"];
+                
+                const currentIdx = selectInputWidget.value || 0;
+                if (connectedCount > 0) {
+                    selectWidget.value = options[Math.min(currentIdx, options.length - 1)] || options[0];
+                } else {
+                    selectWidget.value = "[None]";
+                    selectInputWidget.value = 0;
+                }
+            }
+
+            // 连接/断开处理
+            node.onConnectionsChange = function (type, slot, connected) {
+                if (type === LiteGraph.INPUT) {
+                    // 如果正在操作一个动态端口.
+                    if(node.inputs[slot].name.startsWith("input")){
+                        if (connected){
+                            let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                            let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                            let unconnectedCount = dynamicInputs.length - connectedCount;
+                            // 如果正在连接第一个动态端口,并且没有连接类.
+                            if(connectedCount === 1 && !currentConnected){
+                                currentConnected = true;
+                                const input = node.inputs[slot];
+                                const link = node.graph.links[input.link];
+                                const upstreamNode = node.graph.getNodeById(link.origin_id);
+                                if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
+                                    const outputInfo = upstreamNode.outputs[link.origin_slot];
+                                    currentType = outputInfo.type;
+                                    updateInputsType();
+                                    updateOutputsType();
+                                }
+                            }
+                            if (unconnectedCount === 0){
+                                // 添加一个空闲端口.
+                                addDynamicInput();
+                            }
+                            updateComboOptions();
+                        }else{
+                            let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                            let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                            let unconnectedCount = dynamicInputs.length - connectedCount;
+                            if(unconnectedCount > 1){
+                                node.removeInput(slot);
+                                let index = 1;
+                                for (let i = slot; i < node.inputs.length; i++) {
+                                    if(node.inputs[i].name.startsWith("input")){
+                                        node.inputs[i].name = `input${index++}`;
+                                    }
+                                }
+                                updateComboOptions();
+                            }
+                            // 如果只有一个动态端口,那么需要看输出有没有连接,来决定是否断开类型.
+                            if(connectedCount === 0){
+                                // 如果输出端口没有连接,那么断开类型.
+                                if(!node.outputs[0].link){
+                                    currentType = "*";
+                                    currentConnected = false;
+                                    updateInputsType();
+                                    updateOutputsType();
+                                }
+                            }
+                        }
+                    }
+                }else if(type === LiteGraph.OUTPUT){
+                    if (connected){
+                        // 如果正在连接输出端口,并且没有连接类.
+                        if(slot === 0 && !currentConnected){
+                            currentConnected = true;
+                            const output = node.outputs[slot];
+                            const link = node.graph.links[output.links[0]];
+                            const upstreamNode = node.graph.getNodeById(link.origin_id);
+                            if (upstreamNode && upstreamNode.inputs && link.origin_slot < upstreamNode.inputs.length) {
+                                const inputInfo = upstreamNode.inputs[link.origin_slot];
+                                currentType = inputInfo.type;   
+                                updateInputsType();
+                                updateOutputsType();
+                            }
+                        }
+                    }else{
+                        let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                        let anyConnected = dynamicInputs.some(inp => inp.link != null);
+                        if(!anyConnected){
+                            currentType = "*";
+                            currentConnected = false;
+                            updateInputsType();
+                            updateOutputsType();
+                        }
+                    }
+                }
+                node.setDirtyCanvas(true, true);
+            };
+
+            // Combo 回调 - 选择后同步到 selectInputWidget
+            selectWidget.callback = function (value) {
+                const match = value.match(/\[(\d+)\]/);
+                if (match) {
+                    selectInputWidget.value = parseInt(match[1]);
+                }
+            };
+
+            // 节点加载时恢复
+            const origOnConfigure = node.onConfigure;
+            node.onConfigure = function (info) {
+                origOnConfigure?.apply(this, arguments);
+            };
+
+            // 初始化：创建一个空端口
+            addDynamicInput();
+        };
+    }
+});

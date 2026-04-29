@@ -1,4 +1,6 @@
 from ..libs.utils import AlwaysEqualProxy, compare_revision
+import comfy_execution
+import inspect
 
 any_type = AlwaysEqualProxy("*")
 lazy_options = {"lazy": True} if compare_revision(2543) else {}
@@ -130,3 +132,53 @@ class BranchBooleanNode:
 
     def execute(self, toggle):
         return (toggle,)
+    
+class BranchSwitchesNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        dyn_inputs = {"input1": (any_type, {"lazy": True, "tooltip": "Any input. When connected, one more input slot is added."}), }
+        stack = inspect.stack()
+        if stack[2].function == 'get_input_info':
+            # bypass validation
+            class AllContainer:
+                def __contains__(self, item):
+                    return True
+
+                def __getitem__(self, key):
+                    return any_type, {"lazy": True}
+            dyn_inputs = AllContainer()
+        
+        return {
+            "required": {
+                "select" : (["[None]"], {"default": "[None]"}),
+                "select_input": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "step": 1,
+                }),
+            },
+            "optional": dyn_inputs,
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("output",)
+    FUNCTION = "switch"
+    CATEGORY = "custom/branch"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, select, select_input, **kwargs):
+        return True
+
+    def check_lazy_status(self, select, select_input, **kwargs):
+        if select_input <= 0:
+            return []
+        selected_key = f"input{select_input}"
+        if selected_key not in kwargs:
+            return []
+        return [selected_key]
+
+    def switch(self, select, select_input, **kwargs):
+        if select_input <= 0:
+            raise ValueError(f"select_input {select_input} is out of range for input keys {input_keys}")
+        input = kwargs[f"input{select_input}"]
+        return (input,)        

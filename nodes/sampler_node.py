@@ -144,14 +144,12 @@ class SamplerContext:
 class ContextData:
     def __init__(self):
         self.contexts = {}
-        self.prompt_need_context = []
-        self.similarity_need_context = []
+        self.queries = {}
     
     def copy(self):
         new = ContextData()
         new.contexts = self.contexts.copy()
-        new.prompt_need_context = self.prompt_need_context.copy()
-        new.similarity_need_context = self.similarity_need_context.copy()
+        new.queries = self.queries.copy()
         return new
     
     def get_context(self, regex_pattern: str) -> (str, str, list[str]):
@@ -181,10 +179,32 @@ class ContextData:
         positive_parts = []
         negative_parts = []
         loras = []
-        if prompt is not None and prompt != '':  
-            for need_regex, need_context_regex in self.prompt_need_context:
-                if re.match(prompt, need_regex):
+        if prompt is not None and prompt != '' and image is not None:  
+            for qurey_id, query_datas in self.queries.items():
+                match_index = -1
+                match_score = 0
+                data_size = len(query_datas)
+                for query_data_index in range(data_size):
+                    query_data = query_datas[query_data_index]
+                    original_image = query_data["image"]
+                    model = query_data["model"]
+                    threshold = query_data["threshold"]
+                    prompt_regex = query_data["prompt_regex"]
+                    need_context_regex = query_data["need_context_regex"]
+                    if re.match(prompt_regex, prompt):
+                        similarity = get_similarity(model, original_image, image)
+                        print(f"[Query({qurey_id})]({prompt_regex}): {need_context_regex} : {similarity}({threshold})")
+                        if similarity > threshold:
+                            if similarity > match_score:
+                                match_index = query_data_index
+                                match_score = similarity
+                                break
+                    else:
+                        print(f"[Query({qurey_id})]({prompt_regex}): Fail Prompt")
+                if match_index != -1:
                     for name, context in self.contexts.items():
+                        query_data = query_datas[match_index]
+                        need_context_regex = query_data["need_context_regex"]
                         if re.match(need_context_regex, name):
                             if context.positive:
                                 positive_parts.append(context.positive.strip())
@@ -192,22 +212,7 @@ class ContextData:
                                 negative_parts.append(context.negative.strip())
                             if context.loras:
                                 loras.extend(context.loras)
-        if image is not None:
-            for similarity_data, need_context_regex in self.similarity_need_context:
-                model = similarity_data["model"]
-                original_image = similarity_data["image"]
-                threshold = similarity_data["threshold"]
-                similarity = get_similarity(model, original_image, image)
-                if similarity > threshold:
-                    for name, context in self.contexts.items():
-                        if re.match(need_context_regex, name):
-                            if context.positive:
-                                positive_parts.append(context.positive.strip())
-                            if context.negative:
-                                negative_parts.append(context.negative.strip())
-                            if context.loras:
-                                loras.extend(context.loras)
-                                
+
         positive = ",".join(positive_parts).strip(",")
         negative = ",".join(negative_parts).strip(",")
         return (positive, negative, loras, )
@@ -552,14 +557,16 @@ class ContextNode:
 
         return (context,)
     
-class ContextSimilarityNeedNode:
+class ContextQueryNode:
     @classmethod
     def INPUT_TYPES(s):
         return{
             "required": {
+                "query_id": ("STRING", {"default": ""}),
                 "image": ("IMAGE",),  
                 "threshold": ("FLOAT", {"default": 0.8}),  
                 "similarity_model": ("*",),
+                "prompt_regex": ("STRING", {"default": ".+"}),
                 "need_context_regex": ("STRING", {"default": ""}),
             },
             "optional": {
@@ -572,48 +579,23 @@ class ContextSimilarityNeedNode:
     FUNCTION = "process"
     CATEGORY = "sampling/custom"
     
-    def process(self, image, threshold, similarity_model, need_context_regex,
+    def process(self, query_id, image, threshold, similarity_model, prompt_regex, need_context_regex,
                 context : ContextData = None):
         if context is None:
             context = ContextData()
         else:
             context = context.copy()
+        
+        if query_id not in context.queries:
+            context.queries[query_id] = []
             
-        context.similarity_need_context.append(({
+        context.queries[query_id].append({
             "image": image,
             "threshold": threshold,
-            "model": similarity_model
-        },need_context_regex))
-        
-        
-        return (context,)
-    
-class ContextPromptNeedNode:
-    @classmethod
-    def INPUT_TYPES(s):
-        return{
-            "required": {
-                "prompt": ("STRING", {"default": ""}),
-                "need_context_regex": ("STRING", {"default": ""}),
-            },
-            "optional": {
-                "context": ("CONTEXT_DATA",),
-            }
-        }
-        
-    RETURN_TYPES = ("CONTEXT_DATA",)
-    RETURN_NAMES = ("context",)
-    FUNCTION = "process"
-    CATEGORY = "sampling/custom"
-    
-    def process(self, prompt, need_context_regex,
-                context : ContextData = None):
-        if context is None:
-            context = ContextData()
-        else:
-            context = context.copy()
-            
-        context.prompt_need_context.append((prompt, need_context_regex))
+            "model": similarity_model,
+            "prompt_regex": prompt_regex,
+            "need_context_regex": need_context_regex,
+        })
         
         return (context,)
 
@@ -1779,6 +1761,77 @@ class PipelineDetectNode:
 
         # 原样返回 pipeline（不做任何修改）
         return (next_pipeline, detailer_mask,)
+    
+class PipelineGetPromptNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "context_regex": ("STRING", {"default": ".+"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "loras")
+    FUNCTION = "get_prompt"
+    CATEGORY = "sampling/custom"
+
+    def get_prompt(self, pipeline, context_regex):
+        positive, negative, loras = pipeline.context.get_context(context_regex)
+        # 将 loras 列表转换为字符串
+        loras_str = ",".join(loras) if loras else ""
+        return (positive, negative, loras_str)
+
+class PipelineSamplerDataNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "context_regex": ("STRING", {"default": ".+"}),
+            }
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA", "MODEL", "CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("pipeline", "model", "positive", "negative", "latent")
+    FUNCTION = "get_sampler_data"
+    CATEGORY = "sampling/custom"
+
+    def get_sampler_data(self, pipeline, context_regex):
+        next_pipeline = pipeline.copy()
+        
+        # 获取 positive 和 negative
+        positive_str, negative_str, loras = next_pipeline.context.get_context(context_regex)
+        
+        # 获取 model 和 clip（应用 loras）
+        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model=next_pipeline.model,
+            clip=next_pipeline.clip,
+            loras=loras
+        )
+        
+        # 获取 latent
+        latent = next_pipeline.get_latent()
+        
+        # 将字符串转换为 CONDITIONING
+        positive_condition = next_pipeline.get_conditioning(
+            mode="positive",
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=positive_str,
+            reference=next_pipeline.reference
+        )
+        
+        negative_condition = next_pipeline.get_conditioning(
+            mode="negative",
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=negative_str,
+            reference=next_pipeline.reference
+        )
+        
+        return (next_pipeline, model_to_use, positive_condition, negative_condition, latent)
 
 class PipelineTagNode:
     @classmethod
@@ -1844,7 +1897,6 @@ class PipelineVideoSamplerAdvancedNode:
 
                 # Recover 参数
                 "recover_method": (["bounds_only", "mask_blend", "mask_only"], {"default": "mask_blend"}),
-                # 【新增】与 DetailerAdvanced 保持一致的参数
                 "inpaint_mode": ("BOOLEAN", {"default": False}),
                 "foreach_mask": ("BOOLEAN", {"default": False}),
                 "tagger_mask": ("BOOLEAN", {"default": False}),
@@ -1866,11 +1918,9 @@ class PipelineVideoSamplerAdvancedNode:
                               detector_threshold, detector_prompt, detector_dilation,
                               detector_crop_factor, detector_drop_size, detector_grow, detector_blur,
                               pixels, align, crop_reserve, recover_method,
-                              # 【新增】新参数接收
                               inpaint_mode=False, foreach_mask=False, tagger_mask=False,
                               detector=None, tagger=None):
 
-        # 【修改】统一处理列表输入（与 DetailerAdvanced 一致）
         if isinstance(bypass, (list, tuple)) and len(bypass) > 0:
             bypass = bypass[0]
         if bypass:

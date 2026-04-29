@@ -24,6 +24,7 @@ from .nodes.branch_node import *
 from .nodes.video_node import *
 from .nodes.timestamp_node import *
 from .nodes.audio_node import *
+from .nodes.prompt_node import *
 from .nodes.sampler_node import *
     
 
@@ -60,6 +61,7 @@ NODE_CONFIG = {
     "BranchOptionalRequiredNode" : {"class": BranchOptionalRequiredNode, "name": "BranchOptionalRequiredNode"},
     "BranchGroupNode" : {"class": BranchGroupNode, "name": "BranchGroupNode"},
     "BranchSwitchNode" : {"class": BranchSwitchNode, "name": "BranchSwitchNode"},
+    "BranchSwitchesNode" : {"class": BranchSwitchesNode, "name": "BranchSwitchesNode"},
     "BranchBooleanNode" : {"class": BranchBooleanNode, "name": "BranchBooleanNode"},
     
     "TypeDebugNode" : {"class": TypeDebugNode, "name": "TypeDebugNode"},
@@ -120,6 +122,7 @@ NODE_CONFIG = {
     "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
     "VideoFolderLoaderNode": {"class": VideoFolderLoaderNode, "name": "VideoFolderLoaderNode"},
     "VideoGetFileInfoNode": {"class": VideoGetFileInfoNode, "name": "VideoGetFileInfoNode"},
+    "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
     
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
@@ -138,8 +141,7 @@ NODE_CONFIG = {
     
     "ConfigNode": {"class": ConfigNode, "name": "ConfigNode"},
     "ContextNode": {"class": ContextNode, "name": "ContextNode"},
-    "ContextPromptNeedNode": {"class": ContextPromptNeedNode, "name": "ContextPromptNeedNode"},
-    "ContextSimilarityNeedNode": {"class": ContextSimilarityNeedNode, "name": "ContextSimilarityNeedNode"},
+    "ContextQueryNode": {"class": ContextQueryNode, "name": "ContextQueryNode"},
     "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},
     "PipelineSamplerNode": {"class": PipelineSamplerNode, "name": "PipelineSamplerNode"},
     "PipelineSamplerAdvancedNode": {"class": PipelineSamplerAdvancedNode, "name": "PipelineSamplerAdvancedNode"},
@@ -151,6 +153,8 @@ NODE_CONFIG = {
     "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
     "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
     "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},
+    "PipelineGetPromptNode": {"class": PipelineGetPromptNode, "name": "PipelineGetPromptNode"},
+    "PipelineSamplerDataNode": {"class": PipelineSamplerDataNode, "name": "PipelineSamplerDataNode"},
     "PipelineVideoSamplerAdvancedNode": {"class": PipelineVideoSamplerAdvancedNode, "name": "PipelineVideoSamplerAdvancedNode"},
     
 }

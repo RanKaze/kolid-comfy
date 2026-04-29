@@ -1,0 +1,2202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Snapshot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #f5f5f5;
+            min-height: 100vh;
+            padding: 20px;
+            padding-bottom: 100px;
+        }
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            background: #2d2d2d;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .search-box input {
+            padding: 8px 15px;
+            border-radius: 8px;
+            border: 1px solid #444;
+            background: #3a3a3a;
+            color: #fff;
+            width: 200px;
+        }
+        .search-box button, .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #007aff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #0055cc;
+        }
+        .btn-secondary {
+            background: #4a4a4a;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #5a5a5a;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #bb2d3a;
+        }
+        .selected-bar {
+            background: #2d2d2d;
+            border-radius: 12px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+        }
+        .selected-bar h3 {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 10px;
+        }
+        .selected-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: #007aff;
+            border-radius: 20px;
+            font-size: 13px;
+        }
+        .tag .remove {
+            cursor: pointer;
+            opacity: 0.7;
+        }
+        .tag .remove:hover {
+            opacity: 1;
+        }
+        
+        /* Category 容器 - 使用 flex 布局 */
+        .categories-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: flex-start;
+            width: 100%;
+        }
+        
+        /* Category 样式 */
+        .category {
+            background: #2d2d2d;
+            border-radius: 12px;
+            overflow: hidden;
+            flex: 0 0 auto;
+        }
+        .category.dragging {
+            opacity: 0.5;
+            border: 2px dashed #007aff;
+        }
+        .category.drag-over {
+            border: 2px dashed #007aff;
+        }
+
+        .category-header .drag-handle {
+            cursor: grab;
+            padding: 4px;
+            margin-right: 8px;
+            opacity: 0.5;
+            transition: opacity 0.2s;
+        }
+        .category-header .drag-handle:hover {
+            opacity: 1;
+        }
+        .category-header .drag-handle:active {
+            cursor: grabbing;
+        }
+        
+        /* 折叠状态的 category - 紧凑显示 */
+        .category.collapsed {
+            width: auto;
+            min-width: 120px;
+        }
+        
+        /* 展开状态的 category - 占满整行 */
+        .category.expanded {
+            width: 100%;
+            flex: 1 1 100%;
+        }
+        
+        .category-header {
+            padding: 12px 16px;
+            background: #3a3a3a;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            white-space: nowrap;
+            transition: background 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+        .category-header:hover {
+            background: #444;
+        }
+        .category-header .toggle {
+            font-size: 12px;
+            color: #888;
+            margin-left: 8px;
+            transition: transform 0.3s;
+        }
+        
+        /* 折叠状态：类别背景图 - 从左侧开始，到右侧渐变透明 */
+        .category.collapsed .category-header .bg-image {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: auto;
+            max-width: 80%;
+            object-fit: cover;
+            mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);
+            -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);
+            z-index: 0;
+            pointer-events: none;
+        }
+        
+        /* 展开状态：背景图从左侧渐变到右侧透明 */
+        .category.expanded {
+            position: relative;
+        }
+        .category.expanded::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 80%;
+            background-image: var(--cat-bg-image);
+            background-size: cover;
+            background-position: left top;
+            background-repeat: no-repeat;
+            mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
+            -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
+            z-index: 0;
+            pointer-events: none;
+        }
+        
+        /* 展开状态：类别头部变为毛玻璃 */
+        .category.expanded .category-header {
+            background: rgba(58, 58, 58, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .category.expanded .category-header:hover {
+            background: rgba(68, 68, 68, 0.7);
+        }
+        
+        .category-header .header-content {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+        .category-header .edit-category-btn {
+            position: relative;
+            z-index: 2;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: none;
+            font-size: 11px;
+            cursor: pointer;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            margin-left: 8px;
+            transition: background 0.2s;
+        }
+        .category-header .edit-category-btn:hover {
+            background: #007aff;
+        }
+        .category-header .display-mode-btn {
+            position: relative;
+            z-index: 2;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: none;
+            font-size: 11px;
+            cursor: pointer;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            margin-left: 8px;
+            transition: background 0.2s;
+        }
+        .category-header .display-mode-btn:hover {
+            background: #007aff;
+        }
+        /* 展开状态下始终显示编辑按钮 */
+        .category.expanded .category-header .edit-category-btn {
+            display: inline-block;
+        }
+        /* 折叠状态下隐藏编辑按钮 */
+        .category.collapsed .category-header .edit-category-btn {
+            display: none;
+        }
+        /* 展开状态下始终显示显示模式按钮 */
+        .category.expanded .category-header .display-mode-btn {
+            display: inline-block;
+        }
+        /* 折叠状态下隐藏显示模式按钮 */
+        .category.collapsed .category-header .display-mode-btn {
+            display: none;
+        }
+        .category.expanded .category-header .toggle {
+            transform: rotate(180deg);
+        }
+        
+        /* 展开状态的内容 */
+        .category-content {
+            padding: 20px;
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 15px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            white-space: nowrap;
+            scrollbar-width: thin;
+            scrollbar-color: #555 #2a2a2a;
+        }
+        .category-content.box-mode {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            flex-wrap: wrap;
+            overflow-x: hidden;
+            overflow-y: auto;
+            white-space: normal;
+            max-height: none;
+        }
+        .category-content.box-mode .prompt-item {
+            width: 100%;
+            height: 350px;
+        }
+        .category-content.animating {
+            animation: expandIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        @keyframes expandIn {
+            from {
+                opacity: 0;
+                max-height: 0;
+                padding: 0 20px;
+            }
+            to {
+                opacity: 1;
+                max-height: 500px;
+                padding: 20px;
+            }
+        }
+        .category-content::-webkit-scrollbar {
+            height: 8px;
+        }
+        .category-content::-webkit-scrollbar-track {
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+        .category-content::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+        .category-content::-webkit-scrollbar-thumb:hover {
+            background: #777;
+        }
+        
+        /* 提示词卡片 - 图片铺满，元素叠加 */
+        .prompt-item {
+            flex: 0 0 auto;
+            display: flex;
+            flex-direction: column;
+            width: 250px;
+            height: 350px;
+            background: #3a3a3a36;
+            border-radius: 12px;
+            font-size: 14px;
+            transition: all 0.2s;
+            position: relative;
+            cursor: pointer;
+            overflow: hidden;
+        }
+        /* Mini 模式下的提示词卡片 - 水平 flex 布局 */
+        .category-content.mini-mode .prompt-item {
+            width: 240px;
+            height: 80px;
+            flex-direction: row;
+            align-items: center;
+            padding: 0;
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+        .category-content.mini-mode .prompt-item .select-area {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100% !important;
+            height: 100% !important;
+            z-index: 1;
+        }
+        .category-content.mini-mode .prompt-item .image-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        .category-content.mini-mode .prompt-item .image-layer img,
+        .category-content.mini-mode .prompt-item .image-layer .no-image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .category-content.mini-mode .prompt-item .glass-layer {
+            display: none;
+        }
+        .category-content.mini-mode .prompt-item .text-layer {
+            position: relative;
+            z-index: 2;
+            width: auto;
+            height: auto;
+            flex: 1;
+            padding: 0 32px 0 16px;
+            justify-content: center;
+            background: transparent;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .category-content.mini-mode .prompt-item .name {
+            font-size: 15px;
+            font-weight: 600;
+            color: #fff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+            line-height: 1.4;
+        }
+        .category-content.mini-mode .prompt-item .prompt-text {
+            font-size: 13px;
+            color: #e0e0e0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
+            line-height: 1.4;
+            margin-top: 3px;
+        }
+        .category-content.mini-mode .prompt-item .actions {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            opacity: 0;
+            display: flex;
+            gap: 2px;
+            z-index: 10;
+        }
+        .category-content.mini-mode .prompt-item:hover .actions {
+            opacity: 1;
+        }
+        .category-content.mini-mode .prompt-item .action-btn {
+            padding: 3px 6px;
+            font-size: 10px;
+            background: rgba(0,0,0,0.7);
+        }
+        .category-content.mini-mode .prompt-item .drag-handle {
+            top: 4px;
+            left: 4px;
+            z-index: 10;
+            font-size: 11px;
+            padding: 3px;
+        }
+        /* Box + Mini 组合模式 */
+        .category-content.box-mode.mini-mode {
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+        }
+        .category-content.box-mode.mini-mode .prompt-item {
+            width: 100%;
+        }
+        .prompt-item.dragging {
+            opacity: 0.5;
+            border: 2px dashed #007aff;
+        }
+        .prompt-item.drag-over {
+            border: 2px dashed #007aff;
+        }
+        .prompt-item .drag-handle {
+            position: absolute;
+            top: 5px;
+            left: 5px;
+            cursor: grab;
+            padding: 4px;
+            z-index: 10;
+            opacity: 0;
+            transition: opacity 0.2s;
+            background: rgba(0,0,0,0.5);
+            border-radius: 4px;
+            color: white;
+            font-size: 12px;
+        }
+        .prompt-item:hover .drag-handle {
+            opacity: 1;
+        }
+        .prompt-item .drag-handle:active {
+            cursor: grabbing;
+        }
+        .prompt-item:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .prompt-item.selected {
+            border-color: #007aff;
+            box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0,0,0,0.3);
+        }
+        
+        /* 底层：图片铺满整个卡片 */
+        .prompt-item .image-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+        .prompt-item .image-layer img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .prompt-item .image-layer .no-image {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 12px;
+        }
+        
+        /* 中层：毛玻璃效果 - 正方形渲染，由根容器裁剪 */
+        .prompt-item .glass-layer {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 35%;
+            background: rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(2px);
+            z-index: 2;
+        }
+        
+        /* 顶层：提示词文字 */
+        .prompt-item .text-layer {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 35%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 12px 15px;
+            z-index: 3;
+        }
+        .prompt-item .name {
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-size: 15px;
+            color: #fff;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+        .prompt-item .prompt-text {
+            font-size: 12px;
+            color: #ddd;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 4px;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+        
+        .prompt-item .actions {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            display: flex;
+            gap: 4px;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
+        .prompt-item:hover .actions {
+            opacity: 1;
+        }
+        .prompt-item .action-btn {
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: none;
+            font-size: 11px;
+            cursor: pointer;
+            background: rgba(0,0,0,0.5);
+            color: white;
+        }
+        .prompt-item .action-btn:hover {
+            background: rgba(0,0,0,0.7);
+        }
+        .prompt-item .action-btn.edit:hover {
+            background: #007aff;
+        }
+        .prompt-item .action-btn.delete:hover {
+            background: #dc3545;
+        }
+        
+        /* Add Category 卡片 */
+        .add-category-card {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 16px;
+            background: #3a3a3a;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            border: 2px dashed #555;
+        }
+        .add-category-card:hover {
+            background: #4a4a4a;
+            border-color: #007aff;
+        }
+        .add-category-card span {
+            font-size: 14px;
+            color: #888;
+        }
+        .add-category-card:hover span {
+            color: #007aff;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.visible {
+            display: flex;
+        }
+        .modal-content {
+            background: #2d2d2d;
+            border-radius: 12px;
+            padding: 25px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-content h2 {
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        .modal-content input, .modal-content select, .modal-content textarea {
+            width: 100%;
+            padding: 10px 15px;
+            margin-bottom: 12px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            background: #2a2a2a;
+            color: #fff;
+        }
+        .modal-content .image-preview {
+            width: 100%;
+            max-height: 200px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            display: none;
+            border: 1px solid #555;
+        }
+        .modal-content .image-preview.visible {
+            display: block;
+        }
+        .modal-content .modal-buttons {
+            display: flex;
+            gap: 12px;
+            margin-top: 15px;
+        }
+        .modal-content .btn {
+            flex: 1;
+            padding: 12px;
+        }
+        .footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            background: linear-gradient(transparent, #1a1a1a 30%);
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            z-index: 500;
+        }
+        .footer button {
+            padding: 12px 30px;
+            border-radius: 10px;
+            border: none;
+            font-size: 15px;
+            cursor: pointer;
+        }
+        .hidden {
+            display: none !important;
+        }
+        .tag-input-container {
+            margin-bottom: 12px;
+        }
+        .tag-input-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .tag-input-row input {
+            flex: 1;
+            margin-bottom: 0 !important;
+        }
+        .tag-input-row button {
+            white-space: nowrap;
+            padding: 8px 16px;
+        }
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            min-height: 0;
+        }
+        .tag-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            background: #007aff;
+            border-radius: 16px;
+            font-size: 13px;
+            color: white;
+            cursor: default;
+            transition: all 0.2s;
+        }
+        .tag-chip .tag-remove {
+            cursor: pointer;
+            opacity: 0;
+            width: 0;
+            overflow: hidden;
+            transition: all 0.2s;
+            font-size: 14px;
+            line-height: 1;
+        }
+        .tag-chip:hover .tag-remove {
+            opacity: 1;
+            width: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎨 Prompt Snapshot</h1>
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Search prompts...">
+                <button class="btn btn-primary" onclick="searchPrompts()">Search</button>
+            </div>
+        </div>
+
+        <div class="selected-bar">
+            <h3>Selected Prompts (<span id="selectedCount">0</span>)</h3>
+            <div class="selected-tags" id="selectedTags"></div>
+        </div>
+
+        <div class="categories-container" id="categories"></div>
+    </div>
+
+    <div class="footer">
+        <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
+        <button class="btn btn-primary" onclick="confirmSelection()">Confirm</button>
+    </div>
+
+    <div class="modal" id="editModal">
+        <div class="modal-content">
+            <h2>Edit Prompt</h2>
+            <input type="hidden" id="editId">
+            <input type="text" id="editName" placeholder="Name">
+            <input type="text" id="editPrompt" placeholder="Prompt text">
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
+                <div class="tag-input-row">
+                    <input type="text" id="editTagsInput" placeholder="Enter tag...">
+                    <button class="btn btn-primary" onclick="addEditTag()">Add Tag</button>
+                </div>
+                <div class="tag-list" id="editTagList"></div>
+            </div>
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
+                <div class="tag-input-row">
+                    <input type="text" id="editDecorationsInput" placeholder="Enter decoration...">
+                    <button class="btn btn-primary" onclick="addEditDecoration()">Add Deco</button>
+                </div>
+                <div class="tag-list" id="editDecorationList"></div>
+            </div>
+            <select id="editCategory">
+                <option value="">Keep current category</option>
+            </select>
+            <input type="file" id="editImage" accept="image/*">
+            <img id="editImagePreview" class="image-preview" alt="Preview">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="updatePrompt()">Update</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="addModal">
+        <div class="modal-content">
+            <h2>Add New Prompt</h2>
+            <input type="text" id="addName" placeholder="Name">
+            <input type="text" id="addPrompt" placeholder="Prompt text">
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
+                <div class="tag-input-row">
+                    <input type="text" id="addTagsInput" placeholder="Enter tag...">
+                    <button class="btn btn-primary" onclick="addAddTag()">Add Tag</button>
+                </div>
+                <div class="tag-list" id="addTagList"></div>
+            </div>
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
+                <div class="tag-input-row">
+                    <input type="text" id="addDecorationsInput" placeholder="Enter decoration...">
+                    <button class="btn btn-primary" onclick="addAddDecoration()">Add Deco</button>
+                </div>
+                <div class="tag-list" id="addDecorationList"></div>
+            </div>
+            <input type="text" id="addCategory" placeholder="Category (default: 杂项)">
+            <input type="file" id="addImage" accept="image/*">
+            <img id="addImagePreview" class="image-preview" alt="Preview">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeAddModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addPrompt()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="addCategoryModal">
+        <div class="modal-content">
+            <h2>Add New Category</h2>
+            <input type="text" id="newCategoryName" placeholder="Category name">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeAddCategoryModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addCategory()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editCategoryModal">
+        <div class="modal-content">
+            <h2>Edit Category</h2>
+            <input type="hidden" id="editCategoryOldName">
+            <input type="text" id="editCategoryNewName" placeholder="Category name">
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
+                <div class="tag-input-row">
+                    <input type="text" id="editCategoryTagsInput" placeholder="Enter tag...">
+                    <button class="btn btn-primary" onclick="addEditCategoryTag()">Add Tag</button>
+                </div>
+                <div class="tag-list" id="editCategoryTagList"></div>
+            </div>
+            <div class="tag-input-container">
+                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
+                <div class="tag-input-row">
+                    <input type="text" id="editCategoryDecorationsInput" placeholder="Enter decoration...">
+                    <button class="btn btn-primary" onclick="addEditCategoryDecoration()">Add Deco</button>
+                </div>
+                <div class="tag-list" id="editCategoryDecorationList"></div>
+            </div>
+            <input type="file" id="editCategoryImage" accept="image/*">
+            <img id="editCategoryImagePreview" class="image-preview" alt="Preview">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditCategoryModal()">Cancel</button>
+                <button class="btn btn-danger" onclick="removeCategoryBg()">Remove BG</button>
+                <button class="btn btn-primary" onclick="updateCategory()">Update</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editDisplayModeModal">
+        <div class="modal-content">
+            <h2>Edit Category Display Mode</h2>
+            <input type="hidden" id="editDisplayModeCategory">
+            <label>Layout Mode</label>
+            <select id="editDisplayModeSelect">
+                <option value="horizontal">Horizontal (Scroll)</option>
+                <option value="box">Box (Adaptive Grid)</option>
+            </select>
+            <label>Size Mode</label>
+            <select id="editSizeModeSelect">
+                <option value="normal">Normal</option>
+                <option value="mini">Mini</option>
+            </select>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditDisplayModeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="updateDisplayMode()">Update</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="decorationModal">
+        <div class="modal-content" style="max-width: 95vw; width: 1400px; max-height: 90vh; display: flex; flex-direction: column;">
+            <h2 id="decorationModalTitle">Select Decoration</h2>
+            <div id="decorationSelectedTags" style="margin-bottom: 8px;"></div>
+            <div id="decorationPromptsList" style="flex: 1; overflow-y: auto; margin: 12px 0;"></div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeDecorationModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="finishDecorationSelection()">Finish</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allPrompts = {};
+        let selectedPrompts = [];
+        let lastSelected = [];
+        let expandedCategories = new Set();
+        let searchQuery = '';
+        let categoryDisplayModes = {};
+        let categorySizeModes = {};
+        let promptFoldout = false;
+        let currentDecorationTarget = null;
+        let currentDecorationSelections = [];
+
+        async function loadData() {
+            try {
+                const res = await fetch('/prompts_data');
+                const data = await res.json();
+                allPrompts = data.categories;
+                lastSelected = data.last_selected || [];
+                promptFoldout = data.prompt_foldout || false;
+                
+                // 加载类别显示模式设置
+                categoryDisplayModes = data.category_display_modes || {};
+                categorySizeModes = data.category_size_modes || {};
+                
+                // 清理已不存在的类别的展开状态
+                for (const cat of expandedCategories) {
+                    if (!allPrompts[cat]) {
+                        expandedCategories.delete(cat);
+                    }
+                }
+                
+                // 初始化选中状态
+                selectedPrompts = [...lastSelected];
+                updateSelectedTags();
+                
+                // 根据 prompt_foldout 决定展开策略
+                if (promptFoldout) {
+                    // 展开包含上次选中词条的类别
+                    for (const [category, catData] of Object.entries(allPrompts)) {
+                        const prompts = catData.prompts || catData;
+                        const hasSelected = prompts.some(p => lastSelected.includes(p.prompt));
+                        if (hasSelected) {
+                            expandedCategories.add(category);
+                        }
+                    }
+                }
+                // 如果 promptFoldout 为 false，保持所有类别折叠
+                
+                renderCategories();
+                initDragEvents();
+            } catch (e) {
+                console.error('Failed to load data', e);
+            }
+        }
+
+        function renderCategories() {
+            const container = document.getElementById('categories');
+            container.innerHTML = '';
+
+            for (const [category, catData] of Object.entries(allPrompts)) {
+                const prompts = catData.prompts || catData;
+                const bgImage = catData.bg_image || '';
+                
+                // 搜索过滤
+                let filteredPrompts = prompts;
+                if (searchQuery) {
+                    filteredPrompts = prompts.filter(p => {
+                        const tagsMatch = Array.isArray(p.tags) 
+                            ? p.tags.some(t => t.toLowerCase().includes(searchQuery))
+                            : (p.tags || '').toLowerCase().includes(searchQuery);
+                        return p.name.toLowerCase().includes(searchQuery) || 
+                            p.prompt.toLowerCase().includes(searchQuery) ||
+                            tagsMatch;
+                    });
+                }
+                
+                // 检查类别标签是否匹配搜索
+                const categoryTagsMatch = searchQuery && Array.isArray(catData.tags)
+                    ? catData.tags.some(t => t.toLowerCase().includes(searchQuery))
+                    : false;
+                
+                // 如果没有匹配的提示词且类别标签也不匹配，隐藏整个类别
+                if (searchQuery && filteredPrompts.length === 0 && !categoryTagsMatch) {
+                    continue;
+                }
+
+                const isExpanded = expandedCategories.has(category);
+                
+                const categoryDiv = document.createElement('div');
+                categoryDiv.className = `category ${isExpanded ? 'expanded' : 'collapsed'}`;
+                categoryDiv.id = `category-${category}`;
+                
+                // 展开状态下，通过 CSS 变量设置背景图
+                if (isExpanded && bgImage) {
+                    categoryDiv.style.setProperty('--cat-bg-image', `url(/images/${bgImage})`);
+                }
+                
+                const displayMode = categoryDisplayModes[category] || 'horizontal';
+                const sizeMode = categorySizeModes[category] || 'normal';
+                const displayModeIcon = displayMode === 'box' ? '⊞' : '☰';
+                const sizeModeIcon = sizeMode === 'mini' ? '▪' : '▫';
+                
+                categoryDiv.innerHTML = `
+                    <div class="category-header" onclick="toggleCategory('${category}')">
+                        ${!isExpanded && bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
+                        <div class="header-content">
+                            <div style="display: flex; align-items: center;">
+                                <span class="drag-handle" data-drag-type="category" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                                <span>${category}</span>
+                            </div>
+                            <div style="display: flex; align-items: center;">
+                                <button class="display-mode-btn" onclick="event.stopPropagation(); openEditDisplayModeModal('${category}')" title="Display: ${displayMode} | Size: ${sizeMode}">${displayModeIcon}${sizeModeIcon}</button>
+                                <button class="edit-category-btn" onclick="event.stopPropagation(); openEditCategoryModal('${category}')">✏️</button>
+                                <span class="toggle">${isExpanded ? '▲' : '▼'}</span>
+                            </div>
+                        </div>
+                    </div>
+                    ${isExpanded ? `
+                    <div class="category-content ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}" id="cat-${category}">
+                        ${filteredPrompts.map(p => `
+                            <div class="prompt-item ${isBasePromptSelected(p.prompt) ? 'selected' : ''}"
+                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                    <div class="image-layer">
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                    </div>
+                                    <div class="glass-layer"></div>
+                                    <div class="text-layer">
+                                        <div class="name">${p.name}</div>
+                                        <div class="prompt-text">${p.prompt}</div>
+                                    </div>
+                                </div>
+                                <div class="actions">
+                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                        ${!searchQuery ? `
+                        <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #44444469; border: 2px dashed #b9b9b9; justify-content: center; min-width: 100px; filter: blur(3px)">
+                        </div>
+                        ` : ''}
+                    </div>
+                    ` : ''}
+                `;
+                container.appendChild(categoryDiv);
+            }
+            
+            // 添加 Add Category 卡片
+            const addCategoryDiv = document.createElement('div');
+            addCategoryDiv.className = 'add-category-card';
+            addCategoryDiv.onclick = openAddCategoryModal;
+            addCategoryDiv.innerHTML = '<span>+ Add Category</span>';
+            container.appendChild(addCategoryDiv);
+        }
+
+        function toggleCategory(category) {
+            const categoryDiv = document.getElementById(`category-${category}`);
+            const isExpanded = expandedCategories.has(category);
+            const catData = allPrompts[category] || {};
+            const bgImage = catData.bg_image || '';
+            
+            if (isExpanded) {
+                // 折叠：直接移除内容，不使用动画
+                expandedCategories.delete(category);
+                categoryDiv.classList.remove('expanded');
+                categoryDiv.classList.add('collapsed');
+                
+                // 移除容器背景图
+                categoryDiv.style.removeProperty('--cat-bg-image');
+                
+                const content = document.getElementById(`cat-${category}`);
+                if (content) {
+                    content.remove();
+                }
+                
+                // 重新渲染 header 以恢复折叠状态的背景图
+                const header = categoryDiv.querySelector('.category-header');
+                if (header && bgImage) {
+                    // 检查是否已有 bg-image，没有则添加
+                    if (!header.querySelector('.bg-image')) {
+                        const img = document.createElement('img');
+                        img.src = `/images/${bgImage}`;
+                        img.className = 'bg-image';
+                        img.alt = '';
+                        header.insertBefore(img, header.firstChild);
+                    }
+                }
+            } else {
+                // 展开：只在这个卡片上添加动画
+                expandedCategories.add(category);
+                categoryDiv.classList.remove('collapsed');
+                categoryDiv.classList.add('expanded');
+                
+                // 设置容器背景图（通过 CSS 变量）
+                if (bgImage) {
+                    categoryDiv.style.setProperty('--cat-bg-image', `url(/images/${bgImage})`);
+                }
+                
+                // 移除 header 中的背景图（展开时背景图在容器上）
+                const header = categoryDiv.querySelector('.category-header');
+                const headerBgImg = header.querySelector('.bg-image');
+                if (headerBgImg) {
+                    headerBgImg.remove();
+                }
+                
+                // 获取当前类别的提示词数据
+                const prompts = catData.prompts || [];
+                let filteredPrompts = prompts;
+                if (searchQuery) {
+                    filteredPrompts = prompts.filter(p => {
+                        const tagsMatch = Array.isArray(p.tags) 
+                            ? p.tags.some(t => t.toLowerCase().includes(searchQuery))
+                            : (p.tags || '').toLowerCase().includes(searchQuery);
+                        return p.name.toLowerCase().includes(searchQuery) || 
+                            p.prompt.toLowerCase().includes(searchQuery) ||
+                            tagsMatch;
+                    });
+                }
+                
+                const displayMode = categoryDisplayModes[category] || 'horizontal';
+                const sizeMode = categorySizeModes[category] || 'normal';
+                
+                // 创建内容区域并添加动画类
+                const contentDiv = document.createElement('div');
+                contentDiv.className = `category-content animating ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}`;
+                contentDiv.id = `cat-${category}`;
+                contentDiv.innerHTML = `
+                    ${filteredPrompts.map(p => `
+                        <div class="prompt-item ${isBasePromptSelected(p.prompt) ? 'selected' : ''}"
+                             data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                            <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                <div class="image-layer">
+                                    ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                </div>
+                                <div class="glass-layer"></div>
+                                <div class="text-layer">
+                                    <div class="name">${p.name}</div>
+                                    <div class="prompt-text">${p.prompt}</div>
+                                </div>
+                            </div>
+                            <div class="actions">
+                                <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                            </div>
+                        </div>
+                    `).join('')}
+                    ${!searchQuery ? `
+                    <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
+                        <div style="font-size: 24px; color: #888;">+</div>
+                    </div>
+                    ` : ''}
+                `;
+                categoryDiv.appendChild(contentDiv);
+                
+                // 动画结束后移除 animating 类
+                contentDiv.addEventListener('animationend', () => {
+                    contentDiv.classList.remove('animating');
+                }, { once: true });
+            }
+            
+            // 更新箭头
+            const header = categoryDiv.querySelector('.category-header');
+            const toggle = header.querySelector('.toggle');
+            toggle.textContent = expandedCategories.has(category) ? '▲' : '▼';
+        }
+
+        function togglePrompt(prompt) {
+            // 先检查是否已作为 base prompt 被选中（包括 decoration 组合）
+            const decoIndex = findSelectedDecorationPrompt(prompt);
+            if (decoIndex !== -1) {
+                // 取消包含该 base prompt 的 decoration 组合
+                selectedPrompts.splice(decoIndex, 1);
+                updateSelectedTags();
+                renderCategories();
+                return;
+            }
+            
+            const index = selectedPrompts.indexOf(prompt);
+            if (index === -1) {
+                // 检查是否需要 decoration 选择
+                const promptData = findPromptData(prompt);
+                const allDecorations = promptData ? getPromptDecorations(promptData) : [];
+                if (allDecorations.length > 0) {
+                    openDecorationModal(promptData);
+                    return;
+                }
+                selectedPrompts.push(prompt);
+            } else {
+                selectedPrompts.splice(index, 1);
+            }
+            updateSelectedTags();
+            renderCategories();
+        }
+
+        function findSelectedDecorationPrompt(basePrompt) {
+            // 查找 selectedPrompts 中包含 basePrompt 的 decoration 组合项
+            for (let i = 0; i < selectedPrompts.length; i++) {
+                const p = selectedPrompts[i];
+                // 检查是否是 [xxx] basePrompt 格式
+                const parts = p.split(' ');
+                const lastPart = parts[parts.length - 1];
+                if (lastPart === basePrompt) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        function isBasePromptSelected(prompt) {
+            // 检查 prompt 是否作为 base prompt 被选中（包括 decoration 组合）
+            if (selectedPrompts.includes(prompt)) return true;
+            return findSelectedDecorationPrompt(prompt) !== -1;
+        }
+
+        function findPromptData(prompt) {
+            for (const [cat, catData] of Object.entries(allPrompts)) {
+                const prompts = catData.prompts || [];
+                for (const p of prompts) {
+                    if (p.prompt === prompt) {
+                        return { ...p, category: cat };
+                    }
+                }
+            }
+            return null;
+        }
+
+        function getPromptDecorations(promptData) {
+            // 合并提示词自身的 decorations 和类别继承的 decorations
+            const ownDecorations = promptData.decorations || [];
+            const catData = allPrompts[promptData.category] || {};
+            const catDecorations = catData.decorations || [];
+            return [...new Set([...ownDecorations, ...catDecorations])];
+        }
+
+        function openDecorationModal(promptData) {
+            const decorations = getPromptDecorations(promptData);
+            currentDecorationTarget = promptData;
+            currentDecorationSelections = [];
+            updateDecorationSelectedTags();
+            
+            // 按类别收集匹配的 decoration prompts
+            const categoryMatches = {};
+            
+            for (const deco of decorations) {
+                for (const [cat, catData] of Object.entries(allPrompts)) {
+                    const catTags = catData.tags || [];
+                    const prompts = catData.prompts || [];
+                    const catHasMatch = catTags.includes(deco);
+                    
+                    for (const p of prompts) {
+                        const pTags = p.tags || [];
+                        if (p.prompt !== promptData.prompt && (pTags.includes(deco) || catHasMatch)) {
+                            if (!categoryMatches[cat]) {
+                                categoryMatches[cat] = {
+                                    catData: catData,
+                                    prompts: []
+                                };
+                            }
+                            // 避免同一提示词在同一类别中重复
+                            const alreadyAdded = categoryMatches[cat].prompts.some(
+                                existing => existing.id === p.id
+                            );
+                            if (!alreadyAdded) {
+                                categoryMatches[cat].prompts.push({ ...p, category: cat });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            document.getElementById('decorationModalTitle').textContent = 
+                `Select decoration for "${promptData.name}"`;
+            
+            const listContainer = document.getElementById('decorationPromptsList');
+            const catEntries = Object.entries(categoryMatches);
+            
+            if (catEntries.length === 0) {
+                listContainer.innerHTML = '<div style="color: #888; text-align: center;">No matching decorations found</div>';
+            } else {
+                listContainer.innerHTML = catEntries.map(([cat, data]) => {
+                    const bgImage = data.catData.bg_image || '';
+                    return `
+                    <div class="category expanded" style="margin-bottom: 16px;">
+                        <div class="category-header">
+                            ${bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
+                            <div class="header-content">
+                                <span>${cat}</span>
+                            </div>
+                        </div>
+                        <div class="category-content box-mode" style="max-height: none;">
+                            ${data.prompts.map(p => `
+                                <div class="prompt-item" style="cursor: pointer;"
+                                     onclick="toggleDecorationSelection('${p.prompt}', '${cat}')"
+                                     id="deco-${cat}-${p.id}">
+                                    <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                        <div class="image-layer">
+                                            ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                        </div>
+                                        <div class="glass-layer"></div>
+                                        <div class="text-layer">
+                                            <div class="name">${p.name}</div>
+                                            <div class="prompt-text">${p.prompt}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                    `;
+                }).join('');
+            }
+            
+            document.getElementById('decorationModal').classList.add('visible');
+        }
+
+        function toggleDecorationSelection(decoPrompt, decoration) {
+            const existingIndex = currentDecorationSelections.findIndex(s => s.decoration === decoration && s.prompt === decoPrompt);
+            
+            if (existingIndex !== -1) {
+                // 取消选择
+                currentDecorationSelections.splice(existingIndex, 1);
+            } else {
+                // 直接添加，允许多选不同 decoration 类型
+                currentDecorationSelections.push({ decoration, prompt: decoPrompt });
+            }
+            
+            updateDecorationSelectedTags();
+            updateDecorationCardStyles();
+        }
+
+        function updateDecorationSelectedTags() {
+            const container = document.getElementById('decorationSelectedTags');
+            if (currentDecorationSelections.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            container.innerHTML = currentDecorationSelections.map(s => `
+                <span class="tag-chip">
+                    ${s.decoration}: ${s.prompt}
+                    <span class="tag-remove" onclick="event.stopPropagation(); toggleDecorationSelection('${s.prompt}', '${s.decoration}')">×</span>
+                </span>
+            `).join('');
+        }
+
+        function updateDecorationCardStyles() {
+            document.querySelectorAll('#decorationPromptsList .prompt-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            
+            for (const s of currentDecorationSelections) {
+                const el = document.getElementById(`deco-${s.decoration}-${findPromptIdByPrompt(s.prompt)}`);
+                if (el) {
+                    el.classList.add('selected');
+                }
+            }
+        }
+
+        function findPromptIdByPrompt(prompt) {
+            for (const [cat, catData] of Object.entries(allPrompts)) {
+                const prompts = catData.prompts || [];
+                for (const p of prompts) {
+                    if (p.prompt === prompt) {
+                        return p.id;
+                    }
+                }
+            }
+            return '';
+        }
+
+        function finishDecorationSelection() {
+            if (!currentDecorationTarget) return;
+            
+            // 组合格式: [decoration1] [decoration2] ... originalPrompt
+            let combined = currentDecorationTarget.prompt;
+            for (const s of currentDecorationSelections) {
+                combined = `[${s.prompt}] ${combined}`;
+            }
+            
+            selectedPrompts.push(combined);
+            updateSelectedTags();
+            closeDecorationModal();
+            renderCategories();
+        }
+
+        function closeDecorationModal() {
+            document.getElementById('decorationModal').classList.remove('visible');
+            currentDecorationTarget = null;
+            currentDecorationSelections = [];
+        }
+
+        function updateSelectedTags() {
+            document.getElementById('selectedCount').textContent = selectedPrompts.length;
+            const container = document.getElementById('selectedTags');
+            container.innerHTML = selectedPrompts.map(p => `
+                <span class="tag">
+                    ${p}
+                    <span class="remove" onclick="togglePrompt('${p.replace(/'/g, "\\'")}')">×</span>
+                </span>
+            `).join('');
+        }
+
+        function searchPrompts() {
+            searchQuery = document.getElementById('searchInput').value.toLowerCase().trim();
+            renderCategories();
+        }
+
+        let addTags = [];
+        let editTags = [];
+        let addDecorations = [];
+        let editDecorations = [];
+
+        function renderTagList(containerId, tagsArray) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = tagsArray.map((tag, index) => `
+                <span class="tag-chip">
+                    ${tag}
+                    <span class="tag-remove" onclick="event.stopPropagation(); removeTag('${containerId}', ${index})">×</span>
+                </span>
+            `).join('');
+        }
+
+        function addAddTag() {
+            const input = document.getElementById('addTagsInput');
+            const tag = input.value.trim();
+            if (tag && !addTags.includes(tag)) {
+                addTags.push(tag);
+                renderTagList('addTagList', addTags);
+                input.value = '';
+            }
+        }
+
+        function addEditTag() {
+            const input = document.getElementById('editTagsInput');
+            const tag = input.value.trim();
+            if (tag && !editTags.includes(tag)) {
+                editTags.push(tag);
+                renderTagList('editTagList', editTags);
+                input.value = '';
+            }
+        }
+
+        function addAddDecoration() {
+            const input = document.getElementById('addDecorationsInput');
+            const deco = input.value.trim();
+            if (deco && !addDecorations.includes(deco)) {
+                addDecorations.push(deco);
+                renderTagList('addDecorationList', addDecorations);
+                input.value = '';
+            }
+        }
+
+        function addEditDecoration() {
+            const input = document.getElementById('editDecorationsInput');
+            const deco = input.value.trim();
+            if (deco && !editDecorations.includes(deco)) {
+                editDecorations.push(deco);
+                renderTagList('editDecorationList', editDecorations);
+                input.value = '';
+            }
+        }
+
+        function removeTag(containerId, index) {
+            if (containerId === 'addTagList') {
+                addTags.splice(index, 1);
+                renderTagList('addTagList', addTags);
+            } else if (containerId === 'editTagList') {
+                editTags.splice(index, 1);
+                renderTagList('editTagList', editTags);
+            } else if (containerId === 'addDecorationList') {
+                addDecorations.splice(index, 1);
+                renderTagList('addDecorationList', addDecorations);
+            } else if (containerId === 'editDecorationList') {
+                editDecorations.splice(index, 1);
+                renderTagList('editDecorationList', editDecorations);
+            } else if (containerId === 'editCategoryTagList') {
+                editCategoryTags.splice(index, 1);
+                renderTagList('editCategoryTagList', editCategoryTags);
+            } else if (containerId === 'editCategoryDecorationList') {
+                editCategoryDecorations.splice(index, 1);
+                renderTagList('editCategoryDecorationList', editCategoryDecorations);
+            }
+        }
+
+        function openAddModal(category) {
+            document.getElementById('addCategory').value = category || '';
+            document.getElementById('addName').value = '';
+            document.getElementById('addPrompt').value = '';
+            document.getElementById('addTagsInput').value = '';
+            addTags = [];
+            renderTagList('addTagList', addTags);
+            document.getElementById('addDecorationsInput').value = '';
+            addDecorations = [];
+            renderTagList('addDecorationList', addDecorations);
+            document.getElementById('addImage').value = '';
+            document.getElementById('addImagePreview').classList.remove('visible');
+            document.getElementById('addModal').classList.add('visible');
+        }
+
+        function closeAddModal() {
+            document.getElementById('addModal').classList.remove('visible');
+        }
+
+        async function addPrompt() {
+            const name = document.getElementById('addName').value.trim();
+            const promptText = document.getElementById('addPrompt').value.trim();
+            const tags = addTags;
+            const decorations = addDecorations;
+            const category = document.getElementById('addCategory').value.trim() || '杂项';
+            
+            if (!name || !promptText) {
+                alert('Please enter name and prompt text');
+                return;
+            }
+
+            let imageData = '';
+            const imageFile = document.getElementById('addImage').files[0];
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+
+            try {
+                await fetch('/add_prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        category,
+                        name,
+                        prompt: promptText,
+                        tags,
+                        decorations,
+                        image: imageData
+                    })
+                });
+                closeAddModal();
+                await loadData();
+            } catch (e) {
+                console.error('Failed to add prompt', e);
+            }
+        }
+
+        function openEditModal(promptId, category) {
+            let promptData = null;
+            for (const [cat, catData] of Object.entries(allPrompts)) {
+                const prompts = catData.prompts || catData;
+                for (const p of prompts) {
+                    if (p.id === promptId) {
+                        promptData = { ...p, category: cat };
+                        break;
+                    }
+                }
+                if (promptData) break;
+            }
+
+            if (!promptData) {
+                return;
+            }
+
+            document.getElementById('editId').value = promptId;
+            document.getElementById('editName').value = promptData.name;
+            document.getElementById('editPrompt').value = promptData.prompt;
+            document.getElementById('editTagsInput').value = '';
+            editTags = Array.isArray(promptData.tags) ? [...promptData.tags] : (promptData.tags || '').split(',').filter(t => t.trim());
+            renderTagList('editTagList', editTags);
+            document.getElementById('editDecorationsInput').value = '';
+            editDecorations = Array.isArray(promptData.decorations) ? [...promptData.decorations] : (promptData.decorations || '').split(',').filter(t => t.trim());
+            renderTagList('editDecorationList', editDecorations);
+            document.getElementById('editImage').value = '';
+
+            const categorySelect = document.getElementById('editCategory');
+            categorySelect.innerHTML = '<option value="">Keep current category</option>';
+            for (const catName of Object.keys(allPrompts)) {
+                categorySelect.innerHTML += `<option value="${catName}" ${catName === category ? 'selected' : ''}>${catName}</option>`;
+            }
+
+            const previewImg = document.getElementById('editImagePreview');
+            if (promptData.preview) {
+                previewImg.src = `/images/${promptData.preview}`;
+                previewImg.classList.add('visible');
+            } else {
+                previewImg.classList.remove('visible');
+            }
+
+            document.getElementById('editModal').classList.add('visible');
+        }
+
+        function closeEditModal() {
+            document.getElementById('editModal').classList.remove('visible');
+        }
+
+        async function updatePrompt() {
+            const promptId = document.getElementById('editId').value;
+            const name = document.getElementById('editName').value.trim();
+            const promptText = document.getElementById('editPrompt').value.trim();
+            const tags = editTags;
+            const decorations = editDecorations;
+            const category = document.getElementById('editCategory').value;
+
+            if (!name || !promptText) {
+                alert('Please enter name and prompt text');
+                return;
+            }
+
+            let imageData = '';
+            const imageFile = document.getElementById('editImage').files[0];
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+
+            try {
+                await fetch('/update_prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: promptId,
+                        name,
+                        prompt: promptText,
+                        tags,
+                        decorations,
+                        category,
+                        image: imageData
+                    })
+                });
+                closeEditModal();
+                await loadData();
+            } catch (e) {
+                console.error('Failed to update prompt', e);
+            }
+        }
+
+        async function deletePrompt(promptId) {
+            if (!confirm('Are you sure you want to delete this prompt?')) {
+                return;
+            }
+
+            try {
+                await fetch('/delete_prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: promptId })
+                });
+                await loadData();
+            } catch (e) {
+                console.error('Failed to delete prompt', e);
+            }
+        }
+
+        function openAddCategoryModal() {
+            document.getElementById('newCategoryName').value = '';
+            document.getElementById('addCategoryModal').classList.add('visible');
+        }
+
+        function closeAddCategoryModal() {
+            document.getElementById('addCategoryModal').classList.remove('visible');
+        }
+
+        async function addCategory() {
+            const categoryName = document.getElementById('newCategoryName').value.trim();
+            
+            if (!categoryName) {
+                alert('Please enter category name');
+                return;
+            }
+
+            try {
+                await fetch('/add_category', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: categoryName })
+                });
+                closeAddCategoryModal();
+                await loadData();
+            } catch (e) {
+                console.error('Failed to add category', e);
+            }
+        }
+
+        function cancel() {
+            fetch('/window_closed', { method: 'POST' });
+            window.close();
+        }
+
+        async function confirmSelection() {
+            if (selectedPrompts.length === 0) {
+                alert('Please select at least one prompt');
+                return;
+            }
+
+            const confirmBtn = document.querySelector('.footer .btn-primary');
+            const originalText = confirmBtn ? confirmBtn.textContent : 'Confirm';
+            
+            try {
+                // 禁用按钮防止重复提交
+                if (confirmBtn) {
+                    confirmBtn.disabled = true;
+                    confirmBtn.textContent = 'Saving...';
+                }
+                
+                const response = await fetch('/select_prompt', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompts: selectedPrompts })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    window.close();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to confirm', e);
+                alert('Failed to save selection: ' + e.message);
+                
+                // 恢复按钮状态
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = originalText;
+                }
+            }
+        }
+
+        document.getElementById('addImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('addImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+            } else {
+                preview.classList.remove('visible');
+            }
+        });
+
+        document.getElementById('editImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('editImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        let editCategoryTags = [];
+        let editCategoryDecorations = [];
+
+        function addEditCategoryTag() {
+            const input = document.getElementById('editCategoryTagsInput');
+            const tag = input.value.trim();
+            if (tag && !editCategoryTags.includes(tag)) {
+                editCategoryTags.push(tag);
+                renderTagList('editCategoryTagList', editCategoryTags);
+                input.value = '';
+            }
+        }
+
+        function addEditCategoryDecoration() {
+            const input = document.getElementById('editCategoryDecorationsInput');
+            const deco = input.value.trim();
+            if (deco && !editCategoryDecorations.includes(deco)) {
+                editCategoryDecorations.push(deco);
+                renderTagList('editCategoryDecorationList', editCategoryDecorations);
+                input.value = '';
+            }
+        }
+
+        function openEditCategoryModal(category) {
+            document.getElementById('editCategoryOldName').value = category;
+            document.getElementById('editCategoryNewName').value = category;
+            document.getElementById('editCategoryImage').value = '';
+            document.getElementById('editCategoryTagsInput').value = '';
+            document.getElementById('editCategoryDecorationsInput').value = '';
+            
+            const catData = allPrompts[category] || {};
+            editCategoryTags = Array.isArray(catData.tags) ? [...catData.tags] : [];
+            renderTagList('editCategoryTagList', editCategoryTags);
+            editCategoryDecorations = Array.isArray(catData.decorations) ? [...catData.decorations] : [];
+            renderTagList('editCategoryDecorationList', editCategoryDecorations);
+            
+            const preview = document.getElementById('editCategoryImagePreview');
+            const bgImage = catData.bg_image || '';
+            
+            if (bgImage) {
+                preview.src = `/images/${bgImage}`;
+                preview.classList.add('visible');
+            } else {
+                preview.src = '';
+                preview.classList.remove('visible');
+            }
+            
+            document.getElementById('editCategoryModal').classList.add('visible');
+        }
+
+        function closeEditCategoryModal() {
+            document.getElementById('editCategoryModal').classList.remove('visible');
+        }
+
+        async function updateCategory() {
+            const oldName = document.getElementById('editCategoryOldName').value;
+            const newName = document.getElementById('editCategoryNewName').value.trim();
+            const imageFile = document.getElementById('editCategoryImage').files[0];
+            
+            if (!newName) {
+                alert('Please enter category name');
+                return;
+            }
+
+            let imageData = null;
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+
+            try {
+                const response = await fetch('/update_category', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        old_name: oldName,
+                        new_name: newName,
+                        tags: editCategoryTags,
+                        decorations: editCategoryDecorations,
+                        image: imageData
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    closeEditCategoryModal();
+                    await loadData();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to update category', e);
+                alert('Failed to update category: ' + e.message);
+            }
+        }
+
+        async function removeCategoryBg() {
+            const oldName = document.getElementById('editCategoryOldName').value;
+            const newName = document.getElementById('editCategoryNewName').value.trim() || oldName;
+            
+            try {
+                const response = await fetch('/update_category', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        old_name: oldName,
+                        new_name: newName,
+                        tags: editCategoryTags,
+                        decorations: editCategoryDecorations,
+                        image: ''
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    closeEditCategoryModal();
+                    await loadData();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to remove category background', e);
+                alert('Failed to remove category background: ' + e.message);
+            }
+        }
+
+        document.getElementById('editCategoryImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('editCategoryImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+            } else {
+                preview.classList.remove('visible');
+            }
+        });
+
+        function openEditDisplayModeModal(category) {
+            document.getElementById('editDisplayModeCategory').value = category;
+            const currentMode = categoryDisplayModes[category] || 'horizontal';
+            const currentSize = categorySizeModes[category] || 'normal';
+            document.getElementById('editDisplayModeSelect').value = currentMode;
+            document.getElementById('editSizeModeSelect').value = currentSize;
+            document.getElementById('editDisplayModeModal').classList.add('visible');
+        }
+
+        function closeEditDisplayModeModal() {
+            document.getElementById('editDisplayModeModal').classList.remove('visible');
+        }
+
+        async function updateDisplayMode() {
+            const category = document.getElementById('editDisplayModeCategory').value;
+            const mode = document.getElementById('editDisplayModeSelect').value;
+            const size = document.getElementById('editSizeModeSelect').value;
+            
+            try {
+                const response = await fetch('/update_category_display_mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        category: category,
+                        display_mode: mode,
+                        size_mode: size
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    categoryDisplayModes[category] = mode;
+                    categorySizeModes[category] = size;
+                    closeEditDisplayModeModal();
+                    renderCategories();
+                    initDragEvents();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to update display mode', e);
+                alert('Failed to update display mode: ' + e.message);
+            }
+        }
+
+        // 拖拽相关变量
+        let draggedItem = null;
+        let draggedType = null;
+        let draggedCategory = null;
+
+        // 初始化拖拽事件
+        function initDragEvents() {
+            // 类别拖拽
+            document.querySelectorAll('.category .drag-handle[data-drag-type="category"]').forEach(handle => {
+                handle.draggable = true;
+                handle.addEventListener('dragstart', (e) => {
+                    const category = handle.dataset.category;
+                    draggedItem = category;
+                    draggedType = 'category';
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', category);
+                    
+                    const categoryDiv = document.getElementById(`category-${category}`);
+                    if (categoryDiv) {
+                        categoryDiv.classList.add('dragging');
+                    }
+                });
+                
+                handle.addEventListener('dragend', (e) => {
+                    const categoryDiv = document.getElementById(`category-${draggedItem}`);
+                    if (categoryDiv) {
+                        categoryDiv.classList.remove('dragging');
+                    }
+                    document.querySelectorAll('.category.drag-over').forEach(el => el.classList.remove('drag-over'));
+                    draggedItem = null;
+                    draggedType = null;
+                });
+            });
+
+            // 类别放置区域
+            document.querySelectorAll('.category').forEach(categoryDiv => {
+                categoryDiv.addEventListener('dragover', (e) => {
+                    if (draggedType === 'category') {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        categoryDiv.classList.add('drag-over');
+                    }
+                });
+                
+                categoryDiv.addEventListener('dragleave', (e) => {
+                    categoryDiv.classList.remove('drag-over');
+                });
+                
+                categoryDiv.addEventListener('drop', async (e) => {
+                    if (draggedType === 'category') {
+                        e.preventDefault();
+                        categoryDiv.classList.remove('drag-over');
+                        
+                        const targetCategory = categoryDiv.id.replace('category-', '');
+                        if (draggedItem !== targetCategory) {
+                            await reorderCategories(draggedItem, targetCategory);
+                        }
+                    }
+                });
+            });
+
+            // 提示词拖拽
+            document.querySelectorAll('.prompt-item .drag-handle[data-drag-type="prompt"]').forEach(handle => {
+                handle.draggable = true;
+                handle.addEventListener('dragstart', (e) => {
+                    const promptId = handle.dataset.id;
+                    const category = handle.dataset.category;
+                    draggedItem = promptId;
+                    draggedType = 'prompt';
+                    draggedCategory = category;
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', promptId);
+                    
+                    const promptItem = handle.closest('.prompt-item');
+                    if (promptItem) {
+                        promptItem.classList.add('dragging');
+                    }
+                });
+                
+                handle.addEventListener('dragend', (e) => {
+                    document.querySelectorAll('.prompt-item.dragging').forEach(el => el.classList.remove('dragging'));
+                    document.querySelectorAll('.prompt-item.drag-over').forEach(el => el.classList.remove('drag-over'));
+                    draggedItem = null;
+                    draggedType = null;
+                    draggedCategory = null;
+                });
+            });
+
+            // 提示词放置区域
+            document.querySelectorAll('.prompt-item').forEach(promptItem => {
+                promptItem.addEventListener('dragover', (e) => {
+                    if (draggedType === 'prompt') {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        promptItem.classList.add('drag-over');
+                    }
+                });
+                
+                promptItem.addEventListener('dragleave', (e) => {
+                    promptItem.classList.remove('drag-over');
+                });
+                
+                promptItem.addEventListener('drop', async (e) => {
+                    if (draggedType === 'prompt') {
+                        e.preventDefault();
+                        promptItem.classList.remove('drag-over');
+                        
+                        const targetId = promptItem.dataset.id;
+                        const targetCategory = promptItem.dataset.category;
+                        
+                        if (draggedItem !== targetId && draggedCategory === targetCategory) {
+                            await reorderPrompts(draggedCategory, draggedItem, targetId);
+                        }
+                    }
+                });
+            });
+        }
+
+        async function reorderCategories(fromCategory, toCategory) {
+            try {
+                const response = await fetch('/reorder_categories', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        from_category: fromCategory,
+                        to_category: toCategory
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    await loadData();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to reorder categories', e);
+                alert('Failed to reorder categories: ' + e.message);
+            }
+        }
+
+        async function reorderPrompts(category, fromId, toId) {
+            try {
+                const response = await fetch('/reorder_prompts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        category: category,
+                        from_id: fromId,
+                        to_id: toId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    await loadData();
+                } else {
+                    throw new Error(result.error || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to reorder prompts', e);
+                alert('Failed to reorder prompts: ' + e.message);
+            }
+        }
+
+        // 事件委托处理提示词卡片点击
+        document.addEventListener('click', (e) => {
+            // 处理 select-area 点击（选择提示词）
+            const selectArea = e.target.closest('.select-area');
+            if (selectArea) {
+                const promptItem = selectArea.closest('.prompt-item');
+                if (promptItem && promptItem.dataset.prompt) {
+                    togglePrompt(promptItem.dataset.prompt);
+                }
+                return;
+            }
+            
+            // 处理 action 按钮点击
+            const actionBtn = e.target.closest('.action-btn');
+            if (actionBtn) {
+                e.stopPropagation();
+                const action = actionBtn.dataset.action;
+                const id = actionBtn.dataset.id;
+                const category = actionBtn.dataset.category;
+                
+                if (action === 'edit') {
+                    openEditModal(id, category);
+                } else if (action === 'delete') {
+                    deletePrompt(id);
+                }
+                return;
+            }
+            
+            // 处理添加提示词按钮点击
+            const addBtn = e.target.closest('.add-prompt-btn');
+            if (addBtn) {
+                openAddModal(addBtn.dataset.category);
+                return;
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', loadData);
+    </script>
+</body>
+</html>
