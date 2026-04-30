@@ -13,6 +13,22 @@ import folder_paths
 from server import PromptServer
 import comfy.model_management as mm
 
+try:
+    from PIL import ImageGrab
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+    print("[SnapshotPrompt] PIL not available, screenshot feature disabled")
+
+try:
+    from PySide6.QtCore import Qt, QRect, QPoint, QPropertyAnimation, QEasingCurve, QEventLoop, Signal
+    from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QPixmap, QImage, QRegion
+    from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QHBoxLayout, QVBoxLayout, QLabel
+    HAS_QT = True
+except ImportError:
+    HAS_QT = False
+    print("[SnapshotPrompt] PySide6 not available, region screenshot feature disabled")
+
 
 def check_interrupted():
     """
@@ -589,6 +605,355 @@ class SnapshotPromptServer:
                 else:
                     self.send_error(500, "Server error")
 
+            elif self.path == '/capture_screenshot':
+                if self.server_instance:
+                    try:
+                        if not HAS_PIL or not HAS_QT:
+                            self.send_response(500)
+                            self.send_header('Content-type', 'application/json')
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.end_headers()
+                            self.wfile.write(json.dumps({'success': False, 'error': 'PIL or PySide6 not available'}).encode('utf-8'))
+                            return
+                        
+                        # 使用独立线程运行截图流程（包含准备面板和选框截图）
+                        import threading
+                        import queue
+                        
+                        result_queue = queue.Queue()
+                        
+                        def run_screenshot():
+                            try:
+                                import sys
+                                import pyautogui
+                                from PIL import Image
+                                from PIL.ImageQt import ImageQt
+                                
+                                # 确保每次都有独立的QApplication实例
+                                app = QApplication.instance()
+                                if app is None:
+                                    app = QApplication(sys.argv)
+                                
+                                # ====================== FloatingCapturePanel ======================
+                                class FloatingCapturePanel(QWidget):
+                                    closed_with_action = Signal(str)
+                                    
+                                    def __init__(self):
+                                        super().__init__()
+                                        self.action = "cancel"
+                                        self._drag_pos = None
+                                        self._final_pos = None
+                                        
+                                        self.setWindowFlags(
+                                            Qt.FramelessWindowHint |
+                                            Qt.WindowStaysOnTopHint |
+                                            Qt.Tool |
+                                            Qt.NoDropShadowWindowHint
+                                        )
+                                        self.setAttribute(Qt.WA_TranslucentBackground, True)
+                                        self.setFixedSize(320, 150)
+                                        
+                                        self._build_ui()
+                                        self._move_to_primary_screen_bottom_right()
+                                        self._remove_windows_shadow()
+                                    
+                                    def _build_ui(self):
+                                        root = QVBoxLayout(self)
+                                        root.setContentsMargins(0, 0, 0, 0)
+                                        root.setSpacing(0)
+                                        
+                                        self.card = QWidget(self)
+                                        self.card.setObjectName("captureCard")
+                                        
+                                        card_layout = QVBoxLayout(self.card)
+                                        card_layout.setContentsMargins(16, 16, 16, 16)
+                                        card_layout.setSpacing(12)
+                                        
+                                        title = QLabel("屏幕截图")
+                                        title.setObjectName("titleLabel")
+                                        
+                                        tip = QLabel("点击 Shot 框选截图区域\nESC 或右键取消")
+                                        tip.setObjectName("tipLabel")
+                                        
+                                        row = QHBoxLayout()
+                                        row.setContentsMargins(0, 0, 0, 0)
+                                        row.setSpacing(8)
+                                        
+                                        self.shot_btn = QPushButton("Shot")
+                                        self.shot_btn.setObjectName("shotBtn")
+                                        self.shot_btn.clicked.connect(self.on_capture_click)
+                                        
+                                        self.cancel_btn = QPushButton("Cancel")
+                                        self.cancel_btn.setObjectName("cancelBtn")
+                                        self.cancel_btn.clicked.connect(self.on_exit_click)
+                                        
+                                        row.addWidget(self.shot_btn, 1)
+                                        row.addWidget(self.cancel_btn, 1)
+                                        
+                                        card_layout.addWidget(title)
+                                        card_layout.addWidget(tip)
+                                        card_layout.addLayout(row)
+                                        
+                                        root.addWidget(self.card)
+                                        
+                                        self.setStyleSheet("""
+                                            QWidget#captureCard {
+                                                background: rgba(18, 18, 20, 245);
+                                                border-radius: 10px;
+                                            }
+                                            QLabel#titleLabel {
+                                                color: white;
+                                                font-size: 15px;
+                                                font-weight: 700;
+                                            }
+                                            QLabel#tipLabel {
+                                                color: rgba(255, 255, 255, 160);
+                                                font-size: 12px;
+                                            }
+                                            QPushButton {
+                                                border: none;
+                                                border-radius: 8px;
+                                                min-height: 36px;
+                                                padding: 0 14px;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                color: white;
+                                                background: #2C2C2E;
+                                            }
+                                            QPushButton#shotBtn {
+                                                background: #0A84FF;
+                                            }
+                                            QPushButton#shotBtn:hover { background: #3395FF; }
+                                            QPushButton#shotBtn:pressed { background: #006FE8; }
+                                            QPushButton#cancelBtn:hover { background: #3A3A3C; }
+                                            QPushButton#cancelBtn:pressed { background: #242426; }
+                                        """)
+                                    
+                                    def _move_to_primary_screen_bottom_right(self):
+                                        screen = QGuiApplication.primaryScreen()
+                                        geo = screen.availableGeometry()
+                                        margin = 24
+                                        x = geo.x() + geo.width() - self.width() - margin
+                                        y = geo.y() + geo.height() - self.height() - margin
+                                        self._final_pos = QPoint(x, y)
+                                        self.move(x, y)
+                                    
+                                    def _remove_windows_shadow(self):
+                                        try:
+                                            import ctypes
+                                            hwnd = int(self.winId())
+                                            DWMWA_NCRENDERING_POLICY = 2
+                                            DWMNCRP_DISABLED = 1
+                                            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                                                hwnd, DWMWA_NCRENDERING_POLICY,
+                                                ctypes.byref(ctypes.c_uint(DWMNCRP_DISABLED)), 
+                                                ctypes.sizeof(ctypes.c_uint)
+                                            )
+                                        except:
+                                            pass
+                                    
+                                    def on_capture_click(self):
+                                        self.action = "capture"
+                                        self.close()
+                                    
+                                    def on_exit_click(self):
+                                        self.action = "cancel"
+                                        self.close()
+                                    
+                                    def closeEvent(self, event):
+                                        self.closed_with_action.emit(self.action)
+                                        super().closeEvent(event)
+                                    
+                                    def mousePressEvent(self, event):
+                                        if event.button() == Qt.LeftButton:
+                                            child = self.childAt(event.position().toPoint())
+                                            if isinstance(child, QPushButton):
+                                                event.ignore()
+                                                return
+                                            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                                            event.accept()
+                                    
+                                    def mouseMoveEvent(self, event):
+                                        if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
+                                            self.move(event.globalPosition().toPoint() - self._drag_pos)
+                                            self._final_pos = self.pos()
+                                            event.accept()
+                                    
+                                    def mouseReleaseEvent(self, event):
+                                        self._drag_pos = None
+                                        event.accept()
+                                
+                                # ====================== ScreenshotOverlay ======================
+                                class ScreenshotOverlay(QWidget):
+                                    closed_with_action = Signal()
+                                    
+                                    def __init__(self):
+                                        super().__init__()
+                                        self.start_point = QPoint()
+                                        self.end_point = QPoint()
+                                        self.selecting = False
+                                        self.captured = False
+                                        self.image = None
+                                        
+                                        screens = QGuiApplication.screens()
+                                        left = min(s.geometry().left() for s in screens)
+                                        top = min(s.geometry().top() for s in screens)
+                                        right = max(s.geometry().right() for s in screens)
+                                        bottom = max(s.geometry().bottom() for s in screens)
+                                        self.virtual_rect = QRect(left, top, right - left + 1, bottom - top + 1)
+                                        
+                                        self.setGeometry(self.virtual_rect)
+                                        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+                                        self.setAttribute(Qt.WA_TranslucentBackground, True)
+                                        self.setCursor(Qt.CrossCursor)
+                                        self.setMouseTracking(True)
+                                        self.setFocusPolicy(Qt.StrongFocus)
+                                        
+                                        primary_screen = QGuiApplication.primaryScreen()
+                                        self.dpr = float(primary_screen.devicePixelRatio()) if primary_screen else 1.0
+                                        
+                                        full_img = pyautogui.screenshot(
+                                            region=(
+                                                int(round(self.virtual_rect.x() * self.dpr)),
+                                                int(round(self.virtual_rect.y() * self.dpr)),
+                                                int(round(self.virtual_rect.width() * self.dpr)),
+                                                int(round(self.virtual_rect.height() * self.dpr)),
+                                            )
+                                        )
+                                        self.full_pil = full_img
+                                        
+                                        qt_image = ImageQt(full_img.convert("RGBA"))
+                                        if isinstance(qt_image, QImage):
+                                            self.background = QPixmap.fromImage(qt_image)
+                                        else:
+                                            self.background = QPixmap.fromImage(QImage(qt_image))
+                                    
+                                    def paintEvent(self, event):
+                                        painter = QPainter(self)
+                                        painter.setRenderHint(QPainter.Antialiasing, True)
+                                        painter.drawPixmap(self.rect(), self.background)
+                                        painter.fillRect(self.rect(), QColor(8, 8, 10, 110))
+                                        
+                                        if self.selecting or self.captured:
+                                            rect = QRect(self.start_point, self.end_point).normalized()
+                                            painter.save()
+                                            painter.setClipRect(rect)
+                                            painter.drawPixmap(self.rect(), self.background)
+                                            painter.restore()
+                                            
+                                            pen = QPen(QColor(10, 132, 255), 2)
+                                            painter.setPen(pen)
+                                            painter.setBrush(QColor(10, 132, 255, 30))
+                                            painter.drawRect(rect)
+                                    
+                                    def keyPressEvent(self, event):
+                                        if event.key() == Qt.Key_Escape:
+                                            self.close()
+                                    
+                                    def mousePressEvent(self, event):
+                                        if event.button() == Qt.LeftButton:
+                                            self.start_point = event.position().toPoint()
+                                            self.end_point = self.start_point
+                                            self.selecting = True
+                                            self.update()
+                                        elif event.button() == Qt.RightButton:
+                                            self.close()
+                                    
+                                    def mouseMoveEvent(self, event):
+                                        if self.selecting:
+                                            self.end_point = event.position().toPoint()
+                                            self.update()
+                                    
+                                    def mouseReleaseEvent(self, event):
+                                        if event.button() == Qt.LeftButton and self.selecting:
+                                            self.end_point = event.position().toPoint()
+                                            self.selecting = False
+                                            
+                                            rect = QRect(self.start_point, self.end_point).normalized()
+                                            if rect.width() > 10 and rect.height() > 10:
+                                                left_px = int(round(rect.x() * self.dpr))
+                                                top_px = int(round(rect.y() * self.dpr))
+                                                right_px = int(round((rect.x() + rect.width()) * self.dpr))
+                                                bottom_px = int(round((rect.y() + rect.height()) * self.dpr))
+                                                
+                                                self.image = self.full_pil.crop((left_px, top_px, right_px, bottom_px))
+                                                self.captured = True
+                                            
+                                            self.close()
+                                    
+                                    def closeEvent(self, event):
+                                        self.closed_with_action.emit()
+                                        super().closeEvent(event)
+                                
+                                # ====================== 执行流程 ======================
+                                def wait_for_close(widget, signal_name="closed_with_action"):
+                                    loop = QEventLoop()
+                                    getattr(widget, signal_name).connect(loop.quit)
+                                    loop.exec()
+                                
+                                # 1. 显示准备面板
+                                panel = FloatingCapturePanel()
+                                panel.show()
+                                panel.raise_()
+                                panel.activateWindow()
+                                wait_for_close(panel, "closed_with_action")
+                                
+                                action = panel.action
+                                
+                                if action == "cancel":
+                                    result_queue.put({'success': False, 'error': 'User cancelled'})
+                                    return
+                                
+                                # 2. 显示选框截图层
+                                overlay = ScreenshotOverlay()
+                                overlay.show()
+                                overlay.raise_()
+                                overlay.activateWindow()
+                                wait_for_close(overlay)
+                                
+                                if overlay.captured and overlay.image is not None:
+                                    import io
+                                    buffer = io.BytesIO()
+                                    overlay.image.save(buffer, format='PNG')
+                                    image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                                    result_queue.put({'success': True, 'image_data': f'data:image/png;base64,{image_data}'})
+                                else:
+                                    result_queue.put({'success': False, 'error': 'No region selected'})
+                                    
+                            except Exception as e:
+                                result_queue.put({'success': False, 'error': str(e)})
+                        
+                        # Run screenshot in separate thread
+                        screenshot_thread = threading.Thread(target=run_screenshot)
+                        screenshot_thread.daemon = True
+                        screenshot_thread.start()
+                        screenshot_thread.join(timeout=120)
+                        
+                        if not result_queue.empty():
+                            result = result_queue.get()
+                            self.send_response(200 if result.get('success') else 500)
+                            self.send_header('Content-type', 'application/json')
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.end_headers()
+                            self.wfile.write(json.dumps(result).encode('utf-8'))
+                        else:
+                            self.send_response(500)
+                            self.send_header('Content-type', 'application/json')
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.end_headers()
+                            self.wfile.write(json.dumps({'success': False, 'error': 'Screenshot timeout'}).encode('utf-8'))
+                            
+                    except Exception as e:
+                        print(f"[SnapshotPrompt] Screenshot error: {e}")
+                        traceback.print_exc()
+                        self.send_response(500)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                    self.wfile.write(json.dumps({'success': False, 'error': str(e)}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             elif self.path == '/add_category':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -684,18 +1049,25 @@ class SnapshotPromptServer:
                 if self.server_instance:
                     from_category = data.get('from_category', '')
                     to_category = data.get('to_category', '')
+                    position = data.get('position', 'at')  # 'at' or 'end'
                     
-                    if from_category and to_category and from_category in self.server_instance.prompts_data and to_category in self.server_instance.prompts_data:
+                    if from_category and from_category in self.server_instance.prompts_data:
                         # 获取当前所有类别的键
                         keys = list(self.server_instance.prompts_data.keys())
                         
-                        # 找到源和目标索引
+                        # 找到源索引
                         from_idx = keys.index(from_category)
-                        to_idx = keys.index(to_category)
                         
                         # 移动键
                         keys.pop(from_idx)
-                        keys.insert(to_idx, from_category)
+                        
+                        if position == 'end' or not to_category:
+                            # 插入到末尾
+                            keys.append(from_category)
+                        elif to_category in self.server_instance.prompts_data:
+                            # 插入到目标类别的位置（替换成"at"）
+                            to_idx = keys.index(to_category)
+                            keys.insert(to_idx, from_category)
                         
                         # 重建字典保持新顺序
                         new_data = {}
@@ -722,23 +1094,37 @@ class SnapshotPromptServer:
                     category = data.get('category', '')
                     from_id = data.get('from_id', '')
                     to_id = data.get('to_id', '')
+                    position = data.get('position', 'at')  # 'at' or 'end'
                     
                     if category and category in self.server_instance.prompts_data:
                         prompts = self.server_instance.prompts_data[category].get("prompts", [])
                         
-                        # 找到源和目标索引
+                        # 找到源索引
                         from_idx = None
-                        to_idx = None
                         for i, p in enumerate(prompts):
                             if p.get('id') == from_id:
                                 from_idx = i
-                            if p.get('id') == to_id:
-                                to_idx = i
+                                break
                         
-                        if from_idx is not None and to_idx is not None:
+                        if from_idx is not None:
                             # 移动提示词
                             prompt_item = prompts.pop(from_idx)
-                            prompts.insert(to_idx, prompt_item)
+                            
+                            if position == 'end' or not to_id:
+                                # 插入到末尾
+                                prompts.append(prompt_item)
+                            else:
+                                # 找到目标索引并插入到该位置
+                                to_idx = None
+                                for i, p in enumerate(prompts):
+                                    if p.get('id') == to_id:
+                                        to_idx = i
+                                        break
+                                
+                                if to_idx is not None:
+                                    prompts.insert(to_idx, prompt_item)
+                                else:
+                                    prompts.append(prompt_item)
                             
                             self.server_instance._save_prompts(self.server_instance.prompts_data)
 

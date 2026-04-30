@@ -14,24 +14,147 @@
             -moz-user-select: none;
             -ms-user-select: none;
         }
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #252525;
+            --bg-tertiary: #2d2d2d;
+            --bg-card: #3a3a3a;
+            --bg-card-hover: #444;
+            --border-color: #444;
+            --accent-color: #007aff;
+            --text-primary: #f5f5f5;
+            --text-secondary: #888;
+        }
+        
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #1a1a1a;
-            color: #f5f5f5;
-            min-height: 100vh;
-            padding: 20px;
-            padding-bottom: 100px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
         }
+        
+        .app-container {
+            display: flex;
+            height: 100vh;
+        }
+        .app-container:has(.zoom-view) {
+            z-index: 10000;
+        }
+        
+        .main-wrapper {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        .main-wrapper:has(.zoom-view) {
+            z-index: 10000;
+        }
+        
+        .scroll-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: linear-gradient(135deg, rgba(30,30,30,0.8) 0%, rgba(25,25,25,0.9) 100%);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        
+        /* 自定义滚动条样式 */
+        .scroll-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        .scroll-container::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.15);
+            border-radius: 3px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.25);
+        }
+        
         .container {
             max-width: 100%;
             margin: 0 auto;
+        }
+        .container:has(.zoom-view) {
+            z-index: 10000;
+        }
+        
+        .right-bar {
+            width: 320px;
+            flex-shrink: 0;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            height: 100vh;
+        }
+        
+        .right-bar .selected-bar {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0;
+            margin-bottom: 15px;
+            box-shadow: none;
+            background: transparent;
+        }
+        
+        .right-bar .selected-bar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .right-bar .selected-bar::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+        }
+        .right-bar .selected-bar::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.15);
+            border-radius: 3px;
+        }
+        .right-bar .selected-bar::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.25);
+        }
+        
+        .right-bar .selected-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        
+        .right-bar .custom-input-section {
+            margin-bottom: 15px;
+            background: transparent;
+            padding: 0;
+            box-shadow: none;
+            height: 330px;
+            flex-shrink: 0;
+        }
+        
+        .right-bar .custom-input-section textarea {
+            height: calc(330px - 40px);
+            resize: none;
+        }
+        
+        .right-bar .footer {
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .right-bar .footer button {
+            width: 100%;
         }
         .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
             padding: 15px 20px;
-            background: #2d2d2d;
+            background: var(--bg-tertiary);
             border-radius: 12px;
             margin-bottom: 20px;
             flex-wrap: wrap;
@@ -49,9 +172,9 @@
         .search-box input {
             padding: 8px 15px;
             border-radius: 8px;
-            border: 1px solid #444;
-            background: #3a3a3a;
-            color: #fff;
+            border: 1px solid var(--border-color);
+            background: var(--bg-card);
+            color: var(--text-primary);
             width: 200px;
         }
         .search-box button, .btn {
@@ -70,8 +193,8 @@
             background: #0055cc;
         }
         .btn-secondary {
-            background: #4a4a4a;
-            color: white;
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
         }
         .btn-secondary:hover {
             background: #5a5a5a;
@@ -84,14 +207,14 @@
             background: #bb2d3a;
         }
         .selected-bar {
-            background: #2d2d2d;
+            background: var(--bg-tertiary);
             border-radius: 12px;
             padding: 15px 20px;
             margin-bottom: 20px;
         }
         .selected-bar h3 {
             font-size: 14px;
-            color: #888;
+            color: var(--text-secondary);
             margin-bottom: 10px;
         }
         .selected-tags {
@@ -125,20 +248,34 @@
             width: 100%;
         }
         
-        /* Category 样式 */
+        /* Category 样式 - 作为定位上下文 */
         .category {
-            background: #2d2d2d;
+            position: relative;
+            background: var(--bg-tertiary);
             border-radius: 12px;
-            overflow: hidden;
             flex: 0 0 auto;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-user-drag: none;
+            z-index: 1;
+        }
+        .category:has(.zoom-view) {
+            z-index: 10000;
+        }
+        .category-content:has(.zoom-view) {
+            z-index: 10000;
+        }
+        .categories-container:has(.zoom-view) {
+            z-index: 10000;
+        }
+        .scroll-container:has(.zoom-view) {
+            z-index: 10000;
         }
         .category.dragging {
             opacity: 0.5;
             border: 2px dashed #007aff;
         }
-        .category.drag-over {
-            border: 2px dashed #007aff;
-        }
+
 
         .category-header .drag-handle {
             cursor: grab;
@@ -167,8 +304,10 @@
         }
         
         .category-header {
+            position: relative;
+            z-index: 1;
             padding: 12px 16px;
-            background: #3a3a3a;
+            background: var(--bg-card);
             font-weight: 600;
             font-size: 14px;
             cursor: pointer;
@@ -177,15 +316,15 @@
             align-items: center;
             white-space: nowrap;
             transition: background 0.2s;
-            position: relative;
             overflow: hidden;
+            border-radius: 12px;
         }
         .category-header:hover {
-            background: #444;
+            background: var(--bg-card-hover);
         }
         .category-header .toggle {
             font-size: 12px;
-            color: #888;
+            color: var(--text-secondary);
             margin-left: 8px;
             transition: transform 0.3s;
         }
@@ -195,35 +334,52 @@
             position: absolute;
             top: 0;
             left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
             height: 100%;
-            width: auto;
-            max-width: 80%;
             object-fit: cover;
             mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);
             -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 40%, rgba(0,0,0,0) 100%);
             z-index: 0;
             pointer-events: none;
+            border-radius: inherit;
         }
         
-        /* 展开状态：背景图从左侧渐变到右侧透明 */
-        .category.expanded {
-            position: relative;
-        }
-        .category.expanded::before {
-            content: '';
+        /* 展开状态：背景图遮罩容器 - 填满整个category */
+        .category-background-mask {
             position: absolute;
             top: 0;
             left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
             height: 100%;
-            width: 80%;
-            background-image: var(--cat-bg-image);
-            background-size: cover;
-            background-position: left top;
-            background-repeat: no-repeat;
-            mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
-            -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
             z-index: 0;
             pointer-events: none;
+            display: none;
+            border-radius: inherit;
+            overflow: hidden;
+            mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
+            -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,1) 0%, rgba(0,0,0,1) 60%, rgba(0,0,0,0.2) 85%, rgba(0,0,0,0) 100%);
+            filter: blur(6px);
+        }
+        .category.expanded .category-background-mask {
+            display: block;
+        }
+        
+        /* 背景图本身 */
+        .category-background {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: var(--bg-width, 120%);
+            height: var(--bg-height, 120%);
+            background-size: contain;
+            background-position: center;
+            background-repeat: no-repeat;
+            transform: translate(calc(-50% + var(--bg-x, 0px)), calc(-50% + var(--bg-y, 0px)));
+            transition: transform 0.1s ease-out;
         }
         
         /* 展开状态：类别头部变为毛玻璃 */
@@ -329,86 +485,223 @@
         
         /* 展开状态的内容 */
         .category-content {
+            position: relative;
+            z-index: 1;
             padding: 20px;
             display: flex;
             flex-wrap: nowrap;
-            gap: 15px;
-            overflow-x: auto;
-            overflow-y: hidden;
+            gap: 20px;
+            overflow: visible;
             white-space: nowrap;
             scrollbar-width: thin;
-            scrollbar-color: #555 #2a2a2a;
+            scrollbar-color: var(--border-color) var(--bg-secondary);
+            will-change: transform, opacity;
         }
         .category-content.box-mode {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
             flex-wrap: wrap;
-            overflow-x: hidden;
-            overflow-y: auto;
+            overflow: visible;
             white-space: normal;
             max-height: none;
+            gap: 15px;
+            padding: 5px;
+            position: relative; /* 让absolute定位的子元素相对于容器 */
         }
         .category-content.box-mode .prompt-item {
             width: 100%;
             height: 350px;
         }
         .category-content.animating {
-            animation: expandIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            animation: expandIn 0.3s cubic-bezier(0.2, 0.8, 0.3, 1);
         }
         @keyframes expandIn {
             from {
                 opacity: 0;
-                max-height: 0;
-                padding: 0 20px;
+                transform: scaleY(0.8);
+                transform-origin: top;
             }
             to {
                 opacity: 1;
-                max-height: 500px;
-                padding: 20px;
+                transform: scaleY(1);
+                transform-origin: top;
             }
         }
         .category-content::-webkit-scrollbar {
             height: 8px;
         }
         .category-content::-webkit-scrollbar-track {
-            background: #2a2a2a;
+            background: var(--bg-secondary);
             border-radius: 4px;
         }
         .category-content::-webkit-scrollbar-thumb {
-            background: #555;
+            background: var(--border-color);
             border-radius: 4px;
         }
         .category-content::-webkit-scrollbar-thumb:hover {
-            background: #777;
+            background: var(--bg-card-hover);
         }
         
         /* 提示词卡片 - 图片铺满，元素叠加 */
         .prompt-item {
             flex: 0 0 auto;
             display: flex;
+            transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                        height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                        transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+                        box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+                        border-radius 0.25s ease;
+            position: relative;
+            cursor: default;
+            overflow: hidden;
+            z-index: 1;
+            user-select: none; /* 禁用文本选择 */
+            -webkit-user-drag: none; /* 禁用原生拖拽 */
+            -webkit-user-select: none;
+        }
+        
+        /* 让prompt-item默认填满wrapper */
+        .prompt-item-wrapper .prompt-item {
+            position: relative;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        /* 拖拽手柄特殊样式 */
+        .drag-handle {
+            cursor: grab;
+            cursor: -webkit-grab;
+        }
+        
+        .drag-handle:active {
+            cursor: grabbing;
+            cursor: -webkit-grabbing;
+        }
+        
+        /* 选择区域 - 点击指针 */
+        .select-area {
+            cursor: pointer;
+        }
+
+        /* ==================== Normal Mode ==================== */
+        .prompt-item.normal-mode {
             flex-direction: column;
             width: 250px;
             height: 350px;
-            background: #3a3a3a36;
+            background: rgba(58, 58, 58, 0.62);
             border-radius: 12px;
             font-size: 14px;
-            transition: all 0.2s;
-            position: relative;
-            cursor: pointer;
-            overflow: hidden;
+            transition: all 0.3s ease;
         }
-        /* Mini 模式下的提示词卡片 - 水平 flex 布局 */
-        .category-content.mini-mode .prompt-item {
-            width: 240px;
-            height: 80px;
+        
+        /* Normal Mode 基础悬浮效果 */
+        .prompt-item.normal-mode:hover {
+            transform: scale(1.025) translateY(-2.5px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+            z-index: 10;
+        }
+        
+        .prompt-item.normal-mode:hover .image-layer img {
+            transform: scale(1.05);
+        }
+        
+        /* Normal Mode 仔细看模式 */
+        .prompt-item.normal-mode.zoom-view {
+            width: var(--zoom-width, 300px) !important;
+            height: var(--zoom-height, 600px) !important;
+            border-radius: 16px !important;
+            transform: translate(calc(var(--zoom-offset-x, 0px)), calc(-10px + var(--zoom-offset-y, 0px))) !important;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.5) !important;
+            z-index: 10000 !important;
+            position: absolute !important;
+            top: 0;
+            left: 0;
+            /* 提前准备GPU加速防止抖动 */
+            will-change: width, height, transform, box-shadow;
+        }
+        
+        /* Normal Mode 回缩动画 - 使用绝对定位避免影响布局 */
+        .prompt-item.normal-mode.zoom-exit {
+            width: 250px !important;
+            height: 350px !important;
+            border-radius: 12px !important;
+            transform: translate(0, 0) !important;
+            box-shadow: none !important;
+            z-index: 10000 !important;
+            position: absolute !important;
+            top: 0;
+            left: 0;
+            will-change: width, height, transform, box-shadow;
+        }
+        
+        /* zoom-view时禁用普通hover样式 */
+        .prompt-item.normal-mode.zoom-view:hover {
+            transform: translate(calc(var(--zoom-offset-x, 0px)), calc(-10px + var(--zoom-offset-y, 0px))) !important;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.5) !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view:hover .image-layer img {
+            transform: scale(1) !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .image-layer img {
+            transform: scale(1) !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .text-layer {
+            height: 45% !important;
+            padding: 18px 20px !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .name,
+        .prompt-item.normal-mode.zoom-view .prompt-text {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            text-shadow: 0 2px 5px rgba(0,0,0,0.9) !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .name {
+            font-size: 18px !important;
+            margin-bottom: 8px !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .prompt-text {
+            font-size: 15px !important;
+            line-height: 1.5 !important;
+        }
+        
+        .prompt-item.normal-mode.zoom-view .glass-layer {
+            height: 45% !important;
+            background: rgba(0, 0, 0, 0.5) !important;
+            backdrop-filter: blur(4px) !important;
+        }
+
+        /* ==================== Mini Mode ==================== */
+        .prompt-item.mini-mode {
             flex-direction: row;
             align-items: center;
+            width: 240px;
+            height: 80px;
             padding: 0;
             border-radius: 8px;
-            position: relative;
-            overflow: hidden;
+            background: rgba(58, 58, 58, 0.62);
         }
-        .category-content.mini-mode .prompt-item .select-area {
+        
+        /* Mini Mode 悬浮效果 */
+        .prompt-item.mini-mode:hover {
+            transform: scale(1.015) translateY(-1.5px);
+            box-shadow: 0 5px 18px rgba(0,0,0,0.35);
+            z-index: 10;
+        }
+        
+        .prompt-item.mini-mode:hover .image-layer img {
+            transform: scale(1.04);
+        }
+
+        .prompt-item.mini-mode .select-area {
             position: absolute;
             top: 0;
             left: 0;
@@ -416,48 +709,54 @@
             height: 100% !important;
             z-index: 1;
         }
-        .category-content.mini-mode .prompt-item .image-layer {
+
+        .prompt-item.mini-mode .image-layer {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
         }
-        .category-content.mini-mode .prompt-item .image-layer img,
-        .category-content.mini-mode .prompt-item .image-layer .no-image {
+
+        .prompt-item.mini-mode .image-layer img,
+        .prompt-item.mini-mode .image-layer .no-image {
             width: 100%;
             height: 100%;
             object-fit: cover;
         }
-        .category-content.mini-mode .prompt-item .glass-layer {
+
+        .prompt-item.mini-mode .glass-layer {
             display: none;
         }
-        .category-content.mini-mode .prompt-item .text-layer {
+
+        .prompt-item.mini-mode .text-layer {
             position: relative;
             z-index: 2;
             width: auto;
             height: auto;
             flex: 1;
-            padding: 0 32px 0 16px;
+            padding: 8px 32px 0 32px;
             justify-content: center;
             background: transparent;
             min-width: 0;
             display: flex;
             flex-direction: column;
         }
-        .category-content.mini-mode .prompt-item .name {
+
+        .prompt-item.mini-mode .name {
             font-size: 15px;
             font-weight: 600;
-            color: #fff;
+            color: var(--text-primary);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
             line-height: 1.4;
         }
-        .category-content.mini-mode .prompt-item .prompt-text {
+
+        .prompt-item.mini-mode .prompt-text {
             font-size: 13px;
-            color: #e0e0e0;
+            color: var(--text-primary);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -465,7 +764,8 @@
             line-height: 1.4;
             margin-top: 3px;
         }
-        .category-content.mini-mode .prompt-item .actions {
+
+        .prompt-item.mini-mode .actions {
             position: absolute;
             top: 4px;
             right: 4px;
@@ -474,56 +774,212 @@
             gap: 2px;
             z-index: 10;
         }
-        .category-content.mini-mode .prompt-item:hover .actions {
+
+        .prompt-item.mini-mode:hover .actions {
             opacity: 1;
         }
-        .category-content.mini-mode .prompt-item .action-btn {
+
+        .prompt-item.mini-mode .action-btn {
             padding: 3px 6px;
             font-size: 10px;
             background: rgba(0,0,0,0.7);
         }
-        .category-content.mini-mode .prompt-item .drag-handle {
+
+        .prompt-item.mini-mode .drag-handle {
             top: 4px;
             left: 4px;
-            z-index: 1000;
+            z-index: 100;
             font-size: 11px;
             padding: 4px 3px;
             pointer-events: auto !important;
         }
-        /* Box + Mini 组合模式 */
+        
+        /* Mini Mode Zoom View */
+        .prompt-item.mini-mode.zoom-view {
+            flex-direction: column !important;
+            width: var(--zoom-width, 300px) !important;
+            height: var(--zoom-height, 600px) !important;
+            border-radius: 16px !important;
+            transform: translate(calc(var(--zoom-offset-x, 0px)), calc(-10px + var(--zoom-offset-y, 0px))) !important;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.5) !important;
+            z-index: 10000 !important;
+            padding: 0 !important;
+            position: absolute !important;
+            top: 0;
+            left: 0;
+            /* 提前准备GPU加速防止抖动 */
+            will-change: width, height, transform, box-shadow;
+        }
+        
+        /* Mini Mode 回缩动画 - 使用绝对定位避免影响布局 */
+        .prompt-item.mini-mode.zoom-exit {
+            flex-direction: row !important;
+            width: 240px !important;
+            height: 80px !important;
+            border-radius: 8px !important;
+            transform: translate(0, 0) !important;
+            box-shadow: none !important;
+            z-index: 10000 !important;
+            padding: 0 !important;
+            position: absolute !important;
+            top: 0;
+            left: 0;
+            will-change: width, height, transform, box-shadow;
+        }
+        
+        /* zoom-view时禁用普通hover样式 */
+        .prompt-item.mini-mode.zoom-view:hover {
+            transform: translate(calc(var(--zoom-offset-x, 0px)), calc(-10px + var(--zoom-offset-y, 0px))) !important;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.5) !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view:hover .image-layer img {
+            transform: scale(1) !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .select-area {
+            position: relative !important;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .image-layer {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .image-layer img {
+            transform: scale(1) !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .glass-layer {
+            display: block !important;
+            position: absolute !important;
+            bottom: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            height: 45% !important;
+            background: rgba(0, 0, 0, 0.5) !important;
+            backdrop-filter: blur(4px) !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .text-layer {
+            position: relative !important;
+            z-index: 2 !important;
+            width: 100% !important;
+            height: 45% !important;
+            padding: 18px 20px !important;
+            justify-content: flex-end !important;
+            flex-direction: column !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .name,
+        .prompt-item.mini-mode.zoom-view .prompt-text {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            text-shadow: 0 2px 5px rgba(0,0,0,0.9) !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .name {
+            font-size: 18px !important;
+            margin-bottom: 8px !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .prompt-text {
+            font-size: 15px !important;
+            line-height: 1.5 !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .actions {
+            position: absolute !important;
+            top: 8px !important;
+            right: 8px !important;
+            opacity: 1 !important;
+        }
+        
+        .prompt-item.mini-mode.zoom-view .drag-handle {
+            position: absolute !important;
+            top: 8px !important;
+            left: 8px !important;
+        }
+
+        /* ==================== Box Mode Compatibility ==================== */
         .category-content.box-mode.mini-mode {
             grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 12px;
         }
-        .category-content.box-mode.mini-mode .prompt-item {
+
+        .category-content.box-mode .prompt-item.normal-mode {
+            width: 100%;
+            height: 350px;
+        }
+
+        .category-content.box-mode .prompt-item.mini-mode {
+            width: 100%;
+            height: 80px;
+        }
+        .prompt-item.add-prompt-btn.normal-mode {
+            width: 250px;
+            height: 350px;
+        }
+        .prompt-item.add-prompt-btn.mini-mode {
+            width: 240px;
+            height: 80px;
+        }
+        .category-content.box-mode .prompt-item.add-prompt-btn {
             width: 100%;
         }
+        
+        .prompt-item.add-prompt-btn {
+            background: var(--bg-card);
+            border: 2px dashed var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+        
+        .prompt-item.add-prompt-btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent-color);
+            transform: scale(1.02);
+        }
+        
+        .prompt-item.add-prompt-btn div {
+            font-size: 24px;
+            color: var(--text-secondary);
+            transition: color 0.3s, transform 0.3s;
+        }
+        
+        .prompt-item.add-prompt-btn:hover div {
+            color: var(--accent-color);
+            transform: scale(1.2);
+        }
         .prompt-item.dragging {
-            opacity: 0.5;
-            border: 2px dashed #007aff;
+            opacity: 0.6;
+            transform: scale(0.98);
         }
-        .prompt-item.drag-over {
-            border: 2px dashed #007aff;
-        }
+        .category.drag-over,
+        .prompt-item.drag-over,
         .category-content.drag-over {
-            outline: 2px dashed #007aff;
-            outline-offset: -2px;
-            border-radius: 8px;
+            border: 3px dashed #007aff !important;
+            background: rgba(0, 122, 255, 0.1) !important;
         }
         .prompt-item .drag-handle {
+            pointer-events: all !important;
+            z-index: 100 !important;
             position: absolute;
             top: 5px;
             left: 5px;
-            cursor: grab;
-            padding: 8px 6px;
-            z-index: 1000;
-            opacity: 0;
-            transition: opacity 0.2s;
-            background: rgba(0,0,0,0.7);
+            background: rgba(0,0,0,0.85) !important;
+            padding: 6px 8px !important;
             border-radius: 4px;
-            color: white;
-            font-size: 12px;
-            line-height: 1;
-            pointer-events: auto !important;
+            cursor: grab !important;
+            user-select: none;
         }
         .prompt-item:hover .drag-handle {
             opacity: 1;
@@ -531,10 +987,7 @@
         .prompt-item .drag-handle:active {
             cursor: grabbing;
         }
-        .prompt-item:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        }
+        /* 移除通用的 hover 样式，让各 mode 自己控制 */
         .prompt-item.selected {
             border-color: #007aff;
             box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0,0,0,0.3);
@@ -553,6 +1006,14 @@
             width: 100%;
             height: 100%;
             object-fit: cover;
+            transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        
+        .prompt-item .text-layer,
+        .prompt-item .name,
+        .prompt-item .prompt-text,
+        .prompt-item .glass-layer {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         .prompt-item .image-layer .no-image {
             width: 100%;
@@ -560,7 +1021,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #666;
+            color: var(--text-secondary);
             font-size: 12px;
         }
         
@@ -595,12 +1056,12 @@
             overflow: hidden;
             text-overflow: ellipsis;
             font-size: 15px;
-            color: #fff;
+            color: var(--text-primary);
             text-shadow: 0 1px 3px rgba(0,0,0,0.8);
         }
         .prompt-item .prompt-text {
             font-size: 12px;
-            color: #ddd;
+            color: var(--text-primary);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -659,92 +1120,97 @@
         .prompt-item-wrapper {
             position: relative;
             display: flex;
-            flex-direction: row;
+            flex-direction: column;
             gap: 0;
             flex: 0 0 auto;
             align-items: flex-start;
+            overflow: visible !important;
+            z-index: 1;
+        }
+        .prompt-item-wrapper:has(.zoom-view) {
+            z-index: 10000;
+        }
+        
+        /* Normal-mode wrapper 维持固定布局 */
+        .prompt-item-wrapper:has(.prompt-item.normal-mode) {
+            flex: 0 0 250px !important;
+            width: 250px;
+            height: auto;
+            min-height: 350px;
+        }
+        
+        /* Mini-mode wrapper 维持固定布局 */
+        .prompt-item-wrapper:has(.prompt-item.mini-mode) {
+            flex: 0 0 240px !important;
+            width: 240px;
+            height: auto;
+            min-height: 80px;
         }
         
         .category-content.box-mode .prompt-item-wrapper {
             display: flex;
             flex-direction: column;
             width: 100%;
+            height: auto !important;
         }
-        .category-content.box-mode .prompt-item-wrapper .selected-card {
-            width: 100%;
+        
+        /* Box-mode下的wrapper维持固定尺寸 */
+        .category-content.box-mode .prompt-item-wrapper:has(.prompt-item.normal-mode) {
+            width: 100% !important;
             height: auto;
-            min-height: 60px;
+            min-height: 350px;
+        }
+        
+        .category-content.box-mode .prompt-item-wrapper:has(.prompt-item.mini-mode) {
+            width: 100% !important;
+            height: auto;
+            min-height: 80px;
+        }
+        
+        .prompt-item-wrapper .selected-card {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: #007aff;
+            border-radius: 20px;
+            margin-top: 8px;
+            font-size: 13px;
+            z-index: 2;
+            width: auto;
+            height: auto;
+            position: relative;
+        }
+        
+        .category-content.mini-mode .prompt-item-wrapper .selected-card {
+            padding: 4px 10px;
+            font-size: 12px;
+        }
+        
+        .category-content.box-mode .prompt-item-wrapper .selected-card {
             margin-left: 0;
             margin-top: 10px;
         }
-        .prompt-item-wrapper .selected-card {
-            position: relative;
-            flex: 0 0 auto;
-            width: 250px;
-            height: 350px;
-            background: rgba(0, 122, 255, 0.2);
-            border: 2px solid #007aff;
-            border-radius: 12px;
-            margin-left: 10px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 15px;
-            z-index: 2;
-        }
+        
         .prompt-item-wrapper .selected-card-content {
-            font-size: 14px;
             color: white;
-            font-weight: 500;
             word-break: break-all;
-            text-align: center;
-            margin-bottom: 10px;
         }
+        
         .prompt-item-wrapper .selected-card-delete {
-            position: absolute;
-            top: 5px;
-            right: 5px;
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            background: rgba(220, 53, 69, 0.9);
+            cursor: pointer;
+            opacity: 0.7;
+            transition: opacity 0.2s;
+            background: transparent;
             border: none;
             color: white;
-            font-size: 14px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: background 0.2s;
-            z-index: 10;
+            font-size: 16px;
+            padding: 0;
+            line-height: 1;
         }
+        
         .prompt-item-wrapper .selected-card-delete:hover {
-            background: rgba(220, 53, 69, 1);
-        }
-        .category-content.mini-mode .prompt-item-wrapper {
-            display: flex;
-            flex-direction: row;
-            align-items: flex-start;
-        }
-        .category-content.mini-mode .prompt-item-wrapper .selected-card {
-            width: 240px;
-            height: 80px;
-            padding: 5px 10px;
-        }
-        .category-content.mini-mode .prompt-item-wrapper .selected-card .selected-card-content {
-            font-size: 11px;
-            word-break: break-all;
-        }
-        .category-content.box-mode.mini-mode .prompt-item-wrapper {
-            display: flex;
-            flex-direction: column;
-        }
-        .category-content.box-mode.mini-mode .prompt-item-wrapper .selected-card {
-            width: 100%;
-            height: 80px;
-            margin-left: 0;
-            margin-top: 8px;
+            opacity: 1;
         }
         
         /* Add Category 卡片 */
@@ -754,23 +1220,23 @@
             align-items: center;
             justify-content: center;
             padding: 12px 16px;
-            background: #3a3a3a;
+            background: var(--bg-card);
             border-radius: 12px;
             cursor: pointer;
             transition: all 0.2s;
             white-space: nowrap;
-            border: 2px dashed #555;
+            border: 2px dashed var(--border-color);
         }
         .add-category-card:hover {
-            background: #4a4a4a;
-            border-color: #007aff;
+            background: var(--bg-card-hover);
+            border-color: var(--accent-color);
         }
         .add-category-card span {
             font-size: 14px;
-            color: #888;
+            color: var(--text-secondary);
         }
         .add-category-card:hover span {
-            color: #007aff;
+            color: var(--accent-color);
         }
         
         .modal {
@@ -789,7 +1255,7 @@
             display: flex;
         }
         .modal-content {
-            background: #2d2d2d;
+            background: var(--bg-tertiary);
             border-radius: 12px;
             padding: 25px;
             max-width: 500px;
@@ -806,9 +1272,9 @@
             padding: 10px 15px;
             margin-bottom: 12px;
             border-radius: 8px;
-            border: 1px solid #555;
-            background: #2a2a2a;
-            color: #fff;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
         }
         .modal-content .image-preview {
             width: 100%;
@@ -817,11 +1283,28 @@
             border-radius: 8px;
             margin-bottom: 12px;
             display: none;
-            border: 1px solid #555;
+            border: 1px solid var(--border-color);
         }
         .modal-content .image-preview.visible {
             display: block;
         }
+        .modal-content .image-input-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .modal-content .image-input-row input[type="file"] {
+            flex: 1;
+            margin-bottom: 0;
+        }
+        .modal-content .image-input-row .btn {
+            flex: 0 0 auto;
+            padding: 10px 15px;
+            white-space: nowrap;
+        }
+        
+
         .modal-content .modal-buttons {
             display: flex;
             gap: 12px;
@@ -832,15 +1315,9 @@
             padding: 12px;
         }
         .footer {
-            position: fixed;
-            bottom: 0;
-            right: 0;
-            padding: 20px;
-            background: linear-gradient(transparent, #1a1a1a 30%);
             display: flex;
             justify-content: flex-end;
             gap: 15px;
-            z-index: 500;
         }
         .footer button {
             padding: 12px 30px;
@@ -850,18 +1327,14 @@
             cursor: pointer;
         }
         .custom-input-section {
-            position: fixed;
-            bottom: 80px;
-            left: 20px;
-            right: 20px;
-            background: #2d2d2d;
+            background: var(--bg-tertiary);
             border-radius: 12px;
             padding: 15px 20px;
-            z-index: 400;
+            margin-bottom: 15px;
         }
         .custom-input-section h3 {
             font-size: 14px;
-            color: #888;
+            color: var(--text-secondary);
             margin-bottom: 10px;
         }
         .custom-input-section textarea {
@@ -869,9 +1342,9 @@
             min-height: 60px;
             padding: 10px 15px;
             border-radius: 8px;
-            border: 1px solid #444;
-            background: #3a3a3a;
-            color: #fff;
+            border: 1px solid var(--border-color);
+            background: var(--bg-card);
+            color: var(--text-primary);
             font-family: inherit;
             font-size: 14px;
             resize: vertical;
@@ -881,6 +1354,13 @@
         }
         .tag-input-container {
             margin-bottom: 12px;
+        }
+        
+        .tag-input-container label {
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 4px;
+            display: block;
         }
         .tag-input-row {
             display: flex;
@@ -941,84 +1421,124 @@
             font-weight: 500;
             box-shadow: 0 4px 12px rgba(40, 167, 69, 0.3);
         }
-        
+
         .temporary-banner.hidden {
             display: none !important;
         }
-        
+
         .temporary-banner span {
             flex: 1;
+        }
+        
+        .temporary-banner button {
+            margin-left: 10px;
+            padding: 6px 12px;
+            font-size: 13px;
+        }
+        
+        .temporary-banner .btn-warning {
+            background: #ffc107;
+            color: #000;
+        }
+        
+        .temporary-banner .btn-warning:hover {
+            background: #e0a800;
+        }
+        
+        .temporary-banner .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .temporary-banner .btn-success:hover {
+            background: #218838;
+        }
+        
+        .no-decorations {
+            color: var(--text-secondary);
+            text-align: center;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎨 Prompt Snapshot</h1>
-            <div class="search-box">
-                <input type="text" id="searchInput" placeholder="Search prompts...">
-                <button class="btn btn-primary" onclick="searchPrompts()">Search</button>
+    <div class="app-container">
+        <div class="main-wrapper">
+            <div class="scroll-container">
+                <div class="container">
+                    <div class="header">
+                        <h1>🎨 Prompt Snapshot</h1>
+                        <div class="search-box">
+                            <input type="text" id="searchInput" placeholder="Search prompts...">
+                            <button class="btn btn-primary" onclick="searchPrompts()">Search</button>
+                        </div>
+                    </div>
+
+                    <!-- 新增：临时模式提示条幅 -->
+            <div id="temporaryBanner" class="temporary-banner hidden">
+                <span id="bannerText"></span>
+                <button class="btn btn-warning" id="backBtn" onclick="endTemporaryContext()">
+                    ← 返回上层
+                </button>
+                <button class="btn btn-success" onclick="addBasePromptOnly()">
+                    直接添加
+                </button>
+                <button class="btn btn-secondary" onclick="confirmSelection()">
+                    完成选择
+                </button>
+            </div>
+
+                    <div class="categories-container" id="categories"></div>
+                </div>
+            </div>
+
+            <div class="right-bar">
+                <div class="selected-bar">
+                    <h3>Selected Prompts (<span id="selectedCount">0</span>)</h3>
+                    <div class="selected-tags" id="selectedTags"></div>
+                </div>
+
+                <div class="custom-input-section">
+                    <h3>Custom Prompts</h3>
+                    <textarea id="customPromptInput" placeholder="Enter custom prompts here..."></textarea>
+                </div>
+
+                <div class="footer">
+                    <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
+                    <button class="btn btn-primary" onclick="confirmSelection()">Confirm</button>
+                </div>
             </div>
         </div>
-
-        <div class="selected-bar">
-            <h3>Selected Prompts (<span id="selectedCount">0</span>)</h3>
-            <div class="selected-tags" id="selectedTags"></div>
-        </div>
-
-        <!-- 新增：临时模式提示条幅 -->
-        <div id="temporaryBanner" class="temporary-banner hidden">
-            <span id="bannerText"></span>
-            <button class="btn btn-warning" id="backBtn" onclick="endTemporaryContext()" style="margin-left: 15px; padding: 6px 12px; font-size: 13px; background: #ffc107; display: none;">
-                ← 返回上层
-            </button>
-            <button class="btn btn-success" onclick="addBasePromptOnly()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px; background: #28a745;">
-                直接添加
-            </button>
-            <button class="btn btn-secondary" onclick="confirmSelection()" style="margin-left: 10px; padding: 6px 12px; font-size: 13px;">
-                完成选择
-            </button>
-        </div>
-
-        <div class="categories-container" id="categories"></div>
-    </div>
-
-    <div class="custom-input-section">
-        <h3>Custom Prompts</h3>
-        <textarea id="customPromptInput" placeholder="Enter custom prompts here..."></textarea>
-    </div>
-
-    <div class="footer">
-        <button class="btn btn-secondary" onclick="cancel()">Cancel</button>
-        <button class="btn btn-primary" onclick="confirmSelection()">Confirm</button>
     </div>
 
     <div class="modal" id="editModal">
         <div class="modal-content">
-            <h2>Edit Prompt</h2>
-            <input type="hidden" id="editId">
-            <input type="text" id="editName" placeholder="Name">
-            <input type="text" id="editPrompt" placeholder="Prompt text">
-            <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
-                <div class="tag-input-row">
-                    <input type="text" id="editTagsInput" placeholder="Enter tag...">
-                    <button class="btn btn-primary" onclick="addEditTag()">Add Tag</button>
+                <h2>Edit Prompt</h2>
+                <input type="hidden" id="editId">
+                <input type="text" id="editName" placeholder="Name">
+                <input type="text" id="editPrompt" placeholder="Prompt text">
+                <div class="tag-input-container">
+                    <label>Tags</label>
+                    <div class="tag-input-row">
+                        <input type="text" id="editTagsInput" placeholder="Enter tag...">
+                        <button class="btn btn-primary" onclick="addEditTag()">Add Tag</button>
+                    </div>
+                    <div class="tag-list" id="editTagList"></div>
                 </div>
-                <div class="tag-list" id="editTagList"></div>
-            </div>
-            <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
-                <div class="tag-input-row">
-                    <input type="text" id="editDecorationsInput" placeholder="Enter decoration...">
-                    <button class="btn btn-primary" onclick="addEditDecoration()">Add Deco</button>
+                <div class="tag-input-container">
+                    <label>Decorations</label>
+                    <div class="tag-input-row">
+                        <input type="text" id="editDecorationsInput" placeholder="Enter decoration...">
+                        <button class="btn btn-primary" onclick="addEditDecoration()">Add Deco</button>
+                    </div>
+                    <div class="tag-list" id="editDecorationList"></div>
                 </div>
-                <div class="tag-list" id="editDecorationList"></div>
-            </div>
             <select id="editCategory">
                 <option value="">Keep current category</option>
             </select>
-            <input type="file" id="editImage" accept="image/*">
+            <div class="image-input-row">
+                <input type="file" id="editImage" accept="image/*">
+                <button class="btn btn-secondary" onclick="captureScreenshot('edit')">📷 Screenshot</button>
+            </div>
             <img id="editImagePreview" class="image-preview" alt="Preview">
             <div class="modal-buttons">
                 <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
@@ -1033,7 +1553,7 @@
             <input type="text" id="addName" placeholder="Name">
             <input type="text" id="addPrompt" placeholder="Prompt text">
             <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
+                <label>Tags</label>
                 <div class="tag-input-row">
                     <input type="text" id="addTagsInput" placeholder="Enter tag...">
                     <button class="btn btn-primary" onclick="addAddTag()">Add Tag</button>
@@ -1041,7 +1561,7 @@
                 <div class="tag-list" id="addTagList"></div>
             </div>
             <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
+                <label>Decorations</label>
                 <div class="tag-input-row">
                     <input type="text" id="addDecorationsInput" placeholder="Enter decoration...">
                     <button class="btn btn-primary" onclick="addAddDecoration()">Add Deco</button>
@@ -1049,7 +1569,10 @@
                 <div class="tag-list" id="addDecorationList"></div>
             </div>
             <input type="text" id="addCategory" placeholder="Category (default: 杂项)">
-            <input type="file" id="addImage" accept="image/*">
+            <div class="image-input-row">
+                <input type="file" id="addImage" accept="image/*">
+                <button class="btn btn-secondary" onclick="captureScreenshot('add')">📷 Screenshot</button>
+            </div>
             <img id="addImagePreview" class="image-preview" alt="Preview">
             <div class="modal-buttons">
                 <button class="btn btn-secondary" onclick="closeAddModal()">Cancel</button>
@@ -1075,7 +1598,7 @@
             <input type="hidden" id="editCategoryOldName">
             <input type="text" id="editCategoryNewName" placeholder="Category name">
             <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Tags</label>
+                <label>Tags</label>
                 <div class="tag-input-row">
                     <input type="text" id="editCategoryTagsInput" placeholder="Enter tag...">
                     <button class="btn btn-primary" onclick="addEditCategoryTag()">Add Tag</button>
@@ -1083,7 +1606,7 @@
                 <div class="tag-list" id="editCategoryTagList"></div>
             </div>
             <div class="tag-input-container">
-                <label style="color:#888; font-size:12px; margin-bottom:4px; display:block;">Decorations</label>
+                <label>Decorations</label>
                 <div class="tag-input-row">
                     <input type="text" id="editCategoryDecorationsInput" placeholder="Enter decoration...">
                     <button class="btn btn-primary" onclick="addEditCategoryDecoration()">Add Deco</button>
@@ -1262,9 +1785,13 @@
                     // 已经是装饰对象，直接使用
                     processedSelections.push(p);
                 } else {
+                    // 查找对应的name
+                    const promptData = findPromptData(p);
+                    const name = promptData ? promptData.name : '';
                     // 创建新的装饰对象
                     processedSelections.push({
                         text: p,
+                        name: name,
                         level: ctx.level,
                         decorations: []
                     });
@@ -1294,9 +1821,13 @@
                 }
                 
                 if (!found) {
+                    // 查找 basePrompt 对应的 name
+                    const basePromptData = findPromptData(ctx.basePrompt);
+                    const basePromptName = basePromptData ? basePromptData.name : '';
                     // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
                     temporarySelectedPrompts.push({
                         text: ctx.basePrompt,
+                        name: basePromptName,
                         level: basePromptLevel,
                         decorations: processedSelections
                     });
@@ -1305,9 +1836,19 @@
                 expandedCategories = new Set(prevCtx.originalExpandedCategories);
                 showTemporaryBanner();
             } else {
+                // 查找 basePrompt 对应的 name
+                const basePromptData = findPromptData(ctx.basePrompt);
+                const basePromptName = basePromptData ? basePromptData.name : '';
                 // 没有上一层，最终组合并添加到最终选择列表
                 const finalCombined = combineAll(ctx.basePrompt, processedSelections, basePromptLevel);
-                selectedPrompts.push(finalCombined);
+                // 创建装饰对象以便显示时包含 name
+                const finalObj = {
+                    text: ctx.basePrompt,
+                    name: basePromptName,
+                    level: basePromptLevel,
+                    decorations: processedSelections
+                };
+                selectedPrompts.push(finalObj);
                 temporarySelectedPrompts = [];
                 expandedCategories = new Set(ctx.originalExpandedCategories);
                 hideTemporaryBanner();
@@ -1332,9 +1873,13 @@
                     // 已经是装饰对象，直接使用
                     processedSelections.push(p);
                 } else {
+                    // 查找对应的name
+                    const promptData = findPromptData(p);
+                    const name = promptData ? promptData.name : '';
                     // 创建新的装饰对象
                     processedSelections.push({
                         text: p,
+                        name: name,
                         level: ctx.level,
                         decorations: []
                     });
@@ -1364,9 +1909,13 @@
                 }
                 
                 if (!found && (processedSelections.length > 0 || temporarySelectedPrompts.length === 0)) {
+                    // 查找 basePrompt 对应的 name
+                    const basePromptData = findPromptData(ctx.basePrompt);
+                    const basePromptName = basePromptData ? basePromptData.name : '';
                     // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
                     temporarySelectedPrompts.push({
                         text: ctx.basePrompt,
+                        name: basePromptName,
                         level: basePromptLevel,
                         decorations: processedSelections
                     });
@@ -1375,10 +1924,19 @@
                 expandedCategories = new Set(prevCtx.originalExpandedCategories);
                 showTemporaryBanner();
             } else {
+                // 查找 basePrompt 对应的 name
+                const basePromptData = findPromptData(ctx.basePrompt);
+                const basePromptName = basePromptData ? basePromptData.name : '';
                 // 没有上一层，最终组合并添加到最终选择列表
                 if (processedSelections.length > 0 || temporarySelectedPrompts.length === 0) {
-                    const finalCombined = combineAll(ctx.basePrompt, processedSelections, basePromptLevel);
-                    selectedPrompts.push(finalCombined);
+                    // 创建装饰对象以便显示时包含 name
+                    const finalObj = {
+                        text: ctx.basePrompt,
+                        name: basePromptName,
+                        level: basePromptLevel,
+                        decorations: processedSelections
+                    };
+                    selectedPrompts.push(finalObj);
                 }
                 temporarySelectedPrompts = [];
                 expandedCategories = new Set(ctx.originalExpandedCategories);
@@ -1411,6 +1969,27 @@
             if (banner) {
                 banner.classList.add('hidden');
             }
+        }
+
+        function setBackgroundScale(bgContainer, bgImagePath) {
+            const img = new Image();
+            img.onload = function() {
+                const maskWidth = bgContainer.parentElement.offsetWidth;
+                const maskHeight = bgContainer.parentElement.offsetHeight;
+                const imageWidth = img.naturalWidth;
+                const imageHeight = img.naturalHeight;
+                if (imageWidth > 0 && imageHeight > 0 && maskWidth > 0 && maskHeight > 0) {
+                    const scale = Math.max(
+                        (maskWidth * 1.2) / imageWidth,
+                        (maskHeight * 1.2) / imageHeight
+                    );
+                    const bgWidth = imageWidth * scale;
+                    const bgHeight = imageHeight * scale;
+                    bgContainer.style.setProperty('--bg-width', bgWidth + 'px');
+                    bgContainer.style.setProperty('--bg-height', bgHeight + 'px');
+                }
+            };
+            img.src = bgImagePath;
         }
 
         async function loadData() {
@@ -1481,10 +2060,6 @@
                 categoryDiv.className = `category ${isExpanded ? 'expanded' : 'collapsed'}`;
                 categoryDiv.id = `category-${category}`;
 
-                if (isExpanded && bgImage) {
-                    categoryDiv.style.setProperty('--cat-bg-image', `url(/images/${bgImage})`);
-                }
-
                 const displayMode = categoryDisplayModes[category] || 'horizontal';
                 const sizeMode = categorySizeModes[category] || 'normal';
 
@@ -1497,13 +2072,24 @@
                     </div>
                 ` : '';
 
+                // 创建背景图遮罩容器（包含背景图）
+                const bgHtml = isExpanded && bgImage 
+                    ? `<div class="category-background-mask"><div class="category-background" style="background-image: url(/images/${bgImage})"></div></div>` 
+                    : '';
+                
+                // 折叠状态下的header背景图
+                const headerBgHtml = !isExpanded && bgImage 
+                    ? `<img src="/images/${bgImage}" class="bg-image" alt="">` 
+                    : '';
+
                 categoryDiv.innerHTML = `
+                    ${bgHtml}
                     <div class="category-header" onclick="toggleCategory('${category}')">
-                        ${!isExpanded && bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
+                        ${headerBgHtml}
                         <div class="header-content">
                             <div style="display: flex; align-items: center;">
                                 <span class="drag-handle" data-drag-type="category" data-category="${category}">⋮⋮</span>
-                                <span>${category}</span>
+                                <span style="text-shadow: 0px 0px 4px black;">${category}</span>
                             </div>
                             <div style="display: flex; align-items: center;">
                                 ${catDecoTagsHtml}
@@ -1514,78 +2100,100 @@
                             </div>
                         </div>
                     </div>
-                    ${isExpanded ? `
-                    <div class="category-content ${displayMode === 'box' ? 'box-mode' : ''} ${categorySizeModes[category] === 'mini' ? 'mini-mode' : ''}" id="cat-${category}">
-                        ${filteredPrompts.map(p => {
-                                const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
-                                const uniquePDecorations = pDecorations.filter(d => !catDecorations.includes(d));
-                                const decoTagsHtml = uniquePDecorations.length > 0 ? `
-                                    <div class="decoration-tags">
-                                        ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
-                                    </div>
-                                ` : '';
-                                
-                                let isSelected = false;
-                                if (isTemporaryContext()) {
-                                    // 在临时模式下，检查字符串或对象匹配
-                                    isSelected = temporarySelectedPrompts.includes(p.prompt);
-                                    if (!isSelected) {
-                                        for (const item of temporarySelectedPrompts) {
-                                            if (isDecorationObject(item) && item.text === p.prompt) {
-                                                isSelected = true;
-                                                break;
-                                            }
-                                        }
+                `;
+
+                if (isExpanded) {
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = `category-content ${displayMode === 'box' ? 'box-mode' : ''} ${categorySizeModes[category] === 'mini' ? 'mini-mode' : ''}`;
+                    contentDiv.id = `cat-${category}`;
+                    
+                    const isMiniMode = categorySizeModes[category] === 'mini';
+                    const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+                    
+                    // 添加提示词
+                    for (const p of filteredPrompts) {
+                        const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
+                        const uniquePDecorations = pDecorations.filter(d => !catDecorations.includes(d));
+                        const decoTagsHtml = uniquePDecorations.length > 0 ? `
+                            <div class="decoration-tags">
+                                ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
+                            </div>
+                        ` : '';
+                        
+                        let isSelected = false;
+                        if (isTemporaryContext()) {
+                            isSelected = temporarySelectedPrompts.includes(p.prompt);
+                            if (!isSelected) {
+                                for (const item of temporarySelectedPrompts) {
+                                    if (isDecorationObject(item) && item.text === p.prompt) {
+                                        isSelected = true;
+                                        break;
                                     }
-                                } else {
-                                    isSelected = isBasePromptSelected(p.prompt);
                                 }
-                                const combos = getPromptCombinations(p.prompt);
-                                
-                                let selectedCardsHtml = '';
+                            }
+                        } else {
+                            isSelected = isBasePromptSelected(p.prompt);
+                        }
+                        
+                        const combos = getPromptCombinations(p.prompt);
+                        let selectedCardsHtml = '';
                         for (const combo of combos) {
                             const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
                             selectedCardsHtml += `
                                 <div class="selected-card" data-prompt="${escapedCombo}">
-                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
                                     <div class="selected-card-content">${combo}</div>
+                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
                                 </div>
                             `;
                         }
-                                
-                                return `
-                            <div class="prompt-item-wrapper">
-                                <div class="prompt-item ${isSelected ? 'selected' : ''}"
-                                    data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                                    <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
-                                    ${decoTagsHtml}
-                                    <div class="select-area">
-                                        <div class="image-layer">
-                                            ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
-                                        </div>
-                                        <div class="glass-layer"></div>
-                                        <div class="text-layer">
-                                            <div class="name">${p.name}</div>
-                                            <div class="prompt-text">${p.prompt}</div>
-                                        </div>
+                        
+                        const wrapperDiv = document.createElement('div');
+                        wrapperDiv.className = 'prompt-item-wrapper';
+                        wrapperDiv.innerHTML = `
+                            <div class="prompt-item ${modeClass} ${isSelected ? 'selected' : ''}"
+                                data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}">⋮⋮</span>
+                                ${decoTagsHtml}
+                                <div class="select-area">
+                                    <div class="image-layer">
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
                                     </div>
-                                    <div class="actions">
-                                        <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
-                                        <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                                    ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                    <div class="text-layer">
+                                        <div class="name">${p.name}</div>
+                                        <div class="prompt-text">${p.prompt}</div>
                                     </div>
                                 </div>
-                                ${selectedCardsHtml}
+                                <div class="actions">
+                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                                </div>
                             </div>
+                            ${selectedCardsHtml}
                         `;
-                            }).join('')}
-                        ${!searchQuery ? `
-                        <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
-                            <div style="font-size: 24px; color: #888;">+</div>
-                        </div>
-                        ` : ''}
-                    </div>` : ''}
-                `;
+                        contentDiv.appendChild(wrapperDiv);
+                    }
+                    
+                    // 添加prompt按钮
+            if (!searchQuery) {
+                const addBtnDiv = document.createElement('div');
+                addBtnDiv.className = `prompt-item add-prompt-btn ${modeClass}`;
+                addBtnDiv.dataset.category = category;
+                addBtnDiv.innerHTML = `<div>+</div>`;
+                contentDiv.appendChild(addBtnDiv);
+            }
+                    
+                    categoryDiv.appendChild(contentDiv);
+                }
                 container.appendChild(categoryDiv);
+                
+                // 设置背景图缩放比例
+                if (isExpanded && bgImage) {
+                    const bgContainer = categoryDiv.querySelector('.category-background');
+                    if (bgContainer) {
+                        setBackgroundScale(bgContainer, `/images/${bgImage}`);
+                    }
+                }
             }
 
             // 临时模式下隐藏添加类别卡片
@@ -1631,8 +2239,11 @@
                 categoryDiv.classList.remove('expanded');
                 categoryDiv.classList.add('collapsed');
                 
-                // 移除容器背景图
-                categoryDiv.style.removeProperty('--cat-bg-image');
+                // 移除背景图遮罩容器
+                const bgMask = categoryDiv.querySelector('.category-background-mask');
+                if (bgMask) {
+                    bgMask.remove();
+                }
                 
                 const content = document.getElementById(`cat-${category}`);
                 if (content) {
@@ -1657,12 +2268,22 @@
                 categoryDiv.classList.remove('collapsed');
                 categoryDiv.classList.add('expanded');
                 
-                // 设置容器背景图（通过 CSS 变量）
+                // 创建背景图遮罩容器（包含背景图）
                 if (bgImage) {
-                    categoryDiv.style.setProperty('--cat-bg-image', `url(/images/${bgImage})`);
+                    const bgMask = document.createElement('div');
+                    bgMask.className = 'category-background-mask';
+                    
+                    const bgContainer = document.createElement('div');
+                    bgContainer.className = 'category-background';
+                    bgContainer.style.backgroundImage = `url(/images/${bgImage})`;
+                    
+                    bgMask.appendChild(bgContainer);
+                    categoryDiv.insertBefore(bgMask, categoryDiv.firstChild);
+                    
+                    setBackgroundScale(bgContainer, `/images/${bgImage}`);
                 }
                 
-                // 移除 header 中的背景图（展开时背景图在容器上）
+                // 移除 header 中的背景图（展开时背景图在独立的容器中）
                 const header = categoryDiv.querySelector('.category-header');
                 const headerBgImg = header.querySelector('.bg-image');
                 if (headerBgImg) {
@@ -1691,66 +2312,78 @@
                 const contentDiv = document.createElement('div');
                 contentDiv.className = `category-content animating ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}`;
                 contentDiv.id = `cat-${category}`;
-                contentDiv.innerHTML = `
-                    ${filteredPrompts.map(p => {
-                        const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
-                        const uniquePDecorations = pDecorations.filter(d => !catDecos.includes(d));
-                        const decoTagsHtml = uniquePDecorations.length > 0 ? `
-                            <div class="decoration-tags">
-                                ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
-                            </div>
-                        ` : '';
-                        const isSelected = isBasePromptSelected(p.prompt);
-                        const combos = getPromptCombinations(p.prompt);
-                        
-                        let selectedCardsHtml = '';
-                        for (const combo of combos) {
-                            const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                            selectedCardsHtml += `
-                                <div class="selected-card" data-prompt="${escapedCombo}">
-                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
-                                    <div class="selected-card-content">${combo}</div>
-                                </div>
-                            `;
-                        }
-                        
-                        return `
-                        <div class="prompt-item-wrapper">
-                            <div class="prompt-item ${isSelected ? 'selected' : ''}"
-                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
-                                ${decoTagsHtml}
-                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
-                                    <div class="image-layer">
-                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
-                                    </div>
-                                    <div class="glass-layer"></div>
-                                    <div class="text-layer">
-                                        <div class="name">${p.name}</div>
-                                        <div class="prompt-text">${p.prompt}</div>
-                                    </div>
-                                </div>
-                                <div class="actions">
-                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
-                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
-                                </div>
-                            </div>
-                            ${selectedCardsHtml}
+                
+                const isMiniMode = sizeMode === 'mini';
+                const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+                
+                // 添加提示词
+                for (const p of filteredPrompts) {
+                    const pDecorations = Array.isArray(p.decorations) ? p.decorations : [];
+                    const uniquePDecorations = pDecorations.filter(d => !catDecos.includes(d));
+                    const decoTagsHtml = uniquePDecorations.length > 0 ? `
+                        <div class="decoration-tags">
+                            ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
                         </div>
+                    ` : '';
+                    const isSelected = isBasePromptSelected(p.prompt);
+                    const combos = getPromptCombinations(p.prompt);
+                    
+                    let selectedCardsHtml = '';
+                    for (const combo of combos) {
+                        const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                        selectedCardsHtml += `
+                            <div class="selected-card" data-prompt="${escapedCombo}">
+                                <div class="selected-card-content">${combo}</div>
+                                <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
+                            </div>
+                        `;
+                    }
+                    
+                    const wrapperDiv = document.createElement('div');
+                    wrapperDiv.className = 'prompt-item-wrapper';
+                    wrapperDiv.innerHTML = `
+                        <div class="prompt-item ${modeClass} ${isSelected ? 'selected' : ''}"
+                             data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                            <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                            ${decoTagsHtml}
+                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                <div class="image-layer">
+                                    ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                </div>
+                                ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                <div class="text-layer">
+                                    <div class="name">${p.name}</div>
+                                    <div class="prompt-text">${p.prompt}</div>
+                                </div>
+                            </div>
+                            <div class="actions">
+                                <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${category}">✏️</button>
+                                <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                            </div>
+                        </div>
+                        ${selectedCardsHtml}
                     `;
-                    }).join('')}
-                    ${!searchQuery ? `
-                    <div class="prompt-item add-prompt-btn" data-category="${category}" style="background: #444; border: 2px dashed #666; justify-content: center; min-width: 100px;">
-                        <div style="font-size: 24px; color: #888;">+</div>
-                    </div>
-                    ` : ''}
-                `;
+                    contentDiv.appendChild(wrapperDiv);
+                }
+                
+                // 添加prompt按钮
+            if (!searchQuery) {
+                const addBtnDiv = document.createElement('div');
+                addBtnDiv.className = `prompt-item add-prompt-btn ${modeClass}`;
+                addBtnDiv.dataset.category = category;
+                addBtnDiv.innerHTML = `<div>+</div>`;
+                contentDiv.appendChild(addBtnDiv);
+            }
+                
                 categoryDiv.appendChild(contentDiv);
                 
                 // 动画结束后移除 animating 类
                 contentDiv.addEventListener('animationend', () => {
                     contentDiv.classList.remove('animating');
                 }, { once: true });
+                
+                // 重新初始化拖拽事件，因为新的prompt-item已添加到DOM
+                initDragEvents();
             }
             
             // 更新箭头
@@ -1966,21 +2599,21 @@
             const catEntries = Object.entries(categoryMatches);
             
             if (catEntries.length === 0) {
-                listContainer.innerHTML = '<div style="color: #888; text-align: center;">No matching decorations found</div>';
+                listContainer.innerHTML = '<div class="no-decorations">No matching decorations found</div>';
             } else {
                 listContainer.innerHTML = catEntries.map(([cat, data]) => {
                     const bgImage = data.catData.bg_image || '';
                     return `
-                    <div class="category expanded" style="margin-bottom: 16px;">
+                    <div class="category expanded deco-category" data-cat="${cat}" style="margin-bottom: 16px;">
+                        ${bgImage ? `<div class="category-background-mask"><div class="category-background" data-bg="${bgImage}" style="background-image: url(/images/${bgImage})"></div></div>` : ''}
                         <div class="category-header">
-                            ${bgImage ? `<img src="/images/${bgImage}" class="bg-image" alt="">` : ''}
                             <div class="header-content">
                                 <span>${cat}</span>
                             </div>
                         </div>
                         <div class="category-content box-mode" style="max-height: none;">
                             ${data.prompts.map(p => `
-                                <div class="prompt-item" style="cursor: pointer;"
+                                <div class="prompt-item normal-mode" style="cursor: pointer;"
                                      onclick="toggleDecorationSelection('${p.prompt}', '${cat}')"
                                      id="deco-${cat}-${p.id}">
                                     <div class="select-area" style="width: 100%; height: 100%; position: relative;">
@@ -1999,6 +2632,14 @@
                     </div>
                     `;
                 }).join('');
+                
+                // 设置装饰模态框中背景图的缩放比例
+                listContainer.querySelectorAll('.deco-category').forEach(decoCat => {
+                    const bgContainer = decoCat.querySelector('.category-background');
+                    if (bgContainer && bgContainer.dataset.bg) {
+                        setBackgroundScale(bgContainer, `/images/${bgContainer.dataset.bg}`);
+                    }
+                });
             }
             
             document.getElementById('decorationModal').classList.add('visible');
@@ -2087,17 +2728,23 @@
         // 显示装饰对象的字符串表示
         function getDisplayText(item) {
             if (isDecorationObject(item)) {
-                // 对于装饰对象，先递归显示装饰，然后显示当前项
                 let result = '';
                 if (item.decorations && item.decorations.length > 0) {
                     for (const deco of item.decorations) {
                         result += getDisplayText(deco) + ' ';
                     }
                 }
-                result += wrapWithBrackets(item.text, item.level);
+                const promptPart = wrapWithBrackets(item.text, item.level);
+                const namePart = item.name ? `(${wrapWithBrackets(item.name, item.level)})` : '';
+                result += promptPart + namePart;
                 return result;
             }
-            return item; // 普通字符串直接返回
+            // 普通字符串，查找对应的name
+            const promptData = findPromptData(item);
+            if (promptData) {
+                return `${item}(${promptData.name})`;
+            }
+            return item;
         }
 
         function updateSelectedTags() {
@@ -2179,6 +2826,50 @@
                 editDecorations.push(deco);
                 renderTagList('editDecorationList', editDecorations);
                 input.value = '';
+            }
+        }
+
+        // 截图功能
+        async function captureScreenshot(mode) {
+            try {
+                // 请求后端截图（后端会显示独立的PySide6准备面板）
+                const response = await fetch('/capture_screenshot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Screenshot failed');
+                }
+                
+                const data = await response.json();
+                if (data.success && data.image_data) {
+                    // 显示预览
+                    const previewImg = document.getElementById(`${mode}ImagePreview`);
+                    previewImg.src = data.image_data;
+                    previewImg.classList.add('visible');
+                    
+                    // 创建一个File对象，以便后续提交时使用
+                    const byteString = atob(data.image_data.split(',')[1]);
+                    const mimeString = data.image_data.split(',')[0].split(':')[1].split(';')[0];
+                    const ab = new ArrayBuffer(byteString.length);
+                    const ia = new Uint8Array(ab);
+                    for (let i = 0; i < byteString.length; i++) {
+                        ia[i] = byteString.charCodeAt(i);
+                    }
+                    const blob = new Blob([ab], { type: mimeString });
+                    const file = new File([blob], `screenshot_${Date.now()}.png`, { type: mimeString });
+                    
+                    // 创建 DataTransfer 对象来模拟文件选择
+                    const dataTransfer = new DataTransfer();
+                    dataTransfer.items.add(file);
+                    document.getElementById(`${mode}Image`).files = dataTransfer.files;
+                } else {
+                    alert('Screenshot failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (e) {
+                console.error('Screenshot error:', e);
+                alert('Failed to capture screenshot: ' + e.message);
             }
         }
 
@@ -2714,184 +3405,297 @@
             }
         }
 
-        // 拖拽相关变量
-        let draggedItem = null;
-        let draggedType = null;
-        let draggedCategory = null;
+        // 拖拽状态管理
+        const dragState = {
+            type: null,        // 'category' or 'prompt'
+            item: null,       // item id
+            category: null,   // 提示词所属类别
+            element: null,    // 被拖拽的元素
+        };
 
-        // 初始化拖拽事件
+        // 清理所有拖拽样式
+        function clearDragStyles() {
+            document.querySelectorAll('.dragging, .drag-over').forEach(el => {
+                el.classList.remove('dragging', 'drag-over');
+            });
+        }
+
+        // ==================== 简化版拖拽系统 ====================
         function initDragEvents() {
-            // 类别拖拽
-            document.querySelectorAll('.category .drag-handle[data-drag-type="category"]').forEach(handle => {
+            clearDragStyles();
+
+            // 1. 提示词拖拽
+            console.log('[Drag] initDragEvents: 查找prompt拖拽把手...');
+            const promptHandles = document.querySelectorAll('.prompt-item .drag-handle[data-drag-type="prompt"]');
+            console.log('[Drag] 找到', promptHandles.length, '个prompt拖拽把手');
+            
+            promptHandles.forEach(handle => {
                 handle.draggable = true;
-                handle.addEventListener('mousedown', (e) => {
-                    e.stopPropagation();
-                });
-                handle.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                });
+                handle.style.pointerEvents = 'all';
+                handle.style.zIndex = '10000';
+                console.log('[Drag] 设置draggable:', handle.dataset.id, handle.dataset.category);
+                
                 handle.addEventListener('dragstart', (e) => {
-                    e.stopPropagation();
-                    const category = handle.dataset.category;
-                    draggedItem = category;
-                    draggedType = 'category';
-                    e.dataTransfer.effectAllowed = 'move';
-                    e.dataTransfer.setData('text/plain', category);
+                    console.log('[Drag] dragstart 触发:', handle.dataset.id);
+                    // 开始拖拽：禁用zoom-view
+                    isDragging = true;
+                    clearTimeout(zoomTimer);
+                    clearTimeout(leaveTimer);
+                    if (currentZoomItem) {
+                        currentZoomItem.classList.remove('zoom-view');
+                        currentZoomItem = null;
+                    }
                     
-                    const categoryDiv = document.getElementById(`category-${category}`);
-                    if (categoryDiv) {
-                        categoryDiv.classList.add('dragging');
-                    }
-                });
-                
-                handle.addEventListener('dragend', (e) => {
-                    const categoryDiv = document.getElementById(`category-${draggedItem}`);
-                    if (categoryDiv) {
-                        categoryDiv.classList.remove('dragging');
-                    }
-                    document.querySelectorAll('.category.drag-over').forEach(el => el.classList.remove('drag-over'));
-                    draggedItem = null;
-                    draggedType = null;
-                });
-            });
-
-            // 类别放置区域
-            document.querySelectorAll('.category').forEach(categoryDiv => {
-                categoryDiv.addEventListener('dragover', (e) => {
-                    if (draggedType === 'category') {
-                        e.preventDefault();
-                        e.dataTransfer.dropEffect = 'move';
-                        categoryDiv.classList.add('drag-over');
-                    }
-                });
-                
-                categoryDiv.addEventListener('dragleave', (e) => {
-                    categoryDiv.classList.remove('drag-over');
-                });
-                
-                categoryDiv.addEventListener('drop', async (e) => {
-                    if (draggedType === 'category') {
-                        e.preventDefault();
-                        categoryDiv.classList.remove('drag-over');
-                        
-                        const targetCategory = categoryDiv.id.replace('category-', '');
-                        if (draggedItem !== targetCategory) {
-                            await reorderCategories(draggedItem, targetCategory);
-                        }
-                    }
-                });
-            });
-
-            // 提示词拖拽
-            document.querySelectorAll('.prompt-item .drag-handle[data-drag-type="prompt"]').forEach(handle => {
-                handle.draggable = true;
-                handle.addEventListener('mousedown', (e) => {
-                    e.stopPropagation();
-                });
-                handle.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                });
-                handle.addEventListener('dragstart', (e) => {
-                    e.stopPropagation();
+                    // 设置dataTransfer，确保拖拽能正常工作
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', handle.dataset.id);
+                    
                     const promptId = handle.dataset.id;
                     const category = handle.dataset.category;
-                    draggedItem = promptId;
-                    draggedType = 'prompt';
-                    draggedCategory = category;
-                    e.dataTransfer.effectAllowed = 'move';
-                    e.dataTransfer.setData('text/plain', promptId);
+                    
+                    dragState.type = 'prompt';
+                    dragState.item = promptId;
+                    dragState.category = category;
+                    console.log('[Drag] dragState 设置:', dragState);
                     
                     const promptItem = handle.closest('.prompt-item');
                     if (promptItem) {
+                        dragState.element = promptItem;
                         promptItem.classList.add('dragging');
+                        console.log('[Drag] 添加dragging类');
                     }
                 });
                 
-                handle.addEventListener('dragend', (e) => {
-                    document.querySelectorAll('.prompt-item.dragging').forEach(el => el.classList.remove('dragging'));
-                    document.querySelectorAll('.prompt-item.drag-over').forEach(el => el.classList.remove('drag-over'));
-                    document.querySelectorAll('.category-content.drag-over').forEach(el => el.classList.remove('drag-over'));
-                    draggedItem = null;
-                    draggedType = null;
-                    draggedCategory = null;
+                handle.addEventListener('click', e => {
+                    console.log('[Drag] click 触发');
+                    e.stopPropagation();
+                });
+                // 注意：不要阻止mousedown的默认行为，否则会影响dragstart
+            });
+
+            // 2. 类别拖拽
+            document.querySelectorAll('.category .drag-handle[data-drag-type="category"]').forEach(handle => {
+                handle.draggable = true;
+                handle.style.pointerEvents = 'all';
+                
+                handle.addEventListener('dragstart', (e) => {
+                    // 开始拖拽：禁用zoom-view
+                    isDragging = true;
+                    clearTimeout(zoomTimer);
+                    clearTimeout(leaveTimer);
+                    if (currentZoomItem) {
+                        currentZoomItem.classList.remove('zoom-view');
+                        currentZoomItem = null;
+                    }
+                    
+                    // 设置dataTransfer，确保拖拽能正常工作
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', handle.dataset.category);
+                    
+                    const category = handle.dataset.category;
+                    if (!category) return;
+                    
+                    dragState.type = 'category';
+                    dragState.item = category;
+                    
+                    const categoryDiv = document.getElementById(`category-${category}`);
+                    if (categoryDiv) {
+                        dragState.element = categoryDiv;
+                        categoryDiv.classList.add('dragging');
+                    }
                 });
             });
 
-            // 提示词放置区域 - 支持跨类别
-            document.querySelectorAll('.prompt-item').forEach(promptItem => {
-                promptItem.addEventListener('dragover', (e) => {
-                    if (draggedType === 'prompt') {
+            // 3. 全局拖拽结束
+            document.addEventListener('dragend', () => {
+                console.log('[Drag] dragend 触发');
+                isDragging = false; // 恢复zoom-view
+                clearDragStyles();
+                dragState.type = null;
+                dragState.item = null;
+                dragState.category = null;
+                dragState.element = null;
+            });
+
+            // 4. 设置拖放目标
+            setupDropTargets();
+        }
+
+        function setupDropTargets() {
+            // 全局管理drag-over状态，防止边界抖动
+            let dragOverTimer = null;
+            
+            // === 类别拖放目标 ===
+            document.querySelectorAll('.category').forEach(category => {
+                const catHeader = category.querySelector('.category-header');
+                if (catHeader) {
+                    catHeader.addEventListener('dragover', (e) => {
+                        if (dragState.type === 'category' && category.id !== `category-${dragState.item}`) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            // 防止重复设置
+                            if (!category.classList.contains('drag-over')) {
+                                clearTimeout(dragOverTimer);
+                                dragOverTimer = null;
+                                category.classList.add('drag-over');
+                            }
+                        }
+                    });
+                    
+                    catHeader.addEventListener('dragleave', (e) => {
+                        // 延迟移除drag-over，防止边界抖动
+                        const rect = catHeader.getBoundingClientRect();
+                        const isStillOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                                        e.clientY >= rect.top && e.clientY <= rect.bottom;
+                        
+                        if (!isStillOver) {
+                            dragOverTimer = setTimeout(() => {
+                                category.classList.remove('drag-over');
+                            }, 50);
+                        }
+                    });
+                    
+                    catHeader.addEventListener('drop', async (e) => {
                         e.preventDefault();
-                        e.dataTransfer.dropEffect = 'move';
-                        promptItem.classList.add('drag-over');
+                        e.stopPropagation();
+                        clearTimeout(dragOverTimer);
+                        dragOverTimer = null;
+                        category.classList.remove('drag-over');
+                        
+                        if (dragState.type === 'category') {
+                            const targetCategory = category.id.replace('category-', '');
+                            if (dragState.item !== targetCategory) {
+                                await reorderCategories(dragState.item, targetCategory, 'at');
+                            }
+                        }
+                    });
+                }
+            });
+
+            // === 添加类别卡片（拖到末尾） ===
+            document.querySelectorAll('.add-category-card').forEach(card => {
+                card.addEventListener('dragover', (e) => {
+                    if (dragState.type === 'category') {
+                        e.preventDefault();
+                        if (!card.classList.contains('drag-over')) {
+                            card.classList.add('drag-over');
+                        }
                     }
                 });
                 
-                promptItem.addEventListener('dragleave', (e) => {
-                    promptItem.classList.remove('drag-over');
+                card.addEventListener('dragleave', () => {
+                    card.classList.remove('drag-over');
                 });
                 
-                promptItem.addEventListener('drop', async (e) => {
-                    if (draggedType === 'prompt') {
+                card.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    card.classList.remove('drag-over');
+                    
+                    if (dragState.type === 'category') {
+                        await reorderCategories(dragState.item, null, 'end');
+                    }
+                });
+            });
+
+            // === 提示词拖放目标 ===
+            const promptDropTargets = document.querySelectorAll('.prompt-item:not(.add-prompt-btn)');
+            console.log('[Drag] 找到', promptDropTargets.length, '个prompt拖放目标');
+            
+            promptDropTargets.forEach(item => {
+                let itemDragTimer = null;
+                
+                item.addEventListener('dragover', (e) => {
+                    if (dragState.type === 'prompt') {
+                        console.log('[Drag] dragover 触发:', item.dataset.id);
                         e.preventDefault();
                         e.stopPropagation();
-                        promptItem.classList.remove('drag-over');
+                        clearTimeout(itemDragTimer);
+                        itemDragTimer = null;
+                        if (!item.classList.contains('drag-over')) {
+                            item.classList.add('drag-over');
+                        }
+                    }
+                });
+                
+                item.addEventListener('dragleave', (e) => {
+                    // 检查鼠标是否真的离开了
+                    const rect = item.getBoundingClientRect();
+                    const isStillOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                                       e.clientY >= rect.top && e.clientY <= rect.bottom;
+                    
+                    if (!isStillOver) {
+                        itemDragTimer = setTimeout(() => {
+                            item.classList.remove('drag-over');
+                        }, 50);
+                    }
+                });
+                
+                item.addEventListener('drop', async (e) => {
+                    console.log('[Drag] drop 触发:', item.dataset.id);
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearTimeout(itemDragTimer);
+                    itemDragTimer = null;
+                    item.classList.remove('drag-over');
+                    
+                    if (dragState.type === 'prompt') {
+                        const targetId = item.dataset.id;
+                        const targetCategory = item.dataset.category;
+                        console.log('[Drag] drop 处理:', dragState.item, '->', targetId, 'cat:', dragState.category, '->', targetCategory);
                         
-                        const targetId = promptItem.dataset.id;
-                        const targetCategory = promptItem.dataset.category;
-                        
-                        if (draggedItem !== targetId) {
-                            if (draggedCategory === targetCategory) {
-                                // 同类别内排序
-                                await reorderPrompts(draggedCategory, draggedItem, targetId);
+                        if (targetId && dragState.item !== targetId) {
+                            if (dragState.category === targetCategory) {
+                                await reorderPrompts(dragState.category, dragState.item, targetId, 'at');
                             } else {
-                                // 跨类别移动
-                                await movePromptToCategory(draggedCategory, targetCategory, draggedItem, targetId);
+                                await movePromptToCategory(dragState.category, targetCategory, dragState.item, targetId);
                             }
                         }
                     }
                 });
             });
 
-            // 类别内容放置区域 - 支持拖到空类别或类别末尾
-            document.querySelectorAll('.category-content').forEach(contentDiv => {
-                contentDiv.addEventListener('dragover', (e) => {
-                    if (draggedType === 'prompt') {
+            // === 添加提示词按钮（拖到末尾） ===
+            document.querySelectorAll('.add-prompt-btn').forEach(btn => {
+                btn.addEventListener('dragover', (e) => {
+                    if (dragState.type === 'prompt') {
                         e.preventDefault();
-                        e.dataTransfer.dropEffect = 'move';
-                        contentDiv.classList.add('drag-over');
+                        if (!btn.classList.contains('drag-over')) {
+                            btn.classList.add('drag-over');
+                        }
                     }
                 });
                 
-                contentDiv.addEventListener('dragleave', (e) => {
-                    contentDiv.classList.remove('drag-over');
+                btn.addEventListener('dragleave', () => {
+                    btn.classList.remove('drag-over');
                 });
                 
-                contentDiv.addEventListener('drop', async (e) => {
-                    if (draggedType === 'prompt') {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        contentDiv.classList.remove('drag-over');
-                        
-                        const targetCategory = contentDiv.id.replace('cat-', '');
-                        
-                        if (draggedCategory !== targetCategory) {
-                            // 跨类别移动到目标类别末尾
-                            await movePromptToCategory(draggedCategory, targetCategory, draggedItem, 'end');
+                btn.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    btn.classList.remove('drag-over');
+                    
+                    if (dragState.type === 'prompt') {
+                        const targetCategory = btn.dataset.category;
+                        if (targetCategory) {
+                            if (dragState.category === targetCategory) {
+                                await reorderPrompts(dragState.category, dragState.item, null, 'end');
+                            } else {
+                                await movePromptToCategory(dragState.category, targetCategory, dragState.item, null);
+                            }
                         }
                     }
                 });
             });
         }
 
-        async function reorderCategories(fromCategory, toCategory) {
+        async function reorderCategories(fromCategory, toCategory, position = 'before') {
             try {
                 const response = await fetch('/reorder_categories', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         from_category: fromCategory,
-                        to_category: toCategory
+                        to_category: toCategory,
+                        position: position
                     })
                 });
                 
@@ -2912,7 +3716,7 @@
             }
         }
 
-        async function reorderPrompts(category, fromId, toId) {
+        async function reorderPrompts(category, fromId, toId, position = 'before') {
             try {
                 const response = await fetch('/reorder_prompts', {
                     method: 'POST',
@@ -2920,7 +3724,8 @@
                     body: JSON.stringify({
                         category: category,
                         from_id: fromId,
-                        to_id: toId
+                        to_id: toId,
+                        position: position
                     })
                 });
                 
@@ -2971,6 +3776,148 @@
             }
         }
 
+        // Zoom View - 延迟 0.5s 进入仔细看模式
+        let zoomTimer = null;
+        let leaveTimer = null;
+        let currentZoomItem = null;
+        let isDragging = false; // 标记是否正在拖拽
+        
+        // 计算zoom-view尺寸：按1024*1024像素量等比例缩放
+        function setZoomViewSize(promptItem) {
+            const img = promptItem.querySelector('.image-layer img');
+            if (!img || !img.naturalWidth || !img.naturalHeight) {
+                return false;
+            }
+            const imgW = img.naturalWidth;
+            const imgH = img.naturalHeight;
+            const targetPixels = 750 * 750;
+            const currentPixels = imgW * imgH;
+            const scale = Math.sqrt(targetPixels / currentPixels);
+            const zoomW = imgW * scale;
+            const zoomH = imgH * scale;
+            promptItem.style.setProperty('--zoom-width', zoomW + 'px');
+            promptItem.style.setProperty('--zoom-height', zoomH + 'px');
+            return true;
+        }
+        
+        // 调整zoom-view位置，避免碰到浏览器边框
+        function adjustZoomViewPosition(promptItem) {
+            const rect = promptItem.getBoundingClientRect();
+            const zoomW = parseFloat(getComputedStyle(promptItem).width) || rect.width;
+            const zoomH = parseFloat(getComputedStyle(promptItem).height) || rect.height;
+            const margin = 20; // 距离浏览器边框的最小间距
+            
+            let offsetX = 0;
+            let offsetY = 0;
+            
+            // 检查右边缘
+            if (rect.left + zoomW > window.innerWidth - margin) {
+                offsetX = window.innerWidth - margin - zoomW - rect.left;
+            }
+            // 检查左边缘
+            if (rect.left + offsetX < margin) {
+                offsetX = margin - rect.left;
+            }
+            // 检查下边缘
+            if (rect.top + zoomH > window.innerHeight - margin) {
+                offsetY = window.innerHeight - margin - zoomH - rect.top;
+            }
+            // 检查上边缘
+            if (rect.top + offsetY < margin) {
+                offsetY = margin - rect.top;
+            }
+            
+            if (offsetX !== 0 || offsetY !== 0) {
+                promptItem.style.setProperty('--zoom-offset-x', offsetX + 'px');
+                promptItem.style.setProperty('--zoom-offset-y', offsetY + 'px');
+            } else {
+                promptItem.style.removeProperty('--zoom-offset-x');
+                promptItem.style.removeProperty('--zoom-offset-y');
+            }
+        }
+        
+        document.addEventListener('mouseover', (e) => {
+            // 如果正在拖拽，直接跳过
+            if (isDragging) {
+                return;
+            }
+            
+            const promptItem = e.target.closest('.prompt-item:not(.add-prompt-btn)');
+            if (promptItem) {
+                // 检查是否有预览图
+                const hasPreview = setZoomViewSize(promptItem);
+                if (!hasPreview) {
+                    return;
+                }
+                
+                // 清除离开计时器
+                clearTimeout(leaveTimer);
+                leaveTimer = null;
+                
+                if (currentZoomItem !== promptItem) {
+                    if (currentZoomItem) {
+                        currentZoomItem.classList.remove('zoom-view');
+                    }
+                    clearTimeout(zoomTimer);
+                    currentZoomItem = promptItem;
+                    zoomTimer = setTimeout(() => {
+                        if (currentZoomItem === promptItem && !isDragging) {
+                            promptItem.classList.add('zoom-view');
+                            adjustZoomViewPosition(promptItem);
+                        }
+                    }, 2000);
+                }
+            }
+        });
+        
+        document.addEventListener('mouseout', (e) => {
+            // 如果正在拖拽，直接跳过
+            if (isDragging) {
+                return;
+            }
+            
+            const promptItem = e.target.closest('.prompt-item:not(.add-prompt-btn)');
+            if (promptItem && currentZoomItem === promptItem) {
+                // 检查是否真的离开了wrapper，还是只是在内部元素间移动
+                const wrapper = promptItem.closest('.prompt-item-wrapper');
+                if (wrapper) {
+                    const rect = wrapper.getBoundingClientRect();
+                    const isStillOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                                       e.clientY >= rect.top && e.clientY <= rect.bottom;
+                    
+                    if (isStillOver) {
+                        // 还在wrapper内，不做处理
+                        return;
+                    }
+                }
+                
+                // 延迟一点时间再移除，防止抖动
+                clearTimeout(leaveTimer);
+                leaveTimer = setTimeout(() => {
+                    clearTimeout(zoomTimer);
+                    // 先添加zoom-exit类，使用绝对定位回缩，避免影响布局
+                    promptItem.classList.remove('zoom-view');
+                    promptItem.classList.add('zoom-exit');
+                    currentZoomItem = null;
+                    
+                    // 等待transition动画完成后移除zoom-exit
+                    const onTransitionEnd = (e) => {
+                        if (e.propertyName === 'width' || e.propertyName === 'height') {
+                            promptItem.classList.remove('zoom-exit');
+                            promptItem.removeEventListener('transitionend', onTransitionEnd);
+                        }
+                    };
+                    promptItem.addEventListener('transitionend', onTransitionEnd);
+                    
+                    // 保险：如果transition事件没有触发，300ms后强制移除
+                    setTimeout(() => {
+                        promptItem.classList.remove('zoom-exit');
+                        promptItem.removeEventListener('transitionend', onTransitionEnd);
+                    }, 350);
+                }, 100);
+            }
+        });
+        
         // 事件委托处理提示词卡片点击
         document.addEventListener('click', (e) => {
             // 处理 drag-handle 点击（拖拽）- 不做任何事
@@ -3014,10 +3961,176 @@
             }
         });
 
+        // 展开状态的类别背景图片跟随鼠标移动 + 随机晃动
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        
+        // 平滑随机晃动的状态
+        const shakeState = {
+            offsetX: 0,
+            offsetY: 0,
+            targetX: 0,
+            targetY: 0,
+            lastTime: Date.now()
+        };
+        
+        document.addEventListener('mousemove', (e) => {
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        });
+        
+        // 动画循环 - 结合鼠标移动和平滑随机晃动
+        function animateBackground() {
+            const now = Date.now();
+            const deltaTime = (now - shakeState.lastTime) / 1000;
+            shakeState.lastTime = now;
+            
+            // 更新随机目标位置
+            if (Math.random() < 0.02) {
+                shakeState.targetX = (Math.random() - 0.5) * 4;
+                shakeState.targetY = (Math.random() - 0.5) * 4;
+            }
+            
+            // 平滑过渡到目标位置
+            const lerpFactor = 0.05;
+            shakeState.offsetX += (shakeState.targetX - shakeState.offsetX) * lerpFactor;
+            shakeState.offsetY += (shakeState.targetY - shakeState.offsetY) * lerpFactor;
+            
+            const bgMasks = document.querySelectorAll('.category-background-mask');
+            bgMasks.forEach(mask => {
+                const category = mask.closest('.category');
+                if (!category) return;
+                
+                const rect = category.getBoundingClientRect();
+                const centerX = rect.left + rect.width / 2;
+                const centerY = rect.top + rect.height / 2;
+                const deltaX = (lastMouseX - centerX) / rect.width;
+                const deltaY = (lastMouseY - centerY) / rect.height;
+                
+                // 找到内部的背景图元素并设置变换
+                const bg = mask.querySelector('.category-background');
+                if (!bg) return;
+                
+                // 计算背景图与mask的尺寸差
+                const maskW = mask.offsetWidth;
+                const maskH = mask.offsetHeight;
+                const bgW = parseFloat(getComputedStyle(bg).width) || maskW * 1.2;
+                const bgH = parseFloat(getComputedStyle(bg).height) || maskH * 1.2;
+                
+                const maxMoveX = Math.max(0, (bgW - maskW) * 0.5);
+                const maxMoveY = Math.max(0, (bgH - maskH) * 0.5);
+                
+                // 鼠标移动系数，降低移动幅度（0.1 = 10%的移动量）
+                const mouseSensitivity = 0.05;
+                
+                // 目标位置（无限制时）
+                const targetX = deltaX * maxMoveX * mouseSensitivity + shakeState.offsetX;
+                const targetY = deltaY * maxMoveY * mouseSensitivity + shakeState.offsetY;
+                
+                // 边缘衰减函数：越接近边缘，移动越慢，在边缘处速度降为0
+                function applyEdgeDecay(value, maxValue) {
+                    if (maxValue <= 0) return 0;
+                    const ratio = value / maxValue;
+                    const decayedRatio = Math.tanh(ratio);
+                    return decayedRatio * maxValue;
+                }
+                
+                const totalX = applyEdgeDecay(targetX, maxMoveX);
+                const totalY = applyEdgeDecay(targetY, maxMoveY);
+                
+                bg.style.setProperty('--bg-x', `${totalX}px`);
+                bg.style.setProperty('--bg-y', `${totalY}px`);
+            });
+            
+            requestAnimationFrame(animateBackground);
+        }
+        
+        // 启动动画循环
+        requestAnimationFrame(animateBackground);
+        
+        // 当类别折叠时，重置背景位置
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach(mutation => {
+                if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                    const category = mutation.target;
+                    if (category.classList.contains('category') && !category.classList.contains('expanded')) {
+                        category.style.removeProperty('--bg-x');
+                        category.style.removeProperty('--bg-y');
+                    }
+                }
+            });
+        });
+        
+        // 观察categories-container的子元素变化，确保新添加的category也被观察
+        const containerObserver = new MutationObserver((mutations) => {
+            mutations.forEach(mutation => {
+                if (mutation.addedNodes) {
+                    mutation.addedNodes.forEach(node => {
+                        if (node.classList && node.classList.contains('category')) {
+                            observer.observe(node, { attributes: true });
+                        }
+                    });
+                }
+            });
+        });
+        
         window.beginTemporaryContext = beginTemporaryContext;
         window.endTemporaryContext = endTemporaryContext;
         window.addBasePromptOnly = addBasePromptOnly;
-        document.addEventListener('DOMContentLoaded', loadData);
+        document.addEventListener('DOMContentLoaded', () => {
+            loadData();
+            // 监听所有现有类别的class变化
+            document.querySelectorAll('.category').forEach(category => {
+                observer.observe(category, { attributes: true });
+            });
+            // 观察容器，监听新添加的category
+            const container = document.getElementById('categories');
+            if (container) {
+                containerObserver.observe(container, { childList: true, subtree: true });
+            }
+            
+            // ResizeObserver 监听背景图mask尺寸变化，重新计算缩放
+            const bgResizeObserver = new ResizeObserver((entries) => {
+                entries.forEach(entry => {
+                    const mask = entry.target;
+                    const bg = mask.querySelector('.category-background');
+                    if (bg) {
+                        const bgImage = bg.style.backgroundImage;
+                        const match = bgImage.match(/url\(["']?\/images\/([^"')]+)["']?\)/);
+                        if (match && match[1]) {
+                            setBackgroundScale(bg, `/images/${match[1]}`);
+                        }
+                    }
+                });
+            });
+            
+            // 监听所有现有的背景图mask
+            document.querySelectorAll('.category-background-mask').forEach(mask => {
+                bgResizeObserver.observe(mask);
+            });
+            
+            // 通过容器观察器监听新添加的背景图mask
+            const bgMaskObserver = new MutationObserver((mutations) => {
+                mutations.forEach(mutation => {
+                    if (mutation.addedNodes) {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.classList && node.classList.contains('category-background-mask')) {
+                                bgResizeObserver.observe(node);
+                            }
+                            if (node.querySelectorAll) {
+                                node.querySelectorAll('.category-background-mask').forEach(mask => {
+                                    bgResizeObserver.observe(mask);
+                                });
+                            }
+                        });
+                    }
+                });
+            });
+            
+            if (container) {
+                bgMaskObserver.observe(container, { childList: true, subtree: true });
+            }
+        });
     </script>
 </body>
 </html>
