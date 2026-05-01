@@ -92,8 +92,10 @@ class SnapshotPromptServer:
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
         self.images_dir = os.path.join(self.data_dir, "images")
         self.prompt_json = os.path.join(self.data_dir, "prompt.json")
-        
+        self.library_json = os.path.join(self.data_dir, "library.json")
+
         self.prompts_data = self._load_prompts()
+        self.libraries_data = self._load_libraries()
         self.category_display_modes = self._load_category_display_modes()
         self.category_size_modes = self._load_category_size_modes()
 
@@ -202,6 +204,28 @@ class SnapshotPromptServer:
                         elif isinstance(p["decorations"], str):
                             p["decorations"] = [t.strip() for t in p["decorations"].split(",") if t.strip()]
         return migrated
+
+    def _load_libraries(self):
+        """Load libraries data from library.json"""
+        self._ensure_dirs()
+        if os.path.exists(self.library_json):
+            try:
+                with open(self.library_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except:
+                pass
+        return {}
+
+    def _save_libraries(self, data):
+        """Save libraries data to library.json"""
+        self._ensure_dirs()
+        try:
+            with open(self.library_json, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
 
     def _load_category_display_modes(self):
         """Load category display modes from a separate config file."""
@@ -391,6 +415,7 @@ class SnapshotPromptServer:
             elif self.path == '/prompts_data':
                 data = {
                     'categories': self.server_instance.prompts_data,
+                    'libraries': self.server_instance.libraries_data,
                     'last_selected': self.server_instance.last_selected,
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
@@ -1215,6 +1240,296 @@ class SnapshotPromptServer:
                 else:
                     self.send_error(500, "Server error")
 
+            elif self.path == '/add_library':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = data.get('name', '').strip()
+                    if lib_name and lib_name not in self.server_instance.libraries_data:
+                        self.server_instance.libraries_data[lib_name] = {
+                            "bg_image": "",
+                            "prompts": [],
+                            "prompt_ids": []
+                        }
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_library':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    old_name = data.get('old_name', '').strip()
+                    new_name = data.get('new_name', '').strip()
+                    image_data = data.get('image', '')
+                    prompt_ids = data.get('prompt_ids', None)
+
+                    if old_name and new_name and old_name in self.server_instance.libraries_data:
+                        lib_data = self.server_instance.libraries_data.pop(old_name)
+                        if image_data:
+                            lib_data['bg_image'] = self.server_instance._save_image(image_data)
+                        elif image_data == '':
+                            lib_data['bg_image'] = ''
+                        if prompt_ids is not None:
+                            lib_data['prompt_ids'] = prompt_ids
+                        self.server_instance.libraries_data[new_name] = lib_data
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/delete_library':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = data.get('name', '').strip()
+                    if lib_name in self.server_instance.libraries_data:
+                        del self.server_instance.libraries_data[lib_name]
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_library_display_mode':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = data.get('library', '').strip()
+                    display_mode = data.get('display_mode', 'horizontal')
+                    size_mode = data.get('size_mode', 'normal')
+                    
+                    if lib_name and lib_name in self.server_instance.libraries_data:
+                        self.server_instance.libraries_data[lib_name]['display_mode'] = display_mode
+                        self.server_instance.libraries_data[lib_name]['size_mode'] = size_mode
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/add_library_prefab':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = (data.get('library') or '').strip()
+                    prefab_name = (data.get('prefab_name') or '').strip()
+                    prefab_tags = data.get('prefab_tags', [])
+                    custom_prompts = data.get('custom_prompts', '')
+                    image_data = data.get('image', '')
+
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_name and prefab_tags:
+                        lib_data = self.server_instance.libraries_data[lib_name]
+                        if 'prefabs' not in lib_data:
+                            lib_data['prefabs'] = []
+                        prefab = {
+                            'name': prefab_name,
+                            'tags': prefab_tags,
+                            'custom_prompts': custom_prompts
+                        }
+                        if image_data:
+                            prefab['preview'] = self.server_instance._save_image(image_data)
+                        lib_data['prefabs'].append(prefab)
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/delete_library_prefab':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = (data.get('library') or '').strip()
+                    prefab_index = data.get('prefab_index', -1)
+
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_index >= 0:
+                        lib_data = self.server_instance.libraries_data[lib_name]
+                        prefabs = lib_data.get('prefabs', [])
+                        if 0 <= prefab_index < len(prefabs):
+                            prefabs.pop(prefab_index)
+                            self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_library_prefab':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = (data.get('library') or '').strip()
+                    prefab_index = data.get('prefab_index', -1)
+                    prefab_name = (data.get('prefab_name') or '').strip()
+
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_index >= 0 and prefab_name:
+                        lib_data = self.server_instance.libraries_data[lib_name]
+                        prefabs = lib_data.get('prefabs', [])
+                        if 0 <= prefab_index < len(prefabs):
+                            prefabs[prefab_index]['name'] = prefab_name
+                            if 'custom_prompts' in data:
+                                prefabs[prefab_index]['custom_prompts'] = data['custom_prompts']
+                            if 'prefab_tags' in data:
+                                prefabs[prefab_index]['tags'] = data['prefab_tags']
+                            # 仅当前端发送了 image 字段才处理图片
+                            if 'image' in data:
+                                image_data = data['image']
+                                if image_data:
+                                    prefabs[prefab_index]['preview'] = self.server_instance._save_image(image_data)
+                                elif 'preview' in prefabs[prefab_index]:
+                                    del prefabs[prefab_index]['preview']
+                            self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/reorder_libraries':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    from_lib = (data.get('from_library') or '').strip()
+                    to_lib = (data.get('to_library') or '').strip()
+                    position = data.get('position', 'before')
+
+                    keys = list(self.server_instance.libraries_data.keys())
+
+                    if from_lib in keys:
+                        keys.remove(from_lib)
+                        if to_lib and to_lib in keys:
+                            idx = keys.index(to_lib)
+                            if position == 'after':
+                                idx += 1
+                            keys.insert(idx, from_lib)
+                        else:
+                            keys.append(from_lib)
+
+                        reordered = {k: self.server_instance.libraries_data[k] for k in keys if k in self.server_instance.libraries_data}
+                        self.server_instance.libraries_data.clear()
+                        self.server_instance.libraries_data.update(reordered)
+                        self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/reorder_library_prefabs':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    lib_name = (data.get('library') or '').strip()
+                    from_index = data.get('from_index', -1)
+                    to_index = data.get('to_index', -1)
+
+                    if lib_name and lib_name in self.server_instance.libraries_data:
+                        lib_data = self.server_instance.libraries_data[lib_name]
+                        prefabs = lib_data.get('prefabs', [])
+                        if 0 <= from_index < len(prefabs):
+                            item = prefabs.pop(from_index)
+                            if to_index is not None and 0 <= to_index < len(prefabs):
+                                # 调整目标索引（如果 from 在 to 前面，pop 后 to 会偏移）
+                                adjusted_to = to_index if from_index > to_index else to_index - 1
+                                prefabs.insert(adjusted_to, item)
+                            else:
+                                prefabs.append(item)
+                            self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/move_prefab_to_library':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    from_lib = (data.get('from_library') or '').strip()
+                    to_lib = (data.get('to_library') or '').strip()
+                    from_index = data.get('from_index', -1)
+                    to_index = data.get('to_index', -1)
+
+                    if (from_lib in self.server_instance.libraries_data and
+                        to_lib in self.server_instance.libraries_data and
+                        from_lib != to_lib):
+                        from_prefabs = self.server_instance.libraries_data[from_lib].get('prefabs', [])
+                        to_lib_data = self.server_instance.libraries_data[to_lib]
+                        to_prefabs = to_lib_data.get('prefabs', [])
+                        if 'prefabs' not in to_lib_data:
+                            to_lib_data['prefabs'] = to_prefabs
+                        if 0 <= from_index < len(from_prefabs):
+                            item = from_prefabs.pop(from_index)
+                            if to_index is not None and 0 <= to_index <= len(to_prefabs):
+                                to_prefabs.insert(to_index, item)
+                            else:
+                                to_prefabs.append(item)
+                            self.server_instance._save_libraries(self.server_instance.libraries_data)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             elif self.path == '/window_closed':
                 self.server_instance.window_closed = True
                 self.server_instance.prompt_event.set()
@@ -1271,12 +1586,30 @@ class SnapshotPromptNode:
             raise RuntimeError("[SnapshotPrompt] Interrupted")
             
         # 从 prompt widget 获取上次选中的值
+        # 鲁棒解析：用 ',' 分割，但忽略 <> 内部的逗号
         last_selected = []
         custom_prompts = ''
         if prompt and prompt.strip():
-            parts = [p.strip() for p in prompt.split(",") if p.strip()]
+            parts = []
+            current = []
+            angle_depth = 0
+            for ch in prompt:
+                if ch == '<':
+                    angle_depth += 1
+                    current.append(ch)
+                elif ch == '>':
+                    angle_depth -= 1
+                    current.append(ch)
+                elif ch == ',' and angle_depth == 0:
+                    parts.append(''.join(current).strip())
+                    current = []
+                else:
+                    current.append(ch)
+            if current:
+                parts.append(''.join(current).strip())
             for part in parts:
-                # 检查是否是 <> 包裹的自定义输入
+                if not part:
+                    continue
                 if part.startswith('<') and part.endswith('>'):
                     custom_prompts = part[1:-1]
                 else:
@@ -1319,20 +1652,24 @@ class SnapshotPromptNode:
             raise RuntimeError("[SnapshotPrompt] Interrupted or timed out")
         server.stop()
 
-        if server.window_closed or not server.selected_prompts:
+        if server.window_closed or (not server.selected_prompts and not server.custom_prompts):
             raise RuntimeError("[SnapshotPrompt] Window closed or no prompts selected")
 
         # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入
         cleaned_prompts = []
         for p in server.selected_prompts:
-            # 检查是否是 <> 包裹的自定义输入
+            # 检查是否是 <> 包裹的自定义输入(兼容旧数据)
             if p.startswith('<') and p.endswith('>'):
-                # 去掉 <> 但保留内容
                 cleaned = p[1:-1]
             else:
                 # 去掉 [ 和 ]
                 cleaned = p.replace('[', '').replace(']', '')
             cleaned_prompts.append(cleaned)
+
+        # 追加 custom_prompts 到结果
+        if server.custom_prompts:
+            cleaned_prompts.append(server.custom_prompts)
+            server.selected_prompts.append(f"<{server.custom_prompts}>")
 
         result_prompt = prompt_separator.join(server.selected_prompts)
         cleaned_result = prompt_separator.join(cleaned_prompts)

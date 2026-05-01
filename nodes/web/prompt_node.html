@@ -992,6 +992,14 @@
             border-color: #007aff;
             box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0,0,0,0.3);
         }
+        .prompt-item.prefab-partial {
+            border-color: #ffc107;
+            box-shadow: 0 0 0 2px #ffc107, 0 4px 12px rgba(0,0,0,0.3);
+        }
+        .prompt-item.prefab-full {
+            border-color: #007aff;
+            box-shadow: 0 0 0 2px #007aff, 0 4px 12px rgba(0,0,0,0.3);
+        }
         
         /* 底层：图片铺满整个卡片 */
         .prompt-item .image-layer {
@@ -1108,6 +1116,12 @@
             flex-wrap: wrap;
             gap: 2px;
             z-index: 9;
+        }
+        .prompt-item.mini-mode .decoration-tags {
+            top: auto;
+            left: auto;
+            bottom: 4px;
+            right: 4px;
         }
         .prompt-item .decoration-tag {
             padding: 2px 6px;
@@ -1239,6 +1253,32 @@
             color: var(--accent-color);
         }
         
+        /* Add Library 卡片 */
+        .add-library-card {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 16px;
+            background: var(--bg-card);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            white-space: nowrap;
+            border: 2px dashed var(--border-color);
+        }
+        .add-library-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent-color);
+        }
+        .add-library-card span {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+        .add-library-card:hover span {
+            color: var(--accent-color);
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -1276,17 +1316,53 @@
             background: var(--bg-secondary);
             color: var(--text-primary);
         }
-        .modal-content .image-preview {
+        .modal-content .image-preview-container {
+            position: relative;
             width: 100%;
-            max-height: 200px;
-            object-fit: cover;
+        }
+        .modal-content .image-preview-container .image-preview {
+            width: 100%;
+            max-height: 300px;
+            object-fit: contain;
             border-radius: 8px;
             margin-bottom: 12px;
             display: none;
             border: 1px solid var(--border-color);
+            cursor: crosshair;
+            background: #1a1a1a;
         }
-        .modal-content .image-preview.visible {
+        .modal-content .image-preview-container .image-preview.visible {
             display: block;
+        }
+        .focus-marker {
+            position: absolute;
+            width: 24px;
+            height: 24px;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 10;
+            border: 2px solid rgba(255, 50, 50, 0.9);
+            border-radius: 50%;
+            box-shadow: 0 0 4px rgba(0,0,0,0.5);
+            display: none;
+        }
+        .focus-marker::before,
+        .focus-marker::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 50, 50, 0.9);
+        }
+        .focus-marker::before {
+            width: 2px;
+            height: 100%;
+            left: 50%;
+            top: 0;
+        }
+        .focus-marker::after {
+            width: 100%;
+            height: 2px;
+            top: 50%;
+            left: 0;
         }
         .modal-content .image-input-row {
             display: flex;
@@ -1476,10 +1552,10 @@
                     <!-- 新增：临时模式提示条幅 -->
             <div id="temporaryBanner" class="temporary-banner hidden">
                 <span id="bannerText"></span>
-                <button class="btn btn-warning" id="backBtn" onclick="endTemporaryContext()">
+                <button class="btn btn-warning" id="backBtn" onclick="goBackLayer()">
                     ← 返回上层
                 </button>
-                <button class="btn btn-success" onclick="addBasePromptOnly()">
+                <button class="btn btn-success" onclick="completeCurrentLayer()">
                     直接添加
                 </button>
                 <button class="btn btn-secondary" onclick="confirmSelection()">
@@ -1539,7 +1615,10 @@
                 <input type="file" id="editImage" accept="image/*">
                 <button class="btn btn-secondary" onclick="captureScreenshot('edit')">📷 Screenshot</button>
             </div>
-            <img id="editImagePreview" class="image-preview" alt="Preview">
+            <div class="image-preview-container">
+                <img id="editImagePreview" class="image-preview" alt="Preview">
+                <div id="editFocusMarker" class="focus-marker"></div>
+            </div>
             <div class="modal-buttons">
                 <button class="btn btn-secondary" onclick="closeEditModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="updatePrompt()">Update</button>
@@ -1614,7 +1693,10 @@
                 <div class="tag-list" id="editCategoryDecorationList"></div>
             </div>
             <input type="file" id="editCategoryImage" accept="image/*">
-            <img id="editCategoryImagePreview" class="image-preview" alt="Preview">
+            <div class="image-preview-container">
+                <img id="editCategoryImagePreview" class="image-preview" alt="Preview">
+                <div id="editCategoryFocusMarker" class="focus-marker"></div>
+            </div>
             <div class="modal-buttons">
                 <button class="btn btn-secondary" onclick="closeEditCategoryModal()">Cancel</button>
                 <button class="btn btn-danger" onclick="removeCategoryBg()">Remove BG</button>
@@ -1644,6 +1726,104 @@
         </div>
     </div>
 
+    <div class="modal" id="addLibraryModal">
+        <div class="modal-content">
+            <h2>Add New Library</h2>
+            <input type="text" id="newLibraryName" placeholder="Library name">
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeAddLibraryModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addLibrary()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editLibraryModal">
+        <div class="modal-content">
+            <h2>Edit Library</h2>
+            <input type="hidden" id="editLibraryOldName">
+            <input type="text" id="editLibraryNewName" placeholder="Library name">
+            <label>Select Prompt IDs (comma separated)</label>
+            <input type="text" id="editLibraryPromptIds" placeholder="e.g. prompt_id1, prompt_id2">
+            <div class="image-input-row">
+                <input type="file" id="editLibraryImage" accept="image/*">
+            </div>
+            <div class="image-preview-container">
+                <img id="editLibraryImagePreview" class="image-preview" alt="Preview">
+                <div id="editLibraryFocusMarker" class="focus-marker"></div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditLibraryModal()">Cancel</button>
+                <button class="btn btn-danger" onclick="deleteLibrary()">Delete</button>
+                <button class="btn btn-primary" onclick="updateLibrary()">Update</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editLibraryDisplayModeModal">
+        <div class="modal-content">
+            <h2>Edit Library Display Mode</h2>
+            <input type="hidden" id="editLibraryDisplayModeName">
+            <label>Layout Mode</label>
+            <select id="editLibraryDisplayModeSelect">
+                <option value="horizontal">Horizontal (Scroll)</option>
+                <option value="box">Box (Adaptive Grid)</option>
+            </select>
+            <label>Size Mode</label>
+            <select id="editLibrarySizeModeSelect">
+                <option value="normal">Normal</option>
+                <option value="mini">Mini</option>
+            </select>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditLibraryDisplayModeModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="updateLibraryDisplayMode()">Update</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="addPrefabModal">
+        <div class="modal-content">
+            <h2>Add Prefab</h2>
+            <input type="text" id="addPrefabName" placeholder="Prefab name">
+            <input type="hidden" id="addPrefabLibrary">
+            <div class="image-input-row">
+                <input type="file" id="addPrefabImage" accept="image/*">
+                <button class="btn btn-secondary" onclick="captureScreenshot('addPrefab')">📷 Screenshot</button>
+            </div>
+            <div class="image-preview-container">
+                <img id="addPrefabImagePreview" class="image-preview" alt="Preview">
+                <div id="addPrefabFocusMarker" class="focus-marker"></div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeAddPrefabModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="addPrefab()">Save Prefab</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="editPrefabModal">
+        <div class="modal-content">
+            <h2>Edit Prefab</h2>
+            <input type="hidden" id="editPrefabLibrary">
+            <input type="hidden" id="editPrefabIndex">
+            <input type="text" id="editPrefabName" placeholder="Prefab name">
+            <label>Custom Prompts</label>
+            <textarea id="editPrefabCustomPrompts" placeholder="Custom prompts text..."></textarea>
+            <div class="image-input-row">
+                <input type="file" id="editPrefabImage" accept="image/*">
+                <button class="btn btn-secondary" onclick="captureScreenshot('editPrefab')">📷 Screenshot</button>
+            </div>
+            <div class="image-preview-container">
+                <img id="editPrefabImagePreview" class="image-preview" alt="Preview">
+                <div id="editPrefabFocusMarker" class="focus-marker"></div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeEditPrefabModal()">Cancel</button>
+                <button class="btn btn-secondary" onclick="syncPrefab()">Sync</button>
+                <button class="btn btn-primary" onclick="updatePrefab()">Update</button>
+            </div>
+        </div>
+    </div>
+
     <div class="modal" id="decorationModal">
         <div class="modal-content" style="max-width: 95vw; width: 1400px; max-height: 90vh; display: flex; flex-direction: column;">
             <h2 id="decorationModalTitle">Select Decoration</h2>
@@ -1658,13 +1838,300 @@
 
     <script>
         let allPrompts = {};
-        let selectedPrompts = [];
-        let lastSelected = [];
+        let allLibraries = {};
+        let selectedTags = [];
         let expandedCategories = new Set();
+        let expandedLibraries = new Set();
         let searchQuery = '';
 
-        // ==================== 新增：临时上下文相关变量（支持嵌套） ====================
-        let temporaryContextStack = [];  // 栈：每一层 {matchFn, basePrompt, title, selectedPrompts}
+        // ==================== 焦点点 (Focus Point) 管理 ====================
+        // focusPoints[promptId] = { x: number, y: number }  (0-100, 图片百分比)
+        // categoryFocusPoints[categoryName] = { x: number, y: number }
+        let focusPoints = {};
+        let categoryFocusPoints = {};
+
+        function loadFocusPoints() {
+            try {
+                const saved = localStorage.getItem('kolid_focus_points');
+                if (saved) focusPoints = JSON.parse(saved);
+            } catch(e) { focusPoints = {}; }
+            try {
+                const saved = localStorage.getItem('kolid_category_focus_points');
+                if (saved) categoryFocusPoints = JSON.parse(saved);
+            } catch(e) { categoryFocusPoints = {}; }
+        }
+        loadFocusPoints();
+
+        function saveFocusPoints() {
+            try {
+                localStorage.setItem('kolid_focus_points', JSON.stringify(focusPoints));
+            } catch(e) {}
+        }
+
+        function saveCategoryFocusPoints() {
+            try {
+                localStorage.setItem('kolid_category_focus_points', JSON.stringify(categoryFocusPoints));
+            } catch(e) {}
+        }
+
+        function setFocusPoint(promptId, x, y) {
+            focusPoints[promptId] = { x, y };
+            saveFocusPoints();
+        }
+
+        function removeFocusPoint(promptId) {
+            delete focusPoints[promptId];
+            saveFocusPoints();
+        }
+
+        function setCategoryFocusPoint(categoryName, x, y) {
+            categoryFocusPoints[categoryName] = { x, y };
+            saveCategoryFocusPoints();
+        }
+
+        function removeCategoryFocusPoint(categoryName) {
+            delete categoryFocusPoints[categoryName];
+            saveCategoryFocusPoints();
+        }
+
+        function getFocusStyle(promptId) {
+            const pt = focusPoints[promptId];
+            if (!pt) return '';
+            return `object-position: ${pt.x}% 50%;`;
+        }
+
+        // 图片加载后精确计算 object-position: cover 下焦点可见
+        function onPromptImageLoad(img, promptId) {
+            const pt = focusPoints[promptId];
+            if (!pt) return;
+            const cw = img.clientWidth;
+            const ch = img.clientHeight;
+            const iw = img.naturalWidth;
+            const ih = img.naturalHeight;
+            if (!iw || !ih || !cw || !ch) return;
+
+            const scale = Math.max(cw / iw, ch / ih);
+            const scaledH = scale * ih;
+            const ratio = scaledH / ch;
+
+            let cy;
+            if (pt.y <= 65) {
+                cy = pt.y;
+            } else {
+                cy = (pt.y * ratio - 65) / (ratio - 1);
+                cy = Math.max(0, Math.min(100, cy));
+            }
+
+            img.style.objectPosition = `${pt.x}% ${cy}%`;
+        }
+
+        // 类别收起时的 bg-image 焦点计算 (object-fit: cover)
+        function onCategoryBgImageLoad(img, categoryName) {
+            const pt = categoryFocusPoints[categoryName];
+            if (!pt) return;
+            const cw = img.clientWidth;
+            const ch = img.clientHeight;
+            const iw = img.naturalWidth;
+            const ih = img.naturalHeight;
+            if (!iw || !ih || !cw || !ch) return;
+
+            const scale = Math.max(cw / iw, ch / ih);
+            const scaledH = scale * ih;
+            const ratio = scaledH / ch;
+
+            let cy;
+            if (pt.y <= 50) {
+                cy = pt.y;
+            } else {
+                cy = (pt.y * ratio - 50) / (ratio - 1);
+                cy = Math.max(0, Math.min(100, cy));
+            }
+
+            img.style.objectPosition = `${pt.x}% ${cy}%`;
+        }
+
+        function getCategoryBgPosition(categoryName) {
+            return 'center';
+        }
+
+        // 类别背景图自然尺寸缓存
+        let categoryBgImageSizes = {};
+        // 类别背景焦点 base offset (px) — 鼠标动画会叠加在 base 上
+        let categoryFocusBase = {};
+
+        function setBackgroundScale(bgContainer, bgImagePath, categoryName) {
+            const img = new Image();
+            img.onload = function() {
+                const mask = bgContainer.parentElement;
+                const maskWidth = mask.offsetWidth;
+                const maskHeight = mask.offsetHeight;
+                const imageWidth = img.naturalWidth;
+                const imageHeight = img.naturalHeight;
+                
+                const key = bgImagePath.replace(/^.*\/images\//, '');
+                categoryBgImageSizes[key] = { w: imageWidth, h: imageHeight };
+                
+                if (imageWidth > 0 && imageHeight > 0 && maskWidth > 0 && maskHeight > 0) {
+                    const scale = Math.max(
+                        (maskWidth * 1.2) / imageWidth,
+                        (maskHeight * 1.2) / imageHeight
+                    );
+                    const bgWidth = imageWidth * scale;
+                    const bgHeight = imageHeight * scale;
+                    bgContainer.style.setProperty('--bg-width', bgWidth + 'px');
+                    bgContainer.style.setProperty('--bg-height', bgHeight + 'px');
+                    
+                    if (categoryName) {
+                        applyCategoryBgPosition(bgContainer, key, categoryName);
+                    }
+                }
+            };
+            img.src = bgImagePath;
+        }
+
+        // 类别背景焦点: 计算 div 偏移量 (--bg-x, --bg-y)，使焦点在 mask 中心可见
+        function applyCategoryBgPosition(bgContainer, imageKey, categoryName) {
+            const pt = categoryFocusPoints[categoryName];
+            const sizes = categoryBgImageSizes[imageKey];
+            if (!pt || !sizes) {
+                delete categoryFocusBase[categoryName];
+                return;
+            }
+
+            const bgW = parseFloat(bgContainer.style.getPropertyValue('--bg-width')) || bgContainer.offsetWidth;
+            const bgH = parseFloat(bgContainer.style.getPropertyValue('--bg-height')) || bgContainer.offsetHeight;
+            if (!bgW || !bgH) return;
+
+            // 焦点在图片上的坐标 → 在 div 上的位置 (图片通过 contain 填满 div)
+            // focus 距离 div 左上角: pt.x% * bgW, pt.y% * bgH
+            // div 默认居中时, 焦点在 mask 中的位置: maskW/2 + bgW*(pt.x/100 - 0.5), maskH/2 + bgH*(pt.y/100 - 0.5)
+            // 希望焦点在 mask 中心 → 需要偏移 div:
+            //   offsetX = maskW/2 + bgW*(pt.x/100 - 0.5) - maskW/2 = bgW*(pt.x/100 - 0.5)
+            //   取反: bgX = -bgW*(pt.x/100 - 0.5) = bgW*(0.5 - pt.x/100)
+            //   再修正: 默认 --bg-x=0 时焦点偏移 maskW/2 + bgW*(pt.x/100-0.5)
+            //   要使焦点到 mask 中心: maskW/2 + bgW*(pt.x/100-0.5) + bgX = maskW/2
+            //   => bgX = -bgW*(pt.x/100-0.5) = bgW*(0.5-pt.x/100)
+            const offsetX = bgW * (0.5 - pt.x / 100);
+            const offsetY = bgH * (0.5 - pt.y / 100);
+
+            // clamp: 最多只能偏移到边缘
+            const mask = bgContainer.parentElement;
+            const maskW = mask ? mask.offsetWidth : bgW;
+            const maskH = mask ? mask.offsetHeight : bgH;
+            const maxX = Math.max(0, (bgW - maskW) * 0.5);
+            const maxY = Math.max(0, (bgH - maskH) * 0.5);
+
+            const clampedX = Math.max(-maxX, Math.min(maxX, offsetX));
+            const clampedY = Math.max(-maxY, Math.min(maxY, offsetY));
+
+            categoryFocusBase[categoryName] = { x: clampedX, y: clampedY };
+            bgContainer.style.setProperty('--bg-x', `${clampedX}px`);
+            bgContainer.style.setProperty('--bg-y', `${clampedY}px`);
+        }
+
+        // 计算图片在 contain 容器内的实际渲染区域（排除 letterbox 黑边）
+        function getImageRenderRect(img) {
+            const containerW = img.clientWidth;
+            const containerH = img.clientHeight;
+            const nw = img.naturalWidth;
+            const nh = img.naturalHeight;
+            if (!nw || !nh) return { offsetX: 0, offsetY: 0, renderW: containerW, renderH: containerH };
+            const ratio = nw / nh;
+            if (ratio > containerW / containerH) {
+                const renderH = containerW / ratio;
+                return { offsetX: 0, offsetY: (containerH - renderH) / 2, renderW: containerW, renderH };
+            } else {
+                const renderW = containerH * ratio;
+                return { offsetX: (containerW - renderW) / 2, offsetY: 0, renderW, renderH: containerH };
+            }
+        }
+
+        // ==================== Tag 工具函数 ====================
+        // Tag: { decoration_num: number, name: string, prompt: string }
+
+        function tagsToDisplayString(tags) {
+            return tags.map(tag => {
+                if (tag.decoration_num > 0) {
+                    const brackets = '['.repeat(tag.decoration_num);
+                    const closing = ']'.repeat(tag.decoration_num);
+                    return `${brackets}${tag.prompt}${closing}`;
+                }
+                return tag.prompt;
+            }).join(' ');
+        }
+
+        function tagsToDisplayName(tags) {
+            return tags.map(tag => tag.name || tag.prompt).join(' ');
+        }
+
+        function findTagGroupIndex(basePrompt) {
+            return selectedTags.findIndex(group =>
+                group.some(tag => tag.decoration_num === 0 && tag.prompt === basePrompt)
+            );
+        }
+
+        function findTagGroupByBasePrompt(basePrompt) {
+            return selectedTags.find(group =>
+                group.some(tag => tag.decoration_num === 0 && tag.prompt === basePrompt)
+            );
+        }
+
+        function isBasePromptSelectedInTags(prompt) {
+            return selectedTags.some(group =>
+                group.some(tag => tag.decoration_num === 0 && tag.prompt === prompt)
+            );
+        }
+
+        function findPromptName(promptText) {
+            for (const [, catData] of Object.entries(allPrompts)) {
+                const prompts = catData.prompts || [];
+                for (const p of prompts) {
+                    if (p.prompt === promptText) {
+                        return p.name || promptText;
+                    }
+                }
+            }
+            return promptText;
+        }
+
+        function createTag(decorationNum, promptText) {
+            return {
+                decoration_num: decorationNum,
+                name: findPromptName(promptText),
+                prompt: promptText
+            };
+        }
+
+        // 将 Python 返回的字符串（如 "[golden hour] natural light"）解析为 List<Tag>
+        function parseStringToTags(str) {
+            const tags = [];
+            let pos = 0;
+            while (pos < str.length) {
+                const bracketMatch = str.slice(pos).match(/^(\[+)([^\]]+)\]+/);
+                if (bracketMatch) {
+                    const decoNum = bracketMatch[1].length;
+                    const content = bracketMatch[2].trim();
+                    tags.push(createTag(decoNum, content));
+                    pos += bracketMatch[0].length;
+                } else {
+                    const remaining = str.slice(pos);
+                    const nextBracket = remaining.indexOf('[');
+                    if (nextBracket === -1) {
+                        const text = remaining.trim();
+                        if (text) tags.push(createTag(0, text));
+                        break;
+                    } else {
+                        const text = remaining.slice(0, nextBracket).trim();
+                        if (text) tags.push(createTag(0, text));
+                        pos += nextBracket;
+                    }
+                }
+            }
+            return tags;
+        }
+
+        // ==================== 临时上下文相关变量 ====================
+        let temporaryContextStack = [];  // 栈：每一层 {matchFn, basePrompt, title, tagGroups, originalExpandedCategories, level}
         
         function isTemporaryContext() {
             return temporaryContextStack.length > 0;
@@ -1688,7 +2155,7 @@
                 confirmBtn.textContent = 'Select';
                 confirmBtn.style.background = '#28a745';
                 confirmBtn.style.borderColor = '#28a745';
-                confirmBtn.onclick = endTemporaryContext;
+                confirmBtn.onclick = completeCurrentLayer;
             } else {
                 confirmBtn.textContent = 'Confirm';
                 confirmBtn.style.background = '';
@@ -1698,158 +2165,47 @@
         }
 
         function beginTemporaryContext(matchFn, basePrompt, title = "正在选择装饰提示词") {
-            // 保存当前状态到栈中（如果已经在临时上下文中）
-            if (temporaryContextStack.length > 0) {
-                const currentCtx = getCurrentTemporaryContext();
-                currentCtx.selectedPrompts = [...temporarySelectedPrompts];
-            }
-            
-            // 保存当前展开的类别状态
             const currentExpanded = new Set(expandedCategories);
             
-            // 创建新的临时上下文层
             temporaryContextStack.push({
                 matchFn: matchFn,
                 basePrompt: basePrompt,
                 title: title,
-                selectedPrompts: [],
+                tagGroups: [],
                 originalExpandedCategories: currentExpanded,
-                level: temporaryContextStack.length + 1 // 保存当前嵌套层数
+                level: temporaryContextStack.length + 1
             });
             
-            // 初始化当前层的状态
-            temporarySelectedPrompts = [];
             expandedCategories.clear();
-
             renderCategories();
             initDragEvents();
             updateFooterButton();
             showTemporaryBanner();
-
-            console.log(`✅ 进入临时模式 (第${temporaryContextStack.length}层): ${title}`);
+            updateSelectedTags();
         }
 
-        // 根据层数生成对应数量的方括号
-        function wrapWithBrackets(text, level) {
-            const brackets = '['.repeat(level);
-            const closingBrackets = ']'.repeat(level);
-            return `${brackets}${text}${closingBrackets}`;
-        }
-
-        // 递归组合提示词和它的装饰词，使用正确的层级信息
-        function combinePromptWithDecorations(promptObj) {
-            // 如果没有装饰词，直接返回带正确括号的提示词
-            if (!promptObj.decorations || promptObj.decorations.length === 0) {
-                return wrapWithBrackets(promptObj.text, promptObj.level);
-            }
-            
-            // 递归组合所有装饰词
-            let result = '';
-            for (const deco of promptObj.decorations) {
-                result += combinePromptWithDecorations(deco) + ' ';
-            }
-            
-            // 添加当前层级的提示词
-            result += wrapWithBrackets(promptObj.text, promptObj.level);
-            return result;
-        }
-
-        // 最终组合所有内容，基础提示词不带括号
-        function combineAll(basePrompt, decorations, baseLevel) {
-            let result = '';
-            
-            // 先组合所有装饰词
-            for (const deco of decorations) {
-                result += combinePromptWithDecorations(deco) + ' ';
-            }
-            
-            // 添加基础提示词（不带括号）
-            result += basePrompt;
-            return result;
-        }
-
-        // 检查一个字符串是否是装饰提示对象（有text和level属性）
-        function isDecorationObject(obj) {
-            return typeof obj === 'object' && obj !== null && 'text' in obj && 'level' in obj;
-        }
-
-        function addBasePromptOnly() {
+        function completeCurrentLayer() {
             if (temporaryContextStack.length === 0) return;
-            
             const ctx = temporaryContextStack.pop();
             
-            // 处理当前层的选择 - 新选择的修饰词层级是当前层级
-            const processedSelections = [];
-            for (const p of temporarySelectedPrompts) {
-                if (isDecorationObject(p)) {
-                    // 已经是装饰对象，直接使用
-                    processedSelections.push(p);
-                } else {
-                    // 查找对应的name
-                    const promptData = findPromptData(p);
-                    const name = promptData ? promptData.name : '';
-                    // 创建新的装饰对象
-                    processedSelections.push({
-                        text: p,
-                        name: name,
-                        level: ctx.level,
-                        decorations: []
-                    });
-                }
-            }
+            const tagGroups = [...ctx.tagGroups];
+            if (tagGroups.length === 0 && temporaryContextStack.length === 0) return;
             
-            // basePrompt 作为修饰词时的层级应该是当前层级减1
-            const basePromptLevel = Math.max(1, ctx.level - 1);
+            const basePromptData = findPromptData(ctx.basePrompt);
+            const basePromptName = basePromptData ? basePromptData.name : '';
+            const baseDecoNum = Math.max(0, ctx.level - 1);
             
-            // 恢复上一层状态或正常状态
             if (temporaryContextStack.length > 0) {
-                // 有上一层，将当前层选择的对象传递给上一层
                 const prevCtx = getCurrentTemporaryContext();
-                temporarySelectedPrompts = prevCtx.selectedPrompts || [];
-                
-                // 查找上一层中是否已经有与当前 basePrompt 匹配的选择
-                let found = false;
-                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
-                    const item = temporarySelectedPrompts[i];
-                    if (isDecorationObject(item) && item.text === ctx.basePrompt) {
-                        // 找到匹配项，将当前选择添加为它的装饰
-                        item.decorations = item.decorations || [];
-                        item.decorations.push(...processedSelections);
-                        found = true;
-                        break;
-                    }
-                }
-                
-                if (!found) {
-                    // 查找 basePrompt 对应的 name
-                    const basePromptData = findPromptData(ctx.basePrompt);
-                    const basePromptName = basePromptData ? basePromptData.name : '';
-                    // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
-                    temporarySelectedPrompts.push({
-                        text: ctx.basePrompt,
-                        name: basePromptName,
-                        level: basePromptLevel,
-                        decorations: processedSelections
-                    });
-                }
+                const combined = combineTagGroups(tagGroups, ctx.basePrompt, basePromptName, baseDecoNum);
+                prevCtx.tagGroups.push(combined);
                 
                 expandedCategories = new Set(prevCtx.originalExpandedCategories);
                 showTemporaryBanner();
             } else {
-                // 查找 basePrompt 对应的 name
-                const basePromptData = findPromptData(ctx.basePrompt);
-                const basePromptName = basePromptData ? basePromptData.name : '';
-                // 没有上一层，最终组合并添加到最终选择列表
-                const finalCombined = combineAll(ctx.basePrompt, processedSelections, basePromptLevel);
-                // 创建装饰对象以便显示时包含 name
-                const finalObj = {
-                    text: ctx.basePrompt,
-                    name: basePromptName,
-                    level: basePromptLevel,
-                    decorations: processedSelections
-                };
-                selectedPrompts.push(finalObj);
-                temporarySelectedPrompts = [];
+                const combined = combineTagGroups(tagGroups, ctx.basePrompt, basePromptName, baseDecoNum);
+                selectedTags.push(combined);
+                
                 expandedCategories = new Set(ctx.originalExpandedCategories);
                 hideTemporaryBanner();
             }
@@ -1857,88 +2213,29 @@
             renderCategories();
             updateSelectedTags();
             updateFooterButton();
-            
-            console.log("✅ 直接添加基础提示词");
         }
 
-        function endTemporaryContext() {
-            if (temporaryContextStack.length === 0) return;
-            
+        function goBackLayer() {
+            if (temporaryContextStack.length <= 1) return;
             const ctx = temporaryContextStack.pop();
             
-            // 处理当前层的选择 - 新选择的修饰词层级是当前层级
-            const processedSelections = [];
-            for (const p of temporarySelectedPrompts) {
-                if (isDecorationObject(p)) {
-                    // 已经是装饰对象，直接使用
-                    processedSelections.push(p);
-                } else {
-                    // 查找对应的name
-                    const promptData = findPromptData(p);
-                    const name = promptData ? promptData.name : '';
-                    // 创建新的装饰对象
-                    processedSelections.push({
-                        text: p,
-                        name: name,
-                        level: ctx.level,
-                        decorations: []
-                    });
-                }
-            }
+            const prevCtx = getCurrentTemporaryContext();
+            expandedCategories = new Set(prevCtx.originalExpandedCategories);
+            showTemporaryBanner();
+            renderCategories();
+            updateSelectedTags();
+            updateFooterButton();
+        }
+
+        function cancelTemporaryContext() {
+            if (temporaryContextStack.length === 0) return;
+            const ctx = temporaryContextStack.pop();
             
-            // basePrompt 作为修饰词时的层级应该是当前层级减1
-            const basePromptLevel = Math.max(1, ctx.level - 1);
-            
-            // 恢复上一层状态或正常状态
             if (temporaryContextStack.length > 0) {
-                // 有上一层，将当前层选择的对象传递给上一层
                 const prevCtx = getCurrentTemporaryContext();
-                temporarySelectedPrompts = prevCtx.selectedPrompts || [];
-                
-                // 查找上一层中是否已经有与当前 basePrompt 匹配的选择
-                let found = false;
-                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
-                    const item = temporarySelectedPrompts[i];
-                    if (isDecorationObject(item) && item.text === ctx.basePrompt) {
-                        // 找到匹配项，将当前选择添加为它的装饰
-                        item.decorations = item.decorations || [];
-                        item.decorations.push(...processedSelections);
-                        found = true;
-                        break;
-                    }
-                }
-                
-                if (!found && (processedSelections.length > 0 || temporarySelectedPrompts.length === 0)) {
-                    // 查找 basePrompt 对应的 name
-                    const basePromptData = findPromptData(ctx.basePrompt);
-                    const basePromptName = basePromptData ? basePromptData.name : '';
-                    // 没找到匹配项，创建新的装饰对象，basePrompt 层级减1
-                    temporarySelectedPrompts.push({
-                        text: ctx.basePrompt,
-                        name: basePromptName,
-                        level: basePromptLevel,
-                        decorations: processedSelections
-                    });
-                }
-                
                 expandedCategories = new Set(prevCtx.originalExpandedCategories);
                 showTemporaryBanner();
             } else {
-                // 查找 basePrompt 对应的 name
-                const basePromptData = findPromptData(ctx.basePrompt);
-                const basePromptName = basePromptData ? basePromptData.name : '';
-                // 没有上一层，最终组合并添加到最终选择列表
-                if (processedSelections.length > 0 || temporarySelectedPrompts.length === 0) {
-                    // 创建装饰对象以便显示时包含 name
-                    const finalObj = {
-                        text: ctx.basePrompt,
-                        name: basePromptName,
-                        level: basePromptLevel,
-                        decorations: processedSelections
-                    };
-                    selectedPrompts.push(finalObj);
-                }
-                temporarySelectedPrompts = [];
                 expandedCategories = new Set(ctx.originalExpandedCategories);
                 hideTemporaryBanner();
             }
@@ -1946,8 +2243,21 @@
             renderCategories();
             updateSelectedTags();
             updateFooterButton();
-            
-            console.log("✅ 完成临时上下文选择");
+        }
+
+        function combineTagGroups(tagGroups, basePrompt, basePromptName, baseDecoNum = 0) {
+            const result = [];
+            for (const group of tagGroups) {
+                for (const tag of group) {
+                    result.push(tag);
+                }
+            }
+            result.push({
+                decoration_num: baseDecoNum,
+                name: basePromptName || findPromptName(basePrompt),
+                prompt: basePrompt
+            });
+            return result;
         }
 
         function showTemporaryBanner() {
@@ -1971,49 +2281,45 @@
             }
         }
 
-        function setBackgroundScale(bgContainer, bgImagePath) {
-            const img = new Image();
-            img.onload = function() {
-                const maskWidth = bgContainer.parentElement.offsetWidth;
-                const maskHeight = bgContainer.parentElement.offsetHeight;
-                const imageWidth = img.naturalWidth;
-                const imageHeight = img.naturalHeight;
-                if (imageWidth > 0 && imageHeight > 0 && maskWidth > 0 && maskHeight > 0) {
-                    const scale = Math.max(
-                        (maskWidth * 1.2) / imageWidth,
-                        (maskHeight * 1.2) / imageHeight
-                    );
-                    const bgWidth = imageWidth * scale;
-                    const bgHeight = imageHeight * scale;
-                    bgContainer.style.setProperty('--bg-width', bgWidth + 'px');
-                    bgContainer.style.setProperty('--bg-height', bgHeight + 'px');
-                }
-            };
-            img.src = bgImagePath;
-        }
-
         async function loadData() {
             try {
                 const res = await fetch('/prompts_data');
                 const data = await res.json();
                 allPrompts = data.categories;
-                lastSelected = data.last_selected || [];
+                allLibraries = data.libraries || {};
+                const lastSelected = data.last_selected || [];
                 promptFoldout = data.prompt_foldout || false;
                 
                 categoryDisplayModes = data.category_display_modes || {};
                 categorySizeModes = data.category_size_modes || {};
 
-                selectedPrompts = [...lastSelected];
+                selectedTags = lastSelected
+                    .filter(str => !str.startsWith('<') || !str.endsWith('>'))
+                    .map(str => parseStringToTags(str));
                 updateSelectedTags();
                 
                 // 加载自定义输入内容
-                const customPrompts = data.custom_prompts || '';
+                let customPrompts = data.custom_prompts || '';
+                // 从 lastSelected 中恢复 <> 包裹的 custom_prompts (兼容旧数据)
+                for (const str of lastSelected) {
+                    const m = str.match(/^<(.+)>$/);
+                    if (m) {
+                        const recovered = m[1];
+                        if (customPrompts) {
+                            if (!customPrompts.split('\n').map(s => s.trim()).includes(recovered)) {
+                                customPrompts += '\n' + recovered;
+                            }
+                        } else {
+                            customPrompts = recovered;
+                        }
+                    }
+                }
                 document.getElementById('customPromptInput').value = customPrompts;
                 
                 if (promptFoldout) {
                     for (const [category, catData] of Object.entries(allPrompts)) {
                         const prompts = catData.prompts || catData;
-                        if (prompts.some(p => lastSelected.includes(p.prompt))) {
+                        if (prompts.some(p => isBasePromptSelectedInTags(p.prompt))) {
                             expandedCategories.add(category);
                         }
                     }
@@ -2074,12 +2380,12 @@
 
                 // 创建背景图遮罩容器（包含背景图）
                 const bgHtml = isExpanded && bgImage 
-                    ? `<div class="category-background-mask"><div class="category-background" style="background-image: url(/images/${bgImage})"></div></div>` 
+                    ? `<div class="category-background-mask"><div class="category-background" style="background-image: url(/images/${bgImage}); background-position: ${getCategoryBgPosition(category)}"></div></div>` 
                     : '';
                 
                 // 折叠状态下的header背景图
                 const headerBgHtml = !isExpanded && bgImage 
-                    ? `<img src="/images/${bgImage}" class="bg-image" alt="">` 
+                    ? `<img src="/images/${bgImage}" class="bg-image" alt="" onload="onCategoryBgImageLoad(this, '${category}')">` 
                     : '';
 
                 categoryDiv.innerHTML = `
@@ -2122,31 +2428,30 @@
                         
                         let isSelected = false;
                         if (isTemporaryContext()) {
-                            isSelected = temporarySelectedPrompts.includes(p.prompt);
-                            if (!isSelected) {
-                                for (const item of temporarySelectedPrompts) {
-                                    if (isDecorationObject(item) && item.text === p.prompt) {
-                                        isSelected = true;
-                                        break;
-                                    }
-                                }
-                            }
+                            const ctx = getCurrentTemporaryContext();
+                            isSelected = ctx.tagGroups.some(group =>
+                                group.some(tag => tag.prompt === p.prompt)
+                            );
                         } else {
-                            isSelected = isBasePromptSelected(p.prompt);
+                            isSelected = isBasePromptSelectedInTags(p.prompt);
                         }
                         
-                        const combos = getPromptCombinations(p.prompt);
                         let selectedCardsHtml = '';
-                        for (const combo of combos) {
-                            const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                            selectedCardsHtml += `
-                                <div class="selected-card" data-prompt="${escapedCombo}">
-                                    <div class="selected-card-content">${combo}</div>
-                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
-                                </div>
-                            `;
+                        if (!isTemporaryContext()) {
+                            const group = findTagGroupByBasePrompt(p.prompt);
+                            if (group) {
+                                const display = tagsToDisplayName(group);
+                                const escapedCombo = display.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                                selectedCardsHtml += `
+                                    <div class="selected-card" data-prompt="${escapedCombo}">
+                                        <div class="selected-card-content">${display}</div>
+                                        <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
+                                    </div>
+                                `;
+                            }
                         }
-                        
+
+                        const focusStyle = getFocusStyle(p.id);
                         const wrapperDiv = document.createElement('div');
                         wrapperDiv.className = 'prompt-item-wrapper';
                         wrapperDiv.innerHTML = `
@@ -2156,7 +2461,7 @@
                                 ${decoTagsHtml}
                                 <div class="select-area">
                                     <div class="image-layer">
-                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy">` : '<div class="no-image">No Image</div>'}
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" style="${focusStyle}" onload="onPromptImageLoad(this, '${p.id}')">` : '<div class="no-image">No Image</div>'}
                                     </div>
                                     ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
                                     <div class="text-layer">
@@ -2191,7 +2496,7 @@
                 if (isExpanded && bgImage) {
                     const bgContainer = categoryDiv.querySelector('.category-background');
                     if (bgContainer) {
-                        setBackgroundScale(bgContainer, `/images/${bgImage}`);
+                        setBackgroundScale(bgContainer, `/images/${bgImage}`, category);
                     }
                 }
             }
@@ -2205,25 +2510,187 @@
                 container.appendChild(addDiv);
             }
 
+            // ====================== 渲染 Library 卡片 ======================
+            for (const [libName, libData] of Object.entries(allLibraries)) {
+                const bgImage = libData.bg_image || '';
+                const isExpanded = expandedLibraries.has(libName);
+                const displayMode = libData.display_mode || 'horizontal';
+                const sizeMode = libData.size_mode || 'normal';
+
+                // 收集 library 中的 prompt IDs
+                const libPromptIds = libData.prompt_ids || [];
+                const prompts = [];
+                for (const [cat, catData] of Object.entries(allPrompts)) {
+                    const catPrompts = catData.prompts || [];
+                    for (const p of catPrompts) {
+                        if (libPromptIds.includes(p.id)) {
+                            prompts.push({ ...p, category: cat });
+                        }
+                    }
+                }
+
+                if (searchQuery && prompts.length === 0) continue;
+
+                const categoryDiv = document.createElement('div');
+                categoryDiv.className = `category ${isExpanded ? 'expanded' : 'collapsed'}`;
+                categoryDiv.id = `library-${libName}`;
+
+                // 背景图及折叠图
+                const bgHtml = isExpanded && bgImage 
+                    ? `<div class="category-background-mask"><div class="category-background" style="background-image: url(/images/${bgImage}); background-position: center"></div></div>` 
+                    : '';
+                const headerBgHtml = !isExpanded && bgImage 
+                    ? `<img src="/images/${bgImage}" class="bg-image" alt="" onload="onCategoryBgImageLoad(this, '${libName}')">` 
+                    : '';
+
+                categoryDiv.innerHTML = `
+                    ${bgHtml}
+                    <div class="category-header" onclick="toggleLibrary('${libName}')">
+                        ${headerBgHtml}
+                        <div class="header-content">
+                            <div style="display: flex; align-items: center;">
+                                <span class="drag-handle" data-drag-type="library" data-library="${libName}">⋮⋮</span>
+                                <span style="text-shadow: 0px 0px 4px black;">${libName}</span>
+                            </div>
+                            <div style="display: flex; align-items: center;">
+                                <button class="display-mode-btn" onclick="event.stopPropagation(); openEditLibraryDisplayModeModal('${libName}')">⊞</button>
+                                <button class="edit-category-btn" onclick="event.stopPropagation(); openEditLibraryModal('${libName}')">✏️</button>
+                                <span class="toggle">${isExpanded ? '▲' : '▼'}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                if (isExpanded) {
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = `category-content ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}`;
+                    contentDiv.id = `libcat-${libName}`;
+
+                    const isMiniMode = sizeMode === 'mini';
+                    const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+
+                    for (const p of prompts) {
+                        const focusStyle = getFocusStyle(p.id);
+                        const wrapperDiv = document.createElement('div');
+                        wrapperDiv.className = 'prompt-item-wrapper';
+                        wrapperDiv.innerHTML = `
+                            <div class="prompt-item ${modeClass}"
+                                data-prompt="${p.prompt}" data-id="${p.id}" data-category="${p.category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${p.category}">⋮⋮</span>
+                                <div class="select-area">
+                                    <div class="image-layer">
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" style="${focusStyle}" onload="onPromptImageLoad(this, '${p.id}')">` : '<div class="no-image">No Image</div>'}
+                                    </div>
+                                    ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                    <div class="text-layer">
+                                        <div class="name">${p.name}</div>
+                                        <div class="prompt-text">${p.prompt}</div>
+                                    </div>
+                                </div>
+                                <div class="actions">
+                                    <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${p.category}">✏️</button>
+                                    <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                                </div>
+                            </div>
+                        `;
+                        contentDiv.appendChild(wrapperDiv);
+                    }
+
+                    // 渲染 prefab items
+                    const libData = allLibraries[libName] || {};
+                    const prefabs = libData.prefabs || [];
+                    for (let pi = 0; pi < prefabs.length; pi++) {
+                        const pf = prefabs[pi];
+                        const pfKey = `prefab_${libName}_${pi}`;
+                        const pfFocusStyle = getFocusStyle(pfKey);
+                        const displayStr = pf.tags.map(group => tagsToDisplayName(group)).join(' + ');
+                        const state = getPrefabMatchState(pf.tags);
+                        const stateClass = state === 'full' ? 'prefab-full' : state === 'partial' ? 'prefab-partial' : '';
+                        const wrapperDiv = document.createElement('div');
+                        wrapperDiv.className = 'prompt-item-wrapper';
+                        wrapperDiv.innerHTML = `
+                            <div class="prompt-item ${modeClass} ${stateClass}"
+                                data-prefab="${pfKey}" data-library="${libName}" data-prefab-index="${pi}" style="cursor: pointer;">
+                                <span class="drag-handle" data-drag-type="prefab" data-library="${libName}" data-index="${pi}">⋮⋮</span>
+                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                    <div class="image-layer">
+                                        ${pf.preview ? `<img src="/images/${pf.preview}" alt="${pf.name}" loading="lazy" style="${pfFocusStyle}" onload="onPromptImageLoad(this, '${pfKey}')">` : '<div class="no-image">No Image</div>'}
+                                    </div>
+                                    ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                    <div class="text-layer">
+                                        <div class="name" style="color: var(--accent-color);">${pf.name}</div>
+                                        <div class="prompt-text">${displayStr}</div>
+                                    </div>
+                                </div>
+                                <div class="actions" style="position: absolute; top: 4px; right: 4px;">
+                                    <button class="action-btn edit" onclick="event.stopPropagation(); openEditPrefabModal('${libName}', ${pi})">✏️</button>
+                                    <button class="action-btn delete" onclick="event.stopPropagation(); deleteLibraryPrefab('${libName}', ${pi})">🗑️</button>
+                                </div>
+                            </div>
+                        `;
+                        const item = wrapperDiv.querySelector('.prompt-item');
+                         let clickTimer = null;
+                         item.onclick = () => {
+                             if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; return; }
+                             clickTimer = setTimeout(() => {
+                                 clickTimer = null;
+                                 mergePrefab(pf);
+                             }, 250);
+                         };
+                         item.ondblclick = (e) => {
+                             e.stopPropagation();
+                             if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+                             replacePrefab(pf);
+                         };
+                         contentDiv.appendChild(wrapperDiv);
+                    }
+
+                    // +Add Prefab 按钮
+                    if (selectedTags.length > 0) {
+                        const addPfDiv = document.createElement('div');
+                        addPfDiv.className = `prompt-item add-prompt-btn ${modeClass}`;
+                        addPfDiv.style.cssText = 'cursor: pointer;';
+                        addPfDiv.dataset.library = libName;
+                        addPfDiv.innerHTML = '<div style="font-size: 12px;">+ Add Prefab</div>';
+                        addPfDiv.onclick = () => openAddPrefabModal(libName);
+                        contentDiv.appendChild(addPfDiv);
+                    }
+
+                    categoryDiv.appendChild(contentDiv);
+
+                    if (bgImage) {
+                        const bgContainer = categoryDiv.querySelector('.category-background');
+                        if (bgContainer) {
+                            setBackgroundScale(bgContainer, `/images/${bgImage}`, libName);
+                        }
+                    }
+                }
+
+                container.appendChild(categoryDiv);
+            }
+
+            // 添加Library按钮
+            if (!isTemporaryContext()) {
+                const addDiv = document.createElement('div');
+                addDiv.className = 'add-library-card';
+                addDiv.onclick = openAddLibraryModal;
+                addDiv.innerHTML = '<span>+ Add Library</span>';
+                container.appendChild(addDiv);
+            }
+
             initDragEvents();
         }
 
         function getCategorySelectedCount(category, prompts) {
             if (isTemporaryContext()) {
-                // 在临时模式下，检查 prompt 是否被选中（可以是字符串或对象）
+                const ctx = getCurrentTemporaryContext();
                 return prompts.filter(p => {
-                    // 先检查是否是直接的字符串匹配
-                    if (temporarySelectedPrompts.includes(p.prompt)) return true;
-                    // 再检查是否是装饰对象匹配
-                    for (const item of temporarySelectedPrompts) {
-                        if (isDecorationObject(item) && item.text === p.prompt) {
-                            return true;
-                        }
-                    }
-                    return false;
+                    return ctx.tagGroups.some(group =>
+                        group.some(tag => tag.prompt === p.prompt)
+                    );
                 }).length;
             }
-            return prompts.filter(p => isBasePromptSelected(p.prompt)).length;
+            return prompts.filter(p => isBasePromptSelectedInTags(p.prompt)).length;
         }
 
 
@@ -2259,6 +2726,7 @@
                         img.src = `/images/${bgImage}`;
                         img.className = 'bg-image';
                         img.alt = '';
+                        img.onload = () => onCategoryBgImageLoad(img, category);
                         header.insertBefore(img, header.firstChild);
                     }
                 }
@@ -2276,11 +2744,12 @@
                     const bgContainer = document.createElement('div');
                     bgContainer.className = 'category-background';
                     bgContainer.style.backgroundImage = `url(/images/${bgImage})`;
+                    bgContainer.style.backgroundPosition = getCategoryBgPosition(category);
                     
                     bgMask.appendChild(bgContainer);
                     categoryDiv.insertBefore(bgMask, categoryDiv.firstChild);
                     
-                    setBackgroundScale(bgContainer, `/images/${bgImage}`);
+                    setBackgroundScale(bgContainer, `/images/${bgImage}`, category);
                 }
                 
                 // 移除 header 中的背景图（展开时背景图在独立的容器中）
@@ -2325,32 +2794,35 @@
                             ${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}
                         </div>
                     ` : '';
-                    const isSelected = isBasePromptSelected(p.prompt);
-                    const combos = getPromptCombinations(p.prompt);
-                    
+                    const isSelected = isBasePromptSelectedInTags(p.prompt);
                     let selectedCardsHtml = '';
-                    for (const combo of combos) {
-                        const escapedCombo = combo.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                        selectedCardsHtml += `
-                            <div class="selected-card" data-prompt="${escapedCombo}">
-                                <div class="selected-card-content">${combo}</div>
-                                <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
-                            </div>
-                        `;
-                    }
-                    
-                    const wrapperDiv = document.createElement('div');
-                    wrapperDiv.className = 'prompt-item-wrapper';
-                    wrapperDiv.innerHTML = `
-                        <div class="prompt-item ${modeClass} ${isSelected ? 'selected' : ''}"
-                             data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
-                            <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
-                            ${decoTagsHtml}
-                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
-                                <div class="image-layer">
-                                    ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                    if (!isTemporaryContext()) {
+                        const group = findTagGroupByBasePrompt(p.prompt);
+                        if (group) {
+                            const display = tagsToDisplayName(group);
+                            const escapedCombo = display.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                            selectedCardsHtml += `
+                                <div class="selected-card" data-prompt="${escapedCombo}">
+                                    <div class="selected-card-content">${display}</div>
+                                    <button class="selected-card-delete" onclick="deleteSelectedPrompt(event, '${escapedCombo}')">×</button>
                                 </div>
-                                ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                            `;
+                        }
+                        }
+                        
+                        const focusStyle = getFocusStyle(p.id);
+                        const wrapperDiv = document.createElement('div');
+                        wrapperDiv.className = 'prompt-item-wrapper';
+                        wrapperDiv.innerHTML = `
+                            <div class="prompt-item ${modeClass} ${isSelected ? 'selected' : ''}"
+                                 data-prompt="${p.prompt}" data-id="${p.id}" data-category="${category}">
+                                <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${category}" title="Drag to reorder">⋮⋮</span>
+                                ${decoTagsHtml}
+                                <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                    <div class="image-layer">
+                                        ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" style="${focusStyle}" onload="onPromptImageLoad(this, '${p.id}')" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                    </div>
+                                    ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
                                 <div class="text-layer">
                                     <div class="name">${p.name}</div>
                                     <div class="prompt-text">${p.prompt}</div>
@@ -2416,29 +2888,15 @@
                     return;
                 }
                 
-                // 没有修饰，直接添加到当前层的选择列表
-                // 先检查是否已经作为字符串或对象存在
-                let index = temporarySelectedPrompts.indexOf(prompt);
-                let objIndex = -1;
-                for (let i = 0; i < temporarySelectedPrompts.length; i++) {
-                    const item = temporarySelectedPrompts[i];
-                    if (isDecorationObject(item) && item.text === prompt) {
-                        objIndex = i;
-                        break;
-                    }
-                }
-                
-                if (index === -1 && objIndex === -1) {
-                    // 都不存在，添加新的
-                    temporarySelectedPrompts.push(prompt);
+                // 没有修饰，直接在当前层的 tagGroups 中切换
+                const tagGroup = [createTag(ctx.level, prompt)];
+                const existingIndex = ctx.tagGroups.findIndex(group =>
+                    group.some(tag => tag.decoration_num > 0 && tag.prompt === prompt)
+                );
+                if (existingIndex === -1) {
+                    ctx.tagGroups.push(tagGroup);
                 } else {
-                    // 存在，删除它
-                    if (index !== -1) {
-                        temporarySelectedPrompts.splice(index, 1);
-                    }
-                    if (objIndex !== -1) {
-                        temporarySelectedPrompts.splice(objIndex, 1);
-                    }
+                    ctx.tagGroups.splice(existingIndex, 1);
                 }
                 
                 updateSelectedTags();
@@ -2461,79 +2919,21 @@
                     return pTags.some(t => allDecorations.includes(t)) || 
                         catTags.some(t => allDecorations.includes(t));
                 };
-                const title = isBasePromptSelected(prompt) ? `继续选择 "${promptData.name}" 的修饰词` : `选择 "${promptData.name}" 的修饰词`;
+                const title = isBasePromptSelectedInTags(prompt) ? `继续选择 "${promptData.name}" 的修饰词` : `选择 "${promptData.name}" 的修饰词`;
                 beginTemporaryContext(matchFn, prompt, title);
                 return;
             }
 
             // 情况3：普通提示词（无装饰）→ 切换选择/删除
-            const normalIndex = selectedPrompts.indexOf(prompt);
-            if (normalIndex === -1) {
-                selectedPrompts.push(prompt);
+            const groupIndex = findTagGroupIndex(prompt);
+            if (groupIndex === -1) {
+                selectedTags.push([createTag(0, prompt)]);
             } else {
-                selectedPrompts.splice(normalIndex, 1);
+                selectedTags.splice(groupIndex, 1);
             }
 
             updateSelectedTags();
             renderCategories();
-        }
-
-        // 从组合字符串中提取基础提示词
-        function extractBaseFromCombined(combinedStr, basePrompt) {
-            // 或者字符串正好是 basePrompt
-            if (combinedStr === basePrompt) {
-                return true;
-            }
-            // 如果字符串不包含 '[' 或 ']'，匹配所有
-            if (!combinedStr.includes('[') && !combinedStr.includes(']')) {
-                return combinedStr === basePrompt;
-            }
-            // 如果有 '[' 或 ']'，取最后一个 ']' 后的字符串
-            const lastBracketPos = combinedStr.lastIndexOf(']');
-            if (lastBracketPos !== -1) {
-                const afterLastBracket = combinedStr.substring(lastBracketPos + 1).trim();
-                return afterLastBracket === basePrompt;
-            }
-            return false;
-        }
-
-        // 检查装饰对象是否以某个提示词为基础
-        function isObjectBaseMatch(obj, basePrompt) {
-            if (!isDecorationObject(obj)) return false;
-            return obj.text === basePrompt;
-        }
-
-        function isBasePromptSelected(prompt) {
-            // 检查 prompt 是否作为 base prompt 被选中（包括 decoration 组合）
-            if (selectedPrompts.includes(prompt)) return true;
-            
-            // 检查是否有装饰对象匹配
-            for (const p of selectedPrompts) {
-                if (isDecorationObject(p) && isObjectBaseMatch(p, prompt)) {
-                    return true;
-                }
-                // 检查字符串组合的字符串是否包含该 basePrompt
-                if (typeof p === 'string' && extractBaseFromCombined(p, prompt)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        function getPromptCombinations(basePrompt) {
-            const combinations = [];
-            for (const p of selectedPrompts) {
-                if (p === basePrompt) {
-                    combinations.push(p);
-                } else if (isDecorationObject(p) && isObjectBaseMatch(p, basePrompt)) {
-                    // 如果是装饰对象，获取它的显示文本
-                    combinations.push(getDisplayText(p));
-                } else if (typeof p === 'string' && extractBaseFromCombined(p, basePrompt)) {
-                    // 如果是组合的字符串，直接使用
-                    combinations.push(p);
-                }
-            }
-            return combinations;
         }
 
         function findPromptData(prompt) {
@@ -2618,7 +3018,7 @@
                                      id="deco-${cat}-${p.id}">
                                     <div class="select-area" style="width: 100%; height: 100%; position: relative;">
                                         <div class="image-layer">
-                                            ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
+                                            ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" style="${getFocusStyle(p.id)}" onload="onPromptImageLoad(this, '${p.id}')" onerror="this.style.display='none'; this.parentElement.querySelector('.no-image') || this.parentElement.insertAdjacentHTML('beforeend', '<div class=\\'no-image\\'>No Image</div>');">` : '<div class="no-image">No Image</div>'}
                                         </div>
                                         <div class="glass-layer"></div>
                                         <div class="text-layer">
@@ -2637,11 +3037,12 @@
                 listContainer.querySelectorAll('.deco-category').forEach(decoCat => {
                     const bgContainer = decoCat.querySelector('.category-background');
                     if (bgContainer && bgContainer.dataset.bg) {
-                        setBackgroundScale(bgContainer, `/images/${bgContainer.dataset.bg}`);
+                        setBackgroundScale(bgContainer, `/images/${bgContainer.dataset.bg}`, decoCat.dataset.cat);
                     }
                 });
             }
             
+            clearZoomView();
             document.getElementById('decorationModal').classList.add('visible');
         }
 
@@ -2705,14 +3106,12 @@
             const basePrompt = currentDecorationTarget.prompt;
             const baseId = currentDecorationTarget.id;
             
-            // 组合格式: [decoration1] [decoration2] ... originalPrompt
-            let combined = basePrompt;
+            const tags = [];
             for (const s of currentDecorationSelections) {
-                const decoPrompt = s.prompt.startsWith('[') ? s.prompt : `[${s.prompt}]`;
-                combined = `${decoPrompt} ${combined}`;
+                tags.push(createTag(1, s.prompt));
             }
-            
-            selectedPrompts.push(combined);
+            tags.push(createTag(0, basePrompt));
+            selectedTags.push(tags);
             
             updateSelectedTags();
             closeDecorationModal();
@@ -2725,48 +3124,37 @@
             currentDecorationSelections = [];
         }
 
-        // 显示装饰对象的字符串表示
-        function getDisplayText(item) {
-            if (isDecorationObject(item)) {
-                let result = '';
-                if (item.decorations && item.decorations.length > 0) {
-                    for (const deco of item.decorations) {
-                        result += getDisplayText(deco) + ' ';
-                    }
-                }
-                const promptPart = wrapWithBrackets(item.text, item.level);
-                const namePart = item.name ? `(${wrapWithBrackets(item.name, item.level)})` : '';
-                result += promptPart + namePart;
-                return result;
-            }
-            // 普通字符串，查找对应的name
-            const promptData = findPromptData(item);
-            if (promptData) {
-                return `${item}(${promptData.name})`;
-            }
-            return item;
-        }
-
         function updateSelectedTags() {
-            const list = isTemporaryContext() ? temporarySelectedPrompts : selectedPrompts;
-            const count = list.length;
-            document.getElementById('selectedCount').textContent = count;
-
             const container = document.getElementById('selectedTags');
 
-            container.innerHTML = list.map((p, index) => {
-                const displayText = getDisplayText(p);
-                const escapedDisplayText = displayText.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                const removeFunc = isTemporaryContext() ? 
-                    `event.stopPropagation(); temporarySelectedPrompts.splice(${index}, 1); updateSelectedTags(); renderCategories();` :
-                    `selectedPrompts.splice(${index}, 1); updateSelectedTags(); renderCategories();`;
-                return `
-                    <span class="tag">
-                        ${displayText}
-                        <span class="remove" onclick="${removeFunc}">×</span>
-                    </span>
-                `;
-            }).join('');
+            if (isTemporaryContext()) {
+                const ctx = getCurrentTemporaryContext();
+                const count = ctx.tagGroups.length;
+                document.getElementById('selectedCount').textContent = count;
+                container.innerHTML = ctx.tagGroups.map((group, index) => {
+                    const displayText = tagsToDisplayName(group);
+                    const escapedDisplayText = displayText.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    const removeClick = `event.stopPropagation(); ctx.tagGroups.splice(${index}, 1); updateSelectedTags(); renderCategories();`;
+                    return `
+                        <span class="tag">
+                            ${displayText}
+                            <span class="remove" onclick="${removeClick}">×</span>
+                        </span>
+                    `;
+                }).join('');
+            } else {
+                document.getElementById('selectedCount').textContent = selectedTags.length;
+                container.innerHTML = selectedTags.map((group, index) => {
+                    const displayText = tagsToDisplayName(group);
+                    const escapedDisplayText = displayText.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                    return `
+                        <span class="tag">
+                            ${displayText}
+                            <span class="remove" onclick="event.stopPropagation(); selectedTags.splice(${index}, 1); updateSelectedTags(); renderCategories();">×</span>
+                        </span>
+                    `;
+                }).join('');
+            }
         }
 
         function searchPrompts() {
@@ -2907,6 +3295,7 @@
             renderTagList('addDecorationList', addDecorations);
             document.getElementById('addImage').value = '';
             document.getElementById('addImagePreview').classList.remove('visible');
+            clearZoomView();
             document.getElementById('addModal').classList.add('visible');
         }
 
@@ -2998,6 +3387,18 @@
                 previewImg.classList.remove('visible');
             }
 
+            // 显示焦点点标记
+            const marker = document.getElementById('editFocusMarker');
+            const pt = focusPoints[promptId];
+            if (pt && promptData.preview) {
+                marker.style.left = pt.x + '%';
+                marker.style.top = pt.y + '%';
+                marker.style.display = 'block';
+            } else {
+                marker.style.display = 'none';
+            }
+
+            clearZoomView();
             document.getElementById('editModal').classList.add('visible');
         }
 
@@ -3055,26 +3456,10 @@
         }
 
         function removeSelectedPrompt(promptText) {
-            // 先尝试直接匹配
-            let index = selectedPrompts.indexOf(promptText);
-            if (index !== -1) {
-                selectedPrompts.splice(index, 1);
-                updateSelectedTags();
-                renderCategories();
-                return;
-            }
-            
-            // 如果没有直接匹配，尝试匹配装饰对象的显示文本
-            for (let i = 0; i < selectedPrompts.length; i++) {
-                if (isDecorationObject(selectedPrompts[i]) && getDisplayText(selectedPrompts[i]) === promptText) {
-                    selectedPrompts.splice(i, 1);
-                    updateSelectedTags();
-                    renderCategories();
-                    return;
-                }
-                // 如果是组合的字符串，也尝试匹配
-                if (typeof selectedPrompts[i] === 'string' && selectedPrompts[i] === promptText) {
-                    selectedPrompts.splice(i, 1);
+            for (let i = 0; i < selectedTags.length; i++) {
+                const display = tagsToDisplayName(selectedTags[i]);
+                if (display === promptText) {
+                    selectedTags.splice(i, 1);
                     updateSelectedTags();
                     renderCategories();
                     return;
@@ -3101,6 +3486,7 @@
 
         function openAddCategoryModal() {
             document.getElementById('newCategoryName').value = '';
+            clearZoomView();
             document.getElementById('addCategoryModal').classList.add('visible');
         }
 
@@ -3135,22 +3521,14 @@
         }
 
         async function confirmSelection() {
-            if (selectedPrompts.length === 0) {
+            const customInput = document.getElementById('customPromptInput').value.trim();
+            if (selectedTags.length === 0 && !customInput) {
                 alert('Please select at least one prompt');
                 return;
             }
 
-            // 获取自定义输入内容
-            const customInput = document.getElementById('customPromptInput').value.trim();
-            
-            // 构建要发送的数据
-            const promptsToSend = [...selectedPrompts];
-            
-            // 如果有自定义输入，用<>包裹并添加到结果中
-            if (customInput) {
-                const customWrapped = `<${customInput}>`;
-                promptsToSend.push(customWrapped);
-            }
+            // 将 selectedTags (List<List<Tag>>) 转换为 Python 后端需要的 string[]
+            const promptsToSend = selectedTags.map(group => tagsToDisplayString(group));
 
             try {
                 const response = await fetch('/select_prompt', {
@@ -3198,7 +3576,168 @@
                     preview.classList.add('visible');
                 };
                 reader.readAsDataURL(file);
+                // 更换图片后清除旧的焦点点
+                const promptId = document.getElementById('editId').value;
+                if (promptId && focusPoints[promptId]) {
+                    removeFocusPoint(promptId);
+                    document.getElementById('editFocusMarker').style.display = 'none';
+                }
             }
+        });
+
+        // 点击预览图标记焦点点 (考虑 contain 的 letterbox)
+        document.getElementById('editImagePreview').addEventListener('click', (e) => {
+            const img = e.target;
+            if (!img.classList.contains('visible')) return;
+            const promptId = document.getElementById('editId').value;
+            if (!promptId) return;
+            const rect = img.getBoundingClientRect();
+            const rr = getImageRenderRect(img);
+            const x = ((e.clientX - rect.left - rr.offsetX) / rr.renderW) * 100;
+            const y = ((e.clientY - rect.top - rr.offsetY) / rr.renderH) * 100;
+            setFocusPoint(promptId, Math.max(0, Math.min(100, x)), Math.max(0, Math.min(100, y)));
+            const marker = document.getElementById('editFocusMarker');
+            const markerX = ((e.clientX - rect.left) / rect.width) * 100;
+            const markerY = ((e.clientY - rect.top) / rect.height) * 100;
+            marker.style.left = markerX + '%';
+            marker.style.top = markerY + '%';
+            marker.style.display = 'block';
+        });
+
+        // 右键点击标记图删除焦点点
+        document.getElementById('editImagePreview').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const promptId = document.getElementById('editId').value;
+            if (!promptId) return;
+            removeFocusPoint(promptId);
+            document.getElementById('editFocusMarker').style.display = 'none';
+        });
+
+        // 类别背景图焦点点 - 点击标记
+        document.getElementById('editCategoryImagePreview').addEventListener('click', (e) => {
+            const img = e.target;
+            if (!img.classList.contains('visible')) return;
+            const categoryName = document.getElementById('editCategoryOldName').value;
+            if (!categoryName) return;
+            const rect = img.getBoundingClientRect();
+            const rr = getImageRenderRect(img);
+            const x = ((e.clientX - rect.left - rr.offsetX) / rr.renderW) * 100;
+            const y = ((e.clientY - rect.top - rr.offsetY) / rr.renderH) * 100;
+            setCategoryFocusPoint(categoryName, Math.max(0, Math.min(100, x)), Math.max(0, Math.min(100, y)));
+            // 实时更新主页面中的背景图（展开和收起状态）
+            const catDiv = document.getElementById(`category-${categoryName}`);
+            if (catDiv) {
+                const bg = catDiv.querySelector('.category-background');
+                if (bg) {
+                    const match = bg.style.backgroundImage.match(/\/images\/([^"')]+)/);
+                    if (match) {
+                        applyCategoryBgPosition(bg, match[1], categoryName);
+                    }
+                }
+                const bgImg = catDiv.querySelector('.bg-image');
+                if (bgImg) {
+                    onCategoryBgImageLoad(bgImg, categoryName);
+                }
+            }
+            const marker = document.getElementById('editCategoryFocusMarker');
+            const markerX = ((e.clientX - rect.left) / rect.width) * 100;
+            const markerY = ((e.clientY - rect.top) / rect.height) * 100;
+            marker.style.left = markerX + '%';
+            marker.style.top = markerY + '%';
+            marker.style.display = 'block';
+        });
+
+        // 类别背景图焦点点 - 右键删除
+        document.getElementById('editCategoryImagePreview').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const categoryName = document.getElementById('editCategoryOldName').value;
+            if (!categoryName) return;
+            removeCategoryFocusPoint(categoryName);
+            // 实时重置主页面背景图
+            const catDiv = document.getElementById(`category-${categoryName}`);
+            if (catDiv) {
+                const bg = catDiv.querySelector('.category-background');
+                if (bg) {
+                    delete categoryFocusBase[categoryName];
+                    bg.style.setProperty('--bg-x', '0px');
+                    bg.style.setProperty('--bg-y', '0px');
+                }
+                const bgImg = catDiv.querySelector('.bg-image');
+                if (bgImg) {
+                    bgImg.style.objectPosition = '50% 50%';
+                }
+            }
+            document.getElementById('editCategoryFocusMarker').style.display = 'none';
+        });
+
+        // 编辑Library背景图预览
+        document.getElementById('editLibraryImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('editLibraryImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+                // 换图清除焦点
+                const libName = document.getElementById('editLibraryOldName').value;
+                if (libName && categoryFocusPoints[libName]) {
+                    delete categoryFocusPoints[libName];
+                    saveCategoryFocusPoints();
+                    document.getElementById('editLibraryFocusMarker').style.display = 'none';
+                }
+            } else {
+                preview.classList.remove('visible');
+            }
+        });
+
+        // Library焦点 - 点击标记
+        document.getElementById('editLibraryImagePreview').addEventListener('click', (e) => {
+            const img = e.target;
+            if (!img.classList.contains('visible')) return;
+            const libName = document.getElementById('editLibraryOldName').value;
+            if (!libName) return;
+            const rect = img.getBoundingClientRect();
+            const rr = getImageRenderRect(img);
+            const x = ((e.clientX - rect.left - rr.offsetX) / rr.renderW) * 100;
+            const y = ((e.clientY - rect.top - rr.offsetY) / rr.renderH) * 100;
+            setCategoryFocusPoint(libName, Math.max(0, Math.min(100, x)), Math.max(0, Math.min(100, y)));
+            // 实时更新主页面
+            const libDiv = document.getElementById(`library-${libName}`);
+            if (libDiv) {
+                const bg = libDiv.querySelector('.category-background');
+                if (bg) {
+                    const match = bg.style.backgroundImage.match(/\/images\/([^"')]+)/);
+                    if (match) applyCategoryBgPosition(bg, match[1], libName);
+                }
+            }
+            const marker = document.getElementById('editLibraryFocusMarker');
+            const markerX = ((e.clientX - rect.left) / rect.width) * 100;
+            const markerY = ((e.clientY - rect.top) / rect.height) * 100;
+            marker.style.left = markerX + '%';
+            marker.style.top = markerY + '%';
+            marker.style.display = 'block';
+        });
+
+        // Library焦点 - 右键删除
+        document.getElementById('editLibraryImagePreview').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const libName = document.getElementById('editLibraryOldName').value;
+            if (!libName) return;
+            delete categoryFocusPoints[libName];
+            saveCategoryFocusPoints();
+            const libDiv = document.getElementById(`library-${libName}`);
+            if (libDiv) {
+                const bg = libDiv.querySelector('.category-background');
+                if (bg) {
+                    delete categoryFocusBase[libName];
+                    bg.style.setProperty('--bg-x', '0px');
+                    bg.style.setProperty('--bg-y', '0px');
+                }
+            }
+            document.getElementById('editLibraryFocusMarker').style.display = 'none';
         });
 
         let editCategoryTags = [];
@@ -3248,6 +3787,18 @@
                 preview.classList.remove('visible');
             }
             
+            // 显示类别焦点点标记
+            const marker = document.getElementById('editCategoryFocusMarker');
+            const pt = categoryFocusPoints[category];
+            if (pt && bgImage) {
+                marker.style.left = pt.x + '%';
+                marker.style.top = pt.y + '%';
+                marker.style.display = 'block';
+            } else {
+                marker.style.display = 'none';
+            }
+            
+            clearZoomView();
             document.getElementById('editCategoryModal').classList.add('visible');
         }
 
@@ -3350,6 +3901,11 @@
                     preview.classList.add('visible');
                 };
                 reader.readAsDataURL(file);
+                const categoryName = document.getElementById('editCategoryOldName').value;
+                if (categoryName && categoryFocusPoints[categoryName]) {
+                    removeCategoryFocusPoint(categoryName);
+                    document.getElementById('editCategoryFocusMarker').style.display = 'none';
+                }
             } else {
                 preview.classList.remove('visible');
             }
@@ -3361,6 +3917,7 @@
             const currentSize = categorySizeModes[category] || 'normal';
             document.getElementById('editDisplayModeSelect').value = currentMode;
             document.getElementById('editSizeModeSelect').value = currentSize;
+            clearZoomView();
             document.getElementById('editDisplayModeModal').classList.add('visible');
         }
 
@@ -3405,12 +3962,776 @@
             }
         }
 
-        // 拖拽状态管理
+        // ==================== Library 管理 ====================
+
+        function toggleLibrary(libName) {
+            const categoryDiv = document.getElementById(`library-${libName}`);
+            const isExpanded = expandedLibraries.has(libName);
+            const libData = allLibraries[libName] || {};
+            const bgImage = libData.bg_image || '';
+
+            if (isExpanded) {
+                expandedLibraries.delete(libName);
+                categoryDiv.classList.remove('expanded');
+                categoryDiv.classList.add('collapsed');
+
+                const bgMask = categoryDiv.querySelector('.category-background-mask');
+                if (bgMask) {
+                    bgMask.remove();
+                }
+
+                const content = document.getElementById(`libcat-${libName}`);
+                if (content) {
+                    content.remove();
+                }
+
+                const header = categoryDiv.querySelector('.category-header');
+                if (header && bgImage) {
+                    if (!header.querySelector('.bg-image')) {
+                        const img = document.createElement('img');
+                        img.src = `/images/${bgImage}`;
+                        img.className = 'bg-image';
+                        img.alt = '';
+                        img.onload = () => onCategoryBgImageLoad(img, libName);
+                        header.insertBefore(img, header.firstChild);
+                    }
+                }
+            } else {
+                expandedLibraries.add(libName);
+                categoryDiv.classList.remove('collapsed');
+                categoryDiv.classList.add('expanded');
+
+                if (bgImage) {
+                    const bgMask = document.createElement('div');
+                    bgMask.className = 'category-background-mask';
+
+                    const bgContainer = document.createElement('div');
+                    bgContainer.className = 'category-background';
+                    bgContainer.style.backgroundImage = `url(/images/${bgImage})`;
+                    bgContainer.style.backgroundPosition = 'center';
+
+                    bgMask.appendChild(bgContainer);
+                    categoryDiv.insertBefore(bgMask, categoryDiv.firstChild);
+
+                    setBackgroundScale(bgContainer, `/images/${bgImage}`, libName);
+                }
+
+                const header = categoryDiv.querySelector('.category-header');
+                const headerBgImg = header.querySelector('.bg-image');
+                if (headerBgImg) {
+                    headerBgImg.remove();
+                }
+
+                const libPromptIds = libData.prompt_ids || [];
+                const prompts = [];
+                for (const [cat, catData] of Object.entries(allPrompts)) {
+                    const catPrompts = catData.prompts || [];
+                    for (const p of catPrompts) {
+                        if (libPromptIds.includes(p.id)) {
+                            prompts.push({ ...p, category: cat });
+                        }
+                    }
+                }
+
+                const displayMode = libData.display_mode || 'horizontal';
+                const sizeMode = libData.size_mode || 'normal';
+
+                const contentDiv = document.createElement('div');
+                contentDiv.className = `category-content animating ${displayMode === 'box' ? 'box-mode' : ''} ${sizeMode === 'mini' ? 'mini-mode' : ''}`;
+                contentDiv.id = `libcat-${libName}`;
+
+                const isMiniMode = sizeMode === 'mini';
+                const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+
+                for (const p of prompts) {
+                    const focusStyle = getFocusStyle(p.id);
+                    const wrapperDiv = document.createElement('div');
+                    wrapperDiv.className = 'prompt-item-wrapper';
+                    wrapperDiv.innerHTML = `
+                        <div class="prompt-item ${modeClass}"
+                            data-prompt="${p.prompt}" data-id="${p.id}" data-category="${p.category}">
+                            <span class="drag-handle" data-drag-type="prompt" data-id="${p.id}" data-category="${p.category}" title="Drag to reorder">⋮⋮</span>
+                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                <div class="image-layer">
+                                    ${p.preview ? `<img src="/images/${p.preview}" alt="${p.name}" loading="lazy" style="${focusStyle}" onload="onPromptImageLoad(this, '${p.id}')">` : '<div class="no-image">No Image</div>'}
+                                </div>
+                                ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                <div class="text-layer">
+                                    <div class="name">${p.name}</div>
+                                    <div class="prompt-text">${p.prompt}</div>
+                                </div>
+                            </div>
+                            <div class="actions">
+                                <button class="action-btn edit" data-action="edit" data-id="${p.id}" data-category="${p.category}">✏️</button>
+                                <button class="action-btn delete" data-action="delete" data-id="${p.id}">🗑️</button>
+                            </div>
+                        </div>
+                    `;
+                    contentDiv.appendChild(wrapperDiv);
+                }
+
+                // 渲染 prefab items (toggle)
+                const prefabs = libData.prefabs || [];
+                for (let pi = 0; pi < prefabs.length; pi++) {
+                    const pf = prefabs[pi];
+                    const pfKey = `prefab_${libName}_${pi}`;
+                    const pfFocusStyle = getFocusStyle(pfKey);
+                    const displayStr = pf.tags.map(group => tagsToDisplayName(group)).join(' + ');
+                    const state = getPrefabMatchState(pf.tags);
+                    const stateClass = state === 'full' ? 'prefab-full' : state === 'partial' ? 'prefab-partial' : '';
+                    const wrapperDiv = document.createElement('div');
+                    wrapperDiv.className = 'prompt-item-wrapper';
+                    wrapperDiv.innerHTML = `
+                        <div class="prompt-item ${modeClass} ${stateClass}"
+                            data-prefab="${pfKey}" data-library="${libName}" data-prefab-index="${pi}" style="cursor: pointer;">
+                            <span class="drag-handle" data-drag-type="prefab" data-library="${libName}" data-index="${pi}">⋮⋮</span>
+                            <div class="select-area" style="width: 100%; height: 100%; position: relative;">
+                                <div class="image-layer">
+                                    ${pf.preview ? `<img src="/images/${pf.preview}" alt="${pf.name}" loading="lazy" style="${pfFocusStyle}" onload="onPromptImageLoad(this, '${pfKey}')">` : '<div class="no-image">No Image</div>'}
+                                </div>
+                                ${!isMiniMode ? '<div class="glass-layer"></div>' : ''}
+                                <div class="text-layer">
+                                    <div class="name" style="color: var(--accent-color);">${pf.name}</div>
+                                    <div class="prompt-text">${displayStr}</div>
+                                </div>
+                            </div>
+                            <div class="actions" style="position: absolute; top: 4px; right: 4px;">
+                                <button class="action-btn edit" onclick="event.stopPropagation(); openEditPrefabModal('${libName}', ${pi})">✏️</button>
+                                <button class="action-btn delete" onclick="event.stopPropagation(); deleteLibraryPrefab('${libName}', ${pi})">🗑️</button>
+                            </div>
+                        </div>
+                    `;
+                    const item = wrapperDiv.querySelector('.prompt-item');
+                    let clickTimer = null;
+                    item.onclick = () => {
+                        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; return; }
+                        clickTimer = setTimeout(() => {
+                            clickTimer = null;
+                            mergePrefab(pf);
+                        }, 250);
+                    };
+                    item.ondblclick = (e) => {
+                        e.stopPropagation();
+                        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+                        replacePrefab(pf);
+                    };
+                    contentDiv.appendChild(wrapperDiv);
+                }
+
+                // +Add Prefab 按钮
+                if (selectedTags.length > 0) {
+                    const addPfDiv = document.createElement('div');
+                    addPfDiv.className = `prompt-item add-prompt-btn ${modeClass}`;
+                    addPfDiv.style.cssText = 'cursor: pointer;';
+                    addPfDiv.dataset.library = libName;
+                    addPfDiv.innerHTML = '<div style="font-size: 12px;">+ Add Prefab</div>';
+                    addPfDiv.onclick = () => openAddPrefabModal(libName);
+                    contentDiv.appendChild(addPfDiv);
+                }
+
+                categoryDiv.appendChild(contentDiv);
+
+                contentDiv.addEventListener('animationend', () => {
+                    contentDiv.classList.remove('animating');
+                }, { once: true });
+
+                initDragEvents();
+            }
+
+            const toggle = categoryDiv.querySelector('.toggle');
+            if (toggle) {
+                toggle.textContent = expandedLibraries.has(libName) ? '▲' : '▼';
+            }
+        }
+
+        function openAddLibraryModal() {
+            document.getElementById('newLibraryName').value = '';
+            clearZoomView();
+            document.getElementById('addLibraryModal').classList.add('visible');
+        }
+
+        function closeAddLibraryModal() {
+            document.getElementById('addLibraryModal').classList.remove('visible');
+        }
+
+        async function addLibrary() {
+            const libName = document.getElementById('newLibraryName').value.trim();
+            if (!libName) {
+                alert('Please enter library name');
+                return;
+            }
+            try {
+                await fetch('/add_library', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: libName })
+                });
+                closeAddLibraryModal();
+                await loadData();
+            } catch (e) {
+                console.error('Failed to add library', e);
+            }
+        }
+
+        function openEditLibraryModal(libName) {
+            const libData = allLibraries[libName] || {};
+            document.getElementById('editLibraryOldName').value = libName;
+            document.getElementById('editLibraryNewName').value = libName;
+            document.getElementById('editLibraryPromptIds').value = (libData.prompt_ids || []).join(', ');
+            document.getElementById('editLibraryImage').value = '';
+
+            const preview = document.getElementById('editLibraryImagePreview');
+            const bgImage = libData.bg_image || '';
+            if (bgImage) {
+                preview.src = `/images/${bgImage}`;
+                preview.classList.add('visible');
+            } else {
+                preview.src = '';
+                preview.classList.remove('visible');
+            }
+
+            // 显示焦点点标记
+            const marker = document.getElementById('editLibraryFocusMarker');
+            const pt = categoryFocusPoints[libName];
+            if (pt && bgImage) {
+                marker.style.left = pt.x + '%';
+                marker.style.top = pt.y + '%';
+                marker.style.display = 'block';
+            } else {
+                marker.style.display = 'none';
+            }
+
+            clearZoomView();
+            document.getElementById('editLibraryModal').classList.add('visible');
+        }
+
+        function closeEditLibraryModal() {
+            document.getElementById('editLibraryModal').classList.remove('visible');
+        }
+
+        async function updateLibrary() {
+            const oldName = document.getElementById('editLibraryOldName').value;
+            const newName = document.getElementById('editLibraryNewName').value.trim();
+            const promptIdsStr = document.getElementById('editLibraryPromptIds').value.trim();
+            const imageFile = document.getElementById('editLibraryImage').files[0];
+
+            if (!newName) {
+                alert('Please enter library name');
+                return;
+            }
+
+            const promptIds = promptIdsStr ? promptIdsStr.split(',').map(s => s.trim()).filter(s => s) : [];
+
+            let imageData = null;
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+
+            try {
+                const response = await fetch('/update_library', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        old_name: oldName,
+                        new_name: newName,
+                        image: imageData,
+                        prompt_ids: promptIds
+                    })
+                });
+                if (response.ok) {
+                    closeEditLibraryModal();
+                    await loadData();
+                } else {
+                    alert('Failed to update library');
+                }
+            } catch (e) {
+                console.error('Failed to update library', e);
+            }
+        }
+
+        async function deleteLibrary() {
+            const libName = document.getElementById('editLibraryOldName').value;
+            if (!confirm(`Delete library "${libName}"?`)) return;
+
+            try {
+                const response = await fetch('/delete_library', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: libName })
+                });
+                if (response.ok) {
+                    closeEditLibraryModal();
+                    await loadData();
+                } else {
+                    alert('Failed to delete library');
+                }
+            } catch (e) {
+                console.error('Failed to delete library', e);
+            }
+        }
+
+        function openEditLibraryDisplayModeModal(libName) {
+            document.getElementById('editLibraryDisplayModeName').value = libName;
+            const libData = allLibraries[libName] || {};
+            document.getElementById('editLibraryDisplayModeSelect').value = libData.display_mode || 'horizontal';
+            document.getElementById('editLibrarySizeModeSelect').value = libData.size_mode || 'normal';
+            clearZoomView();
+            document.getElementById('editLibraryDisplayModeModal').classList.add('visible');
+        }
+
+        function closeEditLibraryDisplayModeModal() {
+            document.getElementById('editLibraryDisplayModeModal').classList.remove('visible');
+        }
+
+        async function updateLibraryDisplayMode() {
+            const libName = document.getElementById('editLibraryDisplayModeName').value;
+            const mode = document.getElementById('editLibraryDisplayModeSelect').value;
+            const size = document.getElementById('editLibrarySizeModeSelect').value;
+
+            try {
+                const response = await fetch('/update_library_display_mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ library: libName, display_mode: mode, size_mode: size })
+                });
+                if (response.ok) {
+                    if (allLibraries[libName]) {
+                        allLibraries[libName].display_mode = mode;
+                        allLibraries[libName].size_mode = size;
+                    }
+                    closeEditLibraryDisplayModeModal();
+                    renderCategories();
+                    initDragEvents();
+                }
+            } catch (e) {
+                console.error('Failed to update library display mode', e);
+            }
+        }
+
+        // ==================== Library Prefab 管理 ====================
+
+        function openAddPrefabModal(libName) {
+            document.getElementById('addPrefabName').value = '';
+            document.getElementById('addPrefabLibrary').value = libName;
+            document.getElementById('addPrefabImage').value = '';
+            document.getElementById('addPrefabImagePreview').classList.remove('visible');
+            document.getElementById('addPrefabFocusMarker').style.display = 'none';
+            clearZoomView();
+            document.getElementById('addPrefabModal').classList.add('visible');
+        }
+
+        function closeAddPrefabModal() {
+            document.getElementById('addPrefabModal').classList.remove('visible');
+        }
+
+        async function addPrefab() {
+            const libName = document.getElementById('addPrefabLibrary').value;
+            const pfName = document.getElementById('addPrefabName').value.trim();
+            if (!pfName) { alert('Please enter prefab name'); return; }
+            let imageData = null;
+            const imageFile = document.getElementById('addPrefabImage').files[0];
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+            closeAddPrefabModal();
+            await addLibraryPrefab(libName, pfName, imageData);
+        }
+
+        async function addLibraryPrefab(libName, prefabName, imageData) {
+            const prefabTags = selectedTags.map(group => group.map(tag => ({ ...tag })));
+            const body = {
+                library: libName,
+                prefab_name: prefabName,
+                prefab_tags: prefabTags,
+                custom_prompts: document.getElementById('customPromptInput').value.trim()
+            };
+            if (imageData) {
+                body.image = imageData;
+            }
+            try {
+                const response = await fetch('/add_library_prefab', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (response.ok) {
+                    // 转移焦点点到新 key
+                    const tempKey = `prefab_temp_${libName}_${prefabName}`;
+                    let savedFocus = null;
+                    if (focusPoints[tempKey]) {
+                        savedFocus = focusPoints[tempKey];
+                        delete focusPoints[tempKey];
+                    }
+                    await loadData();
+                    // 找到新 index 设置正确的焦点
+                    if (savedFocus) {
+                        const prefabs = allLibraries[libName]?.prefabs || [];
+                        const idx = prefabs.findIndex(pf => pf.name === prefabName);
+                        if (idx >= 0) {
+                            const newKey = `prefab_${libName}_${idx}`;
+                            focusPoints[newKey] = savedFocus;
+                            saveFocusPoints();
+                            renderCategories();
+                            initDragEvents();
+                        }
+                    }
+                } else {
+                    alert('Failed to save prefab');
+                }
+            } catch (e) {
+                console.error('Failed to add prefab', e);
+            }
+        }
+
+        // 添加prefab图片预览
+        document.getElementById('addPrefabImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('addPrefabImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+                // 换图清除焦点
+                const libName = document.getElementById('addPrefabLibrary').value;
+                const pfName = document.getElementById('addPrefabName').value.trim();
+                if (libName && pfName) {
+                    const tempKey = `prefab_temp_${libName}_${pfName}`;
+                    removeFocusPoint(tempKey);
+                }
+                document.getElementById('addPrefabFocusMarker').style.display = 'none';
+            }
+        });
+
+        // Prefab图片焦点 - 点击标记
+        document.getElementById('addPrefabImagePreview').addEventListener('click', (e) => {
+            const img = e.target;
+            if (!img.classList.contains('visible')) return;
+            const libName = document.getElementById('addPrefabLibrary').value;
+            if (!libName) return;
+            const prefabName = document.getElementById('addPrefabName').value.trim();
+            if (!prefabName) return;
+            const rect = img.getBoundingClientRect();
+            const rr = getImageRenderRect(img);
+            const x = ((e.clientX - rect.left - rr.offsetX) / rr.renderW) * 100;
+            const y = ((e.clientY - rect.top - rr.offsetY) / rr.renderH) * 100;
+            const pfKey = `prefab_temp_${libName}_${prefabName}`;
+            setFocusPoint(pfKey, Math.max(0, Math.min(100, x)), Math.max(0, Math.min(100, y)));
+            const marker = document.getElementById('addPrefabFocusMarker');
+            const markerX = ((e.clientX - rect.left) / rect.width) * 100;
+            const markerY = ((e.clientY - rect.top) / rect.height) * 100;
+            marker.style.left = markerX + '%';
+            marker.style.top = markerY + '%';
+            marker.style.display = 'block';
+        });
+
+        // Prefab图片焦点 - 右键删除
+        document.getElementById('addPrefabImagePreview').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const libName = document.getElementById('addPrefabLibrary').value;
+            const prefabName = document.getElementById('addPrefabName').value.trim();
+            const pfKey = `prefab_temp_${libName}_${prefabName}`;
+            removeFocusPoint(pfKey);
+            document.getElementById('addPrefabFocusMarker').style.display = 'none';
+        });
+
+        async function deleteLibraryPrefab(libName, prefabIndex) {
+            if (!confirm('Delete this prefab?')) return;
+            try {
+                const response = await fetch('/delete_library_prefab', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ library: libName, prefab_index: prefabIndex })
+                });
+                if (response.ok) {
+                    if (allLibraries[libName] && allLibraries[libName].prefabs) {
+                        allLibraries[libName].prefabs.splice(prefabIndex, 1);
+                    }
+                    renderCategories();
+                    initDragEvents();
+                }
+            } catch (e) {
+                console.error('Failed to delete prefab', e);
+            }
+        }
+
+        function applyPrefab(tags, customPrompts) {
+            selectedTags = tags.map(group => group.map(tag => ({ ...tag })));
+            if (customPrompts) {
+                document.getElementById('customPromptInput').value = customPrompts;
+            }
+            updateSelectedTags();
+            renderCategories();
+            initDragEvents();
+        }
+
+        function getPrefabMatchState(prefabTags) {
+            let matchCount = 0;
+            const total = prefabTags.length;
+            if (total === 0) return 'none';
+            for (const group of prefabTags) {
+                const baseTag = group.find(t => t.decoration_num === 0);
+                if (baseTag && isBasePromptSelectedInTags(baseTag.prompt)) {
+                    matchCount++;
+                }
+            }
+            if (matchCount === 0) return 'none';
+            if (matchCount < total) return 'partial';
+            return 'full';
+        }
+
+        function mergePrefab(pf) {
+            const prefabTags = pf.tags || [];
+            const prefabCp = pf.custom_prompts || '';
+
+            // 判断是否所有 prefab 的 tag group 都已选中
+            let allMatched = true;
+            let anyMatched = false;
+            for (const group of prefabTags) {
+                const baseTag = group.find(t => t.decoration_num === 0);
+                if (baseTag && isBasePromptSelectedInTags(baseTag.prompt)) {
+                    anyMatched = true;
+                } else {
+                    allMatched = false;
+                }
+            }
+
+            if (allMatched && anyMatched) {
+                // 全有 → 删除所有匹配的 group
+                for (const group of prefabTags) {
+                    const baseTag = group.find(t => t.decoration_num === 0);
+                    if (baseTag) {
+                        const idx = findTagGroupIndex(baseTag.prompt);
+                        if (idx !== -1) selectedTags.splice(idx, 1);
+                    }
+                }
+            } else {
+                // 部分或没有 → 添加所有缺失的 group
+                for (const group of prefabTags) {
+                    const baseTag = group.find(t => t.decoration_num === 0);
+                    if (baseTag && !isBasePromptSelectedInTags(baseTag.prompt)) {
+                        selectedTags.push(group.map(t => ({ ...t })));
+                    }
+                }
+            }
+
+            // custom_prompts 合并
+            if (prefabCp) {
+                const currentCp = document.getElementById('customPromptInput').value;
+                const prefabSegments = prefabCp.split('\n').map(s => s.trim()).filter(s => s);
+                const currentSegments = currentCp.split('\n').map(s => s.trim()).filter(s => s);
+
+                if (allMatched && anyMatched) {
+                    // 全有 → 删除 prefab 中出现的所有段
+                    const remaining = currentSegments.filter(s => !prefabSegments.includes(s));
+                    document.getElementById('customPromptInput').value = remaining.join('\n');
+                } else {
+                    // 部分或没有 → 添加不存在的段
+                    for (const seg of prefabSegments) {
+                        if (!currentSegments.includes(seg)) {
+                            currentSegments.push(seg);
+                        }
+                    }
+                    document.getElementById('customPromptInput').value = currentSegments.join('\n');
+                }
+            }
+
+            updateSelectedTags();
+            renderCategories();
+            initDragEvents();
+        }
+
+        function replacePrefab(pf) {
+            selectedTags = (pf.tags || []).map(group => group.map(tag => ({ ...tag })));
+            if (pf.custom_prompts) {
+                document.getElementById('customPromptInput').value = pf.custom_prompts;
+            } else {
+                document.getElementById('customPromptInput').value = '';
+            }
+            updateSelectedTags();
+            renderCategories();
+            initDragEvents();
+        }
+
+        // ==================== Prefab 编辑 Modal ====================
+
+        function openEditPrefabModal(libName, prefabIndex) {
+            const pf = allLibraries[libName]?.prefabs?.[prefabIndex];
+            if (!pf) return;
+            document.getElementById('editPrefabLibrary').value = libName;
+            document.getElementById('editPrefabIndex').value = prefabIndex;
+            document.getElementById('editPrefabName').value = pf.name;
+            document.getElementById('editPrefabCustomPrompts').value = pf.custom_prompts || '';
+            document.getElementById('editPrefabImage').value = '';
+
+            const preview = document.getElementById('editPrefabImagePreview');
+            if (pf.preview) {
+                preview.src = `/images/${pf.preview}`;
+                preview.classList.add('visible');
+            } else {
+                preview.src = '';
+                preview.classList.remove('visible');
+            }
+
+            const marker = document.getElementById('editPrefabFocusMarker');
+            const pfKey = `prefab_${libName}_${prefabIndex}`;
+            const pt = focusPoints[pfKey];
+            if (pt && pf.preview) {
+                marker.style.left = pt.x + '%';
+                marker.style.top = pt.y + '%';
+                marker.style.display = 'block';
+            } else {
+                marker.style.display = 'none';
+            }
+
+            clearZoomView();
+            document.getElementById('editPrefabModal').classList.add('visible');
+        }
+
+        function closeEditPrefabModal() {
+            document.getElementById('editPrefabModal').classList.remove('visible');
+        }
+
+        async function updatePrefab() {
+            const libName = document.getElementById('editPrefabLibrary').value;
+            const prefabIndex = parseInt(document.getElementById('editPrefabIndex').value);
+            const pfName = document.getElementById('editPrefabName').value.trim();
+            if (!pfName) { alert('Please enter prefab name'); return; }
+
+            let imageData = null;
+            const imageFile = document.getElementById('editPrefabImage').files[0];
+            if (imageFile) {
+                const reader = new FileReader();
+                imageData = await new Promise((resolve) => {
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(imageFile);
+                });
+            }
+
+            const body = {
+                library: libName,
+                prefab_index: prefabIndex,
+                prefab_name: pfName,
+                custom_prompts: document.getElementById('editPrefabCustomPrompts').value.trim()
+            };
+            if (imageData !== null) {
+                body.image = imageData;
+            }
+
+            try {
+                const response = await fetch('/update_library_prefab', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (response.ok) {
+                    closeEditPrefabModal();
+                    await loadData();
+                } else {
+                    alert('Failed to update prefab');
+                }
+            } catch (e) {
+                console.error('Failed to update prefab', e);
+            }
+        }
+
+        async function syncPrefab() {
+            const libName = document.getElementById('editPrefabLibrary').value;
+            const prefabIndex = parseInt(document.getElementById('editPrefabIndex').value);
+            const prefabTags = selectedTags.map(group => group.map(tag => ({ ...tag })));
+            const customPrompts = document.getElementById('customPromptInput').value.trim();
+
+            if (prefabTags.length === 0 && !customPrompts) {
+                alert('No tags or custom_prompts to sync');
+                return;
+            }
+
+            try {
+                const response = await fetch('/update_library_prefab', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        library: libName,
+                        prefab_index: prefabIndex,
+                        prefab_name: document.getElementById('editPrefabName').value.trim(),
+                        prefab_tags: prefabTags,
+                        custom_prompts: customPrompts
+                    })
+                });
+                if (response.ok) {
+                    closeEditPrefabModal();
+                    await loadData();
+                } else {
+                    alert('Failed to sync prefab');
+                }
+            } catch (e) {
+                console.error('Failed to sync prefab', e);
+            }
+        }
+
+        // 编辑prefab图片预览
+        document.getElementById('editPrefabImage').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            const preview = document.getElementById('editPrefabImagePreview');
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    preview.src = ev.target.result;
+                    preview.classList.add('visible');
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // 编辑prefab焦点 - 点击标记
+        document.getElementById('editPrefabImagePreview').addEventListener('click', (e) => {
+            const img = e.target;
+            if (!img.classList.contains('visible')) return;
+            const libName = document.getElementById('editPrefabLibrary').value;
+            const prefabIndex = parseInt(document.getElementById('editPrefabIndex').value);
+            if (!libName || isNaN(prefabIndex)) return;
+            const rect = img.getBoundingClientRect();
+            const rr = getImageRenderRect(img);
+            const x = ((e.clientX - rect.left - rr.offsetX) / rr.renderW) * 100;
+            const y = ((e.clientY - rect.top - rr.offsetY) / rr.renderH) * 100;
+            const pfKey = `prefab_${libName}_${prefabIndex}`;
+            setFocusPoint(pfKey, Math.max(0, Math.min(100, x)), Math.max(0, Math.min(100, y)));
+            const marker = document.getElementById('editPrefabFocusMarker');
+            const markerX = ((e.clientX - rect.left) / rect.width) * 100;
+            const markerY = ((e.clientY - rect.top) / rect.height) * 100;
+            marker.style.left = markerX + '%';
+            marker.style.top = markerY + '%';
+            marker.style.display = 'block';
+        });
+
+        // 编辑prefab焦点 - 右键删除
+        document.getElementById('editPrefabImagePreview').addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            const libName = document.getElementById('editPrefabLibrary').value;
+            const prefabIndex = parseInt(document.getElementById('editPrefabIndex').value);
+            const pfKey = `prefab_${libName}_${prefabIndex}`;
+            removeFocusPoint(pfKey);
+            document.getElementById('editPrefabFocusMarker').style.display = 'none';
+        });
+
+        // ==================== 拖拽状态管理 ====================
         const dragState = {
-            type: null,        // 'category' or 'prompt'
+            type: null,        // 'category' or 'prompt' or 'library' or 'prefab'
             item: null,       // item id
             category: null,   // 提示词所属类别
             element: null,    // 被拖拽的元素
+            library: null,    // prefab 所属 library
+            index: null,      // prefab 在 library 中的索引
         };
 
         // 清理所有拖拽样式
@@ -3506,7 +4827,68 @@
                 });
             });
 
-            // 3. 全局拖拽结束
+            // 3. Library 拖拽
+              document.querySelectorAll('.category[id^="library-"] .drag-handle[data-drag-type="library"]').forEach(handle => {
+                 handle.draggable = true;
+                 handle.style.pointerEvents = 'all';
+                 handle.addEventListener('dragstart', (e) => {
+                     isDragging = true;
+                     clearTimeout(zoomTimer);
+                     clearTimeout(leaveTimer);
+                     if (currentZoomItem) {
+                         currentZoomItem.classList.remove('zoom-view');
+                         currentZoomItem = null;
+                     }
+                     e.dataTransfer.effectAllowed = 'move';
+                     e.dataTransfer.setData('text/plain', handle.dataset.library);
+                     const libName = handle.dataset.library;
+                     if (!libName) return;
+                     dragState.type = 'library';
+                     dragState.item = libName;
+                     const libDiv = document.getElementById(`library-${libName}`);
+                     if (libDiv) {
+                         dragState.element = libDiv;
+                         libDiv.classList.add('dragging');
+                     }
+                 });
+                 handle.addEventListener('click', e => {
+                     e.stopPropagation();
+                 });
+             });
+
+            // 4. Prefab 拖拽
+            document.querySelectorAll('.prompt-item .drag-handle[data-drag-type="prefab"]').forEach(handle => {
+                handle.draggable = true;
+                handle.style.pointerEvents = 'all';
+                handle.style.zIndex = '10000';
+                handle.addEventListener('dragstart', (e) => {
+                    isDragging = true;
+                    clearTimeout(zoomTimer);
+                    clearTimeout(leaveTimer);
+                    if (currentZoomItem) {
+                        currentZoomItem.classList.remove('zoom-view');
+                        currentZoomItem = null;
+                    }
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', handle.dataset.library + '::' + handle.dataset.index);
+                    const libName = handle.dataset.library;
+                    const idx = parseInt(handle.dataset.index);
+                    dragState.type = 'prefab';
+                    dragState.item = libName + '::' + idx;
+                    dragState.library = libName;
+                    dragState.index = idx;
+                    const promptItem = handle.closest('.prompt-item');
+                    if (promptItem) {
+                        dragState.element = promptItem;
+                        promptItem.classList.add('dragging');
+                    }
+                });
+                handle.addEventListener('click', e => {
+                    e.stopPropagation();
+                });
+            });
+
+            // 5. 全局拖拽结束
             document.addEventListener('dragend', () => {
                 console.log('[Drag] dragend 触发');
                 isDragging = false; // 恢复zoom-view
@@ -3515,6 +4897,8 @@
                 dragState.item = null;
                 dragState.category = null;
                 dragState.element = null;
+                dragState.library = null;
+                dragState.index = null;
             });
 
             // 4. 设置拖放目标
@@ -3597,6 +4981,63 @@
                 });
             });
 
+            // === Library 拖放目标 ===
+            document.querySelectorAll('.category[id^="library-"]').forEach(lib => {
+                const libHeader = lib.querySelector('.category-header');
+                if (libHeader) {
+                    libHeader.addEventListener('dragover', (e) => {
+                        if (dragState.type === 'library' && lib.id !== `library-${dragState.item}`) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (!lib.classList.contains('drag-over')) {
+                                lib.classList.add('drag-over');
+                            }
+                        }
+                    });
+                    libHeader.addEventListener('dragleave', (e) => {
+                        const rect = libHeader.getBoundingClientRect();
+                        const isStillOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                                        e.clientY >= rect.top && e.clientY <= rect.bottom;
+                        if (!isStillOver) {
+                            setTimeout(() => lib.classList.remove('drag-over'), 50);
+                        }
+                    });
+                    libHeader.addEventListener('drop', async (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        lib.classList.remove('drag-over');
+                        if (dragState.type === 'library') {
+                            const targetLib = lib.id.replace('library-', '');
+                            if (dragState.item !== targetLib) {
+                                await reorderLibraries(dragState.item, targetLib, 'at');
+                            }
+                        }
+                    });
+                }
+            });
+
+            // === 添加Library卡片（拖到末尾） ===
+            document.querySelectorAll('.add-library-card').forEach(card => {
+                card.addEventListener('dragover', (e) => {
+                    if (dragState.type === 'library') {
+                        e.preventDefault();
+                        if (!card.classList.contains('drag-over')) {
+                            card.classList.add('drag-over');
+                        }
+                    }
+                });
+                card.addEventListener('dragleave', () => {
+                    card.classList.remove('drag-over');
+                });
+                card.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    card.classList.remove('drag-over');
+                    if (dragState.type === 'library') {
+                        await reorderLibraries(dragState.item, null, 'end');
+                    }
+                });
+            });
+
             // === 提示词拖放目标 ===
             const promptDropTargets = document.querySelectorAll('.prompt-item:not(.add-prompt-btn)');
             console.log('[Drag] 找到', promptDropTargets.length, '个prompt拖放目标');
@@ -3654,10 +5095,53 @@
                 });
             });
 
+            // === Prefab 拖放目标 ===
+            const prefabDropTargets = document.querySelectorAll('.prompt-item[data-prefab]');
+            prefabDropTargets.forEach(item => {
+                let pfDragTimer = null;
+                item.addEventListener('dragover', (e) => {
+                    if (dragState.type === 'prefab') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        clearTimeout(pfDragTimer);
+                        pfDragTimer = null;
+                        if (!item.classList.contains('drag-over')) {
+                            item.classList.add('drag-over');
+                        }
+                    }
+                });
+                item.addEventListener('dragleave', (e) => {
+                    const rect = item.getBoundingClientRect();
+                    const isStillOver = e.clientX >= rect.left && e.clientX <= rect.right &&
+                                       e.clientY >= rect.top && e.clientY <= rect.bottom;
+                    if (!isStillOver) {
+                        pfDragTimer = setTimeout(() => {
+                            item.classList.remove('drag-over');
+                        }, 50);
+                    }
+                });
+                item.addEventListener('drop', async (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearTimeout(pfDragTimer);
+                    pfDragTimer = null;
+                    item.classList.remove('drag-over');
+                    if (dragState.type === 'prefab') {
+                        const targetLib = item.dataset.library;
+                        const targetIndex = parseInt(item.dataset.prefabIndex);
+                        if (dragState.library === targetLib) {
+                            await reorderLibraryPrefabs(targetLib, dragState.index, targetIndex);
+                        } else {
+                            await movePrefabToLibrary(dragState.library, targetLib, dragState.index, targetIndex);
+                        }
+                    }
+                });
+            });
+
             // === 添加提示词按钮（拖到末尾） ===
             document.querySelectorAll('.add-prompt-btn').forEach(btn => {
                 btn.addEventListener('dragover', (e) => {
-                    if (dragState.type === 'prompt') {
+                    if (dragState.type === 'prompt' || dragState.type === 'prefab') {
                         e.preventDefault();
                         if (!btn.classList.contains('drag-over')) {
                             btn.classList.add('drag-over');
@@ -3681,6 +5165,13 @@
                             } else {
                                 await movePromptToCategory(dragState.category, targetCategory, dragState.item, null);
                             }
+                        }
+                    } else if (dragState.type === 'prefab') {
+                        const targetLib = btn.dataset.library;
+                        if (targetLib && dragState.library === targetLib) {
+                            await reorderLibraryPrefabs(targetLib, dragState.index, null);
+                        } else if (targetLib && dragState.library !== targetLib) {
+                            await movePrefabToLibrary(dragState.library, targetLib, dragState.index, null);
                         }
                     }
                 });
@@ -3713,6 +5204,27 @@
             } catch (e) {
                 console.error('Failed to reorder categories', e);
                 alert('Failed to reorder categories: ' + e.message);
+            }
+        }
+
+        async function reorderLibraries(fromLibrary, toLibrary, position = 'before') {
+            try {
+                const response = await fetch('/reorder_libraries', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        from_library: fromLibrary,
+                        to_library: toLibrary,
+                        position: position
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+                if (result.success) await loadData();
+                else throw new Error(result.error || 'Unknown error');
+            } catch (e) {
+                console.error('Failed to reorder libraries', e);
+                alert('Failed to reorder libraries: ' + e.message);
             }
         }
 
@@ -3776,11 +5288,65 @@
             }
         }
 
-        // Zoom View - 延迟 0.5s 进入仔细看模式
+        async function reorderLibraryPrefabs(libName, fromIndex, toIndex) {
+            try {
+                const response = await fetch('/reorder_library_prefabs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        library: libName,
+                        from_index: fromIndex,
+                        to_index: toIndex
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+                if (result.success) await loadData();
+                else throw new Error(result.error || 'Unknown error');
+            } catch (e) {
+                console.error('Failed to reorder prefabs', e);
+                alert('Failed to reorder prefabs: ' + e.message);
+            }
+        }
+
+        async function movePrefabToLibrary(fromLib, toLib, fromIndex, toIndex) {
+            try {
+                const response = await fetch('/move_prefab_to_library', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        from_library: fromLib,
+                        to_library: toLib,
+                        from_index: fromIndex,
+                        to_index: toIndex
+                    })
+                });
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const result = await response.json();
+                if (result.success) await loadData();
+                else throw new Error(result.error || 'Unknown error');
+            } catch (e) {
+                console.error('Failed to move prefab', e);
+                alert('Failed to move prefab: ' + e.message);
+            }
+        }
+
+        // Zoom View - 延迟 2s 进入仔细看模式
         let zoomTimer = null;
         let leaveTimer = null;
         let currentZoomItem = null;
         let isDragging = false; // 标记是否正在拖拽
+
+        function clearZoomView() {
+            clearTimeout(zoomTimer);
+            clearTimeout(leaveTimer);
+            zoomTimer = null;
+            leaveTimer = null;
+            if (currentZoomItem) {
+                currentZoomItem.classList.remove('zoom-view');
+                currentZoomItem = null;
+            }
+        }
         
         // 计算zoom-view尺寸：按1024*1024像素量等比例缩放
         function setZoomViewSize(promptItem) {
@@ -3842,6 +5408,16 @@
                 return;
             }
             
+            // 如果有 modal 打开，不触发 zoom-view
+            if (document.querySelector('.modal.visible')) {
+                return;
+            }
+            
+            // 如果鼠标在 actions、action-btn、drag-handle 上，不触发 zoom-view
+            if (e.target.closest('.actions, .action-btn, .drag-handle, .selected-card-delete')) {
+                return;
+            }
+            
             const promptItem = e.target.closest('.prompt-item:not(.add-prompt-btn)');
             if (promptItem) {
                 // 检查是否有预览图
@@ -3862,6 +5438,7 @@
                     currentZoomItem = promptItem;
                     zoomTimer = setTimeout(() => {
                         if (currentZoomItem === promptItem && !isDragging) {
+                            if (document.querySelector('.modal.visible')) return;
                             promptItem.classList.add('zoom-view');
                             adjustZoomViewPosition(promptItem);
                         }
@@ -3932,7 +5509,28 @@
             if (selectArea) {
                 const promptItem = selectArea.closest('.prompt-item');
                 if (promptItem && promptItem.dataset.prompt) {
-                    togglePrompt(promptItem.dataset.prompt);
+                    const wasZoomed = promptItem.classList.contains('zoom-view');
+                    const clickedPrompt = promptItem.dataset.prompt;
+                    togglePrompt(clickedPrompt);
+                    if (wasZoomed) {
+                        clearTimeout(zoomTimer);
+                        clearTimeout(leaveTimer);
+                        zoomTimer = null;
+                        leaveTimer = null;
+                        requestAnimationFrame(() => {
+                            const items = document.querySelectorAll('.prompt-item[data-prompt]');
+                            for (const item of items) {
+                                if (item.dataset.prompt === clickedPrompt) {
+                                    if (setZoomViewSize(item)) {
+                                        currentZoomItem = item;
+                                        item.classList.add('zoom-view');
+                                        adjustZoomViewPosition(item);
+                                    }
+                                    break;
+                                }
+                            }
+                        });
+                    }
                 }
                 return;
             }
@@ -3953,9 +5551,9 @@
                 return;
             }
             
-            // 处理添加提示词按钮点击
+            // 处理添加提示词按钮点击（跳过 prefab 的 +Add Prefab）
             const addBtn = e.target.closest('.add-prompt-btn');
-            if (addBtn) {
+            if (addBtn && addBtn.dataset.category) {
                 openAddModal(addBtn.dataset.category);
                 return;
             }
@@ -4037,9 +5635,16 @@
                 
                 const totalX = applyEdgeDecay(targetX, maxMoveX);
                 const totalY = applyEdgeDecay(targetY, maxMoveY);
-                
-                bg.style.setProperty('--bg-x', `${totalX}px`);
-                bg.style.setProperty('--bg-y', `${totalY}px`);
+
+                // 叠加焦点 base offset
+                const catEl = mask.closest('.category');
+                const catName = catEl ? catEl.id.replace('category-', '') : '';
+                const base = categoryFocusBase[catName];
+                const finalX = base ? totalX + base.x : totalX;
+                const finalY = base ? totalY + base.y : totalY;
+
+                bg.style.setProperty('--bg-x', `${finalX}px`);
+                bg.style.setProperty('--bg-y', `${finalY}px`);
             });
             
             requestAnimationFrame(animateBackground);
@@ -4075,8 +5680,31 @@
         });
         
         window.beginTemporaryContext = beginTemporaryContext;
-        window.endTemporaryContext = endTemporaryContext;
-        window.addBasePromptOnly = addBasePromptOnly;
+        window.completeCurrentLayer = completeCurrentLayer;
+        window.goBackLayer = goBackLayer;
+        window.toggleLibrary = toggleLibrary;
+        window.openAddLibraryModal = openAddLibraryModal;
+        window.closeAddLibraryModal = closeAddLibraryModal;
+        window.addLibrary = addLibrary;
+        window.openEditLibraryModal = openEditLibraryModal;
+        window.closeEditLibraryModal = closeEditLibraryModal;
+        window.updateLibrary = updateLibrary;
+        window.deleteLibrary = deleteLibrary;
+        window.openEditLibraryDisplayModeModal = openEditLibraryDisplayModeModal;
+        window.closeEditLibraryDisplayModeModal = closeEditLibraryDisplayModeModal;
+        window.updateLibraryDisplayMode = updateLibraryDisplayMode;
+        window.reorderLibraries = reorderLibraries;
+        window.addLibraryPrefab = addLibraryPrefab;
+        window.deleteLibraryPrefab = deleteLibraryPrefab;
+        window.applyPrefab = applyPrefab;
+        window.mergePrefab = mergePrefab;
+        window.replacePrefab = replacePrefab;
+        window.openAddPrefabModal = openAddPrefabModal;
+        window.closeAddPrefabModal = closeAddPrefabModal;
+        window.addPrefab = addPrefab;
+        window.openEditPrefabModal = openEditPrefabModal;
+        window.closeEditPrefabModal = closeEditPrefabModal;
+        window.updatePrefab = updatePrefab;
         document.addEventListener('DOMContentLoaded', () => {
             loadData();
             // 监听所有现有类别的class变化
@@ -4098,7 +5726,9 @@
                         const bgImage = bg.style.backgroundImage;
                         const match = bgImage.match(/url\(["']?\/images\/([^"')]+)["']?\)/);
                         if (match && match[1]) {
-                            setBackgroundScale(bg, `/images/${match[1]}`);
+                            const catEl = mask.closest('.category');
+                            const catName = catEl ? catEl.id.replace('category-', '') : '';
+                            setBackgroundScale(bg, `/images/${match[1]}`, catName);
                         }
                     }
                 });
