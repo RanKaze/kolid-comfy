@@ -75,7 +75,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, prompt_foldout=False):
+    def __init__(self, port=None, last_selected=None, prompt_foldout=False, lora_regex="", last_selected_loras=None):
         self.port = port
         self.server = None
         self.started = False
@@ -87,6 +87,9 @@ class SnapshotPromptServer:
         self.last_selected = last_selected or []
         self.prompt_foldout = prompt_foldout
         self.should_stop = False
+        self.lora_regex = lora_regex
+        self.last_selected_loras = last_selected_loras or []
+        self.selected_loras = []
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -105,8 +108,8 @@ class SnapshotPromptServer:
         self._migrate_display_modes()
         self._migrate_size_modes()
         
-        # Scan Lora metadata files
-        self.lora_data = self._scan_loras()
+        # Scan Lora metadata files (with regex filter)
+        self.lora_data = self._scan_loras(self.lora_regex)
 
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -252,12 +255,14 @@ class SnapshotPromptServer:
             except:
                 pass
 
-    def _scan_loras(self):
+    def _scan_loras(self, regex_pattern=""):
         """Scan F:\\ComfyDB\\models\\loras for *.metadata.json files."""
+        import re
         lora_root = r"F:\ComfyDB\models\loras"
         folders = {}
         if not os.path.exists(lora_root):
             return folders
+        compiled_re = re.compile(regex_pattern) if regex_pattern else None
         for dirpath, dirnames, filenames in os.walk(lora_root):
             for filename in filenames:
                 if not filename.endswith('.metadata.json'):
@@ -275,11 +280,17 @@ class SnapshotPromptServer:
                 folder_key = rel_dir.replace('\\', '/')
                 # base name without .metadata.json
                 base_name = filename[:-len('.metadata.json')]
+                # file_path: prefer the one in metadata.json, fallback to computed absolute path
+                file_path = meta.get('file_path', filepath[:-len('.metadata.json')]).replace('\\', '/')
+                # apply regex filter on file_path
+                if compiled_re and not compiled_re.search(file_path):
+                    continue
                 civitai = meta.get('civitai', {}) or {}
                 trained_words = civitai.get('trainedWords', []) if isinstance(civitai, dict) else []
                 item = {
                     'name': meta.get('name', base_name),
                     'file_name': base_name,
+                    'file_path': file_path,
                     'preview_url': meta.get('preview_url', ''),
                     'tags': trained_words if isinstance(trained_words, list) else [],
                     'metadata': meta,
@@ -463,7 +474,8 @@ class SnapshotPromptServer:
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
                     'prompt_foldout': self.server_instance.prompt_foldout,
-                    'custom_prompts': self.server_instance.custom_prompts
+                    'custom_prompts': self.server_instance.custom_prompts,
+                    'last_selected_loras': self.server_instance.last_selected_loras,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -495,7 +507,8 @@ class SnapshotPromptServer:
 
             elif self.path == '/lora_data':
                 data = {
-                    'folders': self.server_instance.lora_data if self.server_instance else {}
+                    'folders': self.server_instance.lora_data if self.server_instance else {},
+                    'last_selected_loras': self.server_instance.last_selected_loras if self.server_instance else [],
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -541,6 +554,7 @@ class SnapshotPromptServer:
                 if self.server_instance:
                     self.server_instance.selected_prompts = data.get('prompts', [])
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
+                    self.server_instance.selected_loras = data.get('loras', [])
                     self.server_instance.prompt_event.set()
 
                     self.send_response(200)
@@ -1473,6 +1487,7 @@ class SnapshotPromptServer:
                     prefab_name = (data.get('prefab_name') or '').strip()
                     prefab_tags = data.get('prefab_tags', [])
                     custom_prompts = data.get('custom_prompts', '')
+                    loras = data.get('loras', [])
                     image_data = data.get('image', '')
 
                     if lib_name and lib_name in self.server_instance.libraries_data and prefab_name and prefab_tags:
@@ -1482,7 +1497,8 @@ class SnapshotPromptServer:
                         prefab = {
                             'name': prefab_name,
                             'tags': prefab_tags,
-                            'custom_prompts': custom_prompts
+                            'custom_prompts': custom_prompts,
+                            'loras': loras
                         }
                         if image_data:
                             prefab['preview'] = self.server_instance._save_image(image_data)
@@ -1545,6 +1561,8 @@ class SnapshotPromptServer:
                                 prefabs[prefab_index]['custom_prompts'] = data['custom_prompts']
                             if 'prefab_tags' in data:
                                 prefabs[prefab_index]['tags'] = data['prefab_tags']
+                            if 'loras' in data:
+                                prefabs[prefab_index]['loras'] = data['loras']
                             # 仅当前端发送了 image 字段才处理图片
                             if 'image' in data:
                                 image_data = data['image']
@@ -1696,19 +1714,23 @@ class SnapshotPromptNode:
                 "prompt_parsing": ("STRING", {"default": "", "multiline": False}),
                 "prompt_foldout": ("BOOLEAN", {"default": False}),
                 "prompt_cache": ("BOOLEAN", {"default": False}),
+                "lora_cache": ("BOOLEAN", {"default": False}),
+                "lora_regex": ("STRING", {"default": "", "multiline": False}),
+                "lora": ("STRING", {"default": "", "multiline": True}),
+                "lora_path_mode": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("prompt",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "active_loras", "lora_trigger_words", "merged_prompt")
     FUNCTION = "snapshot_prompt"
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache):
+    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode):
         return float("nan")
 
     @staticmethod
@@ -1912,7 +1934,7 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
-    def snapshot_prompt(self, prompt_separator, prompt , prompt_parsing, prompt_foldout, prompt_cache, unique_id):
+    def snapshot_prompt(self, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, unique_id):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -1971,7 +1993,22 @@ class SnapshotPromptNode:
                     if part not in last_selected:
                         last_selected.append(part)
         
-        server = SnapshotPromptServer(last_selected=last_selected, prompt_foldout=prompt_foldout)
+        # Parse lora widget (previous saved lora selections)
+        last_selected_loras = []
+        if lora and lora.strip():
+            try:
+                last_selected_loras = json.loads(lora.strip())
+                if not isinstance(last_selected_loras, list):
+                    last_selected_loras = []
+            except Exception:
+                last_selected_loras = []
+        
+        server = SnapshotPromptServer(
+            last_selected=last_selected,
+            prompt_foldout=prompt_foldout,
+            lora_regex=lora_regex,
+            last_selected_loras=last_selected_loras,
+        )
         server.custom_prompts = custom_prompts
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
@@ -2032,6 +2069,35 @@ class SnapshotPromptNode:
         print(f"[SnapshotPrompt] Selected prompts: {result_prompt}")
         print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
+        # Compute active_loras output (only cards with active=True)
+        active_lora_parts = []
+        for lora_item in server.selected_loras:
+            if not lora_item.get('active', True):
+                continue
+            file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            strength = lora_item.get('strength', 1.0)
+            if not file_path:
+                continue
+            if lora_path_mode:
+                active_lora_parts.append(f"<lora_path:{file_path}:{strength}>")
+            else:
+                # Use basename (file_name) for standard lora format
+                file_name = lora_item.get('file_name', '')
+                if not file_name:
+                    file_name = file_path.split('/')[-1].split('\\')[-1]
+                active_lora_parts.append(f"<lora:{file_name}:{strength}>")
+        active_loras = prompt_separator.join(active_lora_parts)
+        print(f"[SnapshotPrompt] Active loras: {active_loras}")
+
+        # Compute lora_trigger_words output (only from cards with active=True)
+        all_active_tags = []
+        for lora_item in server.selected_loras:
+            if not lora_item.get('active', True):
+                continue
+            all_active_tags.extend(lora_item.get('active_tags', []))
+        lora_trigger_words = ", ".join(all_active_tags)
+        print(f"[SnapshotPrompt] Lora trigger words: {lora_trigger_words}")
+
         # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
         if prompt_cache:
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
@@ -2040,5 +2106,16 @@ class SnapshotPromptNode:
                 "type": "STRING", 
                 "value": result_prompt
             })
+        # 保存选中的值到 lora widget（仅当 lora_cache 为 True）
+        if lora_cache:
+            PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                "node_id": unique_id,
+                "widget_name": "lora",
+                "type": "STRING",
+                "value": json.dumps(server.selected_loras, ensure_ascii=False)
+            })
 
-        return (cleaned_result,)
+        merged_prompt = cleaned_result
+        if lora_trigger_words:
+            merged_prompt = cleaned_result + prompt_separator + lora_trigger_words
+        return (cleaned_result, active_loras, lora_trigger_words, merged_prompt)

@@ -276,29 +276,35 @@ class SamplerCache:
             lora_str = item.strip()
 
             try:
-                if not lora_str.startswith("lora:"):
-                    print(f"Warning: 必须以 lora: 开头: {lora_str}")
-                    continue
-
                 parts = lora_str.split(":", 2)
                 if len(parts) != 3:
-                    print(f"Warning: 格式错误，需要 lora:name:weight: {lora_str}")
+                    print(f"Warning: 格式错误，需要 lora:name:weight 或 lora_path:path:weight: {lora_str}")
                     continue
 
-                _, lora_name, strength_part = parts
-                lora_name = lora_name.strip()
+                prefix, lora_name_or_path, strength_part = parts
+                prefix = prefix.strip()
+                lora_name_or_path = lora_name_or_path.strip()
                 strength = float(strength_part.strip())
 
-                # 查找完整路径（支持子文件夹）
-                lora_path = _lora_path_cache.get(lora_name)
-                if lora_path is None:
-                    for key in _lora_path_cache:
-                        if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
-                            lora_path = _lora_path_cache[key]
-                            break
+                if prefix == "lora_path":
+                    # Direct path mode: use the path directly
+                    lora_path = lora_name_or_path
+                    lora_name = lora_name_or_path.replace("/", "\\").split("\\")[-1]
+                elif prefix == "lora":
+                    # Normal mode: look up in cache
+                    lora_name = lora_name_or_path
+                    lora_path = _lora_path_cache.get(lora_name)
+                    if lora_path is None:
+                        for key in _lora_path_cache:
+                            if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
+                                lora_path = _lora_path_cache[key]
+                                break
 
-                if lora_path is None:
-                    print(f"Warning: 未找到 LoRA 文件: {lora_name}")
+                    if lora_path is None:
+                        print(f"Warning: 未找到 LoRA 文件: {lora_name}")
+                        continue
+                else:
+                    print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
                     continue
 
                 # === 关键修复：先加载 state_dict，再传入 load_lora_for_models ===
@@ -338,7 +344,8 @@ class PipelineData:
                  cfg=None,
                  context=None,
                  reference=None,
-                 config=None):
+                 config=None,
+                 ):
         
         self.cache = cache
         self.model = model
@@ -541,16 +548,16 @@ class ContextNode:
                 sampler_context.negative += ',' + negative
                 
             if sampler_context.loras is None:
-                sampler_context.loras = re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras)
+                sampler_context.loras = re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras)
             elif loras is not None:
-                sampler_context.loras.extend(re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras))
+                sampler_context.loras.extend(re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras))
                 
         else:
             sampler_context = SamplerContext()
             sampler_context.positive = positive
             sampler_context.negative = negative
             if loras is not None:
-                sampler_context.loras = re.findall(r"(?<=\<)(lora:[^>]+)(?=>)", loras)
+                sampler_context.loras = re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras)
             else:
                 sampler_context.loras = None
             context.contexts[name] = sampler_context
@@ -723,6 +730,7 @@ class PipelineNode:
                 "context": ("CONTEXT_DATA",),
                 "reference": ("REFERENCE_DATA",),   
                 "config": ("CONFIG_DATA",),
+
             }
         }
 
@@ -750,7 +758,7 @@ class PipelineNode:
                 cfg=None,
                 context : ContextData = None,
                 reference : ReferenceData = None,
-                config : ConfigData = None
+                config : ConfigData = None,
                 ):
         
         if pipeline is not None:
@@ -800,8 +808,7 @@ class PipelineNode:
             next_pipeline.config = config.copy()
         elif next_pipeline.config is None:
             next_pipeline.config = ConfigData()
-
-
+        
         return (
             next_pipeline,
             next_pipeline.cache,
@@ -847,6 +854,34 @@ class ConfigNode:
         
         config[key] = value
         return (config,)
+
+class ConfigGetNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return{
+            "required": {
+                "key": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "config": ("CONFIG_DATA",),
+            }
+        }
+        
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                key="",
+                config : ConfigData = None):
+        if config is None:
+            return ("",)
+        
+        value = config.get(key, "")
+        if value is None:
+            value = ""
+        return (str(value),)
 
 # ====================== SamplerNode ======================
 class PipelineSamplerNode:

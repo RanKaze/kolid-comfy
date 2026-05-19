@@ -141,6 +141,7 @@ NODE_CONFIG = {
     "ReferenceGuidanceNode": {"class": ReferenceGuidanceNode, "name": "ReferenceGuidanceNode"}, 
     
     "ConfigNode": {"class": ConfigNode, "name": "ConfigNode"},
+    "ConfigGetNode": {"class": ConfigGetNode, "name": "ConfigGetNode"},
     "ContextNode": {"class": ContextNode, "name": "ContextNode"},
     "ContextQueryNode": {"class": ContextQueryNode, "name": "ContextQueryNode"},
     "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},

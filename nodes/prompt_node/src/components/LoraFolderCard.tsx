@@ -22,7 +22,7 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
 
   if (searchQuery && filtered.length === 0) return null;
 
-  const isSelected = (item: LoraItemData) => selectedLoras.some(l => l.file_name === item.file_name);
+  const isSelected = (item: LoraItemData) => selectedLoras.some(l => l.file_path === item.file_path);
 
   return (
     <div className={`category lora-folder ${expanded ? 'expanded' : 'collapsed'}`}>
@@ -47,10 +47,10 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
         <div className="category-content lora-content">
           {filtered.map(item => (
             <LoraItem
-              key={item.file_name}
+              key={item.file_path}
               item={item}
               isSelected={isSelected(item)}
-              onClick={() => onToggleLora(item)}
+              onToggle={() => onToggleLora(item)}
             />
           ))}
         </div>
