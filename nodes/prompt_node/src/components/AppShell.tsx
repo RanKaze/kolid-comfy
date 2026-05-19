@@ -1004,10 +1004,20 @@ export function AppShell() {
     const pfLoras = buildPrefabLoras();
     if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0) { alert('No tags, custom_prompts or loras to sync'); return; }
     try {
-      await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras}) });
+      const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras}) });
+      const result = await res.json();
       closeModal();
+      setAllLibraries((prev: AllLibraries) => {
+        const libData = prev[lib];
+        if (!libData || !libData.prefabs || idx === undefined || idx < 0 || idx >= libData.prefabs.length) return prev;
+        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tags: pfTags, custom_prompts: customPrompts, loras: pfLoras };
+        if (result && result.preview) updatedPrefab.preview = result.preview;
+        const prefabs = [...libData.prefabs];
+        prefabs[idx] = updatedPrefab;
+        return { ...prev, [lib]: { ...libData, prefabs } };
+      });
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, modal?.data?.lib, modal?.data?.idx]);
+  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, modal?.data?.lib, modal?.data?.idx, setAllLibraries]);
 
   // ========== Delete Prefab ==========
   const deletePrefab = useCallback(async (lib: string, idx: number) => {
