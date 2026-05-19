@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { PrefabData, FocusPoints } from '../types';
+import type { PrefabData, FocusPoints, AllLibraries } from '../types';
 import { tagsToDisplayName } from '../hooks/useSelection';
 
 const iconGrip = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{verticalAlign:'middle'}}><circle cx="9" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>;
@@ -15,30 +15,25 @@ interface PrefabItemProps {
   prefabClass: string;
   focusPoints: FocusPoints;
   imgUrl: (path: string) => string;
-  onMerge: (pf: PrefabData) => void;
-  onReplace: (pf: PrefabData) => void;
+  isSelected: boolean;
+  onToggle: () => void;
+  allLibraries: AllLibraries;
   onEdit: () => void;
   onDelete: () => void;
 }
 
 export function PrefabItem({
   prefab, libName, idx, modeClass, isMiniMode, prefabClass, focusPoints, imgUrl,
-  onMerge, onReplace, onEdit, onDelete,
+  isSelected, onToggle, allLibraries, onEdit, onDelete,
 }: PrefabItemProps) {
   const focusKey = `prefab_${libName}_${idx}`;
   const fp = focusPoints[focusKey];
 
   const handleClick = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest('.actions, .action-btn, .drag-handle')) return;
-    if (e.detail !== 1) return;
-    onMerge(prefab);
+    onToggle();
   };
 
-  const handleDblClick = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.actions, .action-btn, .drag-handle')) return;
-    e.stopPropagation();
-    onReplace(prefab);
-  };
 
   const displayStr = useMemo(
     () => (prefab.tags || []).map(g => tagsToDisplayName(g)).join(' + '),
@@ -51,15 +46,57 @@ export function PrefabItem({
     return `Lora(${loras.length}): ${loras.map(l => l.name).join(', ')}`;
   }, [prefab.loras]);
 
+  const nestedPrefabStr = useMemo(() => {
+    const direct = prefab.selected_prefabs || [];
+    if (direct.length === 0) return '';
+
+    // Build guid -> prefab map from all libraries
+    const guidMap = new Map<string, PrefabData>();
+    for (const libData of Object.values(allLibraries)) {
+      for (const p of libData.prefabs || []) {
+        if (p.guid) guidMap.set(p.guid, p);
+      }
+    }
+
+    // BFS expand nested prefabs, deduplicate and cycle-safe
+    const visited = new Set<string>();
+    const queue: string[] = [];
+    for (const sp of direct) {
+      const g = sp.guid;
+      if (g && !visited.has(g)) {
+        visited.add(g);
+        queue.push(g);
+      }
+    }
+
+    const names: string[] = [];
+    while (queue.length > 0) {
+      const currentGuid = queue.shift()!;
+      const p = guidMap.get(currentGuid);
+      if (!p) continue;
+      names.push(p.name);
+      for (const nested of p.selected_prefabs || []) {
+        const ng = nested.guid;
+        if (ng && !visited.has(ng)) {
+          visited.add(ng);
+          queue.push(ng);
+        }
+      }
+    }
+
+    if (names.length === 0) return '';
+    return `Prefab(${names.length}): ${names.join(', ')}`;
+  }, [prefab.selected_prefabs, allLibraries]);
+
   return (
     <div className="prompt-item-wrapper">
       <div
-        className={`prompt-item ${modeClass} ${prefabClass}`}
+        className={`prompt-item ${modeClass} ${prefabClass} ${isSelected ? 'prefab-selected' : ''}`}
         data-prefab={`prefab_${libName}_${idx}`}
         data-library={libName}
         data-prefab-index={idx}
         onMouseDown={handleClick}
-        onDoubleClick={handleDblClick}
+
       >
         <span className="drag-handle" data-drag-type="prefab" data-library={libName} data-index={idx}>{iconGrip}</span>
         <div className="select-area" style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -71,6 +108,7 @@ export function PrefabItem({
             <div className="name" style={{ color: 'var(--accent-color)' }}>{prefab.name}</div>
             <div className="prompt-text">{displayStr}</div>
             {loraStr && <div className="prefab-loras">{loraStr}</div>}
+            {nestedPrefabStr && <div className="prefab-loras">{nestedPrefabStr}</div>}
           </div>
         </div>
         <div className="actions" style={{ position: 'absolute', top: 4, right: 4 }} onMouseDown={e => e.stopPropagation()}>

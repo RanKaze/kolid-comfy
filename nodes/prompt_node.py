@@ -8,6 +8,7 @@ import hashlib
 import base64
 import urllib.parse
 import traceback
+import uuid
 from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 import folder_paths
 from server import PromptServer
@@ -75,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, prompt_foldout=False, lora_regex="", last_selected_loras=None):
+    def __init__(self, port=None, last_selected=None, prompt_foldout=False, lora_regex="", last_selected_loras=None, last_selected_prefabs=None):
         self.port = port
         self.server = None
         self.started = False
@@ -90,6 +91,8 @@ class SnapshotPromptServer:
         self.lora_regex = lora_regex
         self.last_selected_loras = last_selected_loras or []
         self.selected_loras = []
+        self.last_selected_prefabs = last_selected_prefabs or []
+        self.selected_prefabs = []
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -309,6 +312,16 @@ class SnapshotPromptServer:
                 with open(self.library_json, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 if isinstance(data, dict):
+                    # Migrate: assign GUID to prefabs without one
+                    modified = False
+                    for lib_data in data.values():
+                        prefabs = lib_data.get('prefabs', [])
+                        for pf in prefabs:
+                            if not pf.get('guid'):
+                                pf['guid'] = str(uuid.uuid4())
+                                modified = True
+                    if modified:
+                        self._save_libraries(data)
                     return data
             except:
                 pass
@@ -476,6 +489,7 @@ class SnapshotPromptServer:
                     'prompt_foldout': self.server_instance.prompt_foldout,
                     'custom_prompts': self.server_instance.custom_prompts,
                     'last_selected_loras': self.server_instance.last_selected_loras,
+                    'last_selected_prefabs': self.server_instance.last_selected_prefabs,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -509,6 +523,7 @@ class SnapshotPromptServer:
                 data = {
                     'folders': self.server_instance.lora_data if self.server_instance else {},
                     'last_selected_loras': self.server_instance.last_selected_loras if self.server_instance else [],
+                    'last_selected_prefabs': self.server_instance.last_selected_prefabs if self.server_instance else [],
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -555,6 +570,7 @@ class SnapshotPromptServer:
                     self.server_instance.selected_prompts = data.get('prompts', [])
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
                     self.server_instance.selected_loras = data.get('loras', [])
+                    self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.prompt_event.set()
 
                     self.send_response(200)
@@ -1345,10 +1361,14 @@ class SnapshotPromptServer:
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
                     result = {'success': True}
-                    if image_data and lib_name and lib_name in self.server_instance.libraries_data:
+                    if lib_name and lib_name in self.server_instance.libraries_data:
                         prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
-                        if prefs and 'preview' in prefs[-1]:
-                            result['preview'] = prefs[-1]['preview']
+                        if prefs:
+                            last_prefab = prefs[-1]
+                            if 'preview' in last_prefab:
+                                result['preview'] = last_prefab['preview']
+                            if 'guid' in last_prefab:
+                                result['guid'] = last_prefab['guid']
                     self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
@@ -1490,7 +1510,8 @@ class SnapshotPromptServer:
                     loras = data.get('loras', [])
                     image_data = data.get('image', '')
 
-                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_name and prefab_tags:
+                    has_content = prefab_tags or custom_prompts or loras or data.get('selected_prefabs')
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_name and has_content:
                         lib_data = self.server_instance.libraries_data[lib_name]
                         if 'prefabs' not in lib_data:
                             lib_data['prefabs'] = []
@@ -1498,7 +1519,9 @@ class SnapshotPromptServer:
                             'name': prefab_name,
                             'tags': prefab_tags,
                             'custom_prompts': custom_prompts,
-                            'loras': loras
+                            'loras': loras,
+                            'selected_prefabs': data.get('selected_prefabs', []),
+                            'guid': str(uuid.uuid4())
                         }
                         if image_data:
                             prefab['preview'] = self.server_instance._save_image(image_data)
@@ -1510,10 +1533,14 @@ class SnapshotPromptServer:
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
                     result = {'success': True}
-                    if image_data and lib_name and lib_name in self.server_instance.libraries_data:
+                    if lib_name and lib_name in self.server_instance.libraries_data:
                         prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
-                        if prefs and 'preview' in prefs[-1]:
-                            result['preview'] = prefs[-1]['preview']
+                        if prefs:
+                            last_prefab = prefs[-1]
+                            if 'preview' in last_prefab:
+                                result['preview'] = last_prefab['preview']
+                            if 'guid' in last_prefab:
+                                result['guid'] = last_prefab['guid']
                     self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
@@ -1563,6 +1590,8 @@ class SnapshotPromptServer:
                                 prefabs[prefab_index]['tags'] = data['prefab_tags']
                             if 'loras' in data:
                                 prefabs[prefab_index]['loras'] = data['loras']
+                            if 'selected_prefabs' in data:
+                                prefabs[prefab_index]['selected_prefabs'] = data['selected_prefabs']
                             # 仅当前端发送了 image 字段才处理图片
                             if 'image' in data:
                                 image_data = data['image']
@@ -1718,6 +1747,8 @@ class SnapshotPromptNode:
                 "lora_regex": ("STRING", {"default": "", "multiline": False}),
                 "lora": ("STRING", {"default": "", "multiline": True}),
                 "lora_path_mode": ("BOOLEAN", {"default": False}),
+                "prefab": ("STRING", {"default": "", "multiline": True}),
+                "prefab_cache": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1730,7 +1761,7 @@ class SnapshotPromptNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode):
+    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, prefab, prefab_cache):
         return float("nan")
 
     @staticmethod
@@ -1934,7 +1965,7 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
-    def snapshot_prompt(self, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, unique_id):
+    def snapshot_prompt(self, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, prefab, prefab_cache, unique_id):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2003,11 +2034,21 @@ class SnapshotPromptNode:
             except Exception:
                 last_selected_loras = []
         
+        last_selected_prefabs = []
+        if prefab and prefab.strip():
+            try:
+                last_selected_prefabs = json.loads(prefab.strip())
+                if not isinstance(last_selected_prefabs, list):
+                    last_selected_prefabs = []
+            except Exception:
+                last_selected_prefabs = []
+        
         server = SnapshotPromptServer(
             last_selected=last_selected,
             prompt_foldout=prompt_foldout,
             lora_regex=lora_regex,
             last_selected_loras=last_selected_loras,
+            last_selected_prefabs=last_selected_prefabs,
         )
         server.custom_prompts = custom_prompts
         server_thread = threading.Thread(target=server.start)
@@ -2045,7 +2086,103 @@ class SnapshotPromptNode:
             raise RuntimeError("[SnapshotPrompt] Interrupted or timed out")
         server.stop()
 
-        if server.window_closed or (not server.selected_prompts and not server.custom_prompts):
+        # Expand selected prefabs (nested support + deduplication)
+        print(f"[PREFAB_DEBUG] server.selected_prefabs = {server.selected_prefabs}")
+        print(f"[PREFAB_DEBUG] server.libraries_data keys = {list(server.libraries_data.keys())}")
+        
+        guid_to_prefab = {}
+        for lib_name, lib_data in server.libraries_data.items():
+            for idx, pf in enumerate(lib_data.get('prefabs', [])):
+                guid = pf.get('guid')
+                if guid:
+                    guid_to_prefab[guid] = pf
+                else:
+                    print(f"[PREFAB_DEBUG] Prefab in lib '{lib_name}' idx {idx} has NO guid: {pf.get('name')}")
+        
+        print(f"[PREFAB_DEBUG] guid_to_prefab count = {len(guid_to_prefab)}")
+        print(f"[PREFAB_DEBUG] guid_to_prefab keys (first 10) = {list(guid_to_prefab.keys())[:10]}")
+        
+        expanded_prefabs = []
+        visited_guids = set()
+        queue = []
+        for sp in server.selected_prefabs:
+            guid = sp.get('guid') if isinstance(sp, dict) else sp
+            print(f"[PREFAB_DEBUG] Processing selected_prefab entry: {sp}, extracted guid = {guid}")
+            if guid and guid not in visited_guids:
+                visited_guids.add(guid)
+                queue.append(guid)
+        
+        print(f"[PREFAB_DEBUG] Initial queue = {queue}")
+        
+        while queue:
+            current_guid = queue.pop(0)
+            pf = guid_to_prefab.get(current_guid)
+            print(f"[PREFAB_DEBUG] Looking up guid '{current_guid}' in guid_to_prefab: found = {pf is not None}")
+            if not pf:
+                continue
+            expanded_prefabs.append(pf)
+            print(f"[PREFAB_DEBUG] Expanded prefab '{pf.get('name')}', tags count = {len(pf.get('tags', []))}, loras count = {len(pf.get('loras', []))}")
+            for nested in pf.get('selected_prefabs', []):
+                nested_guid = nested.get('guid') if isinstance(nested, dict) else nested
+                if nested_guid and nested_guid not in visited_guids:
+                    visited_guids.add(nested_guid)
+                    queue.append(nested_guid)
+        
+        print(f"[PREFAB_DEBUG] Total expanded_prefabs = {len(expanded_prefabs)}")
+        
+        # Collect prompts and loras from expanded prefabs (keep separate from user selections)
+        prefab_prompts_raw = []      # for result_prompt (with decorations)
+        prefab_prompts_cleaned = []  # for cleaned_result (no decorations)
+        prefab_loras = []            # for active_loras / trigger_words
+        
+        for pf in expanded_prefabs:
+            # Collect tags as prompts
+            for tag_group in pf.get('tags', []):
+                if isinstance(tag_group, list):
+                    parts = []
+                    for tag in tag_group:
+                        if isinstance(tag, dict):
+                            deco = tag.get('decoration_num') or 0
+                            prompt_text = tag.get('prompt', '')
+                            if deco > 0:
+                                parts.append('[' * deco + prompt_text + ']' * deco)
+                            else:
+                                parts.append(prompt_text)
+                    if parts:
+                        prompt_str = ', '.join(parts)
+                        if prompt_str not in prefab_prompts_raw:
+                            prefab_prompts_raw.append(prompt_str)
+                            prefab_prompts_cleaned.append(prompt_str.replace('[', '').replace(']', ''))
+            
+            # Collect custom_prompts
+            cp = pf.get('custom_prompts', '')
+            if cp:
+                wrapped = f"<{cp}>"
+                if wrapped not in prefab_prompts_raw:
+                    prefab_prompts_raw.append(wrapped)
+                    prefab_prompts_cleaned.append(cp)
+            
+            # Collect loras (deduplicate by file_path)
+            for lora_item in pf.get('loras', []):
+                if isinstance(lora_item, dict):
+                    file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                    if not file_path:
+                        continue
+                    exists = False
+                    for existing in prefab_loras:
+                        if existing.get('file_path', '') == file_path or existing.get('file_name', '') == file_path:
+                            exists = True
+                            break
+                    if not exists:
+                        prefab_loras.append(lora_item)
+        
+        print(f"[PREFAB_DEBUG] Final prefab_prompts_raw = {prefab_prompts_raw}")
+        print(f"[PREFAB_DEBUG] Final prefab_loras count = {len(prefab_loras)}")
+        print(f"[PREFAB_DEBUG] server.selected_prompts = {server.selected_prompts}")
+        print(f"[PREFAB_DEBUG] server.custom_prompts = {server.custom_prompts}")
+
+        if server.window_closed or (not server.selected_prompts and not server.custom_prompts and not prefab_prompts_raw and not prefab_loras):
+            print(f"[PREFAB_DEBUG] THROWING ERROR: window_closed={server.window_closed}, selected_prompts={server.selected_prompts}, custom_prompts={server.custom_prompts}, prefab_prompts_raw={prefab_prompts_raw}, prefab_loras={prefab_loras}")
             raise RuntimeError("[SnapshotPrompt] Window closed or no prompts selected")
 
         # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入
@@ -2064,14 +2201,19 @@ class SnapshotPromptNode:
             cleaned_prompts.append(server.custom_prompts)
             server.selected_prompts.append(f"<{server.custom_prompts}>")
 
-        result_prompt = prompt_separator.join(server.selected_prompts)
-        cleaned_result = prompt_separator.join(cleaned_prompts)
+        # Merge user selections + prefab expansions for final outputs
+        all_prompts_raw = server.selected_prompts + prefab_prompts_raw
+        all_prompts_cleaned = cleaned_prompts + prefab_prompts_cleaned
+        
+        result_prompt = prompt_separator.join(all_prompts_raw)
+        cleaned_result = prompt_separator.join(all_prompts_cleaned)
         print(f"[SnapshotPrompt] Selected prompts: {result_prompt}")
         print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
-        # Compute active_loras output (only cards with active=True)
+        # Compute active_loras output from user selections + prefab expansions
+        all_loras = server.selected_loras + prefab_loras
         active_lora_parts = []
-        for lora_item in server.selected_loras:
+        for lora_item in all_loras:
             if not lora_item.get('active', True):
                 continue
             file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
@@ -2089,9 +2231,9 @@ class SnapshotPromptNode:
         active_loras = prompt_separator.join(active_lora_parts)
         print(f"[SnapshotPrompt] Active loras: {active_loras}")
 
-        # Compute lora_trigger_words output (only from cards with active=True)
+        # Compute lora_trigger_words output from user selections + prefab expansions
         all_active_tags = []
-        for lora_item in server.selected_loras:
+        for lora_item in all_loras:
             if not lora_item.get('active', True):
                 continue
             all_active_tags.extend(lora_item.get('active_tags', []))
@@ -2099,12 +2241,14 @@ class SnapshotPromptNode:
         print(f"[SnapshotPrompt] Lora trigger words: {lora_trigger_words}")
 
         # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
+        # Only save user-direct selections, not prefab-expanded content
+        user_prompt_only = prompt_separator.join(server.selected_prompts)
         if prompt_cache:
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id, 
                 "widget_name": "prompt", 
                 "type": "STRING", 
-                "value": result_prompt
+                "value": user_prompt_only
             })
         # 保存选中的值到 lora widget（仅当 lora_cache 为 True）
         if lora_cache:
@@ -2113,6 +2257,14 @@ class SnapshotPromptNode:
                 "widget_name": "lora",
                 "type": "STRING",
                 "value": json.dumps(server.selected_loras, ensure_ascii=False)
+            })
+        # 保存选中的值到 prefab widget（仅当 prefab_cache 为 True）
+        if prefab_cache:
+            PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                "node_id": unique_id,
+                "widget_name": "prefab",
+                "type": "STRING",
+                "value": json.dumps(server.selected_prefabs, ensure_ascii=False)
             })
 
         merged_prompt = cleaned_result

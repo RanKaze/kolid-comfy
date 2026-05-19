@@ -79,7 +79,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
-    loraData, loadLoraData, lastSelectedLoras,
+    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs,
   } = api;
 
   const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
@@ -99,6 +99,8 @@ export function AppShell() {
   }
   const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
+  const [selectedPrefabs, setSelectedPrefabs] = useState<{ guid: string; prefab: PrefabData }[]>([]);
+  const prefabRestoredRef = useRef(false);
 
   const [imgVersion, setImgVersion] = useState(0);
   const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
@@ -239,9 +241,34 @@ export function AppShell() {
     loraRestoredRef.current = true;
   }, [loraData, lastSelectedLoras]);
 
+  // Restore selected prefabs from last_selected_prefabs
+  useEffect(() => {
+    if (prefabRestoredRef.current) return;
+    if (!allLibraries || Object.keys(allLibraries).length === 0) return;
+    if (!lastSelectedPrefabs || lastSelectedPrefabs.length === 0) {
+      prefabRestoredRef.current = true;
+      return;
+    }
+    const restored: { guid: string; prefab: PrefabData }[] = [];
+    const guidToPrefab = new Map<string, PrefabData>();
+    for (const libData of Object.values(allLibraries)) {
+      for (const pf of libData.prefabs || []) {
+        if (pf.guid) guidToPrefab.set(pf.guid, pf);
+      }
+    }
+    for (const sp of lastSelectedPrefabs) {
+      const pf = guidToPrefab.get(sp.guid);
+      if (pf) {
+        restored.push({ guid: sp.guid, prefab: pf });
+      }
+    }
+    setSelectedPrefabs(restored);
+    prefabRestoredRef.current = true;
+  }, [allLibraries, lastSelectedPrefabs]);
+
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
-  const closeModal = useCallback(() => setModal(null), []);
+  const closeModal = useCallback(() => { setModal(null); setErrorModal(null); }, []);
   // Form state for modals
   const [modalName, setModalName] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
@@ -261,6 +288,7 @@ export function AppShell() {
   const [modalFocusY, setModalFocusY] = useState(0);
   const [modalFocusVisible, setModalFocusVisible] = useState(false);
   const [modalImageFile, setModalImageFile] = useState<File|null>(null);
+  const [errorModal, setErrorModal] = useState<{ title: string; message: string }|null>(null);
 
   // ========== Image helpers ==========
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -529,7 +557,20 @@ export function AppShell() {
     setSelectedLoras(prev => prev.filter(l => l.file_path !== filePath));
   }, []);
 
+  // ========== Prefab Selection ==========
+  const togglePrefab = useCallback((guid: string, prefab: PrefabData) => {
+    setSelectedPrefabs(prev => {
+      const exists = prev.some(p => p.guid === guid);
+      if (exists) {
+        return prev.filter(p => p.guid !== guid);
+      }
+      return [...prev, { guid, prefab }];
+    });
+  }, []);
 
+  const removeSelectedPrefab = useCallback((guid: string) => {
+    setSelectedPrefabs(prev => prev.filter(p => p.guid !== guid));
+  }, []);
 
   // ========== Prefab Merge/Replace ==========
   const mergePrefab = useCallback((pf: PrefabData) => {
@@ -538,6 +579,7 @@ export function AppShell() {
     const prefabTags = pf.tags || [];
     const prefabCp = pf.custom_prompts || '';
     const prefabLoras = pf.loras || [];
+    const prefabSelectedPrefabs = pf.selected_prefabs || [];
 
     // Overall content matching: all prompts AND all loras must be present to count as "fully matched"
     const hasPrompts = prefabTags.length > 0;
@@ -644,6 +686,22 @@ export function AppShell() {
     setSelectedTags(tags);
     setCustomPrompts(pf.custom_prompts || '');
 
+    // Restore nested selected_prefabs
+    const nestedPrefabs = pf.selected_prefabs || [];
+    const restoredPrefabs: { guid: string; prefab: PrefabData }[] = [];
+    // Build guid -> prefab map
+    const guidMap = new Map<string, PrefabData>();
+    for (const libData of Object.values(allLibraries)) {
+      for (const p of libData.prefabs || []) {
+        if (p.guid) guidMap.set(p.guid, p);
+      }
+    }
+    for (const sp of nestedPrefabs) {
+      const nested = guidMap.get(sp.guid);
+      if (nested) restoredPrefabs.push({ guid: sp.guid, prefab: nested });
+    }
+    setSelectedPrefabs(restoredPrefabs);
+
     // Replace loras
     const prefabLoras = pf.loras || [];
     const newSelectedLoras: LoraItemData[] = [];
@@ -669,7 +727,7 @@ export function AppShell() {
     }
     setSelectedLoras(newSelectedLoras);
     setLoraSelections(newLoraSelections);
-  }, [setSelectedTags, setCustomPrompts, loraData, setSelectedLoras, setLoraSelections]);
+  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, allLibraries, loraData, setSelectedLoras, setLoraSelections]);
 
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
@@ -685,8 +743,9 @@ export function AppShell() {
         split_mode: sel?.split_mode,
       };
     });
-    submitSelection(promptsToSend, customPrompts, lorasPayload);
-  }, [selectedTags, customPrompts, selectedLoras, loraSelections, submitSelection]);
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid }));
+    submitSelection(promptsToSend, customPrompts, lorasPayload, prefabsPayload);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection]);
 
   // ========== Delete Prompt ==========
   const deletePrompt = useCallback(async (id: string) => {
@@ -943,6 +1002,39 @@ export function AppShell() {
     });
   }, [selectedLoras, loraSelections]);
 
+  const buildSelectedPrefabs = useCallback(() => {
+    return selectedPrefabs.map(p => ({ guid: p.guid }));
+  }, [selectedPrefabs]);
+
+  // Check for circular dependencies in selected_prefabs
+  const checkPrefabCycle = useCallback((targetGuid: string | null, selectedPrefabsToCheck: { guid: string }[]): string | null => {
+    // Build guid -> prefab map
+    const guidMap = new Map<string, PrefabData>();
+    for (const libData of Object.values(allLibraries)) {
+      for (const pf of libData.prefabs || []) {
+        if (pf.guid) guidMap.set(pf.guid, pf);
+      }
+    }
+    for (const sp of selectedPrefabsToCheck) {
+      const visited = new Set<string>();
+      const stack: string[] = [sp.guid];
+      while (stack.length > 0) {
+        const currentGuid = stack.pop()!;
+        if (targetGuid && currentGuid === targetGuid) {
+          return `Cycle detected: ${sp.guid} -> ... -> ${targetGuid}`;
+        }
+        if (visited.has(currentGuid)) continue;
+        visited.add(currentGuid);
+        const pf = guidMap.get(currentGuid);
+        const nested = pf?.selected_prefabs || [];
+        for (const n of nested) {
+          stack.push(n.guid);
+        }
+      }
+    }
+    return null;
+  }, [allLibraries]);
+
   // ========== Add Prefab ==========
   const addPrefab = useCallback(async () => {
     const lib = modal?.data?.lib;
@@ -950,23 +1042,27 @@ export function AppShell() {
     if (!name || !lib) { alert('Please enter prefab name'); return; }
     const pfTags = selectedTags.map(g => g.map(t => ({...t})));
     const pfLoras = buildPrefabLoras();
+    const pfSelectedPrefabs = buildSelectedPrefabs();
+    const cycle = checkPrefabCycle(null, pfSelectedPrefabs);
+    if (cycle) { setErrorModal({ title: 'Circular Dependency', message: cycle }); return; }
     let imageData = '';
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
     try {
-      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, image:imageData}) });
+      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, selected_prefabs:pfSelectedPrefabs, image:imageData}) });
       const result = await res.json();
       closeModal();
       if (imageData) setImgVersion(v => v + 1);
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData) return prev;
-        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts, loras: pfLoras };
+        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
         if (result && result.preview) newPrefab.preview = result.preview;
+        if (result && result.guid) newPrefab.guid = result.guid;
         const prefabs = [...(libData.prefabs || []), newPrefab];
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, buildPrefabLoras, modalImageFile, setAllLibraries]);
+  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, buildPrefabLoras, buildSelectedPrefabs, checkPrefabCycle, modalImageFile, setAllLibraries]);
 
   // ========== Update Prefab ==========
   const updatePrefab = useCallback(async () => {
@@ -1002,26 +1098,31 @@ export function AppShell() {
     const idx = modal?.data?.idx;
     const pfTags = selectedTags.map(g => g.map(t => ({...t})));
     const pfLoras = buildPrefabLoras();
-    if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0) { alert('No tags, custom_prompts or loras to sync'); return; }
+    const pfSelectedPrefabs = buildSelectedPrefabs();
+    if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0 && pfSelectedPrefabs.length === 0) { alert('No tags, custom_prompts, loras or selected_prefabs to sync'); return; }
+    const targetGuid = allLibraries[lib]?.prefabs?.[idx ?? -1]?.guid || null;
+    const cycle = checkPrefabCycle(targetGuid, pfSelectedPrefabs);
+    if (cycle) { setErrorModal({ title: 'Circular Dependency', message: cycle }); return; }
     try {
-      const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras}) });
+      const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, selected_prefabs:pfSelectedPrefabs}) });
       const result = await res.json();
       closeModal();
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData || !libData.prefabs || idx === undefined || idx < 0 || idx >= libData.prefabs.length) return prev;
-        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tags: pfTags, custom_prompts: customPrompts, loras: pfLoras };
+        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tags: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
         if (result && result.preview) updatedPrefab.preview = result.preview;
         const prefabs = [...libData.prefabs];
         prefabs[idx] = updatedPrefab;
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, modal?.data?.lib, modal?.data?.idx, setAllLibraries]);
+  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, buildSelectedPrefabs, checkPrefabCycle, modal?.data?.lib, modal?.data?.idx, setAllLibraries]);
 
   // ========== Delete Prefab ==========
   const deletePrefab = useCallback(async (lib: string, idx: number) => {
     if (!confirm('Delete this prefab?')) return;
+    const targetGuid = allLibraries[lib]?.prefabs?.[idx]?.guid;
     try {
       const r = await fetch('/delete_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib,prefab_index:idx}) });
       if (!r.ok) return;
@@ -1031,8 +1132,11 @@ export function AppShell() {
         const next = { ...prev, [lib]: { ...libData, prefabs: libData.prefabs.filter((_: any, i: number) => i !== idx) } };
         return next;
       });
+      if (targetGuid) {
+        setSelectedPrefabs(prev => prev.filter(p => p.guid !== targetGuid));
+      }
     } catch(e) { console.error(e); }
-  }, [setAllLibraries]);
+  }, [setAllLibraries, allLibraries, setSelectedPrefabs]);
 
   // ========== DRAG & DROP (vanilla JS init on render) ==========
   const initDragAndDrop = useCallback(() => {
@@ -1934,7 +2038,10 @@ export function AppShell() {
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
                             prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
-                            onMerge={mergePrefab} onReplace={replacePrefab}
+                            isSelected={selectedPrefabs.some(p => p.guid === pf.guid)}
+                            onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`, pf)}
+                            allLibraries={allLibraries}
+
                             onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
                             onDelete={() => deletePrefab(lib, i)}
                           />
@@ -1955,9 +2062,63 @@ export function AppShell() {
 
         <div className="right-bar">
           <div className="selected-bar">
+            {selectedPrefabs.length > 0 ? (
+              <>
+                <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
+                <div className="prefab-list">
+                  {selectedPrefabs.map(({ guid, prefab }) => {
+                    const pfTags = (prefab.tags || []).map(g => tagsToDisplayName(g)).join(' + ');
+                    const pfLoras = prefab.loras || [];
+                    // Expand nested prefabs for display
+                    const guidMap = new Map<string, PrefabData>();
+                    for (const libData of Object.values(allLibraries)) {
+                      for (const p of libData.prefabs || []) {
+                        if (p.guid) guidMap.set(p.guid, p);
+                      }
+                    }
+                    const visited = new Set<string>();
+                    const queue: string[] = [];
+                    for (const sp of prefab.selected_prefabs || []) {
+                      if (sp.guid && !visited.has(sp.guid)) {
+                        visited.add(sp.guid);
+                        queue.push(sp.guid);
+                      }
+                    }
+                    const nestedNames: string[] = [];
+                    while (queue.length > 0) {
+                      const cg = queue.shift()!;
+                      const p = guidMap.get(cg);
+                      if (!p) continue;
+                      nestedNames.push(p.name);
+                      for (const n of p.selected_prefabs || []) {
+                        if (n.guid && !visited.has(n.guid)) {
+                          visited.add(n.guid);
+                          queue.push(n.guid);
+                        }
+                      }
+                    }
+                    return (
+                      <div key={guid} className="prefab-card">
+                        <div className="prefab-card-header">
+                          <span className="prefab-card-name">{prefab.name}</span>
+                          <div className="prefab-card-actions">
+                            <button className="prefab-card-btn merge" onMouseDown={() => mergePrefab(prefab)}>Merge</button>
+                            <button className="prefab-card-btn remove" onMouseDown={() => removeSelectedPrefab(guid)}>{iconX}</button>
+                          </div>
+                        </div>
+                        {pfTags && <div className="prefab-card-tags">{pfTags}</div>}
+                        {pfLoras.length > 0 && <div className="prefab-card-loras">Lora({pfLoras.length}): {pfLoras.map(l => l.name).join(', ')}</div>}
+                        {nestedNames.length > 0 && <div className="prefab-card-loras">Prefab({nestedNames.length}): {nestedNames.join(', ')}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
             {selectedLoras.length > 0 ? (
               <>
-                <h3>Selected Loras ({selectedLoras.length})</h3>
+                <h3 style={selectedPrefabs.length > 0 ? { marginTop: 12 } : {}}>Selected Loras ({selectedLoras.length})</h3>
                 <div className="lora-list">
                   {selectedLoras.map(lora => {
                     const sel = loraSelections[lora.file_path];
@@ -2180,6 +2341,18 @@ export function AppShell() {
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.type}</h2>
             <div className="modal-buttons"><button className="btn btn-secondary" onClick={closeModal}>Close</button></div>
+          </div>
+        </div>
+      ) : null}
+
+      {errorModal ? (
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+            <h2 style={{ color: '#ff3b30' }}>{errorModal.title}</h2>
+            <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>{errorModal.message}</p>
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Close</button>
+            </div>
           </div>
         </div>
       ) : null}

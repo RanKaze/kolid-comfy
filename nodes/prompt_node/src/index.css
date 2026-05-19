@@ -976,6 +976,23 @@ body {
 .lora-card-tag.active { background: #007aff; border-color: #007aff; color: #fff; }
 .lora-card-tag.active:hover { transform: translateY(-1px); }
 .prefab-loras { font-size: 10px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Selected prefab in grid */
+.prompt-item.prefab-selected { border-color: rgba(0, 122, 255, 0.7); box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.4), 0 4px 12px rgba(0,0,0,0.3); }
+
+/* Selected Prefabs sidebar list */
+.prefab-list { display: flex; flex-direction: column; gap: 8px; }
+.prefab-card { background: var(--bg-tertiary); border-radius: 8px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); }
+.prefab-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.prefab-card-name { font-weight: 600; font-size: 13px; color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prefab-card-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+.prefab-card-btn { height: 20px; padding: 0 8px; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; transition: background 0.2s, color 0.2s; }
+.prefab-card-btn.merge { background: rgba(0, 122, 255, 0.15); color: #007aff; }
+.prefab-card-btn.merge:hover { background: #007aff; color: #fff; }
+.prefab-card-btn.remove { background: transparent; color: var(--text-secondary); width: 20px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.prefab-card-btn.remove:hover { color: #ff3b30; }
+.prefab-card-tags { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.prefab-card-loras { font-size: 10px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .lora-folder { position: relative; background: var(--bg-tertiary); border-radius: 12px; flex: 0 0 auto; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; z-index: 1; }
 .lora-folder.expanded { width: 100%; flex: 1 1 100%; }
 .lora-folder.collapsed { width: auto; min-width: 120px; }
