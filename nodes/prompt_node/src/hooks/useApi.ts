@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes,
+  LoraFolders,
 } from '../types';
 
 const API_BASE = '';
@@ -14,6 +15,7 @@ export function useApi() {
   const [customPrompts, setCustomPrompts] = useState('');
   const [promptFoldout, setPromptFoldout] = useState(false);
   const [lastSelected, setLastSelected] = useState<string[]>([]);
+  const [loraData, setLoraData] = useState<LoraFolders>({});
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
@@ -42,6 +44,13 @@ export function useApi() {
     window.close();
   }, []);
 
+  const loadLoraData = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/lora_data`);
+    const data = await res.json();
+    setLoraData(data.folders || {});
+    return data.folders || {};
+  }, []);
+
   return {
     allPrompts, setAllPrompts,
     allLibraries, setAllLibraries,
@@ -49,6 +58,7 @@ export function useApi() {
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
     promptFoldout, lastSelected,
-    loadData, submitSelection, closeWindow,
+    loraData, setLoraData,
+    loadData, submitSelection, closeWindow, loadLoraData,
   };
 }
