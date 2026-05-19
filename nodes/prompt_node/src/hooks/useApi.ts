@@ -1,0 +1,54 @@
+import { useState, useCallback, useRef } from 'react';
+import type {
+  AllPrompts, AllLibraries, PointsResponse,
+  CategoryDisplayModes, CategorySizeModes,
+} from '../types';
+
+const API_BASE = '';
+
+export function useApi() {
+  const [allPrompts, setAllPrompts] = useState<AllPrompts>({});
+  const [allLibraries, setAllLibraries] = useState<AllLibraries>({});
+  const [categoryDisplayModes, setCategoryDisplayModes] = useState<CategoryDisplayModes>({});
+  const [categorySizeModes, setCategorySizeModes] = useState<CategorySizeModes>({});
+  const [customPrompts, setCustomPrompts] = useState('');
+  const [promptFoldout, setPromptFoldout] = useState(false);
+  const [lastSelected, setLastSelected] = useState<string[]>([]);
+
+  const loadData = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/prompts_data`);
+    const data: PointsResponse = await res.json();
+    setAllPrompts(data.categories);
+    setAllLibraries(data.libraries || {});
+    setCategoryDisplayModes(data.category_display_modes || {});
+    setCategorySizeModes(data.category_size_modes || {});
+    setPromptFoldout(data.prompt_foldout || false);
+    setLastSelected(data.last_selected || []);
+    setCustomPrompts(data.custom_prompts || '');
+    return data;
+  }, []);
+
+  const submitSelection = useCallback(async (prompts: string[], custom: string) => {
+    const res = await fetch(`${API_BASE}/select_prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompts, custom_prompts: custom }),
+    });
+    if (res.ok) window.close();
+  }, []);
+
+  const closeWindow = useCallback(() => {
+    fetch(`${API_BASE}/window_closed`, { method: 'POST' });
+    window.close();
+  }, []);
+
+  return {
+    allPrompts, setAllPrompts,
+    allLibraries, setAllLibraries,
+    categoryDisplayModes, setCategoryDisplayModes,
+    categorySizeModes, setCategorySizeModes,
+    customPrompts, setCustomPrompts,
+    promptFoldout, lastSelected,
+    loadData, submitSelection, closeWindow,
+  };
+}

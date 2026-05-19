@@ -1,0 +1,2044 @@
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import type {
+  AllPrompts, AllLibraries, PointsResponse,
+  CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
+  PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
+} from '../types';
+import {
+  categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
+} from '../modules';
+import {
+  parseStringToTags, tagsToDisplayName, tagsToDisplayString,
+  findPromptData, getPromptDecorations, combineTagGroups,
+  isBasePromptSelectedInTags, findTagGroupByBasePrompt,
+} from '../hooks/useSelection';
+import { useApi } from '../hooks/useApi';
+import { SearchBar } from './SearchBar';
+import { PrefabItem } from './PrefabItem';
+import { CustomPromptsEditor } from './CustomPromptsEditor';
+
+/* ========== Inline SVG Icons (no emoji) ========== */
+const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
+const iconArrowLeft = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'4px'}}><path d="M19 12H5M12 19l-7-7 7-7"/></svg>;
+const iconGrip = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{verticalAlign:'middle'}}><circle cx="9" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>;
+const iconGrid = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>;
+const iconPencil = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>;
+const iconTrash = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
+const iconChevronUp = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M18 15l-6-6-6 6"/></svg>;
+const iconChevronDown = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M6 9l6 6 6-6"/></svg>;
+const iconX = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M18 6L6 18M6 6l12 12"/></svg>;
+const iconClipboard = <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'4px'}}><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>;
+const iconPlus = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M5 12h14"/></svg>;
+
+const ZOOM_DELAY = 2000;
+let zoomTimer: ReturnType<typeof setTimeout> | null = null;
+let leaveTimer: ReturnType<typeof setTimeout> | null = null;
+let currentZoomItem: HTMLElement | null = null;
+let isDragging = false;
+
+const dragState: DragState = { type: null, item: null, category: null, element: null, library: null, index: null };
+let dragDropController: AbortController | null = null;
+let initDone = false;
+let zoomRestoreSelector: string | null = null;
+let zoomRestoreVars: Record<string, string> = {};
+
+function clearZoomState() {
+  if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+  if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+  if (currentZoomItem) {
+    currentZoomItem.classList.remove('zoom-view', 'zoom-exit');
+    currentZoomItem = null;
+  }
+}
+
+function snapshotZoom() {
+  if (currentZoomItem) {
+    const el = currentZoomItem;
+    if (el.dataset.prefab) {
+      zoomRestoreSelector = `.prompt-item[data-prefab="${el.dataset.prefab}"]`;
+    } else if (el.dataset.id) {
+      zoomRestoreSelector = `.prompt-item[data-id="${el.dataset.id}"]`;
+    } else {
+      zoomRestoreSelector = null;
+      return;
+    }
+    zoomRestoreVars = {
+      '--zoom-width': el.style.getPropertyValue('--zoom-width'),
+      '--zoom-height': el.style.getPropertyValue('--zoom-height'),
+      '--zoom-offset-x': el.style.getPropertyValue('--zoom-offset-x'),
+      '--zoom-offset-y': el.style.getPropertyValue('--zoom-offset-y'),
+    };
+  }
+}
+
+export function AppShell() {
+  const api = useApi();
+  const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
+    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow,
+    setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
+  } = api;
+
+  const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedFilter, setSelectedFilter] = useState('');
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
+  const [expandedLibraries, setExpandedLibraries] = useState<Set<string>>(new Set());
+  const [animating, setAnimating] = useState<Set<string>>(new Set());
+  const [focusPoints, setFocusPoints] = useState<FocusPoints>({});
+  const [categoryFocusPoints, setCategoryFocusPoints] = useState<Record<string, {x:number;y:number}>>({});
+  const [temporaryCtx, setTemporaryCtx] = useState<{stack: {matchFn:(p:PromptData,c:string)=>boolean;basePrompt:string;title:string;tagGroups:TagGroup[];level:number}[]}>({stack: []});
+  const [imgVersion, setImgVersion] = useState(0);
+  const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
+  const [, forceRender] = useState(0);
+  const rerender = useCallback(() => forceRender(n => n + 1), []);
+
+  const toList = useCallback((v: string | string[] | undefined): string[] => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
+    return [];
+  }, []);
+
+  const allFilterOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const catData of Object.values(allPrompts)) {
+      const cd = catData as any;
+      (Array.isArray(cd.decorations) ? cd.decorations : typeof cd.decorations === 'string' ? cd.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []).forEach((d: string) => set.add(d));
+      (Array.isArray(cd.tags) ? cd.tags : typeof cd.tags === 'string' ? cd.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []).forEach((t: string) => set.add(t));
+      if (cd.prompts) {
+        for (const p of cd.prompts) {
+          toList(p.decorations).forEach((d: string) => set.add(d));
+          toList(p.tags).forEach((t: string) => set.add(t));
+        }
+      }
+    }
+    return [...set].sort();
+  }, [allPrompts, toList]);
+
+  // Auto-reset filter when its value no longer exists in any prompt
+  useEffect(() => {
+    if (selectedFilter && !allFilterOptions.includes(selectedFilter)) {
+      setSelectedFilter('');
+    }
+  }, [selectedFilter, allFilterOptions]);
+
+  const bgSizesRef = useRef<Record<string,{w:number;h:number}>>({});
+  const bgBaseRef = useRef<Record<string,{x:number;y:number}>>({});
+  const categoryFocusRef = useRef<Record<string,{x:number;y:number}>>({});
+  const shakeRef = useRef({ ox:0, oy:0, tx:0, ty:0, lt: Date.now() });
+  const mouseRef = useRef({ x:0, y:0 });
+  const bgAnimRunningRef = useRef(false);
+
+  // Keep categoryFocusRef in sync with state
+  useEffect(() => { categoryFocusRef.current = categoryFocusPoints; }, [categoryFocusPoints]);
+
+  // ========== LOAD DATA ==========
+  const loadData = useCallback(async () => {
+    const data = await apiLoadData();
+    const lastSelected = data.last_selected || [];
+    const tags = lastSelected
+      .filter(str => !str.startsWith('<') || !str.endsWith('>'))
+      .map(str => parseStringToTags(str, data.categories));
+    setSelectedTags(tags);
+
+    let cp = data.custom_prompts || '';
+    for (const str of lastSelected) {
+      const m = str.match(/^<(.+)>$/);
+      if (m) {
+        const recovered = m[1];
+        if (cp) {
+          if (!cp.split('\n').map(s => s.trim()).includes(recovered)) cp += '\n' + recovered;
+        } else { cp = recovered; }
+      }
+    }
+    setCustomPrompts(cp);
+
+    if (data.prompt_foldout) {
+      const expanded = new Set<string>();
+      for (const [cat, catData] of Object.entries(data.categories)) {
+        const prompts: PromptData[] = (catData as { prompts?: PromptData[] }).prompts || [];
+        if (prompts.some(p => tags.some(g => g.some(t => t.decoration_num === 0 && t.prompt === p.prompt)))) {
+          expanded.add(cat);
+        }
+      }
+      setExpandedCategories(expanded);
+    }
+    return data;
+  }, [apiLoadData, setCustomPrompts, setSelectedTags]);
+
+  useEffect(() => {
+    loadData().then(() => {
+      try { const s = localStorage.getItem('kolid_focus_points'); if (s) setFocusPoints(JSON.parse(s)); } catch {}
+      try { const s = localStorage.getItem('kolid_category_focus_points'); if (s) setCategoryFocusPoints(JSON.parse(s)); } catch {}
+    });
+  }, []);
+
+  // ========== Modal state ==========
+  const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
+  const closeModal = useCallback(() => setModal(null), []);
+  // Form state for modals
+  const [modalName, setModalName] = useState('');
+  const [modalPrompt, setModalPrompt] = useState('');
+  const [modalTags, setModalTags] = useState<string[]>([]);
+  const [modalDecorations, setModalDecorations] = useState<string[]>([]);
+  const [modalMuteDecorations, setModalMuteDecorations] = useState<string[]>([]);
+  const [modalCategory, setModalCategory] = useState('');
+  const [modalOldName, setModalOldName] = useState('');
+  const [modalPromptIds, setModalPromptIds] = useState('');
+  const [modalCustomPrompts, setModalCustomPrompts] = useState('');
+  const [modalMode, setModalMode] = useState('horizontal');
+  const [modalSize, setModalSize] = useState('normal');
+  const [modalIsCat, setModalIsCat] = useState(true);
+  const [modalPreviewUrl, setModalPreviewUrl] = useState('');
+  const [modalPreviewVisible, setModalPreviewVisible] = useState(false);
+  const [modalFocusX, setModalFocusX] = useState(0);
+  const [modalFocusY, setModalFocusY] = useState(0);
+  const [modalFocusVisible, setModalFocusVisible] = useState(false);
+  const [modalImageFile, setModalImageFile] = useState<File|null>(null);
+
+  // ========== Image helpers ==========
+  const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) { setModalPreviewUrl(''); setModalPreviewVisible(false); setModalImageFile(null); return; }
+    setModalImageFile(file);
+    const reader = new FileReader();
+    reader.onload = ev => { setModalPreviewUrl(ev.target?.result as string); setModalPreviewVisible(true); };
+    reader.readAsDataURL(file);
+    setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+  }, []);
+
+  const handlePasteImage = useCallback((file: File) => {
+    setModalImageFile(file);
+    const reader = new FileReader();
+    reader.onload = ev => { setModalPreviewUrl(ev.target?.result as string); setModalPreviewVisible(true); };
+    reader.readAsDataURL(file);
+    setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+  }, []);
+
+  const handlePreviewClick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    const rect = img.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+    setModalFocusX(x); setModalFocusY(y); setModalFocusVisible(true);
+  }, []);
+
+  const handleRemoveFocus = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+  }, []);
+
+  const clearImageFields = useCallback(() => {
+    setModalPreviewUrl(''); setModalPreviewVisible(false);
+    setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+    setModalImageFile(null);
+  }, []);
+
+  // ========== Clear zoom before opening modals ==========
+  const clearZoomView = useCallback(() => {
+    if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+    if (currentZoomItem) {
+      currentZoomItem.classList.remove('zoom-view');
+      currentZoomItem.classList.add('zoom-exit');
+      const old = currentZoomItem;
+      currentZoomItem = null;
+      setTimeout(() => { old.classList.remove('zoom-exit'); }, 300);
+    }
+  }, []);
+
+  // ========== Reset all modal form state ==========
+  const resetModalForm = useCallback(() => {
+    clearZoomView();
+    setModalName(''); setModalPrompt(''); setModalTags([]); setModalDecorations([]); setModalMuteDecorations([]);
+    setModalCategory(''); setModalOldName(''); setModalPromptIds('');
+    setModalCustomPrompts(''); setModalMode('horizontal'); setModalSize('normal');
+    setModalIsCat(true); clearImageFields();
+  }, [clearImageFields]);
+
+  const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
+    if (modalFocusVisible) {
+      const pt = { x: modalFocusX, y: modalFocusY };
+      if (isCategory) {
+        setCategoryFocusPoints(prev => { const n = {...prev, [key]: pt}; localStorage.setItem('kolid_category_focus_points', JSON.stringify(n)); return n; });
+      } else {
+        setFocusPoints(prev => { const n = {...prev, [key]: pt}; localStorage.setItem('kolid_focus_points', JSON.stringify(n)); return n; });
+      }
+    }
+  }, [modalFocusVisible, modalFocusX, modalFocusY]);
+
+  const removeModalFocus = useCallback((key: string, isCategory: boolean) => {
+    if (isCategory) {
+      setCategoryFocusPoints(prev => { if(!prev[key]) return prev; const n = {...prev}; delete n[key]; localStorage.setItem('kolid_category_focus_points', JSON.stringify(n)); return n; });
+    } else {
+      setFocusPoints(prev => { if(!prev[key]) return prev; const n = {...prev}; delete n[key]; localStorage.setItem('kolid_focus_points', JSON.stringify(n)); return n; });
+    }
+    setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+  }, []);
+
+  // ========== Toggle Category/Library ==========
+  const toggleCategory = useCallback((cat: string) => {
+    setExpandedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(cat)) next.delete(cat);
+      else { next.add(cat); setAnimating(old => new Set([...old, cat])); }
+      return next;
+    });
+  }, []);
+
+  const toggleLibrary = useCallback((lib: string) => {
+    setExpandedLibraries(prev => {
+      const next = new Set(prev);
+      if (next.has(lib)) next.delete(lib);
+      else { next.add(lib); setAnimating(old => new Set([...old, lib])); }
+      return next;
+    });
+  }, []);
+
+  // ========== Search & Filter ==========
+  const handleSearch = useCallback((q: string) => {
+    setSearchQuery(q.toLowerCase());
+  }, []);
+  const handleFilterChange = useCallback((f: string) => setSelectedFilter(f), []);
+
+  const handleCustomPromptsParsed = useCallback((tagGroup: TagGroup, displayString: string) => {
+    setSelectedTags(prev => [...prev, tagGroup]);
+  }, [setSelectedTags]);
+
+  // ========== Select Prompt (full toggle logic) ==========
+  const selectPrompt = useCallback((prompt: string) => {
+    clearZoomState();
+    snapshotZoom();
+    const ctxStack = temporaryCtx.stack;
+    if (ctxStack.length > 0) {
+      const ctx = ctxStack[ctxStack.length - 1];
+      const promptData = findPromptData(prompt, allPrompts);
+      if (!promptData) return;
+      const allDecorations = getPromptDecorations(promptData, allPrompts);
+      const tag = { decoration_num: ctx.level, name: promptData.name, prompt };
+
+      if (allDecorations.length > 0) {
+        // Push a sub-layer for this prompt's decorations (tag will be combined on completion)
+        setTemporaryCtx(prev => {
+          const stack = [...prev.stack];
+          const last = stack[stack.length - 1];
+          stack.push({
+            matchFn: (p: PromptData, cat: string) => {
+              if (p.prompt === prompt) return false;
+              const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
+              const cd = allPrompts[cat] || {};
+              const ct = (cd.tags as string[]) || [];
+              return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
+            },
+            basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
+            tagGroups: [], level: last.level + 1,
+          });
+          return { stack };
+        });
+        return;
+      }
+
+      // No decorations: just toggle the decoration tag
+      setTemporaryCtx(prev => {
+        const stack = [...prev.stack];
+        const lastIdx = stack.length - 1;
+        const last = stack[lastIdx];
+        const existing = last.tagGroups.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
+        const newLast = { ...last, tagGroups: existing === -1
+          ? [...last.tagGroups, [tag]]
+          : last.tagGroups.filter((_g, i) => i !== existing)
+        };
+        stack[lastIdx] = newLast;
+        return { stack };
+      });
+      return;
+    }
+
+    const promptData = findPromptData(prompt, allPrompts);
+    if (!promptData) return;
+    const allDecorations = getPromptDecorations(promptData, allPrompts);
+    if (allDecorations.length > 0) {
+      setTemporaryCtx(prev => ({
+        stack: [...prev.stack, {
+          matchFn: (p: PromptData, cat: string) => {
+            if (p.prompt === prompt) return false;
+            const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
+            const cd = allPrompts[cat] || {};
+            const ct = (cd.tags as string[]) || [];
+            return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
+          },
+          basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
+          tagGroups: [], level: 1,
+        }],
+      }));
+      return;
+    }
+
+    setSelectedTags(prev => {
+      const idx = prev.findIndex(g => g.some(t => t.decoration_num === 0 && t.prompt === prompt));
+      if (idx === -1) return [...prev, [{ decoration_num: 0, name: promptData.name, prompt }]];
+      return prev.filter((_, i) => i !== idx);
+    });
+  }, [temporaryCtx, allPrompts, setSelectedTags]);
+
+  // ========== Complete/Cancel temporary context ==========
+  const completeLayer = useCallback(() => {
+    setTemporaryCtx(prev => {
+      if (prev.stack.length === 0) return prev;
+      const stack = [...prev.stack];
+      const ctx = stack.pop()!;
+      const tagGroups = [...ctx.tagGroups];
+      const bp = findPromptData(ctx.basePrompt, allPrompts);
+      const bpName = bp ? bp.name : '';
+      const bdn = Math.max(0, ctx.level - 1);
+      const combined = combineTagGroups(tagGroups, ctx.basePrompt, bpName, bdn, allPrompts);
+      if (stack.length > 0) {
+        const prevCtx = { ...stack[stack.length - 1] };
+        prevCtx.tagGroups = [...prevCtx.tagGroups, combined];
+        stack[stack.length - 1] = prevCtx;
+        return { stack };
+      }
+      setSelectedTags(prev => [...prev, combined]);
+      return { stack };
+    });
+  }, [allPrompts, setSelectedTags]);
+
+  const backLayer = useCallback(() => {
+    setTemporaryCtx(prev => ({ stack: prev.stack.slice(0, -1) }));
+  }, []);
+
+  const cancelTemporary = useCallback(() => {
+    setTemporaryCtx({ stack: [] });
+  }, []);
+
+  const isTemporary = temporaryCtx.stack.length > 0;
+  const currentCtx = isTemporary ? temporaryCtx.stack[temporaryCtx.stack.length - 1] : null;
+
+  // ========== Tag Selection Helper ==========
+  const isTagSelected = useCallback((prompt: string) => {
+    return isBasePromptSelectedInTags(prompt, selectedTags);
+  }, [selectedTags]);
+
+  const getTagGroupForPrompt = useCallback((prompt: string): TagGroup | undefined => {
+    return findTagGroupByBasePrompt(prompt, selectedTags);
+  }, [selectedTags]);
+
+  const isPromptSelectedInTempCtx = useCallback((prompt: string): boolean => {
+    if (!currentCtx) return false;
+    return currentCtx.tagGroups.some(g => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
+  }, [currentCtx]);
+
+  const removeTag = useCallback((idx: number) => {
+    setSelectedTags(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const removeTemporaryTag = useCallback((tgIdx: number) => {
+    setTemporaryCtx(prev => {
+      if (prev.stack.length === 0) return prev;
+      const stack = [...prev.stack];
+      const lastIdx = stack.length - 1;
+      const last = stack[lastIdx];
+      const newLast = { ...last, tagGroups: last.tagGroups.filter((_, i) => i !== tgIdx) };
+      stack[lastIdx] = newLast;
+      return { stack };
+    });
+  }, []);
+
+  // ========== Prefab Merge/Replace ==========
+  const mergePrefab = useCallback((pf: PrefabData) => {
+    clearZoomState();
+    snapshotZoom();
+    const prefabTags = pf.tags || [];
+    const prefabCp = pf.custom_prompts || '';
+
+    let allMatched = true, anyMatched = false;
+    for (const group of prefabTags) {
+      const baseTag = group.find((t: any) => t.decoration_num === 0);
+      if (baseTag && isBasePromptSelectedInTags(baseTag.prompt, selectedTags)) { anyMatched = true; }
+      else { allMatched = false; }
+    }
+
+    setSelectedTags(prev => {
+      const next = prev.map(g => g.map(t => ({...t})));
+      if (allMatched && anyMatched) {
+        for (const group of prefabTags) {
+          const baseTag = group.find((t: any) => t.decoration_num === 0);
+          if (baseTag) {
+            const idx = next.findIndex(g => g.some(t => t.decoration_num === 0 && t.prompt === baseTag.prompt));
+            if (idx !== -1) next.splice(idx, 1);
+          }
+        }
+      } else {
+        for (const group of prefabTags) {
+          const baseTag = group.find((t: any) => t.decoration_num === 0);
+          if (baseTag && !next.some(g => g.some(t => t.decoration_num === 0 && t.prompt === baseTag.prompt))) {
+            next.push(group.map((t: any) => ({...t})));
+          }
+        }
+      }
+      return next;
+    });
+
+    if (prefabCp) {
+      setCustomPrompts(prev => {
+        const pSeg = prefabCp.split('\n').map((s: string) => s.trim()).filter((s: string) => s);
+        const cSeg = prev.split('\n').map((s: string) => s.trim()).filter((s: string) => s);
+        if (allMatched && anyMatched) return cSeg.filter((s: string) => !pSeg.includes(s)).join('\n');
+        for (const seg of pSeg) { if (!cSeg.includes(seg)) cSeg.push(seg); }
+        return cSeg.join('\n');
+      });
+    }
+  }, [selectedTags, setSelectedTags, setCustomPrompts]);
+
+  const replacePrefab = useCallback((pf: PrefabData) => {
+    clearZoomState();
+    snapshotZoom();
+    const tags: TagGroup[] = (pf.tags || []) as TagGroup[];
+    setSelectedTags(tags);
+    setCustomPrompts(pf.custom_prompts || '');
+  }, [setSelectedTags, setCustomPrompts]);
+
+  // ========== Confirm ==========
+  const handleConfirm = useCallback(() => {
+    const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+    submitSelection(promptsToSend, customPrompts);
+  }, [selectedTags, customPrompts, submitSelection]);
+
+  // ========== Delete Prompt ==========
+  const deletePrompt = useCallback(async (id: string) => {
+    if (!confirm('Delete this prompt?')) return;
+    try {
+      const r = await fetch('/delete_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id}) });
+      if (!r.ok) return;
+      setAllPrompts((prev: AllPrompts) => {
+        const next: AllPrompts = {};
+        for (const [cat, catData] of Object.entries(prev)) {
+          const prompts = ((catData as CategoryData).prompts || []).filter((p: PromptData) => p.id !== id);
+          next[cat] = { ...(catData as CategoryData), prompts };
+        }
+        return next;
+      });
+    } catch(e) { console.error(e); }
+  }, [setAllPrompts]);
+
+  // ========== Add Prompt ==========
+  const addPrompt = useCallback(async (cat: string) => {
+    const name = prompt('Prompt name:')?.trim();
+    if (!name) return;
+    const text = prompt('Prompt text:')?.trim();
+    if (!text) return;
+    try {
+      const res = await fetch('/add_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category:cat, name, prompt:text}) });
+      if (!res.ok) return;
+      const result = await res.json();
+      const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: text, preview: result.preview || '' };
+      setAllPrompts((prev: AllPrompts) => {
+        const catData = prev[cat];
+        return { ...prev, [cat]: { ...(catData as CategoryData || {}), prompts: [...((catData as CategoryData)?.prompts || []), newPrompt] } };
+      });
+    } catch(e) { console.error(e); }
+  }, [setAllPrompts]);
+
+  // ========== Add Category ==========
+  const addCategory = useCallback(async () => {
+    const name = modalName.trim();
+    if (!name) return;
+    try {
+      await categoryGroup.add(name);
+      closeModal();
+      setAllPrompts((prev: AllPrompts) => ({ ...prev, [name]: { prompts: [], display_mode: 'horizontal', size_mode: 'normal' as any } }));
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalName, setAllPrompts]);
+
+  // ========== Add Library ==========
+  const addLibrary = useCallback(async () => {
+    const name = modalName.trim();
+    if (!name) return;
+    try {
+      await libraryGroup.add(name);
+      closeModal();
+      setAllLibraries((prev: AllLibraries) => ({ ...prev, [name]: { prefabs: [] } }));
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalName, setAllLibraries]);
+
+  // ========== Update Category ==========
+  const updateCategory = useCallback(async () => {
+    const oldName = modalOldName;
+    const newName = modalName.trim();
+    if (!newName) { alert('Please enter category name'); return; }
+    let imageData: string|null = null;
+    if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
+    try {
+      const result = await categoryGroup.update(oldName, newName, {
+        tags: modalTags, decorations: modalDecorations, image: imageData
+      });
+      if (result.success) {
+        if (imageData) setImgVersion(v => v + 1);
+        saveModalFocus(newName, true);
+        setAllPrompts((prev: AllPrompts) => {
+          const catData = prev[oldName];
+          if (!catData) return prev;
+          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: result.bg_image !== undefined ? result.bg_image : (catData as CategoryData).bg_image };
+          if (newName !== oldName) {
+            const next: AllPrompts = {};
+            for (const k of Object.keys(prev)) {
+              next[k === oldName ? newName : k] = k === oldName ? updated : prev[k];
+            }
+            return next;
+          } else {
+            return { ...prev, [oldName]: updated };
+          }
+        });
+        if (newName !== oldName) {
+          setCategoryDisplayModes((prev: any) => {
+            const n = { ...prev };
+            if (oldName in n) { n[newName] = n[oldName]; delete n[oldName]; }
+            return n;
+          });
+          setCategorySizeModes((prev: any) => {
+            const n = { ...prev };
+            if (oldName in n) { n[newName] = n[oldName]; delete n[oldName]; }
+            return n;
+          });
+        }
+        closeModal();
+      }
+    } catch(e) { console.error(e); alert('Failed to update category'); }
+  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, modalImageFile, saveModalFocus, setAllPrompts, setCategoryDisplayModes, setCategorySizeModes]);
+
+  const removeCategoryBg = useCallback(async () => {
+    const oldName = modalOldName;
+    const newName = modalName.trim() || oldName;
+    try {
+      const result = await categoryGroup.update(oldName, newName, { tags: modalTags, decorations: modalDecorations, image: '' });
+      if (result.success) {
+        setImgVersion(v => v + 1);
+        removeModalFocus(newName, true);
+        setAllPrompts((prev: AllPrompts) => {
+          const catData = prev[oldName];
+          if (!catData) return prev;
+          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: '' };
+          if (newName !== oldName) {
+            const next: AllPrompts = {};
+            for (const k of Object.keys(prev)) {
+              next[k === oldName ? newName : k] = k === oldName ? updated : prev[k];
+            }
+            return next;
+          } else {
+            return { ...prev, [oldName]: updated };
+          }
+        });
+        closeModal();
+      }
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, removeModalFocus, setAllPrompts]);
+
+  // ========== Update Library ==========
+  const updateLibrary = useCallback(async () => {
+    const oldName = modalOldName;
+    const newName = modalName.trim();
+    if (!newName) { alert('Please enter library name'); return; }
+    const pids = modalPromptIds ? modalPromptIds.split(',').map((s: string) => s.trim()).filter((s: string) => s) : [];
+    let imageData: string|null = null;
+    if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
+    try {
+      const result = await libraryGroup.update(oldName, newName, { prompt_ids: pids, image: imageData });
+      if (result.success) {
+        if (imageData !== null) setImgVersion(v => v + 1);
+        saveModalFocus(newName, true);
+        setAllLibraries((prev: AllLibraries) => {
+          const libData = prev[oldName];
+          if (!libData) return prev;
+          const updated: LibraryData = { ...libData, prompt_ids: pids, bg_image: result.bg_image !== undefined ? result.bg_image : libData.bg_image };
+          if (newName !== oldName) {
+            const next: AllLibraries = {};
+            for (const k of Object.keys(prev)) {
+              next[k === oldName ? newName : k] = k === oldName ? updated : prev[k];
+            }
+            return next;
+          } else {
+            return { ...prev, [oldName]: updated };
+          }
+        });
+        closeModal();
+      }
+    } catch(e) { console.error(e); alert('Failed to update library'); }
+  }, [closeModal, modalOldName, modalName, modalPromptIds, modalImageFile, saveModalFocus, setAllLibraries]);
+
+  // ========== Delete Library ==========
+  const deleteLibrary = useCallback(async () => {
+    const name = modalOldName;
+    if (!confirm(`Delete library "${name}"?`)) return;
+    try {
+      const result = await libraryGroup.delete(name);
+      if (result.success) { closeModal(); }
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalOldName]);
+
+  const deleteCategoryDirect = useCallback(async (name: string) => {
+    if (!confirm(`Delete category "${name}"? All prompts inside will also be deleted.`)) return;
+    try {
+      await categoryGroup.delete(name);
+      setAllPrompts((prev: AllPrompts) => {
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+      setCategoryDisplayModes((prev: any) => { const n = { ...prev }; delete n[name]; return n; });
+      setCategorySizeModes((prev: any) => { const n = { ...prev }; delete n[name]; return n; });
+      removeModalFocus(name, true);
+    } catch(e) { console.error(e); }
+  }, [setAllPrompts, setCategoryDisplayModes, setCategorySizeModes, removeModalFocus]);
+
+  const deleteLibraryDirect = useCallback(async (name: string) => {
+    if (!confirm(`Delete library "${name}"?`)) return;
+    try {
+      await libraryGroup.delete(name);
+      setAllLibraries((prev: AllLibraries) => {
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+      removeModalFocus(name, true);
+    } catch(e) { console.error(e); }
+  }, [setAllLibraries, removeModalFocus]);
+
+  // ========== Update Display Mode ==========
+  const updateDisplayMode = useCallback(async () => {
+    const name = modalOldName;
+    const mod = modalIsCat ? categoryDisplay : libraryDisplay;
+    try {
+      const result = await mod.save(name, modalMode, modalSize);
+      if (result.success) {
+        mod.setLocal(name, modalMode, modalSize, categoryDisplayModes, categorySizeModes, allLibraries);
+        closeModal();
+        rerender();
+      }
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalOldName, modalMode, modalSize, modalIsCat, categoryDisplayModes, categorySizeModes, allLibraries, rerender]);
+
+  // ========== Update Prompt ==========
+  const updatePrompt = useCallback(async () => {
+    const id = modalOldName;
+    const name = modalName.trim();
+    const pt = modalPrompt.trim();
+    if (!name || !pt) { alert('Please enter name and prompt text'); return; }
+    let imageData = '';
+    if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
+    try {
+      const res = await fetch('/update_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name, prompt:pt, tags:modalTags, decorations:modalDecorations, mute_decorations:modalMuteDecorations, category:modalCategory, image:imageData}) });
+      const result = await res.json();
+      if (imageData) setImgVersion(v => v + 1);
+      saveModalFocus(id, false);
+      setAllPrompts((prev: AllPrompts) => {
+        const next: AllPrompts = {};
+        for (const [cat, catData] of Object.entries(prev)) {
+          const prompts = ((catData as CategoryData).prompts || []).map((p: PromptData) =>
+            p.id === id ? { ...p, name, prompt: pt, tags: modalTags as any, decorations: modalDecorations as any, mute_decorations: modalMuteDecorations, preview: result.preview || p.preview } : p,
+          );
+          next[cat] = { ...(catData as CategoryData), prompts };
+        }
+        return next;
+      });
+      closeModal();
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalDecorations, modalMuteDecorations, modalCategory, modalImageFile, saveModalFocus, setAllPrompts]);
+
+  // ========== Add Prefab ==========
+  const addPrefab = useCallback(async () => {
+    const lib = modal?.data?.lib;
+    const name = modalName.trim();
+    if (!name || !lib) { alert('Please enter prefab name'); return; }
+    const pfTags = selectedTags.map(g => g.map(t => ({...t})));
+    let imageData = '';
+    if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
+    try {
+      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, image:imageData}) });
+      const result = await res.json();
+      closeModal();
+      if (imageData) setImgVersion(v => v + 1);
+      setAllLibraries((prev: AllLibraries) => {
+        const libData = prev[lib];
+        if (!libData) return prev;
+        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts };
+        if (result && result.preview) newPrefab.preview = result.preview;
+        const prefabs = [...(libData.prefabs || []), newPrefab];
+        return { ...prev, [lib]: { ...libData, prefabs } };
+      });
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, modalImageFile, setAllLibraries]);
+
+  // ========== Update Prefab ==========
+  const updatePrefab = useCallback(async () => {
+    const lib = modal?.data?.lib;
+    const idx = modal?.data?.idx;
+    const name = modalName.trim();
+    if (!name || lib==null || idx==null) { alert('Please enter prefab name'); return; }
+    let imageData = null;
+    if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
+    const body: any = {library:lib, prefab_index:idx, prefab_name:name, custom_prompts:modalCustomPrompts};
+    if (imageData !== null) body.image = imageData;
+    try {
+      const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const result = await res.json();
+      if (imageData !== null) setImgVersion(v => v + 1);
+      const key = `prefab_${lib}_${idx}`;
+      saveModalFocus(key, false);
+      setAllLibraries((prev: AllLibraries) => {
+        const libData = prev[lib];
+        if (!libData || !libData.prefabs) return prev;
+        const prefabs = libData.prefabs.map((pf: PrefabData, i: number) =>
+          i === idx ? { ...pf, name, custom_prompts: modalCustomPrompts, preview: result.preview !== undefined ? result.preview : pf.preview } : pf,
+        );
+        return { ...prev, [lib]: { ...libData, prefabs } };
+      });
+      closeModal();
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalName, modalCustomPrompts, modal?.data?.lib, modal?.data?.idx, modalImageFile, saveModalFocus, setAllLibraries]);
+
+  // ========== Sync Prefab ==========
+  const syncPrefab = useCallback(async () => {
+    const lib = modal?.data?.lib;
+    const idx = modal?.data?.idx;
+    const pfTags = selectedTags.map(g => g.map(t => ({...t})));
+    if (pfTags.length === 0 && !customPrompts) { alert('No tags or custom_prompts to sync'); return; }
+    try {
+      await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts}) });
+      closeModal();
+    } catch(e) { console.error(e); }
+  }, [closeModal, modalName, selectedTags, customPrompts, modal?.data?.lib, modal?.data?.idx]);
+
+  // ========== Delete Prefab ==========
+  const deletePrefab = useCallback(async (lib: string, idx: number) => {
+    if (!confirm('Delete this prefab?')) return;
+    try {
+      const r = await fetch('/delete_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib,prefab_index:idx}) });
+      if (!r.ok) return;
+      setAllLibraries((prev: AllLibraries) => {
+        const libData = prev[lib];
+        if (!libData || !libData.prefabs) return prev;
+        const next = { ...prev, [lib]: { ...libData, prefabs: libData.prefabs.filter((_: any, i: number) => i !== idx) } };
+        return next;
+      });
+    } catch(e) { console.error(e); }
+  }, [setAllLibraries]);
+
+  // ========== DRAG & DROP (vanilla JS init on render) ==========
+  const initDragAndDrop = useCallback(() => {
+    if (dragDropController) dragDropController.abort();
+    dragDropController = new AbortController();
+    const signal = dragDropController.signal;
+
+    const clearDragStyles = () => {
+      document.querySelectorAll('.dragging, .drag-over').forEach(el => el.classList.remove('dragging', 'drag-over'));
+    };
+    const dropZoneClean = () => {
+      document.querySelectorAll('.drop-zone-active').forEach(el => el.classList.remove('drop-zone-active'));
+    };
+    const resetState = () => {
+      isDragging = false;
+      clearDragStyles();
+      dropZoneClean();
+      dragState.type = null; dragState.item = null; dragState.category = null;
+      dragState.element = null; dragState.library = null; dragState.index = null;
+    };
+
+    // ========== DRAG START (capture phase on drag-handles) ==========
+    document.querySelectorAll('.drag-handle').forEach(h => (h as HTMLElement).draggable = true);
+    document.addEventListener('dragstart', (e: Event) => {
+      const h = (e.target as HTMLElement).closest('.drag-handle') as HTMLElement;
+      if (!h || !h.draggable) return;
+      const ev = e as DragEvent;
+      isDragging = true;
+      if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+      if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+      if (currentZoomItem) { currentZoomItem.classList.remove('zoom-view'); currentZoomItem = null; }
+      ev.dataTransfer!.effectAllowed = 'move';
+
+      const dtype = h.dataset.dragType!;
+      dragState.type = dtype as any;
+      if (dtype === 'category') {
+        ev.dataTransfer!.setData('text/plain', h.dataset.category!);
+        dragState.item = h.dataset.category!;
+        const cd = document.getElementById(`category-${h.dataset.category}`);
+        if (cd) { dragState.element = cd; cd.classList.add('dragging'); }
+      } else if (dtype === 'library') {
+        ev.dataTransfer!.setData('text/plain', h.dataset.library!);
+        dragState.item = h.dataset.library!;
+        const ld = document.getElementById(`library-${h.dataset.library}`);
+        if (ld) { dragState.element = ld; ld.classList.add('dragging'); }
+      } else if (dtype === 'prompt') {
+        ev.dataTransfer!.setData('text/plain', h.dataset.id!);
+        dragState.item = h.dataset.id!;
+        dragState.category = h.dataset.category!;
+        const pi = h.closest('.prompt-item');
+        if (pi) { dragState.element = pi as HTMLElement; pi.classList.add('dragging'); }
+      } else if (dtype === 'prefab') {
+        ev.dataTransfer!.setData('text/plain', h.dataset.library! + '::' + h.dataset.index!);
+        dragState.item = h.dataset.library! + '::' + h.dataset.index!;
+        dragState.library = h.dataset.library!;
+        dragState.index = parseInt(h.dataset.index!);
+        const pi = h.closest('.prompt-item');
+        if (pi) { dragState.element = pi as HTMLElement; pi.classList.add('dragging'); }
+      }
+    }, { capture: true, signal });
+
+    // ========== DRAGEND ==========
+    document.addEventListener('dragend', () => resetState(), { signal });
+
+    // ========== DRAGOVER (on containers, determine target via data attributes) ==========
+    document.addEventListener('dragover', (e: Event) => {
+      const ev = e as DragEvent;
+      if (!isDragging) return;
+      const dt = dragState.type;
+      if (!dt) return;
+
+      const target = ev.target as HTMLElement;
+
+      // Category header drop zone
+      if (dt === 'category') {
+        const header = target.closest('.category-header');
+        const cat = header?.closest('.category');
+        if (cat && cat.id !== `category-${dragState.item}` && !cat.classList.contains('dragging')) {
+          ev.preventDefault();
+          document.querySelectorAll('.category.drag-over').forEach(el => el.classList.remove('drag-over'));
+          cat.classList.add('drag-over');
+          return;
+        }
+        const addCard = target.closest('.add-category-card');
+        if (addCard) { ev.preventDefault(); addCard.classList.add('drag-over'); return; }
+      }
+
+      // Library header drop zone
+      if (dt === 'library') {
+        const header = target.closest('.category-header');
+        const lib = header?.closest('.category[id^="library-"]');
+        if (lib && lib.id !== `library-${dragState.item}` && !lib.classList.contains('dragging')) {
+          ev.preventDefault();
+          document.querySelectorAll('.category.drag-over').forEach(el => el.classList.remove('drag-over'));
+          lib.classList.add('drag-over');
+          return;
+        }
+        const addCard = target.closest('.add-library-card');
+        if (addCard) { ev.preventDefault(); addCard.classList.add('drag-over'); return; }
+      }
+
+      // Prompt/Prefab drop zones
+      if (dt === 'prompt' || dt === 'prefab') {
+        const pi = target.closest('.prompt-item:not(.add-prompt-btn):not(.dragging)') as HTMLElement;
+        if (pi) { ev.preventDefault(); pi.classList.add('drag-over'); return; }
+        const addBtn = target.closest('.add-prompt-btn');
+        if (addBtn) { ev.preventDefault(); addBtn.classList.add('drag-over'); return; }
+      }
+    }, { signal });
+
+    // ========== DRAGLEAVE (clean hover classes) ==========
+    document.addEventListener('dragleave', (e: Event) => {
+      if (!isDragging) return;
+      const target = e.target as HTMLElement;
+      target.classList.remove('drag-over');
+    }, { signal });
+
+    // ========== DROP ==========
+    document.addEventListener('drop', async (e: Event) => {
+      const ev = e as DragEvent;
+      if (!isDragging) return;
+      ev.preventDefault();
+
+      // Snapshot drag state before reset
+      const snapType = dragState.type;
+      const snapItem = dragState.item;
+      const snapCategory = dragState.category;
+      const snapLibrary = dragState.library;
+      const snapIndex = dragState.index;
+      resetState();
+
+      if (!snapType) return;
+
+      const target = ev.target as HTMLElement;
+
+      // === Category drop ===
+      if (snapType === 'category') {
+        const header = target.closest('.category-header');
+        const cat = header?.closest('.category');
+        if (cat) {
+          const tc = cat.id.replace('category-', '');
+          if (tc && snapItem !== tc) {
+            setAllPrompts((prev: AllPrompts) => {
+              const keys = Object.keys(prev);
+              const fromIdx = keys.indexOf(snapItem!);
+              const toIdx = keys.indexOf(tc);
+              if (fromIdx === -1 || toIdx === -1) return prev;
+              keys.splice(fromIdx, 1);
+              keys.splice(toIdx, 0, snapItem!);
+              const next: AllPrompts = {};
+              for (const k of keys) next[k] = prev[k];
+              return next;
+            });
+            categoryGroup.reorder(snapItem!, tc, 'at').catch(console.error);
+          }
+          return;
+        }
+        const addCard = target.closest('.add-category-card');
+        if (addCard && snapItem) {
+          setAllPrompts((prev: AllPrompts) => {
+            const keys = Object.keys(prev);
+            const fromIdx = keys.indexOf(snapItem!);
+            if (fromIdx === -1 || fromIdx === keys.length - 1) return prev;
+            keys.splice(fromIdx, 1);
+            keys.push(snapItem!);
+            const next: AllPrompts = {};
+            for (const k of keys) next[k] = prev[k];
+            return next;
+          });
+          categoryGroup.reorder(snapItem!, '' as never as string, 'end').catch(console.error);
+        }
+        return;
+      }
+
+      // === Library drop ===
+      if (snapType === 'library') {
+        const header = target.closest('.category-header');
+        const lib = header?.closest('.category[id^="library-"]');
+        if (lib) {
+          const tl = lib.id.replace('library-', '');
+          if (tl && snapItem !== tl) {
+            setAllLibraries((prev: AllLibraries) => {
+              const keys = Object.keys(prev);
+              const fromIdx = keys.indexOf(snapItem!);
+              const toIdx = keys.indexOf(tl);
+              if (fromIdx === -1 || toIdx === -1) return prev;
+              keys.splice(fromIdx, 1);
+              keys.splice(toIdx, 0, snapItem!);
+              const next: AllLibraries = {};
+              for (const k of keys) next[k] = prev[k];
+              return next;
+            });
+            libraryGroup.reorder(snapItem!, tl, 'at').catch(console.error);
+          }
+          return;
+        }
+        const addCard = target.closest('.add-library-card');
+        if (addCard && snapItem) {
+          setAllLibraries((prev: AllLibraries) => {
+            const keys = Object.keys(prev);
+            const fromIdx = keys.indexOf(snapItem!);
+            if (fromIdx === -1 || fromIdx === keys.length - 1) return prev;
+            keys.splice(fromIdx, 1);
+            keys.push(snapItem!);
+            const next: AllLibraries = {};
+            for (const k of keys) next[k] = prev[k];
+            return next;
+          });
+          libraryGroup.reorder(snapItem!, '' as never as string, 'end').catch(console.error);
+        }
+        return;
+      }
+
+      // === Prompt drop ===
+      if (snapType === 'prompt') {
+        const pi = target.closest('.prompt-item:not(.add-prompt-btn)') as HTMLElement;
+        if (pi && snapItem) {
+          const tid = pi.dataset.id;
+          const tcat = pi.dataset.category;
+          if (tid && snapItem !== tid && snapCategory) {
+            const reorderInCategory = (catName: string, fromId: string, toId: string) => {
+              setAllPrompts((prev: AllPrompts) => {
+                const catData = prev[catName] as CategoryData | undefined;
+                if (!catData) return prev;
+                const prompts = [...(catData.prompts || [])];
+                const fromIdx = prompts.findIndex(p => p.id === fromId);
+                const toIdx = prompts.findIndex(p => p.id === toId);
+                if (fromIdx === -1 || toIdx === -1) return prev;
+                const [item] = prompts.splice(fromIdx, 1);
+                prompts.splice(toIdx, 0, item);
+                return { ...prev, [catName]: { ...catData, prompts } };
+              });
+            };
+
+            if (snapCategory === tcat) {
+              reorderInCategory(tcat, snapItem, tid);
+              fetch('/reorder_prompts', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category: snapCategory, from_id: snapItem, to_id: tid, position: 'at' }),
+              }).catch(console.error);
+            } else {
+              const moveAcrossCategory = (fromCat: string, toCat: string, promptId: string) => {
+                setAllPrompts((prev: AllPrompts) => {
+                  const fromData = prev[fromCat] as CategoryData | undefined;
+                  const toData = prev[toCat] as CategoryData | undefined;
+                  if (!fromData || !toData) return prev;
+                  const fromPrompts = [...(fromData.prompts || [])];
+                  const pIdx = fromPrompts.findIndex(p => p.id === promptId);
+                  if (pIdx === -1) return prev;
+                  const [moved] = fromPrompts.splice(pIdx, 1);
+                  if (!fromPrompts.length && fromCat !== toCat) {
+                    const next = { ...prev };
+                    delete next[fromCat];
+                    return { ...next, [toCat]: { ...toData, prompts: [...(toData.prompts || []), moved] } };
+                  }
+                  return { ...prev, [fromCat]: { ...fromData, prompts: fromPrompts }, [toCat]: { ...toData, prompts: [...(toData.prompts || []), moved] } };
+                });
+              };
+              moveAcrossCategory(snapCategory!, tcat!, snapItem);
+              fetch('/move_prompt_to_category', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from_category: snapCategory, to_category: tcat, prompt_id: snapItem, insert_position: tid }),
+              }).catch(console.error);
+            }
+          }
+          return;
+        }
+        const addBtn = target.closest('.add-prompt-btn') as HTMLElement;
+        if (addBtn && snapItem) {
+          const tcat = addBtn.dataset.category;
+          if (tcat && snapCategory) {
+            if (snapCategory === tcat) {
+              setAllPrompts((prev: AllPrompts) => {
+                const catData = prev[tcat] as CategoryData | undefined;
+                if (!catData) return prev;
+                const prompts = [...(catData.prompts || [])];
+                const fromIdx = prompts.findIndex(p => p.id === snapItem);
+                if (fromIdx === -1) return prev;
+                const [item] = prompts.splice(fromIdx, 1);
+                prompts.push(item);
+                return { ...prev, [tcat]: { ...catData, prompts } };
+              });
+              fetch('/reorder_prompts', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category: tcat, from_id: snapItem, to_id: '', position: 'end' }),
+              }).catch(console.error);
+            } else {
+              setAllPrompts((prev: AllPrompts) => {
+                const fromData = prev[snapCategory!] as CategoryData | undefined;
+                const toData = prev[tcat] as CategoryData | undefined;
+                if (!fromData || !toData) return prev;
+                const fromPrompts = [...(fromData.prompts || [])];
+                const pIdx = fromPrompts.findIndex(p => p.id === snapItem);
+                if (pIdx === -1) return prev;
+                const [moved] = fromPrompts.splice(pIdx, 1);
+                if (!fromPrompts.length && snapCategory !== tcat) {
+                  const next = { ...prev };
+                  delete next[snapCategory!];
+                  return { ...next, [tcat]: { ...toData, prompts: [...(toData.prompts || []), moved] } };
+                }
+                return { ...prev, [snapCategory!]: { ...fromData, prompts: fromPrompts }, [tcat]: { ...toData, prompts: [...(toData.prompts || []), moved] } };
+              });
+              fetch('/move_prompt_to_category', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from_category: snapCategory, to_category: tcat, prompt_id: snapItem, insert_position: 'end' }),
+              }).catch(console.error);
+            }
+          }
+        }
+        return;
+      }
+
+      // === Prefab drop ===
+      if (snapType === 'prefab') {
+        const pi = target.closest('.prompt-item[data-prefab]:not(.add-prompt-btn)') as HTMLElement;
+        if (pi && snapLibrary != null && snapIndex != null) {
+          const tl = pi.dataset.library;
+          const ti = parseInt(pi.dataset.prefabIndex!);
+          if (tl && !isNaN(ti) && snapLibrary === tl) {
+            fetch('/reorder_library_prefabs', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ library: tl, from_index: snapIndex, to_index: ti }),
+            }).catch(console.error);
+          } else if (tl && snapLibrary !== tl) {
+            fetch('/move_prefab_to_library', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ from_library: snapLibrary, to_library: tl, from_index: snapIndex, to_index: ti }),
+            }).catch(console.error);
+          }
+          return;
+        }
+        const addBtn = target.closest('.add-prompt-btn') as HTMLElement;
+        if (addBtn && snapLibrary != null && snapIndex != null) {
+          const tl = addBtn.dataset.library;
+          if (tl && snapLibrary === tl) {
+            fetch('/reorder_library_prefabs', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ library: tl, from_index: snapIndex, to_index: -1 }),
+            }).catch(console.error);
+          } else if (tl && snapLibrary !== tl) {
+            fetch('/move_prefab_to_library', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ from_library: snapLibrary, to_library: tl, from_index: snapIndex, to_index: -1 }),
+            }).catch(console.error);
+          }
+        }
+      }
+    }, { signal });
+  }, [setAllPrompts, setAllLibraries]);
+
+  // ========== ZOOM VIEW (vanilla JS) ==========
+  const initZoomView = useCallback(() => {
+    const handleMouseOver = (e: MouseEvent) => {
+      if (isDragging) return;
+      if (document.querySelector('.modal.visible')) return;
+      const target = e.target as HTMLElement;
+      if (target.closest('.actions, .action-btn, .drag-handle, .selected-card-delete')) return;
+      const pi = target.closest('.prompt-item:not(.add-prompt-btn)') as HTMLElement;
+
+      // 先取消任何离场定时器（防子元素切换抖动）
+      if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+
+      if (!pi) {
+        // 鼠标不在任何 prompt-item 上，但可能还在已放大项区域内
+        if (currentZoomItem) {
+          const zr = currentZoomItem.getBoundingClientRect();
+          if (e.clientX >= zr.left && e.clientX <= zr.right && e.clientY >= zr.top && e.clientY <= zr.bottom) return;
+          // 确实离开了，100ms 后收起
+          leaveTimer = setTimeout(() => {
+            if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+            if (currentZoomItem!.classList.contains('zoom-view')) {
+              currentZoomItem!.classList.remove('zoom-view');
+              currentZoomItem!.classList.add('zoom-exit');
+              const old = currentZoomItem!;
+              currentZoomItem = null;
+              setTimeout(() => { old.classList.remove('zoom-exit'); }, 300);
+            } else {
+              currentZoomItem = null;
+            }
+          }, 100);
+        }
+        if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+        return;
+      }
+
+      if (pi === currentZoomItem) return;
+
+      const img = pi.querySelector('.image-layer img') as HTMLImageElement;
+      if (!img || !img.naturalWidth) return;
+
+      // 收起旧的已放大项（仅当它真正放了 zoom-view）
+      if (currentZoomItem && currentZoomItem.classList.contains('zoom-view')) {
+        currentZoomItem.classList.remove('zoom-view');
+        currentZoomItem.classList.add('zoom-exit');
+        const old = currentZoomItem;
+        setTimeout(() => { old.classList.remove('zoom-exit'); }, 300);
+      }
+
+      if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+      currentZoomItem = pi;
+
+      zoomTimer = setTimeout(() => {
+        if (isDragging || document.querySelector('.modal.visible')) return;
+        const imgW = img.naturalWidth;
+        const imgH = img.naturalHeight;
+        const targetPx = 750 * 750;
+        const scale = Math.sqrt(targetPx / (imgW * imgH));
+        const zw = imgW * scale;
+        const zh = imgH * scale;
+        pi.style.setProperty('--zoom-width', zw + 'px');
+        pi.style.setProperty('--zoom-height', zh + 'px');
+
+        const rect = pi.getBoundingClientRect();
+        const margin = 20;
+        let ox = 0, oy = 0;
+        if (rect.left + zw > window.innerWidth - margin) ox = window.innerWidth - margin - zw - rect.left;
+        if (rect.left + ox < margin) ox = margin - rect.left;
+        if (rect.top + zh > window.innerHeight - margin) oy = window.innerHeight - margin - zh - rect.top;
+        if (rect.top + oy < margin) oy = margin - rect.top;
+        if (ox !== 0 || oy !== 0) {
+          pi.style.setProperty('--zoom-offset-x', ox + 'px');
+          pi.style.setProperty('--zoom-offset-y', oy + 'px');
+        }
+        pi.classList.add('zoom-view');
+      }, ZOOM_DELAY);
+    };
+
+    document.removeEventListener('mouseover', handleMouseOver);
+    document.addEventListener('mouseover', handleMouseOver);
+
+    // 全局监听 mousemove 来检测真正离开（而不是依赖 mouseout）
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isDragging || !currentZoomItem) return;
+      const zr = currentZoomItem.getBoundingClientRect();
+      if (e.clientX >= zr.left && e.clientX <= zr.right && e.clientY >= zr.top && e.clientY <= zr.bottom) {
+        if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+        return;
+      }
+      if (!leaveTimer) {
+        leaveTimer = setTimeout(() => {
+          if (zoomTimer) { clearTimeout(zoomTimer); zoomTimer = null; }
+          if (currentZoomItem && currentZoomItem.classList.contains('zoom-view')) {
+            currentZoomItem.classList.remove('zoom-view');
+            currentZoomItem.classList.add('zoom-exit');
+            const old = currentZoomItem;
+            currentZoomItem = null;
+            setTimeout(() => { old.classList.remove('zoom-exit'); }, 300);
+          } else {
+            currentZoomItem = null;
+          }
+        }, 150);
+      }
+    };
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  // ========== BACKGROUND ANIMATION ==========
+  const initBgAnimation = useCallback(() => {
+    if (bgAnimRunningRef.current) return;
+    bgAnimRunningRef.current = true;
+    mouseRef.current = { x: 0, y: 0 };
+    shakeRef.current = { ox: 0, oy: 0, tx: 0, ty: 0, lt: Date.now() };
+
+    const onMouseMove = (e: MouseEvent) => { mouseRef.current = { x: e.clientX, y: e.clientY }; };
+    document.removeEventListener('mousemove', onMouseMove);
+    document.addEventListener('mousemove', onMouseMove);
+
+    function animateBg() {
+      const now = Date.now();
+      const dt = (now - shakeRef.current.lt) / 1000;
+      shakeRef.current.lt = now;
+
+      if (Math.random() < 0.02) {
+        shakeRef.current.tx = (Math.random() - 0.5) * 4;
+        shakeRef.current.ty = (Math.random() - 0.5) * 4;
+      }
+      const lf = 0.05;
+      shakeRef.current.ox += (shakeRef.current.tx - shakeRef.current.ox) * lf;
+      shakeRef.current.oy += (shakeRef.current.ty - shakeRef.current.oy) * lf;
+
+      document.querySelectorAll('.category-background-mask').forEach(mask => {
+        const cat = mask.closest('.category') as HTMLElement;
+        if (!cat) return;
+        const rect = cat.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const dx = (mouseRef.current.x - cx) / rect.width;
+        const dy = (mouseRef.current.y - cy) / rect.height;
+        const bg = mask.querySelector('.category-background') as HTMLElement;
+        if (!bg) return;
+
+        const maskW = mask.clientWidth;
+        const maskH = mask.clientHeight;
+        const bgW = parseFloat(getComputedStyle(bg).width) || maskW * 1.2;
+        const bgH = parseFloat(getComputedStyle(bg).height) || maskH * 1.2;
+        const maxX = Math.max(0, (bgW - maskW) * 0.5);
+        const maxY = Math.max(0, (bgH - maskH) * 0.5);
+        const sens = 0.05;
+        const tx = dx * maxX * sens + shakeRef.current.ox;
+        const ty = dy * maxY * sens + shakeRef.current.oy;
+        const decayX = Math.tanh(tx / (maxX || 1)) * maxX;
+        const decayY = Math.tanh(ty / (maxY || 1)) * maxY;
+
+        const catName = cat.id.replace('category-', '').replace('library-', '');
+        const base = bgBaseRef.current[catName];
+        const fx = base ? decayX + base.x : decayX;
+        const fy = base ? decayY + base.y : decayY;
+        bg.style.setProperty('--bg-x', `${fx}px`);
+        bg.style.setProperty('--bg-y', `${fy}px`);
+      });
+      requestAnimationFrame(animateBg);
+    }
+    requestAnimationFrame(animateBg);
+  }, []);
+
+  // ========== BG Scale on render ==========
+  const initBgScales = useCallback(() => {
+    document.querySelectorAll('.category-background-mask .category-background').forEach(bg => {
+      const el = bg as HTMLElement;
+      const mask = el.parentElement;
+      if (!mask) return;
+      const img = el.style.backgroundImage;
+      const url = img.match(/url\(["']?([^"')]+)["']?\)/);
+      if (!url) return;
+      const imgPath = url[1];
+
+      const imgEl = new Image();
+      imgEl.onload = () => {
+        const mw = mask.clientWidth;
+        const mh = mask.clientHeight;
+        const iw = imgEl.naturalWidth;
+        const ih = imgEl.naturalHeight;
+        if (!iw || !ih || !mw || !mh) return;
+        const key = imgPath.replace(/^.*\/images\//, '');
+        bgSizesRef.current[key] = { w: iw, h: ih };
+        const scale = Math.max((mw * 1.2) / iw, (mh * 1.2) / ih);
+        el.style.setProperty('--bg-width', `${iw * scale}px`);
+        el.style.setProperty('--bg-height', `${ih * scale}px`);
+
+        const catEl = mask.closest('.category') as HTMLElement;
+        const catName = catEl ? catEl.id.replace('category-', '').replace('library-', '') : '';
+        if (catName) applyBgFocus(el, key, catName);
+      };
+      imgEl.src = imgPath;
+    });
+  }, []);
+
+  const applyBgFocus = useCallback((bg: HTMLElement, key: string, name: string) => {
+    const pt = categoryFocusRef.current[name];
+    const sizes = bgSizesRef.current[key];
+    if (!pt || !sizes) { delete bgBaseRef.current[name]; return; }
+
+    const bw = parseFloat(bg.style.getPropertyValue('--bg-width')) || bg.clientWidth;
+    const bh = parseFloat(bg.style.getPropertyValue('--bg-height')) || bg.clientHeight;
+    if (!bw || !bh) return;
+
+    const ox = bw * (0.5 - pt.x / 100);
+    const oy = bh * (0.5 - pt.y / 100);
+    const mask = bg.parentElement!;
+    const mw = mask.clientWidth;
+    const mh = mask.clientHeight;
+    const mx = Math.max(0, (bw - mw) * 0.5);
+    const my = Math.max(0, (bh - mh) * 0.5);
+    const cx = Math.max(-mx, Math.min(mx, ox));
+    const cy = Math.max(-my, Math.min(my, oy));
+    bgBaseRef.current[name] = { x: cx, y: cy };
+  }, []);
+
+  // ========== ZOOM RESTORE after re-render ==========
+  useEffect(() => {
+    if (zoomRestoreSelector) {
+      const sel = zoomRestoreSelector;
+      const vars = { ...zoomRestoreVars };
+      zoomRestoreSelector = null;
+      zoomRestoreVars = {};
+      requestAnimationFrame(() => {
+        const el = document.querySelector(sel) as HTMLElement;
+        if (el) {
+          Object.entries(vars).forEach(([k, v]) => { if (v) el.style.setProperty(k, v); });
+          el.classList.add('zoom-view');
+          currentZoomItem = el;
+        }
+      });
+    }
+  }, [selectedTags, temporaryCtx.stack.length]);
+
+  // ========== ALL INIT ==========
+  useEffect(() => {
+    initDragAndDrop();
+    initBgAnimation();
+    initBgScales();
+    const t = setTimeout(() => {
+      initZoomView();
+    }, 100);
+    return () => { clearTimeout(t); };
+  }, [allPrompts, allLibraries, selectedTags, expandedCategories, expandedLibraries, categoryFocusPoints, temporaryCtx.stack.length, initDragAndDrop, initZoomView, initBgAnimation, initBgScales]);
+
+  // ========== RENDER ==========
+  const categories = Object.entries(allPrompts);
+  const libraries = Object.entries(allLibraries);
+
+  // Build duplicate prompt set
+  const allPromptTexts: string[] = [];
+  for (const [, catData] of categories) {
+    const cp = (catData as CategoryData).prompts || [];
+    for (const p of cp) { allPromptTexts.push(p.prompt); }
+  }
+  const duplicateSet = new Set<string>();
+  const seen = new Set<string>();
+  for (const pt of allPromptTexts) {
+    if (seen.has(pt)) duplicateSet.add(pt);
+    seen.add(pt);
+  }
+
+  return (
+    <div className="app-container">
+      <div className="main-wrapper">
+        <div className="scroll-container">
+          <div className="container">
+            <div className="header">
+              <h1>{iconPalette} Prompt Snapshot</h1>
+              <SearchBar
+                searchQuery={searchQuery}
+                onSearchChange={handleSearch}
+                filterOptions={allFilterOptions}
+                selectedFilter={selectedFilter}
+                onFilterChange={handleFilterChange}
+              />
+            </div>
+
+            {isTemporary && currentCtx ? (
+              <div className="temporary-banner">
+                <span>{currentCtx.title}</span>
+                <div>
+                  {temporaryCtx.stack.length > 1 && <button className="btn btn-warning" onClick={backLayer}>{iconArrowLeft} 返回上层</button>}
+                  <button className="btn btn-success" onClick={completeLayer}>直接添加</button>
+                  <button className="btn btn-secondary" onClick={cancelTemporary}>取消</button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="categories-container" id="categories">
+              {categories.map(([cat, catData]) => {
+                const cp = catData.prompts as PromptData[] || [];
+                const catDeco = (catData.decorations as string[]) || [];
+                const catTags = (catData.tags as string[]) || [];
+                const expanded = expandedCategories.has(cat);
+                const anim = animating.has(cat);
+                const displayMode = categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries);
+                const sizeMode = categoryDisplay.getSize(cat, categorySizeModes, allLibraries);
+                const isMiniMode = sizeMode === 'mini';
+                const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+                const bgImage = catData.bg_image || '';
+
+                let filtered = cp;
+                const needsFilter = searchQuery || selectedFilter;
+                if (isTemporary && currentCtx) {
+                  filtered = cp.filter(p => currentCtx.matchFn(p, cat));
+                  if (filtered.length === 0) return null;
+                } else if (needsFilter) {
+                  const catDataObj = allPrompts[cat] as any;
+                  const catDecos: string[] = catDataObj ? (Array.isArray(catDataObj.decorations) ? catDataObj.decorations : typeof catDataObj.decorations === 'string' ? catDataObj.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
+                  const catTgs: string[] = catDataObj ? (Array.isArray(catDataObj.tags) ? catDataObj.tags : typeof catDataObj.tags === 'string' ? catDataObj.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
+                  filtered = cp.filter(p => {
+                    if (searchQuery) {
+                      const tm = Array.isArray(p.tags) ? p.tags.some((t: string) => t.toLowerCase().includes(searchQuery)) : (p.tags || '').toLowerCase().includes(searchQuery);
+                      if (!p.name.toLowerCase().includes(searchQuery) && !p.prompt.toLowerCase().includes(searchQuery) && !tm) return false;
+                    }
+                    if (selectedFilter) {
+                      const pDecos: string[] = Array.isArray(p.decorations) ? p.decorations : typeof p.decorations === 'string' ? p.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+                      const pTgs: string[] = Array.isArray(p.tags) ? p.tags : typeof p.tags === 'string' ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+                      const allCandidates = pDecos.concat(catDecos, pTgs, catTgs);
+                      if (!allCandidates.some(x => x.toLowerCase() === selectedFilter.toLowerCase())) return false;
+                    }
+                    return true;
+                  });
+                  if (filtered.length === 0) return null;
+                }
+
+                const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => isTagSelected(p.prompt)).length;
+                const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
+
+                return (
+                  <div key={cat} className={`category ${expanded ? 'expanded' : 'collapsed'}${catHasDuplicate ? ' duplicate' : ''}`} id={`category-${cat}`}>
+                    {expanded && bgImage ? (
+                      <div className="category-background-mask">
+                        <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})` }} />
+                      </div>
+                    ) : null}
+                    <div className="category-header" onClick={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(cat); }}>
+                      {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : null}
+                      <div className="header-content">
+                        <div style={{ display:'flex', alignItems:'center' }}>
+                          <span className="drag-handle" data-drag-type="category" data-category={cat}>{iconGrip}</span>
+                          <span style={{ textShadow:'0px 0px 4px black' }}>{cat}</span>
+                        </div>
+                        <div style={{ display:'flex', alignItems:'center' }}>
+                          {(catTags.length > 0 || catDeco.length > 0) && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}{catDeco.map(d => <span className="decoration-tag" key={d}>{d}</span>)}</div>}
+                          {selCount > 0 && <span className="count-badge">{selCount}</span>}
+                          <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(cat); setModalMode(categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries)); setModalSize(categoryDisplay.getSize(cat, categorySizeModes, allLibraries)); setModalIsCat(true); setModal({type:'displayMode',data:{name:cat,isCat:true}}); }}>{iconGrid}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconPencil}</button>
+                          <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteCategoryDirect(cat); }}>{iconTrash}</button>
+                          <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
+                        </div>
+                      </div>
+                    </div>
+                    {expanded ? (
+                      <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
+                        {filtered.map(p => {
+                          const pDeco = Array.isArray(p.decorations) ? p.decorations : [];
+                          const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+                          const uDeco = pDeco.filter((d: string) => !catDeco.includes(d));
+                          const sel = isTemporary ? isPromptSelectedInTempCtx(p.prompt) : isTagSelected(p.prompt);
+                          const group = !isTemporary ? getTagGroupForPrompt(p.prompt) : undefined;
+                          const fp = focusPoints[p.id];
+                          const showSelCard = isTemporary ? isPromptSelectedInTempCtx(p.prompt) : !!group;
+
+                          return (
+                            <div key={p.id} className="prompt-item-wrapper">
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
+                                <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
+                                {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
+                                <div className="select-area" onClick={() => selectPrompt(p.prompt)}>
+                                  <div className="image-layer">
+                                    {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
+                                  </div>
+                                  {!isMiniMode && <div className="glass-layer" />}
+                                  <div className="text-layer">
+                                    <div className="name">{p.name}</div>
+                                    <div className="prompt-text">{p.prompt}</div>
+                                  </div>
+                                </div>
+                                <div className="actions">
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconPencil}</button>
+                                  <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
+                                </div>
+                              </div>
+                              {showSelCard ? (
+                                isTemporary && currentCtx ? (
+                                  <div className="selected-card">
+                                    <div className="selected-card-content">{p.name}</div>
+                                    <button className="selected-card-delete" onClick={e => {
+                                      e.stopPropagation();
+                                      const tgIdx = currentCtx.tagGroups.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === p.prompt));
+                                      if (tgIdx !== -1) removeTemporaryTag(tgIdx);
+                                    }}>{iconX}</button>
+                                  </div>
+                                ) : group ? (
+                                  <div className="selected-card">
+                                    <div className="selected-card-content">{tagsToDisplayName(group)}</div>
+                                    <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter(g => g !== group)); }}>{iconX}</button>
+                                  </div>
+                                ) : null
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        {!(searchQuery || selectedFilter) && !isTemporary ? (
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={cat} style={{ cursor:'pointer' }} onClick={() => { resetModalForm(); setModalCategory(cat); setModal({type:'addPrompt'}); }}><div>{iconPlus}</div></div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+              <div className="add-category-card" onClick={() => { resetModalForm(); setModal({type:'addCategory'}); }}><span>{iconPlus} Add Category</span></div>
+            </div>
+
+            {!isTemporary ? (<div className="categories-container">
+              {libraries.map(([lib, libData]) => {
+                const expanded = expandedLibraries.has(lib);
+                const anim = animating.has(lib);
+                const displayMode = libraryDisplay.getMode(lib, categoryDisplayModes, allLibraries);
+                const sizeMode = libraryDisplay.getSize(lib, categorySizeModes, allLibraries);
+                const isMiniMode = sizeMode === 'mini';
+                const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
+                const bgImage = libData.bg_image || '';
+                const pids: string[] = libData.prompt_ids || [];
+                const prefabs = libData.prefabs || [];
+
+                const prompts: (PromptData & { category: string })[] = [];
+                for (const [c, cd] of Object.entries(allPrompts)) {
+                  (cd.prompts as PromptData[] || []).forEach(p => { if (pids.includes(p.id)) prompts.push({ ...p, category: c }); });
+                }
+                let filteredPrompts = prompts;
+                let filteredPrefabs = prefabs;
+                const libNeedsFilter = searchQuery || selectedFilter;
+                if (libNeedsFilter) {
+                  filteredPrompts = prompts.filter(p => {
+                    if (searchQuery) {
+                      const tm = Array.isArray(p.tags) ? p.tags.some((t: string) => t.toLowerCase().includes(searchQuery)) : (p.tags || '').toLowerCase().includes(searchQuery);
+                      if (!p.name.toLowerCase().includes(searchQuery) && !p.prompt.toLowerCase().includes(searchQuery) && !tm) return false;
+                    }
+                    if (selectedFilter) {
+                      const catDataObj = allPrompts[p.category] as any;
+                      const catDecos: string[] = catDataObj ? (Array.isArray(catDataObj.decorations) ? catDataObj.decorations : typeof catDataObj.decorations === 'string' ? catDataObj.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
+                      const catTgs: string[] = catDataObj ? (Array.isArray(catDataObj.tags) ? catDataObj.tags : typeof catDataObj.tags === 'string' ? catDataObj.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
+                      const pDecos: string[] = Array.isArray(p.decorations) ? p.decorations : typeof p.decorations === 'string' ? p.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+                      const pTgs: string[] = Array.isArray(p.tags) ? p.tags : typeof p.tags === 'string' ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+                      const allCandidates = pDecos.concat(catDecos, pTgs, catTgs);
+                      if (!allCandidates.some(x => x.toLowerCase() === selectedFilter.toLowerCase())) return false;
+                    }
+                    return true;
+                  });
+                  filteredPrefabs = prefabs.filter(pf => {
+                    if (searchQuery) {
+                      if (pf.name.toLowerCase().includes(searchQuery)) return true;
+                      for (const group of (pf.tags || [])) {
+                        for (const tag of group) {
+                          if (tag.name.toLowerCase().includes(searchQuery) || tag.prompt.toLowerCase().includes(searchQuery)) return true;
+                        }
+                      }
+                      return false;
+                    }
+                    return true;
+                  });
+                }
+                if (libNeedsFilter && filteredPrompts.length === 0 && filteredPrefabs.length === 0) return null;
+
+                const libHasDuplicate = prompts.some(p => duplicateSet.has(p.prompt));
+
+                return (
+                  <div key={lib} className={`category ${expanded ? 'expanded' : 'collapsed'}${libHasDuplicate ? ' duplicate' : ''}`} id={`library-${lib}`}>
+                    {expanded && bgImage ? (
+                      <div className="category-background-mask">
+                        <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})` }} />
+                      </div>
+                    ) : null}
+                    <div className="category-header" onClick={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleLibrary(lib); }}>
+                      {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} /> : null}
+                      <div className="header-content">
+                        <div style={{ display:'flex', alignItems:'center' }}>
+                          <span className="drag-handle" data-drag-type="library" data-library={lib}>{iconGrip}</span>
+                          <span style={{ textShadow:'0px 0px 4px black' }}>{lib}</span>
+                        </div>
+                        <div style={{ display:'flex', alignItems:'center' }}>
+                          <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(lib); setModalMode(libraryDisplay.getMode(lib, categoryDisplayModes, allLibraries)); setModalSize(libraryDisplay.getSize(lib, categorySizeModes, allLibraries)); setModalIsCat(false); setModal({type:'displayMode',data:{name:lib,isCat:false}}); }}>{iconGrid}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const ld = allLibraries[lib]||{} as any; setModalOldName(lib); setModalName(lib); setModalPromptIds((ld.prompt_ids||[]).join(', ')); const bg = ld.bg_image||''; if(bg){ setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editLibrary',data:{name:lib}}); }}>{iconPencil}</button>
+                          <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteLibraryDirect(lib); }}>{iconTrash}</button>
+                          <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
+                        </div>
+                      </div>
+                    </div>
+                    {expanded ? (
+                      <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
+                        {filteredPrompts.map(p => {
+                          const sel = isTagSelected(p.prompt);
+                          const group = getTagGroupForPrompt(p.prompt);
+                          const fp = focusPoints[p.id];
+                          const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+                          return (
+                            <div key={p.id} className="prompt-item-wrapper">
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
+                                <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
+                                {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
+                                <div className="select-area" onClick={() => selectPrompt(p.prompt)}>
+                                  <div className="image-layer">
+                                    {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
+                                  </div>
+                                  {!isMiniMode && <div className="glass-layer" />}
+                                  <div className="text-layer">
+                                    <div className="name">{p.name}</div>
+                                    <div className="prompt-text">{p.prompt}</div>
+                                  </div>
+                                </div>
+                                <div className="actions">
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconPencil}</button>
+                                  <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
+                                </div>
+                              </div>
+                              {group ? (
+                                <div className="selected-card">
+                                  <div className="selected-card-content">{tagsToDisplayName(group)}</div>
+                                  <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter(g => g !== group)); }}>{iconX}</button>
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                        {filteredPrefabs.map((pf, i) => (
+                          <PrefabItem key={`prefab_${lib}_${i}`}
+                            prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
+                            prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags)}
+                            focusPoints={focusPoints} imgUrl={imgUrl}
+                            onMerge={mergePrefab} onReplace={replacePrefab}
+                            onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
+                            onDelete={() => deletePrefab(lib, i)}
+                          />
+                        ))}
+                        {selectedTags.length > 0 ? (
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer', fontSize:12 }} onClick={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus} Add Prefab</div></div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+              <div className="add-library-card" onClick={() => { resetModalForm(); setModal({type:'addLibrary'}); }}><span>{iconPlus} Add Library</span></div>
+            </div>) : null}
+          </div>
+        </div>
+
+        <div className="right-bar">
+          <div className="selected-bar">
+            <h3>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
+            <div className="selected-tags">
+              {isTemporary && currentCtx
+                ? currentCtx.tagGroups.map((group, i) => (
+                  <span className="tag" key={i}>
+                    {tagsToDisplayName(group)}
+                    <span className="remove" onClick={() => removeTemporaryTag(i)}>{iconX}</span>
+                  </span>
+                ))
+                : selectedTags.map((group, i) => (
+                  <span className="tag" key={i}>
+                    {tagsToDisplayName(group)}
+                    <span className="remove" onClick={() => removeTag(i)}>{iconX}</span>
+                  </span>
+                ))}
+            </div>
+          </div>
+
+          <div className="custom-input-section">
+            <h3>Custom Prompts</h3>
+            <CustomPromptsEditor
+              value={customPrompts}
+              onChange={setCustomPrompts}
+              allPrompts={allPrompts}
+              onParsed={handleCustomPromptsParsed}
+            />
+          </div>
+
+          <div className="footer">
+            <button className="btn btn-secondary" onClick={closeWindow}>Cancel</button>
+            <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>
+          </div>
+        </div>
+      </div>
+
+      {modal?.type === 'addCategory' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Add New Category</h2>
+            <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') addCategory(); }} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={addCategory}>Add</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'addLibrary' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Add New Library</h2>
+            <input type="text" placeholder="Library name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') addLibrary(); }} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={addLibrary}>Add</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'addPrompt' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Add New Prompt</h2>
+            <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
+            <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
+            <TagInput label="Mute Decorations" tags={modalMuteDecorations} setTags={setModalMuteDecorations} />
+            <input type="text" placeholder="Category (default: 杂项)" value={modalCategory} onChange={e => setModalCategory(e.target.value)} />
+             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+             <div className="modal-buttons">
+               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+               <button className="btn btn-primary" onClick={async () => {
+                 const name = modalName.trim(), pt = modalPrompt.trim();
+                 if(!name||!pt){alert('Please enter name and prompt text');return;}
+                 let imageData = '';
+                 if(modalImageFile){const r=new FileReader();imageData=await new Promise(resolve=>{r.onload=e=>resolve(e.target?.result as string);r.readAsDataURL(modalImageFile!);});}
+                 const res = await fetch('/add_prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:modalCategory||'杂项',name,prompt:pt,tags:modalTags,decorations:modalDecorations,mute_decorations:modalMuteDecorations,image:imageData})});
+                 if (!res.ok) return;
+                 const result = await res.json();
+                 if (imageData) setImgVersion(v => v + 1);
+                 const cat = modalCategory || '杂项';
+                 const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: pt, preview: result.preview || '', tags: modalTags as any, decorations: modalDecorations as any, mute_decorations: modalMuteDecorations };
+                 setAllPrompts((prev: AllPrompts) => {
+                   const catData = prev[cat];
+                   return { ...prev, [cat]: { ...(catData as CategoryData || {}), prompts: [...((catData as CategoryData)?.prompts || []), newPrompt] } };
+                 });
+                 closeModal();
+               }}>Add</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editPrompt' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Edit Prompt</h2>
+            <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
+            <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
+            <TagInput label="Mute Decorations" tags={modalMuteDecorations} setTags={setModalMuteDecorations} />
+            <select value={modalCategory} onChange={e => setModalCategory(e.target.value)}>
+              <option value="">Keep current category</option>
+              {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={updatePrompt}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editCategory' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Edit Category</h2>
+            <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-danger" onClick={removeCategoryBg}>Remove BG</button>
+              <button className="btn btn-primary" onClick={updateCategory}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editLibrary' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Edit Library</h2>
+            <input type="text" placeholder="Library name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <label>Select Prompt IDs (comma separated)</label>
+            <input type="text" placeholder="e.g. prompt_id1, prompt_id2" value={modalPromptIds} onChange={e => setModalPromptIds(e.target.value)} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-danger" onClick={deleteLibrary}>Delete</button>
+              <button className="btn btn-primary" onClick={updateLibrary}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'displayMode' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Edit {modalIsCat?'Category':'Library'} Display Mode</h2>
+            <label>Layout Mode</label>
+            <select value={modalMode} onChange={e => setModalMode(e.target.value)}>
+              <option value="horizontal">Horizontal (Scroll)</option>
+              <option value="box">Box (Adaptive Grid)</option>
+            </select>
+            <label>Size Mode</label>
+            <select value={modalSize} onChange={e => setModalSize(e.target.value)}>
+              <option value="normal">Normal</option>
+              <option value="mini">Mini</option>
+            </select>
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={updateDisplayMode}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'addPrefab' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Add Prefab</h2>
+            <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-primary" onClick={e => { e.stopPropagation(); e.preventDefault(); addPrefab(); }}>Save Prefab</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editPrefab' ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>Edit Prefab</h2>
+            <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <label>Custom Prompts</label>
+            <textarea placeholder="Custom prompts text..." value={modalCustomPrompts} onChange={e => setModalCustomPrompts(e.target.value)}></textarea>
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
+              <button className="btn btn-secondary" onClick={syncPrefab}>Sync</button>
+              <button className="btn btn-primary" onClick={e => { e.stopPropagation(); e.preventDefault(); updatePrefab(); }}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal ? (
+        <div className="modal visible" onClick={closeModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2>{modal.type}</h2>
+            <div className="modal-buttons"><button className="btn btn-secondary" onClick={closeModal}>Close</button></div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function getPrefabClass(prefabTags: TagGroup[], selectedTags: TagGroup[]): string {
+  if (prefabTags.length === 0 || selectedTags.length === 0) return '';
+  let matchCount = 0;
+  for (const pfGroup of prefabTags) {
+    const pfDisplay = tagsToDisplayName(pfGroup);
+    for (const selGroup of selectedTags) {
+      if (tagsToDisplayName(selGroup) === pfDisplay) { matchCount++; break; }
+    }
+  }
+  if (matchCount === prefabTags.length) return 'prefab-full';
+  if (matchCount > 0) return 'prefab-partial';
+  return '';
+}
+
+function ImageSection({
+  previewUrl, previewVisible, focusX, focusY, focusVisible,
+  onImageSelect, onPreviewClick, onRemoveFocus, onPasteImage,
+}: {
+  previewUrl: string; previewVisible: boolean; focusX: number; focusY: number; focusVisible: boolean;
+  onImageSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onPreviewClick: (e: React.MouseEvent<HTMLImageElement>) => void;
+  onRemoveFocus: (e: React.MouseEvent) => void;
+  onPasteImage?: (file: File) => void;
+}) {
+  const markerLeft = focusX;
+  const markerTop = focusY;
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!onPasteImage) return;
+    const el = rowRef.current;
+    if (!el) return;
+    const handler = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          e.preventDefault();
+          const blob = items[i].getAsFile();
+          if (blob) onPasteImage(blob);
+          break;
+        }
+      }
+    };
+    el.addEventListener('paste', handler);
+    // Also listen on the document when this section is focused/visible
+    document.addEventListener('paste', handler);
+    return () => {
+      el.removeEventListener('paste', handler);
+      document.removeEventListener('paste', handler);
+    };
+  }, [onPasteImage]);
+
+  const handlePasteClick = useCallback(async () => {
+    if (!onPasteImage) return;
+    try {
+      const permission = await (navigator as any).permissions?.query({ name: 'clipboard-read' });
+      if (permission && permission.state === 'denied') {
+        alert('Clipboard permission denied. Please use Ctrl+V to paste image.');
+        return;
+      }
+    } catch {}
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      for (const item of clipboardItems) {
+        for (const type of item.types) {
+          if (type.startsWith('image/')) {
+            const blob = await item.getType(type);
+            const file = new File([blob], `pasted-image.${type.split('/')[1] || 'png'}`, { type });
+            onPasteImage(file);
+            return;
+          }
+        }
+      }
+      alert('No image found in clipboard. Please copy an image first or use Ctrl+V.');
+    } catch {
+      alert('Failed to read clipboard. Please use Ctrl+V to paste image.');
+    }
+  }, [onPasteImage]);
+
+  return (<>
+    <div className="image-input-row" ref={rowRef} tabIndex={-1}>
+      <input type="file" accept="image/*" onChange={onImageSelect} />
+      {onPasteImage ? (
+        <button className="btn btn-secondary paste-image-btn" type="button" onClick={handlePasteClick} title="Paste image from clipboard (Ctrl+V)">
+          {iconClipboard} Paste
+        </button>
+      ) : null}
+    </div>
+    <div className="image-preview-container">
+      {previewUrl ? <img
+        className={`image-preview${previewVisible ? ' visible' : ''}`} src={previewUrl} alt="Preview"
+        onClick={onPreviewClick} onContextMenu={onRemoveFocus}
+      /> : null}
+      <div className="focus-marker" style={{
+        left: `${markerLeft}%`, top: `${markerTop}%`,
+        display: focusVisible ? 'block' : 'none',
+      }} />
+    </div>
+  </>);
+}
+function TagInput({label, tags, setTags}: {label:string; tags:string[]; setTags:(t:string[])=>void}) {
+  const [val, setVal] = useState('');
+  const add = () => { const v = val.trim(); if(v && !tags.includes(v)) { setTags([...tags, v]); } setVal(''); };
+  return (
+    <div className="tag-input-container">
+      <label>{label}</label>
+      <div className="tag-input-row">
+        <input type="text" placeholder={`Enter ${label.toLowerCase()}...`} value={val} onChange={e => setVal(e.target.value)} onKeyDown={e => { if(e.key==='Enter') add(); }} />
+        <button className="btn btn-primary" onClick={add}>Add {label.slice(-1)==='s'?label.slice(0,-1):label}</button>
+      </div>
+      <div className="tag-list">
+        {tags.map((t,i) => <span className="tag-chip" key={i}>{t}<span className="tag-remove" onClick={() => setTags(tags.filter((_,j)=>j!==i))}>{iconX}</span></span>)}
+      </div>
+    </div>
+  );
+}

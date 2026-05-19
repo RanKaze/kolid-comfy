@@ -96,8 +96,14 @@ class SnapshotPromptServer:
 
         self.prompts_data = self._load_prompts()
         self.libraries_data = self._load_libraries()
-        self.category_display_modes = self._load_category_display_modes()
-        self.category_size_modes = self._load_category_size_modes()
+        self.category_display_modes = {}
+        self.category_size_modes = {}
+        for cat, cat_data in self.prompts_data.items():
+            self.category_display_modes[cat] = cat_data.get("display_mode", "horizontal")
+            self.category_size_modes[cat] = cat_data.get("size_mode", "normal")
+        # Migrate old separate display/size mode files into prompts_data
+        self._migrate_display_modes()
+        self._migrate_size_modes()
 
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -192,6 +198,10 @@ class SnapshotPromptServer:
                     value["decorations"] = []
                 elif isinstance(value["decorations"], str):
                     value["decorations"] = [t.strip() for t in value["decorations"].split(",") if t.strip()]
+                if "display_mode" not in value:
+                    value["display_mode"] = "horizontal"
+                if "size_mode" not in value:
+                    value["size_mode"] = "normal"
                 # Migrate prompts without tags/decorations field or with string tags
                 if "prompts" in value:
                     for p in value["prompts"]:
@@ -203,7 +213,41 @@ class SnapshotPromptServer:
                             p["decorations"] = []
                         elif isinstance(p["decorations"], str):
                             p["decorations"] = [t.strip() for t in p["decorations"].split(",") if t.strip()]
+                        if "mute_decorations" not in p:
+                            p["mute_decorations"] = []
+                        elif isinstance(p["mute_decorations"], str):
+                            p["mute_decorations"] = [t.strip() for t in p["mute_decorations"].split(",") if t.strip()]
         return migrated
+
+    def _migrate_display_modes(self):
+        from_path = os.path.join(self.data_dir, "display_modes.json")
+        if os.path.exists(from_path):
+            try:
+                with open(from_path, 'r', encoding='utf-8') as f:
+                    old_modes = json.load(f)
+                for cat, mode in old_modes.items():
+                    if cat in self.prompts_data:
+                        self.prompts_data[cat]["display_mode"] = mode
+                        self.category_display_modes[cat] = mode
+                os.remove(from_path)
+                self._save_prompts(self.prompts_data)
+            except:
+                pass
+
+    def _migrate_size_modes(self):
+        from_path = os.path.join(self.data_dir, "size_modes.json")
+        if os.path.exists(from_path):
+            try:
+                with open(from_path, 'r', encoding='utf-8') as f:
+                    old_modes = json.load(f)
+                for cat, mode in old_modes.items():
+                    if cat in self.prompts_data:
+                        self.prompts_data[cat]["size_mode"] = mode
+                        self.category_size_modes[cat] = mode
+                os.remove(from_path)
+                self._save_prompts(self.prompts_data)
+            except:
+                pass
 
     def _load_libraries(self):
         """Load libraries data from library.json"""
@@ -224,48 +268,6 @@ class SnapshotPromptServer:
         try:
             with open(self.library_json, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except:
-            pass
-
-    def _load_category_display_modes(self):
-        """Load category display modes from a separate config file."""
-        config_path = os.path.join(self.data_dir, "display_modes.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                pass
-        return {}
-
-    def _save_category_display_modes(self, modes):
-        """Save category display modes to a separate config file."""
-        config_path = os.path.join(self.data_dir, "display_modes.json")
-        self._ensure_dirs()
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(modes, f, ensure_ascii=False, indent=2)
-        except:
-            pass
-
-    def _load_category_size_modes(self):
-        """Load category size modes from a separate config file."""
-        config_path = os.path.join(self.data_dir, "size_modes.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except:
-                pass
-        return {}
-
-    def _save_category_size_modes(self, modes):
-        """Save category size modes to a separate config file."""
-        config_path = os.path.join(self.data_dir, "size_modes.json")
-        self._ensure_dirs()
-        try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(modes, f, ensure_ascii=False, indent=2)
         except:
             pass
 
@@ -431,8 +433,7 @@ class SnapshotPromptServer:
 
             elif self.path.startswith('/images/'):
                 try:
-                    img_filename = self.path[len('/images/'):]
-                    img_filename = urllib.parse.unquote(img_filename)
+                    img_filename = urllib.parse.unquote(self.path[len('/images/'):].split('?')[0])
                     img_path = os.path.join(self.server_instance.images_dir, img_filename)
                     
                     if os.path.exists(img_path):
@@ -504,6 +505,9 @@ class SnapshotPromptServer:
                         decorations = data.get('decorations', [])
                         if isinstance(decorations, str):
                             decorations = [t.strip() for t in decorations.split(",") if t.strip()]
+                        mute_decorations = data.get('mute_decorations', [])
+                        if isinstance(mute_decorations, str):
+                            mute_decorations = [t.strip() for t in mute_decorations.split(",") if t.strip()]
 
                         self.server_instance.prompts_data[category]["prompts"].append({
                             'id': prompt_id,
@@ -511,7 +515,8 @@ class SnapshotPromptServer:
                             'prompt': prompt_text,
                             'preview': preview,
                             'tags': tags,
-                            'decorations': decorations
+                            'decorations': decorations,
+                            'mute_decorations': mute_decorations
                         })
                         self.server_instance._save_prompts(self.server_instance.prompts_data)
 
@@ -519,7 +524,7 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                    self.wfile.write(json.dumps({'status': 'ok', 'preview': preview, 'id': prompt_id}).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -553,6 +558,9 @@ class SnapshotPromptServer:
                                 decorations = data.get('decorations', p.get('decorations', []))
                                 if isinstance(decorations, str):
                                     decorations = [t.strip() for t in decorations.split(",") if t.strip()]
+                                mute_decorations = data.get('mute_decorations', p.get('mute_decorations', []))
+                                if isinstance(mute_decorations, str):
+                                    mute_decorations = [t.strip() for t in mute_decorations.split(",") if t.strip()]
 
                                 if new_category_final != cat_name:
                                     if new_category_final not in self.server_instance.prompts_data:
@@ -569,7 +577,8 @@ class SnapshotPromptServer:
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
-                                        'decorations': decorations
+                                        'decorations': decorations,
+                                        'mute_decorations': mute_decorations
                                     })
                                     prompts.pop(i)
                                     if not prompts:
@@ -581,7 +590,8 @@ class SnapshotPromptServer:
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
-                                        'decorations': decorations
+                                        'decorations': decorations,
+                                        'mute_decorations': mute_decorations
                                     }
                                 
                                 found = True
@@ -596,7 +606,7 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                    self.wfile.write(json.dumps({'status': 'ok', 'preview': new_preview if found and image_data else ''}).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -992,6 +1002,9 @@ class SnapshotPromptServer:
                             self.server_instance.prompts_data[category_name] = {
                                 "bg_image": "",
                                 "tags": [],
+                                "decorations": [],
+                                "display_mode": "horizontal",
+                                "size_mode": "normal",
                                 "prompts": []
                             }
                             self.server_instance._save_prompts(self.server_instance.prompts_data)
@@ -1043,18 +1056,11 @@ class SnapshotPromptServer:
                         if old_name != new_name:
                             self.server_instance.prompts_data[new_name] = cat_data
                             del self.server_instance.prompts_data[old_name]
-                            
-                            # 迁移显示模式设置
+                            # 同步迁移内存中的 display/size modes
                             if old_name in self.server_instance.category_display_modes:
-                                self.server_instance.category_display_modes[new_name] = self.server_instance.category_display_modes[old_name]
-                                del self.server_instance.category_display_modes[old_name]
-                                self.server_instance._save_category_display_modes(self.server_instance.category_display_modes)
-                            
-                            # 迁移大小模式设置
+                                self.server_instance.category_display_modes[new_name] = self.server_instance.category_display_modes.pop(old_name)
                             if old_name in self.server_instance.category_size_modes:
-                                self.server_instance.category_size_modes[new_name] = self.server_instance.category_size_modes[old_name]
-                                del self.server_instance.category_size_modes[old_name]
-                                self.server_instance._save_category_size_modes(self.server_instance.category_size_modes)
+                                self.server_instance.category_size_modes[new_name] = self.server_instance.category_size_modes.pop(old_name)
                         
                         self.server_instance._save_prompts(self.server_instance.prompts_data)
 
@@ -1062,7 +1068,30 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if image_data is not None:
+                        lookup = new_name if new_name in self.server_instance.prompts_data else old_name
+                        result['bg_image'] = self.server_instance.prompts_data[lookup].get('bg_image', '') if lookup in self.server_instance.prompts_data else ''
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/delete_category':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    name = data.get('name', '').strip()
+                    if name and name in self.server_instance.prompts_data:
+                        del self.server_instance.prompts_data[name]
+                        self.server_instance._save_prompts(self.server_instance.prompts_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    result = {'success': True}
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1106,7 +1135,12 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_index >= 0:
+                        prefabs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
+                        if 0 <= prefab_index < len(prefabs) and 'preview' in prefabs[prefab_index]:
+                            result['preview'] = prefabs[prefab_index]['preview']
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1157,7 +1191,12 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_index >= 0:
+                        prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
+                        if 0 <= prefab_index < len(prefs) and 'preview' in prefs[prefab_index]:
+                            result['preview'] = prefs[prefab_index]['preview']
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1211,7 +1250,12 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if image_data and lib_name and lib_name in self.server_instance.libraries_data:
+                        prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
+                        if prefs and 'preview' in prefs[-1]:
+                            result['preview'] = prefs[-1]['preview']
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1225,12 +1269,12 @@ class SnapshotPromptServer:
                     display_mode = data.get('display_mode', 'horizontal')
                     size_mode = data.get('size_mode', 'normal')
                     
-                    if category_name:
+                    if category_name and category_name in self.server_instance.prompts_data:
+                        self.server_instance.prompts_data[category_name]["display_mode"] = display_mode
+                        self.server_instance.prompts_data[category_name]["size_mode"] = size_mode
+                        self.server_instance._save_prompts(self.server_instance.prompts_data)
                         self.server_instance.category_display_modes[category_name] = display_mode
-                        self.server_instance._save_category_display_modes(self.server_instance.category_display_modes)
-                        
                         self.server_instance.category_size_modes[category_name] = size_mode
-                        self.server_instance._save_category_size_modes(self.server_instance.category_size_modes)
 
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
@@ -1331,7 +1375,11 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if old_name and new_name:
+                        bg = self.server_instance.libraries_data.get(new_name, {}).get('bg_image', '')
+                        result['bg_image'] = bg if bg else ''
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1365,7 +1413,12 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if image_data and lib_name and lib_name in self.server_instance.libraries_data:
+                        prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
+                        if prefs and 'preview' in prefs[-1]:
+                            result['preview'] = prefs[-1]['preview']
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1425,7 +1478,12 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
+                    result = {'success': True}
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_index >= 0:
+                        prefs = self.server_instance.libraries_data[lib_name].get('prefabs', [])
+                        if 0 <= prefab_index < len(prefs) and 'preview' in prefs[prefab_index]:
+                            result['preview'] = prefs[prefab_index]['preview']
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -1555,7 +1613,9 @@ class SnapshotPromptNode:
             "required": {
                 "prompt_separator": ("STRING", {"default": ", ", "multiline": False}),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
+                "prompt_parsing": ("STRING", {"default": "", "multiline": False}),
                 "prompt_foldout": ("BOOLEAN", {"default": False}),
+                "prompt_cache": ("BOOLEAN", {"default": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1568,10 +1628,211 @@ class SnapshotPromptNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, prompt_separator, prompt, prompt_foldout):
+    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache):
         return float("nan")
 
-    def snapshot_prompt(self, prompt_separator, prompt, prompt_foldout, unique_id):
+    @staticmethod
+    def _parse_raw_prompt(raw_text):
+        """Parse a raw prompt string by matching against known prompts and decorations.
+        
+        Splits by comma, then for each segment attempts to find matching prompts
+        and decorations. Unmatched segments become custom_prompts.
+        
+        Returns (last_selected, custom_prompts).
+        """
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "prompt")
+        prompt_json = os.path.join(data_dir, "prompt.json")
+
+        prompts_data = {}
+        if os.path.exists(prompt_json):
+            try:
+                with open(prompt_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if data:
+                    prompts_data = data
+            except:
+                pass
+
+        if not prompts_data:
+            return [], raw_text
+
+        def _ensure_list(val):
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                return [v.strip() for v in val.split(',') if v.strip()]
+            return []
+
+        # Build case-insensitive prompt index
+        # lowercase_key -> original_prompt_text
+        prompt_index_lower = {}
+        # tag_name -> set of lowercase prompt texts that have this tag
+        tag_to_prompt_texts = {}
+        # lowercase_prompt_text -> set of lowercase decoration TAG names
+        deco_tag_sets = {}
+
+        for cat_name, cat_data in prompts_data.items():
+            prompts = []
+            if isinstance(cat_data, dict):
+                cat_deco_tags = [d.lower() for d in _ensure_list(cat_data.get('decorations', []))]
+                cat_tags = [t.lower() for t in _ensure_list(cat_data.get('tags', []))]
+                prompts = cat_data.get('prompts', []) or []
+            elif isinstance(cat_data, list):
+                cat_deco_tags = []
+                cat_tags = []
+                prompts = cat_data
+            else:
+                continue
+
+            for p in prompts:
+                if not isinstance(p, dict):
+                    continue
+                pt = p.get('prompt', '')
+                if not pt:
+                    continue
+                key = pt.lower()
+                prompt_index_lower[key] = pt
+
+                # Collect all tags for this prompt (include category tags)
+                p_tags = [t.lower() for t in _ensure_list(p.get('tags', []))] + cat_tags
+                for t in p_tags:
+                    if t not in tag_to_prompt_texts:
+                        tag_to_prompt_texts[t] = set()
+                    tag_to_prompt_texts[t].add(key)
+
+                # Collect decoration tag names (lowercase key)
+                if key not in deco_tag_sets:
+                    p_deco_tags = [d.lower() for d in _ensure_list(p.get('decorations', []))] + cat_deco_tags
+                    p_mute_tags = [d.lower() for d in _ensure_list(p.get('mute_decorations', []))]
+                    deco_tag_sets[key] = set(p_deco_tags + p_mute_tags)
+
+        if not prompt_index_lower:
+            return [], raw_text
+
+        def _resolve_tags(tag_set):
+            """Resolve a set of decoration tags to all lowercase prompt texts that have those tags."""
+            resolved = set()
+            for tag in tag_set:
+                if tag in tag_to_prompt_texts:
+                    resolved |= tag_to_prompt_texts[tag]
+            return resolved
+
+        # ------------------------------------------------------------------
+        # Parse a comma-segment into decorators + base_prompt.
+        # Matching chain:
+        #   base prompt → its decoration tags → resolve → level1 candidates
+        #   level1 prompt → its decoration tags → resolve → level2 candidates
+        #   etc.
+        # ------------------------------------------------------------------
+
+        def _find_all_base_prompts(words):
+            """Find all possible base prompts (suffix of words[]), longest first.
+            Return list of (original_text, words_before)."""
+            bases = []
+            for start in range(len(words)):
+                candidate = ' '.join(words[start:])
+                key = candidate.lower()
+                if key in prompt_index_lower:
+                    bases.append((prompt_index_lower[key], words[:start]))
+                    print(f"  [PARSE] candidate base='{prompt_index_lower[key]}' before={words[:start]}")
+            return bases
+
+        def _match_decoration_level(remaining_words, deco_set, level):
+            """Try to match the LONGEST suffix of remaining_words as a decoration.
+            If not found, drop the leftmost word and retry.
+            Return (matched_text, remaining_words_before) or None."""
+            print(f"  [DECO] level={level} trying remaining={remaining_words} deco_set_size={len(deco_set)}")
+            for start in range(len(remaining_words)):
+                candidate = ' '.join(remaining_words[start:])
+                if candidate.lower() in deco_set:
+                    print(f"  [DECO] level={level} matched='{candidate}' remaining_after={remaining_words[:start]}")
+                    return candidate, remaining_words[:start]
+            print(f"  [DECO] level={level} no match found")
+            return None
+
+        def _try_decompose(words):
+            """Given a list of words (segment), try to decompose into
+            decorations + base_prompt following the chain matching rule.
+            Return the bracket string or None."""
+            base_candidates = _find_all_base_prompts(words)
+            for base_prompt, words_before in base_candidates:
+                print(f"  [TRY] base='{base_prompt}' before={words_before}")
+                # Chain-match decorations level by level
+                remaining = list(words_before)
+                base_key = base_prompt.lower()
+                decoration_levels = []
+                level = 1
+                ok = True
+                current_deco_tags = deco_tag_sets.get(base_key, set())
+                while remaining:
+                    deco_set = _resolve_tags(current_deco_tags)
+                    print(f"  [CHAIN] level={level} current_tags={sorted(current_deco_tags)} deco_count={len(deco_set)}")
+                    result = _match_decoration_level(remaining, deco_set, level)
+                    if result is None:
+                        ok = False
+                        break
+                    matched_text, remaining = result
+                    decoration_levels.append((level, matched_text))
+                    # Next level: use the matched prompt's decoration tags
+                    current_deco_tags = deco_tag_sets.get(matched_text.lower(), set())
+                    level += 1
+
+                if ok:
+                    return _build_bracket_output(base_prompt, decoration_levels)
+                else:
+                    print(f"  [TRY] chain failed for base='{base_prompt}'")
+            return None
+
+        def _build_bracket_output(base_prompt, decoration_levels):
+            """Convert decoration levels into bracket notation.
+            Rightmost = level 1 = [word], next = level 2 = [[word]], etc."""
+            if not decoration_levels:
+                return base_prompt
+            parts = []
+            for lvl, text in decoration_levels:
+                parts.append(('[' * lvl) + text + (']' * lvl))
+            parts.reverse()
+            result = ' '.join(parts) + ' ' + base_prompt
+            print(f"  [OUT] {result}")
+            return result
+
+        raw_text = raw_text.replace('_', ' ')
+        segments = [s.strip() for s in raw_text.split(',')]
+        last_selected = []
+        custom_parts = []
+
+        for seg in segments:
+            if not seg:
+                continue
+
+            matched = None
+            seg_lower = seg.lower()
+            print(f"\n[PARSE] segment='{seg}'")
+
+            # 1) Exact whole-segment match
+            if seg_lower in prompt_index_lower:
+                matched = prompt_index_lower[seg_lower]
+                print(f"  [PARSE] exact match: '{matched}'")
+
+            # 2) Multi-word: decompose via chain matching
+            if matched is None:
+                words = seg.split()
+                print(f"  [PARSE] words={words}")
+                if len(words) > 1:
+                    matched = _try_decompose(words)
+
+            # 3) Decide
+            if matched is not None:
+                print(f"  [RESULT] matched='{matched}'")
+                last_selected.append(matched)
+            else:
+                print(f"  [RESULT] → custom_prompts")
+                custom_parts.append(seg)
+
+        custom = ', '.join(custom_parts) if custom_parts else ''
+        return last_selected, custom
+
+    def snapshot_prompt(self, prompt_separator, prompt , prompt_parsing, prompt_foldout, prompt_cache, unique_id):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -1584,11 +1845,19 @@ class SnapshotPromptNode:
         if check_interrupted():
             print("[SnapshotPrompt] Interrupted before starting!")
             raise RuntimeError("[SnapshotPrompt] Interrupted")
-            
-        # 从 prompt widget 获取上次选中的值
-        # 鲁棒解析：用 ',' 分割，但忽略 <> 内部的逗号
+
         last_selected = []
         custom_prompts = ''
+
+        # Parse prompt_parsing if provided — this is the raw text to parse
+        if prompt_parsing and prompt_parsing.strip():
+            parsed_selected, parsed_custom = self._parse_raw_prompt(prompt_parsing.strip())
+            last_selected.extend(parsed_selected)
+            if parsed_custom:
+                custom_prompts = parsed_custom
+            print(f"[SnapshotPrompt] Parsed prompt_parsing: '{prompt_parsing}' -> {parsed_selected}, custom='{parsed_custom}'")
+
+        # Parse the existing prompt widget (previous saved selections)
         if prompt and prompt.strip():
             parts = []
             current = []
@@ -1611,9 +1880,16 @@ class SnapshotPromptNode:
                 if not part:
                     continue
                 if part.startswith('<') and part.endswith('>'):
-                    custom_prompts = part[1:-1]
+                    cp = part[1:-1]
+                    if custom_prompts:
+                        existing = custom_prompts.split('\n')
+                        if cp not in existing:
+                            custom_prompts += '\n' + cp
+                    else:
+                        custom_prompts = cp
                 else:
-                    last_selected.append(part)
+                    if part not in last_selected:
+                        last_selected.append(part)
         
         server = SnapshotPromptServer(last_selected=last_selected, prompt_foldout=prompt_foldout)
         server.custom_prompts = custom_prompts
@@ -1676,12 +1952,13 @@ class SnapshotPromptNode:
         print(f"[SnapshotPrompt] Selected prompts: {result_prompt}")
         print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
-        # 保存选中的值到 prompt widget（保存原始格式 [decoration] prompt）
-        PromptServer.instance.send_sync("kolid-comfy-widget-set", {
-            "node_id": unique_id, 
-            "widget_name": "prompt", 
-            "type": "STRING", 
-            "value": result_prompt
-        })
+        # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
+        if prompt_cache:
+            PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                "node_id": unique_id, 
+                "widget_name": "prompt", 
+                "type": "STRING", 
+                "value": result_prompt
+            })
 
         return (cleaned_result,)
