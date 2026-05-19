@@ -16,6 +16,7 @@ export function useApi() {
   const [promptFoldout, setPromptFoldout] = useState(false);
   const [lastSelected, setLastSelected] = useState<string[]>([]);
   const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
+  const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string }[]>([]);
   const [loraData, setLoraData] = useState<LoraFolders>({});
 
   const loadData = useCallback(async () => {
@@ -28,15 +29,16 @@ export function useApi() {
     setPromptFoldout(data.prompt_foldout || false);
     setLastSelected(data.last_selected || []);
     setLastSelectedLoras(data.last_selected_loras || []);
+    setLastSelectedPrefabs(data.last_selected_prefabs || []);
     setCustomPrompts(data.custom_prompts || '');
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[]) => {
+  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[]) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs }),
     });
     if (res.ok) window.close();
   }, []);
@@ -59,7 +61,7 @@ export function useApi() {
     categoryDisplayModes, setCategoryDisplayModes,
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
-    promptFoldout, lastSelected, lastSelectedLoras,
+    promptFoldout, lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData,
     loadData, submitSelection, closeWindow, loadLoraData,
   };

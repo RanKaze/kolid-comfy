@@ -24,12 +24,18 @@ export interface Tag {
 
 export type TagGroup = Tag[];
 
+export interface SelectedPrefabRef {
+  guid: string;
+}
+
 export interface PrefabData {
   name: string;
   tags: TagGroup[];
   custom_prompts?: string;
   preview?: string;
   loras?: LoraSelectionData[];
+  selected_prefabs?: SelectedPrefabRef[];
+  guid?: string;
 }
 
 export interface LibraryData {
@@ -74,6 +80,7 @@ export interface PointsResponse {
   category_size_modes: CategorySizeModes;
   prompt_foldout: boolean;
   custom_prompts: string;
+  last_selected_prefabs?: { guid: string }[];
 }
 
 export interface DragState {
