@@ -92,3 +92,15 @@ export interface TemporaryContext {
   originalExpandedCategories: Set<string>;
   level: number;
 }
+
+export interface LoraItemData {
+  name: string;
+  file_name: string;
+  preview_url: string;
+  tags?: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface LoraFolders {
+  [folder: string]: LoraItemData[];
+}

@@ -104,6 +104,9 @@ class SnapshotPromptServer:
         # Migrate old separate display/size mode files into prompts_data
         self._migrate_display_modes()
         self._migrate_size_modes()
+        
+        # Scan Lora metadata files
+        self.lora_data = self._scan_loras()
 
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -248,6 +251,44 @@ class SnapshotPromptServer:
                 self._save_prompts(self.prompts_data)
             except:
                 pass
+
+    def _scan_loras(self):
+        """Scan F:\\ComfyDB\\models\\loras for *.metadata.json files."""
+        lora_root = r"F:\ComfyDB\models\loras"
+        folders = {}
+        if not os.path.exists(lora_root):
+            return folders
+        for dirpath, dirnames, filenames in os.walk(lora_root):
+            for filename in filenames:
+                if not filename.endswith('.metadata.json'):
+                    continue
+                filepath = os.path.join(dirpath, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                except Exception:
+                    continue
+                # folder key is relative path from lora_root
+                rel_dir = os.path.relpath(dirpath, lora_root)
+                if rel_dir == '.':
+                    rel_dir = 'root'
+                folder_key = rel_dir.replace('\\', '/')
+                # base name without .metadata.json
+                base_name = filename[:-len('.metadata.json')]
+                civitai = meta.get('civitai', {}) or {}
+                trained_words = civitai.get('trainedWords', []) if isinstance(civitai, dict) else []
+                item = {
+                    'name': meta.get('name', base_name),
+                    'file_name': base_name,
+                    'preview_url': meta.get('preview_url', ''),
+                    'tags': trained_words if isinstance(trained_words, list) else [],
+                    'metadata': meta,
+                }
+                folders.setdefault(folder_key, []).append(item)
+        # sort items in each folder by name
+        for key in folders:
+            folders[key].sort(key=lambda x: x['name'])
+        return folders
 
     def _load_libraries(self):
         """Load libraries data from library.json"""
@@ -441,6 +482,45 @@ class SnapshotPromptServer:
                             content = f.read()
                         self.send_response(200)
                         self.send_header('Content-type', 'image/png')
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        self.wfile.write(content)
+                        return
+                    else:
+                        self.send_error(404, "Image not found")
+                        return
+                except Exception as e:
+                    self.send_error(500, str(e))
+                    return
+
+            elif self.path == '/lora_data':
+                data = {
+                    'folders': self.server_instance.lora_data if self.server_instance else {}
+                }
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode('utf-8'))
+                return
+
+            elif self.path.startswith('/lora_images/'):
+                try:
+                    img_path = urllib.parse.unquote(self.path[len('/lora_images/'):].split('?')[0])
+                    img_path = img_path.replace('/', os.sep)
+                    if os.path.exists(img_path):
+                        ext = os.path.splitext(img_path)[1].lower()
+                        mime = 'image/png'
+                        if ext in ('.jpg', '.jpeg'):
+                            mime = 'image/jpeg'
+                        elif ext == '.gif':
+                            mime = 'image/gif'
+                        elif ext == '.webp':
+                            mime = 'image/webp'
+                        with open(img_path, 'rb') as f:
+                            content = f.read()
+                        self.send_response(200)
+                        self.send_header('Content-type', mime)
                         self.send_header("Access-Control-Allow-Origin", "*")
                         self.end_headers()
                         self.wfile.write(content)

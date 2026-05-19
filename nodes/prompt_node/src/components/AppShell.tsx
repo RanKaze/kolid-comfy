@@ -3,6 +3,7 @@ import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
+  LoraItemData,
 } from '../types';
 import {
   categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
@@ -16,6 +17,8 @@ import { useApi } from '../hooks/useApi';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
+import { LoraFolderCard } from './LoraFolderCard';
+import { SelectedLora } from './SelectedLora';
 
 /* ========== Inline SVG Icons (no emoji) ========== */
 const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
@@ -76,6 +79,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
+    loraData, loadLoraData,
   } = api;
 
   const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
@@ -87,6 +91,8 @@ export function AppShell() {
   const [focusPoints, setFocusPoints] = useState<FocusPoints>({});
   const [categoryFocusPoints, setCategoryFocusPoints] = useState<Record<string, {x:number;y:number}>>({});
   const [temporaryCtx, setTemporaryCtx] = useState<{stack: {matchFn:(p:PromptData,c:string)=>boolean;basePrompt:string;title:string;tagGroups:TagGroup[];level:number}[]}>({stack: []});
+  const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
+  const [loraSectionExpanded, setLoraSectionExpanded] = useState(true);
   const [imgVersion, setImgVersion] = useState(0);
   const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
   const [, forceRender] = useState(0);
@@ -170,6 +176,7 @@ export function AppShell() {
       try { const s = localStorage.getItem('kolid_focus_points'); if (s) setFocusPoints(JSON.parse(s)); } catch {}
       try { const s = localStorage.getItem('kolid_category_focus_points'); if (s) setCategoryFocusPoints(JSON.parse(s)); } catch {}
     });
+    loadLoraData();
   }, []);
 
   // ========== Modal state ==========
@@ -441,6 +448,29 @@ export function AppShell() {
       stack[lastIdx] = newLast;
       return { stack };
     });
+  }, []);
+
+  // ========== Lora Selection ==========
+  const isLoraSelected = useCallback((item: LoraItemData) => {
+    return selectedLoras.some(l => l.file_name === item.file_name);
+  }, [selectedLoras]);
+
+  const toggleLora = useCallback((item: LoraItemData) => {
+    setSelectedLoras(prev => {
+      const exists = prev.some(l => l.file_name === item.file_name);
+      if (exists) {
+        return prev.filter(l => l.file_name !== item.file_name);
+      }
+      return [...prev, item];
+    });
+  }, []);
+
+  const removeLora = useCallback((fileName: string) => {
+    setSelectedLoras(prev => prev.filter(l => l.file_name !== fileName));
+  }, []);
+
+  const toggleLoraSection = useCallback(() => {
+    setLoraSectionExpanded(prev => !prev);
   }, []);
 
   // ========== Prefab Merge/Replace ==========
@@ -1721,6 +1751,26 @@ export function AppShell() {
               })}
               <div className="add-library-card" onClick={() => { resetModalForm(); setModal({type:'addLibrary'}); }}><span>{iconPlus} Add Library</span></div>
             </div>) : null}
+
+            {/* ========== Lora Section ========== */}
+            {!isTemporary && Object.keys(loraData).length > 0 ? (
+              <div className={`categories-container lora-section ${loraSectionExpanded ? 'expanded' : 'collapsed'}`}>
+                <div className="lora-section-header" onClick={toggleLoraSection}>
+                  <h2>Lora Models</h2>
+                  <span className="toggle">{loraSectionExpanded ? iconChevronUp : iconChevronDown}</span>
+                </div>
+                {loraSectionExpanded ? Object.entries(loraData).map(([folder, items]) => (
+                  <LoraFolderCard
+                    key={folder}
+                    folderName={folder}
+                    items={items}
+                    searchQuery={searchQuery}
+                    selectedLoras={selectedLoras}
+                    onToggleLora={toggleLora}
+                  />
+                )) : null}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -1742,6 +1792,21 @@ export function AppShell() {
                   </span>
                 ))}
             </div>
+
+            {selectedLoras.length > 0 ? (
+              <>
+                <h3 style={{ marginTop: 12 }}>Selected Loras ({selectedLoras.length})</h3>
+                <div className="selected-lora-list">
+                  {selectedLoras.map(lora => (
+                    <SelectedLora
+                      key={lora.file_name}
+                      lora={lora}
+                      onRemove={() => removeLora(lora.file_name)}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : null}
           </div>
 
           <div className="custom-input-section">
