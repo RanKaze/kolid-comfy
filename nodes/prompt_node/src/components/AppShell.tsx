@@ -18,7 +18,7 @@ import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
 import { LoraFolderCard } from './LoraFolderCard';
-import { SelectedLora } from './SelectedLora';
+import { Lora } from './Lora';
 
 /* ========== Inline SVG Icons (no emoji) ========== */
 const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
@@ -1796,9 +1796,9 @@ export function AppShell() {
             {selectedLoras.length > 0 ? (
               <>
                 <h3 style={{ marginTop: 12 }}>Selected Loras ({selectedLoras.length})</h3>
-                <div className="selected-lora-list">
+                <div className="lora-list">
                   {selectedLoras.map(lora => (
-                    <SelectedLora
+                    <Lora
                       key={lora.file_name}
                       lora={lora}
                       onRemove={() => removeLora(lora.file_name)}

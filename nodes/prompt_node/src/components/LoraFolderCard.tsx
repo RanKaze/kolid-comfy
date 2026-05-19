@@ -35,7 +35,10 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
             <span style={{ textShadow: '0px 0px 4px black' }}>{folderName}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            <span className="count-badge">{items.length}</span>
+            {(() => {
+              const selectedCount = items.filter(isSelected).length;
+              return selectedCount > 0 ? <span className="count-badge">{selectedCount}</span> : null;
+            })()}
             <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
           </div>
         </div>
