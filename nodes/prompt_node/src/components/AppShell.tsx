@@ -215,6 +215,23 @@ export function AppShell() {
           active: saved.active ?? true,
           split_mode: saved.split_mode,
         };
+      } else {
+        // Lora was saved but is not in current scan results (filtered by regex or removed)
+        const derivedName = lookupKey.includes('/') ? lookupKey.split('/').pop()! : lookupKey;
+        restoredLoras.push({
+          name: saved.name || derivedName,
+          file_name: derivedName,
+          file_path: lookupKey,
+          preview_url: '',
+          tags: saved.active_tags || [],
+          metadata: { missing: true },
+        });
+        restoredSelections[lookupKey] = {
+          activeTags: saved.active_tags || [],
+          strength: saved.strength ?? 1.0,
+          active: saved.active ?? true,
+          split_mode: saved.split_mode,
+        };
       }
     }
     setSelectedLoras(restoredLoras);
@@ -591,7 +608,7 @@ export function AppShell() {
             }
             if (!item) {
               const derivedName = path.includes('/') ? path.split('/').pop()! : path;
-              item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: {} };
+              item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: { missing: true } };
             }
             next.push(item);
           }
@@ -640,7 +657,7 @@ export function AppShell() {
       }
       if (!item) {
         const derivedName = path.includes('/') ? path.split('/').pop()! : path;
-        item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: {} };
+        item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: { missing: true } };
       }
       newSelectedLoras.push(item);
       newLoraSelections[path] = {
@@ -1942,6 +1959,7 @@ export function AppShell() {
                         initialStrength={sel?.strength}
                         initialActive={sel?.active}
                         initialSplitMode={sel?.split_mode}
+                        isMissing={lora.metadata?.missing === true}
                         onChange={(data) => {
                           setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
                         }}
