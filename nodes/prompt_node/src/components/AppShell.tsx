@@ -3,7 +3,7 @@ import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
-  LoraItemData,
+  LoraItemData, LoraSelectionData,
 } from '../types';
 import {
   categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
@@ -79,7 +79,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
-    loraData, loadLoraData,
+    loraData, loadLoraData, lastSelectedLoras,
   } = api;
 
   const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
@@ -91,8 +91,15 @@ export function AppShell() {
   const [focusPoints, setFocusPoints] = useState<FocusPoints>({});
   const [categoryFocusPoints, setCategoryFocusPoints] = useState<Record<string, {x:number;y:number}>>({});
   const [temporaryCtx, setTemporaryCtx] = useState<{stack: {matchFn:(p:PromptData,c:string)=>boolean;basePrompt:string;title:string;tagGroups:TagGroup[];level:number}[]}>({stack: []});
+  interface LoraSelectionState {
+    activeTags: string[];
+    strength: number;
+    active: boolean;
+    split_mode?: boolean;
+  }
   const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
-  const [loraSectionExpanded, setLoraSectionExpanded] = useState(true);
+  const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
+
   const [imgVersion, setImgVersion] = useState(0);
   const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
   const [, forceRender] = useState(0);
@@ -171,6 +178,8 @@ export function AppShell() {
     return data;
   }, [apiLoadData, setCustomPrompts, setSelectedTags]);
 
+  const loraRestoredRef = useRef(false);
+
   useEffect(() => {
     loadData().then(() => {
       try { const s = localStorage.getItem('kolid_focus_points'); if (s) setFocusPoints(JSON.parse(s)); } catch {}
@@ -178,6 +187,40 @@ export function AppShell() {
     });
     loadLoraData();
   }, []);
+
+  // Restore selected loras from last_selected_loras after loraData loads
+  useEffect(() => {
+    if (loraRestoredRef.current) return;
+    if (!loraData || Object.keys(loraData).length === 0) return;
+    if (!lastSelectedLoras || lastSelectedLoras.length === 0) {
+      loraRestoredRef.current = true;
+      return;
+    }
+    const available = new Map<string, LoraItemData>();
+    for (const items of Object.values(loraData)) {
+      for (const item of items) {
+        available.set(item.file_path, item);
+      }
+    }
+    const restoredLoras: LoraItemData[] = [];
+    const restoredSelections: Record<string, LoraSelectionState> = {};
+    for (const saved of lastSelectedLoras) {
+      const lookupKey = (saved as any).file_path || (saved as any).file_name;
+      const item = available.get(lookupKey);
+      if (item) {
+        restoredLoras.push(item);
+        restoredSelections[item.file_path] = {
+          activeTags: saved.active_tags || [],
+          strength: saved.strength ?? 1.0,
+          active: saved.active ?? true,
+          split_mode: saved.split_mode,
+        };
+      }
+    }
+    setSelectedLoras(restoredLoras);
+    setLoraSelections(restoredSelections);
+    loraRestoredRef.current = true;
+  }, [loraData, lastSelectedLoras]);
 
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
@@ -452,26 +495,24 @@ export function AppShell() {
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
-    return selectedLoras.some(l => l.file_name === item.file_name);
+    return selectedLoras.some(l => l.file_path === item.file_path);
   }, [selectedLoras]);
 
   const toggleLora = useCallback((item: LoraItemData) => {
     setSelectedLoras(prev => {
-      const exists = prev.some(l => l.file_name === item.file_name);
+      const exists = prev.some(l => l.file_path === item.file_path);
       if (exists) {
-        return prev.filter(l => l.file_name !== item.file_name);
+        return prev.filter(l => l.file_path !== item.file_path);
       }
       return [...prev, item];
     });
   }, []);
 
-  const removeLora = useCallback((fileName: string) => {
-    setSelectedLoras(prev => prev.filter(l => l.file_name !== fileName));
+  const removeLora = useCallback((filePath: string) => {
+    setSelectedLoras(prev => prev.filter(l => l.file_path !== filePath));
   }, []);
 
-  const toggleLoraSection = useCallback(() => {
-    setLoraSectionExpanded(prev => !prev);
-  }, []);
+
 
   // ========== Prefab Merge/Replace ==========
   const mergePrefab = useCallback((pf: PrefabData) => {
@@ -479,28 +520,43 @@ export function AppShell() {
     snapshotZoom();
     const prefabTags = pf.tags || [];
     const prefabCp = pf.custom_prompts || '';
+    const prefabLoras = pf.loras || [];
 
-    let allMatched = true, anyMatched = false;
+    // Overall content matching: all prompts AND all loras must be present to count as "fully matched"
+    const hasPrompts = prefabTags.length > 0;
+    const hasLoras = prefabLoras.length > 0;
+
+    let allPromptsMatched = true, anyPromptsMatched = false;
     for (const group of prefabTags) {
-      const baseTag = group.find((t: any) => t.decoration_num === 0);
-      if (baseTag && isBasePromptSelectedInTags(baseTag.prompt, selectedTags)) { anyMatched = true; }
-      else { allMatched = false; }
+      const groupDisplay = tagsToDisplayName(group);
+      if (selectedTags.some(g => tagsToDisplayName(g) === groupDisplay)) { anyPromptsMatched = true; }
+      else { allPromptsMatched = false; }
     }
+
+    const prefabLoraPaths = prefabLoras.map(pl => pl.file_path || (pl as any).file_name);
+    let allLorasMatched = true, anyLorasMatched = false;
+    for (const path of prefabLoraPaths) {
+      if (selectedLoras.some(l => l.file_path === path)) { anyLorasMatched = true; }
+      else { allLorasMatched = false; }
+    }
+
+    const allContentMatched = (!hasPrompts || allPromptsMatched) && (!hasLoras || allLorasMatched) && (hasPrompts || hasLoras);
+    const anyContentMatched = anyPromptsMatched || anyLorasMatched;
 
     setSelectedTags(prev => {
       const next = prev.map(g => g.map(t => ({...t})));
-      if (allMatched && anyMatched) {
+      if (allContentMatched && anyContentMatched) {
+        // Fully matched: delete all prefab prompts
         for (const group of prefabTags) {
-          const baseTag = group.find((t: any) => t.decoration_num === 0);
-          if (baseTag) {
-            const idx = next.findIndex(g => g.some(t => t.decoration_num === 0 && t.prompt === baseTag.prompt));
-            if (idx !== -1) next.splice(idx, 1);
-          }
+          const groupDisplay = tagsToDisplayName(group);
+          const idx = next.findIndex(g => tagsToDisplayName(g) === groupDisplay);
+          if (idx !== -1) next.splice(idx, 1);
         }
       } else {
+        // Not fully matched: add missing prompts only
         for (const group of prefabTags) {
-          const baseTag = group.find((t: any) => t.decoration_num === 0);
-          if (baseTag && !next.some(g => g.some(t => t.decoration_num === 0 && t.prompt === baseTag.prompt))) {
+          const groupDisplay = tagsToDisplayName(group);
+          if (!next.some(g => tagsToDisplayName(g) === groupDisplay)) {
             next.push(group.map((t: any) => ({...t})));
           }
         }
@@ -512,12 +568,57 @@ export function AppShell() {
       setCustomPrompts(prev => {
         const pSeg = prefabCp.split('\n').map((s: string) => s.trim()).filter((s: string) => s);
         const cSeg = prev.split('\n').map((s: string) => s.trim()).filter((s: string) => s);
-        if (allMatched && anyMatched) return cSeg.filter((s: string) => !pSeg.includes(s)).join('\n');
+        if (allContentMatched && anyContentMatched) return cSeg.filter((s: string) => !pSeg.includes(s)).join('\n');
         for (const seg of pSeg) { if (!cSeg.includes(seg)) cSeg.push(seg); }
         return cSeg.join('\n');
       });
     }
-  }, [selectedTags, setSelectedTags, setCustomPrompts]);
+
+    setSelectedLoras(prev => {
+      let next = [...prev];
+      if (allContentMatched && anyContentMatched) {
+        // Fully matched: delete all prefab loras
+        next = next.filter(l => !prefabLoraPaths.includes(l.file_path));
+      } else {
+        // Not fully matched: add missing loras only
+        for (const pl of prefabLoras) {
+          const path = pl.file_path || (pl as any).file_name;
+          if (!next.some(l => l.file_path === path)) {
+            let item: LoraItemData | null = null;
+            for (const items of Object.values(loraData)) {
+              const found = items.find(it => it.file_path === path);
+              if (found) { item = found; break; }
+            }
+            if (!item) {
+              const derivedName = path.includes('/') ? path.split('/').pop()! : path;
+              item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: {} };
+            }
+            next.push(item);
+          }
+        }
+      }
+      return next;
+    });
+
+    setLoraSelections(prev => {
+      const next = { ...prev };
+      if (allContentMatched && anyContentMatched) {
+        for (const pl of prefabLoras) {
+          delete next[pl.file_path || (pl as any).file_name];
+        }
+      } else {
+        for (const pl of prefabLoras) {
+          next[pl.file_path || (pl as any).file_name] = {
+            activeTags: pl.active_tags || [],
+            strength: pl.strength ?? 1.0,
+            active: pl.active ?? true,
+            split_mode: pl.split_mode,
+          };
+        }
+      }
+      return next;
+    });
+  }, [selectedTags, setSelectedTags, setCustomPrompts, selectedLoras, setSelectedLoras, loraData, setLoraSelections]);
 
   const replacePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
@@ -525,13 +626,50 @@ export function AppShell() {
     const tags: TagGroup[] = (pf.tags || []) as TagGroup[];
     setSelectedTags(tags);
     setCustomPrompts(pf.custom_prompts || '');
-  }, [setSelectedTags, setCustomPrompts]);
+
+    // Replace loras
+    const prefabLoras = pf.loras || [];
+    const newSelectedLoras: LoraItemData[] = [];
+    const newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }> = {};
+    for (const pl of prefabLoras) {
+      const path = pl.file_path || (pl as any).file_name;
+      let item: LoraItemData | null = null;
+      for (const items of Object.values(loraData)) {
+        const found = items.find(it => it.file_path === path);
+        if (found) { item = found; break; }
+      }
+      if (!item) {
+        const derivedName = path.includes('/') ? path.split('/').pop()! : path;
+        item = { name: pl.name, file_name: derivedName, file_path: path, preview_url: '', tags: pl.active_tags || [], metadata: {} };
+      }
+      newSelectedLoras.push(item);
+      newLoraSelections[path] = {
+        activeTags: pl.active_tags || [],
+        strength: pl.strength ?? 1.0,
+        active: pl.active ?? true,
+        split_mode: pl.split_mode,
+      };
+    }
+    setSelectedLoras(newSelectedLoras);
+    setLoraSelections(newLoraSelections);
+  }, [setSelectedTags, setCustomPrompts, loraData, setSelectedLoras, setLoraSelections]);
 
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
     const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
-    submitSelection(promptsToSend, customPrompts);
-  }, [selectedTags, customPrompts, submitSelection]);
+    const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+      const sel = loraSelections[l.file_path];
+      return {
+        file_path: l.file_path,
+        name: l.name,
+        strength: sel?.strength ?? 1.0,
+        active_tags: sel?.activeTags ?? [],
+        active: sel?.active ?? true,
+        split_mode: sel?.split_mode,
+      };
+    });
+    submitSelection(promptsToSend, customPrompts, lorasPayload);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, submitSelection]);
 
   // ========== Delete Prompt ==========
   const deletePrompt = useCallback(async (id: string) => {
@@ -773,29 +911,45 @@ export function AppShell() {
     } catch(e) { console.error(e); }
   }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalDecorations, modalMuteDecorations, modalCategory, modalImageFile, saveModalFocus, setAllPrompts]);
 
+  // Helper to build current lora payload for prefab storage
+  const buildPrefabLoras = useCallback(() => {
+    return selectedLoras.map(l => {
+      const sel = loraSelections[l.file_path];
+      return {
+        file_path: l.file_path,
+        name: l.name,
+        strength: sel?.strength ?? 1.0,
+        active_tags: sel?.activeTags ?? [],
+        active: sel?.active ?? true,
+        split_mode: sel?.split_mode,
+      };
+    });
+  }, [selectedLoras, loraSelections]);
+
   // ========== Add Prefab ==========
   const addPrefab = useCallback(async () => {
     const lib = modal?.data?.lib;
     const name = modalName.trim();
     if (!name || !lib) { alert('Please enter prefab name'); return; }
     const pfTags = selectedTags.map(g => g.map(t => ({...t})));
+    const pfLoras = buildPrefabLoras();
     let imageData = '';
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
     try {
-      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, image:imageData}) });
+      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, image:imageData}) });
       const result = await res.json();
       closeModal();
       if (imageData) setImgVersion(v => v + 1);
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData) return prev;
-        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts };
+        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts, loras: pfLoras };
         if (result && result.preview) newPrefab.preview = result.preview;
         const prefabs = [...(libData.prefabs || []), newPrefab];
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, modalImageFile, setAllLibraries]);
+  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, buildPrefabLoras, modalImageFile, setAllLibraries]);
 
   // ========== Update Prefab ==========
   const updatePrefab = useCallback(async () => {
@@ -830,12 +984,13 @@ export function AppShell() {
     const lib = modal?.data?.lib;
     const idx = modal?.data?.idx;
     const pfTags = selectedTags.map(g => g.map(t => ({...t})));
-    if (pfTags.length === 0 && !customPrompts) { alert('No tags or custom_prompts to sync'); return; }
+    const pfLoras = buildPrefabLoras();
+    if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0) { alert('No tags, custom_prompts or loras to sync'); return; }
     try {
-      await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts}) });
+      await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras}) });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, selectedTags, customPrompts, modal?.data?.lib, modal?.data?.idx]);
+  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, modal?.data?.lib, modal?.data?.idx]);
 
   // ========== Delete Prefab ==========
   const deletePrefab = useCallback(async (lib: string, idx: number) => {
@@ -1493,7 +1648,23 @@ export function AppShell() {
               </div>
             ) : null}
 
-            <div className="categories-container" id="categories">
+            {/* ========== Lora Section ========== */}
+            {!isTemporary && Object.keys(loraData).length > 0 ? (
+              <div className="categories-container lora-section">
+                {Object.entries(loraData).map(([folder, items]) => (
+                  <LoraFolderCard
+                    key={folder}
+                    folderName={folder}
+                    items={items}
+                    searchQuery={searchQuery}
+                    selectedLoras={selectedLoras}
+                    onToggleLora={toggleLora}
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
                 const catDeco = (catData.decorations as string[]) || [];
@@ -1541,7 +1712,7 @@ export function AppShell() {
                         <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})` }} />
                       </div>
                     ) : null}
-                    <div className="category-header" onClick={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(cat); }}>
+                    <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(cat); }}>
                       {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : null}
                       <div className="header-content">
                         <div style={{ display:'flex', alignItems:'center' }}>
@@ -1574,7 +1745,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onClick={() => selectPrompt(p.prompt)}>
+                                <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -1584,7 +1755,7 @@ export function AppShell() {
                                     <div className="prompt-text">{p.prompt}</div>
                                   </div>
                                 </div>
-                                <div className="actions">
+                                <div className="actions" onMouseDown={e => e.stopPropagation()}>
                                   <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconPencil}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
@@ -1610,17 +1781,17 @@ export function AppShell() {
                           );
                         })}
                         {!(searchQuery || selectedFilter) && !isTemporary ? (
-                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={cat} style={{ cursor:'pointer' }} onClick={() => { resetModalForm(); setModalCategory(cat); setModal({type:'addPrompt'}); }}><div>{iconPlus}</div></div>
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={cat} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModalCategory(cat); setModal({type:'addPrompt'}); }}><div>{iconPlus}</div></div>
                         ) : null}
                       </div>
                     ) : null}
                   </div>
                 );
               })}
-              <div className="add-category-card" onClick={() => { resetModalForm(); setModal({type:'addCategory'}); }}><span>{iconPlus} Add Category</span></div>
+              <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addCategory'}); }}><span>{iconPlus} Add Category</span></div>
             </div>
 
-            {!isTemporary ? (<div className="categories-container">
+            {!isTemporary ? (<div className="categories-container prefab-section">
               {libraries.map(([lib, libData]) => {
                 const expanded = expandedLibraries.has(lib);
                 const anim = animating.has(lib);
@@ -1680,7 +1851,7 @@ export function AppShell() {
                         <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})` }} />
                       </div>
                     ) : null}
-                    <div className="category-header" onClick={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleLibrary(lib); }}>
+                    <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleLibrary(lib); }}>
                       {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} /> : null}
                       <div className="header-content">
                         <div style={{ display:'flex', alignItems:'center' }}>
@@ -1707,7 +1878,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onClick={() => selectPrompt(p.prompt)}>
+                                <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -1717,7 +1888,7 @@ export function AppShell() {
                                     <div className="prompt-text">{p.prompt}</div>
                                   </div>
                                 </div>
-                                <div className="actions">
+                                <div className="actions" onMouseDown={e => e.stopPropagation()}>
                                   <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconPencil}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
@@ -1734,7 +1905,7 @@ export function AppShell() {
                         {filteredPrefabs.map((pf, i) => (
                           <PrefabItem key={`prefab_${lib}_${i}`}
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
-                            prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags)}
+                            prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
                             onMerge={mergePrefab} onReplace={replacePrefab}
                             onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
@@ -1742,41 +1913,54 @@ export function AppShell() {
                           />
                         ))}
                         {selectedTags.length > 0 ? (
-                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer', fontSize:12 }} onClick={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus} Add Prefab</div></div>
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer', fontSize:12 }} onMouseDown={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus} Add Prefab</div></div>
                         ) : null}
                       </div>
                     ) : null}
                   </div>
                 );
               })}
-              <div className="add-library-card" onClick={() => { resetModalForm(); setModal({type:'addLibrary'}); }}><span>{iconPlus} Add Library</span></div>
+              <div className="add-library-card" onMouseDown={() => { resetModalForm(); setModal({type:'addLibrary'}); }}><span>{iconPlus} Add Library</span></div>
             </div>) : null}
 
-            {/* ========== Lora Section ========== */}
-            {!isTemporary && Object.keys(loraData).length > 0 ? (
-              <div className={`categories-container lora-section ${loraSectionExpanded ? 'expanded' : 'collapsed'}`}>
-                <div className="lora-section-header" onClick={toggleLoraSection}>
-                  <h2>Lora Models</h2>
-                  <span className="toggle">{loraSectionExpanded ? iconChevronUp : iconChevronDown}</span>
-                </div>
-                {loraSectionExpanded ? Object.entries(loraData).map(([folder, items]) => (
-                  <LoraFolderCard
-                    key={folder}
-                    folderName={folder}
-                    items={items}
-                    searchQuery={searchQuery}
-                    selectedLoras={selectedLoras}
-                    onToggleLora={toggleLora}
-                  />
-                )) : null}
-              </div>
-            ) : null}
           </div>
         </div>
 
         <div className="right-bar">
           <div className="selected-bar">
-            <h3>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
+            {selectedLoras.length > 0 ? (
+              <>
+                <h3>Selected Loras ({selectedLoras.length})</h3>
+                <div className="lora-list">
+                  {selectedLoras.map(lora => {
+                    const sel = loraSelections[lora.file_path];
+                    return (
+                      <Lora
+                        key={lora.file_path}
+                        lora={lora}
+                        initialActiveTags={sel?.activeTags}
+                        initialStrength={sel?.strength}
+                        initialActive={sel?.active}
+                        initialSplitMode={sel?.split_mode}
+                        onChange={(data) => {
+                          setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
+                        }}
+                        onRemove={() => {
+                          removeLora(lora.file_path);
+                          setLoraSelections(prev => {
+                            const next = { ...prev };
+                            delete next[lora.file_path];
+                            return next;
+                          });
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            <h3 style={selectedLoras.length > 0 ? { marginTop: 12 } : {}}>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
             <div className="selected-tags">
               {isTemporary && currentCtx
                 ? currentCtx.tagGroups.map((group, i) => (
@@ -1792,21 +1976,6 @@ export function AppShell() {
                   </span>
                 ))}
             </div>
-
-            {selectedLoras.length > 0 ? (
-              <>
-                <h3 style={{ marginTop: 12 }}>Selected Loras ({selectedLoras.length})</h3>
-                <div className="lora-list">
-                  {selectedLoras.map(lora => (
-                    <Lora
-                      key={lora.file_name}
-                      lora={lora}
-                      onRemove={() => removeLora(lora.file_name)}
-                    />
-                  ))}
-                </div>
-              </>
-            ) : null}
           </div>
 
           <div className="custom-input-section">
@@ -1827,8 +1996,8 @@ export function AppShell() {
       </div>
 
       {modal?.type === 'addCategory' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Category</h2>
             <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') addCategory(); }} />
             <div className="modal-buttons">
@@ -1838,8 +2007,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'addLibrary' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Library</h2>
             <input type="text" placeholder="Library name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') addLibrary(); }} />
             <div className="modal-buttons">
@@ -1849,8 +2018,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'addPrompt' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
@@ -1882,8 +2051,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'editPrompt' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
@@ -1902,8 +2071,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'editCategory' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Category</h2>
             <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
@@ -1917,8 +2086,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'editLibrary' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Library</h2>
             <input type="text" placeholder="Library name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <label>Select Prompt IDs (comma separated)</label>
@@ -1932,8 +2101,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'displayMode' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit {modalIsCat?'Category':'Library'} Display Mode</h2>
             <label>Layout Mode</label>
             <select value={modalMode} onChange={e => setModalMode(e.target.value)}>
@@ -1952,8 +2121,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'addPrefab' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add Prefab</h2>
             <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
@@ -1964,8 +2133,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'editPrefab' ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prefab</h2>
             <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <label>Custom Prompts</label>
@@ -1979,8 +2148,8 @@ export function AppShell() {
           </div>
         </div>
       ) : modal ? (
-        <div className="modal visible" onClick={closeModal}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.type}</h2>
             <div className="modal-buttons"><button className="btn btn-secondary" onClick={closeModal}>Close</button></div>
           </div>
@@ -1990,17 +2159,47 @@ export function AppShell() {
   );
 }
 
-function getPrefabClass(prefabTags: TagGroup[], selectedTags: TagGroup[]): string {
-  if (prefabTags.length === 0 || selectedTags.length === 0) return '';
-  let matchCount = 0;
+function getPrefabClass(
+  prefabTags: TagGroup[],
+  selectedTags: TagGroup[],
+  prefabLoras: LoraSelectionData[],
+  selectedLoras: LoraItemData[],
+  loraSelections: Record<string, { activeTags: string[]; active: boolean }>
+): string {
+  // Prompt matching
+  let promptMatchCount = 0;
   for (const pfGroup of prefabTags) {
     const pfDisplay = tagsToDisplayName(pfGroup);
     for (const selGroup of selectedTags) {
-      if (tagsToDisplayName(selGroup) === pfDisplay) { matchCount++; break; }
+      if (tagsToDisplayName(selGroup) === pfDisplay) { promptMatchCount++; break; }
     }
   }
-  if (matchCount === prefabTags.length) return 'prefab-full';
-  if (matchCount > 0) return 'prefab-partial';
+
+  // Lora matching
+  let loraMatchCount = 0;
+  for (const pl of prefabLoras) {
+    const path = pl.file_path || (pl as any).file_name;
+    const selLora = selectedLoras.find(l => l.file_path === path);
+    if (!selLora) continue;
+    const selData = loraSelections[path];
+    if (!selData) continue;
+    if (pl.active && !selData.active) continue;
+    const currentTags = new Set(selData.activeTags || []);
+    const prefabTagList = pl.active_tags || [];
+    let allTagsMatch = true;
+    for (const tag of prefabTagList) {
+      if (!currentTags.has(tag)) { allTagsMatch = false; break; }
+    }
+    if (allTagsMatch) loraMatchCount++;
+  }
+
+  const allPromptsMatch = prefabTags.length === 0 || promptMatchCount === prefabTags.length;
+  const allLorasMatch = prefabLoras.length === 0 || loraMatchCount === prefabLoras.length;
+  const somePromptsMatch = promptMatchCount > 0;
+  const someLorasMatch = loraMatchCount > 0;
+
+  if (allPromptsMatch && allLorasMatch) return 'prefab-full';
+  if (somePromptsMatch || someLorasMatch) return 'prefab-partial';
   return '';
 }
 

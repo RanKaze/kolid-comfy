@@ -1,8 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes,
-  LoraFolders,
+  LoraFolders, LoraSelectionData,
 } from '../types';
 
 const API_BASE = '';
@@ -15,26 +15,28 @@ export function useApi() {
   const [customPrompts, setCustomPrompts] = useState('');
   const [promptFoldout, setPromptFoldout] = useState(false);
   const [lastSelected, setLastSelected] = useState<string[]>([]);
+  const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
   const [loraData, setLoraData] = useState<LoraFolders>({});
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
-    const data: PointsResponse = await res.json();
+    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[] } = await res.json();
     setAllPrompts(data.categories);
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
     setCategorySizeModes(data.category_size_modes || {});
     setPromptFoldout(data.prompt_foldout || false);
     setLastSelected(data.last_selected || []);
+    setLastSelectedLoras(data.last_selected_loras || []);
     setCustomPrompts(data.custom_prompts || '');
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string) => {
+  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[]) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras }),
     });
     if (res.ok) window.close();
   }, []);
@@ -57,7 +59,7 @@ export function useApi() {
     categoryDisplayModes, setCategoryDisplayModes,
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
-    promptFoldout, lastSelected,
+    promptFoldout, lastSelected, lastSelectedLoras,
     loraData, setLoraData,
     loadData, submitSelection, closeWindow, loadLoraData,
   };

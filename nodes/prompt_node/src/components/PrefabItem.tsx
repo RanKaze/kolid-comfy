@@ -45,6 +45,12 @@ export function PrefabItem({
     [prefab.tags],
   );
 
+  const loraStr = useMemo(() => {
+    const loras = prefab.loras || [];
+    if (loras.length === 0) return '';
+    return `Lora(${loras.length}): ${loras.map(l => l.name).join(', ')}`;
+  }, [prefab.loras]);
+
   return (
     <div className="prompt-item-wrapper">
       <div
@@ -52,7 +58,7 @@ export function PrefabItem({
         data-prefab={`prefab_${libName}_${idx}`}
         data-library={libName}
         data-prefab-index={idx}
-        onClick={handleClick}
+        onMouseDown={handleClick}
         onDoubleClick={handleDblClick}
       >
         <span className="drag-handle" data-drag-type="prefab" data-library={libName} data-index={idx}>{iconGrip}</span>
@@ -64,9 +70,10 @@ export function PrefabItem({
           <div className="text-layer">
             <div className="name" style={{ color: 'var(--accent-color)' }}>{prefab.name}</div>
             <div className="prompt-text">{displayStr}</div>
+            {loraStr && <div className="prefab-loras">{loraStr}</div>}
           </div>
         </div>
-        <div className="actions" style={{ position: 'absolute', top: 4, right: 4 }}>
+        <div className="actions" style={{ position: 'absolute', top: 4, right: 4 }} onMouseDown={e => e.stopPropagation()}>
           <button className="action-btn edit" onClick={e => { e.stopPropagation(); onEdit(); }}>{iconPencil}</button>
           <button className="action-btn delete" onClick={e => { e.stopPropagation(); onDelete(); }}>{iconTrash}</button>
         </div>

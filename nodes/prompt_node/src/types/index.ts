@@ -29,6 +29,7 @@ export interface PrefabData {
   tags: TagGroup[];
   custom_prompts?: string;
   preview?: string;
+  loras?: LoraSelectionData[];
 }
 
 export interface LibraryData {
@@ -96,9 +97,19 @@ export interface TemporaryContext {
 export interface LoraItemData {
   name: string;
   file_name: string;
+  file_path: string;
   preview_url: string;
   tags?: string[];
   metadata: Record<string, unknown>;
+}
+
+export interface LoraSelectionData {
+  file_path: string;
+  name: string;
+  strength: number;
+  active_tags: string[];
+  active: boolean;
+  split_mode?: boolean;
 }
 
 export interface LoraFolders {

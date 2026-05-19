@@ -951,25 +951,29 @@ body {
 .lora-tag-list { position: absolute; top: 5px; left: 5px; right: 5px; display: flex; flex-wrap: wrap; gap: 4px; z-index: 4; pointer-events: none; }
 .lora-tag-chip { padding: 2px 6px; background: rgba(0, 122, 255, 0.85); border-radius: 4px; font-size: 10px; color: #fff; font-weight: 500; pointer-events: none; }
 .lora-list { display: flex; flex-direction: column; gap: 8px; }
-.lora-card { border-radius: 10px; padding: 10px 12px; border: 1px solid var(--border-color); }
+.lora-card { border-radius: 10px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.12); cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.lora-card:not(.active) { border-color: rgba(255,255,255,0.08); }
+.lora-card:not(.active) .lora-card-name { color: var(--text-secondary); }
+.lora-card.active { border-color: rgba(0, 122, 255, 0.5); background: rgba(0, 122, 255, 0.06); }
+.lora-card.active .lora-card-name { color: var(--text-primary); }
 .lora-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.lora-card-name { font-weight: 600; font-size: 13px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-.lora-card-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 8px; }
-.lora-card-toggle { background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: color 0.2s, background 0.2s; }
+.lora-card-name { font-weight: 600; font-size: 13px; height: 20px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; transition: color 0.2s; }
+.lora-card-meta { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: 8px; }
+.lora-strength { width: 36px; height: 20px; line-height: 20px; padding: 0; background: transparent; border: none; border-radius: 4px; color: var(--text-primary); font-size: 11px; text-align: center; outline: none; }
+.lora-strength-btn { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s; }
+.lora-strength-btn:hover { color: #fff; }
+.lora-card-toggle { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s; }
 .lora-card-toggle:hover { color: #fff; background: #007aff; }
 .lora-card-toggle.active { color: #007aff; }
 .lora-card-toggle.active:hover { color: #fff; }
-.lora-card-default-active { background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: color 0.2s, background 0.2s; }
-.lora-card-default-active:hover { color: #fff; background: #28a745; }
-.lora-card-default-active.active { color: #28a745; }
-.lora-card-default-active.active:hover { color: #fff; }
-.lora-card-remove { background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: color 0.2s, background 0.2s; }
+.lora-card-remove { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s; }
 .lora-card-remove:hover { color: #fff; background: #dc3545; }
 .lora-card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 .lora-card-tag { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); cursor: pointer; transition: transform 0.2s; }
 .lora-card-tag:hover { transform: translateY(-1px); }
 .lora-card-tag.active { background: #007aff; border-color: #007aff; color: #fff; }
 .lora-card-tag.active:hover { transform: translateY(-1px); }
+.prefab-loras { font-size: 10px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lora-folder { position: relative; background: var(--bg-tertiary); border-radius: 12px; flex: 0 0 auto; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; z-index: 1; }
 .lora-folder.expanded { width: 100%; flex: 1 1 100%; }
 .lora-folder.collapsed { width: auto; min-width: 120px; }
