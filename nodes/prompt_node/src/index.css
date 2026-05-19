@@ -956,6 +956,8 @@ body {
 .lora-card:not(.active) .lora-card-name { color: var(--text-secondary); }
 .lora-card.active { border-color: rgba(0, 122, 255, 0.5); background: rgba(0, 122, 255, 0.06); }
 .lora-card.active .lora-card-name { color: var(--text-primary); }
+.lora-card.missing { border-color: rgba(255, 59, 48, 0.6); background: rgba(255, 59, 48, 0.06); }
+.lora-card.missing .lora-card-name { color: #ff3b30; }
 .lora-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .lora-card-name { font-weight: 600; font-size: 13px; height: 20px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; transition: color 0.2s; }
 .lora-card-meta { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: 8px; }

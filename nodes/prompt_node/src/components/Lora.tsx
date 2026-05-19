@@ -14,6 +14,7 @@ interface LoraProps {
   initialStrength?: number;
   initialActive?: boolean;
   initialSplitMode?: boolean;
+  isMissing?: boolean;
   onChange: (data: LoraChangeData) => void;
   onRemove: () => void;
 }
@@ -59,7 +60,7 @@ function buildActiveSetFromInitial(
   return { mergeActive, splitActive };
 }
 
-export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, onChange, onRemove }: LoraProps) {
+export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, onChange, onRemove }: LoraProps) {
   const rawTags = lora.tags || [];
   const splitTags = rawTags.flatMap(t => t.split(',').map(s => s.trim()).filter(Boolean));
 
@@ -200,7 +201,7 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
   };
 
   return (
-    <div className={`lora-card ${cardActive ? 'active' : ''}`} onMouseDown={toggleCard}>
+    <div className={`lora-card ${cardActive ? 'active' : ''} ${isMissing ? 'missing' : ''}`} onMouseDown={toggleCard}>
       <div className="lora-card-header">
         <span className="lora-card-name">{lora.name}</span>
         <div className="lora-card-meta" onMouseDown={e => e.stopPropagation()}>

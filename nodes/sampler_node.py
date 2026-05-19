@@ -276,30 +276,31 @@ class SamplerCache:
             lora_str = item.strip()
 
             try:
-                parts = lora_str.split(":", 2)
-                if len(parts) != 3:
-                    print(f"Warning: 格式错误，需要 lora:name:weight 或 lora_path:path:weight: {lora_str}")
-                    continue
-
-                prefix, lora_name_or_path, strength_part = parts
-                prefix = prefix.strip()
-                lora_name_or_path = lora_name_or_path.strip()
-                strength = float(strength_part.strip())
-
-                if prefix == "lora_path":
-                    # Direct path mode: use the path directly
-                    lora_path = lora_name_or_path
-                    lora_name = lora_name_or_path.replace("/", "\\").split("\\")[-1]
-                elif prefix == "lora":
-                    # Normal mode: look up in cache
-                    lora_name = lora_name_or_path
+                if lora_str.startswith("lora_path:"):
+                    # Direct path mode: path may contain ':' (Windows drive letter)
+                    # Format: lora_path:path:strength  — split from the rightmost ':'
+                    body = lora_str[len("lora_path:"):]
+                    last_colon = body.rfind(":")
+                    if last_colon == -1:
+                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                        continue
+                    lora_path = body[:last_colon].strip()
+                    strength = float(body[last_colon+1:].strip())
+                    lora_name = lora_path.replace("/", "\\").split("\\")[-1]
+                elif lora_str.startswith("lora:"):
+                    # Normal mode: lora:name:strength
+                    parts = lora_str.split(":", 2)
+                    if len(parts) != 3:
+                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                        continue
+                    lora_name = parts[1].strip()
+                    strength = float(parts[2].strip())
                     lora_path = _lora_path_cache.get(lora_name)
                     if lora_path is None:
                         for key in _lora_path_cache:
                             if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
                                 lora_path = _lora_path_cache[key]
                                 break
-
                     if lora_path is None:
                         print(f"Warning: 未找到 LoRA 文件: {lora_name}")
                         continue
