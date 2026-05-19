@@ -131,6 +131,7 @@ NODE_CONFIG = {
     "ImageBatchNode": {"class": ImageBatchNode, "name": "ImageBatchNode"},
     "ImageRecoverBatchNode": {"class": ImageRecoverBatchNode, "name": "ImageRecoverBatchNode"},
     "ImageDetectContentNode": {"class": ImageDetectContentNode, "name": "ImageDetectContentNode"},
+    "SnapshotMaskNode": {"class": SnapshotMaskNode, "name": "SnapshotMaskNode"},
     
     "ImageToBase64Node": {"class": ImageToBase64Node, "name": "ImageToBase64Node"},
     "Base64ToImageNode": {"class": Base64ToImageNode, "name": "Base64ToImageNode"},

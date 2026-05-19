@@ -30,6 +30,7 @@ import pyautogui
 from PySide6.QtCore import Qt, QRect, QPoint, QPropertyAnimation, QEasingCurve
 from ..libs.image_utils import crop_mask, recover_crop, hex_to_rgb, batch_images, recover_batch, limit_pixels, recover_size, batch_image_mask_list
 from ..libs.mask_utils import combine_masks, create_empty_mask
+from ..libs.detect_utils import detect_mask
 from PySide6.QtGui import QColor, QPainter, QPen, QGuiApplication, QPixmap, QImage, QPainterPath
 from PySide6.QtWidgets import (QApplication, QWidget, QPushButton, QHBoxLayout, QVBoxLayout)
 from server import PromptServer
@@ -224,6 +225,68 @@ def image_to_base64(image_tensor):
     # 转换为base64
     base64_str = base64.b64encode(buffer).decode('utf-8')
     return f"data:image/jpeg;base64,{base64_str}"
+
+
+def mask_to_base64(mask_tensor):
+    """将mask张量转换为base64编码的PNG
+    
+    Args:
+        mask_tensor: mask张量，形状为 (B, H, W) 或 (H, W)，值范围 [0, 1]
+    
+    Returns:
+        str: base64编码的PNG图片字符串
+    """
+    if isinstance(mask_tensor, torch.Tensor):
+        mask_np = mask_tensor.cpu().numpy()
+    else:
+        mask_np = np.array(mask_tensor)
+    
+    # 去掉batch维度
+    if mask_np.ndim == 3:
+        mask_np = mask_np[0]
+    
+    mask_np = np.squeeze(mask_np)
+    
+    # 转为uint8
+    mask_uint8 = (np.clip(mask_np, 0.0, 1.0) * 255).astype(np.uint8)
+    
+    # 编码为png
+    _, buffer = cv2.imencode('.png', mask_uint8)
+    base64_str = base64.b64encode(buffer).decode('utf-8')
+    return f"data:image/png;base64,{base64_str}"
+
+
+def detector_mask_to_base64(mask_tensor, alpha=0.6):
+    """将detector返回的mask转为红色半透明RGBA base64，用于前端直接叠加绘制
+    
+    Args:
+        mask_tensor: mask张量，形状 (B, H, W) 或 (H, W)，值范围 [0, 1]
+        alpha: 叠加透明度系数
+    
+    Returns:
+        str: base64编码的PNG图片字符串
+    """
+    if isinstance(mask_tensor, torch.Tensor):
+        mask_np = mask_tensor.cpu().numpy()
+    else:
+        mask_np = np.array(mask_tensor)
+    
+    if mask_np.ndim == 3:
+        mask_np = mask_np[0]
+    mask_np = np.squeeze(mask_np)
+    
+    h, w = mask_np.shape
+    mask_uint8 = (np.clip(mask_np, 0.0, 1.0) * 255).astype(np.uint8)
+    
+    # Create RGBA: red with mask as alpha
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[:, :, 0] = 255  # R
+    rgba[:, :, 3] = (mask_uint8 * alpha).astype(np.uint8)  # A
+    
+    # Encode as PNG (BGRA for cv2)
+    _, buffer = cv2.imencode('.png', cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+    base64_str = base64.b64encode(buffer).decode('utf-8')
+    return f"data:image/png;base64,{base64_str}"
 
 
 def handlePointsSelection(severHandler, set_event):
@@ -1664,3 +1727,415 @@ class ImageDetectContentNode:
         output_has_border = torch.tensor(has_borders, dtype=torch.bool, device=image.device)
         
         return (output_mask, output_has_border)
+
+def handleMask(serverHandler, set_event):
+    # Handle mask drawing data
+    content_length = int(serverHandler.headers['Content-Length'])
+    post_data = serverHandler.rfile.read(content_length)
+    data = json.loads(post_data)
+    
+    if serverHandler.server_instance:
+        # Get mask data
+        rawMask_base64 = data.get('mask')
+        # Extract base64 data
+        base64_data = rawMask_base64.split(',')[1]
+        mask_data = base64.b64decode(base64_data)
+        
+        # Decode to numpy
+        nparr = np.frombuffer(mask_data, np.uint8)
+        mask_bgra = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)  # May have alpha channel
+        
+        if mask_bgra is None:
+            serverHandler.send_error(500, "Failed to decode mask image")
+            return
+        
+        # Convert to grayscale: if has alpha, use it; otherwise use red channel intensity
+        if mask_bgra.ndim == 3:
+            if mask_bgra.shape[2] == 4:
+                # Use alpha channel as mask intensity
+                mask_gray = mask_bgra[:, :, 3].astype(np.float32) / 255.0
+            else:
+                # Use max of RGB channels
+                mask_gray = mask_bgra[:, :, :3].max(axis=2).astype(np.float32) / 255.0
+        else:
+            mask_gray = mask_bgra.astype(np.float32) / 255.0
+        
+        # Get original image dimensions
+        original_image = serverHandler.server_instance.image
+        if hasattr(original_image, 'shape'):
+            if len(original_image.shape) == 4:
+                _, orig_h, orig_w, _ = original_image.shape
+            elif len(original_image.shape) == 3:
+                orig_h, orig_w, _ = original_image.shape
+            else:
+                orig_h, orig_w = mask_gray.shape
+        else:
+            orig_h, orig_w = mask_gray.shape
+        
+        # Resize mask to match original image dimensions
+        if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
+            mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Binarize: any painted area becomes 1.0
+        mask_gray = (mask_gray > 0).astype(np.float32)
+        
+        # Add batch dimension -> [1, H, W]
+        mask_array = np.expand_dims(mask_gray, axis=0)
+        
+        # Convert to torch tensor
+        try:
+            import torch
+            serverHandler.server_instance.mask = torch.from_numpy(mask_array).float()
+        except ImportError:
+            serverHandler.server_instance.mask = mask_array.astype(np.float32)
+        
+        serverHandler.send_response(200)
+        serverHandler.send_header('Content-type', 'application/json')
+        serverHandler.send_header("Access-Control-Allow-Origin", "*")
+        serverHandler.end_headers()
+        serverHandler.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+        
+        # Signal that mask is ready
+        if set_event:
+            serverHandler.server_instance.screenshot_event.set()
+    else:
+        serverHandler.send_error(500, "Server error")
+
+
+def handleDetect(serverHandler):
+    """Handle detector request and return mask as base64 for frontend overlay."""
+    content_length = int(serverHandler.headers['Content-Length'])
+    post_data = serverHandler.rfile.read(content_length)
+    data = json.loads(post_data)
+    
+    instance = serverHandler.server_instance
+    if not instance or instance.detector is None:
+        serverHandler.send_error(400, "No detector available")
+        return
+    
+    try:
+        # Use frontend params directly (all parameters are controlled from the web UI)
+        params = {
+            'threshold': data.get('threshold', 0.5),
+            'dilation': data.get('dilation', 4),
+            'crop_factor': data.get('crop_factor', 1.5),
+            'drop_size': data.get('drop_size', 0),
+            'prompt': data.get('prompt', ''),
+            'fill_mask': data.get('fill_mask', True),
+        }
+        
+        image = instance.image
+        # Ensure image is a single image tensor for detect_mask
+        if hasattr(image, 'shape') and len(image.shape) == 4:
+            # Use first image in batch
+            single_image = image[0]
+        else:
+            single_image = image
+        
+        # Run detection
+        mask_list = detect_mask(
+            detector=instance.detector,
+            image=single_image,
+            threshold=params['threshold'],
+            dilation=params['dilation'],
+            crop_factor=params['crop_factor'],
+            drop_size=params['drop_size'],
+            prompt=params['prompt'],
+            fill_mask=params['fill_mask'],
+        )
+        
+        if mask_list is None or len(mask_list) == 0:
+            serverHandler.send_response(200)
+            serverHandler.send_header('Content-type', 'application/json')
+            serverHandler.send_header("Access-Control-Allow-Origin", "*")
+            serverHandler.end_headers()
+            serverHandler.wfile.write(json.dumps({'mask': None, 'message': 'No objects detected'}).encode('utf-8'))
+            return
+        
+        # Combine masks (OR)
+        combined = combine_masks(mask_list, mode="max")
+        # Ensure shape is [1, H, W]
+        if combined.dim() == 2:
+            combined = combined.unsqueeze(0)
+        
+        # Convert to base64 overlay image
+        mask_base64 = detector_mask_to_base64(combined)
+        
+        serverHandler.send_response(200)
+        serverHandler.send_header('Content-type', 'application/json')
+        serverHandler.send_header("Access-Control-Allow-Origin", "*")
+        serverHandler.end_headers()
+        serverHandler.wfile.write(json.dumps({'mask': mask_base64}).encode('utf-8'))
+        
+    except Exception as e:
+        import traceback
+        print(f"[SnapshotMask] Detection failed: {e}")
+        traceback.print_exc()
+        serverHandler.send_response(500)
+        serverHandler.send_header('Content-type', 'application/json')
+        serverHandler.send_header("Access-Control-Allow-Origin", "*")
+        serverHandler.end_headers()
+        serverHandler.wfile.write(json.dumps({'error': str(e)}).encode('utf-8'))
+
+
+def handleGrow(serverHandler):
+    """Handle grow request: dilate the provided mask and return overlay base64."""
+    content_length = int(serverHandler.headers['Content-Length'])
+    post_data = serverHandler.rfile.read(content_length)
+    data = json.loads(post_data)
+    
+    try:
+        rawMask_base64 = data.get('mask')
+        grow = int(data.get('grow', 0))
+        
+        if not rawMask_base64 or grow <= 0:
+            serverHandler.send_response(200)
+            serverHandler.send_header('Content-type', 'application/json')
+            serverHandler.send_header("Access-Control-Allow-Origin", "*")
+            serverHandler.end_headers()
+            serverHandler.wfile.write(json.dumps({'mask': rawMask_base64}).encode('utf-8'))
+            return
+        
+        # Extract base64 data
+        base64_data = rawMask_base64.split(',')[1]
+        mask_data = base64.b64decode(base64_data)
+        
+        # Decode to numpy (RGBA)
+        nparr = np.frombuffer(mask_data, np.uint8)
+        mask_bgra = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+        
+        if mask_bgra is None:
+            serverHandler.send_error(500, "Failed to decode mask image")
+            return
+        
+        # Extract alpha channel as binary mask
+        if mask_bgra.ndim == 3 and mask_bgra.shape[2] == 4:
+            mask_gray = (mask_bgra[:, :, 3] > 0).astype(np.uint8) * 255
+        else:
+            mask_gray = cv2.cvtColor(mask_bgra, cv2.COLOR_BGR2GRAY)
+            mask_gray = (mask_gray > 0).astype(np.uint8) * 255
+        
+        # Dilate
+        k = grow * 2 + 1
+        kernel = np.ones((k, k), np.uint8)
+        dilated = cv2.dilate(mask_gray, kernel, iterations=1)
+        
+        # Convert to red overlay base64
+        h, w = dilated.shape
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, 0] = 255
+        rgba[:, :, 3] = (dilated > 0).astype(np.uint8) * 153  # alpha 0.6 = 153
+        
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        result_base64 = f"data:image/png;base64,{base64_str}"
+        
+        serverHandler.send_response(200)
+        serverHandler.send_header('Content-type', 'application/json')
+        serverHandler.send_header("Access-Control-Allow-Origin", "*")
+        serverHandler.end_headers()
+        serverHandler.wfile.write(json.dumps({'mask': result_base64}).encode('utf-8'))
+        
+    except Exception as e:
+        import traceback
+        print(f"[SnapshotMask] Grow failed: {e}")
+        traceback.print_exc()
+        serverHandler.send_response(500)
+        serverHandler.send_header('Content-type', 'application/json')
+        serverHandler.send_header("Access-Control-Allow-Origin", "*")
+        serverHandler.end_headers()
+        serverHandler.wfile.write(json.dumps({'error': str(e)}).encode('utf-8'))
+
+
+class SnapshotMaskNodeServer:
+    """Temporary HTTP server to serve the mask drawing page and handle mask submission."""
+
+    def __init__(self, image, initial_mask=None, detector=None):
+        self.image = image
+        self.initial_mask = initial_mask
+        self.detector = detector
+        self.mask = None
+        self.server = None
+        self.started = False
+        self.screenshot_event = threading.Event()
+        self.window_closed = False
+        self.browser_url = None
+
+    def start(self):
+        # Find an available port
+        for port in range(8080, 9000):
+            try:
+                self.server = socketserver.TCPServer(('localhost', port), self.SnapshotMaskNodeHandler)
+                self.started = True
+                print(f"[SnapshotMask] Server started on port {port}")
+                break
+            except Exception:
+                continue
+        
+        self.browser_url = f"http://localhost:{port}/mask_node.html"
+        
+        if not self.started:
+            print("[SnapshotMask] Failed to start server")
+            return
+        
+        # Store reference to self in the handler class
+        self.SnapshotMaskNodeHandler.server_instance = self
+        
+        # Serve forever
+        try:
+            self.server.serve_forever()
+        except Exception:
+            pass
+
+    def stop(self):
+        if self.server:
+            print("[SnapshotMask] Stopping server")
+            self.server.shutdown()
+            self.server.server_close()
+
+    def wait_for_selection(self):
+        """Wait for mask submission indefinitely."""
+        if not waitSnapShot(self.screenshot_event):
+            raise Exception("Canceled")
+
+    class SnapshotMaskNodeHandler(http.server.SimpleHTTPRequestHandler):
+        server_instance = None
+
+        def do_GET(self):
+            if self.path == '/mask_node.html':
+                # Serve the mask_node.html file
+                file_path = os.path.join(os.path.dirname(__file__), 'web', 'mask_node.html')
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "File not found")
+            elif self.path.startswith('/js/'):
+                # Serve JavaScript files
+                file_path = os.path.join(os.path.dirname(__file__), 'web', self.path[1:])
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/javascript')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "File not found")
+            elif self.path == '/image_data':
+                # Serve image data as JSON
+                if self.server_instance:
+                    try:
+                        image_base64 = image_to_base64(self.server_instance.image)
+                        response = {
+                            'image': image_base64
+                        }
+                        if self.server_instance.initial_mask is not None:
+                            response['initial_mask'] = mask_to_base64(self.server_instance.initial_mask)
+                        # Detector info
+                        response['has_detector'] = self.server_instance.detector is not None
+                        response_data = json.dumps(response).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Content-Length', str(len(response_data)))
+                        self.end_headers()
+                        self.wfile.write(response_data)
+                    except Exception as e:
+                        self.send_error(500, f"Error processing image data: {e}")
+                        return
+                else:
+                    self.send_error(500, "Server error")
+            else:
+                super().do_GET()
+
+        def do_POST(self):
+            if self.path == '/mask':
+                handleMask(self, True)
+            elif self.path == '/detect':
+                handleDetect(self)
+            elif self.path == '/grow':
+                handleGrow(self)
+            elif self.path == '/window_closed':
+                self.server_instance.window_closed = True
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+            else:
+                super().do_POST()
+
+        def log_message(self, format, *args):
+            # Suppress server logs
+            pass
+
+
+class SnapshotMaskNode:
+    """Open an image in a browser, allow user to draw a mask with a brush, and return the mask."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {
+                    "tooltip": "Input image to draw mask on",
+                }),
+            },
+            "optional": {
+                "mask": ("MASK", {
+                    "tooltip": "Optional initial mask to load into the editor",
+                }),
+                "detector": ("*", {
+                    "tooltip": "Optional detector for auto-detection",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mask",)
+    FUNCTION = "draw_mask"
+    CATEGORY = "Kolid-Toolkit"
+    
+    @classmethod
+    def IS_CHANGED(s):
+        return float("nan")
+
+    def draw_mask(self, image, mask=None, detector=None):
+        focused_window = None
+        if has_win32gui:
+            focused_window = win32gui.GetForegroundWindow()
+
+        # Start a temporary HTTP server to serve the mask drawing page
+        server = SnapshotMaskNodeServer(image, initial_mask=mask, detector=detector)
+        server_thread = threading.Thread(target=server.start)
+        server_thread.daemon = True
+        server_thread.start()
+
+        start_time = time.time()
+        timeout = 10  # 10 seconds timeout
+        while not server.started:
+            if time.time() - start_time > timeout:
+                raise RuntimeError(f"[SnapshotMask] Server startup timeout after {timeout} seconds")
+            time.sleep(0.1)
+
+        print(f"[SnapshotMask] Opening browser at: {server.browser_url}")
+        webbrowser.open(server.browser_url)
+
+        # Wait for mask to be submitted
+        print("[SnapshotMask] Waiting for mask drawing...")
+        server.wait_for_selection()
+
+        # Stop the server
+        server.stop()
+
+        # Restore window focus
+        if has_win32gui and focused_window:
+            time.sleep(0.5)
+            focus_window(focused_window)
+
+        if server.window_closed or server.mask is None:
+            raise ValueError("Window closed without drawing mask")
+        
+        return (server.mask,)

@@ -1,0 +1,2 @@
+Remaining emoji in HTML: {'✏', '🗑', '✕', '⋮'}
+SVG count: 1
