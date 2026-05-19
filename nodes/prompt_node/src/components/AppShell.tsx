@@ -99,7 +99,7 @@ export function AppShell() {
   }
   const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
-  const [selectedPrefabs, setSelectedPrefabs] = useState<{ guid: string; prefab: PrefabData }[]>([]);
+  const [selectedPrefabs, setSelectedPrefabs] = useState<{ guid: string; prefab: PrefabData; active: boolean }[]>([]);
   const prefabRestoredRef = useRef(false);
 
   const [imgVersion, setImgVersion] = useState(0);
@@ -249,7 +249,7 @@ export function AppShell() {
       prefabRestoredRef.current = true;
       return;
     }
-    const restored: { guid: string; prefab: PrefabData }[] = [];
+    const restored: { guid: string; prefab: PrefabData; active: boolean }[] = [];
     const guidToPrefab = new Map<string, PrefabData>();
     for (const libData of Object.values(allLibraries)) {
       for (const pf of libData.prefabs || []) {
@@ -259,7 +259,7 @@ export function AppShell() {
     for (const sp of lastSelectedPrefabs) {
       const pf = guidToPrefab.get(sp.guid);
       if (pf) {
-        restored.push({ guid: sp.guid, prefab: pf });
+        restored.push({ guid: sp.guid, prefab: pf, active: sp.active !== false });
       }
     }
     setSelectedPrefabs(restored);
@@ -564,12 +564,16 @@ export function AppShell() {
       if (exists) {
         return prev.filter(p => p.guid !== guid);
       }
-      return [...prev, { guid, prefab }];
+      return [...prev, { guid, prefab, active: true }];
     });
   }, []);
 
   const removeSelectedPrefab = useCallback((guid: string) => {
     setSelectedPrefabs(prev => prev.filter(p => p.guid !== guid));
+  }, []);
+
+  const togglePrefabActive = useCallback((guid: string) => {
+    setSelectedPrefabs(prev => prev.map(p => p.guid === guid ? { ...p, active: !p.active } : p));
   }, []);
 
   // ========== Prefab Merge/Replace ==========
@@ -688,7 +692,7 @@ export function AppShell() {
 
     // Restore nested selected_prefabs
     const nestedPrefabs = pf.selected_prefabs || [];
-    const restoredPrefabs: { guid: string; prefab: PrefabData }[] = [];
+    const restoredPrefabs: { guid: string; prefab: PrefabData; active: boolean }[] = [];
     // Build guid -> prefab map
     const guidMap = new Map<string, PrefabData>();
     for (const libData of Object.values(allLibraries)) {
@@ -698,7 +702,7 @@ export function AppShell() {
     }
     for (const sp of nestedPrefabs) {
       const nested = guidMap.get(sp.guid);
-      if (nested) restoredPrefabs.push({ guid: sp.guid, prefab: nested });
+      if (nested) restoredPrefabs.push({ guid: sp.guid, prefab: nested, active: true });
     }
     setSelectedPrefabs(restoredPrefabs);
 
@@ -1003,7 +1007,7 @@ export function AppShell() {
   }, [selectedLoras, loraSelections]);
 
   const buildSelectedPrefabs = useCallback(() => {
-    return selectedPrefabs.map(p => ({ guid: p.guid }));
+    return selectedPrefabs.map(p => ({ guid: p.guid, active: p.active }));
   }, [selectedPrefabs]);
 
   // Check for circular dependencies in selected_prefabs
@@ -2066,7 +2070,7 @@ export function AppShell() {
               <>
                 <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
                 <div className="prefab-list">
-                  {selectedPrefabs.map(({ guid, prefab }) => {
+                  {selectedPrefabs.map(({ guid, prefab, active }) => {
                     const pfTags = (prefab.tags || []).map(g => tagsToDisplayName(g)).join(' + ');
                     const pfLoras = prefab.loras || [];
                     // Expand nested prefabs for display
@@ -2098,17 +2102,18 @@ export function AppShell() {
                       }
                     }
                     return (
-                      <div key={guid} className="prefab-card">
+                      <div key={guid} className={`prefab-card ${active ? '' : 'prefab-inactive'}`}>
                         <div className="prefab-card-header">
-                          <span className="prefab-card-name">{prefab.name}</span>
+                          <span className="prefab-card-name" style={{ opacity: active ? 1 : 0.5 }}>{prefab.name}</span>
                           <div className="prefab-card-actions">
+                            <button className="prefab-card-btn toggle" onMouseDown={(e) => { e.stopPropagation(); togglePrefabActive(guid); }}>{active ? 'ON' : 'OFF'}</button>
                             <button className="prefab-card-btn merge" onMouseDown={() => mergePrefab(prefab)}>Merge</button>
                             <button className="prefab-card-btn remove" onMouseDown={() => removeSelectedPrefab(guid)}>{iconX}</button>
                           </div>
                         </div>
-                        {pfTags && <div className="prefab-card-tags">{pfTags}</div>}
-                        {pfLoras.length > 0 && <div className="prefab-card-loras">Lora({pfLoras.length}): {pfLoras.map(l => l.name).join(', ')}</div>}
-                        {nestedNames.length > 0 && <div className="prefab-card-loras">Prefab({nestedNames.length}): {nestedNames.join(', ')}</div>}
+                        {active && pfTags && <div className="prefab-card-tags">{pfTags}</div>}
+                        {active && pfLoras.length > 0 && <div className="prefab-card-loras">Lora({pfLoras.length}): {pfLoras.map(l => l.name).join(', ')}</div>}
+                        {active && nestedNames.length > 0 && <div className="prefab-card-loras">Prefab({nestedNames.length}): {nestedNames.join(', ')}</div>}
                       </div>
                     );
                   })}

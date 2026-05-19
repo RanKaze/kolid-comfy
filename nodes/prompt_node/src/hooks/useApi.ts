@@ -16,7 +16,7 @@ export function useApi() {
   const [promptFoldout, setPromptFoldout] = useState(false);
   const [lastSelected, setLastSelected] = useState<string[]>([]);
   const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
-  const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string }[]>([]);
+  const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
   const [loraData, setLoraData] = useState<LoraFolders>({});
 
   const loadData = useCallback(async () => {
