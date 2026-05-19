@@ -2107,8 +2107,9 @@ class SnapshotPromptNode:
         queue = []
         for sp in server.selected_prefabs:
             guid = sp.get('guid') if isinstance(sp, dict) else sp
-            print(f"[PREFAB_DEBUG] Processing selected_prefab entry: {sp}, extracted guid = {guid}")
-            if guid and guid not in visited_guids:
+            active = sp.get('active', True) if isinstance(sp, dict) else True
+            print(f"[PREFAB_DEBUG] Processing selected_prefab entry: {sp}, extracted guid = {guid}, active = {active}")
+            if guid and active and guid not in visited_guids:
                 visited_guids.add(guid)
                 queue.append(guid)
         

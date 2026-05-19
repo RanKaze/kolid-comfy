@@ -26,6 +26,7 @@ export type TagGroup = Tag[];
 
 export interface SelectedPrefabRef {
   guid: string;
+  active?: boolean;
 }
 
 export interface PrefabData {
@@ -80,7 +81,7 @@ export interface PointsResponse {
   category_size_modes: CategorySizeModes;
   prompt_foldout: boolean;
   custom_prompts: string;
-  last_selected_prefabs?: { guid: string }[];
+  last_selected_prefabs?: { guid: string; active?: boolean }[];
 }
 
 export interface DragState {
