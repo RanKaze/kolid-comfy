@@ -2503,86 +2503,119 @@ export function AppShell() {
                 </div>
               </div>
               <div className="edit-prefab-right">
-                <div className="edit-prefab-section">
-                  <label>Tags ({modalPrefabTags.length})</label>
-                  <div className="modal-tag-list">
-                    {modalPrefabTags.map((group, i) => (
-                      <div key={i} className="modal-tag">
-                        <span>{tagsToDisplayString(group)}</span>
-                        <button type="button" onClick={() => setModalPrefabTags(prev => prev.filter((_, j) => j !== i))}>×</button>
-                      </div>
-                    ))}
-                  </div>
-                  <input type="text" placeholder="Add tags (comma separated), press Enter..." style={{ fontSize: 12 }} onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      const val = (e.target as HTMLInputElement).value.trim();
-                      if (val) {
-                        const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
-                        if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
-                        (e.target as HTMLInputElement).value = '';
-                      }
-                    }
-                  }} />
-              </div>
-              <div className="edit-prefab-section">
-                <label>Loras ({modalPrefabLoras.length})</label>
-                <div className="modal-lora-list">
-                  {modalPrefabLoras.map((l, i) => (
-                    <div key={l.file_path} className="modal-lora-card">
-                      <span className="name">{l.name || l.file_path}</span>
-                      <div className="meta">
-                        <input type="number" step={0.1} min={0} max={2} value={l.strength} onChange={e => { const v = parseFloat(e.target.value); setModalPrefabLoras(prev => prev.map((pl, j) => j === i ? { ...pl, strength: isNaN(v) ? 1 : v } : pl)); }} />
-                        <button type="button" onClick={() => setModalPrefabLoras(prev => prev.filter((_, j) => j !== i))}>×</button>
-                      </div>
+                <div className="edit-prefab-columns">
+                  <div className="edit-prefab-section">
+                    <label>Tags ({modalPrefabTags.length})</label>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                      {modalPrefabTags.map((group, i) => (
+                        <span className="tag" key={i}>
+                          {tagsToDisplayName(group)}
+                          <span className="remove" onClick={() => setModalPrefabTags(prev => prev.filter((_, j) => j !== i))}>{iconX}</span>
+                        </span>
+                      ))}
                     </div>
-                  ))}
+                    <input type="text" placeholder="Add tags, press Enter..." style={{ fontSize: 12 }} onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const val = (e.target as HTMLInputElement).value.trim();
+                        if (val) {
+                          const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
+                          if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
+                          (e.target as HTMLInputElement).value = '';
+                        }
+                      }
+                    }} />
+                  </div>
+                  <div className="edit-prefab-section">
+                    <label>Loras ({modalPrefabLoras.length})</label>
+                    <div className="lora-list">
+                      {modalPrefabLoras.map((l, i) => {
+                        const item = Object.values(loraData).flat().find(it => it.file_path === l.file_path);
+                        if (!item) return null;
+                        return (
+                          <Lora
+                            key={l.file_path}
+                            lora={item}
+                            initialActiveTags={l.active_tags}
+                            initialStrength={l.strength}
+                            initialActive={l.active}
+                            initialSplitMode={l.split_mode}
+                            onChange={(data) => setModalPrefabLoras(prev => prev.map((pl, j) => j === i ? { ...pl, strength: data.strength, active_tags: data.activeTags, active: data.active, split_mode: data.split_mode } : pl))}
+                            onRemove={() => setModalPrefabLoras(prev => prev.filter((_, j) => j !== i))}
+                          />
+                        );
+                      })}
+                    </div>
+                    <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
+                      const path = e.target.value;
+                      if (!path) return;
+                      const item = Object.values(loraData).flat().find(it => it.file_path === path);
+                      if (item) {
+                        setModalPrefabLoras(prev => {
+                          if (prev.some(p => p.file_path === path)) return prev;
+                          return [...prev, { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true }];
+                        });
+                      }
+                      e.target.value = '';
+                    }}>
+                      <option value="">Add Lora...</option>
+                      {Object.values(loraData).flat().filter(item => !modalPrefabLoras.some(l => l.file_path === item.file_path)).map(item => (
+                        <option key={item.file_path} value={item.file_path}>{item.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="edit-prefab-section">
+                    <label>Prefabs ({modalPrefabSelectedPrefabs.length})</label>
+                    <div className="prefab-list">
+                      {modalPrefabSelectedPrefabs.map((sp, i) => {
+                        const pf = findPrefabByGuid(sp.guid);
+                        return (
+                          <div key={sp.guid} className="prefab-card" style={{ cursor: 'default' }}>
+                            <div className="prefab-card-header">
+                              <span className="prefab-card-name">{pf?.name || sp.guid}</span>
+                              <div className="prefab-card-actions">
+                                <button className="prefab-card-btn edit" onClick={() => {
+                                  const loc = (() => {
+                                    for (const [libName, libData] of Object.entries(allLibraries)) {
+                                      const idx = (libData.prefabs || []).findIndex(p => p.guid === sp.guid);
+                                      if (idx !== -1) return { lib: libName, idx };
+                                    }
+                                    return null;
+                                  })();
+                                  if (loc) {
+                                    const target = allLibraries[loc.lib]?.prefabs?.[loc.idx];
+                                    setModalName(target?.name || '');
+                                    setModalCustomPrompts(target?.custom_prompts || '');
+                                    setModalPrefabTags((target?.tags || []) as TagGroup[]);
+                                    setModalPrefabLoras((target?.loras || []) as LoraSelectionData[]);
+                                    setModalPrefabSelectedPrefabs((target?.selected_prefabs || []) as SelectedPrefabRef[]);
+                                    setModalPreviewUrl(target?.preview ? imgUrl(target.preview) : '');
+                                    setModalPreviewVisible(!!target?.preview);
+                                    setModal({ type: 'editPrefab', data: { lib: loc.lib, idx: loc.idx } });
+                                  }
+                                }}>{iconGear}</button>
+                                <button className="prefab-card-btn remove" onClick={() => setModalPrefabSelectedPrefabs(prev => prev.filter((_, j) => j !== i))}>{iconX}</button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
+                      const guid = e.target.value;
+                      if (!guid) return;
+                      setModalPrefabSelectedPrefabs(prev => {
+                        if (prev.some(p => p.guid === guid)) return prev;
+                        return [...prev, { guid }];
+                      });
+                      e.target.value = '';
+                    }}>
+                      <option value="">Add Prefab...</option>
+                      {Object.values(allLibraries).flatMap(libData => (libData.prefabs || []).map(pf => ({ guid: pf.guid || '', name: pf.name }))).filter(p => p.guid && !modalPrefabSelectedPrefabs.some(sp => sp.guid === p.guid)).map(p => (
+                        <option key={p.guid} value={p.guid}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-                <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
-                  const path = e.target.value;
-                  if (!path) return;
-                  const item = Object.values(loraData).flat().find(it => it.file_path === path);
-                  if (item) {
-                    setModalPrefabLoras(prev => {
-                      if (prev.some(p => p.file_path === path)) return prev;
-                      return [...prev, { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true }];
-                    });
-                  }
-                  e.target.value = '';
-                }}>
-                  <option value="">Add Lora...</option>
-                  {Object.values(loraData).flat().filter(item => !modalPrefabLoras.some(l => l.file_path === item.file_path)).map(item => (
-                    <option key={item.file_path} value={item.file_path}>{item.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="edit-prefab-section">
-                <label>Nested Prefabs ({modalPrefabSelectedPrefabs.length})</label>
-                <div className="modal-prefab-list">
-                  {modalPrefabSelectedPrefabs.map((sp, i) => {
-                    const pf = findPrefabByGuid(sp.guid);
-                    return (
-                      <div key={sp.guid} className="modal-prefab-card">
-                        <span className="name">{pf?.name || sp.guid}</span>
-                        <button type="button" onClick={() => setModalPrefabSelectedPrefabs(prev => prev.filter((_, j) => j !== i))}>×</button>
-                      </div>
-                    );
-                  })}
-                </div>
-                <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
-                  const guid = e.target.value;
-                  if (!guid) return;
-                  setModalPrefabSelectedPrefabs(prev => {
-                    if (prev.some(p => p.guid === guid)) return prev;
-                    return [...prev, { guid }];
-                  });
-                  e.target.value = '';
-                }}>
-                  <option value="">Add Prefab...</option>
-                  {Object.values(allLibraries).flatMap(libData => (libData.prefabs || []).map(pf => ({ guid: pf.guid || '', name: pf.name }))).filter(p => p.guid && !modalPrefabSelectedPrefabs.some(sp => sp.guid === p.guid)).map(p => (
-                    <option key={p.guid} value={p.guid}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
               </div>
             </div>
             <div className="modal-buttons">
