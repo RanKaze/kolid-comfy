@@ -123,6 +123,44 @@ export interface TemporaryContext {
   level: number;
 }
 
+export type TempContextMode = 'tag' | 'lora' | 'prefab';
+
+export interface TempContextRestorePoint {
+  name: string;
+  customPrompts: string;
+  prefabTags: TagGroup[];
+  prefabLoras: LoraSelectionData[];
+  prefabSelectedPrefabs: SelectedPrefabRef[];
+  previewUrl: string;
+  previewVisible: boolean;
+  focusX: number;
+  focusY: number;
+  focusVisible: boolean;
+  modalData: { lib: string; idx: number };
+}
+
+export interface LoraTempState {
+  strength: number;
+  active_tags: string[];
+  active: boolean;
+  split_mode: boolean;
+}
+
+export interface TempContextLayer {
+  type: TempContextMode;
+  title: string;
+  // tag mode fields
+  matchFn?: (p: PromptData, cat: string) => boolean;
+  basePrompt?: string;
+  tagGroups?: TagGroup[];
+  level?: number;
+  // lora/prefab mode fields
+  selections?: string[];
+  restorePoint?: TempContextRestorePoint;
+  // lora mode: per-file-path state
+  loraStates?: Record<string, LoraTempState>;
+}
+
 export interface LoraItemData {
   name: string;
   file_name: string;

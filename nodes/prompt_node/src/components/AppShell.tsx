@@ -14,6 +14,7 @@ import {
   isBasePromptSelectedInTags, findTagGroupByBasePrompt,
 } from '../hooks/useSelection';
 import { useApi } from '../hooks/useApi';
+import { useTempContext } from '../hooks/useTempContext';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
@@ -92,7 +93,7 @@ export function AppShell() {
   const [animating, setAnimating] = useState<Set<string>>(new Set());
   const [focusPoints, setFocusPoints] = useState<FocusPoints>({});
   const [categoryFocusPoints, setCategoryFocusPoints] = useState<Record<string, {x:number;y:number}>>({});
-  const [temporaryCtx, setTemporaryCtx] = useState<{stack: {matchFn:(p:PromptData,c:string)=>boolean;basePrompt:string;title:string;tagGroups:TagGroup[];level:number}[]}>({stack: []});
+  const tempCtx = useTempContext();
   interface LoraSelectionState {
     activeTags: string[];
     strength: number;
@@ -393,22 +394,7 @@ export function AppShell() {
   const [modalPrefabTags, setModalPrefabTags] = useState<TagGroup[]>([]);
   const [modalPrefabLoras, setModalPrefabLoras] = useState<LoraSelectionData[]>([]);
   const [modalPrefabSelectedPrefabs, setModalPrefabSelectedPrefabs] = useState<SelectedPrefabRef[]>([]);
-  const [modalRestorePoint, setModalRestorePoint] = useState<{
-    name: string;
-    customPrompts: string;
-    prefabTags: TagGroup[];
-    prefabLoras: LoraSelectionData[];
-    prefabSelectedPrefabs: SelectedPrefabRef[];
-    previewUrl: string;
-    previewVisible: boolean;
-    focusX: number;
-    focusY: number;
-    focusVisible: boolean;
-    modalData: { lib: string; idx: number };
-    mode: 'lora' | 'prefab';
-  } | null>(null);
-  const [mainTempSelectedLoras, setMainTempSelectedLoras] = useState<Set<string>>(new Set());
-  const [mainTempSelectedPrefabs, setMainTempSelectedPrefabs] = useState<Set<string>>(new Set());
+
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
   const [modalIsCat, setModalIsCat] = useState(true);
@@ -419,6 +405,76 @@ export function AppShell() {
   const [modalFocusVisible, setModalFocusVisible] = useState(false);
   const [modalImageFile, setModalImageFile] = useState<File|null>(null);
   const [errorModal, setErrorModal] = useState<{ title: string; message: string }|null>(null);
+
+  // Tag autocomplete for editPrefab modal
+  const [tagInputQuery, setTagInputQuery] = useState('');
+  const [tagInputShowDropdown, setTagInputShowDropdown] = useState(false);
+  const [tagInputSelIdx, setTagInputSelIdx] = useState(-1);
+  const tagInputRef = useRef<HTMLInputElement>(null);
+
+  const tagAutocompleteSuggestions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const cd of Object.values(allPrompts)) {
+      const prompts = ((cd as any).prompts || []) as { name: string; prompt: string }[];
+      for (const p of prompts) {
+        if (p.name && !map.has(p.name)) map.set(p.name, p.prompt || p.name);
+      }
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh-CN'));
+  }, [allPrompts]);
+
+  const filteredTagSuggestions = useMemo(() => {
+    if (!tagInputQuery) return tagAutocompleteSuggestions.slice(0, 50);
+    const q = tagInputQuery.toLowerCase();
+    return tagAutocompleteSuggestions.filter(([name, prompt]) =>
+      name.toLowerCase().includes(q) || prompt.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [tagAutocompleteSuggestions, tagInputQuery]);
+
+  const selectTagSuggestion = useCallback((name: string) => {
+    const input = tagInputRef.current;
+    if (!input) return;
+    const val = input.value;
+    const lastCommaIdx = val.lastIndexOf(',');
+    const prefix = lastCommaIdx >= 0 ? val.slice(0, lastCommaIdx + 1) : '';
+    input.value = prefix + name;
+    setTagInputShowDropdown(false);
+    setTagInputQuery('');
+    setTagInputSelIdx(-1);
+    setTimeout(() => input.focus(), 0);
+  }, []);
+
+  const handleTagInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    const parts = val.split(',');
+    const lastPart = parts[parts.length - 1].trim();
+    setTagInputQuery(lastPart);
+    setTagInputShowDropdown(lastPart.length >= 1);
+    setTagInputSelIdx(-1);
+  }, []);
+
+  const handleTagInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (tagInputShowDropdown && filteredTagSuggestions.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setTagInputSelIdx(i => Math.min(i + 1, filteredTagSuggestions.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setTagInputSelIdx(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Tab') { e.preventDefault(); selectTagSuggestion(filteredTagSuggestions[tagInputSelIdx >= 0 ? tagInputSelIdx : 0][0]); return; }
+      if (e.key === 'Enter' && tagInputSelIdx >= 0) { e.preventDefault(); selectTagSuggestion(filteredTagSuggestions[tagInputSelIdx][0]); return; }
+      if (e.key === 'Escape') { setTagInputShowDropdown(false); return; }
+    }
+    if (e.key === 'Enter') {
+      const input = tagInputRef.current;
+      if (!input) return;
+      const val = input.value.trim();
+      if (val) {
+        const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
+        if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
+        input.value = '';
+        setTagInputShowDropdown(false);
+        setTagInputQuery('');
+        setTagInputSelIdx(-1);
+      }
+    }
+  }, [tagInputShowDropdown, filteredTagSuggestions, tagInputSelIdx, selectTagSuggestion, setModalPrefabTags]);
 
   // ========== Image helpers ==========
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -478,7 +534,7 @@ export function AppShell() {
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
     setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
-    setModalRestorePoint(null); setMainTempSelectedLoras(new Set()); setMainTempSelectedPrefabs(new Set());
+    tempCtx.clear();
   }, [clearImageFields]);
 
   const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
@@ -534,20 +590,21 @@ export function AppShell() {
   const selectPrompt = useCallback((prompt: string) => {
     clearZoomState();
     snapshotZoom();
-    const ctxStack = temporaryCtx.stack;
+    const ctxStack = tempCtx.stack;
     if (ctxStack.length > 0) {
-      const ctx = ctxStack[ctxStack.length - 1];
+      const ctx = ctxStack[ctxStack.length - 1] as { matchFn?: (p: PromptData, cat: string) => boolean; basePrompt?: string; tagGroups?: TagGroup[]; level?: number };
       const promptData = findPromptData(prompt, allPrompts);
       if (!promptData) return;
       const allDecorations = getPromptDecorations(promptData, allPrompts);
-      const tag = { decoration_num: ctx.level, name: promptData.name, prompt };
+      const tag = { decoration_num: ctx.level || 1, name: promptData.name, prompt };
 
       if (allDecorations.length > 0) {
         // Push a sub-layer for this prompt's decorations (tag will be combined on completion)
-        setTemporaryCtx(prev => {
-          const stack = [...prev.stack];
+        tempCtx.setStack(prev => {
+          const stack = [...prev];
           const last = stack[stack.length - 1];
           stack.push({
+            type: 'tag' as const,
             matchFn: (p: PromptData, cat: string) => {
               if (p.prompt === prompt) return false;
               const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
@@ -556,25 +613,25 @@ export function AppShell() {
               return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
             },
             basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
-            tagGroups: [], level: last.level + 1,
+            tagGroups: [], level: (last.level || 1) + 1,
           });
-          return { stack };
+          return stack;
         });
         return;
       }
 
       // No decorations: just toggle the decoration tag
-      setTemporaryCtx(prev => {
-        const stack = [...prev.stack];
+      tempCtx.setStack(prev => {
+        const stack = [...prev];
         const lastIdx = stack.length - 1;
         const last = stack[lastIdx];
-        const existing = last.tagGroups.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
+        const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
         const newLast = { ...last, tagGroups: existing === -1
-          ? [...last.tagGroups, [tag]]
-          : last.tagGroups.filter((_g, i) => i !== existing)
+          ? [...(last.tagGroups || []), [tag]]
+          : (last.tagGroups || []).filter((_g: TagGroup, i: number) => i !== existing)
         };
         stack[lastIdx] = newLast;
-        return { stack };
+        return stack;
       });
       return;
     }
@@ -583,19 +640,18 @@ export function AppShell() {
     if (!promptData) return;
     const allDecorations = getPromptDecorations(promptData, allPrompts);
     if (allDecorations.length > 0) {
-      setTemporaryCtx(prev => ({
-        stack: [...prev.stack, {
-          matchFn: (p: PromptData, cat: string) => {
-            if (p.prompt === prompt) return false;
-            const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
-            const cd = allPrompts[cat] || {};
-            const ct = (cd.tags as string[]) || [];
-            return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
-          },
-          basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
-          tagGroups: [], level: 1,
-        }],
-      }));
+      tempCtx.setStack(prev => [...prev, {
+        type: 'tag' as const,
+        matchFn: (p: PromptData, cat: string) => {
+          if (p.prompt === prompt) return false;
+          const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
+          const cd = allPrompts[cat] || {};
+          const ct = (cd.tags as string[]) || [];
+          return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
+        },
+        basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
+        tagGroups: [], level: 1,
+      }]);
       return;
     }
 
@@ -604,40 +660,41 @@ export function AppShell() {
       if (idx === -1) return [...prev, [{ decoration_num: 0, name: promptData.name, prompt }]];
       return prev.filter((_, i) => i !== idx);
     });
-  }, [temporaryCtx, allPrompts, setSelectedTags]);
+  }, [tempCtx, allPrompts, setSelectedTags]);
 
   // ========== Complete/Cancel temporary context ==========
   const completeLayer = useCallback(() => {
-    setTemporaryCtx(prev => {
-      if (prev.stack.length === 0) return prev;
-      const stack = [...prev.stack];
+    tempCtx.setStack(prev => {
+      if (prev.length === 0) return prev;
+      const stack = [...prev];
       const ctx = stack.pop()!;
-      const tagGroups = [...ctx.tagGroups];
-      const bp = findPromptData(ctx.basePrompt, allPrompts);
+      if (ctx.type !== 'tag') return prev;
+      const tagGroups = [...(ctx.tagGroups || [])];
+      const bp = findPromptData(ctx.basePrompt || '', allPrompts);
       const bpName = bp ? bp.name : '';
-      const bdn = Math.max(0, ctx.level - 1);
-      const combined = combineTagGroups(tagGroups, ctx.basePrompt, bpName, bdn, allPrompts);
+      const bdn = Math.max(0, (ctx.level || 1) - 1);
+      const combined = combineTagGroups(tagGroups, ctx.basePrompt || '', bpName, bdn, allPrompts);
       if (stack.length > 0) {
         const prevCtx = { ...stack[stack.length - 1] };
-        prevCtx.tagGroups = [...prevCtx.tagGroups, combined];
+        prevCtx.tagGroups = [...(prevCtx.tagGroups || []), combined];
         stack[stack.length - 1] = prevCtx;
-        return { stack };
+        return stack;
       }
-      setSelectedTags(prev => [...prev, combined]);
-      return { stack };
+      setSelectedTags(prevTags => [...prevTags, combined]);
+      return stack;
     });
-  }, [allPrompts, setSelectedTags]);
+  }, [allPrompts, setSelectedTags, tempCtx]);
 
   const backLayer = useCallback(() => {
-    setTemporaryCtx(prev => ({ stack: prev.stack.slice(0, -1) }));
-  }, []);
+    tempCtx.pop();
+  }, [tempCtx]);
 
   const cancelTemporary = useCallback(() => {
-    setTemporaryCtx({ stack: [] });
-  }, []);
+    tempCtx.clear();
+  }, [tempCtx]);
 
-  const isTemporary = temporaryCtx.stack.length > 0;
-  const currentCtx = isTemporary ? temporaryCtx.stack[temporaryCtx.stack.length - 1] : null;
+  const isTemporary = tempCtx.isActive;
+  const currentCtx = tempCtx.current;
 
   // ========== Tag Selection Helper ==========
   const isTagSelected = useCallback((prompt: string) => {
@@ -649,42 +706,28 @@ export function AppShell() {
   }, [selectedTags]);
 
   const isPromptSelectedInTempCtx = useCallback((prompt: string): boolean => {
-    if (!currentCtx) return false;
-    return currentCtx.tagGroups.some(g => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
-  }, [currentCtx]);
+    return tempCtx.isIdSelected(prompt);
+  }, [tempCtx]);
 
   const removeTag = useCallback((idx: number) => {
     setSelectedTags(prev => prev.filter((_, i) => i !== idx));
   }, []);
 
   const removeTemporaryTag = useCallback((tgIdx: number) => {
-    setTemporaryCtx(prev => {
-      if (prev.stack.length === 0) return prev;
-      const stack = [...prev.stack];
-      const lastIdx = stack.length - 1;
-      const last = stack[lastIdx];
-      const newLast = { ...last, tagGroups: last.tagGroups.filter((_, i) => i !== tgIdx) };
-      stack[lastIdx] = newLast;
-      return { stack };
-    });
-  }, []);
+    tempCtx.removeTagGroup(tgIdx);
+  }, [tempCtx]);
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
-    if (modalRestorePoint?.mode === 'lora') {
-      return mainTempSelectedLoras.has(item.file_path);
+    if (tempCtx.mode === 'lora') {
+      return tempCtx.isIdSelected(item.file_path);
     }
     return selectedLoras.some(l => l.file_path === item.file_path);
-  }, [selectedLoras, modalRestorePoint?.mode, mainTempSelectedLoras]);
+  }, [selectedLoras, tempCtx]);
 
   const toggleLora = useCallback((item: LoraItemData) => {
-    if (modalRestorePoint?.mode === 'lora') {
-      setMainTempSelectedLoras(prev => {
-        const next = new Set(prev);
-        if (next.has(item.file_path)) next.delete(item.file_path);
-        else next.add(item.file_path);
-        return next;
-      });
+    if (tempCtx.mode === 'lora') {
+      tempCtx.toggleId(item.file_path);
       return;
     }
     setSelectedLoras(prev => {
@@ -694,7 +737,7 @@ export function AppShell() {
       }
       return [...prev, item];
     });
-  }, [modalRestorePoint?.mode]);
+  }, [tempCtx]);
 
   const removeLora = useCallback((filePath: string) => {
     setSelectedLoras(prev => prev.filter(l => l.file_path !== filePath));
@@ -702,13 +745,8 @@ export function AppShell() {
 
   // ========== Prefab Selection ==========
   const togglePrefab = useCallback((guid: string) => {
-    if (modalRestorePoint?.mode === 'prefab') {
-      setMainTempSelectedPrefabs(prev => {
-        const next = new Set(prev);
-        if (next.has(guid)) next.delete(guid);
-        else next.add(guid);
-        return next;
-      });
+    if (tempCtx.mode === 'prefab') {
+      tempCtx.toggleId(guid);
       return;
     }
     setSelectedPrefabs(prev => {
@@ -719,7 +757,7 @@ export function AppShell() {
       const item = buildPrefabItemTree(guid);
       return item ? [...prev, item] : prev;
     });
-  }, [buildPrefabItemTree, modalRestorePoint?.mode]);
+  }, [buildPrefabItemTree, tempCtx]);
 
   const removeSelectedPrefab = useCallback((guid: string) => {
     setSelectedPrefabs(prev => {
@@ -1316,21 +1354,30 @@ export function AppShell() {
 
   // ========== Restore Modal from Main Selection ==========
   const restoreModalWithSelections = useCallback(() => {
-    if (!modalRestorePoint) return;
-    setModalName(modalRestorePoint.name);
-    setModalCustomPrompts(modalRestorePoint.customPrompts);
-    setModalPrefabTags(modalRestorePoint.prefabTags);
-    let newLoras = [...modalRestorePoint.prefabLoras];
-    let newPrefabs = [...modalRestorePoint.prefabSelectedPrefabs];
-    if (modalRestorePoint.mode === 'lora') {
-      const added = Array.from(mainTempSelectedLoras).map(path => {
+    if (!tempCtx.current || !tempCtx.current.restorePoint) return;
+    const rp = tempCtx.current.restorePoint;
+    setModalName(rp.name);
+    setModalCustomPrompts(rp.customPrompts);
+    setModalPrefabTags(rp.prefabTags);
+    let newLoras = [...rp.prefabLoras];
+    let newPrefabs = [...rp.prefabSelectedPrefabs];
+    if (tempCtx.mode === 'lora') {
+      const added = (tempCtx.current.selections || []).map(path => {
         const item = Object.values(loraData).flat().find(it => it.file_path === path);
         if (!item || newLoras.some(l => l.file_path === path)) return null;
-        return { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true };
+        const state = tempCtx.current.loraStates?.[path];
+        return {
+          file_path: item.file_path,
+          name: item.name,
+          strength: state?.strength ?? 1.0,
+          active_tags: state?.active_tags ?? (item.tags || []),
+          active: state?.active ?? true,
+          split_mode: state?.split_mode,
+        };
       }).filter(Boolean) as LoraSelectionData[];
       newLoras = [...newLoras, ...added];
-    } else if (modalRestorePoint.mode === 'prefab') {
-      const added = Array.from(mainTempSelectedPrefabs).map(guid => {
+    } else if (tempCtx.mode === 'prefab') {
+      const added = (tempCtx.current.selections || []).map(guid => {
         if (newPrefabs.some(p => p.guid === guid)) return null;
         return { guid };
       }).filter(Boolean) as SelectedPrefabRef[];
@@ -1338,34 +1385,31 @@ export function AppShell() {
     }
     setModalPrefabLoras(newLoras);
     setModalPrefabSelectedPrefabs(newPrefabs);
-    setModalPreviewUrl(modalRestorePoint.previewUrl);
-    setModalPreviewVisible(modalRestorePoint.previewVisible);
-    setModalFocusX(modalRestorePoint.focusX);
-    setModalFocusY(modalRestorePoint.focusY);
-    setModalFocusVisible(modalRestorePoint.focusVisible);
-    setModal({ type: 'editPrefab', data: modalRestorePoint.modalData });
-    setModalRestorePoint(null);
-    setMainTempSelectedLoras(new Set());
-    setMainTempSelectedPrefabs(new Set());
-  }, [modalRestorePoint, mainTempSelectedLoras, mainTempSelectedPrefabs, loraData]);
+    setModalPreviewUrl(rp.previewUrl);
+    setModalPreviewVisible(rp.previewVisible);
+    setModalFocusX(rp.focusX);
+    setModalFocusY(rp.focusY);
+    setModalFocusVisible(rp.focusVisible);
+    setModal({ type: 'editPrefab', data: rp.modalData });
+    tempCtx.clear();
+  }, [tempCtx, loraData]);
 
   const cancelMainSelection = useCallback(() => {
-    if (!modalRestorePoint) return;
-    setModalName(modalRestorePoint.name);
-    setModalCustomPrompts(modalRestorePoint.customPrompts);
-    setModalPrefabTags(modalRestorePoint.prefabTags);
-    setModalPrefabLoras(modalRestorePoint.prefabLoras);
-    setModalPrefabSelectedPrefabs(modalRestorePoint.prefabSelectedPrefabs);
-    setModalPreviewUrl(modalRestorePoint.previewUrl);
-    setModalPreviewVisible(modalRestorePoint.previewVisible);
-    setModalFocusX(modalRestorePoint.focusX);
-    setModalFocusY(modalRestorePoint.focusY);
-    setModalFocusVisible(modalRestorePoint.focusVisible);
-    setModal({ type: 'editPrefab', data: modalRestorePoint.modalData });
-    setModalRestorePoint(null);
-    setMainTempSelectedLoras(new Set());
-    setMainTempSelectedPrefabs(new Set());
-  }, [modalRestorePoint]);
+    if (!tempCtx.current || !tempCtx.current.restorePoint) return;
+    const rp = tempCtx.current.restorePoint;
+    setModalName(rp.name);
+    setModalCustomPrompts(rp.customPrompts);
+    setModalPrefabTags(rp.prefabTags);
+    setModalPrefabLoras(rp.prefabLoras);
+    setModalPrefabSelectedPrefabs(rp.prefabSelectedPrefabs);
+    setModalPreviewUrl(rp.previewUrl);
+    setModalPreviewVisible(rp.previewVisible);
+    setModalFocusX(rp.focusX);
+    setModalFocusY(rp.focusY);
+    setModalFocusVisible(rp.focusVisible);
+    setModal({ type: 'editPrefab', data: rp.modalData });
+    tempCtx.clear();
+  }, [tempCtx]);
 
   // ========== Sync Prefab ==========
   const syncPrefab = useCallback(async () => {
@@ -1997,7 +2041,7 @@ export function AppShell() {
         }
       });
     }
-  }, [selectedTags, temporaryCtx.stack.length]);
+  }, [selectedTags, tempCtx.stack.length]);
 
   // ========== ALL INIT ==========
   useEffect(() => {
@@ -2008,7 +2052,7 @@ export function AppShell() {
       initZoomView();
     }, 100);
     return () => { clearTimeout(t); };
-  }, [allPrompts, allLibraries, selectedTags, expandedCategories, expandedLibraries, categoryFocusPoints, temporaryCtx.stack.length, initDragAndDrop, initZoomView, initBgAnimation, initBgScales]);
+  }, [allPrompts, allLibraries, selectedTags, expandedCategories, expandedLibraries, categoryFocusPoints, tempCtx.stack.length, initDragAndDrop, initZoomView, initBgAnimation, initBgScales]);
 
   // ========== RENDER ==========
   const categories = Object.entries(allPrompts);
@@ -2043,20 +2087,20 @@ export function AppShell() {
               />
             </div>
 
-            {isTemporary && currentCtx ? (
+            {tempCtx.mode === 'tag' && currentCtx ? (
               <div className="temporary-banner">
                 <span>{currentCtx.title}</span>
                 <div>
-                  {temporaryCtx.stack.length > 1 && <button className="btn btn-warning" onClick={backLayer}>{iconArrowLeft} 返回上层</button>}
+                  {tempCtx.stack.length > 1 && <button className="btn btn-warning" onClick={backLayer}>{iconArrowLeft} 返回上层</button>}
                   <button className="btn btn-success" onClick={completeLayer}>直接添加</button>
                   <button className="btn btn-secondary" onClick={cancelTemporary}>取消</button>
                 </div>
               </div>
             ) : null}
 
-            {modalRestorePoint ? (
+            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' ? (
               <div className="temporary-banner" style={{ background: 'linear-gradient(135deg, #007aff, #5856d6)', boxShadow: '0 4px 12px rgba(0, 122, 255, 0.3)' }}>
-                <span>{modalRestorePoint.mode === 'lora' ? `Select Loras (${mainTempSelectedLoras.size})` : `Select Prefabs (${mainTempSelectedPrefabs.size})`}</span>
+                <span>{tempCtx.mode === 'lora' ? `Select Loras (${(tempCtx.current?.selections || []).length})` : `Select Prefabs (${(tempCtx.current?.selections || []).length})`}</span>
                 <div>
                   <button className="btn btn-success" onClick={restoreModalWithSelections}>Add Selected</button>
                   <button className="btn btn-secondary" onClick={cancelMainSelection}>Cancel</button>
@@ -2065,7 +2109,7 @@ export function AppShell() {
             ) : null}
 
             {/* ========== Lora Section ========== */}
-            {!isTemporary && Object.keys(loraData).length > 0 && modalRestorePoint?.mode !== 'prefab' ? (
+            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && Object.keys(loraData).length > 0 ? (
               <div className="categories-container lora-section">
                 {Object.entries(loraData).map(([folder, items]) => (
                   <LoraFolderCard
@@ -2081,7 +2125,7 @@ export function AppShell() {
               </div>
             ) : null}
 
-            {!modalRestorePoint?.mode ? (
+            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'prefab' ? (
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
@@ -2098,7 +2142,7 @@ export function AppShell() {
                 let filtered = cp;
                 const needsFilter = searchQuery || selectedFilter;
                 if (isTemporary && currentCtx) {
-                  filtered = cp.filter(p => currentCtx.matchFn(p, cat));
+                  filtered = cp.filter(p => currentCtx!.matchFn!(p, cat));
                   if (filtered.length === 0) return null;
                 } else if (needsFilter) {
                   const catDataObj = allPrompts[cat] as any;
@@ -2184,7 +2228,7 @@ export function AppShell() {
                                     <div className="selected-card-content">{p.name}</div>
                                     <button className="selected-card-delete" onClick={e => {
                                       e.stopPropagation();
-                                      const tgIdx = currentCtx.tagGroups.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === p.prompt));
+                                      const tgIdx = currentCtx!.tagGroups!.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === p.prompt));
                                       if (tgIdx !== -1) removeTemporaryTag(tgIdx);
                                     }}>{iconX}</button>
                                   </div>
@@ -2210,7 +2254,7 @@ export function AppShell() {
             </div>
             ) : null}
 
-            {!isTemporary && modalRestorePoint?.mode !== 'lora' ? (<div className="categories-container prefab-section">
+            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'tag' ? (<div className="categories-container prefab-section">
               {libraries.map(([lib, libData]) => {
                 const expanded = expandedLibraries.has(lib);
                 const anim = animating.has(lib);
@@ -2229,11 +2273,11 @@ export function AppShell() {
                 let filteredPrompts = prompts;
                 let filteredPrefabs = prefabs;
                 // Filter out prefabs that would cause circular dependency when in prefab selection mode
-                if (modalRestorePoint?.mode === 'prefab') {
-                  const targetGuid = allLibraries[modalRestorePoint.modalData.lib]?.prefabs?.[modalRestorePoint.modalData.idx]?.guid || null;
+                if (tempCtx.mode === 'prefab' && tempCtx.current?.restorePoint) {
+                  const targetGuid = allLibraries[tempCtx.current.restorePoint.modalData.lib]?.prefabs?.[tempCtx.current.restorePoint.modalData.idx]?.guid || null;
                   filteredPrefabs = prefabs.filter(pf => {
                     if (!pf.guid) return false;
-                    if (modalRestorePoint.prefabSelectedPrefabs.some(sp => sp.guid === pf.guid)) return false;
+                    if (tempCtx.current!.restorePoint!.prefabSelectedPrefabs.some(sp => sp.guid === pf.guid)) return false;
                     const cycle = checkPrefabCycle(targetGuid, [{ guid: pf.guid }]);
                     return !cycle;
                   });
@@ -2336,7 +2380,7 @@ export function AppShell() {
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
                             prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
-                            isSelected={modalRestorePoint?.mode === 'prefab' ? mainTempSelectedPrefabs.has(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
+                            isSelected={tempCtx.mode === 'prefab' ? tempCtx.isIdSelected(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
                             onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
                             allLibraries={allLibraries}
 
@@ -2360,11 +2404,14 @@ export function AppShell() {
 
         <div className="right-bar">
           <div className="selected-bar">
-            {modalRestorePoint?.mode === 'prefab' && mainTempSelectedPrefabs.size > 0 ? (
+            {tempCtx.mode === 'prefab' ? (
               <>
-                <h3>Selected Prefabs ({mainTempSelectedPrefabs.size})</h3>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
                 <div className="prefab-list">
-                  {Array.from(mainTempSelectedPrefabs).map(guid => {
+                  {(tempCtx.current?.selections || []).map(guid => {
                     const pf = findPrefabByGuid(guid);
                     if (!pf) return null;
                     const fp = (() => {
@@ -2380,7 +2427,7 @@ export function AppShell() {
                         <div className="prefab-card-header">
                           <span className="prefab-card-name">{pf.name}</span>
                           <div className="prefab-card-actions">
-                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); setMainTempSelectedPrefabs(prev => { const next = new Set(prev); next.delete(guid); return next; }); }}>{iconX}</button>
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); tempCtx.toggleId(guid); }}>{iconX}</button>
                           </div>
                         </div>
                       </div>
@@ -2390,103 +2437,110 @@ export function AppShell() {
               </>
             ) : null}
 
-            {modalRestorePoint?.mode === 'lora' && mainTempSelectedLoras.size > 0 ? (
+            {tempCtx.mode === 'lora' ? (
               <>
-                <h3>Selected Loras ({mainTempSelectedLoras.size})</h3>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Selected Loras ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [], loraStates: {} }))} title="Clear">{iconX}</button>
+                </div>
                 <div className="lora-list">
-                  {Array.from(mainTempSelectedLoras).map(path => {
+                  {(tempCtx.current?.selections || []).map(path => {
                     const item = Object.values(loraData).flat().find(it => it.file_path === path);
                     if (!item) return null;
+                    const state = tempCtx.current?.loraStates?.[path];
                     return (
-                      <div key={path} className="lora-card active">
-                        <div className="lora-card-header">
-                          <span className="lora-card-name">{item.name}</span>
-                          <div className="lora-card-meta">
-                            <button className="lora-card-remove" onClick={() => setMainTempSelectedLoras(prev => { const next = new Set(prev); next.delete(path); return next; })}>{iconX}</button>
-                          </div>
-                        </div>
-                      </div>
+                      <Lora
+                        key={path}
+                        lora={item}
+                        initialStrength={state?.strength ?? 1.0}
+                        initialActive={state?.active ?? true}
+                        initialActiveTags={state?.active_tags}
+                        initialSplitMode={state?.split_mode}
+                        onChange={(data) => tempCtx.setLoraState(path, { strength: data.strength, active_tags: data.activeTags, active: data.active, split_mode: data.split_mode })}
+                        onRemove={() => tempCtx.toggleId(path)}
+                      />
                     );
                   })}
                 </div>
               </>
             ) : null}
 
-            {!modalRestorePoint?.mode ? (
+            {!tempCtx.mode ? (
               <>
                 {!isTemporary ? (
                   <>
-                    {selectedPrefabs.length > 0 ? (
-                      <>
-                        <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
-                        <div className="prefab-list">
-                          {selectedPrefabs.map(node => {
-                            const pf = findPrefabByGuid(node.guid);
-                            if (!pf) return null;
-                            const fp = (() => {
-                              for (const [libName, libData] of Object.entries(allLibraries)) {
-                                const idx = (libData.prefabs || []).findIndex(p => p.guid === node.guid);
-                                if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
-                              }
-                              return undefined;
-                            })();
-                            return (
-                              <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
-                                {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
-                                <div className="prefab-card-header">
-                                  <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
-                                  <div className="prefab-card-actions">
-                                    <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconGear}</button>
-                                    <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>{iconLayers}</button>
-                                    <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
-                                  </div>
-                                </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                      <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({selectedPrefabs.length})</h3>
+                      <button className="clear-btn" onClick={() => setSelectedPrefabs([])} title="Clear">{iconX}</button>
+                    </div>
+                    <div className="prefab-list">
+                      {selectedPrefabs.map(node => {
+                        const pf = findPrefabByGuid(node.guid);
+                        if (!pf) return null;
+                        const fp = (() => {
+                          for (const [libName, libData] of Object.entries(allLibraries)) {
+                            const idx = (libData.prefabs || []).findIndex(p => p.guid === node.guid);
+                            if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                          }
+                          return undefined;
+                        })();
+                        return (
+                          <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                            {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                            <div className="prefab-card-header">
+                              <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
+                              <div className="prefab-card-actions">
+                                <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconGear}</button>
+                                <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>{iconLayers}</button>
+                                <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
                               </div>
-                            );
-                          })}
-                        </div>
-                      </>
-                    ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
 
-                    {selectedLoras.length > 0 ? (
-                      <>
-                        <h3 style={selectedPrefabs.length > 0 ? { marginTop: 12 } : {}}>Selected Loras ({selectedLoras.length})</h3>
-                        <div className="lora-list">
-                          {selectedLoras.map(lora => {
-                            const sel = loraSelections[lora.file_path];
-                            return (
-                              <Lora
-                                key={lora.file_path}
-                                lora={lora}
-                                initialActiveTags={sel?.activeTags}
-                                initialStrength={sel?.strength}
-                                initialActive={sel?.active}
-                                initialSplitMode={sel?.split_mode}
-                                isMissing={lora.metadata?.missing === true}
-                                onChange={(data) => {
-                                  setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
-                                }}
-                                onRemove={() => {
-                                  removeLora(lora.file_path);
-                                  setLoraSelections(prev => {
-                                    const next = { ...prev };
-                                    delete next[lora.file_path];
-                                    return next;
-                                  });
-                                }}
-                              />
-                            );
-                          })}
-                        </div>
-                      </>
-                    ) : null}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...(selectedPrefabs.length > 0 ? { marginTop: 12 } : {}) }}>
+                      <h3 style={{ marginBottom: 0 }}>Selected Loras ({selectedLoras.length})</h3>
+                      <button className="clear-btn" onClick={() => { setSelectedLoras([]); setLoraSelections({}); }} title="Clear">{iconX}</button>
+                    </div>
+                    <div className="lora-list">
+                      {selectedLoras.map(lora => {
+                        const sel = loraSelections[lora.file_path];
+                        return (
+                          <Lora
+                            key={lora.file_path}
+                            lora={lora}
+                            initialActiveTags={sel?.activeTags}
+                            initialStrength={sel?.strength}
+                            initialActive={sel?.active}
+                            initialSplitMode={sel?.split_mode}
+                            isMissing={lora.metadata?.missing === true}
+                            onChange={(data) => {
+                              setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
+                            }}
+                            onRemove={() => {
+                              removeLora(lora.file_path);
+                              setLoraSelections(prev => {
+                                const next = { ...prev };
+                                delete next[lora.file_path];
+                                return next;
+                              });
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
                   </>
                 ) : null}
 
-                <h3 style={(selectedPrefabs.length > 0 || selectedLoras.length > 0) && !isTemporary ? { marginTop: 12 } : {}}>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || selectedLoras.length > 0) && !isTemporary ? { marginTop: 12 } : {}) }}>
+                  <h3 style={{ marginBottom: 0 }}>Selected Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length})</h3>
+                  <button className="clear-btn" onClick={() => setSelectedTags([])} title="Clear">{iconX}</button>
+                </div>
                 <div className="selected-tags">
                   {isTemporary && currentCtx
-                    ? currentCtx.tagGroups.map((group, i) => (
+                    ? currentCtx!.tagGroups!.map((group, i) => (
                       <span className="tag" key={i}>
                         {tagsToDisplayName(group)}
                         <span className="remove" onClick={() => removeTemporaryTag(i)}>{iconX}</span>
@@ -2503,7 +2557,7 @@ export function AppShell() {
             ) : null}
           </div>
 
-          {!modalRestorePoint?.mode && !isTemporary ? (
+          {!tempCtx.mode && !isTemporary ? (
             <>
               <div className="custom-input-section">
                 <h3>Custom Prompts</h3>
@@ -2692,16 +2746,36 @@ export function AppShell() {
                         </span>
                       ))}
                     </div>
-                    <input type="text" placeholder="Add tags, press Enter..." style={{ fontSize: 12 }} onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        const val = (e.target as HTMLInputElement).value.trim();
-                        if (val) {
-                          const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
-                          if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
-                          (e.target as HTMLInputElement).value = '';
-                        }
-                      }
-                    }} />
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        ref={tagInputRef}
+                        type="text"
+                        placeholder="Add tags, press Enter..."
+                        style={{ fontSize: 12, width: '100%' }}
+                        onChange={handleTagInputChange}
+                        onKeyDown={handleTagInputKeyDown}
+                        onBlur={() => setTimeout(() => setTagInputShowDropdown(false), 200)}
+                      />
+                      {tagInputShowDropdown && filteredTagSuggestions.length > 0 ? (
+                        <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, maxHeight: 180, overflowY: 'auto', background: '#2c2c2e', borderRadius: 10, marginBottom: 4, zIndex: 100, boxShadow: '0 -4px 16px rgba(0,0,0,0.4)' }}>
+                          {filteredTagSuggestions.map(([name, prompt], i) => (
+                            <div
+                              key={name}
+                              onMouseDown={e => { e.preventDefault(); selectTagSuggestion(name); }}
+                              style={{
+                                padding: '8px 14px', fontSize: 14, cursor: 'pointer',
+                                color: '#fff', background: i === tagInputSelIdx ? '#3a3a3c' : 'transparent',
+                                fontFamily: '-apple-system, system-ui, Helvetica Neue, sans-serif',
+                                display: 'flex', alignItems: 'center',
+                              }}
+                            >
+                              <span style={{ flex: 1 }}>{name}</span>
+                              {prompt !== name ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12 }}>{prompt}</span> : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="edit-prefab-section">
                     <label>Loras ({modalPrefabLoras.length})</label>
@@ -2723,22 +2797,25 @@ export function AppShell() {
                         );
                       })}
                     </div>
-                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, padding: '8px 12px' }} onClick={() => {
-                      setModalRestorePoint({
-                        name: modalName,
-                        customPrompts: modalCustomPrompts,
-                        prefabTags: modalPrefabTags,
-                        prefabLoras: modalPrefabLoras,
-                        prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
-                        previewUrl: modalPreviewUrl,
-                        previewVisible: modalPreviewVisible,
-                        focusX: modalFocusX,
-                        focusY: modalFocusY,
-                        focusVisible: modalFocusVisible,
-                        modalData: modal.data as { lib: string; idx: number },
-                        mode: 'lora',
+                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
+                      tempCtx.push({
+                        type: 'lora',
+                        title: 'Select Loras',
+                        selections: [],
+                        restorePoint: {
+                          name: modalName,
+                          customPrompts: modalCustomPrompts,
+                          prefabTags: modalPrefabTags,
+                          prefabLoras: modalPrefabLoras,
+                          prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
+                          previewUrl: modalPreviewUrl,
+                          previewVisible: modalPreviewVisible,
+                          focusX: modalFocusX,
+                          focusY: modalFocusY,
+                          focusVisible: modalFocusVisible,
+                          modalData: modal.data as { lib: string; idx: number },
+                        },
                       });
-                      setMainTempSelectedLoras(new Set());
                       closeModal();
                     }}>
                       {iconPlus} Add Lora
@@ -2749,8 +2826,16 @@ export function AppShell() {
                     <div className="prefab-list">
                       {modalPrefabSelectedPrefabs.map((sp, i) => {
                         const pf = findPrefabByGuid(sp.guid);
+                        const fp = (() => {
+                          for (const [libName, libData] of Object.entries(allLibraries)) {
+                            const idx = (libData.prefabs || []).findIndex(p => p.guid === sp.guid);
+                            if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                          }
+                          return undefined;
+                        })();
                         return (
                           <div key={sp.guid} className="prefab-card" style={{ cursor: 'default' }}>
+                            {pf?.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                             <div className="prefab-card-header">
                               <span className="prefab-card-name">{pf?.name || sp.guid}</span>
                               <div className="prefab-card-actions">
@@ -2764,9 +2849,7 @@ export function AppShell() {
                                   })();
                                   if (loc) {
                                     const target = allLibraries[loc.lib]?.prefabs?.[loc.idx];
-                                    setModalRestorePoint(null);
-                                    setMainTempSelectedLoras(new Set());
-                                    setMainTempSelectedPrefabs(new Set());
+                                    tempCtx.clear();
                                     setModalName(target?.name || '');
                                     setModalCustomPrompts(target?.custom_prompts || '');
                                     setModalPrefabTags((target?.tags || []) as TagGroup[]);
@@ -2784,22 +2867,25 @@ export function AppShell() {
                         );
                       })}
                     </div>
-                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, padding: '8px 12px' }} onClick={() => {
-                      setModalRestorePoint({
-                        name: modalName,
-                        customPrompts: modalCustomPrompts,
-                        prefabTags: modalPrefabTags,
-                        prefabLoras: modalPrefabLoras,
-                        prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
-                        previewUrl: modalPreviewUrl,
-                        previewVisible: modalPreviewVisible,
-                        focusX: modalFocusX,
-                        focusY: modalFocusY,
-                        focusVisible: modalFocusVisible,
-                        modalData: modal.data as { lib: string; idx: number },
-                        mode: 'prefab',
+                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
+                      tempCtx.push({
+                        type: 'prefab',
+                        title: 'Select Prefabs',
+                        selections: [],
+                        restorePoint: {
+                          name: modalName,
+                          customPrompts: modalCustomPrompts,
+                          prefabTags: modalPrefabTags,
+                          prefabLoras: modalPrefabLoras,
+                          prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
+                          previewUrl: modalPreviewUrl,
+                          previewVisible: modalPreviewVisible,
+                          focusX: modalFocusX,
+                          focusY: modalFocusY,
+                          focusVisible: modalFocusVisible,
+                          modalData: modal.data as { lib: string; idx: number },
+                        },
                       });
-                      setMainTempSelectedPrefabs(new Set());
                       closeModal();
                     }}>
                       {iconPlus} Add Prefab
