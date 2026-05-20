@@ -52,7 +52,7 @@ function buildActiveSetFromInitial(
     idx += parts.length;
   }
 
-  if (!initialActiveTags || initialActiveTags.length === 0) {
+  if (initialActiveTags === undefined) {
     for (let i = 0; i < rawTags.length; i++) mergeActive.add(i);
     for (let i = 0; i < splitTags.length; i++) splitActive.add(i);
   }
