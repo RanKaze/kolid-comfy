@@ -24,9 +24,30 @@ export interface Tag {
 
 export type TagGroup = Tag[];
 
+export interface SelectedPrefabLoraState {
+  file_path: string;
+  active: boolean;
+}
+
+export interface SelectedPrefabTagState {
+  key: string;
+  active: boolean;
+}
+
+export interface SelectedPrefabItem {
+  guid: string;
+  active: boolean;
+  tags: SelectedPrefabTagState[];
+  loras: SelectedPrefabLoraState[];
+  children: SelectedPrefabItem[];
+}
+
 export interface SelectedPrefabRef {
   guid: string;
   active?: boolean;
+  tags?: SelectedPrefabTagState[];
+  loras?: SelectedPrefabLoraState[];
+  children?: SelectedPrefabItem[];
 }
 
 export interface PrefabData {

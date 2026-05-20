@@ -2086,60 +2086,40 @@ class SnapshotPromptNode:
             raise RuntimeError("[SnapshotPrompt] Interrupted or timed out")
         server.stop()
 
-        # Expand selected prefabs (nested support + deduplication)
-        print(f"[PREFAB_DEBUG] server.selected_prefabs = {server.selected_prefabs}")
-        print(f"[PREFAB_DEBUG] server.libraries_data keys = {list(server.libraries_data.keys())}")
-        
+        # Expand selected prefabs (recursive tree with per-lora active states)
         guid_to_prefab = {}
         for lib_name, lib_data in server.libraries_data.items():
             for idx, pf in enumerate(lib_data.get('prefabs', [])):
                 guid = pf.get('guid')
                 if guid:
                     guid_to_prefab[guid] = pf
-                else:
-                    print(f"[PREFAB_DEBUG] Prefab in lib '{lib_name}' idx {idx} has NO guid: {pf.get('name')}")
         
-        print(f"[PREFAB_DEBUG] guid_to_prefab count = {len(guid_to_prefab)}")
-        print(f"[PREFAB_DEBUG] guid_to_prefab keys (first 10) = {list(guid_to_prefab.keys())[:10]}")
-        
-        expanded_prefabs = []
-        visited_guids = set()
-        queue = []
-        for sp in server.selected_prefabs:
-            guid = sp.get('guid') if isinstance(sp, dict) else sp
-            active = sp.get('active', True) if isinstance(sp, dict) else True
-            print(f"[PREFAB_DEBUG] Processing selected_prefab entry: {sp}, extracted guid = {guid}, active = {active}")
-            if guid and active and guid not in visited_guids:
-                visited_guids.add(guid)
-                queue.append(guid)
-        
-        print(f"[PREFAB_DEBUG] Initial queue = {queue}")
-        
-        while queue:
-            current_guid = queue.pop(0)
-            pf = guid_to_prefab.get(current_guid)
-            print(f"[PREFAB_DEBUG] Looking up guid '{current_guid}' in guid_to_prefab: found = {pf is not None}")
+        def expand_prefab_tree(node, visited):
+            """Recursively expand a prefab tree node, respecting active states."""
+            if not node.get('active', True):
+                return [], [], []
+            
+            guid = node.get('guid')
+            if not guid or guid in visited:
+                return [], [], []
+            visited.add(guid)
+            
+            pf = guid_to_prefab.get(guid)
             if not pf:
-                continue
-            expanded_prefabs.append(pf)
-            print(f"[PREFAB_DEBUG] Expanded prefab '{pf.get('name')}', tags count = {len(pf.get('tags', []))}, loras count = {len(pf.get('loras', []))}")
-            for nested in pf.get('selected_prefabs', []):
-                nested_guid = nested.get('guid') if isinstance(nested, dict) else nested
-                if nested_guid and nested_guid not in visited_guids:
-                    visited_guids.add(nested_guid)
-                    queue.append(nested_guid)
-        
-        print(f"[PREFAB_DEBUG] Total expanded_prefabs = {len(expanded_prefabs)}")
-        
-        # Collect prompts and loras from expanded prefabs (keep separate from user selections)
-        prefab_prompts_raw = []      # for result_prompt (with decorations)
-        prefab_prompts_cleaned = []  # for cleaned_result (no decorations)
-        prefab_loras = []            # for active_loras / trigger_words
-        
-        for pf in expanded_prefabs:
-            # Collect tags as prompts
+                return [], [], []
+            
+            prompts_raw = []
+            prompts_cleaned = []
+            loras = []
+            
+            # Collect tags as prompts (respect per-tag-group active state)
+            tag_states = {t.get('key'): t.get('active', True) for t in node.get('tags', [])}
             for tag_group in pf.get('tags', []):
                 if isinstance(tag_group, list):
+                    key = ' '.join(tag.get('name') or tag.get('prompt', '') for tag in tag_group)
+                    is_active = tag_states.get(key, True)
+                    if not is_active:
+                        continue
                     parts = []
                     for tag in tag_group:
                         if isinstance(tag, dict):
@@ -2151,36 +2131,55 @@ class SnapshotPromptNode:
                                 parts.append(prompt_text)
                     if parts:
                         prompt_str = ', '.join(parts)
-                        if prompt_str not in prefab_prompts_raw:
-                            prefab_prompts_raw.append(prompt_str)
-                            prefab_prompts_cleaned.append(prompt_str.replace('[', '').replace(']', ''))
+                        if prompt_str not in prompts_raw:
+                            prompts_raw.append(prompt_str)
+                            prompts_cleaned.append(prompt_str.replace('[', '').replace(']', ''))
             
             # Collect custom_prompts
             cp = pf.get('custom_prompts', '')
             if cp:
                 wrapped = f"<{cp}>"
-                if wrapped not in prefab_prompts_raw:
-                    prefab_prompts_raw.append(wrapped)
-                    prefab_prompts_cleaned.append(cp)
+                if wrapped not in prompts_raw:
+                    prompts_raw.append(wrapped)
+                    prompts_cleaned.append(cp)
             
-            # Collect loras (deduplicate by file_path)
+            # Collect loras (respect per-lora active state)
+            lora_states = {l.get('file_path'): l.get('active', True) for l in node.get('loras', [])}
             for lora_item in pf.get('loras', []):
                 if isinstance(lora_item, dict):
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                     if not file_path:
                         continue
+                    is_active = lora_states.get(file_path, True)
+                    if not is_active:
+                        continue
                     exists = False
-                    for existing in prefab_loras:
+                    for existing in loras:
                         if existing.get('file_path', '') == file_path or existing.get('file_name', '') == file_path:
                             exists = True
                             break
                     if not exists:
-                        prefab_loras.append(lora_item)
+                        loras.append(lora_item)
+            
+            # Recurse into children
+            for child in node.get('children', []):
+                child_raw, child_cleaned, child_loras = expand_prefab_tree(child, visited)
+                prompts_raw.extend(child_raw)
+                prompts_cleaned.extend(child_cleaned)
+                loras.extend(child_loras)
+            
+            return prompts_raw, prompts_cleaned, loras
         
-        print(f"[PREFAB_DEBUG] Final prefab_prompts_raw = {prefab_prompts_raw}")
-        print(f"[PREFAB_DEBUG] Final prefab_loras count = {len(prefab_loras)}")
-        print(f"[PREFAB_DEBUG] server.selected_prompts = {server.selected_prompts}")
-        print(f"[PREFAB_DEBUG] server.custom_prompts = {server.custom_prompts}")
+        prefab_prompts_raw = []
+        prefab_prompts_cleaned = []
+        prefab_loras = []
+        visited_guids = set()
+        
+        for sp in server.selected_prefabs:
+            raw, cleaned, l = expand_prefab_tree(sp, visited_guids)
+            prefab_prompts_raw.extend(raw)
+            prefab_prompts_cleaned.extend(cleaned)
+            prefab_loras.extend(l)
 
         if server.window_closed or (not server.selected_prompts and not server.custom_prompts and not prefab_prompts_raw and not prefab_loras):
             print(f"[PREFAB_DEBUG] THROWING ERROR: window_closed={server.window_closed}, selected_prompts={server.selected_prompts}, custom_prompts={server.custom_prompts}, prefab_prompts_raw={prefab_prompts_raw}, prefab_loras={prefab_loras}")
