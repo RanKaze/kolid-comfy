@@ -1478,9 +1478,12 @@ export function AppShell() {
     };
 
     // ========== DRAG START (capture phase on drag-handles) ==========
-    document.querySelectorAll('.drag-handle').forEach(h => (h as HTMLElement).draggable = true);
+    const dragHandles = document.querySelectorAll('.drag-handle');
+    dragHandles.forEach(h => (h as HTMLElement).draggable = true);
+    console.log('[D&D] initDragAndDrop, drag handles found:', dragHandles.length);
     document.addEventListener('dragstart', (e: Event) => {
       const h = (e.target as HTMLElement).closest('.drag-handle') as HTMLElement;
+      console.log('[D&D] dragstart, target:', e.target, 'h:', h, 'h.draggable:', h?.draggable);
       if (!h || !h.draggable) return;
       const ev = e as DragEvent;
       isDragging = true;
@@ -1526,6 +1529,7 @@ export function AppShell() {
       if (!isDragging) return;
       const dt = dragState.type;
       if (!dt) return;
+      if (dt === 'prefab') console.log('[D&D] dragover prefab, target:', ev.target);
 
       const target = ev.target as HTMLElement;
 
@@ -1770,10 +1774,13 @@ export function AppShell() {
 
       // === Prefab drop ===
       if (snapType === 'prefab') {
+        console.log('[D&D] drop prefab, snapLibrary:', snapLibrary, 'snapIndex:', snapIndex, 'target:', target);
         const pi = target.closest('.prompt-item[data-prefab]:not(.add-prompt-btn)') as HTMLElement;
+        console.log('[D&D] drop prefab, pi:', pi, 'pi?.dataset:', pi?.dataset);
         if (pi && snapLibrary != null && snapIndex != null) {
           const tl = pi.dataset.library;
           const ti = parseInt(pi.dataset.prefabIndex!);
+          console.log('[D&D] drop prefab, target lib:', tl, 'target index:', ti);
           if (tl && !isNaN(ti) && snapLibrary === tl) {
             fetch('/reorder_library_prefabs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2178,7 +2185,7 @@ export function AppShell() {
                       {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : null}
                       <div className="header-content">
                         <div style={{ display:'flex', alignItems:'center' }}>
-                          <span className="drag-handle" data-drag-type="category" data-category={cat}>{iconGrip}</span>
+                          <span className="drag-handle" draggable data-drag-type="category" data-category={cat}>{iconGrip}</span>
                           <span style={{ textShadow:'0px 0px 4px black' }}>{cat}</span>
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
@@ -2205,7 +2212,7 @@ export function AppShell() {
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
-                                <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
+                                <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
                                   <div className="image-layer">
@@ -2328,7 +2335,7 @@ export function AppShell() {
                       {!expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} /> : null}
                       <div className="header-content">
                         <div style={{ display:'flex', alignItems:'center' }}>
-                          <span className="drag-handle" data-drag-type="library" data-library={lib}>{iconGrip}</span>
+                          <span className="drag-handle" draggable data-drag-type="library" data-library={lib}>{iconGrip}</span>
                           <span style={{ textShadow:'0px 0px 4px black' }}>{lib}</span>
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>

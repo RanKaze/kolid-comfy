@@ -98,7 +98,7 @@ export function PrefabItem({
         onMouseDown={handleClick}
 
       >
-        <span className="drag-handle" data-drag-type="prefab" data-library={libName} data-index={idx}>{iconGrip}</span>
+        <span className="drag-handle" draggable data-drag-type="prefab" data-library={libName} data-index={idx}>{iconGrip}</span>
         <div className="select-area" style={{ width: '100%', height: '100%', position: 'relative' }}>
           <div className="image-layer">
             {prefab.preview ? <img src={imgUrl(prefab.preview)} alt={prefab.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}

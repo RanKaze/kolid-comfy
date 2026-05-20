@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { LoraItemData } from '../types';
 
 interface LoraChangeData {
@@ -30,11 +30,18 @@ const iconPlusSmall = <svg width="10" height="10" viewBox="0 0 24 24" fill="none
 function buildActiveSetFromInitial(
   rawTags: string[],
   splitTags: string[],
-  initialActiveTags?: string[]
+  initialActiveTags?: string[],
+  initialSplitMode?: boolean
 ): { mergeActive: Set<number>; splitActive: Set<number> } {
   const initSet = new Set(initialActiveTags || []);
   const mergeActive = new Set<number>();
   const splitActive = new Set<number>();
+
+  if (initialActiveTags === undefined) {
+    for (let i = 0; i < rawTags.length; i++) mergeActive.add(i);
+    for (let i = 0; i < splitTags.length; i++) splitActive.add(i);
+    return { mergeActive, splitActive };
+  }
 
   for (let i = 0; i < splitTags.length; i++) {
     if (initSet.has(splitTags[i])) {
@@ -42,19 +49,26 @@ function buildActiveSetFromInitial(
     }
   }
 
-  let idx = 0;
+  // For merge mode: match rawTags directly (exact match) to avoid ambiguity
+  // when multiple rawTags share common split parts
+  let hasRawTagMatch = false;
   for (let i = 0; i < rawTags.length; i++) {
-    const parts = rawTags[i].split(',').map(s => s.trim()).filter(Boolean);
-    const hasActive = parts.some((_, j) => initSet.has(parts[j]));
-    if (hasActive) {
+    if (initSet.has(rawTags[i])) {
       mergeActive.add(i);
+      hasRawTagMatch = true;
     }
-    idx += parts.length;
   }
 
-  if (initialActiveTags === undefined) {
-    for (let i = 0; i < rawTags.length; i++) mergeActive.add(i);
-    for (let i = 0; i < splitTags.length; i++) splitActive.add(i);
+  // Fallback: if no rawTags matched but we have initialActiveTags,
+  // the data may be in old splitTags format (backward compatibility)
+  if (!hasRawTagMatch && initialActiveTags.length > 0) {
+    for (let i = 0; i < rawTags.length; i++) {
+      const parts = rawTags[i].split(',').map(s => s.trim()).filter(Boolean);
+      const hasActive = parts.some(p => initSet.has(p));
+      if (hasActive) {
+        mergeActive.add(i);
+      }
+    }
   }
 
   return { mergeActive, splitActive };
@@ -62,14 +76,24 @@ function buildActiveSetFromInitial(
 
 export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, onChange, onRemove }: LoraProps) {
   const rawTags = lora.tags || [];
-  const splitTags = rawTags.flatMap(t => t.split(',').map(s => s.trim()).filter(Boolean));
+  const splitTags = useMemo(() => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const t of rawTags.flatMap(t => t.split(',').map(s => s.trim()).filter(Boolean))) {
+      if (!seen.has(t)) {
+        seen.add(t);
+        result.push(t);
+      }
+    }
+    return result;
+  }, [rawTags]);
 
   const [cardActive, setCardActive] = useState(initialActive !== false);
   const [strength, setStrength] = useState(initialStrength ?? 1.0);
   const [inputDisplay, setInputDisplay] = useState((initialStrength ?? 1.0).toFixed(2));
   const [splitMode, setSplitMode] = useState(initialSplitMode ?? false);
 
-  const init = buildActiveSetFromInitial(rawTags, splitTags, initialActiveTags);
+  const init = buildActiveSetFromInitial(rawTags, splitTags, initialActiveTags, initialSplitMode);
   const [mergeActive, setMergeActive] = useState<Set<number>>(init.mergeActive);
   const [splitActive, setSplitActive] = useState<Set<number>>(init.splitActive);
 
@@ -91,8 +115,7 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
     } else {
       for (let i = 0; i < rawTags.length; i++) {
         if (mActive.has(i)) {
-          const parts = rawTags[i].split(',').map(s => s.trim()).filter(Boolean);
-          activeList.push(...parts);
+          activeList.push(rawTags[i]);
         }
       }
     }
@@ -149,28 +172,28 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
 
       if (nextMode) {
         const newSplit = new Set<number>();
-        let idx = 0;
         for (let i = 0; i < rawTags.length; i++) {
           const parts = rawTags[i].split(',').map(s => s.trim()).filter(Boolean);
           if (mergeActive.has(i)) {
-            for (let j = 0; j < parts.length; j++) {
-              newSplit.add(idx + j);
+            for (const part of parts) {
+              const si = splitTags.indexOf(part);
+              if (si !== -1) newSplit.add(si);
             }
           }
-          idx += parts.length;
         }
         setSplitActive(newSplit);
         notifyParent(nextMode, newSplit, mergeActive, strength, cardActive);
       } else {
         const newMerge = new Set<number>();
-        let idx = 0;
         for (let i = 0; i < rawTags.length; i++) {
           const parts = rawTags[i].split(',').map(s => s.trim()).filter(Boolean);
-          const hasActive = parts.some((_, j) => splitActive.has(idx + j));
+          const hasActive = parts.some(p => {
+            const si = splitTags.indexOf(p);
+            return si !== -1 && splitActive.has(si);
+          });
           if (hasActive) {
             newMerge.add(i);
           }
-          idx += parts.length;
         }
         setMergeActive(newMerge);
         notifyParent(nextMode, splitActive, newMerge, strength, cardActive);
