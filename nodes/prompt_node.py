@@ -113,6 +113,12 @@ class SnapshotPromptServer:
         
         # Scan Lora metadata files (with regex filter)
         self.lora_data = self._scan_loras(self.lora_regex)
+        # Build a set of valid lora paths for quick lookup (prefab expansion filtering)
+        self._valid_lora_paths = set()
+        for folder_items in self.lora_data.values():
+            for item in folder_items:
+                self._valid_lora_paths.add(item.get('file_path', '').replace('\\', '/'))
+                self._valid_lora_paths.add(item.get('file_name', ''))
 
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -2143,12 +2149,16 @@ class SnapshotPromptNode:
                     prompts_raw.append(wrapped)
                     prompts_cleaned.append(cp)
             
-            # Collect loras (respect per-lora active state)
+            # Collect loras (respect per-lora active state and lora_regex filter)
             lora_states = {l.get('file_path'): l.get('active', True) for l in node.get('loras', [])}
             for lora_item in pf.get('loras', []):
                 if isinstance(lora_item, dict):
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                     if not file_path:
+                        continue
+                    # Skip if this lora was filtered out by lora_regex
+                    normalized_path = file_path.replace('\\', '/')
+                    if normalized_path not in server._valid_lora_paths and file_path not in server._valid_lora_paths:
                         continue
                     is_active = lora_states.get(file_path, True)
                     if not is_active:
