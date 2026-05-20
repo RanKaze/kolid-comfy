@@ -94,7 +94,7 @@ body {
     height: 330px;
     flex-shrink: 0;
 }
-.right-bar .custom-input-section textarea { height: calc(330px - 40px); resize: none; }
+.right-bar .custom-input-section textarea { height: calc(330px - 40px); resize: none !important; }
 .right-bar .footer { flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
 .right-bar .footer button { width: 100%; }
 
@@ -824,6 +824,7 @@ body {
 }
 .modal.visible { display: flex; }
 .modal-content {
+    position: relative;
     background: rgba(35, 35, 40, 0.72);
     backdrop-filter: blur(40px) saturate(180%);
     -webkit-backdrop-filter: blur(40px) saturate(180%);
@@ -836,6 +837,30 @@ body {
     max-height: 90vh;
     overflow-y: auto;
 }
+.modal-content.wide { max-width: 900px; }
+.modal-content.has-bg-image {
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.modal-glass-bg {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    border-radius: 16px;
+    overflow: hidden;
+    z-index: -1;
+}
+.modal-glass-img {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-size: cover;
+    background-position: center;
+}
+.modal-glass-blur {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(to right, rgba(35, 35, 40, 0.25) 0%, rgba(35, 35, 40, 0.75) 55%, rgba(35, 35, 40, 0.95) 100%);
+}
 .modal-content h2 { margin-bottom: 15px; font-size: 18px; }
 .modal-content input, .modal-content select, .modal-content textarea {
     width: 100%;
@@ -846,6 +871,7 @@ body {
     background: var(--bg-secondary);
     color: var(--text-primary);
 }
+.modal-content textarea { resize: vertical; min-height: 80px; }
 .modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: -8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
@@ -880,8 +906,26 @@ body {
 .modal-content .image-input-row .btn { flex: 0 0 auto; padding: 10px 15px; white-space: nowrap; }
 .modal-content .image-input-row .paste-image-btn { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer; font-size: 14px; transition: background 0.2s; }
 .modal-content .image-input-row .paste-image-btn:hover { background: var(--bg-card-hover); }
-.modal-content .modal-buttons { display: flex; gap: 12px; margin-top: 15px; }
-.modal-content .btn { flex: 1; padding: 12px; }
+.modal-content .modal-buttons { display: flex; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.08); }
+.modal-content .btn {
+    flex: 1;
+    padding: 12px 16px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+}
+.modal-content .btn:hover { background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.2); }
+.modal-content .btn-primary { background: rgba(0, 122, 255, 0.25); border-color: rgba(0, 122, 255, 0.4); }
+.modal-content .btn-primary:hover { background: rgba(0, 122, 255, 0.4); border-color: rgba(0, 122, 255, 0.55); }
+.modal-content .btn-secondary { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); color: rgba(255,255,255,0.9); }
+.modal-content .btn-secondary:hover { background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.2); }
 
 .custom-input-section {
     background: var(--bg-tertiary);
@@ -957,14 +1001,25 @@ body {
 .lora-tag-list { position: absolute; top: 5px; left: 5px; right: 5px; display: flex; flex-wrap: wrap; gap: 4px; z-index: 4; pointer-events: none; }
 .lora-tag-chip { padding: 2px 6px; background: rgba(0, 122, 255, 0.85); border-radius: 4px; font-size: 10px; color: #fff; font-weight: 500; pointer-events: none; }
 .lora-list { display: flex; flex-direction: column; gap: 8px; }
-.lora-card { border-radius: 10px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.12); cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.lora-card { position: relative; overflow: hidden; border-radius: 10px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.12); cursor: pointer; transition: border-color 0.2s, background 0.2s; }
 .lora-card:not(.active) { border-color: rgba(255,255,255,0.08); }
 .lora-card:not(.active) .lora-card-name { color: var(--text-secondary); }
 .lora-card.active { border-color: rgba(0, 122, 255, 0.5); background: rgba(0, 122, 255, 0.06); }
 .lora-card.active .lora-card-name { color: var(--text-primary); }
 .lora-card.missing { border-color: rgba(255, 59, 48, 0.6); background: rgba(255, 59, 48, 0.06); }
 .lora-card.missing .lora-card-name { color: #ff3b30; }
-.lora-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.lora-card-bg {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    mask-image: linear-gradient(to right, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 70%);
+    -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 70%);
+    z-index: 0;
+    pointer-events: none;
+    border-radius: inherit;
+}
+.lora-card-header { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .lora-card-name { font-weight: 600; font-size: 13px; height: 20px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; transition: color 0.2s; }
 .lora-card-meta { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: 8px; }
 .lora-strength { width: 36px; height: 20px; line-height: 20px; padding: 0; background: transparent; border: none; border-radius: 4px; color: var(--text-primary); font-size: 11px; text-align: center; outline: none; }
@@ -976,7 +1031,7 @@ body {
 .lora-card-toggle.active:hover { color: #fff; }
 .lora-card-remove { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s; }
 .lora-card-remove:hover { color: #fff; background: #dc3545; }
-.lora-card-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.lora-card-tags { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 4px; }
 .lora-card-tag { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); cursor: pointer; transition: transform 0.2s; }
 .lora-card-tag:hover { transform: translateY(-1px); }
 .lora-card-tag.active { background: #007aff; border-color: #007aff; color: #fff; }
@@ -990,31 +1045,72 @@ body {
 
 /* Edit Prefab Modal */
 .edit-prefab-body { display: flex; flex-direction: column; gap: 12px; }
+.edit-prefab-body.row { flex-direction: row; gap: 20px; }
+.edit-prefab-left { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.edit-prefab-right { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .edit-prefab-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
 .edit-prefab-section { display: flex; flex-direction: column; gap: 6px; }
-.edit-prefab-section label { margin-bottom: 0; }
+.edit-prefab-section label { margin-bottom: 0 !important; }
+.edit-prefab-section input,
+.edit-prefab-section textarea { margin-bottom: 0 !important; }
 .edit-prefab-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border-radius: 6px; font-size: 13px; }
+.modal-tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.modal-tag { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); display: flex; align-items: center; gap: 4px; }
+.modal-tag button { background: none; border: none; color: inherit; cursor: pointer; padding: 0; font-size: 10px; line-height: 1; }
+.modal-tag button:hover { color: #fff; }
+.modal-lora-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+.modal-lora-card { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: rgba(0, 122, 255, 0.06); border: 1px solid rgba(0, 122, 255, 0.2); border-radius: 8px; font-size: 12px; }
+.modal-lora-card .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.modal-lora-card .meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: 8px; }
+.modal-lora-card input { width: 44px; font-size: 11px; padding: 2px 4px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); }
+.modal-lora-card button { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; font-size: 12px; line-height: 1; }
+.modal-lora-card button:hover { color: #ff3b30; }
+.modal-prefab-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; }
+.modal-prefab-card { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; }
+.modal-prefab-card .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.modal-prefab-card button { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; font-size: 12px; line-height: 1; }
+.modal-prefab-card button:hover { color: #ff3b30; }
 .modal-nested-list { display: flex; flex-direction: column; gap: 6px; }
 .modal-nested-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; }
 .modal-nested-item.inactive { opacity: 0.5; }
 .modal-nested-item .name { font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal-nested-item .actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: 8px; }
-.modal-nested-item .actions button { padding: 2px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; background: var(--bg-card); color: var(--text-primary); transition: background 0.2s; }
-.modal-nested-item .actions button:hover { background: var(--bg-card-hover); }
+.modal-nested-item .actions button { width: 20px; height: 20px; padding: 0; border-radius: 4px; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; background: transparent; color: var(--text-secondary); transition: background 0.2s, color 0.2s; }
+.modal-nested-item .actions button:hover { color: #fff; }
+.modal-nested-item .actions button.nested-edit { background: rgba(0, 122, 255, 0.15); color: #007aff; }
+.modal-nested-item .actions button.nested-edit:hover { background: #007aff; color: #fff; }
+.modal-nested-item .actions button.nested-merge { background: rgba(0, 122, 255, 0.15); color: #007aff; }
+.modal-nested-item .actions button.nested-merge:hover { background: #007aff; color: #fff; }
+.modal-nested-item .actions button.nested-delete { color: var(--text-secondary); }
+.modal-nested-item .actions button.nested-delete:hover { color: #ff3b30; }
 
 /* Selected prefab in grid */
 .prompt-item.prefab-selected { border-color: rgba(0, 122, 255, 0.7); box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.4), 0 4px 12px rgba(0,0,0,0.3); }
 
 /* Selected Prefabs sidebar list */
 .prefab-list { display: flex; flex-direction: column; gap: 8px; }
-.prefab-card { background: var(--bg-tertiary); border-radius: 8px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); }
-.prefab-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.prefab-card { position: relative; overflow: hidden; background: var(--bg-tertiary); border-radius: 8px; padding: 10px 12px; border: 1px solid rgba(255,255,255,0.08); cursor: pointer; }
+.prefab-card-bg {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    mask-image: linear-gradient(to right, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 70%);
+    -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0) 70%);
+    z-index: 0;
+    pointer-events: none;
+    border-radius: inherit;
+}
+.prefab-card-header { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
 .prefab-card-name { font-weight: 600; font-size: 13px; color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .prefab-card-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 8px; }
-.prefab-card-btn { height: 20px; padding: 0 8px; border: none; border-radius: 4px; font-size: 11px; cursor: pointer; transition: background 0.2s, color 0.2s; }
+.prefab-card-btn { width: 20px; height: 20px; padding: 0; border: none; border-radius: 4px; cursor: pointer; transition: background 0.2s, color 0.2s; display: flex; align-items: center; justify-content: center; background: transparent; color: var(--text-secondary); }
+.prefab-card-btn:hover { color: #fff; }
+.prefab-card-btn.edit { background: rgba(0, 122, 255, 0.15); color: #007aff; }
+.prefab-card-btn.edit:hover { background: #007aff; color: #fff; }
 .prefab-card-btn.merge { background: rgba(0, 122, 255, 0.15); color: #007aff; }
 .prefab-card-btn.merge:hover { background: #007aff; color: #fff; }
-.prefab-card-btn.remove { background: transparent; color: var(--text-secondary); width: 20px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.prefab-card-btn.remove { color: var(--text-secondary); }
 .prefab-card-btn.remove:hover { color: #ff3b30; }
 .prefab-card-tags { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .prefab-card-loras { font-size: 10px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }

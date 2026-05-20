@@ -3,7 +3,7 @@ import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
-  LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabLoraState, SelectedPrefabTagState,
+  LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
 } from '../types';
 import {
   categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
@@ -26,7 +26,8 @@ const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" 
 const iconArrowLeft = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'4px'}}><path d="M19 12H5M12 19l-7-7 7-7"/></svg>;
 const iconGrip = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{verticalAlign:'middle'}}><circle cx="9" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>;
 const iconGrid = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>;
-const iconPencil = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>;
+const iconGear = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+const iconLayers = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>;
 const iconTrash = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
 const iconChevronUp = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M18 15l-6-6-6 6"/></svg>;
 const iconChevronDown = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M6 9l6 6 6-6"/></svg>;
@@ -389,6 +390,9 @@ export function AppShell() {
   const [modalOldName, setModalOldName] = useState('');
   const [modalPromptIds, setModalPromptIds] = useState('');
   const [modalCustomPrompts, setModalCustomPrompts] = useState('');
+  const [modalPrefabTags, setModalPrefabTags] = useState<TagGroup[]>([]);
+  const [modalPrefabLoras, setModalPrefabLoras] = useState<LoraSelectionData[]>([]);
+  const [modalPrefabSelectedPrefabs, setModalPrefabSelectedPrefabs] = useState<SelectedPrefabRef[]>([]);
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
   const [modalIsCat, setModalIsCat] = useState(true);
@@ -456,7 +460,7 @@ export function AppShell() {
     clearZoomView();
     setModalName(''); setModalPrompt(''); setModalTags([]); setModalDecorations([]); setModalMuteDecorations([]);
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
-    setModalCustomPrompts(''); setModalMode('horizontal'); setModalSize('normal');
+    setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
   }, [clearImageFields]);
 
@@ -1252,7 +1256,7 @@ export function AppShell() {
     if (!name || lib==null || idx==null) { alert('Please enter prefab name'); return; }
     let imageData = null;
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
-    const body: any = {library:lib, prefab_index:idx, prefab_name:name, custom_prompts:modalCustomPrompts};
+    const body: any = {library:lib, prefab_index:idx, prefab_name:name, custom_prompts:modalCustomPrompts, prefab_tags:modalPrefabTags, loras:modalPrefabLoras, selected_prefabs:modalPrefabSelectedPrefabs};
     if (imageData !== null) body.image = imageData;
     try {
       const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
@@ -1264,13 +1268,13 @@ export function AppShell() {
         const libData = prev[lib];
         if (!libData || !libData.prefabs) return prev;
         const prefabs = libData.prefabs.map((pf: PrefabData, i: number) =>
-          i === idx ? { ...pf, name, custom_prompts: modalCustomPrompts, preview: result.preview !== undefined ? result.preview : pf.preview } : pf,
+          i === idx ? { ...pf, name, custom_prompts: modalCustomPrompts, tags: modalPrefabTags, loras: modalPrefabLoras, selected_prefabs: modalPrefabSelectedPrefabs, preview: result.preview !== undefined ? result.preview : pf.preview } : pf,
         );
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, modalCustomPrompts, modal?.data?.lib, modal?.data?.idx, modalImageFile, saveModalFocus, setAllLibraries]);
+  }, [closeModal, modalName, modalCustomPrompts, modalPrefabTags, modalPrefabLoras, modalPrefabSelectedPrefabs, modal?.data?.lib, modal?.data?.idx, modalImageFile, saveModalFocus, setAllLibraries]);
 
   // ========== Sync Prefab ==========
   const syncPrefab = useCallback(async () => {
@@ -2034,7 +2038,7 @@ export function AppShell() {
                           {(catTags.length > 0 || catDeco.length > 0) && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}{catDeco.map(d => <span className="decoration-tag" key={d}>{d}</span>)}</div>}
                           {selCount > 0 && <span className="count-badge">{selCount}</span>}
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(cat); setModalMode(categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries)); setModalSize(categoryDisplay.getSize(cat, categorySizeModes, allLibraries)); setModalIsCat(true); setModal({type:'displayMode',data:{name:cat,isCat:true}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconPencil}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteCategoryDirect(cat); }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
@@ -2067,7 +2071,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconPencil}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -2171,7 +2175,7 @@ export function AppShell() {
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(lib); setModalMode(libraryDisplay.getMode(lib, categoryDisplayModes, allLibraries)); setModalSize(libraryDisplay.getSize(lib, categorySizeModes, allLibraries)); setModalIsCat(false); setModal({type:'displayMode',data:{name:lib,isCat:false}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const ld = allLibraries[lib]||{} as any; setModalOldName(lib); setModalName(lib); setModalPromptIds((ld.prompt_ids||[]).join(', ')); const bg = ld.bg_image||''; if(bg){ setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editLibrary',data:{name:lib}}); }}>{iconPencil}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const ld = allLibraries[lib]||{} as any; setModalOldName(lib); setModalName(lib); setModalPromptIds((ld.prompt_ids||[]).join(', ')); const bg = ld.bg_image||''; if(bg){ setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editLibrary',data:{name:lib}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteLibraryDirect(lib); }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
@@ -2200,7 +2204,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconPencil}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -2222,7 +2226,7 @@ export function AppShell() {
                             onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
                             allLibraries={allLibraries}
 
-                            onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
+                            onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); setModalPrefabTags((pf?.tags||[]) as TagGroup[]); setModalPrefabLoras((pf?.loras||[]) as LoraSelectionData[]); setModalPrefabSelectedPrefabs((pf?.selected_prefabs||[]) as SelectedPrefabRef[]); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
                             onDelete={() => deletePrefab(lib, i)}
                           />
                         ))}
@@ -2249,13 +2253,21 @@ export function AppShell() {
                   {selectedPrefabs.map(node => {
                     const pf = findPrefabByGuid(node.guid);
                     if (!pf) return null;
+                    const fp = (() => {
+                      for (const [libName, libData] of Object.entries(allLibraries)) {
+                        const idx = (libData.prefabs || []).findIndex(p => p.guid === node.guid);
+                        if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                      }
+                      return undefined;
+                    })();
                     return (
                       <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                        {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                         <div className="prefab-card-header">
                           <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
                           <div className="prefab-card-actions">
-                            <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconPencil}</button>
-                            <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>Merge</button>
+                            <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconGear}</button>
+                            <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>{iconLayers}</button>
                             <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
                           </div>
                         </div>
@@ -2473,12 +2485,106 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'editPrefab' ? (
         <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-content wide" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prefab</h2>
-            <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <label>Custom Prompts</label>
-            <textarea placeholder="Custom prompts text..." value={modalCustomPrompts} onChange={e => setModalCustomPrompts(e.target.value)}></textarea>
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <div className="edit-prefab-body row">
+              <div className="edit-prefab-left">
+                <div className="edit-prefab-section">
+                  <label>Prefab name</label>
+                  <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
+                </div>
+                <div className="edit-prefab-section">
+                  <label>Custom Prompts</label>
+                  <textarea placeholder="Custom prompts text..." value={modalCustomPrompts} onChange={e => setModalCustomPrompts(e.target.value)}></textarea>
+                </div>
+                <div className="edit-prefab-section">
+                  <label>Preview Image</label>
+                  <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+                </div>
+              </div>
+              <div className="edit-prefab-right">
+                <div className="edit-prefab-section">
+                  <label>Tags ({modalPrefabTags.length})</label>
+                  <div className="modal-tag-list">
+                    {modalPrefabTags.map((group, i) => (
+                      <div key={i} className="modal-tag">
+                        <span>{tagsToDisplayString(group)}</span>
+                        <button type="button" onClick={() => setModalPrefabTags(prev => prev.filter((_, j) => j !== i))}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                  <input type="text" placeholder="Add tags (comma separated), press Enter..." style={{ fontSize: 12 }} onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      const val = (e.target as HTMLInputElement).value.trim();
+                      if (val) {
+                        const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
+                        if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
+                        (e.target as HTMLInputElement).value = '';
+                      }
+                    }
+                  }} />
+              </div>
+              <div className="edit-prefab-section">
+                <label>Loras ({modalPrefabLoras.length})</label>
+                <div className="modal-lora-list">
+                  {modalPrefabLoras.map((l, i) => (
+                    <div key={l.file_path} className="modal-lora-card">
+                      <span className="name">{l.name || l.file_path}</span>
+                      <div className="meta">
+                        <input type="number" step={0.1} min={0} max={2} value={l.strength} onChange={e => { const v = parseFloat(e.target.value); setModalPrefabLoras(prev => prev.map((pl, j) => j === i ? { ...pl, strength: isNaN(v) ? 1 : v } : pl)); }} />
+                        <button type="button" onClick={() => setModalPrefabLoras(prev => prev.filter((_, j) => j !== i))}>×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
+                  const path = e.target.value;
+                  if (!path) return;
+                  const item = Object.values(loraData).flat().find(it => it.file_path === path);
+                  if (item) {
+                    setModalPrefabLoras(prev => {
+                      if (prev.some(p => p.file_path === path)) return prev;
+                      return [...prev, { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true }];
+                    });
+                  }
+                  e.target.value = '';
+                }}>
+                  <option value="">Add Lora...</option>
+                  {Object.values(loraData).flat().filter(item => !modalPrefabLoras.some(l => l.file_path === item.file_path)).map(item => (
+                    <option key={item.file_path} value={item.file_path}>{item.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="edit-prefab-section">
+                <label>Nested Prefabs ({modalPrefabSelectedPrefabs.length})</label>
+                <div className="modal-prefab-list">
+                  {modalPrefabSelectedPrefabs.map((sp, i) => {
+                    const pf = findPrefabByGuid(sp.guid);
+                    return (
+                      <div key={sp.guid} className="modal-prefab-card">
+                        <span className="name">{pf?.name || sp.guid}</span>
+                        <button type="button" onClick={() => setModalPrefabSelectedPrefabs(prev => prev.filter((_, j) => j !== i))}>×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
+                  const guid = e.target.value;
+                  if (!guid) return;
+                  setModalPrefabSelectedPrefabs(prev => {
+                    if (prev.some(p => p.guid === guid)) return prev;
+                    return [...prev, { guid }];
+                  });
+                  e.target.value = '';
+                }}>
+                  <option value="">Add Prefab...</option>
+                  {Object.values(allLibraries).flatMap(libData => (libData.prefabs || []).map(pf => ({ guid: pf.guid || '', name: pf.name }))).filter(p => p.guid && !modalPrefabSelectedPrefabs.some(sp => sp.guid === p.guid)).map(p => (
+                    <option key={p.guid} value={p.guid}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+              </div>
+            </div>
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-secondary" onClick={syncPrefab}>Sync</button>
@@ -2488,7 +2594,7 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'editSelectedPrefab' ? (
         <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+          <div className={`modal-content ${findPrefabByGuid(modal.data?.guid || '')?.preview ? 'has-bg-image' : ''}`} onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prefab</h2>
             {(() => {
               const guid = modal.data?.guid;
@@ -2502,67 +2608,82 @@ export function AppShell() {
               }
               const node = findNode(selectedPrefabs);
               const pf = guid ? findPrefabByGuid(guid) : null;
+              const fp = guid ? (() => {
+                for (const [libName, libData] of Object.entries(allLibraries)) {
+                  const idx = (libData.prefabs || []).findIndex(p => p.guid === guid);
+                  if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                }
+                return undefined;
+              })() : undefined;
               if (!node || !pf) return <p style={{ color: 'var(--text-secondary)' }}>Prefab not found</p>;
               return (
-                <div className="edit-prefab-body">
-                  <div className="edit-prefab-title">{pf.name}</div>
-
-                  <div className="edit-prefab-section">
-                    <div className="edit-prefab-row">
-                      <span>Active</span>
-                      <TextToggle text={node.active ? 'On' : 'Off'} active={node.active} onClick={() => togglePrefabActive(node.guid)} />
-                    </div>
-                  </div>
-
-                  {node.tags.length > 0 && (
-                    <div className="edit-prefab-section">
-                      <label>Tags</label>
-                      <div className="text-toggle-list">
-                        {node.tags.map(t => (
-                          <TextToggle key={t.key} text={t.key} active={t.active} onClick={() => togglePrefabTag(node.guid, t.key)} />
-                        ))}
-                      </div>
+                <>
+                  {pf.preview && (
+                    <div className="modal-glass-bg">
+                      <div className="modal-glass-img" style={{ backgroundImage: `url(${imgUrl(pf.preview)})`, backgroundPosition: fp ? `${fp.x}% ${fp.y}%` : 'center center' }} />
+                      <div className="modal-glass-blur" />
                     </div>
                   )}
+                  <div className="edit-prefab-body">
+                    <div className="edit-prefab-title">{pf.name}</div>
 
-                  {node.loras.length > 0 && (
                     <div className="edit-prefab-section">
-                      <label>Loras</label>
-                      <div className="text-toggle-list">
-                        {node.loras.map(l => {
-                          let loraName = l.file_path;
-                          for (const items of Object.values(loraData)) {
-                            const found = items.find(it => it.file_path === l.file_path);
-                            if (found) { loraName = found.name; break; }
-                          }
-                          return <TextToggle key={l.file_path} text={loraName} active={l.active} onClick={() => togglePrefabLora(node.guid, l.file_path)} />;
-                        })}
+                      <div className="edit-prefab-row">
+                        <span>Active</span>
+                        <TextToggle text={node.active ? 'On' : 'Off'} active={node.active} onClick={() => togglePrefabActive(node.guid)} />
                       </div>
                     </div>
-                  )}
 
-                  {node.children.length > 0 && (
-                    <div className="edit-prefab-section">
-                      <label>Nested Prefabs</label>
-                      <div className="modal-nested-list">
-                        {node.children.map(c => {
-                          const childPf = findPrefabByGuid(c.guid);
-                          if (!childPf) return null;
-                          return (
-                            <div key={c.guid} className={`modal-nested-item ${c.active ? '' : 'inactive'}`}>
-                              <span className="name">{childPf.name}</span>
-                              <div className="actions">
-                                <button onClick={(e) => { e.stopPropagation(); setModalStack(prev => [...prev, modal!.data.guid]); setModal({ type: 'editSelectedPrefab', data: { guid: c.guid } }); }}>Edit</button>
-                                <button onClick={(e) => { e.stopPropagation(); mergePrefab(childPf); }}>Merge</button>
-                                <button onClick={(e) => { e.stopPropagation(); removeSelectedPrefab(c.guid); }}>Delete</button>
+                    {node.tags.length > 0 && (
+                      <div className="edit-prefab-section">
+                        <label>Tags</label>
+                        <div className="text-toggle-list">
+                          {node.tags.map(t => (
+                            <TextToggle key={t.key} text={t.key} active={t.active} onClick={() => togglePrefabTag(node.guid, t.key)} />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {node.loras.length > 0 && (
+                      <div className="edit-prefab-section">
+                        <label>Loras</label>
+                        <div className="text-toggle-list">
+                          {node.loras.map(l => {
+                            let loraName = l.file_path;
+                            for (const items of Object.values(loraData)) {
+                              const found = items.find(it => it.file_path === l.file_path);
+                              if (found) { loraName = found.name; break; }
+                            }
+                            return <TextToggle key={l.file_path} text={loraName} active={l.active} onClick={() => togglePrefabLora(node.guid, l.file_path)} />;
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {node.children.length > 0 && (
+                      <div className="edit-prefab-section">
+                        <label>Nested Prefabs</label>
+                        <div className="modal-nested-list">
+                          {node.children.map(c => {
+                            const childPf = findPrefabByGuid(c.guid);
+                            if (!childPf) return null;
+                            return (
+                              <div key={c.guid} className={`modal-nested-item ${c.active ? '' : 'inactive'}`}>
+                                <span className="name">{childPf.name}</span>
+                                <div className="actions">
+                                  <button className="nested-edit" title="Edit" onClick={(e) => { e.stopPropagation(); setModalStack(prev => [...prev, modal!.data.guid]); setModal({ type: 'editSelectedPrefab', data: { guid: c.guid } }); }}>{iconGear}</button>
+                                  <button className="nested-merge" title="Merge" onClick={(e) => { e.stopPropagation(); mergePrefab(childPf); }}>{iconLayers}</button>
+                                  <button className="nested-delete" title="Delete" onClick={(e) => { e.stopPropagation(); removeSelectedPrefab(c.guid); }}>{iconX}</button>
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
+                </>
               );
             })()}
             <div className="modal-buttons">
