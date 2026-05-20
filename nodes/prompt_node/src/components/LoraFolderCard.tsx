@@ -11,9 +11,10 @@ interface LoraFolderCardProps {
   searchQuery?: string;
   selectedLoras: LoraItemData[];
   onToggleLora: (item: LoraItemData) => void;
+  isItemSelected?: (item: LoraItemData) => boolean;
 }
 
-export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora }: LoraFolderCardProps) {
+export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected }: LoraFolderCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const filtered = searchQuery
@@ -22,7 +23,7 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
 
   if (searchQuery && filtered.length === 0) return null;
 
-  const isSelected = (item: LoraItemData) => selectedLoras.some(l => l.file_path === item.file_path);
+  const isSelected = isItemSelected || ((item: LoraItemData) => selectedLoras.some(l => l.file_path === item.file_path));
 
   return (
     <div className={`category lora-folder ${expanded ? 'expanded' : 'collapsed'}`}>

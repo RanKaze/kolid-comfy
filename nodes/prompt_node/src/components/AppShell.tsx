@@ -393,6 +393,22 @@ export function AppShell() {
   const [modalPrefabTags, setModalPrefabTags] = useState<TagGroup[]>([]);
   const [modalPrefabLoras, setModalPrefabLoras] = useState<LoraSelectionData[]>([]);
   const [modalPrefabSelectedPrefabs, setModalPrefabSelectedPrefabs] = useState<SelectedPrefabRef[]>([]);
+  const [modalRestorePoint, setModalRestorePoint] = useState<{
+    name: string;
+    customPrompts: string;
+    prefabTags: TagGroup[];
+    prefabLoras: LoraSelectionData[];
+    prefabSelectedPrefabs: SelectedPrefabRef[];
+    previewUrl: string;
+    previewVisible: boolean;
+    focusX: number;
+    focusY: number;
+    focusVisible: boolean;
+    modalData: { lib: string; idx: number };
+    mode: 'lora' | 'prefab';
+  } | null>(null);
+  const [mainTempSelectedLoras, setMainTempSelectedLoras] = useState<Set<string>>(new Set());
+  const [mainTempSelectedPrefabs, setMainTempSelectedPrefabs] = useState<Set<string>>(new Set());
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
   const [modalIsCat, setModalIsCat] = useState(true);
@@ -462,6 +478,7 @@ export function AppShell() {
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
     setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
+    setModalRestorePoint(null); setMainTempSelectedLoras(new Set()); setMainTempSelectedPrefabs(new Set());
   }, [clearImageFields]);
 
   const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
@@ -654,10 +671,22 @@ export function AppShell() {
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
+    if (modalRestorePoint?.mode === 'lora') {
+      return mainTempSelectedLoras.has(item.file_path);
+    }
     return selectedLoras.some(l => l.file_path === item.file_path);
-  }, [selectedLoras]);
+  }, [selectedLoras, modalRestorePoint?.mode, mainTempSelectedLoras]);
 
   const toggleLora = useCallback((item: LoraItemData) => {
+    if (modalRestorePoint?.mode === 'lora') {
+      setMainTempSelectedLoras(prev => {
+        const next = new Set(prev);
+        if (next.has(item.file_path)) next.delete(item.file_path);
+        else next.add(item.file_path);
+        return next;
+      });
+      return;
+    }
     setSelectedLoras(prev => {
       const exists = prev.some(l => l.file_path === item.file_path);
       if (exists) {
@@ -665,7 +694,7 @@ export function AppShell() {
       }
       return [...prev, item];
     });
-  }, []);
+  }, [modalRestorePoint?.mode]);
 
   const removeLora = useCallback((filePath: string) => {
     setSelectedLoras(prev => prev.filter(l => l.file_path !== filePath));
@@ -673,6 +702,15 @@ export function AppShell() {
 
   // ========== Prefab Selection ==========
   const togglePrefab = useCallback((guid: string) => {
+    if (modalRestorePoint?.mode === 'prefab') {
+      setMainTempSelectedPrefabs(prev => {
+        const next = new Set(prev);
+        if (next.has(guid)) next.delete(guid);
+        else next.add(guid);
+        return next;
+      });
+      return;
+    }
     setSelectedPrefabs(prev => {
       const exists = prev.some(p => p.guid === guid);
       if (exists) {
@@ -681,7 +719,7 @@ export function AppShell() {
       const item = buildPrefabItemTree(guid);
       return item ? [...prev, item] : prev;
     });
-  }, [buildPrefabItemTree]);
+  }, [buildPrefabItemTree, modalRestorePoint?.mode]);
 
   const removeSelectedPrefab = useCallback((guid: string) => {
     setSelectedPrefabs(prev => {
@@ -1275,6 +1313,59 @@ export function AppShell() {
       closeModal();
     } catch(e) { console.error(e); }
   }, [closeModal, modalName, modalCustomPrompts, modalPrefabTags, modalPrefabLoras, modalPrefabSelectedPrefabs, modal?.data?.lib, modal?.data?.idx, modalImageFile, saveModalFocus, setAllLibraries]);
+
+  // ========== Restore Modal from Main Selection ==========
+  const restoreModalWithSelections = useCallback(() => {
+    if (!modalRestorePoint) return;
+    setModalName(modalRestorePoint.name);
+    setModalCustomPrompts(modalRestorePoint.customPrompts);
+    setModalPrefabTags(modalRestorePoint.prefabTags);
+    let newLoras = [...modalRestorePoint.prefabLoras];
+    let newPrefabs = [...modalRestorePoint.prefabSelectedPrefabs];
+    if (modalRestorePoint.mode === 'lora') {
+      const added = Array.from(mainTempSelectedLoras).map(path => {
+        const item = Object.values(loraData).flat().find(it => it.file_path === path);
+        if (!item || newLoras.some(l => l.file_path === path)) return null;
+        return { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true };
+      }).filter(Boolean) as LoraSelectionData[];
+      newLoras = [...newLoras, ...added];
+    } else if (modalRestorePoint.mode === 'prefab') {
+      const added = Array.from(mainTempSelectedPrefabs).map(guid => {
+        if (newPrefabs.some(p => p.guid === guid)) return null;
+        return { guid };
+      }).filter(Boolean) as SelectedPrefabRef[];
+      newPrefabs = [...newPrefabs, ...added];
+    }
+    setModalPrefabLoras(newLoras);
+    setModalPrefabSelectedPrefabs(newPrefabs);
+    setModalPreviewUrl(modalRestorePoint.previewUrl);
+    setModalPreviewVisible(modalRestorePoint.previewVisible);
+    setModalFocusX(modalRestorePoint.focusX);
+    setModalFocusY(modalRestorePoint.focusY);
+    setModalFocusVisible(modalRestorePoint.focusVisible);
+    setModal({ type: 'editPrefab', data: modalRestorePoint.modalData });
+    setModalRestorePoint(null);
+    setMainTempSelectedLoras(new Set());
+    setMainTempSelectedPrefabs(new Set());
+  }, [modalRestorePoint, mainTempSelectedLoras, mainTempSelectedPrefabs, loraData]);
+
+  const cancelMainSelection = useCallback(() => {
+    if (!modalRestorePoint) return;
+    setModalName(modalRestorePoint.name);
+    setModalCustomPrompts(modalRestorePoint.customPrompts);
+    setModalPrefabTags(modalRestorePoint.prefabTags);
+    setModalPrefabLoras(modalRestorePoint.prefabLoras);
+    setModalPrefabSelectedPrefabs(modalRestorePoint.prefabSelectedPrefabs);
+    setModalPreviewUrl(modalRestorePoint.previewUrl);
+    setModalPreviewVisible(modalRestorePoint.previewVisible);
+    setModalFocusX(modalRestorePoint.focusX);
+    setModalFocusY(modalRestorePoint.focusY);
+    setModalFocusVisible(modalRestorePoint.focusVisible);
+    setModal({ type: 'editPrefab', data: modalRestorePoint.modalData });
+    setModalRestorePoint(null);
+    setMainTempSelectedLoras(new Set());
+    setMainTempSelectedPrefabs(new Set());
+  }, [modalRestorePoint]);
 
   // ========== Sync Prefab ==========
   const syncPrefab = useCallback(async () => {
@@ -1963,8 +2054,18 @@ export function AppShell() {
               </div>
             ) : null}
 
+            {modalRestorePoint ? (
+              <div className="temporary-banner" style={{ background: 'linear-gradient(135deg, #007aff, #5856d6)', boxShadow: '0 4px 12px rgba(0, 122, 255, 0.3)' }}>
+                <span>{modalRestorePoint.mode === 'lora' ? `Select Loras (${mainTempSelectedLoras.size})` : `Select Prefabs (${mainTempSelectedPrefabs.size})`}</span>
+                <div>
+                  <button className="btn btn-success" onClick={restoreModalWithSelections}>Add Selected</button>
+                  <button className="btn btn-secondary" onClick={cancelMainSelection}>Cancel</button>
+                </div>
+              </div>
+            ) : null}
+
             {/* ========== Lora Section ========== */}
-            {!isTemporary && Object.keys(loraData).length > 0 ? (
+            {!isTemporary && Object.keys(loraData).length > 0 && modalRestorePoint?.mode !== 'prefab' ? (
               <div className="categories-container lora-section">
                 {Object.entries(loraData).map(([folder, items]) => (
                   <LoraFolderCard
@@ -1974,11 +2075,13 @@ export function AppShell() {
                     searchQuery={searchQuery}
                     selectedLoras={selectedLoras}
                     onToggleLora={toggleLora}
+                    isItemSelected={isLoraSelected}
                   />
                 ))}
               </div>
             ) : null}
 
+            {!modalRestorePoint?.mode ? (
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
@@ -2105,8 +2208,9 @@ export function AppShell() {
               })}
               <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addCategory'}); }}><span>{iconPlus} Add Category</span></div>
             </div>
+            ) : null}
 
-            {!isTemporary ? (<div className="categories-container prefab-section">
+            {!isTemporary && modalRestorePoint?.mode !== 'lora' ? (<div className="categories-container prefab-section">
               {libraries.map(([lib, libData]) => {
                 const expanded = expandedLibraries.has(lib);
                 const anim = animating.has(lib);
@@ -2124,6 +2228,16 @@ export function AppShell() {
                 }
                 let filteredPrompts = prompts;
                 let filteredPrefabs = prefabs;
+                // Filter out prefabs that would cause circular dependency when in prefab selection mode
+                if (modalRestorePoint?.mode === 'prefab') {
+                  const targetGuid = allLibraries[modalRestorePoint.modalData.lib]?.prefabs?.[modalRestorePoint.modalData.idx]?.guid || null;
+                  filteredPrefabs = prefabs.filter(pf => {
+                    if (!pf.guid) return false;
+                    if (modalRestorePoint.prefabSelectedPrefabs.some(sp => sp.guid === pf.guid)) return false;
+                    const cycle = checkPrefabCycle(targetGuid, [{ guid: pf.guid }]);
+                    return !cycle;
+                  });
+                }
                 const libNeedsFilter = searchQuery || selectedFilter;
                 if (libNeedsFilter) {
                   filteredPrompts = prompts.filter(p => {
@@ -2222,7 +2336,7 @@ export function AppShell() {
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
                             prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
-                            isSelected={selectedPrefabs.some(p => p.guid === pf.guid)}
+                            isSelected={modalRestorePoint?.mode === 'prefab' ? mainTempSelectedPrefabs.has(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
                             onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
                             allLibraries={allLibraries}
 
@@ -2246,29 +2360,27 @@ export function AppShell() {
 
         <div className="right-bar">
           <div className="selected-bar">
-            {selectedPrefabs.length > 0 ? (
+            {modalRestorePoint?.mode === 'prefab' && mainTempSelectedPrefabs.size > 0 ? (
               <>
-                <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
+                <h3>Selected Prefabs ({mainTempSelectedPrefabs.size})</h3>
                 <div className="prefab-list">
-                  {selectedPrefabs.map(node => {
-                    const pf = findPrefabByGuid(node.guid);
+                  {Array.from(mainTempSelectedPrefabs).map(guid => {
+                    const pf = findPrefabByGuid(guid);
                     if (!pf) return null;
                     const fp = (() => {
                       for (const [libName, libData] of Object.entries(allLibraries)) {
-                        const idx = (libData.prefabs || []).findIndex(p => p.guid === node.guid);
+                        const idx = (libData.prefabs || []).findIndex(p => p.guid === guid);
                         if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
                       }
                       return undefined;
                     })();
                     return (
-                      <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                      <div key={guid} className="prefab-card">
                         {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                         <div className="prefab-card-header">
-                          <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
+                          <span className="prefab-card-name">{pf.name}</span>
                           <div className="prefab-card-actions">
-                            <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconGear}</button>
-                            <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>{iconLayers}</button>
-                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); setMainTempSelectedPrefabs(prev => { const next = new Set(prev); next.delete(guid); return next; }); }}>{iconX}</button>
                           </div>
                         </div>
                       </div>
@@ -2278,71 +2390,137 @@ export function AppShell() {
               </>
             ) : null}
 
-            {selectedLoras.length > 0 ? (
+            {modalRestorePoint?.mode === 'lora' && mainTempSelectedLoras.size > 0 ? (
               <>
-                <h3 style={selectedPrefabs.length > 0 ? { marginTop: 12 } : {}}>Selected Loras ({selectedLoras.length})</h3>
+                <h3>Selected Loras ({mainTempSelectedLoras.size})</h3>
                 <div className="lora-list">
-                  {selectedLoras.map(lora => {
-                    const sel = loraSelections[lora.file_path];
+                  {Array.from(mainTempSelectedLoras).map(path => {
+                    const item = Object.values(loraData).flat().find(it => it.file_path === path);
+                    if (!item) return null;
                     return (
-                      <Lora
-                        key={lora.file_path}
-                        lora={lora}
-                        initialActiveTags={sel?.activeTags}
-                        initialStrength={sel?.strength}
-                        initialActive={sel?.active}
-                        initialSplitMode={sel?.split_mode}
-                        isMissing={lora.metadata?.missing === true}
-                        onChange={(data) => {
-                          setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
-                        }}
-                        onRemove={() => {
-                          removeLora(lora.file_path);
-                          setLoraSelections(prev => {
-                            const next = { ...prev };
-                            delete next[lora.file_path];
-                            return next;
-                          });
-                        }}
-                      />
+                      <div key={path} className="lora-card active">
+                        <div className="lora-card-header">
+                          <span className="lora-card-name">{item.name}</span>
+                          <div className="lora-card-meta">
+                            <button className="lora-card-remove" onClick={() => setMainTempSelectedLoras(prev => { const next = new Set(prev); next.delete(path); return next; })}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
               </>
             ) : null}
 
-            <h3 style={selectedLoras.length > 0 ? { marginTop: 12 } : {}}>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
-            <div className="selected-tags">
-              {isTemporary && currentCtx
-                ? currentCtx.tagGroups.map((group, i) => (
-                  <span className="tag" key={i}>
-                    {tagsToDisplayName(group)}
-                    <span className="remove" onClick={() => removeTemporaryTag(i)}>{iconX}</span>
-                  </span>
-                ))
-                : selectedTags.map((group, i) => (
-                  <span className="tag" key={i}>
-                    {tagsToDisplayName(group)}
-                    <span className="remove" onClick={() => removeTag(i)}>{iconX}</span>
-                  </span>
-                ))}
-            </div>
+            {!modalRestorePoint?.mode ? (
+              <>
+                {!isTemporary ? (
+                  <>
+                    {selectedPrefabs.length > 0 ? (
+                      <>
+                        <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
+                        <div className="prefab-list">
+                          {selectedPrefabs.map(node => {
+                            const pf = findPrefabByGuid(node.guid);
+                            if (!pf) return null;
+                            const fp = (() => {
+                              for (const [libName, libData] of Object.entries(allLibraries)) {
+                                const idx = (libData.prefabs || []).findIndex(p => p.guid === node.guid);
+                                if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                              }
+                              return undefined;
+                            })();
+                            return (
+                              <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                                {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                                <div className="prefab-card-header">
+                                  <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
+                                  <div className="prefab-card-actions">
+                                    <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconGear}</button>
+                                    <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>{iconLayers}</button>
+                                    <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    ) : null}
+
+                    {selectedLoras.length > 0 ? (
+                      <>
+                        <h3 style={selectedPrefabs.length > 0 ? { marginTop: 12 } : {}}>Selected Loras ({selectedLoras.length})</h3>
+                        <div className="lora-list">
+                          {selectedLoras.map(lora => {
+                            const sel = loraSelections[lora.file_path];
+                            return (
+                              <Lora
+                                key={lora.file_path}
+                                lora={lora}
+                                initialActiveTags={sel?.activeTags}
+                                initialStrength={sel?.strength}
+                                initialActive={sel?.active}
+                                initialSplitMode={sel?.split_mode}
+                                isMissing={lora.metadata?.missing === true}
+                                onChange={(data) => {
+                                  setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
+                                }}
+                                onRemove={() => {
+                                  removeLora(lora.file_path);
+                                  setLoraSelections(prev => {
+                                    const next = { ...prev };
+                                    delete next[lora.file_path];
+                                    return next;
+                                  });
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+
+                <h3 style={(selectedPrefabs.length > 0 || selectedLoras.length > 0) && !isTemporary ? { marginTop: 12 } : {}}>Selected Prompts ({isTemporary && currentCtx ? currentCtx.tagGroups.length : selectedTags.length})</h3>
+                <div className="selected-tags">
+                  {isTemporary && currentCtx
+                    ? currentCtx.tagGroups.map((group, i) => (
+                      <span className="tag" key={i}>
+                        {tagsToDisplayName(group)}
+                        <span className="remove" onClick={() => removeTemporaryTag(i)}>{iconX}</span>
+                      </span>
+                    ))
+                    : selectedTags.map((group, i) => (
+                      <span className="tag" key={i}>
+                        {tagsToDisplayName(group)}
+                        <span className="remove" onClick={() => removeTag(i)}>{iconX}</span>
+                      </span>
+                    ))}
+                </div>
+              </>
+            ) : null}
           </div>
 
-          <div className="custom-input-section">
-            <h3>Custom Prompts</h3>
-            <CustomPromptsEditor
-              value={customPrompts}
-              onChange={setCustomPrompts}
-              allPrompts={allPrompts}
-              onParsed={handleCustomPromptsParsed}
-            />
-          </div>
+          {!modalRestorePoint?.mode && !isTemporary ? (
+            <>
+              <div className="custom-input-section">
+                <h3>Custom Prompts</h3>
+                <CustomPromptsEditor
+                  value={customPrompts}
+                  onChange={setCustomPrompts}
+                  allPrompts={allPrompts}
+                  onParsed={handleCustomPromptsParsed}
+                />
+              </div>
 
-          <div className="footer">
-            <button className="btn btn-secondary" onClick={closeWindow}>Cancel</button>
-            <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>
-          </div>
+              <div className="footer">
+                <button className="btn btn-secondary" onClick={closeWindow}>Cancel</button>
+                <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -2545,23 +2723,26 @@ export function AppShell() {
                         );
                       })}
                     </div>
-                    <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
-                      const path = e.target.value;
-                      if (!path) return;
-                      const item = Object.values(loraData).flat().find(it => it.file_path === path);
-                      if (item) {
-                        setModalPrefabLoras(prev => {
-                          if (prev.some(p => p.file_path === path)) return prev;
-                          return [...prev, { file_path: item.file_path, name: item.name, strength: 1.0, active_tags: item.tags || [], active: true }];
-                        });
-                      }
-                      e.target.value = '';
+                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, padding: '8px 12px' }} onClick={() => {
+                      setModalRestorePoint({
+                        name: modalName,
+                        customPrompts: modalCustomPrompts,
+                        prefabTags: modalPrefabTags,
+                        prefabLoras: modalPrefabLoras,
+                        prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
+                        previewUrl: modalPreviewUrl,
+                        previewVisible: modalPreviewVisible,
+                        focusX: modalFocusX,
+                        focusY: modalFocusY,
+                        focusVisible: modalFocusVisible,
+                        modalData: modal.data as { lib: string; idx: number },
+                        mode: 'lora',
+                      });
+                      setMainTempSelectedLoras(new Set());
+                      closeModal();
                     }}>
-                      <option value="">Add Lora...</option>
-                      {Object.values(loraData).flat().filter(item => !modalPrefabLoras.some(l => l.file_path === item.file_path)).map(item => (
-                        <option key={item.file_path} value={item.file_path}>{item.name}</option>
-                      ))}
-                    </select>
+                      {iconPlus} Add Lora
+                    </button>
                   </div>
                   <div className="edit-prefab-section">
                     <label>Prefabs ({modalPrefabSelectedPrefabs.length})</label>
@@ -2583,6 +2764,9 @@ export function AppShell() {
                                   })();
                                   if (loc) {
                                     const target = allLibraries[loc.lib]?.prefabs?.[loc.idx];
+                                    setModalRestorePoint(null);
+                                    setMainTempSelectedLoras(new Set());
+                                    setMainTempSelectedPrefabs(new Set());
                                     setModalName(target?.name || '');
                                     setModalCustomPrompts(target?.custom_prompts || '');
                                     setModalPrefabTags((target?.tags || []) as TagGroup[]);
@@ -2600,20 +2784,26 @@ export function AppShell() {
                         );
                       })}
                     </div>
-                    <select style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid var(--border-color)', background: 'var(--bg-secondary)', color: 'var(--text-primary)', fontSize: 13 }} onChange={e => {
-                      const guid = e.target.value;
-                      if (!guid) return;
-                      setModalPrefabSelectedPrefabs(prev => {
-                        if (prev.some(p => p.guid === guid)) return prev;
-                        return [...prev, { guid }];
+                    <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, padding: '8px 12px' }} onClick={() => {
+                      setModalRestorePoint({
+                        name: modalName,
+                        customPrompts: modalCustomPrompts,
+                        prefabTags: modalPrefabTags,
+                        prefabLoras: modalPrefabLoras,
+                        prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
+                        previewUrl: modalPreviewUrl,
+                        previewVisible: modalPreviewVisible,
+                        focusX: modalFocusX,
+                        focusY: modalFocusY,
+                        focusVisible: modalFocusVisible,
+                        modalData: modal.data as { lib: string; idx: number },
+                        mode: 'prefab',
                       });
-                      e.target.value = '';
+                      setMainTempSelectedPrefabs(new Set());
+                      closeModal();
                     }}>
-                      <option value="">Add Prefab...</option>
-                      {Object.values(allLibraries).flatMap(libData => (libData.prefabs || []).map(pf => ({ guid: pf.guid || '', name: pf.name }))).filter(p => p.guid && !modalPrefabSelectedPrefabs.some(sp => sp.guid === p.guid)).map(p => (
-                        <option key={p.guid} value={p.guid}>{p.name}</option>
-                      ))}
-                    </select>
+                      {iconPlus} Add Prefab
+                    </button>
                   </div>
                 </div>
               </div>
