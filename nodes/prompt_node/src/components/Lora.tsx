@@ -200,8 +200,13 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
     }
   };
 
+  const previewSrc = lora.preview_url
+    ? `/lora_images/${encodeURIComponent(lora.preview_url)}`
+    : '';
+
   return (
     <div className={`lora-card ${cardActive ? 'active' : ''} ${isMissing ? 'missing' : ''}`} onMouseDown={toggleCard}>
+      {previewSrc && <img className="lora-card-bg" src={previewSrc} alt="" />}
       <div className="lora-card-header">
         <span className="lora-card-name">{lora.name}</span>
         <div className="lora-card-meta" onMouseDown={e => e.stopPropagation()}>
