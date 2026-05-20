@@ -837,7 +837,7 @@ body {
     max-height: 90vh;
     overflow-y: auto;
 }
-.modal-content.wide { max-width: 900px; }
+.modal-content.wide { max-width: 1200px; }
 .modal-content.has-bg-image {
     background: transparent;
     backdrop-filter: none;
@@ -1046,8 +1046,10 @@ body {
 /* Edit Prefab Modal */
 .edit-prefab-body { display: flex; flex-direction: column; gap: 12px; }
 .edit-prefab-body.row { flex-direction: row; gap: 20px; }
-.edit-prefab-left { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.edit-prefab-left { flex: 0 0 320px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .edit-prefab-right { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.edit-prefab-columns { display: flex; flex-direction: row; gap: 16px; }
+.edit-prefab-columns .edit-prefab-section { flex: 1; min-width: 0; }
 .edit-prefab-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
 .edit-prefab-section { display: flex; flex-direction: column; gap: 6px; }
 .edit-prefab-section label { margin-bottom: 0 !important; }
