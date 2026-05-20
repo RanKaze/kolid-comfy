@@ -816,14 +816,20 @@ body {
     display: none;
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.8);
+    background: rgba(0,0,0,0.35);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
     z-index: 1000;
     align-items: center; justify-content: center;
 }
 .modal.visible { display: flex; }
 .modal-content {
-    background: var(--bg-tertiary);
-    border-radius: 12px;
+    background: rgba(35, 35, 40, 0.72);
+    backdrop-filter: blur(40px) saturate(180%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+    border: 1px solid rgba(255,255,255,0.1);
+    box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+    border-radius: 16px;
     padding: 25px;
     max-width: 500px;
     width: 90%;
@@ -975,7 +981,26 @@ body {
 .lora-card-tag:hover { transform: translateY(-1px); }
 .lora-card-tag.active { background: #007aff; border-color: #007aff; color: #fff; }
 .lora-card-tag.active:hover { transform: translateY(-1px); }
+.text-toggle-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.text-toggle { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); cursor: pointer; transition: transform 0.2s, background 0.2s, border-color 0.2s, color 0.2s; }
+.text-toggle:hover { transform: translateY(-1px); }
+.text-toggle.active { background: #007aff; border-color: #007aff; color: #fff; }
+.text-toggle.active:hover { transform: translateY(-1px); }
 .prefab-loras { font-size: 10px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Edit Prefab Modal */
+.edit-prefab-body { display: flex; flex-direction: column; gap: 12px; }
+.edit-prefab-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.edit-prefab-section { display: flex; flex-direction: column; gap: 6px; }
+.edit-prefab-section label { margin-bottom: 0; }
+.edit-prefab-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border-radius: 6px; font-size: 13px; }
+.modal-nested-list { display: flex; flex-direction: column; gap: 6px; }
+.modal-nested-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; }
+.modal-nested-item.inactive { opacity: 0.5; }
+.modal-nested-item .name { font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-nested-item .actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+.modal-nested-item .actions button { padding: 2px 8px; font-size: 11px; border-radius: 4px; border: none; cursor: pointer; background: var(--bg-card); color: var(--text-primary); transition: background 0.2s; }
+.modal-nested-item .actions button:hover { background: var(--bg-card-hover); }
 
 /* Selected prefab in grid */
 .prompt-item.prefab-selected { border-color: rgba(0, 122, 255, 0.7); box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.4), 0 4px 12px rgba(0,0,0,0.3); }

@@ -3,7 +3,7 @@ import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
-  LoraItemData, LoraSelectionData,
+  LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabLoraState, SelectedPrefabTagState,
 } from '../types';
 import {
   categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
@@ -19,6 +19,7 @@ import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
 import { LoraFolderCard } from './LoraFolderCard';
 import { Lora } from './Lora';
+import { TextToggle } from './TextToggle';
 
 /* ========== Inline SVG Icons (no emoji) ========== */
 const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
@@ -99,8 +100,70 @@ export function AppShell() {
   }
   const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
-  const [selectedPrefabs, setSelectedPrefabs] = useState<{ guid: string; prefab: PrefabData; active: boolean }[]>([]);
+  const [selectedPrefabs, setSelectedPrefabs] = useState<SelectedPrefabItem[]>([]);
   const prefabRestoredRef = useRef(false);
+
+  // Helper: find prefab by guid across all libraries
+  const findPrefabByGuid = useCallback((guid: string): PrefabData | null => {
+    for (const libData of Object.values(allLibraries)) {
+      for (const pf of libData.prefabs || []) {
+        if (pf.guid === guid) return pf;
+      }
+    }
+    return null;
+  }, [allLibraries]);
+
+  // Helper: build recursive SelectedPrefabItem tree from a guid
+  const buildPrefabItemTree = useCallback((guid: string, visited = new Set<string>()): SelectedPrefabItem | null => {
+    if (visited.has(guid)) return null;
+    const prefab = findPrefabByGuid(guid);
+    if (!prefab) return null;
+    visited.add(guid);
+    return {
+      guid,
+      active: true,
+      tags: (prefab.tags || []).map(g => ({
+        key: tagsToDisplayName(g as any),
+        active: true,
+      })),
+      loras: (prefab.loras || []).map(l => ({
+        file_path: l.file_path || (l as any).file_name || '',
+        active: true,
+      })),
+      children: (prefab.selected_prefabs || [])
+        .map(sp => buildPrefabItemTree(sp.guid, new Set(visited)))
+        .filter(Boolean) as SelectedPrefabItem[],
+    };
+  }, [findPrefabByGuid]);
+
+  // Helper: cascade active state to all children and loras
+  const cascadeActive = useCallback((item: SelectedPrefabItem, active: boolean): SelectedPrefabItem => ({
+    ...item,
+    active,
+    tags: item.tags.map(t => ({ ...t, active })),
+    loras: item.loras.map(l => ({ ...l, active })),
+    children: item.children.map(c => cascadeActive(c, active)),
+  }), []);
+
+  // Helper: toggle active on a tree node by guid (recursive search)
+  const toggleTreeActive = useCallback((items: SelectedPrefabItem[], guid: string): SelectedPrefabItem[] =>
+    items.map(item => {
+      if (item.guid === guid) {
+        return cascadeActive(item, !item.active);
+      }
+      return { ...item, children: toggleTreeActive(item.children, guid) };
+    }),
+  [cascadeActive]);
+
+  // Helper: toggle lora active on a tree node by guid (recursive search)
+  const toggleTreeLora = useCallback((items: SelectedPrefabItem[], guid: string, filePath: string): SelectedPrefabItem[] =>
+    items.map(item => {
+      if (item.guid === guid) {
+        return { ...item, loras: item.loras.map(l => l.file_path === filePath ? { ...l, active: !l.active } : l) };
+      }
+      return { ...item, children: toggleTreeLora(item.children, guid, filePath) };
+    }),
+  []);
 
   const [imgVersion, setImgVersion] = useState(0);
   const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
@@ -241,7 +304,7 @@ export function AppShell() {
     loraRestoredRef.current = true;
   }, [loraData, lastSelectedLoras]);
 
-  // Restore selected prefabs from last_selected_prefabs
+  // Restore selected prefabs from last_selected_prefabs (recursive tree)
   useEffect(() => {
     if (prefabRestoredRef.current) return;
     if (!allLibraries || Object.keys(allLibraries).length === 0) return;
@@ -249,26 +312,73 @@ export function AppShell() {
       prefabRestoredRef.current = true;
       return;
     }
-    const restored: { guid: string; prefab: PrefabData; active: boolean }[] = [];
-    const guidToPrefab = new Map<string, PrefabData>();
-    for (const libData of Object.values(allLibraries)) {
-      for (const pf of libData.prefabs || []) {
-        if (pf.guid) guidToPrefab.set(pf.guid, pf);
-      }
+
+    function restoreTree(
+      node: { guid: string; active?: boolean; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
+      visited: Set<string>,
+    ): SelectedPrefabItem | null {
+      if (visited.has(node.guid)) return null;
+      const prefab = findPrefabByGuid(node.guid);
+      if (!prefab) return null;
+      visited.add(node.guid);
+
+      // Restore tags: use saved state if available, else default all active
+      const savedTags = (node.tags || []) as SelectedPrefabTagState[];
+      const tags: SelectedPrefabTagState[] = (prefab.tags || []).map(g => {
+        const key = tagsToDisplayName(g as any);
+        const saved = savedTags.find(st => st.key === key);
+        return { key, active: saved ? saved.active !== false : true };
+      });
+
+      // Restore loras: use saved state if available, else default all active
+      const savedLoras = (node.loras || []) as SelectedPrefabLoraState[];
+      const loras: SelectedPrefabLoraState[] = (prefab.loras || []).map(l => {
+        const fp = l.file_path || (l as any).file_name || '';
+        const saved = savedLoras.find(sl => sl.file_path === fp);
+        return { file_path: fp, active: saved ? saved.active !== false : true };
+      });
+
+      // Restore children recursively
+      const savedChildren = (node.children || []) as any[];
+      const children: SelectedPrefabItem[] = (prefab.selected_prefabs || [])
+        .map(nested => {
+          const saved = savedChildren.find(sc => sc.guid === nested.guid);
+          return restoreTree(saved || nested, new Set(visited));
+        })
+        .filter(Boolean) as SelectedPrefabItem[];
+
+      return {
+        guid: node.guid,
+        active: node.active !== false,
+        tags,
+        loras,
+        children,
+      };
     }
+
+    const restored: SelectedPrefabItem[] = [];
     for (const sp of lastSelectedPrefabs) {
-      const pf = guidToPrefab.get(sp.guid);
-      if (pf) {
-        restored.push({ guid: sp.guid, prefab: pf, active: sp.active !== false });
-      }
+      const item = restoreTree(sp, new Set());
+      if (item) restored.push(item);
     }
     setSelectedPrefabs(restored);
     prefabRestoredRef.current = true;
-  }, [allLibraries, lastSelectedPrefabs]);
+  }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid]);
 
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
-  const closeModal = useCallback(() => { setModal(null); setErrorModal(null); }, []);
+  const [modalStack, setModalStack] = useState<string[]>([]);
+  const closeModal = useCallback(() => {
+    if (modal?.type === 'editSelectedPrefab' && modalStack.length > 0) {
+      const parentGuid = modalStack[modalStack.length - 1];
+      setModalStack(prev => prev.slice(0, -1));
+      setModal({ type: 'editSelectedPrefab', data: { guid: parentGuid } });
+    } else {
+      setModal(null);
+      setModalStack([]);
+      setErrorModal(null);
+    }
+  }, [modal, modalStack]);
   // Form state for modals
   const [modalName, setModalName] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
@@ -558,23 +668,49 @@ export function AppShell() {
   }, []);
 
   // ========== Prefab Selection ==========
-  const togglePrefab = useCallback((guid: string, prefab: PrefabData) => {
+  const togglePrefab = useCallback((guid: string) => {
     setSelectedPrefabs(prev => {
       const exists = prev.some(p => p.guid === guid);
       if (exists) {
         return prev.filter(p => p.guid !== guid);
       }
-      return [...prev, { guid, prefab, active: true }];
+      const item = buildPrefabItemTree(guid);
+      return item ? [...prev, item] : prev;
+    });
+  }, [buildPrefabItemTree]);
+
+  const removeSelectedPrefab = useCallback((guid: string) => {
+    setSelectedPrefabs(prev => {
+      function removeFromTree(items: SelectedPrefabItem[]): SelectedPrefabItem[] {
+        return items
+          .filter(item => item.guid !== guid)
+          .map(item => ({ ...item, children: removeFromTree(item.children) }));
+      }
+      return removeFromTree(prev);
     });
   }, []);
 
-  const removeSelectedPrefab = useCallback((guid: string) => {
-    setSelectedPrefabs(prev => prev.filter(p => p.guid !== guid));
-  }, []);
-
   const togglePrefabActive = useCallback((guid: string) => {
-    setSelectedPrefabs(prev => prev.map(p => p.guid === guid ? { ...p, active: !p.active } : p));
-  }, []);
+    setSelectedPrefabs(prev => toggleTreeActive(prev, guid));
+  }, [toggleTreeActive]);
+
+  // Helper: toggle tag active on a tree node by guid (recursive search)
+  const toggleTreeTag = useCallback((items: SelectedPrefabItem[], guid: string, key: string): SelectedPrefabItem[] =>
+    items.map(item => {
+      if (item.guid === guid) {
+        return { ...item, tags: item.tags.map(t => t.key === key ? { ...t, active: !t.active } : t) };
+      }
+      return { ...item, children: toggleTreeTag(item.children, guid, key) };
+    }),
+  []);
+
+  const togglePrefabLora = useCallback((guid: string, filePath: string) => {
+    setSelectedPrefabs(prev => toggleTreeLora(prev, guid, filePath));
+  }, [toggleTreeLora]);
+
+  const togglePrefabTag = useCallback((guid: string, key: string) => {
+    setSelectedPrefabs(prev => toggleTreeTag(prev, guid, key));
+  }, [toggleTreeTag]);
 
   // ========== Prefab Merge/Replace ==========
   const mergePrefab = useCallback((pf: PrefabData) => {
@@ -681,7 +817,56 @@ export function AppShell() {
       }
       return next;
     });
-  }, [selectedTags, setSelectedTags, setCustomPrompts, selectedLoras, setSelectedLoras, loraData, setLoraSelections]);
+
+    // Merge nested prefabs into selectedPrefabs (partial = add, full = remove)
+    function collectNestedGuids(pfDef: PrefabData, visited = new Set<string>()): string[] {
+      const guids: string[] = [];
+      for (const sp of pfDef.selected_prefabs || []) {
+        if (!visited.has(sp.guid)) {
+          visited.add(sp.guid);
+          guids.push(sp.guid);
+          const nestedPf = findPrefabByGuid(sp.guid);
+          if (nestedPf) {
+            guids.push(...collectNestedGuids(nestedPf, visited));
+          }
+        }
+      }
+      return guids;
+    }
+
+    const nestedGuids = collectNestedGuids(pf);
+    setSelectedPrefabs(prev => {
+      if (allContentMatched && anyContentMatched) {
+        // Full merge: remove all nested prefabs (and their descendants) from selectedPrefabs
+        const toRemove = new Set(nestedGuids);
+        function filterOut(items: SelectedPrefabItem[]): SelectedPrefabItem[] {
+          return items
+            .filter(item => !toRemove.has(item.guid))
+            .map(item => ({ ...item, children: filterOut(item.children) }));
+        }
+        return filterOut(prev);
+      } else {
+        // Partial merge: add missing nested prefabs to selectedPrefabs
+        const existing = new Set<string>();
+        function walk(items: SelectedPrefabItem[]) {
+          for (const item of items) {
+            existing.add(item.guid);
+            walk(item.children);
+          }
+        }
+        walk(prev);
+
+        const next = [...prev];
+        for (const guid of nestedGuids) {
+          if (!existing.has(guid)) {
+            const item = buildPrefabItemTree(guid);
+            if (item) next.push(item);
+          }
+        }
+        return next;
+      }
+    });
+  }, [selectedTags, setSelectedTags, setCustomPrompts, selectedLoras, setSelectedLoras, loraData, setLoraSelections, setSelectedPrefabs, findPrefabByGuid, buildPrefabItemTree]);
 
   const replacePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
@@ -690,19 +875,11 @@ export function AppShell() {
     setSelectedTags(tags);
     setCustomPrompts(pf.custom_prompts || '');
 
-    // Restore nested selected_prefabs
-    const nestedPrefabs = pf.selected_prefabs || [];
-    const restoredPrefabs: { guid: string; prefab: PrefabData; active: boolean }[] = [];
-    // Build guid -> prefab map
-    const guidMap = new Map<string, PrefabData>();
-    for (const libData of Object.values(allLibraries)) {
-      for (const p of libData.prefabs || []) {
-        if (p.guid) guidMap.set(p.guid, p);
-      }
-    }
-    for (const sp of nestedPrefabs) {
-      const nested = guidMap.get(sp.guid);
-      if (nested) restoredPrefabs.push({ guid: sp.guid, prefab: nested, active: true });
+    // Restore nested selected_prefabs as recursive tree
+    const restoredPrefabs: SelectedPrefabItem[] = [];
+    for (const sp of pf.selected_prefabs || []) {
+      const item = buildPrefabItemTree(sp.guid);
+      if (item) restoredPrefabs.push(item);
     }
     setSelectedPrefabs(restoredPrefabs);
 
@@ -731,7 +908,7 @@ export function AppShell() {
     }
     setSelectedLoras(newSelectedLoras);
     setLoraSelections(newLoraSelections);
-  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, allLibraries, loraData, setSelectedLoras, setLoraSelections]);
+  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, setSelectedLoras, setLoraSelections]);
 
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
@@ -747,7 +924,7 @@ export function AppShell() {
         split_mode: sel?.split_mode,
       };
     });
-    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid }));
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
     submitSelection(promptsToSend, customPrompts, lorasPayload, prefabsPayload);
   }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection]);
 
@@ -1007,12 +1184,11 @@ export function AppShell() {
   }, [selectedLoras, loraSelections]);
 
   const buildSelectedPrefabs = useCallback(() => {
-    return selectedPrefabs.map(p => ({ guid: p.guid, active: p.active }));
+    return selectedPrefabs.map(p => ({ guid: p.guid }));
   }, [selectedPrefabs]);
 
   // Check for circular dependencies in selected_prefabs
   const checkPrefabCycle = useCallback((targetGuid: string | null, selectedPrefabsToCheck: { guid: string }[]): string | null => {
-    // Build guid -> prefab map
     const guidMap = new Map<string, PrefabData>();
     for (const libData of Object.values(allLibraries)) {
       for (const pf of libData.prefabs || []) {
@@ -2043,7 +2219,7 @@ export function AppShell() {
                             prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
                             isSelected={selectedPrefabs.some(p => p.guid === pf.guid)}
-                            onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`, pf)}
+                            onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
                             allLibraries={allLibraries}
 
                             onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
@@ -2070,50 +2246,19 @@ export function AppShell() {
               <>
                 <h3>Selected Prefabs ({selectedPrefabs.length})</h3>
                 <div className="prefab-list">
-                  {selectedPrefabs.map(({ guid, prefab, active }) => {
-                    const pfTags = (prefab.tags || []).map(g => tagsToDisplayName(g)).join(' + ');
-                    const pfLoras = prefab.loras || [];
-                    // Expand nested prefabs for display
-                    const guidMap = new Map<string, PrefabData>();
-                    for (const libData of Object.values(allLibraries)) {
-                      for (const p of libData.prefabs || []) {
-                        if (p.guid) guidMap.set(p.guid, p);
-                      }
-                    }
-                    const visited = new Set<string>();
-                    const queue: string[] = [];
-                    for (const sp of prefab.selected_prefabs || []) {
-                      if (sp.guid && !visited.has(sp.guid)) {
-                        visited.add(sp.guid);
-                        queue.push(sp.guid);
-                      }
-                    }
-                    const nestedNames: string[] = [];
-                    while (queue.length > 0) {
-                      const cg = queue.shift()!;
-                      const p = guidMap.get(cg);
-                      if (!p) continue;
-                      nestedNames.push(p.name);
-                      for (const n of p.selected_prefabs || []) {
-                        if (n.guid && !visited.has(n.guid)) {
-                          visited.add(n.guid);
-                          queue.push(n.guid);
-                        }
-                      }
-                    }
+                  {selectedPrefabs.map(node => {
+                    const pf = findPrefabByGuid(node.guid);
+                    if (!pf) return null;
                     return (
-                      <div key={guid} className={`prefab-card ${active ? '' : 'prefab-inactive'}`}>
+                      <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
                         <div className="prefab-card-header">
-                          <span className="prefab-card-name" style={{ opacity: active ? 1 : 0.5 }}>{prefab.name}</span>
+                          <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
                           <div className="prefab-card-actions">
-                            <button className="prefab-card-btn toggle" onMouseDown={(e) => { e.stopPropagation(); togglePrefabActive(guid); }}>{active ? 'ON' : 'OFF'}</button>
-                            <button className="prefab-card-btn merge" onMouseDown={() => mergePrefab(prefab)}>Merge</button>
-                            <button className="prefab-card-btn remove" onMouseDown={() => removeSelectedPrefab(guid)}>{iconX}</button>
+                            <button className="prefab-card-btn edit" onMouseDown={(e) => { e.stopPropagation(); setModal({ type: 'editSelectedPrefab', data: { guid: node.guid } }); }}>{iconPencil}</button>
+                            <button className="prefab-card-btn merge" onMouseDown={(e) => { e.stopPropagation(); mergePrefab(pf); }}>Merge</button>
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); removeSelectedPrefab(node.guid); }}>{iconX}</button>
                           </div>
                         </div>
-                        {active && pfTags && <div className="prefab-card-tags">{pfTags}</div>}
-                        {active && pfLoras.length > 0 && <div className="prefab-card-loras">Lora({pfLoras.length}): {pfLoras.map(l => l.name).join(', ')}</div>}
-                        {active && nestedNames.length > 0 && <div className="prefab-card-loras">Prefab({nestedNames.length}): {nestedNames.join(', ')}</div>}
                       </div>
                     );
                   })}
@@ -2338,6 +2483,90 @@ export function AppShell() {
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-secondary" onClick={syncPrefab}>Sync</button>
               <button className="btn btn-primary" onClick={e => { e.stopPropagation(); e.preventDefault(); updatePrefab(); }}>Update</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editSelectedPrefab' ? (
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+            <h2>Edit Prefab</h2>
+            {(() => {
+              const guid = modal.data?.guid;
+              function findNode(items: SelectedPrefabItem[]): SelectedPrefabItem | null {
+                for (const item of items) {
+                  if (item.guid === guid) return item;
+                  const found = findNode(item.children);
+                  if (found) return found;
+                }
+                return null;
+              }
+              const node = findNode(selectedPrefabs);
+              const pf = guid ? findPrefabByGuid(guid) : null;
+              if (!node || !pf) return <p style={{ color: 'var(--text-secondary)' }}>Prefab not found</p>;
+              return (
+                <div className="edit-prefab-body">
+                  <div className="edit-prefab-title">{pf.name}</div>
+
+                  <div className="edit-prefab-section">
+                    <div className="edit-prefab-row">
+                      <span>Active</span>
+                      <TextToggle text={node.active ? 'On' : 'Off'} active={node.active} onClick={() => togglePrefabActive(node.guid)} />
+                    </div>
+                  </div>
+
+                  {node.tags.length > 0 && (
+                    <div className="edit-prefab-section">
+                      <label>Tags</label>
+                      <div className="text-toggle-list">
+                        {node.tags.map(t => (
+                          <TextToggle key={t.key} text={t.key} active={t.active} onClick={() => togglePrefabTag(node.guid, t.key)} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {node.loras.length > 0 && (
+                    <div className="edit-prefab-section">
+                      <label>Loras</label>
+                      <div className="text-toggle-list">
+                        {node.loras.map(l => {
+                          let loraName = l.file_path;
+                          for (const items of Object.values(loraData)) {
+                            const found = items.find(it => it.file_path === l.file_path);
+                            if (found) { loraName = found.name; break; }
+                          }
+                          return <TextToggle key={l.file_path} text={loraName} active={l.active} onClick={() => togglePrefabLora(node.guid, l.file_path)} />;
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {node.children.length > 0 && (
+                    <div className="edit-prefab-section">
+                      <label>Nested Prefabs</label>
+                      <div className="modal-nested-list">
+                        {node.children.map(c => {
+                          const childPf = findPrefabByGuid(c.guid);
+                          if (!childPf) return null;
+                          return (
+                            <div key={c.guid} className={`modal-nested-item ${c.active ? '' : 'inactive'}`}>
+                              <span className="name">{childPf.name}</span>
+                              <div className="actions">
+                                <button onClick={(e) => { e.stopPropagation(); setModalStack(prev => [...prev, modal!.data.guid]); setModal({ type: 'editSelectedPrefab', data: { guid: c.guid } }); }}>Edit</button>
+                                <button onClick={(e) => { e.stopPropagation(); mergePrefab(childPf); }}>Merge</button>
+                                <button onClick={(e) => { e.stopPropagation(); removeSelectedPrefab(c.guid); }}>Delete</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+            <div className="modal-buttons">
+              <button className="btn btn-secondary" onClick={closeModal}>{modalStack.length > 0 ? 'Back' : 'Close'}</button>
             </div>
           </div>
         </div>
