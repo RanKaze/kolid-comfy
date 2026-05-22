@@ -141,9 +141,9 @@ const App: React.FC = () => {
     <div style={containerStyle}>
       <div style={bannerStyle}>{nodeTitle}</div>
 
-      {/* Central preview layer */}
-      {hovered && (
-        <div style={previewWrapperStyle}>
+      {/* Preview area - between header and selection groups */}
+      <div style={previewAreaStyle}>
+        {hovered && (
           <div style={previewInnerStyle}>
             {hovered.type === 'image' || hovered.type === 'mask' ? (
               <img src={hovered.data} alt={hovered.name} style={previewImgStyle} data-preview-img />
@@ -160,8 +160,8 @@ const App: React.FC = () => {
               <pre style={previewPreStyle}>{hovered.data}</pre>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <input
         type="file"
@@ -329,9 +329,8 @@ const containerStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
-  justifyContent: 'flex-end',
   minHeight: '100vh',
-  padding: '24px 24px 60px',
+  padding: '60px 24px 60px',
   gap: '28px',
   background: 'linear-gradient(180deg, #0a0a0a 0%, #1a1a1a 50%, #0d0d0d 100%)',
   position: 'relative',
@@ -366,10 +365,10 @@ const scrollContainerStyle: React.CSSProperties = {
   width: '100%',
   maxWidth: '100vw',
   padding: '0 20px',
-  paddingTop: '80px',
   overflowX: 'auto',
   overflowY: 'hidden',
   scrollBehavior: 'smooth',
+  marginTop: 'auto',
 };
 
 const groupStyle: React.CSSProperties = {
@@ -417,16 +416,13 @@ const historyLabelStyle: React.CSSProperties = groupLabelStyle;
 
 const historyInnerStyle: React.CSSProperties = groupInnerStyle;
 
-const previewWrapperStyle: React.CSSProperties = {
-  position: 'fixed',
-  top: '140px',
-  left: '50%',
-  transform: 'translateX(-50%)',
-  zIndex: 90,
+const previewAreaStyle: React.CSSProperties = {
+  flex: 1,
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  pointerEvents: 'none',
+  width: '100%',
+  minHeight: 0,
 };
 
 const previewInnerStyle: React.CSSProperties = {
