@@ -111,14 +111,18 @@ class SnapshotPromptServer:
         self._migrate_display_modes()
         self._migrate_size_modes()
         
-        # Scan Lora metadata files (with regex filter)
-        self.lora_data = self._scan_loras(self.lora_regex)
-        # Build a set of valid lora paths for quick lookup (prefab expansion filtering)
+        # Scan Lora metadata files (return all for display, but keep regex for output filtering)
+        self.lora_data = self._scan_loras()
+        # Build a set of valid lora paths for output filtering (active_loras / lora_trigger_words)
+        import re as _re
+        compiled_re = _re.compile(self.lora_regex) if self.lora_regex else None
         self._valid_lora_paths = set()
         for folder_items in self.lora_data.values():
             for item in folder_items:
-                self._valid_lora_paths.add(item.get('file_path', '').replace('\\', '/'))
-                self._valid_lora_paths.add(item.get('file_name', ''))
+                fp = item.get('file_path', '').replace('\\', '/')
+                if not compiled_re or compiled_re.search(fp):
+                    self._valid_lora_paths.add(fp)
+                    self._valid_lora_paths.add(item.get('file_name', ''))
 
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
@@ -496,6 +500,7 @@ class SnapshotPromptServer:
                     'custom_prompts': self.server_instance.custom_prompts,
                     'last_selected_loras': self.server_instance.last_selected_loras,
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs,
+                    'lora_regex': self.server_instance.lora_regex,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -530,6 +535,7 @@ class SnapshotPromptServer:
                     'folders': self.server_instance.lora_data if self.server_instance else {},
                     'last_selected_loras': self.server_instance.last_selected_loras if self.server_instance else [],
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs if self.server_instance else [],
+                    'lora_regex': self.server_instance.lora_regex if self.server_instance else '',
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -2149,16 +2155,16 @@ class SnapshotPromptNode:
                     prompts_raw.append(wrapped)
                     prompts_cleaned.append(cp)
             
-            # Collect loras (respect per-lora active state and lora_regex filter)
+            # Collect loras (respect per-lora active state and lora_regex filter for output)
             lora_states = {l.get('file_path'): l.get('active', True) for l in node.get('loras', [])}
             for lora_item in pf.get('loras', []):
                 if isinstance(lora_item, dict):
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                     if not file_path:
                         continue
-                    # Skip if this lora was filtered out by lora_regex
+                    # Skip if this lora was filtered out by lora_regex (output filtering)
                     normalized_path = file_path.replace('\\', '/')
-                    if normalized_path not in server._valid_lora_paths and file_path not in server._valid_lora_paths:
+                    if normalized_path not in self._valid_lora_paths and file_path not in self._valid_lora_paths:
                         continue
                     is_active = lora_states.get(file_path, True)
                     if not is_active:
@@ -2230,6 +2236,10 @@ class SnapshotPromptNode:
             strength = lora_item.get('strength', 1.0)
             if not file_path:
                 continue
+            # Filter out loras excluded by lora_regex
+            normalized_path = file_path.replace('\\', '/')
+            if normalized_path not in server._valid_lora_paths and file_path not in server._valid_lora_paths:
+                continue
             if lora_path_mode:
                 active_lora_parts.append(f"<lora_path:{file_path}:{strength}>")
             else:
@@ -2245,6 +2255,11 @@ class SnapshotPromptNode:
         all_active_tags = []
         for lora_item in all_loras:
             if not lora_item.get('active', True):
+                continue
+            # Filter out loras excluded by lora_regex
+            fp = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            np = fp.replace('\\', '/')
+            if np not in server._valid_lora_paths and fp not in server._valid_lora_paths:
                 continue
             all_active_tags.extend(lora_item.get('active_tags', []))
         lora_trigger_words = ", ".join(all_active_tags)
