@@ -25,6 +25,7 @@ from .nodes.video_node import *
 from .nodes.timestamp_node import *
 from .nodes.audio_node import *
 from .nodes.prompt_node import *
+from .nodes.switch_node import *
 from .nodes.sampler_node import *
     
 
@@ -123,6 +124,7 @@ NODE_CONFIG = {
     "VideoFolderLoaderNode": {"class": VideoFolderLoaderNode, "name": "VideoFolderLoaderNode"},
     "VideoGetFileInfoNode": {"class": VideoGetFileInfoNode, "name": "VideoGetFileInfoNode"},
     "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
+    "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
     
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
