@@ -7,6 +7,7 @@ import time
 import inspect
 import io
 import base64
+import hashlib
 import comfy.model_management as mm
 
 from ..libs.utils import AlwaysEqualProxy, compare_revision
@@ -18,6 +19,100 @@ lazy_options = {"lazy": True} if compare_revision(2543) else {}
 _selection_cache = {}
 _selection_locks = {}
 _CACHE_TTL = 30.0  # seconds
+
+_HISTORY_MAX = 20  # max history snapshots per node
+
+
+def _get_switch_history_dir(unique_id, use_global=False):
+    if use_global:
+        base = os.path.join(os.path.dirname(__file__), "..", "data", "switch", "global")
+    else:
+        base = os.path.join(os.path.dirname(__file__), "..", "data", "switch", str(unique_id))
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def _save_snapshot(unique_id, tensor, use_global=False):
+    """Save a tensor snapshot to history, deduped by MD5. Returns saved path or existing path."""
+    if tensor is None or unique_id is None:
+        return None
+    try:
+        import numpy as np
+        from PIL import Image
+        import torch
+
+        if isinstance(tensor, torch.Tensor):
+            arr = tensor.cpu().numpy()
+        else:
+            arr = np.array(tensor)
+
+        if arr.ndim == 4:
+            arr = arr[0]
+        if arr.dtype in (np.float32, np.float64):
+            arr = (arr * 255).clip(0, 255).astype(np.uint8)
+
+        # Ensure RGB
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        elif arr.ndim == 2:
+            arr = np.stack([arr, arr, arr], axis=2)
+
+        img = Image.fromarray(arr)
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        data = buf.getvalue()
+
+        md5 = hashlib.md5(data).hexdigest()
+        history_dir = _get_switch_history_dir(unique_id, use_global)
+        filepath = os.path.join(history_dir, f"{md5}.png")
+
+        if os.path.exists(filepath):
+            os.utime(filepath, None)
+            return filepath
+
+        with open(filepath, 'wb') as f:
+            f.write(data)
+
+        # Cleanup old history
+        files = [os.path.join(history_dir, f) for f in os.listdir(history_dir) if f.endswith('.png')]
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for old in files[_HISTORY_MAX:]:
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+
+        return filepath
+    except Exception as e:
+        print(f"[SnapshotSwitch] Failed to save snapshot: {e}")
+        return None
+
+
+def _load_history(unique_id, use_global=False):
+    """Load history snapshots as base64 list, newest first."""
+    if unique_id is None:
+        return []
+    history_dir = _get_switch_history_dir(unique_id, use_global)
+    if not os.path.exists(history_dir):
+        return []
+
+    files = [os.path.join(history_dir, f) for f in os.listdir(history_dir) if f.endswith('.png')]
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+    result = []
+    for i, filepath in enumerate(files):
+        try:
+            with open(filepath, 'rb') as f:
+                data = f.read()
+            b64 = base64.b64encode(data).decode()
+            result.append({
+                'key': f'hist_{i}',
+                'src': f'data:image/png;base64,{b64}',
+                'name': f'Snapshot {i+1}',
+            })
+        except Exception:
+            pass
+    return result
 
 
 def check_interrupted():
@@ -138,7 +233,7 @@ def _preview_value(value):
 class SnapshotSwitchServer:
     """HTTP server for SnapshotSwitchNode to let user select which input to output."""
 
-    def __init__(self, input_keys=None, input_previews=None, connection_info=None):
+    def __init__(self, input_keys=None, input_previews=None, connection_info=None, unique_id=None, use_global=False):
         self.port = None
         self.server = None
         self.started = False
@@ -150,6 +245,9 @@ class SnapshotSwitchServer:
         self.input_keys = input_keys or []
         self.input_previews = input_previews or {}
         self.connection_info = connection_info or {}
+        self.unique_id = unique_id
+        self.use_global = use_global
+        self.history = _load_history(unique_id, use_global)
         self.should_stop = False
 
     def start(self):
@@ -229,6 +327,7 @@ class SnapshotSwitchServer:
                     'input_keys': self.server_instance.input_keys if self.server_instance else [],
                     'input_previews': self.server_instance.input_previews if self.server_instance else {},
                     'connection_info': self.server_instance.connection_info if self.server_instance else {},
+                    'history': self.server_instance.history if self.server_instance else [],
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -295,6 +394,7 @@ class SnapshotSwitchNode:
         return {
             "required": {
                 "lazy_switch": ("BOOLEAN", {"default": True}),
+                "global_cache": ("BOOLEAN", {"default": False}),
                 "connection_info": ("STRING", {"default": "{}", "multiline": False}),
             },
             "optional": dyn_inputs,
@@ -319,12 +419,14 @@ class SnapshotSwitchNode:
             del _selection_cache[unique_id]
         return float("nan")
 
-    def _do_open_web(self, input_keys, input_previews, connection_info):
+    def _do_open_web(self, input_keys, input_previews, connection_info, unique_id=None, use_global=False):
         """Internal: actually open browser and block until user selects an input."""
         server = SnapshotSwitchServer(
             input_keys=input_keys,
             input_previews=input_previews,
             connection_info=connection_info,
+            unique_id=unique_id,
+            use_global=use_global,
         )
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
@@ -364,11 +466,11 @@ class SnapshotSwitchNode:
         custom_image = server.custom_image if selected_key == "__custom__" else None
         return selected_key, custom_image
 
-    def _open_web_and_select(self, input_keys, input_previews, connection_info, unique_id):
+    def _open_web_and_select(self, input_keys, input_previews, connection_info, unique_id, use_global=False):
         """Open browser and block until user selects an input.
         Uses a short-lived cache so the same node doesn't open multiple pages in one execution."""
         if unique_id is None:
-            return self._do_open_web(input_keys, input_previews, connection_info)
+            return self._do_open_web(input_keys, input_previews, connection_info, None, use_global)
 
         lock = _selection_locks.setdefault(unique_id, threading.Lock())
         with lock:
@@ -381,11 +483,11 @@ class SnapshotSwitchNode:
                 # Expired, remove
                 del _selection_cache[unique_id]
 
-            selected_key, custom_image = self._do_open_web(input_keys, input_previews, connection_info)
+            selected_key, custom_image = self._do_open_web(input_keys, input_previews, connection_info, unique_id, use_global)
             _selection_cache[unique_id] = (selected_key, custom_image, time.time())
             return selected_key, custom_image
 
-    def check_lazy_status(self, lazy_switch, connection_info, unique_id, **kwargs):
+    def check_lazy_status(self, lazy_switch, global_cache, connection_info, unique_id, **kwargs):
         input_keys = sorted([k for k in kwargs if k.startswith('input')], key=lambda x: int(x[5:]))
 
         if not lazy_switch:
@@ -407,6 +509,7 @@ class SnapshotSwitchNode:
             input_previews={},
             connection_info=conn_map,
             unique_id=unique_id,
+            use_global=global_cache,
         )
         return [selected_key]
 
@@ -436,7 +539,20 @@ class SnapshotSwitchNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_switch(self, lazy_switch, connection_info, unique_id, **kwargs):
+    def _maybe_save_snapshot(self, unique_id, output, use_global=False):
+        """Save output tensor to history if it looks like an image."""
+        if unique_id is None:
+            return
+        try:
+            import torch
+            import numpy as np
+            if isinstance(output, (torch.Tensor, np.ndarray)):
+                if hasattr(output, 'ndim') and output.ndim >= 3:
+                    _save_snapshot(unique_id, output, use_global)
+        except Exception:
+            pass
+
+    def snapshot_switch(self, lazy_switch, global_cache, connection_info, unique_id, **kwargs):
         input_keys = sorted([k for k in kwargs if k.startswith('input')], key=lambda x: int(x[5:]))
 
         if not input_keys:
@@ -454,19 +570,26 @@ class SnapshotSwitchNode:
                 # ComfyUI will only call snapshot_switch with the selected input in kwargs
                 if len(input_keys) == 1:
                     selected_key = input_keys[0]
+                    output = kwargs[selected_key]
                     print(f"[SnapshotSwitch] (lazy) Selected: {selected_key}")
-                    return (kwargs[selected_key],)
+                    self._maybe_save_snapshot(unique_id, output, global_cache)
+                    return (output,)
                 # Fallback if multiple inputs somehow present
                 selected_key, custom_image = self._open_web_and_select(
                     input_keys=input_keys,
                     input_previews={},
                     connection_info=conn_map,
                     unique_id=unique_id,
+                    use_global=global_cache,
                 )
                 print(f"[SnapshotSwitch] (lazy fallback) Selected: {selected_key}")
                 if selected_key == "__custom__":
-                    return (self._decode_custom_image(custom_image),)
-                return (kwargs[selected_key],)
+                    output = self._decode_custom_image(custom_image)
+                    self._maybe_save_snapshot(unique_id, output, global_cache)
+                    return (output,)
+                output = kwargs[selected_key]
+                self._maybe_save_snapshot(unique_id, output, global_cache)
+                return (output,)
 
             # Non-lazy mode: build previews and open web page during execution
             input_previews = {}
@@ -478,11 +601,16 @@ class SnapshotSwitchNode:
                 input_previews=input_previews,
                 connection_info=conn_map,
                 unique_id=unique_id,
+                use_global=global_cache,
             )
             print(f"[SnapshotSwitch] (non-lazy) Selected: {selected_key}")
             if selected_key == "__custom__":
-                return (self._decode_custom_image(custom_image),)
-            return (kwargs[selected_key],)
+                output = self._decode_custom_image(custom_image)
+                self._maybe_save_snapshot(unique_id, output, global_cache)
+                return (output,)
+            output = kwargs[selected_key]
+            self._maybe_save_snapshot(unique_id, output, global_cache)
+            return (output,)
         finally:
             # Clear cache after execution to prevent stale selections in subsequent runs
             _selection_cache.pop(unique_id, None)
