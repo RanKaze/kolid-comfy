@@ -12,55 +12,83 @@ const ImageSwitchCard: React.FC<Props> = ({ name, src, selected, onClick }) => {
     <button
       style={{
         ...cardStyle,
-        borderColor: selected ? '#007aff' : '#444',
-        boxShadow: selected ? '0 0 0 2px #007aff' : 'none',
+        borderColor: selected ? 'rgba(0, 122, 255, 0.7)' : 'rgba(255,255,255,0.12)',
+        boxShadow: selected
+          ? '0 0 0 3px rgba(0, 122, 255, 0.35), 0 12px 40px rgba(0,0,0,0.5)'
+          : '0 4px 16px rgba(0,0,0,0.3)',
+        transform: selected ? 'scale(1.02)' : 'scale(1)',
       }}
       onClick={onClick}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = selected ? 'scale(1.02)' : 'scale(1.04)';
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = selected
+          ? '0 0 0 3px rgba(0, 122, 255, 0.35), 0 16px 48px rgba(0,0,0,0.6)'
+          : '0 8px 32px rgba(0,0,0,0.5)';
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.transform = selected ? 'scale(1.02)' : 'scale(1)';
+        (e.currentTarget as HTMLButtonElement).style.boxShadow = selected
+          ? '0 0 0 3px rgba(0, 122, 255, 0.35), 0 12px 40px rgba(0,0,0,0.5)'
+          : '0 4px 16px rgba(0,0,0,0.3)';
+      }}
     >
-      <div style={headerStyle}>{name}</div>
-      <div style={bodyStyle}>
-        <img src={src} alt={name} style={imgStyle} />
+      <img src={src} alt={name} style={bgImgStyle} />
+      <div style={glassOverlayStyle}>
+        <span style={titleStyle}>{name}</span>
       </div>
     </button>
   );
 };
 
 const cardStyle: React.CSSProperties = {
+  position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  background: '#252525',
-  border: '1px solid #444',
-  borderRadius: '12px',
+  background: '#000',
+  border: '1px solid rgba(255,255,255,0.12)',
+  borderRadius: '20px',
   padding: 0,
   cursor: 'pointer',
-  transition: 'all 0.15s ease',
+  transition: 'all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)',
   overflow: 'hidden',
   color: '#f5f5f5',
+  width: '100%',
+  height: '280px',
 };
 
-const headerStyle: React.CSSProperties = {
-  padding: '10px 14px',
-  fontSize: '13px',
-  fontWeight: 600,
-  color: '#aaa',
-  borderBottom: '1px solid #333',
-  background: '#1f1f1f',
+const bgImgStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  width: '100%',
+  height: '100%',
+  objectFit: 'cover',
+  transition: 'transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1)',
 };
 
-const bodyStyle: React.CSSProperties = {
-  padding: '12px',
-  flex: 1,
+const glassOverlayStyle: React.CSSProperties = {
+  position: 'absolute',
+  bottom: 0,
+  left: 0,
+  right: 0,
+  padding: '18px 16px',
+  background: 'linear-gradient(to top, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0.35) 60%, rgba(0,0,0,0) 100%)',
+  backdropFilter: 'blur(10px) saturate(120%)',
+  WebkitBackdropFilter: 'blur(10px) saturate(120%)',
   display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  minHeight: '120px',
+  alignItems: 'flex-end',
+  justifyContent: 'flex-start',
+  minHeight: '80px',
 };
 
-const imgStyle: React.CSSProperties = {
-  maxWidth: '100%',
-  maxHeight: '220px',
-  borderRadius: '8px',
-  objectFit: 'contain',
+const titleStyle: React.CSSProperties = {
+  fontSize: '15px',
+  fontWeight: 600,
+  color: '#fff',
+  textShadow: '0 1px 4px rgba(0,0,0,0.6)',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
 };
 
 export default ImageSwitchCard;

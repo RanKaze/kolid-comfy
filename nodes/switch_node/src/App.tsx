@@ -6,6 +6,12 @@ import MaskSwitchCard from './components/MaskSwitchCard';
 import JsonSwitchCard from './components/JsonSwitchCard';
 import ConnectionSwitchCard from './components/ConnectionSwitchCard';
 import CustomImageCard from './components/CustomImageCard';
+import {
+  startHoverSuck,
+  stopHoverSuck,
+  startSelectSuck,
+  cleanupAllAnimations,
+} from './animationManager';
 
 interface PreviewItem {
   type: string;
@@ -18,10 +24,27 @@ interface InputItem {
   nodeName?: string;
 }
 
+interface HistoryItem {
+  key: string;
+  src: string;
+  name: string;
+}
+
+interface HoveredInfo {
+  type: string;
+  data: string;
+  name: string;
+}
+
 const App: React.FC = () => {
   const [inputs, setInputs] = useState<InputItem[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [nodeTitle, setNodeTitle] = useState<string>('Snapshot Switch');
+  const [hovered, setHovered] = useState<HoveredInfo | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const hoverRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     fetch('/inputs_data')
@@ -30,18 +53,20 @@ const App: React.FC = () => {
         const keys: string[] = data.input_keys || [];
         const previews: Record<string, PreviewItem> = data.input_previews || {};
         const connections: Record<string, string> = data.connection_info || {};
+        const hist: HistoryItem[] = data.history || [];
+        const title = connections['__node_title__'] || 'Snapshot Switch';
+        setNodeTitle(title);
         const items = keys.map((k) => ({
           key: k,
           preview: previews[k],
           nodeName: connections[k],
         }));
         setInputs(items);
+        setHistory(hist);
         setLoading(false);
       })
       .catch(() => setLoading(false));
   }, []);
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSelect = (key: string, customImage?: string) => {
     setSelected(key);
@@ -52,6 +77,14 @@ const App: React.FC = () => {
     }).then(() => {
       window.close();
     });
+  };
+
+  const handleCardClick = (key: string, imgSrc?: string, customImage?: string) => {
+    if (imgSrc) {
+      startSelectSuck(imgSrc, () => handleSelect(key, customImage));
+    } else {
+      handleSelect(key, customImage);
+    }
   };
 
   const handleCustomClick = () => {
@@ -69,6 +102,15 @@ const App: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
+  const handleDropFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const base64 = reader.result as string;
+      handleSelect('__custom__', base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
   useEffect(() => {
     const handleBeforeUnload = () => {
       navigator.sendBeacon?.('/window_closed', '');
@@ -77,18 +119,50 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (hoverRafRef.current) cancelAnimationFrame(hoverRafRef.current);
+      cleanupAllAnimations();
+    };
+  }, []);
+
   if (loading) {
     return (
       <div style={containerStyle}>
-        <div style={titleStyle}>Loading...</div>
+        <div style={loaderStyle}>Loading…</div>
       </div>
     );
   }
 
   const hasImagePreview = inputs.some((item) => item.preview?.type === 'image');
+  const showHistory = history.length > 0;
 
   return (
     <div style={containerStyle}>
+      <div style={bannerStyle}>{nodeTitle}</div>
+
+      {/* Central preview layer */}
+      {hovered && (
+        <div style={previewWrapperStyle}>
+          <div style={previewInnerStyle}>
+            {hovered.type === 'image' || hovered.type === 'mask' ? (
+              <img src={hovered.data} alt={hovered.name} style={previewImgStyle} data-preview-img />
+            ) : hovered.type === 'int' ? (
+              <div style={previewIntStyle}>{hovered.data}</div>
+            ) : hovered.type === 'text' ? (
+              <div style={previewTextStyle}>{hovered.data}</div>
+            ) : hovered.type === 'connection' ? (
+              <div style={previewConnStyle}>
+                <span style={{ fontSize: '48px' }}>🔌</span>
+                <span>{hovered.data}</span>
+              </div>
+            ) : (
+              <pre style={previewPreStyle}>{hovered.data}</pre>
+            )}
+          </div>
+        </div>
+      )}
+
       <input
         type="file"
         accept="image/*"
@@ -96,59 +170,157 @@ const App: React.FC = () => {
         style={{ display: 'none' }}
         onChange={handleFileChange}
       />
-      <div style={titleStyle}>Select an input</div>
-      <div style={gridStyle}>
-        {inputs.length === 0 && (
+
+      <div style={scrollContainerStyle}>
+        {inputs.length === 0 && history.length === 0 && (
           <div style={emptyStyle}>No connected inputs found.</div>
         )}
-        {inputs.map((item) => {
-          const common = {
-            name: item.key,
-            selected: selected === item.key,
-            onClick: () => handleSelect(item.key),
-          };
 
-          const type = item.preview?.type;
-          const data = item.preview?.data || '';
-
-          // Non-lazy mode: show actual preview content if available
-          if (type === 'image') {
-            return <ImageSwitchCard key={item.key} {...common} src={data} />;
-          }
-          if (type === 'mask') {
-            return <MaskSwitchCard key={item.key} {...common} src={data} />;
-          }
-          if (type === 'int') {
-            return <IntSwitchCard key={item.key} {...common} value={data} />;
-          }
-          if (type === 'text') {
-            return <StringSwitchCard key={item.key} {...common} value={data} />;
-          }
-
-          // Lazy mode fallback: show connection card if nodeName is available
-          if (item.nodeName !== undefined) {
-            return (
-              <ConnectionSwitchCard
-                key={item.key}
-                {...common}
-                nodeName={item.nodeName}
-              />
-            );
-          }
-
-          // json / unknown fallback
-          return <JsonSwitchCard key={item.key} {...common} value={data} />;
-        })}
+        {/* 1. Custom group */}
         {hasImagePreview && (
-          <CustomImageCard
-            selected={selected === '__custom__'}
-            onClick={handleCustomClick}
-          />
+          <div style={groupStyle}>
+            <div style={groupLabelStyle}>Custom</div>
+            <div style={groupInnerStyle}>
+              <div
+                style={{ flexShrink: 0, width: '280px' }}
+                onMouseEnter={() =>
+                  setHovered({ type: 'custom', data: '', name: 'Custom Image' })
+                }
+                onMouseLeave={() => {
+                  setHovered(null);
+                  if (hoverRafRef.current) {
+                    cancelAnimationFrame(hoverRafRef.current);
+                    hoverRafRef.current = null;
+                  }
+                  stopHoverSuck();
+                }}
+              >
+                <CustomImageCard
+                  selected={selected === '__custom__'}
+                  onClick={handleCustomClick}
+                  onDropFile={handleDropFile}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 2. Options group */}
+        {inputs.length > 0 && (
+          <div style={groupStyle}>
+            <div style={groupLabelStyle}>Options</div>
+            <div style={groupInnerStyle}>
+              {inputs.map((item) => {
+                const common = {
+                  name: item.nodeName || item.key,
+                  selected: selected === item.key,
+                  onClick: () => {},
+                };
+
+                const type = item.preview?.type;
+                const data = item.preview?.data || '';
+                const hoverType = type || (item.nodeName !== undefined ? 'connection' : 'json');
+                const hoverData = data || item.nodeName || '';
+                const isImage = type === 'image' || type === 'mask';
+
+                const card = (() => {
+                  if (type === 'image') {
+                    return <ImageSwitchCard key={item.key} {...common} src={data} />;
+                  }
+                  if (type === 'mask') {
+                    return <MaskSwitchCard key={item.key} {...common} src={data} />;
+                  }
+                  if (type === 'int') {
+                    return <IntSwitchCard key={item.key} {...common} value={data} />;
+                  }
+                  if (type === 'text') {
+                    return <StringSwitchCard key={item.key} {...common} value={data} />;
+                  }
+                  if (item.nodeName !== undefined) {
+                    return (
+                      <ConnectionSwitchCard
+                        key={item.key}
+                        {...common}
+                        nodeName={item.nodeName}
+                      />
+                    );
+                  }
+                  return <JsonSwitchCard key={item.key} {...common} value={data} />;
+                })();
+
+                return (
+                  <div
+                    key={item.key}
+                    style={{ flexShrink: 0, width: '280px' }}
+                    onMouseEnter={(e) => {
+                      const info = { type: hoverType, data: hoverData, name: common.name };
+                      if (isImage) {
+                        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                        hoverRafRef.current = requestAnimationFrame(() => {
+                          startHoverSuck(data, rect, () => setHovered(info));
+                        });
+                      } else {
+                        setHovered(info);
+                      }
+                    }}
+                    onMouseLeave={() => {
+                      setHovered(null);
+                      if (hoverRafRef.current) {
+                        cancelAnimationFrame(hoverRafRef.current);
+                        hoverRafRef.current = null;
+                      }
+                      stopHoverSuck();
+                    }}
+                    onClick={() => handleCardClick(item.key, isImage ? data : undefined)}
+                  >
+                    {card}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* 3. History group */}
+        {showHistory && (
+          <div style={historyGroupStyle}>
+            <div style={historyLabelStyle}>History</div>
+            <div style={historyInnerStyle}>
+              {history.map((h) => (
+                <div
+                  key={h.key}
+                  style={{ flexShrink: 0, width: '280px' }}
+                  onMouseEnter={(e) => {
+                    const info = { type: 'image', data: h.src, name: h.name };
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    hoverRafRef.current = requestAnimationFrame(() => {
+                      startHoverSuck(h.src, rect, () => setHovered(info));
+                    });
+                  }}
+                  onMouseLeave={() => {
+                    setHovered(null);
+                    if (hoverRafRef.current) {
+                      cancelAnimationFrame(hoverRafRef.current);
+                      hoverRafRef.current = null;
+                    }
+                    stopHoverSuck();
+                  }}
+                  onClick={() => handleCardClick('__custom__', h.src, h.src)}
+                >
+                  <ImageSwitchCard
+                    name={h.name}
+                    src={h.src}
+                    selected={selected === h.key}
+                    onClick={() => {}}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
-      {selected && (
-        <div style={successStyle}>Selected {selected}. You can close this window.</div>
-      )}
+
+
     </div>
   );
 };
@@ -157,37 +329,177 @@ const containerStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   alignItems: 'center',
-  justifyContent: 'flex-start',
+  justifyContent: 'flex-end',
   minHeight: '100vh',
-  padding: '40px 20px',
-  gap: '24px',
-  background: '#1a1a1a',
+  padding: '24px 24px 60px',
+  gap: '28px',
+  background: 'linear-gradient(180deg, #0a0a0a 0%, #1a1a1a 50%, #0d0d0d 100%)',
+  position: 'relative',
+  overflow: 'hidden',
 };
 
-const titleStyle: React.CSSProperties = {
-  fontSize: '22px',
+const bannerStyle: React.CSSProperties = {
+  position: 'fixed',
+  top: 0,
+  left: 0,
+  right: 0,
+  zIndex: 100,
+  padding: '18px 24px',
+  fontSize: '18px',
   fontWeight: 600,
-  color: '#f5f5f5',
+  color: '#fff',
+  textAlign: 'center',
+  letterSpacing: '0.5px',
+  background: 'rgba(255, 255, 255, 0.06)',
+  backdropFilter: 'blur(24px) saturate(180%)',
+  WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+  borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+  boxShadow: '0 4px 30px rgba(0, 0, 0, 0.2)',
 };
 
-const gridStyle: React.CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
-  gap: '16px',
+const scrollContainerStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'row',
+  flexWrap: 'nowrap',
+  alignItems: 'flex-end',
+  gap: '20px',
   width: '100%',
-  maxWidth: '960px',
+  maxWidth: '100vw',
+  padding: '0 20px',
+  paddingTop: '80px',
+  overflowX: 'auto',
+  overflowY: 'hidden',
+  scrollBehavior: 'smooth',
+};
+
+const groupStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'row',
+  flexWrap: 'nowrap',
+  alignItems: 'flex-end',
+  gap: '16px',
+  flexShrink: 0,
+  padding: '16px 20px',
+  background: 'rgba(255, 255, 255, 0.04)',
+  backdropFilter: 'blur(16px) saturate(140%)',
+  WebkitBackdropFilter: 'blur(16px) saturate(140%)',
+  border: '1px solid rgba(255, 255, 255, 0.1)',
+  borderRadius: '24px',
+  position: 'relative',
+};
+
+const groupLabelStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: '-10px',
+  left: '18px',
+  fontSize: '11px',
+  fontWeight: 700,
+  textTransform: 'uppercase',
+  letterSpacing: '1px',
+  color: '#8e8e93',
+  background: 'rgba(20, 20, 30, 0.85)',
+  padding: '2px 10px',
+  borderRadius: '6px',
+  border: '1px solid rgba(255,255,255,0.08)',
+};
+
+const groupInnerStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'row',
+  flexWrap: 'nowrap',
+  alignItems: 'flex-end',
+  gap: '16px',
+};
+
+const historyGroupStyle: React.CSSProperties = groupStyle;
+
+const historyLabelStyle: React.CSSProperties = groupLabelStyle;
+
+const historyInnerStyle: React.CSSProperties = groupInnerStyle;
+
+const previewWrapperStyle: React.CSSProperties = {
+  position: 'fixed',
+  top: '140px',
+  left: '50%',
+  transform: 'translateX(-50%)',
+  zIndex: 90,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  pointerEvents: 'none',
+};
+
+const previewInnerStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  animation: 'fadeIn 0.2s ease forwards',
+};
+
+const previewImgStyle: React.CSSProperties = {
+  maxWidth: '90vw',
+  maxHeight: '60vh',
+  borderRadius: '16px',
+  objectFit: 'contain',
+  boxShadow: '0 16px 50px rgba(0,0,0,0.6)',
+};
+
+const previewIntStyle: React.CSSProperties = {
+  fontSize: '80px',
+  fontWeight: 800,
+  color: '#ff9f0a',
+  textShadow: '0 4px 30px rgba(255, 159, 10, 0.4)',
+};
+
+const previewTextStyle: React.CSSProperties = {
+  fontSize: '24px',
+  fontWeight: 500,
+  color: '#f5f5f5',
+  textAlign: 'center',
+  lineHeight: 1.6,
+  wordBreak: 'break-word',
+  textShadow: '0 2px 12px rgba(0,0,0,0.5)',
+  maxWidth: '80vw',
+};
+
+const previewConnStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: '12px',
+  fontSize: '26px',
+  fontWeight: 700,
+  color: '#fff',
+  textShadow: '0 2px 12px rgba(0,0,0,0.5)',
+};
+
+const previewPreStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: '17px',
+  color: '#d1d1d6',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  lineHeight: 1.6,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  textShadow: '0 2px 10px rgba(0,0,0,0.5)',
+  maxWidth: '80vw',
+  maxHeight: '45vh',
+  overflow: 'auto',
 };
 
 const emptyStyle: React.CSSProperties = {
-  gridColumn: '1 / -1',
   textAlign: 'center',
   color: '#888',
   padding: '40px 0',
+  fontSize: '16px',
+  flexShrink: 0,
 };
 
-const successStyle: React.CSSProperties = {
-  color: '#34c759',
-  fontSize: '14px',
+const loaderStyle: React.CSSProperties = {
+  color: '#fff',
+  fontSize: '18px',
+  fontWeight: 500,
+  letterSpacing: '1px',
 };
 
 export default App;

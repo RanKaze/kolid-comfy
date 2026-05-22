@@ -46,6 +46,7 @@ app.registerExtension({
                         info[inp.name] = name;
                     }
                 });
+                info["__node_title__"] = node.title || node.type || "SnapshotSwitchNode";
                 connWidget.value = JSON.stringify(info);
             }
 
