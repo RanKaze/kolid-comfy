@@ -171,7 +171,7 @@ const App: React.FC = () => {
         onChange={handleFileChange}
       />
 
-      <div style={scrollContainerStyle}>
+      <div style={scrollContainerStyle} data-scroll-container>
         {inputs.length === 0 && history.length === 0 && (
           <div style={emptyStyle}>No connected inputs found.</div>
         )}
