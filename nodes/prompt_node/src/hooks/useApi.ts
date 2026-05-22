@@ -18,10 +18,11 @@ export function useApi() {
   const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
   const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
   const [loraData, setLoraData] = useState<LoraFolders>({});
+  const [loraRegex, setLoraRegex] = useState('');
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
-    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[] } = await res.json();
+    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string } = await res.json();
     setAllPrompts(data.categories);
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
@@ -31,6 +32,7 @@ export function useApi() {
     setLastSelectedLoras(data.last_selected_loras || []);
     setLastSelectedPrefabs(data.last_selected_prefabs || []);
     setCustomPrompts(data.custom_prompts || '');
+    setLoraRegex(data.lora_regex || '');
     return data;
   }, []);
 
@@ -52,6 +54,7 @@ export function useApi() {
     const res = await fetch(`${API_BASE}/lora_data`);
     const data = await res.json();
     setLoraData(data.folders || {});
+    setLoraRegex(data.lora_regex || '');
     return data.folders || {};
   }, []);
 
@@ -62,7 +65,7 @@ export function useApi() {
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
     promptFoldout, lastSelected, lastSelectedLoras, lastSelectedPrefabs,
-    loraData, setLoraData,
+    loraData, setLoraData, loraRegex,
     loadData, submitSelection, closeWindow, loadLoraData,
   };
 }

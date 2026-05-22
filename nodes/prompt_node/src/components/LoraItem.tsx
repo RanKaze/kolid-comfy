@@ -3,10 +3,11 @@ import type { LoraItemData } from '../types';
 interface LoraItemProps {
   item: LoraItemData;
   isSelected?: boolean;
+  isFiltered?: boolean;
   onToggle?: () => void;
 }
 
-export function LoraItem({ item, isSelected, onToggle }: LoraItemProps) {
+export function LoraItem({ item, isSelected, isFiltered, onToggle }: LoraItemProps) {
   const previewSrc = item.preview_url
     ? `/lora_images/${encodeURIComponent(item.preview_url)}`
     : '';
@@ -14,7 +15,7 @@ export function LoraItem({ item, isSelected, onToggle }: LoraItemProps) {
   const tags = item.tags || [];
 
   return (
-    <div className={`lora-item${isSelected ? ' selected' : ''}`} onMouseDown={onToggle}>
+    <div className={`lora-item${isSelected ? ' selected' : ''}${isFiltered ? ' filtered' : ''}`} onMouseDown={onToggle}>
       <div className="lora-image-layer">
         {previewSrc ? (
           <img src={previewSrc} alt={item.name} loading="lazy" />

@@ -1008,6 +1008,8 @@ body {
 .lora-card.active .lora-card-name { color: var(--text-primary); }
 .lora-card.missing { border-color: rgba(255, 59, 48, 0.6); background: rgba(255, 59, 48, 0.06); }
 .lora-card.missing .lora-card-name { color: #ff3b30; }
+.lora-card.filtered { border-color: rgba(255, 204, 0, 0.6); background: rgba(255, 204, 0, 0.06); }
+.lora-card.filtered .lora-card-name { color: #ffcc00; }
 .lora-card-bg {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;

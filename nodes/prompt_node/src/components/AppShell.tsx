@@ -80,10 +80,16 @@ function snapshotZoom() {
 export function AppShell() {
   const api = useApi();
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
-    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow,
+    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs,
   } = api;
+
+  const isLoraFiltered = useCallback((item: LoraItemData) => {
+    if (!loraRegex) return false;
+    const regex = new RegExp(loraRegex);
+    return !regex.test(item.file_path);
+  }, [loraRegex]);
 
   const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -2116,21 +2122,28 @@ export function AppShell() {
             ) : null}
 
             {/* ========== Lora Section ========== */}
-            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && Object.keys(loraData).length > 0 ? (
-              <div className="categories-container lora-section">
-                {Object.entries(loraData).map(([folder, items]) => (
-                  <LoraFolderCard
-                    key={folder}
-                    folderName={folder}
-                    items={items}
-                    searchQuery={searchQuery}
-                    selectedLoras={selectedLoras}
-                    onToggleLora={toggleLora}
-                    isItemSelected={isLoraSelected}
-                  />
-                ))}
-              </div>
-            ) : null}
+            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && Object.keys(loraData).length > 0 ? (() => {
+              const regex = loraRegex ? new RegExp(loraRegex) : null;
+              const filteredEntries = Object.entries(loraData).map(([folder, items]) => {
+                const filteredItems = regex ? items.filter(it => regex.test(it.file_path)) : items;
+                return [folder, filteredItems] as [string, LoraItemData[]];
+              }).filter(([, items]) => items.length > 0);
+              return filteredEntries.length > 0 ? (
+                <div className="categories-container lora-section">
+                  {filteredEntries.map(([folder, items]) => (
+                    <LoraFolderCard
+                      key={folder}
+                      folderName={folder}
+                      items={items}
+                      searchQuery={searchQuery}
+                      selectedLoras={selectedLoras}
+                      onToggleLora={toggleLora}
+                      isItemSelected={isLoraSelected}
+                    />
+                  ))}
+                </div>
+              ) : null;
+            })() : null}
 
             {tempCtx.mode !== 'lora' && tempCtx.mode !== 'prefab' ? (
             <div className="categories-container prompt-section" id="categories">
@@ -2463,6 +2476,7 @@ export function AppShell() {
                         initialActive={state?.active ?? true}
                         initialActiveTags={state?.active_tags}
                         initialSplitMode={state?.split_mode}
+                        isFiltered={isLoraFiltered(item)}
                         onChange={(data) => tempCtx.setLoraState(path, { strength: data.strength, active_tags: data.activeTags, active: data.active, split_mode: data.split_mode })}
                         onRemove={() => tempCtx.toggleId(path)}
                       />
@@ -2523,6 +2537,7 @@ export function AppShell() {
                             initialActive={sel?.active}
                             initialSplitMode={sel?.split_mode}
                             isMissing={lora.metadata?.missing === true}
+                            isFiltered={isLoraFiltered(lora)}
                             onChange={(data) => {
                               setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
                             }}
@@ -2798,6 +2813,7 @@ export function AppShell() {
                             initialStrength={l.strength}
                             initialActive={l.active}
                             initialSplitMode={l.split_mode}
+                            isFiltered={isLoraFiltered(item)}
                             onChange={(data) => setModalPrefabLoras(prev => prev.map((pl, j) => j === i ? { ...pl, strength: data.strength, active_tags: data.activeTags, active: data.active, split_mode: data.split_mode } : pl))}
                             onRemove={() => setModalPrefabLoras(prev => prev.filter((_, j) => j !== i))}
                           />
