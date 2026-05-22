@@ -31,6 +31,52 @@ function computePreviewSize(naturalW: number, naturalH: number): { w: number; h:
   return { w, h };
 }
 
+// ===== Compute the final preview rect in viewport coordinates =====
+// previewArea is a flex:1 container between the fixed banner and the scrollContainer.
+// Its height = viewport - containerPadTop - containerPadBottom - scrollH - gap.
+// The image is centered inside previewArea both horizontally and vertically.
+function computePreviewRect(src: string): { x: number; y: number; w: number; h: number } {
+  const size = getImageSize(src);
+  const preview = computePreviewSize(size.w, size.h);
+
+  const viewportW = window.innerWidth;
+  const viewportH = window.innerHeight;
+
+  // Layout constants — must stay in sync with App.tsx
+  const containerPadTop = 60;
+  const containerPadBottom = 60;
+  const gap = 28;
+
+  // Read scroll container height from DOM (best-effort)
+  const scrollEl = document.querySelector('[data-scroll-container]');
+  let scrollH = 240; // fallback estimate for ~1 group
+  if (scrollEl) {
+    const rect = scrollEl.getBoundingClientRect();
+    if (rect.height > 0) scrollH = rect.height;
+  }
+
+  // previewArea fills remaining vertical space (flex: 1)
+  const previewAreaH = Math.max(200, viewportH - containerPadTop - containerPadBottom - scrollH - gap);
+  const previewAreaTop = containerPadTop;
+
+  const x = (viewportW - preview.w) / 2;
+  const y = previewAreaTop + (previewAreaH - preview.h) / 2;
+
+  return { x, y, w: preview.w, h: preview.h };
+}
+
+// ===== Read current DOM preview rect (preferred over computed) =====
+function getPreviewRectFromDOM(): { w: number; h: number; x: number; y: number } | null {
+  const img = document.querySelector('[data-preview-img]') as HTMLImageElement | null;
+  if (img) {
+    const rect = img.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return { w: rect.width, h: rect.height, x: rect.left, y: rect.top };
+    }
+  }
+  return null;
+}
+
 // ===== Helper: create a fixed-position flying element =====
 function createFlyingElement(
   src: string,
@@ -62,14 +108,7 @@ export function startHoverSuck(src: string, cardRect: DOMRect, onComplete?: () =
   stopHoverSuck();
   hoverPendingComplete = onComplete ?? null;
 
-  const size = getImageSize(src);
-  const preview = computePreviewSize(size.w, size.h);
-  const pv = {
-    w: preview.w,
-    h: preview.h,
-    x: (window.innerWidth - preview.w) / 2,
-    y: 140,
-  };
+  const pv = computePreviewRect(src);
 
   hoverEl = createFlyingElement(src, cardRect.left, cardRect.top, cardRect.width, cardRect.height, 95);
 
@@ -116,18 +155,6 @@ export function stopHoverSuck() {
   hoverPendingComplete = null;
 }
 
-// ===== Read current DOM preview rect (preferred over computed size) =====
-function getPreviewRectFromDOM(): { w: number; h: number; x: number; y: number } | null {
-  const img = document.querySelector('[data-preview-img]') as HTMLImageElement | null;
-  if (img) {
-    const rect = img.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      return { w: rect.width, h: rect.height, x: rect.left, y: rect.top };
-    }
-  }
-  return null;
-}
-
 // ===== Click: suck preview image FROM center INTO right side =====
 export function startSelectSuck(src: string, onComplete: () => void) {
   stopSelectSuck();
@@ -140,15 +167,8 @@ export function startSelectSuck(src: string, onComplete: () => void) {
     // Use the exact rendered size/position of the central preview image
     pv = domRect;
   } else {
-    // Fallback: compute from natural size (same logic as hover animation)
-    const size = getImageSize(src);
-    const preview = computePreviewSize(size.w, size.h);
-    pv = {
-      w: preview.w,
-      h: preview.h,
-      x: (window.innerWidth - preview.w) / 2,
-      y: 140,
-    };
+    // Fallback: compute from image size + full layout math
+    pv = computePreviewRect(src);
   }
 
   selectEl = createFlyingElement(src, pv.x, pv.y, pv.w, pv.h, 200);
@@ -164,7 +184,6 @@ export function startSelectSuck(src: string, onComplete: () => void) {
   });
 
   // Single continuous morph: preview size → stretched → sucked out to right
-  // power2.in = slow start, fast finish (no sudden squash)
   tl.to(selectEl, {
     x: targetX - pv.x,
     y: targetY - pv.y,
