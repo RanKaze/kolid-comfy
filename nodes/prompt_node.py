@@ -2164,7 +2164,7 @@ class SnapshotPromptNode:
                         continue
                     # Skip if this lora was filtered out by lora_regex (output filtering)
                     normalized_path = file_path.replace('\\', '/')
-                    if normalized_path not in self._valid_lora_paths and file_path not in self._valid_lora_paths:
+                    if normalized_path not in server._valid_lora_paths and file_path not in server._valid_lora_paths:
                         continue
                     is_active = lora_states.get(file_path, True)
                     if not is_active:
