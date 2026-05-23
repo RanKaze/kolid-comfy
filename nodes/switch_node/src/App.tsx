@@ -9,7 +9,7 @@ import CustomImageCard from './components/CustomImageCard';
 import {
   startHoverSuck,
   stopHoverSuck,
-  startSelectSuck,
+  startInstantBurst,
   cleanupAllAnimations,
 } from './animationManager';
 
@@ -45,6 +45,7 @@ const App: React.FC = () => {
   const [hovered, setHovered] = useState<HoveredInfo | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hoverRafRef = useRef<number | null>(null);
+  const previewLockedRef = useRef(false);
 
   useEffect(() => {
     fetch('/inputs_data')
@@ -68,22 +69,24 @@ const App: React.FC = () => {
       .catch(() => setLoading(false));
   }, []);
 
-  const handleSelect = (key: string, customImage?: string) => {
+  const postSelection = (key: string, customImage?: string) => {
     setSelected(key);
     fetch('/select_input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selected_key: key, custom_image: customImage }),
-    }).then(() => {
-      window.close();
     });
   };
 
   const handleCardClick = (key: string, imgSrc?: string, customImage?: string) => {
+    stopHoverSuck();
+    postSelection(key, customImage);
     if (imgSrc) {
-      startSelectSuck(imgSrc, () => handleSelect(key, customImage));
+      previewLockedRef.current = true;
+      startInstantBurst(imgSrc, () => window.close());
     } else {
-      handleSelect(key, customImage);
+      setHovered(null);
+      window.close();
     }
   };
 
@@ -97,7 +100,8 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = reader.result as string;
-      handleSelect('__custom__', base64);
+      postSelection('__custom__', base64);
+      window.close();
     };
     reader.readAsDataURL(file);
   };
@@ -106,7 +110,8 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = () => {
       const base64 = reader.result as string;
-      handleSelect('__custom__', base64);
+      postSelection('__custom__', base64);
+      window.close();
     };
     reader.readAsDataURL(file);
   };
@@ -182,11 +187,14 @@ const App: React.FC = () => {
             <div style={groupLabelStyle}>Custom</div>
             <div style={groupInnerStyle}>
               <div
+                data-card-item
                 style={{ flexShrink: 0, width: '280px' }}
-                onMouseEnter={() =>
-                  setHovered({ type: 'custom', data: '', name: 'Custom Image' })
-                }
+                onMouseEnter={() => {
+                  if (previewLockedRef.current) return;
+                  setHovered({ type: 'custom', data: '', name: 'Custom Image' });
+                }}
                 onMouseLeave={() => {
+                  if (previewLockedRef.current) return;
                   setHovered(null);
                   if (hoverRafRef.current) {
                     cancelAnimationFrame(hoverRafRef.current);
@@ -250,9 +258,11 @@ const App: React.FC = () => {
 
                 return (
                   <div
+                    data-card-item
                     key={item.key}
                     style={{ flexShrink: 0, width: '280px' }}
                     onMouseEnter={(e) => {
+                      if (previewLockedRef.current) return;
                       const info = { type: hoverType, data: hoverData, name: common.name };
                       if (isImage) {
                         const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -264,6 +274,7 @@ const App: React.FC = () => {
                       }
                     }}
                     onMouseLeave={() => {
+                      if (previewLockedRef.current) return;
                       setHovered(null);
                       if (hoverRafRef.current) {
                         cancelAnimationFrame(hoverRafRef.current);
@@ -288,9 +299,11 @@ const App: React.FC = () => {
             <div style={historyInnerStyle}>
               {history.map((h) => (
                 <div
+                  data-card-item
                   key={h.key}
                   style={{ flexShrink: 0, width: '280px' }}
                   onMouseEnter={(e) => {
+                    if (previewLockedRef.current) return;
                     const info = { type: 'image', data: h.src, name: h.name };
                     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                     hoverRafRef.current = requestAnimationFrame(() => {
@@ -298,6 +311,7 @@ const App: React.FC = () => {
                     });
                   }}
                   onMouseLeave={() => {
+                    if (previewLockedRef.current) return;
                     setHovered(null);
                     if (hoverRafRef.current) {
                       cancelAnimationFrame(hoverRafRef.current);
@@ -330,11 +344,9 @@ const containerStyle: React.CSSProperties = {
   flexDirection: 'column',
   alignItems: 'center',
   minHeight: '100vh',
-  padding: '60px 24px 60px',
   gap: '28px',
-  background: 'linear-gradient(180deg, #0a0a0a 0%, #1a1a1a 50%, #0d0d0d 100%)',
+  background: 'linear-gradient(180deg, #0a0a0a 0%, #1a1a1a 75%, rgba(51, 51, 51, 1) 100%)',
   position: 'relative',
-  overflow: 'hidden',
 };
 
 const bannerStyle: React.CSSProperties = {
@@ -357,6 +369,8 @@ const bannerStyle: React.CSSProperties = {
 };
 
 const scrollContainerStyle: React.CSSProperties = {
+  position: 'relative',
+  zIndex: 200,
   display: 'flex',
   flexDirection: 'row',
   flexWrap: 'nowrap',
@@ -365,13 +379,13 @@ const scrollContainerStyle: React.CSSProperties = {
   width: '100%',
   maxWidth: '100vw',
   padding: '0 20px',
-  overflowX: 'auto',
-  overflowY: 'hidden',
   scrollBehavior: 'smooth',
   marginTop: 'auto',
 };
 
 const groupStyle: React.CSSProperties = {
+  position: 'relative',
+  zIndex: 200,
   display: 'flex',
   flexDirection: 'row',
   flexWrap: 'nowrap',
@@ -384,7 +398,6 @@ const groupStyle: React.CSSProperties = {
   WebkitBackdropFilter: 'blur(16px) saturate(140%)',
   border: '1px solid rgba(255, 255, 255, 0.1)',
   borderRadius: '24px',
-  position: 'relative',
 };
 
 const groupLabelStyle: React.CSSProperties = {
@@ -396,6 +409,7 @@ const groupLabelStyle: React.CSSProperties = {
   textTransform: 'uppercase',
   letterSpacing: '1px',
   color: '#8e8e93',
+  zIndex: 200,
   background: 'rgba(20, 20, 30, 0.85)',
   padding: '2px 10px',
   borderRadius: '6px',
@@ -430,6 +444,8 @@ const previewInnerStyle: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   animation: 'fadeIn 0.2s ease forwards',
+  position: 'relative',
+  zIndex: 95,
 };
 
 const previewImgStyle: React.CSSProperties = {

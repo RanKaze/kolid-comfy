@@ -446,7 +446,7 @@ class SuperSplatServer:
         
     def run_process(self):
         # 假设 SuperSplat 项目根目录与当前脚本同级，可根据实际路径调整
-        supersplat_root = os.path.join(os.path.dirname(__file__), "supersplat")
+        supersplat_root = os.path.join(os.path.dirname(__file__), "web", "supersplat")
         if not os.path.isdir(supersplat_root):
             raise RuntimeError("SuperSplat 项目目录未找到，请确保位于节点同级目录下的 SuperSplat 文件夹中")
         

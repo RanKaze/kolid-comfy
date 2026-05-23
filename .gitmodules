@@ -1,0 +1,3 @@
+[submodule "nodes/web/supersplat"]
+	path = nodes/web/supersplat
+	url = https://github.com/playcanvas/supersplat.git

@@ -713,7 +713,11 @@ app.registerExtension({
             }
 
             // 连接/断开处理
-            node.onConnectionsChange = function (type, slot, connected) {
+            const origOnConnectionsChange = node.onConnectionsChange;
+            node.onConnectionsChange = function (type, slot, connected, link_info) {
+                if (origOnConnectionsChange) {
+                    origOnConnectionsChange.apply(this, arguments);
+                }
                 if (type === LiteGraph.INPUT) {
                     // 如果正在操作一个动态端口.
                     if(node.inputs[slot].name.startsWith("input")){
@@ -746,7 +750,7 @@ app.registerExtension({
                             if(unconnectedCount > 1){
                                 node.removeInput(slot);
                                 let index = 1;
-                                for (let i = slot; i < node.inputs.length; i++) {
+                                for (let i = 0; i < node.inputs.length; i++) {
                                     if(node.inputs[i].name.startsWith("input")){
                                         node.inputs[i].name = `input${index++}`;
                                     }
@@ -756,7 +760,7 @@ app.registerExtension({
                             // 如果只有一个动态端口,那么需要看输出有没有连接,来决定是否断开类型.
                             if(connectedCount === 0){
                                 // 如果输出端口没有连接,那么断开类型.
-                                if(!node.outputs[0].link){
+                                if(!node.outputs[0].links || node.outputs[0].links.length === 0){
                                     currentType = "*";
                                     currentConnected = false;
                                     updateInputsType();
@@ -802,14 +806,50 @@ app.registerExtension({
                 }
             };
 
+            function initFromConnections() {
+                let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                let connectedInputs = dynamicInputs.filter(inp => inp.link != null);
+                if (connectedInputs.length > 0) {
+                    currentConnected = true;
+                    const first = connectedInputs[0];
+                    const link = node.graph.links[first.link];
+                    const upstreamNode = link ? node.graph.getNodeById(link.origin_id) : null;
+                    if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
+                        currentType = upstreamNode.outputs[link.origin_slot].type;
+                    }
+                }
+                let outputConnected = node.outputs[0] && node.outputs[0].links && node.outputs[0].links.length > 0;
+                if (!currentConnected && outputConnected) {
+                    currentConnected = true;
+                    const link = node.graph.links[node.outputs[0].links[0]];
+                    const upstreamNode = link ? node.graph.getNodeById(link.origin_id) : null;
+                    if (upstreamNode && upstreamNode.inputs && link.origin_slot < upstreamNode.inputs.length) {
+                        currentType = upstreamNode.inputs[link.origin_slot].type;
+                    }
+                }
+                updateInputsType();
+                updateOutputsType();
+            }
+
             // 节点加载时恢复
             const origOnConfigure = node.onConfigure;
             node.onConfigure = function (info) {
                 origOnConfigure?.apply(this, arguments);
+                initFromConnections();
+                updateComboOptions();
+                // 同步 select_input 与 selectWidget
+                const match = (selectWidget.value || "").match(/\[(\d+)\]/);
+                if (match) {
+                    selectInputWidget.value = parseInt(match[1]);
+                } else {
+                    selectInputWidget.value = 0;
+                }
             };
 
-            // 初始化：创建一个空端口
+            // 初始化：恢复已有连接状态，然后创建一个空端口
+            initFromConnections();
             addDynamicInput();
+            updateComboOptions();
         };
     }
 });
