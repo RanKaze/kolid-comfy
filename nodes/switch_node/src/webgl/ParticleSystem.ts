@@ -5,9 +5,12 @@ export class ParticleSystem {
   private aPos: number;
   private aAlpha: number;
   private aColor: number;
+  private aEdge: number;
   private bufPos: WebGLBuffer;
   private bufAlpha: WebGLBuffer;
   private bufColor: WebGLBuffer;
+  private bufEdge: WebGLBuffer;
+  private extBlendMinMax: EXT_blend_minmax | null;
 
   particles: Array<{
     x: number; y: number;
@@ -48,20 +51,25 @@ export class ParticleSystem {
       attribute vec2 a_pos;
       attribute float a_alpha;
       attribute vec3 a_color;
+      attribute float a_edge;
       varying float v_alpha;
       varying vec3 v_color;
+      varying float v_edge;
       void main() {
         gl_Position = vec4(a_pos, 0.0, 1.0);
         v_alpha = a_alpha;
         v_color = a_color;
+        v_edge = a_edge;
       }
     `;
     const fs = `
       precision mediump float;
       varying float v_alpha;
       varying vec3 v_color;
+      varying float v_edge;
       void main() {
-        gl_FragColor = vec4(v_color, v_alpha);
+        float t = 1.0 - abs(v_edge);
+        gl_FragColor = vec4(v_color, v_alpha * t);
       }
     `;
     this.program = this.createProgram(vs, fs);
@@ -70,11 +78,14 @@ export class ParticleSystem {
     this.aPos = gl.getAttribLocation(this.program, 'a_pos');
     this.aAlpha = gl.getAttribLocation(this.program, 'a_alpha');
     this.aColor = gl.getAttribLocation(this.program, 'a_color');
+    this.aEdge = gl.getAttribLocation(this.program, 'a_edge');
 
     this.bufPos = gl.createBuffer()!;
     this.bufAlpha = gl.createBuffer()!;
     this.bufColor = gl.createBuffer()!;
+    this.bufEdge = gl.createBuffer()!;
 
+    this.extBlendMinMax = gl.getExtension('EXT_blend_minmax');
     gl.disable(gl.DEPTH_TEST);
 
     if (src) {
@@ -257,7 +268,7 @@ export class ParticleSystem {
       trail: [{ x, y, born: performance.now() }],
       color,
       lineWidth: 2 + Math.random() * 3,
-      baseAlpha: 0.1 + Math.random() * 0.4,
+      baseAlpha: 0.1 + Math.random() * 0.7,
     });
   }
 
@@ -307,16 +318,26 @@ export class ParticleSystem {
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
+    this._drawParticles();
+  }
+
+  private _drawParticles() {
+    const gl = this.gl;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+
     let segCount = 0;
     for (const p of this.particles) {
       if (p.trail.length >= 2) segCount += p.trail.length - 1;
     }
     if (segCount === 0) return;
 
-    const totalVerts = segCount * 6;
+    // 2 layers: bloom glow + core = 12 verts per segment
+    const totalVerts = segCount * 12;
     const posArr = new Float32Array(totalVerts * 2);
     const alphaArr = new Float32Array(totalVerts);
     const colorArr = new Float32Array(totalVerts * 3);
+    const edgeArr = new Float32Array(totalVerts);
 
     let vi = 0;
     for (const p of this.particles) {
@@ -331,15 +352,6 @@ export class ParticleSystem {
         const len = Math.sqrt(dx * dx + dy * dy);
         if (len < 0.001) continue;
 
-        const halfW = p.lineWidth / 2;
-        const nx = (-dy / len) * halfW;
-        const ny = (dx / len) * halfW;
-
-        const x1 = a.x + nx, y1 = a.y + ny;
-        const x2 = a.x - nx, y2 = a.y - ny;
-        const x3 = b.x + nx, y3 = b.y + ny;
-        const x4 = b.x - nx, y4 = b.y - ny;
-
         const toNDC = (px: number, py: number) => [
           (px / w) * 2 - 1,
           -((py / h) * 2 - 1),
@@ -350,7 +362,7 @@ export class ParticleSystem {
         const fadeA = Math.max(0, (1.0 - ageA) * p.baseAlpha);
         const fadeB = Math.max(0, (1.0 - ageB) * p.baseAlpha);
 
-        const pushVert = (px: number, py: number, alpha: number) => {
+        const pushVert = (px: number, py: number, alpha: number, edge: number) => {
           const [ndx, ndy] = toNDC(px, py);
           posArr[vi * 2] = ndx;
           posArr[vi * 2 + 1] = ndy;
@@ -358,23 +370,40 @@ export class ParticleSystem {
           colorArr[vi * 3] = p.color[0];
           colorArr[vi * 3 + 1] = p.color[1];
           colorArr[vi * 3 + 2] = p.color[2];
+          edgeArr[vi] = edge;
           vi++;
         };
 
-        pushVert(x1, y1, fadeA);
-        pushVert(x3, y3, fadeB);
-        pushVert(x2, y2, fadeA);
-        pushVert(x2, y2, fadeA);
-        pushVert(x3, y3, fadeB);
-        pushVert(x4, y4, fadeB);
+        // Bloom glow (wide, soft, radial fade)
+        const halfWb = p.lineWidth * 3.5;
+        const nxb = (-dy / len) * halfWb;
+        const nyb = (dx / len) * halfWb;
+        pushVert(a.x + nxb, a.y + nyb, fadeA * 0.35, 1.0);
+        pushVert(b.x + nxb, b.y + nyb, fadeB * 0.35, 1.0);
+        pushVert(a.x - nxb, a.y - nyb, fadeA * 0.35, -1.0);
+        pushVert(a.x - nxb, a.y - nyb, fadeA * 0.35, -1.0);
+        pushVert(b.x + nxb, b.y + nyb, fadeB * 0.35, 1.0);
+        pushVert(b.x - nxb, b.y - nyb, fadeB * 0.35, -1.0);
+
+        // Core (sharp, bright, radial fade)
+        const halfWc = p.lineWidth / 2;
+        const nxc = (-dy / len) * halfWc;
+        const nyc = (dx / len) * halfWc;
+        pushVert(a.x + nxc, a.y + nyc, fadeA, 1.0);
+        pushVert(b.x + nxc, b.y + nyc, fadeB, 1.0);
+        pushVert(a.x - nxc, a.y - nyc, fadeA, -1.0);
+        pushVert(a.x - nxc, a.y - nyc, fadeA, -1.0);
+        pushVert(b.x + nxc, b.y + nyc, fadeB, 1.0);
+        pushVert(b.x - nxc, b.y - nyc, fadeB, -1.0);
       }
     }
 
     if (vi === 0) return;
 
     gl.useProgram(this.program);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bufPos);
     gl.bufferData(gl.ARRAY_BUFFER, posArr, gl.DYNAMIC_DRAW);
@@ -390,6 +419,11 @@ export class ParticleSystem {
     gl.bufferData(gl.ARRAY_BUFFER, colorArr, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(this.aColor);
     gl.vertexAttribPointer(this.aColor, 3, gl.FLOAT, false, 0, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.bufEdge);
+    gl.bufferData(gl.ARRAY_BUFFER, edgeArr, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(this.aEdge);
+    gl.vertexAttribPointer(this.aEdge, 1, gl.FLOAT, false, 0, 0);
 
     gl.drawArrays(gl.TRIANGLES, 0, vi);
   }

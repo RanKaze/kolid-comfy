@@ -657,8 +657,8 @@ app.registerExtension({
             let currentType = "*";
             let currentConnected = false;
 
-            // ==================== 修改：显示用的 Combo 改名为 "select" ====================
-            const selectWidget = node.widgets[0];
+            // ==================== 显示用的 Combo ====================
+            const selectWidget = node.widgets.find(w => w.name === "select") || node.widgets[0];
 
             // ==================== 隐藏的真实 select_input ====================
             // 先尝试查找是否已存在（防止重复添加）
@@ -703,9 +703,22 @@ app.registerExtension({
 
                 selectWidget.options.values = connectedCount > 0 ? options : ["[None]"];
                 
-                const currentIdx = selectInputWidget.value || 0;
+                const targetNum = selectInputWidget.value || 0;
                 if (connectedCount > 0) {
-                    selectWidget.value = options[Math.min(currentIdx, options.length - 1)] || options[0];
+                    let found = false;
+                    for (let opt of options) {
+                        const match = opt.match(/\[(\d+)\]/);
+                        if (match && parseInt(match[1]) === targetNum) {
+                            selectWidget.value = opt;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        selectWidget.value = options[0];
+                        const match = options[0].match(/\[(\d+)\]/);
+                        selectInputWidget.value = match ? parseInt(match[1]) : 0;
+                    }
                 } else {
                     selectWidget.value = "[None]";
                     selectInputWidget.value = 0;
@@ -719,53 +732,66 @@ app.registerExtension({
                     origOnConnectionsChange.apply(this, arguments);
                 }
                 if (type === LiteGraph.INPUT) {
-                    // 如果正在操作一个动态端口.
-                    if(node.inputs[slot].name.startsWith("input")){
-                        if (connected){
-                            let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
-                            let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
-                            let unconnectedCount = dynamicInputs.length - connectedCount;
-                            // 如果正在连接第一个动态端口,并且没有连接类.
-                            if(connectedCount === 1 && !currentConnected){
-                                currentConnected = true;
-                                const input = node.inputs[slot];
-                                const link = node.graph.links[input.link];
-                                const upstreamNode = node.graph.getNodeById(link.origin_id);
-                                if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
-                                    const outputInfo = upstreamNode.outputs[link.origin_slot];
-                                    currentType = outputInfo.type;
-                                    updateInputsType();
-                                    updateOutputsType();
+                    // 防御性检查
+                    if (!node.inputs[slot] || !node.inputs[slot].name.startsWith("input")) {
+                        node.setDirtyCanvas(true, true);
+                        return;
+                    }
+                    if (connected){
+                        let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                        let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                        let unconnectedCount = dynamicInputs.length - connectedCount;
+                        // 如果正在连接第一个动态端口,并且没有连接类.
+                        if(connectedCount === 1 && !currentConnected){
+                            currentConnected = true;
+                            const input = node.inputs[slot];
+                            const link = node.graph.links[input.link];
+                            const upstreamNode = node.graph.getNodeById(link.origin_id);
+                            if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
+                                const outputInfo = upstreamNode.outputs[link.origin_slot];
+                                currentType = outputInfo.type;
+                                updateInputsType();
+                                updateOutputsType();
+                            }
+                        }
+                        if (unconnectedCount === 0){
+                            // 添加一个空闲端口.
+                            addDynamicInput();
+                        }
+                        updateComboOptions();
+                    }else{
+                        let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                        let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                        let unconnectedCount = dynamicInputs.length - connectedCount;
+                        if(unconnectedCount > 1){
+                            // 移除末尾多余的未连接端口，避免已连接端口的索引/名称变化导致连接错位
+                            let lastUnconnectedIdx = -1;
+                            for (let i = node.inputs.length - 1; i >= 0; i--) {
+                                if (node.inputs[i].name.startsWith("input") && node.inputs[i].link == null) {
+                                    lastUnconnectedIdx = i;
+                                    break;
                                 }
                             }
-                            if (unconnectedCount === 0){
-                                // 添加一个空闲端口.
-                                addDynamicInput();
+                            if (lastUnconnectedIdx >= 0) {
+                                const removedNum = parseInt(node.inputs[lastUnconnectedIdx].name.replace("input", "")) || (lastUnconnectedIdx + 1);
+                                node.removeInput(lastUnconnectedIdx);
+                                if (selectInputWidget.value === removedNum) {
+                                    selectInputWidget.value = 0;
+                                }
                             }
                             updateComboOptions();
-                        }else{
-                            let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
-                            let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
-                            let unconnectedCount = dynamicInputs.length - connectedCount;
-                            if(unconnectedCount > 1){
-                                node.removeInput(slot);
-                                let index = 1;
-                                for (let i = 0; i < node.inputs.length; i++) {
-                                    if(node.inputs[i].name.startsWith("input")){
-                                        node.inputs[i].name = `input${index++}`;
-                                    }
-                                }
-                                updateComboOptions();
-                            }
-                            // 如果只有一个动态端口,那么需要看输出有没有连接,来决定是否断开类型.
-                            if(connectedCount === 0){
-                                // 如果输出端口没有连接,那么断开类型.
-                                if(!node.outputs[0].links || node.outputs[0].links.length === 0){
-                                    currentType = "*";
-                                    currentConnected = false;
-                                    updateInputsType();
-                                    updateOutputsType();
-                                }
+                        }
+                        // 重新计算,因为上面可能移除了端口
+                        dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                        connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                        // 如果只有一个动态端口,那么需要看输出有没有连接,来决定是否断开类型.
+                        if(connectedCount === 0){
+                            // 如果输出端口没有连接,那么断开类型.
+                            if(!node.outputs[0] || !node.outputs[0].links || node.outputs[0].links.length === 0){
+                                currentType = "*";
+                                currentConnected = false;
+                                updateInputsType();
+                                updateOutputsType();
                             }
                         }
                     }
@@ -776,10 +802,10 @@ app.registerExtension({
                             currentConnected = true;
                             const output = node.outputs[slot];
                             const link = node.graph.links[output.links[0]];
-                            const upstreamNode = node.graph.getNodeById(link.origin_id);
-                            if (upstreamNode && upstreamNode.inputs && link.origin_slot < upstreamNode.inputs.length) {
-                                const inputInfo = upstreamNode.inputs[link.origin_slot];
-                                currentType = inputInfo.type;   
+                            const downstreamNode = node.graph.getNodeById(link.target_id);
+                            if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
+                                const inputInfo = downstreamNode.inputs[link.target_slot];
+                                currentType = inputInfo.type;
                                 updateInputsType();
                                 updateOutputsType();
                             }
@@ -799,11 +825,24 @@ app.registerExtension({
             };
 
             // Combo 回调 - 选择后同步到 selectInputWidget
+            const origSelectCallback = selectWidget.callback;
             selectWidget.callback = function (value) {
+                if (origSelectCallback) {
+                    origSelectCallback.call(this, value);
+                }
                 const match = value.match(/\[(\d+)\]/);
                 if (match) {
                     selectInputWidget.value = parseInt(match[1]);
                 }
+            };
+
+            // select_input 被手动修改后同步回 combo
+            const origInputCallback = selectInputWidget.callback;
+            selectInputWidget.callback = function (value) {
+                if (origInputCallback) {
+                    origInputCallback.call(this, value);
+                }
+                updateComboOptions();
             };
 
             function initFromConnections() {
@@ -822,13 +861,37 @@ app.registerExtension({
                 if (!currentConnected && outputConnected) {
                     currentConnected = true;
                     const link = node.graph.links[node.outputs[0].links[0]];
-                    const upstreamNode = link ? node.graph.getNodeById(link.origin_id) : null;
-                    if (upstreamNode && upstreamNode.inputs && link.origin_slot < upstreamNode.inputs.length) {
-                        currentType = upstreamNode.inputs[link.origin_slot].type;
+                    const downstreamNode = link ? node.graph.getNodeById(link.target_id) : null;
+                    if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
+                        currentType = downstreamNode.inputs[link.target_slot].type;
                     }
                 }
                 updateInputsType();
                 updateOutputsType();
+            }
+
+            function ensureInputCount() {
+                let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                let connectedCount = dynamicInputs.filter(inp => inp.link != null).length;
+                while (dynamicInputs.length < connectedCount + 1) {
+                    addDynamicInput();
+                    dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                }
+                while (dynamicInputs.length > connectedCount + 1) {
+                    for (let i = node.inputs.length - 1; i >= 0; i--) {
+                        if (node.inputs[i].name.startsWith("input") && node.inputs[i].link == null) {
+                            node.removeInput(i);
+                            break;
+                        }
+                    }
+                    dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                }
+                let index = 1;
+                for (let i = 0; i < node.inputs.length; i++) {
+                    if (node.inputs[i].name.startsWith("input")) {
+                        node.inputs[i].name = `input${index++}`;
+                    }
+                }
             }
 
             // 节点加载时恢复
@@ -836,6 +899,7 @@ app.registerExtension({
             node.onConfigure = function (info) {
                 origOnConfigure?.apply(this, arguments);
                 initFromConnections();
+                ensureInputCount();
                 updateComboOptions();
                 // 同步 select_input 与 selectWidget
                 const match = (selectWidget.value || "").match(/\[(\d+)\]/);
@@ -846,9 +910,9 @@ app.registerExtension({
                 }
             };
 
-            // 初始化：恢复已有连接状态，然后创建一个空端口
+            // 初始化：恢复已有连接状态，确保端口数量 = 已连接数 + 1
             initFromConnections();
-            addDynamicInput();
+            ensureInputCount();
             updateComboOptions();
         };
     }

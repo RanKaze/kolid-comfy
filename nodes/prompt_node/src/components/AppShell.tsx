@@ -111,6 +111,23 @@ export function AppShell() {
   const [selectedPrefabs, setSelectedPrefabs] = useState<SelectedPrefabItem[]>([]);
   const prefabRestoredRef = useRef(false);
 
+  // Listen for auto-tag messages from parent window
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'auto-tag' && typeof event.data.tag === 'string') {
+        const tag = event.data.tag.trim();
+        setCustomPrompts(prev => {
+          if (!prev) return tag;
+          const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
+          if (existing.includes(tag)) return prev;
+          return prev + '\n' + tag;
+        });
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [setCustomPrompts]);
+
   // Helper: find prefab by guid across all libraries
   const findPrefabByGuid = useCallback((guid: string): PrefabData | null => {
     for (const libData of Object.values(allLibraries)) {
@@ -1012,6 +1029,10 @@ export function AppShell() {
     });
     const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
     submitSelection(promptsToSend, customPrompts, lorasPayload, prefabsPayload);
+    // Notify parent window (sampler) that prompt is confirmed
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
+    }
   }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection]);
 
   // ========== Delete Prompt ==========

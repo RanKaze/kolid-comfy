@@ -129,6 +129,13 @@ def conditioning_set_values(conditioning, values={}, append=False):
 
     return c
 
+def get_loras_from_string(loras: str) -> list[str]:
+    """从 LoRA 格式字符串中提取 lora 条目列表。"""
+    if not loras:
+        return []
+    return re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=\>)", loras)
+
+
 class SamplerContext:
     def __init__(self):
         self.positive = None
@@ -549,16 +556,16 @@ class ContextNode:
                 sampler_context.negative += ',' + negative
                 
             if sampler_context.loras is None:
-                sampler_context.loras = re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras)
+                sampler_context.loras = get_loras_from_string(loras)
             elif loras is not None:
-                sampler_context.loras.extend(re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras))
+                sampler_context.loras.extend(get_loras_from_string(loras))
                 
         else:
             sampler_context = SamplerContext()
             sampler_context.positive = positive
             sampler_context.negative = negative
             if loras is not None:
-                sampler_context.loras = re.findall(r"(?<=\<)(lora(?:_path)?:[^>]+)(?=>)", loras)
+                sampler_context.loras = get_loras_from_string(loras)
             else:
                 sampler_context.loras = None
             context.contexts[name] = sampler_context
