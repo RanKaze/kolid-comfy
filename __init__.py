@@ -27,6 +27,7 @@ from .nodes.audio_node import *
 from .nodes.prompt_node import *
 from .nodes.switch_node import *
 from .nodes.sampler_node import *
+from .nodes.snapshot_sampler_node import *
     
 
 NODE_CONFIG = {
@@ -125,6 +126,7 @@ NODE_CONFIG = {
     "VideoGetFileInfoNode": {"class": VideoGetFileInfoNode, "name": "VideoGetFileInfoNode"},
     "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
     "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
+    "SnapshotDetailerSamplerNode": {"class": SnapshotDetailerSamplerNode, "name": "SnapshotDetailerSamplerNode"},
     
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},

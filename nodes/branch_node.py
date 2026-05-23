@@ -178,7 +178,9 @@ class BranchSwitchesNode:
         return [selected_key]
 
     def switch(self, select, select_input, **kwargs):
-        if select_input <= 0:
+        input_keys = [k for k in kwargs if k.startswith('input')]
+        selected_key = f"input{select_input}"
+        if select_input <= 0 or selected_key not in kwargs:
             raise ValueError(f"select_input {select_input} is out of range for input keys {input_keys}")
-        input = kwargs[f"input{select_input}"]
+        input = kwargs[selected_key]
         return (input,)        

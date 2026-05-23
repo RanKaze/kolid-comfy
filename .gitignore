@@ -43,9 +43,9 @@ Thumbs.db
 /models
 
 # Supersplat specific
-nodes/supersplat/node_modules/
-nodes/supersplat/dist/
-nodes/supersplat/build/
+nodes/web/supersplat/node_modules/
+nodes/web/supersplat/dist/
+nodes/web/supersplat/build/
 
 # 产生的cookies
 cookies/
