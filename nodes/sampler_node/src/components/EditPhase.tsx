@@ -1,25 +1,85 @@
 import React from 'react';
+import AdvancedSettings from './AdvancedSettings';
+import type { DetailerParams, Phase, TagPreviews } from '../types';
 
 interface EditPhaseProps {
+  phase: Phase;
   maskUrl: string;
   promptUrl: string;
+  switchUrl: string;
   loopCount: number;
   maskConfirmed: boolean;
   promptReady: boolean;
-  onRunDetail: () => void;
+  autoTagging: boolean;
+  autoTagResult: string | null;
+  tagPreviews: TagPreviews | null;
+  tagResult: string | null;
+  promptIframeRef: React.RefObject<HTMLIFrameElement>;
+  params: DetailerParams;
+  onParamChange: (params: DetailerParams) => void;
+  onAutoTag: () => void;
+  onRunTag: (mode: 'mask' | 'covered' | 'full') => void;
   onFinish: () => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
+  phase,
   maskUrl,
   promptUrl,
+  switchUrl,
   loopCount,
   maskConfirmed,
   promptReady,
-  onRunDetail,
+  autoTagging,
+  autoTagResult,
+  tagPreviews,
+  tagResult,
+  promptIframeRef,
+  params,
+  onParamChange,
+  onAutoTag,
+  onRunTag,
   onFinish,
 }) => {
-  const allReady = maskConfirmed && promptReady;
+  const isMaskPhase = phase === 'mask';
+  const isTagPhase = phase === 'tag';
+  const isPromptPhase = phase === 'prompt';
+  const isWaiting = phase === 'waiting';
+  const isSwitchPhase = phase === 'switch';
+
+  const hasTagPanel = !!tagPreviews;
+
+  const getPanelFlex = (type: 'mask' | 'prompt' | 'tag' | 'switch') => {
+    if (isMaskPhase) {
+      if (type === 'mask') return hasTagPanel ? 1.8 : 2.5;
+      if (type === 'prompt') return hasTagPanel ? 0.8 : 1.0;
+      if (type === 'tag') return hasTagPanel ? 0.3 : 0;
+      return 0;
+    }
+    if (isTagPhase) {
+      if (type === 'mask') return 0.6;
+      if (type === 'tag') return 0.4;
+      if (type === 'prompt') return 0.6;
+      return 0;
+    }
+    if (isPromptPhase || isWaiting) {
+      if (type === 'mask') return 0.5;
+      if (type === 'prompt') return hasTagPanel ? 2.0 : 2.5;
+      if (type === 'tag') return hasTagPanel ? 0.15 : 0;
+      return 0;
+    }
+    if (isSwitchPhase) {
+      if (type === 'switch') return 2.0;
+      if (type === 'mask') return 0.35;
+      if (type === 'prompt') return 0.35;
+      if (type === 'tag') return hasTagPanel ? 0.12 : 0;
+      return 0;
+    }
+    return 1;
+  };
+
+  const showSwitch = isSwitchPhase && !!switchUrl;
+  const showTag = hasTagPanel;
 
   return (
     <div style={styles.container}>
@@ -29,12 +89,23 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <span style={styles.title}>Detailer Sampler</span>
           <span style={styles.badge}>Loop #{loopCount + 1}</span>
         </div>
-        <span style={styles.hint}>Draw mask → Confirm · Select prompt → Run</span>
+        <div style={styles.phaseSteps}>
+          <PhaseStep label="Mask" active={isMaskPhase} done={maskConfirmed} />
+          <PhaseConnector done={maskConfirmed} />
+          <PhaseStep label="Tag" active={isTagPhase} done={!!tagResult} />
+          <PhaseConnector done={!!tagResult} />
+          <PhaseStep label="Prompt" active={isPromptPhase} done={promptReady} />
+          <PhaseConnector done={promptReady} />
+          <PhaseStep label="Waiting" active={isWaiting} done={false} />
+          <PhaseConnector done={false} />
+          <PhaseStep label="Switch" active={isSwitchPhase} done={false} />
+        </div>
       </div>
 
-      {/* Split panel */}
-      <div style={styles.splitPanel}>
-        <div style={getPanelStyle(maskConfirmed)}>
+      {/* Panel layout */}
+      <div style={{ ...styles.splitPanel, position: 'relative' }}>
+        {/* Mask panel */}
+        <div style={{ ...getPanelStyle(maskConfirmed), flex: getPanelFlex('mask') }}>
           <div style={styles.panelLabel}>
             <StatusDot active={maskConfirmed} />
             Mask Editor
@@ -46,40 +117,153 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             allow="clipboard-write"
           />
         </div>
-        <div style={getPanelStyle(promptReady)}>
+
+        {/* Tag panel */}
+        {showTag && (
+          <div style={{ ...getPanelStyle(true), flex: getPanelFlex('tag'), borderColor: '#af52de' }}>
+            <div style={styles.panelLabel}>
+              <StatusDot active={!!tagResult} />
+              Tag Mode
+            </div>
+            <div style={styles.tagPanelInner}>
+              <TagCard
+                label="Mask Tag"
+                description="Cropped to mask"
+                image={tagPreviews.mask}
+                onClick={() => onRunTag('mask')}
+                disabled={autoTagging}
+              />
+              <TagCard
+                label="Covered Tag"
+                description="Mask kept, outside white"
+                image={tagPreviews.covered}
+                onClick={() => onRunTag('covered')}
+                disabled={autoTagging}
+              />
+              <TagCard
+                label="Full Tag"
+                description="Full image"
+                image={tagPreviews.full}
+                onClick={() => onRunTag('full')}
+                disabled={autoTagging}
+              />
+            </div>
+            {autoTagging && (
+              <div style={styles.tagLoading}>
+                <div style={styles.spinner} />
+                <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600 }}>Running tagger…</span>
+              </div>
+            )}
+            {tagResult && (
+              <div style={styles.tagResultBar}>
+                <span style={{ color: '#64d2ff', fontSize: 11, fontWeight: 600 }}>Tag:</span>
+                <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: 11, marginLeft: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tagResult}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Prompt panel */}
+        <div style={{ ...getPanelStyle(promptReady), flex: getPanelFlex('prompt') }}>
           <div style={styles.panelLabel}>
             <StatusDot active={promptReady} />
             Prompt Selector
           </div>
           <iframe
+            ref={promptIframeRef}
             src={promptUrl}
             style={styles.iframe}
             title="Prompt Selector"
             allow="clipboard-write"
           />
         </div>
+
+        {/* Switch panel */}
+        {showSwitch && (
+          <div style={{ ...getPanelStyle(true), flex: getPanelFlex('switch'), borderColor: '#30d158' }}>
+            <div style={styles.panelLabel}>
+              <StatusDot active={true} />
+              Result Switch
+            </div>
+            <iframe
+              src={switchUrl}
+              style={styles.iframe}
+              title="Result Switch"
+              allow="clipboard-write"
+            />
+          </div>
+        )}
+
+        {/* Waiting overlay */}
+        {isWaiting && (
+          <div style={styles.waitingOverlay}>
+            <div style={styles.spinner} />
+            <div style={styles.waitingTitle}>Running Detailer</div>
+            <div style={styles.waitingSubtitle}>Please wait while the detailer processes your image…</div>
+          </div>
+        )}
       </div>
 
-      {/* Bottom status + actions */}
+      {/* Bottom bar */}
       <div style={styles.bottomBar}>
         <div style={styles.statusRow}>
-          <StatusItem label="Mask" active={maskConfirmed} />
-          <StatusItem label="Prompt" active={promptReady} />
+          {isMaskPhase && (
+            <span style={styles.phaseHint}>
+              Draw mask area and click <b style={{ color: '#30d158' }}>Confirm</b> in the mask editor
+            </span>
+          )}
+          {isTagPhase && (
+            <span style={styles.phaseHint}>
+              Select how the tagger should see the image
+            </span>
+          )}
+          {isPromptPhase && (
+            <span style={styles.phaseHint}>
+              Select prompt, then click <b style={{ color: '#0a84ff' }}>Confirm</b> in the prompt selector
+            </span>
+          )}
+          {isWaiting && (
+            <span style={styles.phaseHint}>
+              Detailer is running… <b style={{ color: '#ff9f0a' }}>Do not close</b> this window
+            </span>
+          )}
+          {isSwitchPhase && (
+            <span style={styles.phaseHint}>
+              Choose <b style={{ color: '#30d158' }}>Original</b> or <b style={{ color: '#0a84ff' }}>Detailed</b> for the next loop
+            </span>
+          )}
+          {autoTagResult && !isSwitchPhase && (
+            <div style={styles.tagResult} title={autoTagResult}>
+              <span style={{ color: '#64d2ff', fontSize: 12, fontWeight: 600 }}>Tag:</span>
+              <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginLeft: 6, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {autoTagResult}
+              </span>
+            </div>
+          )}
         </div>
+
+        {(isMaskPhase || isPromptPhase) && (
+          <div style={styles.settingsRow}>
+            <AdvancedSettings params={params} onChange={onParamChange} />
+          </div>
+        )}
+
         <div style={styles.actionRow}>
-          <button
-            style={{
-              ...styles.primaryBtn,
-              opacity: allReady ? 1 : 0.45,
-              cursor: allReady ? 'pointer' : 'not-allowed',
-            }}
-            onClick={onRunDetail}
-            disabled={!allReady}
-          >
-            Run Detail
-          </button>
+          {isPromptPhase && (
+            <button
+              style={{
+                ...styles.autoTagBtn,
+                opacity: autoTagging ? 0.6 : 1,
+                cursor: autoTagging ? 'wait' : 'pointer',
+              }}
+              onClick={onAutoTag}
+              disabled={autoTagging}
+            >
+              {autoTagging ? 'Tagging...' : (maskConfirmed ? 'Auto Mask Tag' : 'Auto Tag')}
+            </button>
+          )}
           <button style={styles.secondaryBtn} onClick={onFinish}>
-            Finish
+            {isSwitchPhase ? 'Finish & Close' : 'Finish'}
           </button>
         </div>
       </div>
@@ -87,10 +271,87 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   );
 };
 
+const TagCard: React.FC<{
+  label: string;
+  description: string;
+  image?: string;
+  onClick: () => void;
+  disabled: boolean;
+}> = ({ label, description, image, onClick, disabled }) => (
+  <button
+    style={{
+      ...styles.tagCard,
+      opacity: disabled ? 0.5 : 1,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+    }}
+    onClick={onClick}
+    disabled={disabled}
+  >
+    <div style={styles.tagCardImageWrap}>
+      {image ? (
+        <img src={image} alt={label} style={styles.tagCardImage} />
+      ) : (
+        <div style={styles.tagCardPlaceholder}>No preview</div>
+      )}
+    </div>
+    <div style={styles.tagCardLabel}>{label}</div>
+    <div style={styles.tagCardDesc}>{description}</div>
+  </button>
+);
+
+const PhaseStep: React.FC<{ label: string; active: boolean; done: boolean }> = ({ label, active, done }) => (
+  <div style={{
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    padding: '4px 12px',
+    borderRadius: 8,
+    background: active ? 'rgba(10, 132, 255, 0.12)' : done ? 'rgba(48, 209, 88, 0.08)' : 'transparent',
+    border: active ? '1px solid rgba(10, 132, 255, 0.25)' : done ? '1px solid rgba(48, 209, 88, 0.2)' : '1px solid transparent',
+    transition: 'all 0.3s ease',
+  }}>
+    <StatusDot active={done || active} />
+    <span style={{
+      fontSize: 12,
+      fontWeight: active ? 700 : 600,
+      color: active ? '#0a84ff' : done ? '#30d158' : 'rgba(255,255,255,0.35)',
+      transition: 'color 0.3s ease',
+    }}>
+      {label}
+    </span>
+  </div>
+);
+
+const PhaseConnector: React.FC<{ done: boolean }> = ({ done }) => (
+  <div style={{
+    width: 18,
+    height: 1,
+    background: done ? '#30d158' : 'rgba(255,255,255,0.1)',
+    transition: 'background 0.3s ease',
+  }} />
+);
+
+const StatusDot: React.FC<{ active: boolean }> = ({ active }) => (
+  <span
+    style={{
+      width: 7,
+      height: 7,
+      borderRadius: '50%',
+      display: 'inline-block',
+      marginRight: 5,
+      background: active ? '#30d158' : '#ff9f0a',
+      boxShadow: active
+        ? '0 0 5px rgba(48, 209, 88, 0.45)'
+        : '0 0 5px rgba(255, 159, 10, 0.4)',
+      transition: 'all 0.3s ease',
+      flexShrink: 0,
+    }}
+  />
+);
+
 function getPanelStyle(active: boolean): React.CSSProperties {
   const color = active ? '#007aff' : '#ff9f0a';
   return {
-    flex: 1,
     minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
@@ -99,39 +360,11 @@ function getPanelStyle(active: boolean): React.CSSProperties {
     borderRadius: 14,
     overflow: 'hidden',
     border: `2px solid ${color}`,
-    boxShadow: active
-      ? `0 0 0 1px ${color}33, 0 0 20px ${color}22`
-      : `0 0 0 1px ${color}33, 0 0 20px ${color}22`,
-    transition: 'border-color 0.4s ease, box-shadow 0.4s ease',
+    boxShadow: `0 0 0 1px ${color}33, 0 0 20px ${color}22`,
+    transition: 'border-color 0.4s ease, box-shadow 0.4s ease, flex 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
     margin: '0 4px',
   };
 }
-
-const StatusDot: React.FC<{ active: boolean }> = ({ active }) => (
-  <span
-    style={{
-      width: 8,
-      height: 8,
-      borderRadius: '50%',
-      display: 'inline-block',
-      marginRight: 6,
-      background: active ? '#30d158' : '#ff9f0a',
-      boxShadow: active
-        ? '0 0 6px rgba(48, 209, 88, 0.5)'
-        : '0 0 6px rgba(255, 159, 10, 0.5)',
-      transition: 'all 0.3s ease',
-    }}
-  />
-);
-
-const StatusItem: React.FC<{ label: string; active: boolean }> = ({ label, active }) => (
-  <div style={styles.statusItem}>
-    <StatusDot active={active} />
-    <span style={{ color: active ? '#30d158' : 'rgba(255,255,255,0.5)', transition: 'color 0.3s' }}>
-      {label} {active ? 'Ready' : 'Pending'}
-    </span>
-  </div>
-);
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
@@ -145,7 +378,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '12px 24px',
+    padding: '10px 24px',
     background: 'rgba(28, 28, 30, 0.6)',
     backdropFilter: 'blur(20px) saturate(180%)',
     WebkitBackdropFilter: 'blur(20px) saturate(180%)',
@@ -173,10 +406,10 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 10,
     letterSpacing: '0.3px',
   },
-  hint: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.4)',
-    fontWeight: 500,
+  phaseSteps: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 2,
   },
   splitPanel: {
     display: 'flex',
@@ -209,6 +442,112 @@ const styles: Record<string, React.CSSProperties> = {
     border: 'none',
     background: '#0d0d0d',
   },
+  tagPanelInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    padding: '44px 6px 6px',
+    overflowY: 'auto',
+    flex: 1,
+    alignItems: 'stretch',
+  },
+  tagCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 4,
+    padding: 6,
+    background: 'rgba(28, 28, 30, 0.6)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    borderRadius: 10,
+    cursor: 'pointer',
+    transition: 'all 0.2s ease',
+    textAlign: 'center',
+    minHeight: 0,
+  },
+  tagCardImageWrap: {
+    width: '100%',
+    aspectRatio: '1',
+    borderRadius: 6,
+    overflow: 'hidden',
+    background: '#1a1a1a',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tagCardImage: {
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+  },
+  tagCardPlaceholder: {
+    fontSize: 9,
+    color: 'rgba(255,255,255,0.3)',
+    fontWeight: 500,
+  },
+  tagCardLabel: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#fff',
+    letterSpacing: '0.1px',
+    lineHeight: 1.2,
+  },
+  tagCardDesc: {
+    fontSize: 9,
+    fontWeight: 500,
+    color: 'rgba(255,255,255,0.4)',
+    lineHeight: 1.2,
+  },
+  tagLoading: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '0 12px 10px',
+  },
+  tagResultBar: {
+    display: 'flex',
+    alignItems: 'center',
+    background: 'rgba(100, 210, 255, 0.08)',
+    padding: '5px 12px',
+    borderRadius: 8,
+    border: '1px solid rgba(100, 210, 255, 0.15)',
+    margin: '0 12px 10px',
+  },
+  waitingOverlay: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(13, 13, 13, 0.82)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    zIndex: 20,
+    borderRadius: 14,
+    gap: 16,
+  },
+  spinner: {
+    width: 24,
+    height: 24,
+    borderRadius: '50%',
+    border: '2px solid rgba(255,255,255,0.08)',
+    borderTopColor: '#0a84ff',
+    animation: 'spin 1s linear infinite',
+    flexShrink: 0,
+  },
+  waitingTitle: {
+    fontSize: 18,
+    fontWeight: 700,
+    color: '#fff',
+    letterSpacing: '0.3px',
+  },
+  waitingSubtitle: {
+    fontSize: 13,
+    fontWeight: 500,
+    color: 'rgba(255,255,255,0.45)',
+    letterSpacing: '0.2px',
+  },
   bottomBar: {
     display: 'flex',
     alignItems: 'center',
@@ -224,31 +563,44 @@ const styles: Record<string, React.CSSProperties> = {
   statusRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: 20,
+    gap: 16,
   },
-  statusItem: {
+  phaseHint: {
+    fontSize: 13,
+    fontWeight: 500,
+    color: 'rgba(255,255,255,0.5)',
+    lineHeight: 1.5,
+  },
+  tagResult: {
     display: 'flex',
     alignItems: 'center',
-    fontSize: 13,
-    fontWeight: 600,
+    background: 'rgba(100, 210, 255, 0.08)',
+    padding: '4px 12px',
+    borderRadius: 10,
+    border: '1px solid rgba(100, 210, 255, 0.15)',
+  },
+  settingsRow: {
+    display: 'flex',
+    alignItems: 'center',
+    marginRight: 20,
   },
   actionRow: {
     display: 'flex',
     alignItems: 'center',
     gap: 10,
   },
-  primaryBtn: {
+  autoTagBtn: {
     padding: '9px 24px',
     fontSize: 14,
     fontWeight: 700,
     color: '#fff',
-    background: 'rgba(0, 122, 255, 0.85)',
+    background: 'rgba(175, 82, 222, 0.85)',
     border: 'none',
     borderRadius: 10,
     cursor: 'pointer',
     transition: 'all 0.2s ease',
     letterSpacing: '0.3px',
-    boxShadow: '0 2px 8px rgba(0, 122, 255, 0.25)',
+    boxShadow: '0 2px 8px rgba(175, 82, 222, 0.25)',
   },
   secondaryBtn: {
     padding: '9px 24px',

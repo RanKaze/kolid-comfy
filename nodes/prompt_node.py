@@ -124,6 +124,46 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
+    def get_active_loras_string(self, prefab_loras=None, prompt_separator=", ", lora_path_mode=False):
+        """Compute active_loras output from user selections + prefab expansions."""
+        all_loras = self.selected_loras + (prefab_loras or [])
+        print(f"[get_active_loras_string] input: selected_loras={len(self.selected_loras)}, prefab_loras={len(prefab_loras or [])}, total={len(all_loras)}, lora_path_mode={lora_path_mode}")
+        print(f"[get_active_loras_string] _valid_lora_paths count={len(self._valid_lora_paths)}")
+        active_lora_parts = []
+        for idx, lora_item in enumerate(all_loras):
+            active = lora_item.get('active', True)
+            file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            strength = lora_item.get('strength', 1.0)
+            print(f"[get_active_loras_string] [{idx}] file_path={file_path}, strength={strength}, active={active}")
+            if not active:
+                print(f"[get_active_loras_string] [{idx}] SKIP: not active")
+                continue
+            if not file_path:
+                print(f"[get_active_loras_string] [{idx}] SKIP: no file_path")
+                continue
+            # Filter out loras excluded by lora_regex
+            normalized_path = file_path.replace('\\', '/')
+            in_valid = normalized_path in self._valid_lora_paths or file_path in self._valid_lora_paths
+            print(f"[get_active_loras_string] [{idx}] normalized_path={normalized_path}, in_valid={in_valid}")
+            if not in_valid:
+                print(f"[get_active_loras_string] [{idx}] SKIP: not in _valid_lora_paths")
+                continue
+            if lora_path_mode:
+                part = f"<lora_path:{file_path}:{strength}>"
+                active_lora_parts.append(part)
+                print(f"[get_active_loras_string] [{idx}] ACCEPT: {part}")
+            else:
+                # Use basename (file_name) for standard lora format
+                file_name = lora_item.get('file_name', '')
+                if not file_name:
+                    file_name = file_path.split('/')[-1].split('\\')[-1]
+                part = f"<lora:{file_name}:{strength}>"
+                active_lora_parts.append(part)
+                print(f"[get_active_loras_string] [{idx}] ACCEPT: {part}")
+        result = prompt_separator.join(active_lora_parts)
+        print(f"[get_active_loras_string] result: {result}")
+        return result
+
     def _ensure_dirs(self):
         os.makedirs(self.data_dir, exist_ok=True)
         os.makedirs(self.images_dir, exist_ok=True)
@@ -577,12 +617,19 @@ class SnapshotPromptServer:
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
                 data = json.loads(post_data)
+                print(f"[PromptNode] /select_prompt received: prompts={len(data.get('prompts', []))}, "
+                      f"custom='{data.get('custom_prompts', '')[:50]}...', "
+                      f"loras={len(data.get('loras', []))}, prefabs={len(data.get('prefabs', []))}")
+                print(f"[PromptNode] received loras raw: {data.get('loras', [])}")
+                print(f"[PromptNode] received prefabs raw: {data.get('prefabs', [])}")
 
                 if self.server_instance:
                     self.server_instance.selected_prompts = data.get('prompts', [])
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
                     self.server_instance.selected_loras = data.get('loras', [])
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
+                    print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
+                    print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
                     self.server_instance.prompt_event.set()
 
                     self.send_response(200)
@@ -2227,28 +2274,7 @@ class SnapshotPromptNode:
         print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
         # Compute active_loras output from user selections + prefab expansions
-        all_loras = server.selected_loras + prefab_loras
-        active_lora_parts = []
-        for lora_item in all_loras:
-            if not lora_item.get('active', True):
-                continue
-            file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
-            strength = lora_item.get('strength', 1.0)
-            if not file_path:
-                continue
-            # Filter out loras excluded by lora_regex
-            normalized_path = file_path.replace('\\', '/')
-            if normalized_path not in server._valid_lora_paths and file_path not in server._valid_lora_paths:
-                continue
-            if lora_path_mode:
-                active_lora_parts.append(f"<lora_path:{file_path}:{strength}>")
-            else:
-                # Use basename (file_name) for standard lora format
-                file_name = lora_item.get('file_name', '')
-                if not file_name:
-                    file_name = file_path.split('/')[-1].split('\\')[-1]
-                active_lora_parts.append(f"<lora:{file_name}:{strength}>")
-        active_loras = prompt_separator.join(active_lora_parts)
+        active_loras = server.get_active_loras_string(prefab_loras=prefab_loras, prompt_separator=prompt_separator, lora_path_mode=lora_path_mode)
         print(f"[SnapshotPrompt] Active loras: {active_loras}")
 
         # Compute lora_trigger_words output from user selections + prefab expansions

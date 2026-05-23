@@ -233,7 +233,7 @@ def _preview_value(value):
 class SnapshotSwitchServer:
     """HTTP server for SnapshotSwitchNode to let user select which input to output."""
 
-    def __init__(self, input_keys=None, input_previews=None, connection_info=None, unique_id=None, use_global=False):
+    def __init__(self, input_keys=None, input_previews=None, connection_info=None, unique_id=None, use_global=False, history=None):
         self.port = None
         self.server = None
         self.started = False
@@ -247,7 +247,7 @@ class SnapshotSwitchServer:
         self.connection_info = connection_info or {}
         self.unique_id = unique_id
         self.use_global = use_global
-        self.history = _load_history(unique_id, use_global)
+        self.history = history if history is not None else _load_history(unique_id, use_global)
         self.should_stop = False
 
     def start(self):

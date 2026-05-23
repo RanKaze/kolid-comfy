@@ -1,7 +1,22 @@
 export interface ServerConfig {
   mask_url: string;
   prompt_url: string;
+  switch_url: string;
   loop_count: number;
+  add_noise: string;
+  start_step_rate: number;
+  end_step_rate: number;
+  pixels: number;
+  crop_reserve: number;
+  has_tagger: boolean;
+}
+
+export interface DetailerParams {
+  add_noise: string;
+  start_step_rate: number;
+  end_step_rate: number;
+  pixels: number;
+  crop_reserve: number;
 }
 
 export interface StatusResponse {
@@ -15,4 +30,10 @@ export interface ResultResponse {
   detailed_image: string;
 }
 
-export type Phase = 'edit' | 'loading' | 'select';
+export type Phase = 'mask' | 'tag' | 'prompt' | 'waiting' | 'switch';
+
+export interface TagPreviews {
+  full?: string;
+  mask?: string;
+  covered?: string;
+}

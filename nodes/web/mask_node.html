@@ -46,6 +46,7 @@
             top: 16px;
             left: 50%;
             transform: translateX(-50%);
+            pointer-events: none;
             background: rgba(28, 28, 30, 0.55);
             backdrop-filter: blur(20px) saturate(180%);
             -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -72,6 +73,7 @@
             bottom: 16px;
             left: 50%;
             transform: translateX(-50%);
+            pointer-events: none;
             background: rgba(28, 28, 30, 0.55);
             backdrop-filter: blur(20px) saturate(180%);
             -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -89,6 +91,42 @@
         .instructions strong {
             color: #fff;
             font-weight: 600;
+        }
+
+        /* Confirm bar at bottom center */
+        .confirm-bar {
+            position: absolute;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 50;
+            display: flex;
+            gap: 10px;
+        }
+        .confirm-btn {
+            padding: 10px 32px;
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            letter-spacing: 0.3px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            background: rgba(48, 209, 88, 0.9);
+        }
+        .confirm-btn:hover {
+            background: rgba(48, 209, 88, 1.0);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(48, 209, 88, 0.35);
+        }
+        .confirm-btn.update {
+            background: rgba(0, 122, 255, 0.9);
+        }
+        .confirm-btn.update:hover {
+            background: rgba(0, 122, 255, 1.0);
+            box-shadow: 0 4px 12px rgba(0, 122, 255, 0.35);
         }
 
         /* iOS frosted glass controls panel */
@@ -292,6 +330,9 @@
         <div class="instructions">
             <strong>LMB</strong> Draw · <strong>RMB</strong> Erase · <strong>Wheel</strong> Size · <strong>Alt+Drag</strong> Resize
         </div>
+        <div class="confirm-bar">
+            <button class="confirm-btn" id="confirmButton">Confirm Mask</button>
+        </div>
         <div class="controls">
             <div class="control-row" style="justify-content: space-between;">
                 <span>Mode</span>
@@ -310,13 +351,6 @@
                 <label style="min-width:50px;">Grow</label>
                 <input type="range" id="growSize" min="0" max="50" step="1" value="4">
                 <span id="growSizeValue">4</span>
-            </div>
-
-            <!-- Confirm button row -->
-            <div class="control-row" style="justify-content: center; margin-top: 4px;">
-                <button class="control-button success" id="confirmButton" style="width: 100%; padding: 10px;">
-                    <span class="indicator-dot pending" id="confirmIndicator"></span>Confirm Mask
-                </button>
             </div>
 
             <!-- Detector panel -->
@@ -369,7 +403,6 @@
         const brushCursor = document.getElementById('brushCursor');
         const detectorSection = document.getElementById('detectorSection');
         const confirmButton = document.getElementById('confirmButton');
-        const confirmIndicator = document.getElementById('confirmIndicator');
 
         let isDrawing = false;
         let brushSize = 20;
@@ -659,9 +692,8 @@
             }
         });
 
-        // Send mask
+        // Send mask (Confirm / Update)
         async function sendMask() {
-            if (maskConfirmed) return;
             try {
                 const base64 = canvas.toDataURL('image/png');
                 const response = await fetch('/mask', {
@@ -670,14 +702,12 @@
                     body: JSON.stringify({ mask: base64 })
                 });
                 if (response.ok) {
+                    const wasConfirmed = maskConfirmed;
                     maskConfirmed = true;
-                    status.textContent = 'Mask confirmed';
+                    status.textContent = wasConfirmed ? 'Mask updated' : 'Mask confirmed';
                     status.classList.add('success');
-                    confirmIndicator.classList.remove('pending');
-                    confirmIndicator.classList.add('confirmed');
-                    confirmButton.innerHTML = '<span class="indicator-dot confirmed" id="confirmIndicator"></span>Confirmed';
-                    confirmButton.style.opacity = '0.7';
-                    confirmButton.style.cursor = 'default';
+                    confirmButton.textContent = 'Update Mask';
+                    confirmButton.classList.add('update');
                     // Notify parent window via postMessage
                     if (window.parent !== window) {
                         window.parent.postMessage({ type: 'mask-confirmed' }, '*');
@@ -698,7 +728,7 @@
 
         // Keep Enter key as alternative
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !maskConfirmed) sendMask();
+            if (e.key === 'Enter') sendMask();
         });
 
         window.addEventListener('beforeunload', async () => {

@@ -1,7 +1,6 @@
 import gsap from 'gsap';
 import Matter from 'matter-js';
 import { ParticleSystem } from './webgl/ParticleSystem';
-import { GodRaySystem } from './webgl/GodRaySystem';
 import { ProgressBar } from './components/ProgressBar';
 
 // ===== Internal state =====
@@ -18,7 +17,6 @@ let portalParticleInterval: ReturnType<typeof setInterval> | null = null;
 let portalActive = false;
 
 let particleSystem: ParticleSystem | null = null;
-let godRaySystem: GodRaySystem | null = null;
 let progressBar: ProgressBar | null = null;
 let isSelectionActive = false;
 let progressEffectInterval: ReturnType<typeof setInterval> | null = null;
@@ -208,13 +206,6 @@ function hidePortal() {
   }, 300);
 }
 
-// ===== Dynamic single godray: spawned every frame at collision =====
-function spawnSingleGodray(x: number, y: number, t: number) {
-  const spread = 70;
-  const baseAngle = 180 + (t - 0.5) * spread;
-  godRaySystem?.spawn(x, y, baseAngle);
-}
-
 // ===== Helper: create a fixed-position flying element =====
 function createFlyingElement(
   src: string,
@@ -362,7 +353,6 @@ export function startInstantBurst(src: string, onComplete: () => void) {
   if (!progressBar) progressBar = new ProgressBar();
 
   particleSystem = new ParticleSystem(src);
-  godRaySystem = new GodRaySystem(src);
 
   // Instant burst: lots of particles from the top, scattering left/right
   const screenW = window.innerWidth;
@@ -373,45 +363,12 @@ export function startInstantBurst(src: string, onComplete: () => void) {
     particleSystem?.emit(x, -20, angle, speed, 0);
   }
 
-  // Burst godrays
-  for (let i = 0; i < 10; i++) {
-    const x = Math.random() * screenW;
-    const y = Math.random() * 100 - 30;
-    const angle = 90 + (Math.random() - 0.5) * 120;
-    godRaySystem?.spawn(x, y, angle);
-  }
-
-  // Render loop for burst particles (no right-edge spawning)
-  let rafId: number;
-  const animate = () => {
-    godRaySystem?.update();
-    godRaySystem?.render();
-
-    const cardEls = document.querySelectorAll('[data-card-item]');
-    const cardRects: Array<{ x: number; y: number; w: number; h: number }> = [];
-    cardEls.forEach((el) => {
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        cardRects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
-      }
-    });
-    particleSystem?.setCardRects(cardRects);
-    particleSystem?.update(1 / 60);
-    particleSystem?.render();
-
-    rafId = requestAnimationFrame(animate);
-  };
-  rafId = requestAnimationFrame(animate);
-
   // Show progress bar then start it after bars are ready
   progressBar.show(src).then(() => {
+    startProgressEffects();
     progressBar?.start(() => {
       isSelectionActive = false;
-      cancelAnimationFrame(rafId);
-      particleSystem?.destroy();
-      particleSystem = null;
-      godRaySystem?.destroy();
-      godRaySystem = null;
+      stopProgressEffects();
       setTimeout(() => onComplete(), 120);
     });
   });
@@ -442,7 +399,6 @@ export function startSelectSuck(src: string, onComplete: () => void) {
   progressBar.show(src);
 
   particleSystem = new ParticleSystem(src);
-  godRaySystem = new GodRaySystem(src);
 
   const engine = Matter.Engine.create();
   engine.gravity.y = 0;
@@ -519,14 +475,6 @@ export function startSelectSuck(src: string, onComplete: () => void) {
     if (intersection && exitRatio < 1) {
       const segLength = Math.abs(intersection[1].y - intersection[0].y);
 
-      // Godrays: distributed along the entire intersection segment
-      const godrayCount = Math.max(2, Math.min(8, Math.floor(segLength / 120)));
-      for (let i = 0; i < godrayCount; i++) {
-        const t = Math.random();
-        const py = intersection[0].y + (intersection[1].y - intersection[0].y) * t;
-        spawnSingleGodray(portalX, py, 1 - t);
-      }
-
       // Particles: emitted along the entire intersection segment
       // More pixels swallowed this frame → higher particle speeds
       const speedFactor = 0.5 + 1.6 * Math.min(1, swallowed / 15);
@@ -548,7 +496,6 @@ export function startSelectSuck(src: string, onComplete: () => void) {
         const py = bounds.top + Math.random() * (bounds.bottom - bounds.top);
         const t = (py - bounds.top) / Math.max(1, bounds.bottom - bounds.top);
         const baseAngle = 180 - (t - 0.5) * 70;
-        godRaySystem?.spawn(window.innerWidth, py, baseAngle);
         const count = 2 + Math.floor(Math.random() * 3);
         for (let i = 0; i < count; i++) {
           const pAngle = baseAngle + (Math.random() - 0.5) * 14;
@@ -557,9 +504,6 @@ export function startSelectSuck(src: string, onComplete: () => void) {
         }
       }
     }
-
-    godRaySystem?.update();
-    godRaySystem?.render();
 
     const cardEls = document.querySelectorAll('[data-card-item]');
     const cardRects: Array<{ x: number; y: number; w: number; h: number }> = [];
@@ -578,9 +522,7 @@ export function startSelectSuck(src: string, onComplete: () => void) {
     } else {
       stopSelectSuck(true);
       const bounds = progressBar?.getBounds();
-      if (bounds) {
-        startProgressEffects(bounds.top, bounds.bottom);
-      }
+      startProgressEffects();
       progressBar?.start(() => {
         isSelectionActive = false;
         stopProgressEffects();
@@ -592,24 +534,19 @@ export function startSelectSuck(src: string, onComplete: () => void) {
   selectRaf = requestAnimationFrame(tick);
 }
 
-function startProgressEffects(barTop: number, barBottom: number) {
+function startProgressEffects() {
   if (progressEffectInterval) return;
   progressEffectInterval = setInterval(() => {
-    const py = barTop + Math.random() * (barBottom - barTop);
-    const t = (py - barTop) / Math.max(1, barBottom - barTop);
-    const baseAngle = 180 - (t - 0.5) * 70;
+    const screenW = window.innerWidth;
 
-    godRaySystem?.spawn(window.innerWidth, py, baseAngle);
-
-    const count = 3 + Math.floor(Math.random() * 4);
-    for (let i = 0; i < count; i++) {
-      const pAngle = baseAngle + (Math.random() - 0.5) * 14;
-      const pSpeed = 300 + Math.random() * 500;
-      particleSystem?.emit(window.innerWidth, py, pAngle, pSpeed, 0);
+    // Rain: continuous particles falling from top
+    const rainCount = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < rainCount; i++) {
+      const x = Math.random() * screenW;
+      const angle = 90 + (Math.random() - 0.5) * 40; // 70° ~ 110°
+      const speed = 300 + Math.random() * 400;
+      particleSystem?.emit(x, -10, angle, speed, 0);
     }
-
-    godRaySystem?.update();
-    godRaySystem?.render();
 
     const cardEls = document.querySelectorAll('[data-card-item]');
     const cardRects: Array<{ x: number; y: number; w: number; h: number }> = [];
@@ -632,8 +569,6 @@ function stopProgressEffects() {
   }
   particleSystem?.destroy();
   particleSystem = null;
-  godRaySystem?.destroy();
-  godRaySystem = null;
 }
 
 export function stopSelectSuck(keepEffects = false) {
@@ -646,8 +581,6 @@ export function stopSelectSuck(keepEffects = false) {
   if (!keepEffects) {
     particleSystem?.destroy();
     particleSystem = null;
-    godRaySystem?.destroy();
-    godRaySystem = null;
   }
   hidePortal();
   progressBar?.reset();
