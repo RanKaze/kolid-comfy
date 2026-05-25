@@ -416,6 +416,7 @@
         let altResizeBaseSize = 20;
         const ALT_RESIZE_SENSITIVITY = 0.5;
         let maskConfirmed = false;
+        let currentLoop = '0';
 
         async function loadImage() {
             try {
@@ -722,7 +723,7 @@
                 const response = await fetch('/mask', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mask: base64 })
+                    body: JSON.stringify({ mask: base64, loop: currentLoop })
                 });
                 if (response.ok) {
                     const wasConfirmed = maskConfirmed;
@@ -754,13 +755,23 @@
             if (e.key === 'Enter') sendMask();
         });
 
-        // Listen for get-mask from parent window (legacy, no longer used by Run Detail)
+        // Listen for messages from parent window
         window.addEventListener('message', (event) => {
             if (event.data?.type === 'get-mask') {
                 const base64 = canvas.toDataURL('image/png');
                 if (window.parent !== window) {
                     window.parent.postMessage({ type: 'mask-data', mask: base64 }, '*');
                 }
+            } else if (event.data?.type === 'new-loop') {
+                // Parent signals a new loop: update loop token, clear canvas and reload image/mask
+                currentLoop = String(event.data.loop ?? '0');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                maskConfirmed = false;
+                confirmButton.textContent = 'Confirm Mask';
+                confirmButton.classList.remove('update');
+                status.textContent = 'Loading...';
+                status.classList.remove('success');
+                loadImage();
             }
         });
 

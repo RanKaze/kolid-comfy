@@ -83,10 +83,9 @@ const App: React.FC = () => {
     postSelection(key, customImage);
     if (imgSrc) {
       previewLockedRef.current = true;
-      startInstantBurst(imgSrc, () => window.close());
+      startInstantBurst(imgSrc, () => {});
     } else {
       setHovered(null);
-      window.close();
     }
   };
 
@@ -101,7 +100,6 @@ const App: React.FC = () => {
     reader.onload = () => {
       const base64 = reader.result as string;
       postSelection('__custom__', base64);
-      window.close();
     };
     reader.readAsDataURL(file);
   };
@@ -111,18 +109,12 @@ const App: React.FC = () => {
     reader.onload = () => {
       const base64 = reader.result as string;
       postSelection('__custom__', base64);
-      window.close();
     };
     reader.readAsDataURL(file);
   };
 
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      navigator.sendBeacon?.('/window_closed', '');
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
+  // Removed: beforeunload handler that sent /window_closed.
+  // Window closing is now managed entirely by the parent sampler page.
 
   useEffect(() => {
     return () => {

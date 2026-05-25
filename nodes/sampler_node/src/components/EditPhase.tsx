@@ -42,11 +42,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onRunTag,
   onFinish,
 }) => {
+  const maskIframeRef = React.useRef<HTMLIFrameElement>(null);
   const isMaskPhase = phase === 'mask';
   const isTagPhase = phase === 'tag';
   const isPromptPhase = phase === 'prompt';
   const isWaiting = phase === 'waiting';
   const isSwitchPhase = phase === 'switch';
+
+  // Notify mask iframe when loop changes (no key remount, use single iframe)
+  React.useEffect(() => {
+    const iframe = maskIframeRef.current;
+    if (iframe?.contentWindow) {
+      iframe.contentWindow.postMessage({ type: 'new-loop', loop: loopCount }, '*');
+    }
+  }, [loopCount]);
 
   const hasTagPanel = !!tagPreviews;
 
@@ -98,7 +107,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   };
 
   const showSwitch = !!switchUrl && (isSwitchPhase || isWaiting);
-  const showTag = hasTagPanel;
+  const showTag = hasTagPanel && !isMaskPhase;
 
   return (
     <div style={styles.container}>
@@ -130,8 +139,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             Mask Editor
           </div>
           <iframe
-            key={`mask-${loopCount}`}
-            src={`${maskUrl}?loop=${loopCount}&t=${Date.now()}`}
+            ref={maskIframeRef}
+            src={maskUrl}
             style={styles.iframe}
             title="Mask Editor"
             allow="clipboard-write"
@@ -190,6 +199,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             Prompt Selector
           </div>
           <iframe
+            key={`prompt-${loopCount}`}
             ref={promptIframeRef}
             src={promptUrl}
             style={styles.iframe}
@@ -206,6 +216,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               Result Switch
             </div>
             <iframe
+              key={`switch-${loopCount}`}
               src={switchUrl}
               style={styles.iframe}
               title="Result Switch"
