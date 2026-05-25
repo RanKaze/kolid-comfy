@@ -228,13 +228,13 @@ def image_to_base64(image_tensor):
 
 
 def mask_to_base64(mask_tensor):
-    """将mask张量转换为base64编码的PNG
+    """将mask张量转换为base64编码的PNG (红色半透明RGBA，透明背景)
     
     Args:
         mask_tensor: mask张量，形状为 (B, H, W) 或 (H, W)，值范围 [0, 1]
     
     Returns:
-        str: base64编码的PNG图片字符串
+        str: base64编码的PNG图片字符串 (RGBA)
     """
     if isinstance(mask_tensor, torch.Tensor):
         mask_np = mask_tensor.cpu().numpy()
@@ -247,11 +247,20 @@ def mask_to_base64(mask_tensor):
     
     mask_np = np.squeeze(mask_np)
     
-    # 转为uint8
+    # 转为uint8 alpha通道
     mask_uint8 = (np.clip(mask_np, 0.0, 1.0) * 255).astype(np.uint8)
+    h, w = mask_uint8.shape
+    
+    # 构建RGBA图像: 红色半透明前景 + 透明背景
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[:, :, 0] = 255   # R
+    rgba[:, :, 3] = mask_uint8  # A (mask强度决定透明度)
+    
+    # cv2默认BGRA格式
+    bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
     
     # 编码为png
-    _, buffer = cv2.imencode('.png', mask_uint8)
+    _, buffer = cv2.imencode('.png', bgra)
     base64_str = base64.b64encode(buffer).decode('utf-8')
     return f"data:image/png;base64,{base64_str}"
 

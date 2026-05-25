@@ -19,7 +19,6 @@ interface EditPhaseProps {
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   params: DetailerParams;
   onParamChange: (params: DetailerParams) => void;
-  onAutoTag: () => void;
   onRunTag: (mode: 'mask' | 'covered' | 'full') => void;
   onFinish: () => void;
 }
@@ -40,7 +39,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   promptIframeRef,
   params,
   onParamChange,
-  onAutoTag,
   onRunTag,
   onFinish,
 }) => {
@@ -294,19 +292,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         )}
 
         <div style={styles.actionRow}>
-          {isPromptPhase && (
-            <button
-              style={{
-                ...styles.autoTagBtn,
-                opacity: autoTagging ? 0.6 : 1,
-                cursor: autoTagging ? 'wait' : 'pointer',
-              }}
-              onClick={onAutoTag}
-              disabled={autoTagging}
-            >
-              {autoTagging ? 'Tagging...' : (maskConfirmed ? 'Auto Mask Tag' : 'Auto Tag')}
-            </button>
-          )}
           <button style={styles.secondaryBtn} onClick={onFinish}>
             {isSwitchPhase ? 'Finish & Close' : 'Finish'}
           </button>
