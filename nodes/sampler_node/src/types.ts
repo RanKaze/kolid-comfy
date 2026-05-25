@@ -20,7 +20,7 @@ export interface DetailerParams {
 }
 
 export interface StatusResponse {
-  detail_status: 'idle' | 'running' | 'done' | 'error';
+  detail_status: 'idle' | 'running' | 'selecting' | 'done' | 'error';
   loop_count: number;
   error?: string;
 }
@@ -36,4 +36,16 @@ export interface TagPreviews {
   full?: string;
   mask?: string;
   covered?: string;
+}
+
+export interface DebugRecoverData {
+  background: string;
+  image: string;
+  mask: string;
+  crop_x: number;
+  crop_y: number;
+  crop_width: number;
+  crop_height: number;
+  original_width: number;
+  original_height: number;
 }

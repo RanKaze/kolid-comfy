@@ -1,6 +1,7 @@
 import React from 'react';
+import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
 import AdvancedSettings from './AdvancedSettings';
-import type { DetailerParams, Phase, TagPreviews } from '../types';
+import type { DetailerParams, Phase, TagPreviews, DebugRecoverData } from '../types';
 
 interface EditPhaseProps {
   phase: Phase;
@@ -14,6 +15,7 @@ interface EditPhaseProps {
   autoTagResult: string | null;
   tagPreviews: TagPreviews | null;
   tagResult: string | null;
+  debugData: DebugRecoverData | null;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   params: DetailerParams;
   onParamChange: (params: DetailerParams) => void;
@@ -34,6 +36,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   autoTagResult,
   tagPreviews,
   tagResult,
+  debugData,
   promptIframeRef,
   params,
   onParamChange,
@@ -51,34 +54,52 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const getPanelFlex = (type: 'mask' | 'prompt' | 'tag' | 'switch') => {
     if (isMaskPhase) {
-      if (type === 'mask') return hasTagPanel ? 1.8 : 2.5;
-      if (type === 'prompt') return hasTagPanel ? 0.8 : 1.0;
-      if (type === 'tag') return hasTagPanel ? 0.3 : 0;
+      // Mask 阶段：mask 为主，prompt 为辅
+      if (type === 'mask') return hasTagPanel ? 2.0 : 2.5;
+      if (type === 'prompt') return hasTagPanel ? 0.6 : 0.8;
+      if (type === 'tag') return hasTagPanel ? 0.4 : 0;
       return 0;
     }
     if (isTagPhase) {
-      if (type === 'mask') return 0.6;
-      if (type === 'tag') return 0.4;
-      if (type === 'prompt') return 0.6;
+      // Tag 阶段：三者均衡
+      if (type === 'mask') return 0.8;
+      if (type === 'tag') return 1.0;
+      if (type === 'prompt') return 0.8;
       return 0;
     }
-    if (isPromptPhase || isWaiting) {
-      if (type === 'mask') return 0.5;
-      if (type === 'prompt') return hasTagPanel ? 2.0 : 2.5;
+    if (isPromptPhase) {
+      // Prompt 阶段：prompt 为主
+      if (type === 'mask') return 0.4;
+      if (type === 'prompt') return hasTagPanel ? 2.2 : 2.5;
+      if (type === 'tag') return hasTagPanel ? 0.15 : 0;
+      return 0;
+    }
+    if (isWaiting) {
+      // Waiting 阶段：如果有 switch，switch 为主；否则和 prompt 阶段类似
+      if (showSwitch) {
+        if (type === 'switch') return 3.0;
+        if (type === 'mask') return 0.3;
+        if (type === 'prompt') return 0.4;
+        if (type === 'tag') return hasTagPanel ? 0.1 : 0;
+        return 0;
+      }
+      if (type === 'mask') return 0.4;
+      if (type === 'prompt') return hasTagPanel ? 2.2 : 2.5;
       if (type === 'tag') return hasTagPanel ? 0.15 : 0;
       return 0;
     }
     if (isSwitchPhase) {
-      if (type === 'switch') return 2.0;
-      if (type === 'mask') return 0.35;
-      if (type === 'prompt') return 0.35;
-      if (type === 'tag') return hasTagPanel ? 0.12 : 0;
+      // Switch 阶段：switch 为主，其余为辅
+      if (type === 'switch') return 3.0;
+      if (type === 'mask') return 0.2;
+      if (type === 'prompt') return 0.2;
+      if (type === 'tag') return hasTagPanel ? 0.08 : 0;
       return 0;
     }
     return 1;
   };
 
-  const showSwitch = isSwitchPhase && !!switchUrl;
+  const showSwitch = !!switchUrl && (isSwitchPhase || isWaiting);
   const showTag = hasTagPanel;
 
   return (
@@ -111,7 +132,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             Mask Editor
           </div>
           <iframe
-            src={maskUrl}
+            key={`mask-${loopCount}`}
+            src={`${maskUrl}?loop=${loopCount}&t=${Date.now()}`}
             style={styles.iframe}
             title="Mask Editor"
             allow="clipboard-write"
@@ -194,8 +216,31 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           </div>
         )}
 
+        {/* Debug panel */}
+        {isSwitchPhase && debugData && (
+          <div style={{ ...getPanelStyle(true), flex: 1, borderColor: '#ff453a', maxWidth: 360, overflowY: 'auto' }}>
+            <div style={styles.panelLabel}>
+              <StatusDot active={true} />
+              Debug: recover_crop
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '44px 10px 10px' }}>
+              <DebugImage src={debugData.background} label="Background" />
+              <DebugImage src={debugData.image} label="Image (to paste)" />
+              <DebugMask src={debugData.mask} label="Mask" />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                <DebugString label="crop_x" value={debugData.crop_x} />
+                <DebugString label="crop_y" value={debugData.crop_y} />
+                <DebugString label="crop_w" value={debugData.crop_width} />
+                <DebugString label="crop_h" value={debugData.crop_height} />
+                <DebugString label="orig_w" value={debugData.original_width} />
+                <DebugString label="orig_h" value={debugData.original_height} />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Waiting overlay */}
-        {isWaiting && (
+        {isWaiting && !switchUrl && (
           <div style={styles.waitingOverlay}>
             <div style={styles.spinner} />
             <div style={styles.waitingTitle}>Running Detailer</div>

@@ -124,6 +124,42 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
+    @staticmethod
+    def parse_prompt_data(prompt_data):
+        """Parse prompt payload into user_positive and user_loras strings."""
+        user_positive = ''
+        user_loras = ''
+        if not prompt_data:
+            return user_positive, user_loras
+
+        prompt_parts = []
+        for p in (prompt_data.get('prompts') or []):
+            if p.startswith('<') and p.endswith('>'):
+                prompt_parts.append(p[1:-1])
+            else:
+                prompt_parts.append(p.replace('[', '').replace(']', ''))
+        custom = prompt_data.get('custom_prompts', '')
+        if custom:
+            prompt_parts.append(custom)
+        user_positive = ', '.join(prompt_parts)
+
+        lora_items = prompt_data.get('loras') or []
+        lora_str_parts = []
+        for item in lora_items:
+            if not item.get('active', True):
+                continue
+            fp = item.get('file_path', '')
+            strength = item.get('strength', 1.0)
+            active_tags = item.get('active_tags', [])
+            split_mode = item.get('split_mode', False)
+            if split_mode and active_tags:
+                for tag in active_tags:
+                    lora_str_parts.append(f"<lora:{fp}:{strength}:{tag}>")
+            else:
+                lora_str_parts.append(f"<lora:{fp}:{strength}>")
+        user_loras = ', '.join(lora_str_parts)
+        return user_positive, user_loras
+
     def get_active_loras_string(self, prefab_loras=None, prompt_separator=", ", lora_path_mode=False):
         """Compute active_loras output from user selections + prefab expansions."""
         all_loras = self.selected_loras + (prefab_loras or [])
@@ -439,9 +475,12 @@ class SnapshotPromptServer:
             return ""
 
     def start(self):
+        import socketserver
+        class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            pass
         for port in range(8500, 8600):
             try:
-                self.server = http.server.HTTPServer(('localhost', port), self.PromptHandler)
+                self.server = ThreadingHTTPServer(('localhost', port), self.PromptHandler)
                 self.port = port
                 self.started = True
                 print(f"[SnapshotPrompt] Server started on port {port}")

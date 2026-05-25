@@ -251,9 +251,12 @@ class SnapshotSwitchServer:
         self.should_stop = False
 
     def start(self):
+        import socketserver
+        class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            pass
         for port in range(8600, 8700):
             try:
-                self.server = http.server.HTTPServer(('localhost', port), self.SwitchHandler)
+                self.server = ThreadingHTTPServer(('localhost', port), self.SwitchHandler)
                 self.port = port
                 self.started = True
                 print(f"[SnapshotSwitch] Server started on port {port}")

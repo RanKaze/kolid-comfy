@@ -419,24 +419,36 @@
 
         async function loadImage() {
             try {
-                const response = await fetch('/image_data');
+                const response = await fetch('/image_data', { cache: 'no-store' });
                 const data = await response.json();
-                baseImage.src = data.image;
-                baseImage.onload = () => {
-                    fitCanvas();
-                    if (data.initial_mask) {
-                        const maskImg = new Image();
-                        maskImg.onload = () => {
-                            ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
-                        };
-                        maskImg.src = data.initial_mask;
-                    }
-                    if (data.has_detector) {
-                        hasDetector = true;
-                        detectorSection.classList.add('visible');
-                    }
-                    status.textContent = 'Ready';
+
+                const handleImageLoaded = () => {
+                    // Defer fitCanvas to next tick so browser has finished layout
+                    setTimeout(() => {
+                        fitCanvas();
+                        if (data.initial_mask) {
+                            const maskImg = new Image();
+                            maskImg.onload = () => {
+                                ctx.globalCompositeOperation = 'source-over';
+                                ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
+                            };
+                            maskImg.src = data.initial_mask;
+                        }
+                        if (data.has_detector) {
+                            hasDetector = true;
+                            detectorSection.classList.add('visible');
+                        }
+                        status.textContent = 'Ready';
+                    }, 0);
                 };
+
+                // 如果 src 与当前相同，直接执行加载逻辑，避免 onload 不触发
+                if (baseImage.getAttribute('src') === data.image) {
+                    handleImageLoaded();
+                } else {
+                    baseImage.onload = handleImageLoaded;
+                    baseImage.src = data.image;
+                }
             } catch (error) {
                 console.error('Error loading image:', error);
                 status.textContent = 'Error loading image';
@@ -446,6 +458,12 @@
         function fitCanvas() {
             const rect = baseImage.getBoundingClientRect();
             const containerRect = imageContainer.getBoundingClientRect();
+            // Guard against zero-size images before layout is complete
+            if (rect.width <= 0 || rect.height <= 0) {
+                console.warn('[MaskNode] Image rect is zero, deferring fitCanvas');
+                setTimeout(fitCanvas, 50);
+                return;
+            }
             canvas.style.left = (rect.left - containerRect.left) + 'px';
             canvas.style.top = (rect.top - containerRect.top) + 'px';
             canvas.width = rect.width;
@@ -598,8 +616,13 @@
         });
 
         // Clear
-        document.getElementById('clearButton').addEventListener('click', () => {
+        document.getElementById('clearButton').addEventListener('click', async () => {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            try {
+                await fetch('/clear', { method: 'POST' });
+            } catch (err) {
+                console.error('Clear failed:', err);
+            }
         });
 
         // Grow size slider
@@ -731,6 +754,16 @@
             if (e.key === 'Enter') sendMask();
         });
 
+        // Listen for get-mask from parent window (legacy, no longer used by Run Detail)
+        window.addEventListener('message', (event) => {
+            if (event.data?.type === 'get-mask') {
+                const base64 = canvas.toDataURL('image/png');
+                if (window.parent !== window) {
+                    window.parent.postMessage({ type: 'mask-data', mask: base64 }, '*');
+                }
+            }
+        });
+
         window.addEventListener('beforeunload', async () => {
             try {
                 await fetch('/window_closed', {
@@ -753,11 +786,16 @@
             ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
         });
 
-        window.addEventListener('load', () => {
+        function initOnLoad() {
             loadImage();
             updateCursorSize();
             updateCursorMode();
-        });
+        }
+        if (document.readyState === 'complete') {
+            initOnLoad();
+        } else {
+            window.addEventListener('load', initOnLoad);
+        }
     </script>
 </body>
 </html>
