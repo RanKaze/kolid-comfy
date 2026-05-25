@@ -3,10 +3,12 @@ import re
 import json
 import threading
 import http.server
+import socketserver
 import webbrowser
 import time
 import base64
 import io
+import urllib.request
 import numpy as np
 from PIL import Image
 import torch
@@ -43,8 +45,8 @@ except ImportError as e:
     get_loras_from_string = None
 
 # Detailer 工具函数（内联，不再引用 sampler_node 中的节点）
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images
-from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, mask_to_base64, set_inpaint_mask
+from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.detect_utils import detect_mask
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -54,50 +56,6 @@ import gc
 # =============================================================================
 # Helpers
 # =============================================================================
-def _tensor_to_base64(image_tensor: torch.Tensor) -> str:
-    """Convert an image tensor [B,H,W,C] or [1,H,W,C] to base64 JPEG data URL."""
-    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
-    img = Image.fromarray(img_array, mode='RGB')
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=90)
-    b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    return f"data:image/jpeg;base64,{b64}"
-
-
-def _set_inpaint_mask(resized_image: torch.Tensor, resized_mask: torch.Tensor, vae, grow_mask_by: int = 0):
-    """处理 inpaint_mode 下的 mask 与 image 预处理"""
-    import math
-    downscale_ratio = vae.spacial_compression_encode() if hasattr(vae, 'spacial_compression_encode') else 8
-    x = (resized_image.shape[1] // downscale_ratio) * downscale_ratio
-    y = (resized_image.shape[2] // downscale_ratio) * downscale_ratio
-    resized_mask = torch.nn.functional.interpolate(
-        resized_mask.reshape((-1, 1, resized_mask.shape[-2], resized_mask.shape[-1])),
-        size=(resized_image.shape[1], resized_image.shape[2]),
-        mode="bilinear"
-    )
-    resized_image = resized_image.clone()
-    if resized_image.shape[1] != x or resized_image.shape[2] != y:
-        x_offset = (resized_image.shape[1] % downscale_ratio) // 2
-        y_offset = (resized_image.shape[2] % downscale_ratio) // 2
-        resized_image = resized_image[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
-        resized_mask = resized_mask[:, :, x_offset:x + x_offset, y_offset:y + y_offset]
-    if grow_mask_by == 0:
-        mask_erosion = resized_mask
-    else:
-        kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
-        padding = math.ceil((grow_mask_by - 1) / 2)
-        mask_erosion = torch.clamp(
-            torch.nn.functional.conv2d(resized_mask.round(), kernel_tensor, padding=padding),
-            0, 1
-        )
-    m = (1.0 - resized_mask.round()).squeeze(1)
-    for i in range(3):
-        resized_image[:, :, :, i] -= 0.5
-        resized_image[:, :, :, i] *= m
-        resized_image[:, :, :, i] += 0.5
-    t = vae.encode(resized_image)
-    tmp_latent = {"samples": t, "noise_mask": mask_erosion[:, :, :x, :y].round()}
-    return resized_image, tmp_latent
 class SnapshotDetailerSamplerServer:
     """
     Composed server that orchestrates:
@@ -126,9 +84,9 @@ class SnapshotDetailerSamplerServer:
         self.unique_id = unique_id
         self.context_regex = context_regex
 
-        self.current_image = pipeline.get_image() if pipeline else None
         self.original_image = None
         self.detailed_image = None
+        self.debug_recover_data = None  # debug: background/image/mask before recover_crop
 
         self.loop_count = 0
         self.phase = 'edit'
@@ -152,29 +110,35 @@ class SnapshotDetailerSamplerServer:
         self.browser_url = ""
         self.started = False
 
+    def _on_mask_set(self, mask):
+        """Callback when mask is confirmed in the mask editor."""
+        if self.pipeline is not None:
+            self.pipeline.mask = mask
+            print(f"[SnapshotDetailerSampler] Pipeline mask updated, shape={mask.shape if mask is not None else None}")
+
     def _generate_tag_previews(self):
         """Generate three preview images for tag selection: full, mask_crop, covered."""
-        if self.current_image is None or self.mask_server is None or self.mask_server.mask is None:
+        if self.pipeline is None or self.pipeline.image is None or self.mask_server is None or self.mask_server.get_mask() is None:
             return {}
         try:
             from ..libs.image_utils import crop_mask
-            img = self.current_image
-            mask = self.mask_server.mask
+            img = self.pipeline.image
+            mask = self.mask_server.get_mask()
             if img.dim() == 3:
                 img = img.unsqueeze(0)
             if mask.dim() == 2:
                 mask = mask.unsqueeze(0)
             # 1. Full image
-            previews = {'full': _tensor_to_base64(img)}
+            previews = {'full': tensor_to_base64(img)}
             # 2. Mask crop + 3. Covered
             try:
                 cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
-                previews['mask'] = _tensor_to_base64(cropped_img)
+                previews['mask'] = tensor_to_base64(cropped_img)
                 # Covered: mask area keeps original, outside becomes white
                 white_bg = torch.ones_like(cropped_img)
                 mask_expanded = cropped_mask.unsqueeze(-1).float()
                 covered = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
-                previews['covered'] = _tensor_to_base64(covered)
+                previews['covered'] = tensor_to_base64(covered)
             except Exception as e:
                 print(f'[TagPreview] crop failed: {e}')
                 previews['mask'] = previews['full']
@@ -192,9 +156,10 @@ class SnapshotDetailerSamplerServer:
         if SnapshotMaskNodeServer is None:
             raise RuntimeError("SnapshotMaskNodeServer not available")
         self.mask_server = SnapshotMaskNodeServer(
-            image=self.current_image,
+            image=self.pipeline.image if self.pipeline is not None else None,
             detector=self.detector,
         )
+        self.mask_server._on_mask_set = self._on_mask_set
         t_mask = threading.Thread(target=self.mask_server.start)
         t_mask.daemon = True
         t_mask.start()
@@ -232,10 +197,28 @@ class SnapshotDetailerSamplerServer:
 
         self.prompt_url = self.prompt_server.browser_url
 
-        # 3) Main server ------------------------------------------------------
+        # 3) Switch server (pre-created, started later after detailer finishes)
+        if SnapshotSwitchServer is not None:
+            self.switch_server = SnapshotSwitchServer(
+                input_keys=['original', 'detailed'],
+                input_previews={
+                    'original': {'type': 'image', 'data': tensor_to_base64(self.pipeline.image if self.pipeline is not None and self.pipeline.image is not None else torch.zeros(1, 512, 512, 3))},
+                    'detailed': {'type': 'image', 'data': tensor_to_base64(self.pipeline.image if self.pipeline is not None and self.pipeline.image is not None else torch.zeros(1, 512, 512, 3))},
+                },
+                connection_info={
+                    '__node_title__': 'Detailer Result',
+                    'original': 'Original',
+                    'detailed': 'Detailed',
+                },
+                history=self.selected_history,
+            )
+
+        # 4) Main server ------------------------------------------------------
+        class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            pass
         for port in range(8700, 8800):
             try:
-                self.main_server = http.server.HTTPServer(
+                self.main_server = ThreadedHTTPServer(
                     ('localhost', port), self.MainHandler
                 )
                 self.main_port = port
@@ -355,36 +338,16 @@ class SnapshotDetailerSamplerServer:
             t.join(timeout=2.0)
 
     # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
     # Detailer execution (background thread)
     # -------------------------------------------------------------------------
-    def _run_detailer(self):
+    def _run_detailer(self, user_mask, user_positive, user_loras):
         self.detail_status = 'running'
         self.detail_error = None
         try:
-            # --- read user mask ------------------------------------------------
-            user_mask = self.mask_server.mask if self.mask_server else None
-            if user_mask is None:
-                raise ValueError("Mask not submitted yet. Draw a mask and press Enter.")
-
-            # --- read user prompt ----------------------------------------------
-            ps = self.prompt_server
             print(f"[SnapshotDetailerSampler] ===== loop={self.loop_count} =====")
-            prompt_parts = []
-            for p in ps.selected_prompts:
-                if p.startswith('<') and p.endswith('>'):
-                    prompt_parts.append(p[1:-1])
-                else:
-                    prompt_parts.append(p.replace('[', '').replace(']', ''))
-            if ps.custom_prompts:
-                prompt_parts.append(ps.custom_prompts)
-            user_positive = ', '.join(prompt_parts)
-
-            # loras: 直接复用 SnapshotPromptServer 的格式化逻辑
-            print(f"[SnapshotDetailerSampler] ps.selected_prompts={ps.selected_prompts}")
-            print(f"[SnapshotDetailerSampler] ps.custom_prompts='{ps.custom_prompts}'")
-            print(f"[SnapshotDetailerSampler] ps.selected_loras={ps.selected_loras}")
-            print(f"[SnapshotDetailerSampler] ps.selected_prefabs={ps.selected_prefabs}")
-            user_loras = ps.get_active_loras_string(lora_path_mode=True)
             print(f"[SnapshotDetailerSampler] user_positive='{user_positive}'")
             print(f"[SnapshotDetailerSampler] user_loras='{user_loras}'")
 
@@ -543,13 +506,36 @@ class SnapshotDetailerSamplerServer:
 
             for processing_index in range(processing_size):
                 image_index = processing_mapping[processing_index]
+                bg = original_images[image_index]
+                img = recovered_images[processing_index]
+                msk = recovered_masks[processing_index]
+                cinfo = crop_infos[processing_index]
                 final_images[image_index], final_masks[image_index] = recover_crop(
-                    background=original_images[image_index],
-                    image=recovered_images[processing_index],
-                    crop_info=crop_infos[processing_index],
+                    background=bg,
+                    image=img,
+                    crop_info=cinfo,
                     recover_method='mask_blend',
-                    mask=recovered_masks[processing_index]
+                    mask=msk
                 )
+                # ---- debug: save final mask (full-size, not cropped) ----
+                try:
+                    self.debug_recover_data = {
+                        'background': tensor_to_base64(bg),
+                        'image': tensor_to_base64(img),
+                        'mask': mask_to_base64(final_masks[image_index]),
+                        'crop_x': cinfo.get('crop_x', 0),
+                        'crop_y': cinfo.get('crop_y', 0),
+                        'crop_width': cinfo.get('crop_width', 0),
+                        'crop_height': cinfo.get('crop_height', 0),
+                        'original_width': cinfo.get('original_width', 0),
+                        'original_height': cinfo.get('original_height', 0),
+                    }
+                except Exception as dbg_e:
+                    print(f'[Debug] failed to save recover debug data: {dbg_e}')
+                # ----------------------------------------------------------
+
+            # Save the full-size final mask for next loop's initial mask
+            self.last_used_mask = final_masks[0] if final_masks else None
 
             next_pipeline.image = final_images[0]
             next_pipeline.latent = None
@@ -571,21 +557,15 @@ class SnapshotDetailerSamplerServer:
                 self.pipeline.image = self.detailed_image
 
             # --- start switch server for result selection ----------------------
-            if SnapshotSwitchServer is not None and self.detailed_image is not None:
+            if SnapshotSwitchServer is not None and self.detailed_image is not None and self.switch_server is not None:
                 try:
-                    self.switch_server = SnapshotSwitchServer(
-                        input_keys=['original', 'detailed'],
-                        input_previews={
-                            'original': {'type': 'image', 'data': _tensor_to_base64(self.original_image)},
-                            'detailed': {'type': 'image', 'data': _tensor_to_base64(self.detailed_image)},
-                        },
-                        connection_info={
-                            '__node_title__': 'Detailer Result',
-                            'original': 'Original',
-                            'detailed': 'Detailed',
-                        },
-                        history=self.selected_history,
-                    )
+                    self.switch_server.should_stop = False
+                    self.switch_server.started = False
+                    self.switch_server.selection_event.clear()
+                    self.switch_server.selected_key = None
+                    self.switch_server.window_closed = False
+                    self.switch_server.input_previews['original'] = {'type': 'image', 'data': tensor_to_base64(self.original_image)}
+                    self.switch_server.input_previews['detailed'] = {'type': 'image', 'data': tensor_to_base64(self.detailed_image)}
                     t_switch = threading.Thread(target=self.switch_server.start)
                     t_switch.daemon = True
                     t_switch.start()
@@ -597,7 +577,37 @@ class SnapshotDetailerSamplerServer:
                         time.sleep(0.01)
                     if self.switch_server.started:
                         self.switch_url = self.switch_server.browser_url
+                        self.detail_status = 'selecting'
                         print(f"[SnapshotDetailerSampler] Switch server at {self.switch_url}")
+                        # Block and wait for user selection
+                        self.switch_server.selection_event.wait()
+                        selected_key = self.switch_server.selected_key
+                        if selected_key == 'original':
+                            self.pipeline.image = self.original_image
+                            print("[SnapshotDetailerSampler] User selected original image")
+                        elif selected_key == 'detailed' or not selected_key:
+                            self.pipeline.image = self.detailed_image
+                            print("[SnapshotDetailerSampler] User selected detailed image")
+                        else:
+                            # 处理历史图片选择
+                            selected_image = None
+                            for h in self.selected_history:
+                                if h.get('key') == selected_key:
+                                    src = h.get('src', '')
+                                    b64_data = src.split(',', 1)[1] if ',' in src else src
+                                    img_bytes = base64.b64decode(b64_data)
+                                    img = Image.open(io.BytesIO(img_bytes))
+                                    if img.mode != 'RGB':
+                                        img = img.convert('RGB')
+                                    arr = np.array(img).astype(np.float32) / 255.0
+                                    selected_image = torch.from_numpy(arr).unsqueeze(0)
+                                    break
+                            if selected_image is not None:
+                                self.pipeline.image = selected_image
+                                print(f"[SnapshotDetailerSampler] User selected history image: {selected_key}")
+                            else:
+                                self.pipeline.image = self.detailed_image
+                                print(f"[SnapshotDetailerSampler] Unknown selection '{selected_key}', fallback to detailed")
                 except Exception as e:
                     print(f"[SnapshotDetailerSampler] Failed to start switch server: {e}")
 
@@ -622,6 +632,9 @@ class SnapshotDetailerSamplerServer:
         def _send_json(self, data, status=200):
             self.send_response(status)
             self.send_header('Content-type', 'application/json')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode('utf-8'))
@@ -666,13 +679,14 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/status':
                 self._send_json({
                     'detail_status': inst.detail_status if inst else 'idle',
+                    'phase': inst.phase if inst else 'edit',
                     'loop_count': inst.loop_count if inst else 0,
                     'error': getattr(inst, 'detail_error', None),
                 })
                 return
 
             if self.path == '/api/has_mask':
-                has = inst.mask_server is not None and inst.mask_server.mask is not None
+                has = inst.mask_server is not None and inst.mask_server.get_mask() is not None
                 self._send_json({'has_mask': has})
                 return
 
@@ -688,8 +702,8 @@ class SnapshotDetailerSamplerServer:
                 if inst and inst.original_image is not None and inst.detailed_image is not None:
                     try:
                         self._send_json({
-                            'original_image': _tensor_to_base64(inst.original_image),
-                            'detailed_image': _tensor_to_base64(inst.detailed_image),
+                            'original_image': tensor_to_base64(inst.original_image),
+                            'detailed_image': tensor_to_base64(inst.detailed_image),
                         })
                     except Exception as e:
                         self._send_json({'error': str(e)}, 500)
@@ -715,6 +729,17 @@ class SnapshotDetailerSamplerServer:
                 self._send_json(previews)
                 return
 
+            if self.path == '/api/debug_recover_data':
+                if inst is None:
+                    self._send_json({'error': 'not ready'})
+                    return
+                data = inst.debug_recover_data
+                if data is None:
+                    self._send_json({'error': 'debug data not available yet'})
+                    return
+                self._send_json(data)
+                return
+
             self.send_error(404)
 
         def do_POST(self):
@@ -731,45 +756,58 @@ class SnapshotDetailerSamplerServer:
                 if inst.detail_status == 'running':
                     self._send_json({'started': False, 'error': 'Already running'})
                     return
-                if inst.mask_server is None or inst.mask_server.mask is None:
-                    self._send_json({
-                        'started': False,
-                        'error': 'Mask not submitted. Draw a mask and press Enter.'
-                    })
-                    return
                 length = int(self.headers.get('Content-Length', 0))
                 data = json.loads(self.rfile.read(length)) if length else {}
                 inst._apply_params(data)
-                inst.original_image = inst.current_image.clone()
+
+                prompt_data = data.get('prompt_data')
+
+                # Use mask from pipeline (set when user confirms in mask editor)
+                user_mask = inst.pipeline.mask if inst.pipeline is not None else None
+                if user_mask is None:
+                    self._send_json({'started': False, 'error': 'Mask not available. Please confirm mask first.'})
+                    return
+
+                # Parse prompt data
+                if SnapshotPromptServer is not None:
+                    user_positive, user_loras = SnapshotPromptServer.parse_prompt_data(prompt_data)
+                else:
+                    user_positive, user_loras = '', ''
+                if prompt_data:
+                    print(f"[SnapshotDetailerSampler] parsed user_positive='{user_positive}'")
+                    print(f"[SnapshotDetailerSampler] parsed user_loras='{user_loras}'")
+                else:
+                    print("[SnapshotDetailerSampler] No prompt_data provided, using empty prompt/lora.")
+
+                print(f"[DEBUG /api/run_detail] loop={inst.loop_count}")
+                print(f"[DEBUG /api/run_detail] mask shape={user_mask.shape}, sum={user_mask.sum().item()}")
+
+                inst.original_image = inst.pipeline.image.clone() if inst.pipeline is not None and inst.pipeline.image is not None else None
                 inst.detail_status = 'running'
                 inst.detail_error = None
-                t = threading.Thread(target=inst._run_detailer)
-                t.daemon = True
-                t.start()
-                self._send_json({'started': True})
+                inst.phase = 'waiting'
+                try:
+                    inst._run_detailer(user_mask, user_positive, user_loras)
+                    self._send_json({'started': True, 'done': True})
+                finally:
+                    if inst.pipeline is not None:
+                        inst.pipeline.mask = None
+                    if inst.mask_server:
+                        inst.mask_server.set_mask(None)
+                        inst.mask_server.set_initial_mask(None)
                 return
 
             if self.path == '/api/next_loop':
                 length = int(self.headers.get('Content-Length', 0))
                 data = json.loads(self.rfile.read(length)) if length else {}
-                # Determine which image to use based on switch selection or fallback
-                selected_key = None
-                if inst.switch_server:
-                    selected_key = inst.switch_server.selected_key
-                use_detailed = data.get('use_detailed', True)
-                selected_image = None
-                if selected_key == 'detailed' and inst.detailed_image is not None:
-                    selected_image = inst.detailed_image
-                elif selected_key == 'original':
-                    selected_image = inst.current_image
-                elif use_detailed and inst.detailed_image is not None:
-                    selected_image = inst.detailed_image
-                if selected_image is not None:
-                    inst.current_image = selected_image.clone()
-                    # save selected image to history for next switch display
+                # pipeline.image 已在 _run_detailer 中根据 switch 选择设置好
+                if inst.pipeline is not None:
+                    inst.pipeline.latent = None
+                # save current image to history for next switch display
+                if inst.pipeline is not None and inst.pipeline.image is not None:
                     inst.selected_history.append({
                         'key': f'loop_{inst.loop_count}',
-                        'src': _tensor_to_base64(selected_image),
+                        'src': tensor_to_base64(inst.pipeline.image),
                         'name': f'Loop {inst.loop_count} Result',
                     })
                     # limit history to last 10
@@ -780,16 +818,24 @@ class SnapshotDetailerSamplerServer:
                 inst.detail_status = 'idle'
                 inst.detail_error = None
                 inst.phase = 'edit'
-                # 保留 prompt/lora/prefab，但清空 custom_prompts（每次循环独立）
+                # 保留 last_selected 记录，但清空当前选择状态（每次循环独立）
                 if inst.prompt_server:
                     inst.prompt_server.last_selected = inst.prompt_server.selected_prompts[:]
                     inst.prompt_server.last_selected_loras = inst.prompt_server.selected_loras[:]
                     inst.prompt_server.last_selected_prefabs = inst.prompt_server.selected_prefabs[:]
+                    inst.prompt_server.selected_prompts = []
+                    inst.prompt_server.selected_loras = []
+                    inst.prompt_server.selected_prefabs = []
                     inst.prompt_server.custom_prompts = ''
+                    print(f"[DEBUG next_loop] cleared prompt selections")
                 if inst.mask_server:
-                    inst.mask_server.image = inst.current_image
-                    inst.mask_server.mask = None
-                    inst.mask_server.initial_mask = None
+                    print(f"[DEBUG next_loop] clearing mask (was shape={inst.mask_server.get_mask().shape if inst.mask_server.get_mask() is not None else None})")
+                    inst.mask_server.set_image(inst.pipeline.image if inst.pipeline is not None else None)
+                    inst.mask_server.set_mask(None)
+                    # Set initial_mask to last used full-size mask so user can refine it next loop
+                    inst.mask_server.set_initial_mask(getattr(inst, 'last_used_mask', None))
+                if inst.pipeline is not None:
+                    inst.pipeline.mask = None
                 # stop switch server in background to avoid blocking
                 if inst.switch_server:
                     def _stop_switch():
@@ -800,7 +846,6 @@ class SnapshotDetailerSamplerServer:
                     t = threading.Thread(target=_stop_switch)
                     t.daemon = True
                     t.start()
-                    inst.switch_server = None
                     inst.switch_url = ''
                 self._send_json({'ok': True})
                 return
@@ -821,11 +866,11 @@ class SnapshotDetailerSamplerServer:
                     mode = body.get('mode', 'mask')
                     from ..libs.caption_utils import get_tag
                     from ..libs.image_utils import crop_mask
-                    tag_image = inst.current_image
-                    if inst.mask_server and inst.mask_server.mask is not None:
+                    tag_image = inst.pipeline.image if inst.pipeline is not None else None
+                    if inst.mask_server and inst.mask_server.get_mask() is not None:
                         try:
                             img = tag_image
-                            mask = inst.mask_server.mask
+                            mask = inst.mask_server.get_mask()
                             if img.dim() == 3:
                                 img = img.unsqueeze(0)
                             if mask.dim() == 2:
@@ -849,6 +894,9 @@ class SnapshotDetailerSamplerServer:
                     import traceback
                     traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)})
+                finally:
+                    # Do NOT clear mask here — the user may still want to run detail with the same mask.
+                    pass
                 return
 
             if self.path == '/api/auto_tag':
@@ -858,12 +906,12 @@ class SnapshotDetailerSamplerServer:
                         return
                     from ..libs.caption_utils import get_tag
                     from ..libs.image_utils import crop_mask
-                    tag_image = inst.current_image
+                    tag_image = inst.pipeline.image if inst.pipeline is not None else None
                     # If user mask is available, crop to the masked region
-                    if inst.mask_server and inst.mask_server.mask is not None:
+                    if inst.mask_server and inst.mask_server.get_mask() is not None:
                         try:
                             img = tag_image
-                            mask = inst.mask_server.mask
+                            mask = inst.mask_server.get_mask()
                             if img.dim() == 3:
                                 img = img.unsqueeze(0)
                             if mask.dim() == 2:
@@ -880,6 +928,9 @@ class SnapshotDetailerSamplerServer:
                     import traceback
                     traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)})
+                finally:
+                    # Do NOT clear mask here — the user may still want to run detail with the same mask.
+                    pass
                 return
 
             if self.path == '/window_closed':

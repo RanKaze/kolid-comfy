@@ -1,9 +1,5 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
+import { renderApp } from '@kolid/ui-utils/react-entry';
 import App from './App';
+import '@kolid/ui-utils/base.css';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+renderApp(App);

@@ -1,0 +1,31 @@
+{
+  "name": "@kolid/ui-utils",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    },
+    "./vite": {
+      "import": "./src/vite-config.ts"
+    },
+    "./react-entry": {
+      "import": "./src/react-entry.tsx"
+    },
+    "./base.css": "./src/base.css",
+    "./tsconfig.base": "./tsconfig.base.json"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.3",
+    "vite": "^6.4.0",
+    "vite-plugin-singlefile": "^2.0.0"
+  }
+}

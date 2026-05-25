@@ -1,3 +1,5 @@
+import io
+import base64
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -741,6 +743,63 @@ def draw_mask(mask, color=(0, 255, 0, 128)):
     tensor = torch.from_numpy(result).float().contiguous()   # (B, H, W, 3)
 
     return tensor
+
+def tensor_to_base64(image_tensor: torch.Tensor) -> str:
+    """Convert an image tensor [B,H,W,C] or [1,H,W,C] to base64 JPEG data URL."""
+    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+    img = Image.fromarray(img_array, mode='RGB')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def mask_to_base64(mask_tensor: torch.Tensor) -> str:
+    """Convert a mask tensor [B,H,W] or [H,W] to base64 grayscale JPEG data URL."""
+    m = mask_tensor.squeeze().cpu().numpy()
+    img_array = (np.clip(m, 0, 1) * 255).astype(np.uint8)
+    img = Image.fromarray(img_array, mode='L')
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def set_inpaint_mask(resized_image: torch.Tensor, resized_mask: torch.Tensor, vae, grow_mask_by: int = 0):
+    """处理 inpaint_mode 下的 mask 与 image 预处理"""
+    import math
+    downscale_ratio = vae.spacial_compression_encode() if hasattr(vae, 'spacial_compression_encode') else 8
+    x = (resized_image.shape[1] // downscale_ratio) * downscale_ratio
+    y = (resized_image.shape[2] // downscale_ratio) * downscale_ratio
+    resized_mask = torch.nn.functional.interpolate(
+        resized_mask.reshape((-1, 1, resized_mask.shape[-2], resized_mask.shape[-1])),
+        size=(resized_image.shape[1], resized_image.shape[2]),
+        mode="bilinear"
+    )
+    resized_image = resized_image.clone()
+    if resized_image.shape[1] != x or resized_image.shape[2] != y:
+        x_offset = (resized_image.shape[1] % downscale_ratio) // 2
+        y_offset = (resized_image.shape[2] % downscale_ratio) // 2
+        resized_image = resized_image[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
+        resized_mask = resized_mask[:, :, x_offset:x + x_offset, y_offset:y + y_offset]
+    if grow_mask_by == 0:
+        mask_erosion = resized_mask
+    else:
+        kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
+        padding = math.ceil((grow_mask_by - 1) / 2)
+        mask_erosion = torch.clamp(
+            torch.nn.functional.conv2d(resized_mask.round(), kernel_tensor, padding=padding),
+            0, 1
+        )
+    m = (1.0 - resized_mask.round()).squeeze(1)
+    for i in range(3):
+        resized_image[:, :, :, i] -= 0.5
+        resized_image[:, :, :, i] *= m
+        resized_image[:, :, :, i] += 0.5
+    t = vae.encode(resized_image)
+    tmp_latent = {"samples": t, "noise_mask": mask_erosion[:, :, :x, :y].round()}
+    return resized_image, tmp_latent
+
 
 def batch_images(image0, image1):
     """

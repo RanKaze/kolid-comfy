@@ -36,13 +36,16 @@ export function useApi() {
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[]) => {
+  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], onBeforeClose?: () => void) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs }),
     });
-    if (res.ok) window.close();
+    if (res.ok) {
+      onBeforeClose?.();
+      window.close();
+    }
   }, []);
 
   const closeWindow = useCallback(() => {

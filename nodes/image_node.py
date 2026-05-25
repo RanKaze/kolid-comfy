@@ -390,12 +390,15 @@ class SnapshotImageNodeServer:
                 if os.path.exists(file_path):
                     self.send_response(200)
                     self.send_header('Content-type', 'application/javascript')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
                         self.wfile.write(f.read())
                 else:
                     self.send_error(404, "File not found")
-            elif self.path == '/image_data':
+            elif path == '/image_data':
                 # Serve image data as JSON
                 if self.server_instance:
                     try:
@@ -411,6 +414,9 @@ class SnapshotImageNodeServer:
                         self.send_response(200)
                         self.send_header('Content-type', 'application/json')
                         self.send_header('Content-Length', str(len(response_data)))
+                        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                        self.send_header('Pragma', 'no-cache')
+                        self.send_header('Expires', '0')
                         self.end_headers()
                         self.wfile.write(response_data)
                     except Exception as e:
@@ -592,6 +598,9 @@ class SnapshotImagePointsNodeServer:
                 if os.path.exists(file_path):
                     self.send_response(200)
                     self.send_header('Content-type', 'application/javascript')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
                         self.wfile.write(f.read())
@@ -1761,7 +1770,7 @@ def handleMask(serverHandler, set_event):
             mask_gray = mask_bgra.astype(np.float32) / 255.0
         
         # Get original image dimensions
-        original_image = serverHandler.server_instance.image
+        original_image = serverHandler.server_instance.get_image()
         if hasattr(original_image, 'shape'):
             if len(original_image.shape) == 4:
                 _, orig_h, orig_w, _ = original_image.shape
@@ -1785,9 +1794,9 @@ def handleMask(serverHandler, set_event):
         # Convert to torch tensor
         try:
             import torch
-            serverHandler.server_instance.mask = torch.from_numpy(mask_array).float()
+            serverHandler.server_instance.set_mask(torch.from_numpy(mask_array).float())
         except ImportError:
-            serverHandler.server_instance.mask = mask_array.astype(np.float32)
+            serverHandler.server_instance.set_mask(mask_array.astype(np.float32))
         
         serverHandler.send_response(200)
         serverHandler.send_header('Content-type', 'application/json')
@@ -1824,7 +1833,7 @@ def handleDetect(serverHandler):
             'fill_mask': data.get('fill_mask', True),
         }
         
-        image = instance.image
+        image = instance.get_image()
         # Ensure image is a single image tensor for detect_mask
         if hasattr(image, 'shape') and len(image.shape) == 4:
             # Use first image in batch
@@ -1951,10 +1960,10 @@ class SnapshotMaskNodeServer:
     """Temporary HTTP server to serve the mask drawing page and handle mask submission."""
 
     def __init__(self, image, initial_mask=None, detector=None):
-        self.image = image
-        self.initial_mask = initial_mask
+        self._image = image
+        self._initial_mask = initial_mask
         self.detector = detector
-        self.mask = None
+        self._mask = None
         self.server = None
         self.started = False
         self.screenshot_event = threading.Event()
@@ -1963,9 +1972,12 @@ class SnapshotMaskNodeServer:
 
     def start(self):
         # Find an available port
+        class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            pass
         for port in range(8080, 9000):
             try:
-                self.server = socketserver.TCPServer(('localhost', port), self.SnapshotMaskNodeHandler)
+                self.server = ThreadingTCPServer(('localhost', port), self.SnapshotMaskNodeHandler)
+                self.server.node_server = self  # each server instance holds its own node server
                 self.started = True
                 print(f"[SnapshotMask] Server started on port {port}")
                 break
@@ -1977,9 +1989,6 @@ class SnapshotMaskNodeServer:
         if not self.started:
             print("[SnapshotMask] Failed to start server")
             return
-        
-        # Store reference to self in the handler class
-        self.SnapshotMaskNodeHandler.server_instance = self
         
         # Serve forever
         try:
@@ -1993,21 +2002,56 @@ class SnapshotMaskNodeServer:
             self.server.shutdown()
             self.server.server_close()
 
+    def clear(self):
+        """Clear the current mask and initial mask."""
+        self._mask = None
+        self._initial_mask = None
+        print("[SnapshotMask] Mask cleared")
+
+    def set_image(self, image):
+        self._image = image
+
+    def get_image(self):
+        return self._image
+
+    def set_mask(self, mask):
+        self._mask = mask
+        if getattr(self, '_on_mask_set', None) is not None:
+            try:
+                self._on_mask_set(mask)
+            except Exception as e:
+                print(f"[SnapshotMask] _on_mask_set error: {e}")
+
+    def get_mask(self):
+        return self._mask
+
+    def set_initial_mask(self, initial_mask):
+        self._initial_mask = initial_mask
+
+    def get_initial_mask(self):
+        return self._initial_mask
+
     def wait_for_selection(self):
         """Wait for mask submission indefinitely."""
         if not waitSnapShot(self.screenshot_event):
             raise Exception("Canceled")
 
     class SnapshotMaskNodeHandler(http.server.SimpleHTTPRequestHandler):
-        server_instance = None
+        @property
+        def server_instance(self):
+            return getattr(self.server, 'node_server', None)
 
         def do_GET(self):
-            if self.path == '/mask_node.html':
+            path = self.path.split('?')[0]
+            if path == '/mask_node.html':
                 # Serve the mask_node.html file
                 file_path = os.path.join(os.path.dirname(__file__), 'web', 'mask_node.html')
                 if os.path.exists(file_path):
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
                         self.wfile.write(f.read())
@@ -2024,22 +2068,25 @@ class SnapshotMaskNodeServer:
                         self.wfile.write(f.read())
                 else:
                     self.send_error(404, "File not found")
-            elif self.path == '/image_data':
+            elif path == '/image_data':
                 # Serve image data as JSON
                 if self.server_instance:
                     try:
-                        image_base64 = image_to_base64(self.server_instance.image)
+                        image_base64 = image_to_base64(self.server_instance.get_image())
                         response = {
                             'image': image_base64
                         }
-                        if self.server_instance.initial_mask is not None:
-                            response['initial_mask'] = mask_to_base64(self.server_instance.initial_mask)
+                        if self.server_instance.get_initial_mask() is not None:
+                            response['initial_mask'] = mask_to_base64(self.server_instance.get_initial_mask())
                         # Detector info
                         response['has_detector'] = self.server_instance.detector is not None
                         response_data = json.dumps(response).encode('utf-8')
                         self.send_response(200)
                         self.send_header('Content-type', 'application/json')
                         self.send_header('Content-Length', str(len(response_data)))
+                        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                        self.send_header('Pragma', 'no-cache')
+                        self.send_header('Expires', '0')
                         self.end_headers()
                         self.wfile.write(response_data)
                     except Exception as e:
@@ -2047,6 +2094,30 @@ class SnapshotMaskNodeServer:
                         return
                 else:
                     self.send_error(500, "Server error")
+            elif path == '/get_mask':
+                # Return current mask as base64 PNG
+                if self.server_instance and self.server_instance.get_mask() is not None:
+                    try:
+                        mask_base64 = mask_to_base64(self.server_instance.get_mask())
+                        response = {'mask': mask_base64}
+                        response_data = json.dumps(response).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Content-Length', str(len(response_data)))
+                        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                        self.send_header('Pragma', 'no-cache')
+                        self.send_header('Expires', '0')
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        self.wfile.write(response_data)
+                    except Exception as e:
+                        self.send_error(500, f"Error encoding mask: {e}")
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'mask': None}).encode('utf-8'))
             else:
                 super().do_GET()
 
@@ -2057,6 +2128,14 @@ class SnapshotMaskNodeServer:
                 handleDetect(self)
             elif self.path == '/grow':
                 handleGrow(self)
+            elif self.path == '/clear':
+                if self.server_instance:
+                    self.server_instance.clear()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
             elif self.path == '/window_closed':
                 self.server_instance.window_closed = True
                 self.send_response(200)
@@ -2109,6 +2188,13 @@ class SnapshotMaskNode:
 
         # Start a temporary HTTP server to serve the mask drawing page
         server = SnapshotMaskNodeServer(image, initial_mask=mask, detector=detector)
+
+        # Use new API: _on_mask_set callback to capture mask
+        result_mask = [None]
+        def _on_mask_set(m):
+            result_mask[0] = m
+        server._on_mask_set = _on_mask_set
+
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -2135,7 +2221,7 @@ class SnapshotMaskNode:
             time.sleep(0.5)
             focus_window(focused_window)
 
-        if server.window_closed or server.mask is None:
+        if server.window_closed or result_mask[0] is None:
             raise ValueError("Window closed without drawing mask")
         
-        return (server.mask,)
+        return (result_mask[0],)

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Phase, ServerConfig, StatusResponse, DetailerParams, TagPreviews } from './types';
+import type { Phase, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -18,6 +18,7 @@ const App: React.FC = () => {
   const [autoTagResult, setAutoTagResult] = useState<string | null>(null);
   const [tagPreviews, setTagPreviews] = useState<TagPreviews | null>(null);
   const [tagResult, setTagResult] = useState<string | null>(null);
+  const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
 
   const [params, setParams] = useState<DetailerParams>({
@@ -87,6 +88,44 @@ const App: React.FC = () => {
     }
   }, [phase, maskConfirmed, config]);
 
+  // Poll mask status periodically (fallback for postMessage)
+  // Also check if backend is requesting a fresh mask
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const awaitingRes = await fetch('/api/awaiting_mask');
+        const awaitingData = await awaitingRes.json();
+        if (!cancelled && awaitingData.awaiting_mask) {
+          const iframe = document.querySelector('iframe[title="Mask Editor"]') as HTMLIFrameElement | null;
+          if (iframe?.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'request-mask' }, '*');
+          }
+          return;
+        }
+      } catch {
+        // ignore
+      }
+
+      try {
+        const res = await fetch('/api/has_mask');
+        const data = await res.json();
+        if (!cancelled && data.has_mask) {
+          setMaskConfirmed(true);
+          setError(null);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    poll();
+    const interval = setInterval(poll, POLL_INTERVAL);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Poll prompt status periodically (fallback)
   useEffect(() => {
     let cancelled = false;
@@ -120,13 +159,16 @@ const App: React.FC = () => {
         const data: StatusResponse = await res.json();
         if (cancelled) return;
 
-        if (data.detail_status === 'done') {
+        if (data.detail_status === 'selecting' || data.detail_status === 'done') {
           const configRes = await fetch('/api/config');
           const newConfig: ServerConfig = await configRes.json();
           if (!cancelled) {
             setConfig(newConfig);
-            setPhase('switch');
           }
+        }
+
+        if (data.detail_status === 'done') {
+          setPhase('switch');
         } else if (data.detail_status === 'error') {
           setError(data.error || 'Detailer failed');
           setPhase('prompt');
@@ -210,20 +252,45 @@ const App: React.FC = () => {
 
   const handleRunDetail = useCallback(async () => {
     setError(null);
+    setPhase('waiting');
     try {
+      const promptPromise = new Promise<any>((resolve) => {
+        const iframe = promptIframeRef.current;
+        if (!iframe?.contentWindow) {
+          resolve(null);
+          return;
+        }
+        const handler = (event: MessageEvent) => {
+          if (event.data?.type === 'prompt-data') {
+            window.removeEventListener('message', handler);
+            resolve(event.data.data);
+          }
+        };
+        window.addEventListener('message', handler);
+        iframe.contentWindow.postMessage({ type: 'get-prompt' }, '*');
+        setTimeout(() => {
+          window.removeEventListener('message', handler);
+          resolve(null);
+        }, 5000);
+      });
+
+      const promptData = await promptPromise;
+
       const res = await fetch('/api/run_detail', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ ...params, prompt_data: promptData }),
       });
       const data = await res.json();
       if (!data.started) {
         setError(data.error || 'Failed to start detailer');
+        setPhase('prompt');
         return;
       }
-      setPhase('waiting');
+      // waiting phase polling will detect done -> switch
     } catch (e: any) {
       setError('Run detail error: ' + e.message);
+      setPhase('prompt');
     }
   }, [params]);
 
@@ -266,6 +333,32 @@ const App: React.FC = () => {
     };
   }, [phase]);
 
+  // Fetch debug recover data when in switch phase
+  useEffect(() => {
+    if (phase !== 'switch') return;
+
+    let cancelled = false;
+    const fetchDebug = async () => {
+      try {
+        const res = await fetch('/api/debug_recover_data');
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data.error) {
+          setDebugData(data);
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    fetchDebug();
+    const interval = setInterval(fetchDebug, POLL_INTERVAL * 2);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [phase]);
+
   const handleFinish = useCallback(async () => {
     try {
       await fetch('/api/finish', { method: 'POST' });
@@ -297,6 +390,7 @@ const App: React.FC = () => {
         autoTagResult={autoTagResult}
         tagPreviews={tagPreviews}
         tagResult={tagResult}
+        debugData={debugData}
         promptIframeRef={promptIframeRef}
         params={params}
         onParamChange={handleParamChange}

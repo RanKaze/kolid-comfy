@@ -1,5 +1,6 @@
 from comfy import model_management
 import math
+import base64
 import numpy as np
 import numpy
 import torch
@@ -309,3 +310,38 @@ def invert_mask(mask):
     
     # 最常用且高效的反转方式（支持 batch）
     return 1.0 - mask
+
+
+def parse_mask_base64(raw_mask_base64: str, original_image: torch.Tensor = None) -> torch.Tensor:
+    """Parse a base64 PNG mask string into a torch tensor."""
+    import cv2
+    base64_data = raw_mask_base64.split(',')[1]
+    mask_data = base64.b64decode(base64_data)
+    nparr = np.frombuffer(mask_data, np.uint8)
+    mask_bgra = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+    if mask_bgra is None:
+        raise ValueError("Failed to decode mask image")
+    if mask_bgra.ndim == 3:
+        if mask_bgra.shape[2] == 4:
+            mask_gray = mask_bgra[:, :, 3].astype(np.float32) / 255.0
+        else:
+            mask_gray = mask_bgra[:, :, :3].max(axis=2).astype(np.float32) / 255.0
+    else:
+        mask_gray = mask_bgra.astype(np.float32) / 255.0
+    # Get original image dimensions
+    if original_image is not None and hasattr(original_image, 'shape'):
+        if len(original_image.shape) == 4:
+            _, orig_h, orig_w, _ = original_image.shape
+        elif len(original_image.shape) == 3:
+            orig_h, orig_w, _ = original_image.shape
+        else:
+            orig_h, orig_w = mask_gray.shape
+    else:
+        orig_h, orig_w = mask_gray.shape
+    if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
+        mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+    mask_gray = (mask_gray > 0).astype(np.float32)
+    mask_tensor = torch.from_numpy(mask_gray).float()
+    if mask_tensor.dim() == 2:
+        mask_tensor = mask_tensor.unsqueeze(0)
+    return mask_tensor

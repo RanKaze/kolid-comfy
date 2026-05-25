@@ -122,11 +122,35 @@ export function AppShell() {
           if (existing.includes(tag)) return prev;
           return prev + '\n' + tag;
         });
+      } else if (event.data?.type === 'get-prompt') {
+        // Atomic collection: return current prompt/lora/prefab data to parent
+        const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+        const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+          const sel = loraSelections[l.file_path];
+          return {
+            file_path: l.file_path,
+            name: l.name,
+            strength: sel?.strength ?? 1.0,
+            active_tags: sel?.activeTags ?? [],
+            active: sel?.active ?? true,
+            split_mode: sel?.split_mode,
+          };
+        });
+        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+        window.parent.postMessage({
+          type: 'prompt-data',
+          data: {
+            prompts: promptsToSend,
+            custom_prompts: customPrompts,
+            loras: lorasPayload,
+            prefabs: prefabsPayload,
+          }
+        }, '*');
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [setCustomPrompts]);
+  }, [setCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts]);
 
   // Helper: find prefab by guid across all libraries
   const findPrefabByGuid = useCallback((guid: string): PrefabData | null => {
@@ -1028,11 +1052,18 @@ export function AppShell() {
       };
     });
     const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
-    submitSelection(promptsToSend, customPrompts, lorasPayload, prefabsPayload);
-    // Notify parent window (sampler) that prompt is confirmed
-    if (window.parent !== window) {
-      window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
-    }
+    submitSelection(
+      promptsToSend,
+      customPrompts,
+      lorasPayload,
+      prefabsPayload,
+      () => {
+        // Notify parent window (sampler) that prompt is confirmed
+        if (window.parent !== window) {
+          window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
+        }
+      }
+    );
   }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection]);
 
   // ========== Delete Prompt ==========
