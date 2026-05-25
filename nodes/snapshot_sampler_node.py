@@ -626,9 +626,15 @@ class SnapshotDetailerSamplerNode:
         Server 的 mask confirm 回调委托到这里。
         Node 直接修改 self._current_pipeline.mask。
         使用 clone 切断引用，避免多线程共享 tensor 导致意外修改。
+        重要：校验 loop_index 必须匹配当前 _loop_count，防止非 mask phase 期间的
+        stale mask 提交错误覆盖 pipeline.mask（例如在 prompt/tag/switch phase 时
+        _expected_loop 尚未更新，handleMask 可能放行旧 loop 的 mask）。
         """
         pm = self._current_pipeline.mask if self._current_pipeline is not None else None
         print(f"[MASK-TRACE] _on_mask_set ENTER | loop={loop_index} | incoming mask id={id(mask)}, shape={mask.shape if mask is not None else None}, sum={mask.sum().item() if mask is not None else 'N/A'} | pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+        if loop_index is not None and loop_index != self._loop_count:
+            print(f"[MASK-TRACE] _on_mask_set REJECTED | received loop_index={loop_index}, current _loop_count={self._loop_count}")
+            return
         if self._current_pipeline is not None:
             self._current_pipeline.mask = mask.clone() if mask is not None else None
             pm2 = self._current_pipeline.mask
@@ -724,7 +730,15 @@ class SnapshotDetailerSamplerNode:
                 parts.append(custom)
             user_positive = ','.join(parts)
             loras = prompt_server.selected_loras or []
-            user_loras = ','.join(loras)
+            lora_str_parts = []
+            for lora_item in loras:
+                if isinstance(lora_item, dict):
+                    file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                    strength = lora_item.get('strength', 1.0)
+                    lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
+                else:
+                    lora_str_parts.append(str(lora_item))
+            user_loras = ','.join(lora_str_parts)
         return user_positive, user_loras
 
     # -------------------------------------------------------------------------
@@ -1129,6 +1143,8 @@ class SnapshotDetailerSamplerNode:
                 # Phase 5: Next loop
                 # ============================================================
                 self._loop_count += 1
+                if server.mask_server:
+                    server.mask_server.set_expected_loop(str(self._loop_count))
                 npm = next_pipeline.mask if next_pipeline is not None else None
                 print(f"[PHASE-TRACE] Loop {self._loop_count - 1} END → next loop {self._loop_count} | next_pipeline.mask id={id(npm)}, shape={npm.shape if npm is not None else None}, sum={npm.sum().item() if npm is not None else 'N/A'}")
                 print(f"[SnapshotDetailerSampler] Next loop: {self._loop_count}")
