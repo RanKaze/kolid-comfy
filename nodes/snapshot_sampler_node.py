@@ -899,40 +899,6 @@ class SnapshotDetailerSamplerServer:
                     pass
                 return
 
-            if self.path == '/api/auto_tag':
-                try:
-                    if inst.tagger is None:
-                        self._send_json({'success': False, 'error': 'Tagger not configured. Connect a tagger to the node input.'})
-                        return
-                    from ..libs.caption_utils import get_tag
-                    from ..libs.image_utils import crop_mask
-                    tag_image = inst.pipeline.image if inst.pipeline is not None else None
-                    # If user mask is available, crop to the masked region
-                    if inst.mask_server and inst.mask_server.get_mask() is not None:
-                        try:
-                            img = tag_image
-                            mask = inst.mask_server.get_mask()
-                            if img.dim() == 3:
-                                img = img.unsqueeze(0)
-                            if mask.dim() == 2:
-                                mask = mask.unsqueeze(0)
-                            cropped_img, _, _ = crop_mask(img, mask, reserve=32)
-                            tag_image = cropped_img
-                        except Exception as mask_err:
-                            print(f"[AutoTag] crop_mask failed, falling back to full image: {mask_err}")
-                    tag = get_tag(inst.tagger, tag_image)
-                    if inst.prompt_server:
-                        inst.prompt_server.custom_prompts = tag
-                    self._send_json({'success': True, 'tag': tag})
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self._send_json({'success': False, 'error': str(e)})
-                finally:
-                    # Do NOT clear mask here — the user may still want to run detail with the same mask.
-                    pass
-                return
-
             if self.path == '/window_closed':
                 inst.window_closed = True
                 inst.event.set()

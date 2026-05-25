@@ -218,29 +218,6 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleAutoTag = useCallback(async () => {
-    setError(null);
-    setAutoTagging(true);
-    try {
-      const res = await fetch('/api/auto_tag', { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || 'Auto tag failed');
-        setAutoTagging(false);
-        return;
-      }
-      setAutoTagResult(data.tag);
-      const iframe = promptIframeRef.current;
-      if (iframe?.contentWindow) {
-        iframe.contentWindow.postMessage({ type: 'auto-tag', tag: data.tag }, '*');
-      }
-    } catch (e: any) {
-      setError('Auto tag error: ' + e.message);
-    } finally {
-      setAutoTagging(false);
-    }
-  }, []);
-
   const handleParamChange = useCallback((next: DetailerParams) => {
     setParams(next);
     fetch('/api/update_config', {
@@ -394,7 +371,6 @@ const App: React.FC = () => {
         promptIframeRef={promptIframeRef}
         params={params}
         onParamChange={handleParamChange}
-        onAutoTag={handleAutoTag}
         onRunTag={handleRunTag}
         onFinish={handleFinish}
       />
