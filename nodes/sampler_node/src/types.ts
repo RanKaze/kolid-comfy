@@ -21,7 +21,9 @@ export interface DetailerParams {
 
 export interface StatusResponse {
   detail_status: 'idle' | 'running' | 'selecting' | 'done' | 'error';
+  phase: string;
   loop_count: number;
+  switch_url?: string;
   error?: string;
 }
 

@@ -337,6 +337,8 @@ class SamplerCache:
 
 
 # ====================== PipelineData 类（只返回 condition） ======================
+import traceback
+
 class PipelineData:
     def __init__(self,
                  cache=None,
@@ -361,7 +363,8 @@ class PipelineData:
         self.vae = vae
         self.image = image
         self.latent = latent
-        self.mask = mask
+        self._mask = None
+        self.mask = mask  # 通过 setter 赋值以触发追踪
         self.sampler_name = sampler_name
         self.scheduler = scheduler
         self.steps = steps
@@ -373,6 +376,23 @@ class PipelineData:
         
         # Conditioning 缓存: key = (clip_id, prompt, frozenset(loras)) → condition
         self._conditioning_cache = {}
+
+    @property
+    def mask(self):
+        return self._mask
+
+    @mask.setter
+    def mask(self, value):
+        old = self._mask
+        self._mask = value
+        # 仅在 mask 实际变化（id 不同）时打印，避免 clone 后相同值重复打印
+        if old is not value:
+            stack = traceback.format_stack(limit=4)
+            caller = stack[-2].strip() if len(stack) >= 2 else 'unknown'
+            old_info = f"id={id(old)}, shape={old.shape}, sum={old.sum().item():.1f}" if old is not None else "None"
+            new_info = f"id={id(value)}, shape={value.shape}, sum={value.sum().item():.1f}" if value is not None else "None"
+            print(f"[MASK-TRACE] PipelineData.mask CHANGED | old={old_info} | new={new_info}")
+            print(f"[MASK-TRACE]   caller: {caller}")
     def copy(self):
         new = PipelineData(
             cache=self.cache.copy() if self.cache else None,
@@ -381,7 +401,7 @@ class PipelineData:
             vae=self.vae,
             image=self.image,
             latent=self.latent,
-            mask=self.mask,
+            mask=self.mask.clone() if self.mask is not None else None,  # 深拷贝 mask，杜绝跨 pipeline 的引用共享
             sampler_name=self.sampler_name,
             scheduler=self.scheduler,
             steps=self.steps,

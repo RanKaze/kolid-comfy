@@ -106,6 +106,7 @@ def expand_mask(mask: torch.Tensor, grow: int, blur: int) -> torch.Tensor:
     if len(original_shape) == 4:
         result = result.unsqueeze(1)
 
+    print(f"[MASK-TRACE] expand_mask OUTPUT | shape={result.shape} | sum={result.sum().item():.1f} | device={result.device}")
     return result
 
 def combine_masks(

@@ -139,6 +139,7 @@ def crop_mask(image, mask, reserve):
 
         final_crop_info = crop_infos[0]
 
+        print(f"[MASK-TRACE] crop_mask OUTPUT | crop_info={final_crop_info} | cropped_mask shape={cropped_mask_tensor.shape} | sum={cropped_mask_tensor.sum().item():.1f}")
         return (cropped_image_tensor, cropped_mask_tensor, final_crop_info)
 
     except Exception as e:
@@ -210,6 +211,7 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
             # 把 cropped mask 放回原始位置
             recovered_mask[:, cy:cy + Hm, cx:cx + Wm] = mask[:, :Hm, :Wm]
 
+        print(f"[MASK-TRACE] recover_crop OUTPUT | recovered_mask shape={recovered_mask.shape if recovered_mask is not None else None} | sum={recovered_mask.sum().item():.1f if recovered_mask is not None else 'N/A'}")
         return (recovered, recovered_mask)
 
     except Exception as e:
@@ -592,6 +594,7 @@ def limit_pixels(image, pixels, mask=None, align=1):
             "was_upscaled": current_pixels < pixels
         }
 
+        print(f"[MASK-TRACE] limit_pixels OUTPUT | resized_mask shape={resized_mask.shape if resized_mask is not None else None} | sum={resized_mask.sum().item():.1f if resized_mask is not None else 'N/A'}")
         return (resized_image, resized_mask, resize_info)
 
     except Exception as e:
@@ -646,6 +649,7 @@ def recover_size(image, resize_info, mask=None):
                 )
                 recovered_mask = recovered_m.squeeze(1).clamp_(0.0, 1.0)
 
+        print(f"[MASK-TRACE] recover_size OUTPUT | recovered_mask shape={recovered_mask.shape if recovered_mask is not None else None} | sum={recovered_mask.sum().item():.1f if recovered_mask is not None else 'N/A'}")
         return (recovered_image, recovered_mask)
 
     except Exception as e:

@@ -18,7 +18,6 @@ import subprocess
 import sys
 import socket
 import requests
-import queue
 import io
 from PIL import Image
 import cv2
@@ -1800,12 +1799,24 @@ def handleMask(serverHandler, set_event):
         # Add batch dimension -> [1, H, W]
         mask_array = np.expand_dims(mask_gray, axis=0)
         
+        # Validate loop token to prevent stale iframe submissions
+        loop = data.get('loop', '0')
+        expected_loop = getattr(serverHandler.server_instance, '_expected_loop', '0')
+        if loop != expected_loop:
+            serverHandler.send_response(400)
+            serverHandler.send_header('Content-type', 'application/json')
+            serverHandler.send_header("Access-Control-Allow-Origin", "*")
+            serverHandler.end_headers()
+            serverHandler.wfile.write(json.dumps({'error': f'stale loop: expected {expected_loop}, got {loop}'}).encode('utf-8'))
+            return
+
         # Convert to torch tensor
+        loop_index = int(loop) if loop is not None else 0
         try:
             import torch
-            serverHandler.server_instance.set_mask(torch.from_numpy(mask_array).float())
+            serverHandler.server_instance.set_mask(torch.from_numpy(mask_array).float(), loop_index=loop_index)
         except ImportError:
-            serverHandler.server_instance.set_mask(mask_array.astype(np.float32))
+            serverHandler.server_instance.set_mask(mask_array.astype(np.float32), loop_index=loop_index)
         
         serverHandler.send_response(200)
         serverHandler.send_header('Content-type', 'application/json')
@@ -1972,12 +1983,17 @@ class SnapshotMaskNodeServer:
         self._image = image
         self._initial_mask = initial_mask
         self.detector = detector
-        self._mask = None
+        # 使用 threading.Lock + _mask_history[] 替代 queue.Queue
+        # 每个 loop 的 mask 按索引存储，可随时回溯
+        self._mask_lock = threading.Lock()
+        self._mask_history = []   # 按索引存储每个循环的 mask
+        self._current_mask = None # 最新提交的 mask（用于 peek）
         self.server = None
         self.started = False
         self.screenshot_event = threading.Event()
         self.window_closed = False
         self.browser_url = None
+        self._expected_loop = '0'
 
     def start(self):
         # Find an available port
@@ -2012,10 +2028,13 @@ class SnapshotMaskNodeServer:
             self.server.server_close()
 
     def clear(self):
-        """Clear the current mask and initial mask."""
-        self._mask = None
-        self._initial_mask = None
-        print("[SnapshotMask] Mask cleared")
+        """Clear all stored masks."""
+        with self._mask_lock:
+            old_hist = [(i, id(m), f"{m.sum().item():.1f}" if m is not None else "None") for i, m in enumerate(self._mask_history)]
+            self._mask_history.clear()
+            self._current_mask = None
+            self._initial_mask = None
+        print(f"[MASK-TRACE] SnapshotMaskNodeServer.clear | cleared history was {old_hist}")
 
     def set_image(self, image):
         self._image = image
@@ -2023,16 +2042,55 @@ class SnapshotMaskNodeServer:
     def get_image(self):
         return self._image
 
-    def set_mask(self, mask):
-        self._mask = mask
+    def set_mask(self, mask, loop_index=None):
+        with self._mask_lock:
+            if loop_index is not None:
+                # 确保列表足够长
+                while len(self._mask_history) <= loop_index:
+                    self._mask_history.append(None)
+                # 竞争检测：如果该索引已有 mask，打印日志
+                old_at_idx = self._mask_history[loop_index]
+                if old_at_idx is not None:
+                    print(f"[SnapshotMask] RACE WARNING: overwriting existing mask at index {loop_index}")
+                self._mask_history[loop_index] = mask
+                hist_status = [(i, id(m), f"{m.sum().item():.1f}" if m is not None else "None") for i, m in enumerate(self._mask_history)]
+                print(f"[MASK-TRACE] SnapshotMaskNodeServer.set_mask | loop_index={loop_index} | mask id={id(mask)}, sum={mask.sum().item() if hasattr(mask, 'sum') else 'N/A'} | history={hist_status}")
+            else:
+                print(f"[MASK-TRACE] SnapshotMaskNodeServer.set_mask | NO loop_index | mask id={id(mask)}, sum={mask.sum().item() if hasattr(mask, 'sum') else 'N/A'}")
+            self._current_mask = mask
         if getattr(self, '_on_mask_set', None) is not None:
             try:
-                self._on_mask_set(mask)
+                self._on_mask_set(mask, loop_index)
             except Exception as e:
                 print(f"[SnapshotMask] _on_mask_set error: {e}")
 
-    def get_mask(self):
-        return self._mask
+    def set_expected_loop(self, loop):
+        self._expected_loop = str(loop)
+
+    def get_mask_for_loop(self, loop_index):
+        """按循环索引获取 mask（返回克隆，防止外部修改）。"""
+        with self._mask_lock:
+            hist_status = [(i, id(m), f"{m.sum().item():.1f}" if m is not None else "None") for i, m in enumerate(self._mask_history)]
+            if 0 <= loop_index < len(self._mask_history):
+                mask = self._mask_history[loop_index]
+                if mask is not None:
+                    cloned = mask.clone()
+                    print(f"[MASK-TRACE] SnapshotMaskNodeServer.get_mask_for_loop | loop_index={loop_index} | src id={id(mask)}, sum={mask.sum().item():.1f} | cloned id={id(cloned)} | history={hist_status}")
+                    return cloned
+            print(f"[MASK-TRACE] SnapshotMaskNodeServer.get_mask_for_loop | loop_index={loop_index} | NOT FOUND | history={hist_status}")
+            return None
+
+    def get_latest_mask(self):
+        """获取最新提交的 mask（返回克隆）。"""
+        with self._mask_lock:
+            if self._current_mask is not None:
+                return self._current_mask.clone()
+            return None
+
+    def peek_latest_mask(self):
+        """非消费性读取：返回最新 mask 的引用，供预览接口使用。"""
+        with self._mask_lock:
+            return self._current_mask
 
     def set_initial_mask(self, initial_mask):
         self._initial_mask = initial_mask
@@ -2104,10 +2162,10 @@ class SnapshotMaskNodeServer:
                 else:
                     self.send_error(500, "Server error")
             elif path == '/get_mask':
-                # Return current mask as base64 PNG
-                if self.server_instance and self.server_instance.get_mask() is not None:
+                # Return current mask as base64 PNG (peek only, do not consume)
+                if self.server_instance and self.server_instance.peek_latest_mask() is not None:
                     try:
-                        mask_base64 = mask_to_base64(self.server_instance.get_mask())
+                        mask_base64 = mask_to_base64(self.server_instance.peek_latest_mask())
                         response = {'mask': mask_base64}
                         response_data = json.dumps(response).encode('utf-8')
                         self.send_response(200)
@@ -2200,7 +2258,7 @@ class SnapshotMaskNode:
 
         # Use new API: _on_mask_set callback to capture mask
         result_mask = [None]
-        def _on_mask_set(m):
+        def _on_mask_set(m, loop_index=None):
             result_mask[0] = m
         server._on_mask_set = _on_mask_set
 

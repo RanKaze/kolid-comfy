@@ -15,7 +15,7 @@ import torch
 import comfy.model_management as mm
 
 # =============================================================================
-# Import existing modules (composition, not duplication)
+# 导入现有模块（组合式复用，避免代码重复）
 # =============================================================================
 try:
     from .image_node import SnapshotMaskNodeServer, waitSnapShot
@@ -44,7 +44,6 @@ except ImportError as e:
     PipelineData = None
     get_loras_from_string = None
 
-# Detailer 工具函数（内联，不再引用 sampler_node 中的节点）
 from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, mask_to_base64, set_inpaint_mask
 from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.detect_utils import detect_mask
@@ -54,50 +53,53 @@ import gc
 
 
 # =============================================================================
-# Helpers
+# SnapshotDetailerSamplerServer：只负责前后端交互，不存储 pipeline
 # =============================================================================
 class SnapshotDetailerSamplerServer:
     """
-    Composed server that orchestrates:
-      - SnapshotMaskNodeServer   (mask editing iframe)
-      - SnapshotPromptServer     (prompt selection iframe)
-      - Main HTTP server         (React UI + detailer API)
+    前后端交互服务器，不持有任何业务状态（如 pipeline）。
+    所有需要 pipeline/image/mask 的请求都通过 node_instance 委托给 Node 获取。
+    职责：
+      - 管理 HTTP 子服务器（mask / prompt / switch / main）
+      - 提供状态查询 API（phase, detail_status, URLs 等），loop_count 由 Node 管理
+      - 提供阻塞等待接口（wait_for_mask / wait_for_prompt / wait_for_switch）
+      - 处理前端参数更新（_apply_params / _sync_widgets）
     """
 
-    def __init__(self, pipeline, seed, detector, tagger, lora_regex="",
-                 add_noise="enable", start_step_rate=0.8, end_step_rate=1.0,
-                 pixels=1048576, align=8, crop_reserve=32, unique_id=None, context_regex=".+"):
-        self.pipeline = pipeline.copy() if pipeline else None
-        self.seed = seed
+    def __init__(self, detector, tagger, lora_regex,
+                 node_instance=None, unique_id=None, config=None):
+        """
+        注意：构造函数不再接收 pipeline。
+        初始图片通过 start(initial_image=...) 传入。
+        """
         self.detector = detector
         self.tagger = tagger
+        self.lora_regex = lora_regex
+        self.node_instance = node_instance  # 业务逻辑委托对象
+        self.unique_id = unique_id
+
+        cfg = config or {}
+        self.add_noise = cfg.get('add_noise', 'enable')
+        self.start_step_rate = cfg.get('start_step_rate', 0.8)
+        self.end_step_rate = cfg.get('end_step_rate', 1.0)
+        self.pixels = cfg.get('pixels', 1048576)
+        self.align = cfg.get('align', 8)
+        self.crop_reserve = cfg.get('crop_reserve', 32)
+
         self.tag_result = None
         self.tag_previews = None
-        self.lora_regex = lora_regex
-        self.lora_path_mode = True
-        self.add_noise = add_noise
-        self.start_step_rate = start_step_rate
-        self.end_step_rate = end_step_rate
-        self.pixels = pixels
-        self.align = align
-        self.crop_reserve = crop_reserve
-        self.unique_id = unique_id
-        self.context_regex = context_regex
-
-        self.original_image = None
-        self.detailed_image = None
-        self.debug_recover_data = None  # debug: background/image/mask before recover_crop
-
-        self.loop_count = 0
         self.phase = 'edit'
         self.detail_status = 'idle'
         self.detail_error = None
         self.finished = False
         self.window_closed = False
         self.event = threading.Event()
-
-        # selected_history: list of {'key', 'src', 'name'} for switch history display
         self.selected_history = []
+
+        # 这些属于前后端交互状态，不是业务对象 pipeline
+        self.original_image = None
+        self.detailed_image = None
+        self.debug_recover_data = None
 
         self.mask_server = None
         self.prompt_server = None
@@ -110,53 +112,26 @@ class SnapshotDetailerSamplerServer:
         self.browser_url = ""
         self.started = False
 
-    def _on_mask_set(self, mask):
-        """Callback when mask is confirmed in the mask editor."""
-        if self.pipeline is not None:
-            self.pipeline.mask = mask
-            print(f"[SnapshotDetailerSampler] Pipeline mask updated, shape={mask.shape if mask is not None else None}")
-
-    def _generate_tag_previews(self):
-        """Generate three preview images for tag selection: full, mask_crop, covered."""
-        if self.pipeline is None or self.pipeline.image is None or self.mask_server is None or self.mask_server.get_mask() is None:
-            return {}
-        try:
-            from ..libs.image_utils import crop_mask
-            img = self.pipeline.image
-            mask = self.mask_server.get_mask()
-            if img.dim() == 3:
-                img = img.unsqueeze(0)
-            if mask.dim() == 2:
-                mask = mask.unsqueeze(0)
-            # 1. Full image
-            previews = {'full': tensor_to_base64(img)}
-            # 2. Mask crop + 3. Covered
-            try:
-                cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
-                previews['mask'] = tensor_to_base64(cropped_img)
-                # Covered: mask area keeps original, outside becomes white
-                white_bg = torch.ones_like(cropped_img)
-                mask_expanded = cropped_mask.unsqueeze(-1).float()
-                covered = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
-                previews['covered'] = tensor_to_base64(covered)
-            except Exception as e:
-                print(f'[TagPreview] crop failed: {e}')
-                previews['mask'] = previews['full']
-                previews['covered'] = previews['full']
-            return previews
-        except Exception as e:
-            print(f'[TagPreview] error: {e}')
-            return {}
+    def _on_mask_set(self, mask, loop_index=None):
+        """
+        Mask 编辑器 confirm 时的回调。
+        Server 不直接修改 pipeline，而是委托给 Node 处理。
+        """
+        if self.node_instance is not None:
+            self.node_instance._on_mask_set(mask, loop_index)
 
     # -------------------------------------------------------------------------
-    # Lifecycle
+    # 生命周期：启动 / 停止
     # -------------------------------------------------------------------------
-    def start(self):
-        # 1) Mask server ------------------------------------------------------
+    def start(self, initial_image=None):
+        """
+        启动所有子服务器。初始图片通过 initial_image 传入，不依赖 pipeline。
+        """
+        # 1) Mask server
         if SnapshotMaskNodeServer is None:
             raise RuntimeError("SnapshotMaskNodeServer not available")
         self.mask_server = SnapshotMaskNodeServer(
-            image=self.pipeline.image if self.pipeline is not None else None,
+            image=initial_image,
             detector=self.detector,
         )
         self.mask_server._on_mask_set = self._on_mask_set
@@ -173,7 +148,7 @@ class SnapshotDetailerSamplerServer:
         _, mask_port = self.mask_server.server.server_address
         self.mask_url = f"http://localhost:{mask_port}/mask_node.html"
 
-        # 2) Prompt server ----------------------------------------------------
+        # 2) Prompt server
         if SnapshotPromptServer is None:
             raise RuntimeError("SnapshotPromptServer not available")
         self.prompt_server = SnapshotPromptServer(
@@ -197,13 +172,13 @@ class SnapshotDetailerSamplerServer:
 
         self.prompt_url = self.prompt_server.browser_url
 
-        # 3) Switch server (pre-created, started later after detailer finishes)
+        # 3) Switch server（预创建，detailer 完成后才启动）
         if SnapshotSwitchServer is not None:
             self.switch_server = SnapshotSwitchServer(
                 input_keys=['original', 'detailed'],
                 input_previews={
-                    'original': {'type': 'image', 'data': tensor_to_base64(self.pipeline.image if self.pipeline is not None and self.pipeline.image is not None else torch.zeros(1, 512, 512, 3))},
-                    'detailed': {'type': 'image', 'data': tensor_to_base64(self.pipeline.image if self.pipeline is not None and self.pipeline.image is not None else torch.zeros(1, 512, 512, 3))},
+                    'original': {'type': 'image', 'data': tensor_to_base64(initial_image if initial_image is not None else torch.zeros(1, 512, 512, 3))},
+                    'detailed': {'type': 'image', 'data': tensor_to_base64(initial_image if initial_image is not None else torch.zeros(1, 512, 512, 3))},
                 },
                 connection_info={
                     '__node_title__': 'Detailer Result',
@@ -213,7 +188,7 @@ class SnapshotDetailerSamplerServer:
                 history=self.selected_history,
             )
 
-        # 4) Main server ------------------------------------------------------
+        # 4) Main server
         class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             pass
         for port in range(8700, 8800):
@@ -237,78 +212,16 @@ class SnapshotDetailerSamplerServer:
         print(f"[SnapshotDetailerSampler] Mask server at {self.mask_url}")
         print(f"[SnapshotDetailerSampler] Prompt server at {self.prompt_url}")
 
-        try:
-            self.main_server.serve_forever()
-        except Exception:
-            pass
-
-    def _sync_widgets(self):
-        """Sync current parameter values back to ComfyUI node widgets via PromptServer."""
-        if self.unique_id is None:
-            return
-        try:
-            from server import PromptServer
-            ps = PromptServer.instance
-            if ps is None:
-                return
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "add_noise",
-                "type": "STRING",
-                "value": self.add_noise,
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "start_step_rate",
-                "type": "FLOAT",
-                "value": str(self.start_step_rate),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "end_step_rate",
-                "type": "FLOAT",
-                "value": str(self.end_step_rate),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "pixels",
-                "type": "INT",
-                "value": str(self.pixels),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "crop_reserve",
-                "type": "INT",
-                "value": str(self.crop_reserve),
-            })
-        except Exception as e:
-            print(f"[SnapshotDetailerSampler] Widget sync failed: {e}")
-
-    def _apply_params(self, data):
-        """Apply parameter overrides from frontend request body."""
-        dirty = False
-        if 'add_noise' in data:
-            self.add_noise = data['add_noise']
-            dirty = True
-        if 'start_step_rate' in data:
-            self.start_step_rate = float(data['start_step_rate'])
-            dirty = True
-        if 'end_step_rate' in data:
-            self.end_step_rate = float(data['end_step_rate'])
-            dirty = True
-        if 'pixels' in data:
-            self.pixels = int(data['pixels'])
-            dirty = True
-        if 'crop_reserve' in data:
-            self.crop_reserve = int(data['crop_reserve'])
-            dirty = True
-        if dirty:
-            self._sync_widgets()
-        return dirty
+        t_main = threading.Thread(target=self.main_server.serve_forever)
+        t_main.daemon = True
+        t_main.start()
 
     def stop(self):
+        """停止所有子服务器。"""
         self.event.set()
-        # Stop all servers in background threads to avoid blocking on shutdown()
+        # 关闭回调，防止旧服务器的延迟请求修改当前 pipeline
+        if self.mask_server:
+            self.mask_server._on_mask_set = None
         def _stop_mask():
             if self.mask_server:
                 try:
@@ -338,290 +251,128 @@ class SnapshotDetailerSamplerServer:
             t.join(timeout=2.0)
 
     # -------------------------------------------------------------------------
-    # Helpers
+    # 用户事件等待接口
     # -------------------------------------------------------------------------
+    def wait_for_mask(self):
+        # 设置当前轮次 token，拒绝来自旧 iframe 的 stale mask 提交
+        if self.mask_server is not None:
+            self.mask_server.set_expected_loop(str(self.node_instance.get_loop_count() if self.node_instance else 0))
+        self.mask_server.screenshot_event.clear()
+        self.mask_server.window_closed = False
+        if not waitSnapShot(self.mask_server.screenshot_event):
+            return False
+        if self.finished:
+            return False
+        return not self.mask_server.window_closed
+
+    def wait_for_prompt(self):
+        self.prompt_server.prompt_event.clear()
+        self.prompt_server.window_closed = False
+        if not waitSnapShot(self.prompt_server.prompt_event):
+            return False
+        if self.finished:
+            return False
+        return not self.prompt_server.window_closed
+
+    def start_switch_server(self, original_image, detailed_image):
+        if self.switch_server is None:
+            return False
+        self.switch_server.should_stop = False
+        self.switch_server.started = False
+        self.switch_server.selection_event.clear()
+        self.switch_server.selected_key = None
+        self.switch_server.window_closed = False
+        self.switch_server.input_previews['original'] = {'type': 'image', 'data': tensor_to_base64(original_image)}
+        self.switch_server.input_previews['detailed'] = {'type': 'image', 'data': tensor_to_base64(detailed_image)}
+
+        t_switch = threading.Thread(target=self.switch_server.start)
+        t_switch.daemon = True
+        t_switch.start()
+
+        t0 = time.time()
+        while not self.switch_server.started:
+            if time.time() - t0 > 10:
+                print("[SnapshotDetailerSampler] Switch server startup timeout")
+                return False
+            time.sleep(0.01)
+
+        if self.switch_server.started and self.switch_server.browser_url:
+            self.switch_url = self.switch_server.browser_url
+        return True
+
+    def wait_for_switch(self):
+        if self.switch_server is None:
+            return True
+        if not self.switch_server.wait_for_selection():
+            return False
+        if self.switch_server.window_closed:
+            return False
+        if self.finished:
+            return False
+        return True
+
+    def stop_switch_server(self):
+        if self.switch_server:
+            self.switch_server.stop()
+        self.switch_url = ''
+
     # -------------------------------------------------------------------------
-    # Detailer execution (background thread)
+    # 参数同步
     # -------------------------------------------------------------------------
-    def _run_detailer(self, user_mask, user_positive, user_loras):
-        self.detail_status = 'running'
-        self.detail_error = None
+    def _sync_widgets(self):
+        if self.unique_id is None:
+            return
         try:
-            print(f"[SnapshotDetailerSampler] ===== loop={self.loop_count} =====")
-            print(f"[SnapshotDetailerSampler] user_positive='{user_positive}'")
-            print(f"[SnapshotDetailerSampler] user_loras='{user_loras}'")
-
-            # --- inline detailer logic ---------------------------------------
-            next_pipeline = self.pipeline.copy()
-            if next_pipeline.cache is None:
-                raise ValueError('PipelineData cache is empty')
-            if next_pipeline.model is None:
-                raise ValueError('PipelineData model is empty, cannot Detailer')
-
-            context_positive, context_negative, context_loras = next_pipeline.context.get_context(self.context_regex)
-            print(f"[SnapshotDetailerSampler] context_positive='{context_positive}'")
-            print(f"[SnapshotDetailerSampler] context_negative='{context_negative}'")
-            print(f"[SnapshotDetailerSampler] context_loras={context_loras}")
-
-            original_images = [next_pipeline.get_image()]
-            image_size = 1
-            detailer_mask_start = [0]
-            detailer_mask_count = [1]
-            detailer_masks = [user_mask]
-
-            detailer_masks[0] = expand_mask(detailer_masks[0], grow=32, blur=32)
-
-            cropped_images = []
-            cropped_masks = []
-            crop_infos = []
-            processing_mapping = []
-
-            for image_index in range(image_size):
-                mask_start = detailer_mask_start[image_index]
-                mask_count = detailer_mask_count[image_index]
-                for mask_index in range(mask_start, mask_start + mask_count):
-                    cropped_image, cropped_mask, crop_info = crop_mask(
-                        image=original_images[image_index],
-                        mask=detailer_masks[mask_index],
-                        reserve=self.crop_reserve
-                    )
-                    processing_mapping.append(image_index)
-                    cropped_images.append(cropped_image)
-                    cropped_masks.append(cropped_mask)
-                    crop_infos.append(crop_info)
-
-            processing_size = len(cropped_images)
-
-            resized_images = []
-            resized_masks = []
-            resize_infos = []
-            tmp_latents = []
-
-            sampler_name = next_pipeline.sampler_name or 'euler'
-            scheduler = next_pipeline.scheduler or 'normal'
-            steps = next_pipeline.steps or 20
-            cfg = next_pipeline.cfg or 8.0
-
-            start_at_step = int(self.start_step_rate * steps)
-            end_at_step = int(self.end_step_rate * steps)
-
-            for processing_index in range(processing_size):
-                resized_image, resized_mask, resize_info = limit_pixels(
-                    image=cropped_images[processing_index],
-                    pixels=self.pixels,
-                    mask=cropped_masks[processing_index],
-                    align=self.align,
-                )
-                resized_images.append(resized_image)
-                resized_masks.append(resized_mask)
-                resize_infos.append(resize_info)
-
-                tmp_latent = VAEEncode().encode(
-                    vae=next_pipeline.vae,
-                    pixels=resized_images[processing_index]
-                )[0]
-                tmp_latents.append(tmp_latent)
-
-            for processing_index in range(processing_size):
-                current_positive = ','.join([p for p in [context_positive, user_positive] if p])
-                current_negative = context_negative
-                current_loras = context_loras.copy()
-                if user_loras:
-                    current_loras.extend(get_loras_from_string(user_loras))
-                print(f"[SnapshotDetailerSampler] current_positive='{current_positive}'")
-                print(f"[SnapshotDetailerSampler] current_negative='{current_negative}'")
-                print(f"[SnapshotDetailerSampler] current_loras={current_loras}")
-
-                tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_images[processing_index])
-                if tmp_positive is not None:
-                    current_positive += ',' + tmp_positive
-                if tmp_negative is not None:
-                    current_negative += ',' + tmp_negative
-                if tmp_loras is not None:
-                    current_loras.extend(tmp_loras)
-
-                model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
-                    model=next_pipeline.model,
-                    clip=next_pipeline.clip,
-                    loras=current_loras
-                )
-
-                tmp_latent = tmp_latents[processing_index]
-
-                positive_condition = next_pipeline.get_conditioning(
-                    mode='positive',
-                    clip=clip_to_use,
-                    vae=next_pipeline.vae,
-                    prompt=current_positive,
-                    reference_latent=None,
-                    reference_image=resized_images[processing_index],
-                    reference=next_pipeline.reference
-                )
-
-                negative_condition = next_pipeline.get_conditioning(
-                    mode='negative',
-                    clip=clip_to_use,
-                    vae=next_pipeline.vae,
-                    prompt=current_negative,
-                    reference_latent=None,
-                    reference_image=resized_images[processing_index],
-                    reference=next_pipeline.reference
-                )
-
-                tmp_latents[processing_index] = KSamplerAdvanced().sample(
-                    model=model_to_use,
-                    add_noise=self.add_noise,
-                    noise_seed=self.seed,
-                    steps=steps,
-                    cfg=cfg,
-                    sampler_name=sampler_name,
-                    scheduler=scheduler,
-                    positive=positive_condition,
-                    negative=negative_condition,
-                    latent_image=tmp_latent,
-                    start_at_step=start_at_step,
-                    end_at_step=end_at_step,
-                    return_with_leftover_noise='disable'
-                )[0]
-
-            detailed_images = []
-            for processing_index in range(processing_size):
-                detailed_images.append(
-                    VAEDecode().decode(vae=next_pipeline.vae, samples=tmp_latents[processing_index])[0]
-                )
-
-            recovered_images = []
-            recovered_masks = []
-            for processing_index in range(processing_size):
-                recovered_image, recovered_mask = recover_size(
-                    image=detailed_images[processing_index],
-                    resize_info=resize_infos[processing_index],
-                    mask=resized_masks[processing_index]
-                )
-                recovered_images.append(recovered_image)
-                recovered_masks.append(recovered_mask)
-
-            final_images = [None]
-            final_masks = [None]
-
-            for processing_index in range(processing_size):
-                image_index = processing_mapping[processing_index]
-                bg = original_images[image_index]
-                img = recovered_images[processing_index]
-                msk = recovered_masks[processing_index]
-                cinfo = crop_infos[processing_index]
-                final_images[image_index], final_masks[image_index] = recover_crop(
-                    background=bg,
-                    image=img,
-                    crop_info=cinfo,
-                    recover_method='mask_blend',
-                    mask=msk
-                )
-                # ---- debug: save final mask (full-size, not cropped) ----
-                try:
-                    self.debug_recover_data = {
-                        'background': tensor_to_base64(bg),
-                        'image': tensor_to_base64(img),
-                        'mask': mask_to_base64(final_masks[image_index]),
-                        'crop_x': cinfo.get('crop_x', 0),
-                        'crop_y': cinfo.get('crop_y', 0),
-                        'crop_width': cinfo.get('crop_width', 0),
-                        'crop_height': cinfo.get('crop_height', 0),
-                        'original_width': cinfo.get('original_width', 0),
-                        'original_height': cinfo.get('original_height', 0),
-                    }
-                except Exception as dbg_e:
-                    print(f'[Debug] failed to save recover debug data: {dbg_e}')
-                # ----------------------------------------------------------
-
-            # Save the full-size final mask for next loop's initial mask
-            self.last_used_mask = final_masks[0] if final_masks else None
-
-            next_pipeline.image = final_images[0]
-            next_pipeline.latent = None
-
-            del cropped_images, cropped_masks, crop_infos
-            del resized_images, resized_masks, resize_infos
-            del tmp_latents
-            del detailed_images, recovered_images, recovered_masks
-
-            gc.collect()
-            mm.soft_empty_cache()
-
-            images = final_images
-            masks = final_masks
-
-            self.pipeline = next_pipeline
-            self.detailed_image = images[0] if images else None
-            if self.detailed_image is not None:
-                self.pipeline.image = self.detailed_image
-
-            # --- start switch server for result selection ----------------------
-            if SnapshotSwitchServer is not None and self.detailed_image is not None and self.switch_server is not None:
-                try:
-                    self.switch_server.should_stop = False
-                    self.switch_server.started = False
-                    self.switch_server.selection_event.clear()
-                    self.switch_server.selected_key = None
-                    self.switch_server.window_closed = False
-                    self.switch_server.input_previews['original'] = {'type': 'image', 'data': tensor_to_base64(self.original_image)}
-                    self.switch_server.input_previews['detailed'] = {'type': 'image', 'data': tensor_to_base64(self.detailed_image)}
-                    t_switch = threading.Thread(target=self.switch_server.start)
-                    t_switch.daemon = True
-                    t_switch.start()
-                    t0 = time.time()
-                    while not self.switch_server.started:
-                        if time.time() - t0 > 10:
-                            print("[SnapshotDetailerSampler] Switch server startup timeout")
-                            break
-                        time.sleep(0.01)
-                    if self.switch_server.started:
-                        self.switch_url = self.switch_server.browser_url
-                        self.detail_status = 'selecting'
-                        print(f"[SnapshotDetailerSampler] Switch server at {self.switch_url}")
-                        # Block and wait for user selection
-                        self.switch_server.selection_event.wait()
-                        selected_key = self.switch_server.selected_key
-                        if selected_key == 'original':
-                            self.pipeline.image = self.original_image
-                            print("[SnapshotDetailerSampler] User selected original image")
-                        elif selected_key == 'detailed' or not selected_key:
-                            self.pipeline.image = self.detailed_image
-                            print("[SnapshotDetailerSampler] User selected detailed image")
-                        else:
-                            # 处理历史图片选择
-                            selected_image = None
-                            for h in self.selected_history:
-                                if h.get('key') == selected_key:
-                                    src = h.get('src', '')
-                                    b64_data = src.split(',', 1)[1] if ',' in src else src
-                                    img_bytes = base64.b64decode(b64_data)
-                                    img = Image.open(io.BytesIO(img_bytes))
-                                    if img.mode != 'RGB':
-                                        img = img.convert('RGB')
-                                    arr = np.array(img).astype(np.float32) / 255.0
-                                    selected_image = torch.from_numpy(arr).unsqueeze(0)
-                                    break
-                            if selected_image is not None:
-                                self.pipeline.image = selected_image
-                                print(f"[SnapshotDetailerSampler] User selected history image: {selected_key}")
-                            else:
-                                self.pipeline.image = self.detailed_image
-                                print(f"[SnapshotDetailerSampler] Unknown selection '{selected_key}', fallback to detailed")
-                except Exception as e:
-                    print(f"[SnapshotDetailerSampler] Failed to start switch server: {e}")
-
-            self.detail_status = 'done'
-
+            from server import PromptServer
+            ps = PromptServer.instance
+            if ps is None:
+                return
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "add_noise", "type": "STRING", "value": self.add_noise,
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "start_step_rate", "type": "FLOAT", "value": str(self.start_step_rate),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "end_step_rate", "type": "FLOAT", "value": str(self.end_step_rate),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "pixels", "type": "INT", "value": str(self.pixels),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "crop_reserve", "type": "INT", "value": str(self.crop_reserve),
+            })
         except Exception as e:
-            import traceback
-            print(f"[SnapshotDetailerSampler] Detailer error: {e}")
-            traceback.print_exc()
-            self.detail_error = str(e)
-            self.detail_status = 'error'
+            print(f"[SnapshotDetailerSampler] Widget sync failed: {e}")
+
+    def _apply_params(self, data):
+        dirty = False
+        if 'add_noise' in data:
+            self.add_noise = data['add_noise']
+            dirty = True
+        if 'start_step_rate' in data:
+            self.start_step_rate = float(data['start_step_rate'])
+            dirty = True
+        if 'end_step_rate' in data:
+            self.end_step_rate = float(data['end_step_rate'])
+            dirty = True
+        if 'pixels' in data:
+            self.pixels = int(data['pixels'])
+            dirty = True
+        if 'crop_reserve' in data:
+            self.crop_reserve = int(data['crop_reserve'])
+            dirty = True
+        if dirty:
+            self._sync_widgets()
+        return dirty
 
     # -------------------------------------------------------------------------
-    # HTTP Handler
+    # HTTP 请求处理器
     # -------------------------------------------------------------------------
     class MainHandler(http.server.SimpleHTTPRequestHandler):
         server_instance = None
@@ -666,7 +417,7 @@ class SnapshotDetailerSamplerServer:
                     'mask_url': inst.mask_url if inst else '',
                     'prompt_url': inst.prompt_url if inst else '',
                     'switch_url': inst.switch_url if inst else '',
-                    'loop_count': inst.loop_count if inst else 0,
+                    'loop_count': inst.node_instance.get_loop_count() if inst and inst.node_instance else 0,
                     'add_noise': inst.add_noise if inst else 'enable',
                     'start_step_rate': inst.start_step_rate if inst else 0.8,
                     'end_step_rate': inst.end_step_rate if inst else 1.0,
@@ -680,13 +431,15 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({
                     'detail_status': inst.detail_status if inst else 'idle',
                     'phase': inst.phase if inst else 'edit',
-                    'loop_count': inst.loop_count if inst else 0,
+                    'loop_count': inst.node_instance.get_loop_count() if inst and inst.node_instance else 0,
+                    'switch_url': inst.switch_url if inst else '',
                     'error': getattr(inst, 'detail_error', None),
                 })
                 return
 
             if self.path == '/api/has_mask':
-                has = inst.mask_server is not None and inst.mask_server.get_mask() is not None
+                # 使用 peek_mask() 而非 get_mask()：状态查询不能消费队列中的 mask
+                has = inst.mask_server is not None and inst.mask_server.peek_latest_mask() is not None
                 self._send_json({'has_mask': has})
                 return
 
@@ -722,10 +475,16 @@ class SnapshotDetailerSamplerServer:
                 return
 
             if self.path == '/api/tag_previews':
-                if inst is None:
+                if inst is None or inst.node_instance is None:
                     self._send_json({'error': 'not ready'})
                     return
-                previews = inst._generate_tag_previews()
+                # 通过 node_instance 获取当前 pipeline，Server 不存储 pipeline
+                pipeline = inst.node_instance.get_current_pipeline()
+                # 使用 peek_mask() 而非 get_mask()：/api/tag_previews 只是预览，不能消费队列中的 mask
+                mask = inst.mask_server.peek_latest_mask() if inst.mask_server else None
+                print(f"[DEBUG] /api/tag_previews: peek_latest_mask shape={mask.shape if mask is not None else None}, sum={mask.sum().item() if mask is not None else 'N/A'}")
+                print(f"[DEBUG] /api/tag_previews: pipeline.mask shape={pipeline.mask.shape if pipeline and pipeline.mask is not None else None}, same_tensor={mask is (pipeline.mask if pipeline else None)}")
+                previews = inst.node_instance._generate_tag_previews(pipeline, mask)
                 self._send_json(previews)
                 return
 
@@ -752,107 +511,16 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True})
                 return
 
-            if self.path == '/api/run_detail':
-                if inst.detail_status == 'running':
-                    self._send_json({'started': False, 'error': 'Already running'})
-                    return
-                length = int(self.headers.get('Content-Length', 0))
-                data = json.loads(self.rfile.read(length)) if length else {}
-                inst._apply_params(data)
-
-                prompt_data = data.get('prompt_data')
-
-                # Use mask from pipeline (set when user confirms in mask editor)
-                user_mask = inst.pipeline.mask if inst.pipeline is not None else None
-                if user_mask is None:
-                    self._send_json({'started': False, 'error': 'Mask not available. Please confirm mask first.'})
-                    return
-
-                # Parse prompt data
-                if SnapshotPromptServer is not None:
-                    user_positive, user_loras = SnapshotPromptServer.parse_prompt_data(prompt_data)
-                else:
-                    user_positive, user_loras = '', ''
-                if prompt_data:
-                    print(f"[SnapshotDetailerSampler] parsed user_positive='{user_positive}'")
-                    print(f"[SnapshotDetailerSampler] parsed user_loras='{user_loras}'")
-                else:
-                    print("[SnapshotDetailerSampler] No prompt_data provided, using empty prompt/lora.")
-
-                print(f"[DEBUG /api/run_detail] loop={inst.loop_count}")
-                print(f"[DEBUG /api/run_detail] mask shape={user_mask.shape}, sum={user_mask.sum().item()}")
-
-                inst.original_image = inst.pipeline.image.clone() if inst.pipeline is not None and inst.pipeline.image is not None else None
-                inst.detail_status = 'running'
-                inst.detail_error = None
-                inst.phase = 'waiting'
-                try:
-                    inst._run_detailer(user_mask, user_positive, user_loras)
-                    self._send_json({'started': True, 'done': True})
-                finally:
-                    if inst.pipeline is not None:
-                        inst.pipeline.mask = None
-                    if inst.mask_server:
-                        inst.mask_server.set_mask(None)
-                        inst.mask_server.set_initial_mask(None)
-                return
-
-            if self.path == '/api/next_loop':
-                length = int(self.headers.get('Content-Length', 0))
-                data = json.loads(self.rfile.read(length)) if length else {}
-                # pipeline.image 已在 _run_detailer 中根据 switch 选择设置好
-                if inst.pipeline is not None:
-                    inst.pipeline.latent = None
-                # save current image to history for next switch display
-                if inst.pipeline is not None and inst.pipeline.image is not None:
-                    inst.selected_history.append({
-                        'key': f'loop_{inst.loop_count}',
-                        'src': tensor_to_base64(inst.pipeline.image),
-                        'name': f'Loop {inst.loop_count} Result',
-                    })
-                    # limit history to last 10
-                    if len(inst.selected_history) > 10:
-                        inst.selected_history = inst.selected_history[-10:]
-                inst.loop_count += 1
-                inst.detailed_image = None
-                inst.detail_status = 'idle'
-                inst.detail_error = None
-                inst.phase = 'edit'
-                # 保留 last_selected 记录，但清空当前选择状态（每次循环独立）
-                if inst.prompt_server:
-                    inst.prompt_server.last_selected = inst.prompt_server.selected_prompts[:]
-                    inst.prompt_server.last_selected_loras = inst.prompt_server.selected_loras[:]
-                    inst.prompt_server.last_selected_prefabs = inst.prompt_server.selected_prefabs[:]
-                    inst.prompt_server.selected_prompts = []
-                    inst.prompt_server.selected_loras = []
-                    inst.prompt_server.selected_prefabs = []
-                    inst.prompt_server.custom_prompts = ''
-                    print(f"[DEBUG next_loop] cleared prompt selections")
-                if inst.mask_server:
-                    print(f"[DEBUG next_loop] clearing mask (was shape={inst.mask_server.get_mask().shape if inst.mask_server.get_mask() is not None else None})")
-                    inst.mask_server.set_image(inst.pipeline.image if inst.pipeline is not None else None)
-                    inst.mask_server.set_mask(None)
-                    # Set initial_mask to last used full-size mask so user can refine it next loop
-                    inst.mask_server.set_initial_mask(getattr(inst, 'last_used_mask', None))
-                if inst.pipeline is not None:
-                    inst.pipeline.mask = None
-                # stop switch server in background to avoid blocking
-                if inst.switch_server:
-                    def _stop_switch():
-                        try:
-                            inst.switch_server.stop()
-                        except Exception:
-                            pass
-                    t = threading.Thread(target=_stop_switch)
-                    t.daemon = True
-                    t.start()
-                    inst.switch_url = ''
-                self._send_json({'ok': True})
-                return
-
             if self.path == '/api/finish':
                 inst.finished = True
                 inst.event.set()
+                # 唤醒所有可能正在阻塞的 Phase，让循环立即退出
+                if inst.mask_server:
+                    inst.mask_server.screenshot_event.set()
+                if inst.prompt_server:
+                    inst.prompt_server.prompt_event.set()
+                if inst.switch_server:
+                    inst.switch_server.selection_event.set()
                 self._send_json({'ok': True})
                 return
 
@@ -864,28 +532,15 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     mode = body.get('mode', 'mask')
-                    from ..libs.caption_utils import get_tag
-                    from ..libs.image_utils import crop_mask
-                    tag_image = inst.pipeline.image if inst.pipeline is not None else None
-                    if inst.mask_server and inst.mask_server.get_mask() is not None:
-                        try:
-                            img = tag_image
-                            mask = inst.mask_server.get_mask()
-                            if img.dim() == 3:
-                                img = img.unsqueeze(0)
-                            if mask.dim() == 2:
-                                mask = mask.unsqueeze(0)
-                            cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
-                            if mode == 'mask':
-                                tag_image = cropped_img
-                            elif mode == 'covered':
-                                white_bg = torch.ones_like(cropped_img)
-                                mask_expanded = cropped_mask.unsqueeze(-1).float()
-                                tag_image = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
-                            # mode == 'full' uses original tag_image
-                        except Exception as mask_err:
-                            print(f"[RunTag] crop_mask failed, falling back to full: {mask_err}")
-                    tag = get_tag(inst.tagger, tag_image)
+                    # 通过 node_instance 获取当前 pipeline，Server 不存储 pipeline
+                    tag = ''
+                    if inst.node_instance:
+                        pipeline = inst.node_instance.get_current_pipeline()
+                        # 使用 pipeline.mask 而非 get_mask()：run_tag 发生在 mask phase 之后，
+                        # mask 已经被消费并保存到 pipeline 中；get_mask() 会再次消费队列
+                        mask = pipeline.mask if pipeline else None
+                        print(f"[DEBUG] /api/run_tag ({mode}): mask shape={mask.shape if mask is not None else None}, sum={mask.sum().item() if mask is not None else 'N/A'}")
+                        tag = inst.node_instance._run_tag(pipeline, mask, inst.tagger, mode)
                     inst.tag_result = tag
                     if inst.prompt_server:
                         inst.prompt_server.custom_prompts = tag
@@ -895,7 +550,6 @@ class SnapshotDetailerSamplerServer:
                     traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)})
                 finally:
-                    # Do NOT clear mask here — the user may still want to run detail with the same mask.
                     pass
                 return
 
@@ -908,10 +562,20 @@ class SnapshotDetailerSamplerServer:
             self.send_error(404)
 
 
+
 # =============================================================================
-# ComfyUI Node
+# SnapshotDetailerSamplerNode：包含所有主要业务逻辑，管理 pipeline 生命周期
 # =============================================================================
 class SnapshotDetailerSamplerNode:
+    """
+    ComfyUI 节点：Snapshot Detailer Sampler。
+    职责：
+      - 管理 pipeline 生命周期（存储在 self._current_pipeline）
+      - 包含 detailer 核心采样逻辑（_run_detailer）
+      - 包含 tag 生成和预览逻辑（_generate_tag_previews / _run_tag）
+      - 驱动整个交互循环（sample 方法中的 mask -> prompt -> detailer -> switch）
+    """
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -942,21 +606,383 @@ class SnapshotDetailerSamplerNode:
     def IS_CHANGED(s, **kwargs):
         return float("nan")
 
+    # -------------------------------------------------------------------------
+    # Pipeline 状态管理（Node 持有，Server 不存储）
+    # -------------------------------------------------------------------------
+    def get_current_pipeline(self):
+        """供 Server 的 HTTP handler 调用，获取当前 pipeline。"""
+        return getattr(self, '_current_pipeline', None)
+
+    def get_current_mask(self):
+        """供 Server 的 HTTP handler 调用，获取当前 mask。"""
+        return self._current_pipeline.mask if self._current_pipeline is not None else None
+
+    def get_loop_count(self):
+        """供 Server 的 HTTP handler 调用，获取当前循环计数。"""
+        return getattr(self, '_loop_count', 0)
+
+    def _on_mask_set(self, mask, loop_index=None):
+        """
+        Server 的 mask confirm 回调委托到这里。
+        Node 直接修改 self._current_pipeline.mask。
+        使用 clone 切断引用，避免多线程共享 tensor 导致意外修改。
+        """
+        pm = self._current_pipeline.mask if self._current_pipeline is not None else None
+        print(f"[MASK-TRACE] _on_mask_set ENTER | loop={loop_index} | incoming mask id={id(mask)}, shape={mask.shape if mask is not None else None}, sum={mask.sum().item() if mask is not None else 'N/A'} | pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+        if self._current_pipeline is not None:
+            self._current_pipeline.mask = mask.clone() if mask is not None else None
+            pm2 = self._current_pipeline.mask
+            print(f"[MASK-TRACE] _on_mask_set DONE | loop={loop_index} | pipeline.mask now id={id(pm2)}, shape={pm2.shape if pm2 is not None else None}, sum={pm2.sum().item() if pm2 is not None else 'N/A'}")
+
+    # -------------------------------------------------------------------------
+    # 业务逻辑：Tag 相关
+    # -------------------------------------------------------------------------
+    def _generate_tag_previews(self, pipeline, mask):
+        """
+        为 Tag 阶段生成三种预览图：
+          - full   : 原图全貌
+          - mask   : 按 mask 裁剪后的区域
+          - covered: mask 区域内保留原图，区域外填充白色
+        参数：
+          pipeline : PipelineData 实例（由 Node 传入，不从 Server 读取）
+          mask     : mask tensor
+        返回 dict，供前端 /api/tag_previews 接口使用。
+        """
+        if pipeline is None or pipeline.image is None or mask is None:
+            return {}
+        try:
+            from ..libs.image_utils import crop_mask
+            img = pipeline.image
+            if img.dim() == 3:
+                img = img.unsqueeze(0)
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0)
+            previews = {'full': tensor_to_base64(img)}
+            try:
+                cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
+                previews['mask'] = tensor_to_base64(cropped_img)
+                white_bg = torch.ones_like(cropped_img)
+                mask_expanded = cropped_mask.unsqueeze(-1).float()
+                covered = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
+                previews['covered'] = tensor_to_base64(covered)
+            except Exception as e:
+                print(f'[TagPreview] crop failed: {e}')
+                previews['mask'] = previews['full']
+                previews['covered'] = previews['full']
+            return previews
+        except Exception as e:
+            print(f'[TagPreview] error: {e}')
+            return {}
+
+    def _run_tag(self, pipeline, mask, tagger, mode='mask'):
+        """
+        运行 tagger 生成 prompt。返回 tag 字符串。
+        参数：
+          pipeline : PipelineData 实例（由 Node 传入，不从 Server 读取）
+          mask     : mask tensor
+          tagger   : 外部 tagger 节点
+          mode     : 'mask' / 'covered' / 'full'
+        """
+        from ..libs.caption_utils import get_tag
+        from ..libs.image_utils import crop_mask
+        tag_image = pipeline.image if pipeline is not None else None
+        if mask is not None:
+            try:
+                img = tag_image
+                if img.dim() == 3:
+                    img = img.unsqueeze(0)
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(0)
+                cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
+                if mode == 'mask':
+                    tag_image = cropped_img
+                elif mode == 'covered':
+                    white_bg = torch.ones_like(cropped_img)
+                    mask_expanded = cropped_mask.unsqueeze(-1).float()
+                    tag_image = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
+            except Exception as mask_err:
+                print(f"[RunTag] crop_mask failed, falling back to full: {mask_err}")
+        return get_tag(tagger, tag_image)
+
+    # -------------------------------------------------------------------------
+    # 业务逻辑：Prompt 解析
+    # -------------------------------------------------------------------------
+    def _parse_prompt(self, prompt_server):
+        """从 prompt_server 解析用户选择的 positive prompt 和 lora 字符串。"""
+        user_positive = ''
+        user_loras = ''
+        if prompt_server:
+            selected = prompt_server.selected_prompts
+            custom = prompt_server.custom_prompts
+            parts = []
+            for p in selected:
+                if p.startswith('<') and p.endswith('>'):
+                    parts.append(p[1:-1])
+                else:
+                    parts.append(p)
+            if custom:
+                parts.append(custom)
+            user_positive = ','.join(parts)
+            loras = prompt_server.selected_loras or []
+            user_loras = ','.join(loras)
+        return user_positive, user_loras
+
+    # -------------------------------------------------------------------------
+    # 业务逻辑：Switch 结果应用
+    # -------------------------------------------------------------------------
+    def _apply_switch_selection(self, pipeline, selected, original_image, detailed_image, selected_history):
+        """根据用户在 switch 界面的选择，更新 pipeline.image。"""
+        if selected == 'original':
+            pipeline.image = original_image.clone() if original_image is not None else None
+        elif selected == 'detailed' or not selected:
+            pipeline.image = detailed_image.clone() if detailed_image is not None else None
+        else:
+            selected_image = None
+            for h in selected_history:
+                if h.get('key') == selected:
+                    src = h.get('src', '')
+                    b64_data = src.split(',', 1)[1] if ',' in src else src
+                    img_bytes = base64.b64decode(b64_data)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    arr = np.array(img).astype(np.float32) / 255.0
+                    selected_image = torch.from_numpy(arr).unsqueeze(0)
+                    break
+            if selected_image is not None:
+                pipeline.image = selected_image
+                print(f"[SnapshotDetailerSampler] User selected history image: {selected}")
+            else:
+                pipeline.image = detailed_image.clone() if detailed_image is not None else None
+                print(f"[SnapshotDetailerSampler] Unknown selection '{selected}', fallback to detailed")
+        return pipeline
+
+    # -------------------------------------------------------------------------
+    # 业务逻辑：Detailer 核心采样
+    # -------------------------------------------------------------------------
+    def _run_detailer(self, pipeline, user_mask, user_positive, user_loras, params):
+        """
+        执行完整的 detailer 采样流水线。
+        参数：
+          pipeline      : 当前 PipelineData（由 Node 传入，不从 Server 读取）
+          user_positive : 用户输入的 positive prompt
+          user_loras    : 用户选择的 lora 字符串
+          params        : dict，包含采样参数
+        返回: (next_pipeline, original_image, detailed_image, debug_recover_data)
+        注意：next_pipeline.mask 已被设为 full-size 最终 mask，供下一轮使用。
+        """
+        seed = params['seed']
+        add_noise = params['add_noise']
+        start_step_rate = params['start_step_rate']
+        end_step_rate = params['end_step_rate']
+        pixels = params['pixels']
+        align = params['align']
+        crop_reserve = params['crop_reserve']
+        context_regex = params['context_regex']
+        loop_count = params.get('loop_count', 0)  # 仅用于打印
+
+        next_pipeline = pipeline.copy()
+        npm = next_pipeline.mask
+        print(f"[MASK-TRACE] _run_detailer: after pipeline.copy() | next_pipeline.mask id={id(npm)}, shape={npm.shape if npm is not None else None}, sum={npm.sum().item() if npm is not None else 'N/A'}")
+        if next_pipeline.cache is None:
+            raise ValueError('PipelineData cache is empty')
+        if next_pipeline.model is None:
+            raise ValueError('PipelineData model is empty, cannot Detailer')
+
+        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
+        print(f"[SnapshotDetailerSampler] context_positive='{context_positive}'")
+        print(f"[SnapshotDetailerSampler] context_negative='{context_negative}'")
+        print(f"[SnapshotDetailerSampler] context_loras={context_loras}")
+
+        original_image = next_pipeline.get_image()
+        if original_image is None:
+            raise ValueError("No image available for detailer")
+
+        # ====== 单 mask 处理流程 ======
+        if user_mask is not None:
+            user_mask = user_mask.clone()
+        print(f"[DEBUG] _run_detailer START: user_mask id={id(user_mask)}, shape={user_mask.shape if user_mask is not None else None}, sum={user_mask.sum().item() if user_mask is not None else 'N/A'}")
+        expanded_mask = expand_mask(user_mask, grow=32, blur=32)
+        print(f"[DEBUG] _run_detailer after expand_mask: expanded_mask id={id(expanded_mask)}, sum={expanded_mask.sum().item():.1f}")
+
+        cropped_image, cropped_mask, crop_info = crop_mask(
+            image=original_image,
+            mask=expanded_mask,
+            reserve=crop_reserve
+        )
+        print(f"[DEBUG] _run_detailer after crop_mask: cropped_mask id={id(cropped_mask)}, sum={cropped_mask.sum().item():.1f}")
+
+        resized_image, resized_mask, resize_info = limit_pixels(
+            image=cropped_image,
+            pixels=pixels,
+            mask=cropped_mask,
+            align=align,
+        )
+        print(f"[DEBUG] _run_detailer after limit_pixels: resized_mask id={id(resized_mask)}, sum={resized_mask.sum().item():.1f}")
+
+        tmp_latent = VAEEncode().encode(
+            vae=next_pipeline.vae,
+            pixels=resized_image
+        )[0]
+
+        sampler_name = next_pipeline.sampler_name or 'euler'
+        scheduler = next_pipeline.scheduler or 'normal'
+        steps = next_pipeline.steps or 20
+        cfg = next_pipeline.cfg or 8.0
+
+        start_at_step = int(start_step_rate * steps)
+        end_at_step = int(end_step_rate * steps)
+
+        current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+        current_negative = context_negative
+        current_loras = context_loras.copy()
+        current_loras.extend(get_loras_from_string(user_loras))
+        
+        print(f"[SnapshotDetailerSampler] current_positive='{current_positive}'")
+        print(f"[SnapshotDetailerSampler] current_negative='{current_negative}'")
+        print(f"[SnapshotDetailerSampler] current_loras={current_loras}")
+
+        tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_image)
+        if tmp_positive is not None:
+            current_positive += ',' + tmp_positive
+        if tmp_negative is not None:
+            current_negative += ',' + tmp_negative
+        if tmp_loras is not None:
+            current_loras.extend(tmp_loras)
+
+        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model=next_pipeline.model,
+            clip=next_pipeline.clip,
+            loras=current_loras
+        )
+
+        positive_condition = next_pipeline.get_conditioning(
+            mode='positive',
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=current_positive,
+            reference_latent=None,
+            reference_image=resized_image,
+            reference=next_pipeline.reference
+        )
+
+        negative_condition = next_pipeline.get_conditioning(
+            mode='negative',
+            clip=clip_to_use,
+            vae=next_pipeline.vae,
+            prompt=current_negative,
+            reference_latent=None,
+            reference_image=resized_image,
+            reference=next_pipeline.reference
+        )
+
+        sampled_latent = KSamplerAdvanced().sample(
+            model=model_to_use,
+            add_noise=add_noise,
+            noise_seed=seed,
+            steps=steps,
+            cfg=cfg,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            positive=positive_condition,
+            negative=negative_condition,
+            latent_image=tmp_latent,
+            start_at_step=start_at_step,
+            end_at_step=end_at_step,
+            return_with_leftover_noise='disable'
+        )[0]
+
+        decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+
+        recovered_image, recovered_mask = recover_size(
+            image=decoded_image,
+            resize_info=resize_info,
+            mask=resized_mask
+        )
+        print(f"[DEBUG] _run_detailer after recover_size: recovered_mask id={id(recovered_mask)}, sum={recovered_mask.sum().item():.1f}")
+
+        final_image, final_mask = recover_crop(
+            background=original_image,
+            image=recovered_image,
+            crop_info=crop_info,
+            recover_method='mask_blend',
+            mask=recovered_mask
+        )
+        print(f"[DEBUG] _run_detailer after recover_crop: final_mask id={id(final_mask)}, sum={final_mask.sum().item():.1f}")
+
+        # detailed_image 保持与原多 mask 版本一致的语义：recover_crop 后的 full-size 图像
+        detailed_image = final_image
+
+        try:
+            debug_recover_data = {
+                'background': tensor_to_base64(original_image),
+                'image': tensor_to_base64(recovered_image),
+                'mask': mask_to_base64(recovered_mask),
+                'crop_x': crop_info.get('crop_x', 0),
+                'crop_y': crop_info.get('crop_y', 0),
+                'crop_width': crop_info.get('crop_width', 0),
+                'crop_height': crop_info.get('crop_height', 0),
+                'original_width': crop_info.get('original_width', 0),
+                'original_height': crop_info.get('original_height', 0),
+            }
+        except Exception as dbg_e:
+            print(f'[Debug] failed to save recover debug data: {dbg_e}')
+            debug_recover_data = None
+
+        # 将 full-size 最终 mask 放入 pipeline.mask，供下一轮作为初始 mask
+        print(f"[MASK-TRACE] _run_detailer: before assignment | next_pipeline.mask id={id(next_pipeline.mask)}, sum={next_pipeline.mask.sum().item() if next_pipeline.mask is not None else 'N/A'}")
+        next_pipeline.image = final_image
+        next_pipeline.latent = None
+        next_pipeline.mask = final_mask
+        print(f"[MASK-TRACE] _run_detailer: after assignment | next_pipeline.mask id={id(next_pipeline.mask)}, sum={next_pipeline.mask.sum().item() if next_pipeline.mask is not None else 'N/A'}")
+
+        gc.collect()
+        mm.soft_empty_cache()
+
+        return next_pipeline, original_image, detailed_image, debug_recover_data
+
+    # -------------------------------------------------------------------------
+    # ComfyUI 节点执行入口
+    # -------------------------------------------------------------------------
     def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
                start_step_rate=0.8, end_step_rate=1.0, pixels=1048576,
                align=8, crop_reserve=32, detector=None, tagger=None, unique_id=None):
+        """
+        ComfyUI 节点执行入口。
+        pipeline 的生命周期完全由 Node 管理，Server 不存储 pipeline。
+        流程：
+          1. Node 初始化 self._current_pipeline
+          2. 创建 Server（不传 pipeline）
+          3. Server.start(initial_image=...) 传入初始图片
+          4. Node 驱动主循环，通过 self._current_pipeline 传递业务状态
+          5. Server 只负责前后端交互（等待用户、返回状态）
+        """
         mm.throw_exception_if_processing_interrupted()
 
-        server = SnapshotDetailerSamplerServer(
-            pipeline, seed, detector, tagger, lora_regex,
-            add_noise, start_step_rate, end_step_rate, pixels, align, crop_reserve,
-            unique_id, context_regex,
-        )
-        t_server = threading.Thread(target=server.start)
-        t_server.daemon = True
-        t_server.start()
+        # ---------- 1. Node 初始化状态 ----------
+        self._current_pipeline = pipeline.copy() if pipeline else None
+        self._loop_count = 0
 
-        # Wait for startup
+        # ---------- 2. 创建 Server，不传 pipeline ----------
+        server = SnapshotDetailerSamplerServer(
+            detector=detector,
+            tagger=tagger,
+            lora_regex=lora_regex,
+            node_instance=self,
+            unique_id=unique_id,
+            config={
+                'add_noise': add_noise,
+                'start_step_rate': start_step_rate,
+                'end_step_rate': end_step_rate,
+                'pixels': pixels,
+                'align': align,
+                'crop_reserve': crop_reserve,
+                'context_regex': context_regex,
+            }
+        )
+        server.start(initial_image=self._current_pipeline.image if self._current_pipeline else None)
+
+        # 等待启动
         t0 = time.time()
         while not server.started:
             mm.throw_exception_if_processing_interrupted()
@@ -968,27 +994,189 @@ class SnapshotDetailerSamplerNode:
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
 
-        # Wait for finish / interrupt / window close
-        while not server.event.is_set():
-            try:
-                mm.throw_exception_if_processing_interrupted()
-            except Exception as e:
-                if "interrupt" in str(e).lower() or "processing" in str(e).lower():
-                    print("[SnapshotDetailerSampler] Interrupted")
-                    server.stop()
-                    raise RuntimeError("[SnapshotDetailerSampler] Interrupted")
-                raise
-            if mm.processing_interrupted():
-                server.stop()
-                raise RuntimeError("[SnapshotDetailerSampler] Interrupted")
-            server.event.wait(0.05)
+        params = {
+            'seed': seed,
+            'add_noise': add_noise,
+            'start_step_rate': start_step_rate,
+            'end_step_rate': end_step_rate,
+            'pixels': pixels,
+            'align': align,
+            'crop_reserve': crop_reserve,
+            'context_regex': context_regex,
+        }
 
-        server.stop()
+        try:
+            while not server.finished:
+                # 检查中断
+                try:
+                    mm.throw_exception_if_processing_interrupted()
+                except Exception as e:
+                    if "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                        print("[SnapshotDetailerSampler] Interrupted")
+                        break
+                    raise
+                if mm.processing_interrupted():
+                    print("[SnapshotDetailerSampler] Interrupted")
+                    break
+
+                # ============================================================
+                # Phase 1: Mask
+                # ============================================================
+                server.phase = 'mask'
+                server.detail_status = 'idle'
+                server.detail_error = None
+                pm = self._current_pipeline.mask
+                print(f"[PHASE-TRACE] Loop {self._loop_count} ENTER mask | pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+                print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: waiting for mask...")
+                if not server.wait_for_mask():
+                    print("[SnapshotDetailerSampler] Interrupted during mask phase")
+                    break
+                
+                user_mask = server.mask_server.get_mask_for_loop(self._loop_count)
+                if user_mask is not None:
+                    user_mask = user_mask.clone()
+                    print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: mask consumed from server, shape={user_mask.shape}, sum={user_mask.sum().item()}")
+                else:
+                    print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: WARNING - no mask from server, using pipeline.mask as fallback")
+                    # 防御性 fallback：如果 server 没有返回 mask，使用 pipeline 中已有的 mask
+                    # 这种情况理论上不应发生，但为了防止竞争导致空指针
+                    user_mask = self._current_pipeline.mask
+                    if user_mask is not None:
+                        user_mask = user_mask.clone()
+                        print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: fallback mask shape={user_mask.shape}, sum={user_mask.sum().item()}")
+                self._current_pipeline.mask = user_mask
+                print(f"[DEBUG] After wait_for_mask: pipeline.mask shape={self._current_pipeline.mask.shape if self._current_pipeline.mask is not None else None}")
+                print(f"[DEBUG] After wait_for_mask: mask_server has mask? {server.mask_server.peek_latest_mask() is not None}")
+                
+                pipeline_mask = self._current_pipeline.mask
+
+                print(f"[DEBUG] Loop {self._loop_count} - User Mask | shape={user_mask.shape if user_mask is not None else None} | sum={user_mask.sum().item() if user_mask is not None else 0}")
+                print(f"[DEBUG] Loop {self._loop_count} - Pipeline Mask | shape={pipeline_mask.shape if pipeline_mask is not None else None} | sum={pipeline_mask.sum().item() if pipeline_mask is not None else 0}")
+                print(f"[DEBUG] Are they the same object? {user_mask is pipeline_mask}")
+
+                # ============================================================
+                # Phase 2: Prompt
+                # ============================================================
+                server.phase = 'prompt'
+                pm = self._current_pipeline.mask
+                print(f"[PHASE-TRACE] Loop {self._loop_count} ENTER prompt | pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+                print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: waiting for prompt...")
+                if not server.wait_for_prompt():
+                    print("[SnapshotDetailerSampler] Interrupted during prompt phase")
+                    break
+
+                user_positive, user_loras = self._parse_prompt(server.prompt_server)
+
+                # ============================================================
+                # Phase 3: Detailer
+                # ============================================================
+                server.phase = 'waiting'
+                server.detail_status = 'running'
+                server.detail_error = None
+                pm = self._current_pipeline.mask
+                print(f"[PHASE-TRACE] Loop {self._loop_count} ENTER waiting/detailer | pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+                print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: running detailer...")
+
+                try:
+                    # 重新从 pipeline 获取 mask，防止用户在 prompt/tag 阶段更新 mask 后使用旧值
+                    current_mask = self._current_pipeline.mask
+                    if current_mask is not None:
+                        current_mask = current_mask.clone()
+                    print(f"[DEBUG] Before detailer: current_mask shape={current_mask.shape if current_mask is not None else None}, sum={current_mask.sum().item() if current_mask is not None else 'N/A'}")
+                    peek = server.mask_server.peek_latest_mask()
+                    print(f"[DEBUG] Before detailer: mask_server.peek_mask shape={peek.shape if peek is not None else None}")
+                    print(f"[DEBUG] Before detailer: are they same tensor? {current_mask is peek}")
+                    next_pipeline, original_image, detailed_image, debug_data = self._run_detailer(
+                        self._current_pipeline, current_mask, user_positive, user_loras,
+                        {**params, 'loop_count': self._loop_count}
+                    )
+                    npm = next_pipeline.mask
+                    print(f"[PHASE-TRACE] Loop {self._loop_count} DETAILER DONE | next_pipeline.mask id={id(npm)}, shape={npm.shape if npm is not None else None}, sum={npm.sum().item() if npm is not None else 'N/A'}")
+                    server.original_image = original_image
+                    server.detailed_image = detailed_image
+                    server.debug_recover_data = debug_data
+                    server.detail_status = 'done'
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    server.detail_status = 'error'
+                    server.detail_error = str(e)
+                    continue
+
+                # ============================================================
+                # Phase 4: Switch
+                # ============================================================
+                server.phase = 'switch'
+                npm = next_pipeline.mask
+                print(f"[PHASE-TRACE] Loop {self._loop_count} ENTER switch | next_pipeline.mask id={id(npm)}, shape={npm.shape if npm is not None else None}, sum={npm.sum().item() if npm is not None else 'N/A'}")
+                print(f"[SnapshotDetailerSampler] Loop {self._loop_count}: waiting for switch selection...")
+
+                if server.switch_server is not None:
+                    server.start_switch_server(server.original_image, server.detailed_image)
+
+                    if not server.wait_for_switch():
+                        print("[SnapshotDetailerSampler] Interrupted during switch phase")
+                        break
+
+                    server.stop_switch_server()
+
+                    selected = server.switch_server.selected_key
+                    next_pipeline = self._apply_switch_selection(
+                        next_pipeline, selected, server.original_image, server.detailed_image, server.selected_history
+                    )
+
+                # ============================================================
+                # Phase 5: Next loop
+                # ============================================================
+                self._loop_count += 1
+                npm = next_pipeline.mask if next_pipeline is not None else None
+                print(f"[PHASE-TRACE] Loop {self._loop_count - 1} END → next loop {self._loop_count} | next_pipeline.mask id={id(npm)}, shape={npm.shape if npm is not None else None}, sum={npm.sum().item() if npm is not None else 'N/A'}")
+                print(f"[SnapshotDetailerSampler] Next loop: {self._loop_count}")
+
+                if next_pipeline is not None and next_pipeline.image is not None:
+                    server.selected_history.append({
+                        'key': f'loop_{self._loop_count - 1}',
+                        'src': tensor_to_base64(next_pipeline.image),
+                        'name': f'Loop {self._loop_count - 1} Result',
+                    })
+                    if len(server.selected_history) > 10:
+                        server.selected_history = server.selected_history[-10:]
+
+                if server.mask_server:
+                    server.mask_server.set_image(next_pipeline.image if next_pipeline is not None else None)
+                    server.mask_server.clear()
+
+                self._current_pipeline = next_pipeline
+                pm = self._current_pipeline.mask if self._current_pipeline is not None else None
+                print(f"[PHASE-TRACE] Loop {self._loop_count} START | _current_pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
+
+                if server.prompt_server:
+                    server.prompt_server.last_selected = server.prompt_server.selected_prompts[:]
+                    server.prompt_server.last_selected_loras = server.prompt_server.selected_loras[:]
+                    server.prompt_server.last_selected_prefabs = server.prompt_server.selected_prefabs[:]
+                    server.prompt_server.selected_prompts = []
+                    server.prompt_server.selected_loras = []
+                    server.prompt_server.selected_prefabs = []
+                    server.prompt_server.custom_prompts = ''
+
+                server.detailed_image = None
+                server.detail_status = 'idle'
+                server.detail_error = None
+                server.original_image = None
+
+                gc.collect()
+                mm.soft_empty_cache()
+
+        finally:
+            server.stop()
 
         if server.window_closed and not server.finished:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
 
-        result = server.pipeline
+        result = self._current_pipeline
+        self._current_pipeline = None
+        self._loop_count = 0
+
         if result is None:
             raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
         return (result,)

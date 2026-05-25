@@ -13,12 +13,16 @@ const App: React.FC = () => {
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [maskConfirmed, setMaskConfirmed] = useState<boolean>(false);
+  const maskConfirmedRef = useRef(false);
+  useEffect(() => { maskConfirmedRef.current = maskConfirmed; }, [maskConfirmed]);
+
   const [promptReady, setPromptReady] = useState<boolean>(false);
   const [autoTagging, setAutoTagging] = useState(false);
   const [autoTagResult, setAutoTagResult] = useState<string | null>(null);
   const [tagPreviews, setTagPreviews] = useState<TagPreviews | null>(null);
   const [tagResult, setTagResult] = useState<string | null>(null);
   const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
+  const [switchUrl, setSwitchUrl] = useState<string>('');
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
 
   const [params, setParams] = useState<DetailerParams>({
@@ -68,8 +72,8 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
         setError(null);
-        if (phaseRef.current === 'prompt') {
-          handleRunDetailRef.current();
+        if (phaseRef.current === 'prompt' && maskConfirmedRef.current) {
+          setPhase('waiting');
         }
       }
     };
@@ -89,24 +93,9 @@ const App: React.FC = () => {
   }, [phase, maskConfirmed, config]);
 
   // Poll mask status periodically (fallback for postMessage)
-  // Also check if backend is requesting a fresh mask
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      try {
-        const awaitingRes = await fetch('/api/awaiting_mask');
-        const awaitingData = await awaitingRes.json();
-        if (!cancelled && awaitingData.awaiting_mask) {
-          const iframe = document.querySelector('iframe[title="Mask Editor"]') as HTMLIFrameElement | null;
-          if (iframe?.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'request-mask' }, '*');
-          }
-          return;
-        }
-      } catch {
-        // ignore
-      }
-
       try {
         const res = await fetch('/api/has_mask');
         const data = await res.json();
@@ -159,12 +148,8 @@ const App: React.FC = () => {
         const data: StatusResponse = await res.json();
         if (cancelled) return;
 
-        if (data.detail_status === 'selecting' || data.detail_status === 'done') {
-          const configRes = await fetch('/api/config');
-          const newConfig: ServerConfig = await configRes.json();
-          if (!cancelled) {
-            setConfig(newConfig);
-          }
+        if (data.switch_url) {
+          setSwitchUrl(data.switch_url);
         }
 
         if (data.detail_status === 'done') {
@@ -227,78 +212,48 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleRunDetail = useCallback(async () => {
-    setError(null);
-    setPhase('waiting');
-    try {
-      const promptPromise = new Promise<any>((resolve) => {
-        const iframe = promptIframeRef.current;
-        if (!iframe?.contentWindow) {
-          resolve(null);
-          return;
-        }
-        const handler = (event: MessageEvent) => {
-          if (event.data?.type === 'prompt-data') {
-            window.removeEventListener('message', handler);
-            resolve(event.data.data);
-          }
-        };
-        window.addEventListener('message', handler);
-        iframe.contentWindow.postMessage({ type: 'get-prompt' }, '*');
-        setTimeout(() => {
-          window.removeEventListener('message', handler);
-          resolve(null);
-        }, 5000);
-      });
-
-      const promptData = await promptPromise;
-
-      const res = await fetch('/api/run_detail', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...params, prompt_data: promptData }),
-      });
-      const data = await res.json();
-      if (!data.started) {
-        setError(data.error || 'Failed to start detailer');
-        setPhase('prompt');
-        return;
-      }
-      // waiting phase polling will detect done -> switch
-    } catch (e: any) {
-      setError('Run detail error: ' + e.message);
-      setPhase('prompt');
-    }
-  }, [params]);
-
-  const handleRunDetailRef = useRef(handleRunDetail);
-  useEffect(() => { handleRunDetailRef.current = handleRunDetail; }, [handleRunDetail]);
-
-  // Poll switch status when in switch phase
+  // Poll status in switch phase: detect loopCount change to auto-advance
   useEffect(() => {
     if (phase !== 'switch') return;
 
     let cancelled = false;
+    let currentLoop = -1; // initialized on first poll, not from stale config
     const poll = async () => {
       try {
-        const res = await fetch('/api/switch_status');
+        const res = await fetch('/api/status');
         const data = await res.json();
         if (cancelled) return;
 
-        if (data.selected) {
-          await fetch('/api/next_loop', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
-          });
-          window.location.reload();
-        } else if (data.window_closed) {
-          await fetch('/api/finish', { method: 'POST' });
-          window.close();
+        if (data.switch_url) {
+          setSwitchUrl(data.switch_url);
+        }
+
+        if (currentLoop < 0) {
+          currentLoop = data.loop_count;
+          return;
+        }
+
+        if (data.loop_count > currentLoop) {
+          // Backend has advanced to next loop
+          currentLoop = data.loop_count;
+          // Refresh full config so all URLs and loop_count stay in sync
+          try {
+            const cfgRes = await fetch('/api/config');
+            const cfgData = await cfgRes.json();
+            if (!cancelled) setConfig(cfgData);
+          } catch {
+            setConfig(prev => prev ? { ...prev, loop_count: data.loop_count } : null);
+          }
+          setMaskConfirmed(false);
+          setPromptReady(false);
+          setTagResult(null);
+          setAutoTagResult(null);
+          setSwitchUrl('');
+          setPhase('mask');
         }
       } catch (e: any) {
         if (!cancelled) {
-          setError('Switch poll error: ' + e.message);
+          setError('Status poll error: ' + e.message);
         }
       }
     };
@@ -359,7 +314,7 @@ const App: React.FC = () => {
         phase={phase}
         maskUrl={config.mask_url}
         promptUrl={config.prompt_url}
-        switchUrl={config.switch_url}
+        switchUrl={switchUrl}
         loopCount={config.loop_count}
         maskConfirmed={maskConfirmed}
         promptReady={promptReady}
