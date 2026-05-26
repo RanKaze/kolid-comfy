@@ -2317,6 +2317,7 @@ class SnapshotPromptNode:
         print(f"[SnapshotPrompt] Active loras: {active_loras}")
 
         # Compute lora_trigger_words output from user selections + prefab expansions
+        all_loras = server.selected_loras + prefab_loras
         all_active_tags = []
         for lora_item in all_loras:
             if not lora_item.get('active', True):
