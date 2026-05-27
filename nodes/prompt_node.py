@@ -2228,7 +2228,7 @@ class SnapshotPromptNode:
                             else:
                                 parts.append(prompt_text)
                     if parts:
-                        prompt_str = ', '.join(parts)
+                        prompt_str = ' '.join(parts)
                         if prompt_str not in prompts_raw:
                             prompts_raw.append(prompt_str)
                             prompts_cleaned.append(prompt_str.replace('[', '').replace(']', ''))
