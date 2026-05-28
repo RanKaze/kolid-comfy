@@ -446,6 +446,114 @@ class SnapshotPromptServer:
         except:
             pass
 
+    def _normalize_prefab_tags(self, prefab_tags):
+        """Normalize prefab tags so that prompt field stores English prompt instead of Chinese name.
+        
+        Also attempts to decompose multi-word prompts into decoration chains when all
+        constituent words are known prompts in prompt.json.
+        
+        For example:
+          - "薄嘴唇" with prompt "thin lips" -> [thin] lips  (if "thin" and "lips" are known)
+        """
+        if not prefab_tags:
+            return prefab_tags
+        
+        # Build lookup maps from prompts_data
+        name_to_prompt = {}
+        prompt_to_name = {}
+        for cat_data in self.prompts_data.values():
+            if isinstance(cat_data, dict):
+                prompts = cat_data.get('prompts', []) or []
+            elif isinstance(cat_data, list):
+                prompts = cat_data
+            else:
+                continue
+            for p in prompts:
+                if isinstance(p, dict):
+                    name = p.get('name', '')
+                    prompt_text = p.get('prompt', '')
+                    if name and prompt_text:
+                        name_to_prompt[name] = prompt_text
+                        prompt_to_name[prompt_text.lower()] = (prompt_text, name)
+        
+        def _try_decompose(prompt_text):
+            """Try to decompose a multi-word prompt into a decoration chain.
+            
+            Returns a list of tag dicts if all words are known prompts, None otherwise.
+            decoration_num increases from left to right:
+              e.g. "very thin lips" -> [very:2, thin:1, lips:0] -> "[[very]] [thin] lips"
+            """
+            words = prompt_text.split()
+            if len(words) < 2:
+                return None
+            
+            # Try each possible split: right side = base prompt, left side = decorations
+            for i in range(len(words) - 1, 0, -1):
+                base = ' '.join(words[i:])
+                base_key = base.lower()
+                if base_key in prompt_to_name and base_key != prompt_text.lower():
+                    decorations = words[:i]
+                    deco_tags = []
+                    all_known = True
+                    for d in decorations:
+                        d_key = d.lower()
+                        if d_key not in prompt_to_name:
+                            all_known = False
+                            break
+                        deco_tags.append(prompt_to_name[d_key])
+                    
+                    if all_known:
+                        result = []
+                        for j, (pt, nm) in enumerate(deco_tags):
+                            result.append({
+                                'decoration_num': len(deco_tags) - j,
+                                'prompt': pt,
+                                'name': nm
+                            })
+                        base_pt, base_nm = prompt_to_name[base_key]
+                        result.append({
+                            'decoration_num': 0,
+                            'prompt': base_pt,
+                            'name': base_nm
+                        })
+                        return result
+            return None
+        
+        normalized = []
+        for tag_group in prefab_tags:
+            if isinstance(tag_group, list):
+                new_group = []
+                for tag in tag_group:
+                    if isinstance(tag, dict):
+                        tag_name = tag.get('name', '')
+                        tag_prompt = tag.get('prompt', '')
+                        # Fix: if prompt is missing, empty, or identical to name,
+                        # replace with the English prompt from prompt.json
+                        if (not tag_prompt or tag_prompt == tag_name) and tag_name in name_to_prompt:
+                            tag = dict(tag)
+                            tag['prompt'] = name_to_prompt[tag_name]
+                            tag_prompt = tag['prompt']
+                        new_group.append(tag)
+                    else:
+                        new_group.append(tag)
+                
+                # Heuristic: if the group has exactly one tag with a multi-word prompt,
+                # try to decompose it into a decoration chain
+                if len(new_group) == 1:
+                    single_tag = new_group[0]
+                    if isinstance(single_tag, dict):
+                        pt = single_tag.get('prompt', '')
+                        if ' ' in pt:
+                            decomposed = _try_decompose(pt)
+                            if decomposed:
+                                new_group = decomposed
+                
+                normalized.append(new_group)
+            else:
+                normalized.append(tag_group)
+        
+        return normalized
+
     def _generate_id(self):
         return f"custom_{int(time.time())}_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
 
@@ -1604,6 +1712,7 @@ class SnapshotPromptServer:
                     lib_name = (data.get('library') or '').strip()
                     prefab_name = (data.get('prefab_name') or '').strip()
                     prefab_tags = data.get('prefab_tags', [])
+                    prefab_tags = self.server_instance._normalize_prefab_tags(prefab_tags)
                     custom_prompts = data.get('custom_prompts', '')
                     loras = data.get('loras', [])
                     image_data = data.get('image', '')
@@ -1685,7 +1794,7 @@ class SnapshotPromptServer:
                             if 'custom_prompts' in data:
                                 prefabs[prefab_index]['custom_prompts'] = data['custom_prompts']
                             if 'prefab_tags' in data:
-                                prefabs[prefab_index]['tags'] = data['prefab_tags']
+                                prefabs[prefab_index]['tags'] = self.server_instance._normalize_prefab_tags(data['prefab_tags'])
                             if 'loras' in data:
                                 prefabs[prefab_index]['loras'] = data['loras']
                             if 'selected_prefabs' in data:
