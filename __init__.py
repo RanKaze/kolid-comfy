@@ -28,6 +28,7 @@ from .nodes.prompt_node import *
 from .nodes.switch_node import *
 from .nodes.sampler_node import *
 from .nodes.snapshot_sampler_node import *
+from .nodes.assets_node import *
     
 
 NODE_CONFIG = {
@@ -127,7 +128,8 @@ NODE_CONFIG = {
     "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
     "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
     "SnapshotDetailerSamplerNode": {"class": SnapshotDetailerSamplerNode, "name": "SnapshotDetailerSamplerNode"},
-    
+    "SnapshotAssetsNode": {"class": SnapshotAssetsNode, "name": "SnapshotAssetsNode"},
+
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
     "ImageCropMaskNode": {"class": ImageCropMaskNode, "name": "ImageCropMaskNode"},
