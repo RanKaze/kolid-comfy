@@ -9,6 +9,7 @@ import hashlib
 import urllib.parse
 import io
 import comfy.model_management as mm
+from server import PromptServer
 
 
 def check_interrupted():
@@ -31,7 +32,7 @@ def check_interrupted():
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data=""):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_strength=False, enable_prompt=False):
         self.port = None
         self.server = None
         self.started = False
@@ -39,8 +40,52 @@ class SnapshotAssetsServer:
         self.window_closed = False
         self.browser_url = None
         self.selected_images = []
+        self.prompt = ""
         self.input_data = input_data
+        self.canvas_snapshot = canvas_snapshot  # tldraw snapshot JSON string
+        self.node_id = node_id  # Node ID for persistence
+        self.enable_strength = enable_strength
+        self.enable_prompt = enable_prompt
         self.should_stop = False
+        # Use data/assets directory for image cache (persistent storage)
+        self.image_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+        os.makedirs(self.image_cache_dir, exist_ok=True)
+
+    def save_base64_image(self, data_url):
+        """Save base64 image to cache directory and return URL path."""
+        try:
+            # Extract base64 data
+            if ',' in data_url:
+                header, base64_data = data_url.split(',', 1)
+            else:
+                base64_data = data_url
+                header = "data:image/png;base64"
+            
+            # Determine extension from mime type
+            ext = ".png"
+            if "image/jpeg" in header or "image/jpg" in header:
+                ext = ".jpg"
+            elif "image/webp" in header:
+                ext = ".webp"
+            elif "image/gif" in header:
+                ext = ".gif"
+            
+            # Generate unique filename
+            import hashlib
+            filename = hashlib.md5(base64_data.encode()).hexdigest() + ext
+            filepath = os.path.join(self.image_cache_dir, filename)
+            
+            # Save file if not exists
+            if not os.path.exists(filepath):
+                img_bytes = base64.b64decode(base64_data)
+                with open(filepath, 'wb') as f:
+                    f.write(img_bytes)
+            
+            # Return URL path (relative to server root)
+            return f"/assets/{filename}"
+        except Exception as e:
+            print(f"[SnapshotAssets] Failed to save image: {e}")
+            return None
 
     def start(self):
         import socketserver
@@ -120,12 +165,41 @@ class SnapshotAssetsServer:
             elif self.path == '/input_data':
                 data = {
                     'input_data': self.server_instance.input_data if self.server_instance else '',
+                    'canvas_snapshot': self.server_instance.canvas_snapshot if self.server_instance else None,
+                    'enable_strength': self.server_instance.enable_strength if self.server_instance else False,
+                    'enable_prompt': self.server_instance.enable_prompt if self.server_instance else False,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode('utf-8'))
+                return
+
+            elif self.path.startswith('/assets/'):
+                # Serve cached images
+                if self.server_instance:
+                    filename = os.path.basename(self.path)
+                    filepath = os.path.join(self.server_instance.image_cache_dir, filename)
+                    if os.path.exists(filepath):
+                        self.send_response(200)
+                        # Determine content type from extension
+                        ext = os.path.splitext(filename)[1].lower()
+                        content_type = 'image/png'
+                        if ext == '.jpg' or ext == '.jpeg':
+                            content_type = 'image/jpeg'
+                        elif ext == '.webp':
+                            content_type = 'image/webp'
+                        elif ext == '.gif':
+                            content_type = 'image/gif'
+                        self.send_header('Content-type', content_type)
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header('Cache-Control', 'public, max-age=31536000')
+                        self.end_headers()
+                        with open(filepath, 'rb') as f:
+                            self.wfile.write(f.read())
+                        return
+                self.send_error(404, "Image not found")
                 return
 
             self.send_error(404, "Not found")
@@ -137,7 +211,73 @@ class SnapshotAssetsServer:
                 data = json.loads(post_data)
 
                 if self.server_instance:
-                    self.server_instance.selected_images = data.get('images', [])
+                    # Get selected images and tldraw snapshot from frontend
+                    selected_images = data.get('images', [])
+                    canvas_snapshot = data.get('canvas_snapshot', '')
+                    
+                    # Process base64 images in snapshot: convert to URLs
+                    if canvas_snapshot:
+                        try:
+                            snapshot = json.loads(canvas_snapshot)
+                            # Process assets in snapshot store
+                            if 'store' in snapshot:
+                                for record_id, record in snapshot['store'].items():
+                                    if isinstance(record, dict) and record.get('typeName') == 'asset' and 'props' in record:
+                                        props = record['props']
+                                        if 'src' in props and props['src'].startswith('data:'):
+                                            url = self.server_instance.save_base64_image(props['src'])
+                                            if url:
+                                                props['src'] = url
+                            # Process panelImages - convert base64 dataUrl to URLs
+                            if 'panelImages' in snapshot and isinstance(snapshot['panelImages'], list):
+                                for panel_img in snapshot['panelImages']:
+                                    if isinstance(panel_img, dict) and 'dataUrl' in panel_img:
+                                        data_url = panel_img['dataUrl']
+                                        if isinstance(data_url, str) and data_url.startswith('data:'):
+                                            url = self.server_instance.save_base64_image(data_url)
+                                            if url:
+                                                panel_img['dataUrl'] = url
+                            canvas_snapshot = json.dumps(snapshot)
+                        except Exception as e:
+                            print(f"[SnapshotAssets] Failed to process snapshot: {e}")
+                    
+                    # Also convert selected images if they are base64
+                    selected_image_items = []
+                    for img_data in selected_images:
+                        if isinstance(img_data, dict) and 'image' in img_data:
+                            image_url = img_data['image']
+                            if image_url.startswith('data:'):
+                                url = self.server_instance.save_base64_image(image_url)
+                                if url:
+                                    image_url = url
+                            item = {"image": image_url}
+                            if 'strength' in img_data and img_data['strength'] is not None:
+                                item['strength'] = img_data['strength']
+                            selected_image_items.append(item)
+                        elif isinstance(img_data, str):
+                            if img_data.startswith('data:'):
+                                url = self.server_instance.save_base64_image(img_data)
+                                if url:
+                                    selected_image_items.append({"image": url})
+                                else:
+                                    selected_image_items.append({"image": img_data})
+                            else:
+                                selected_image_items.append({"image": img_data})
+
+                    self.server_instance.selected_images = selected_image_items
+                    prompt_value = data.get('prompt', '')
+                    print(f"[SnapshotAssets] Received prompt: '{prompt_value}'")
+                    self.server_instance.prompt = prompt_value if prompt_value is not None else ''
+                    self.server_instance.canvas_snapshot = canvas_snapshot
+                    
+                    # Save tldraw snapshot to data widget using send_sync
+                    if self.server_instance.node_id and canvas_snapshot:
+                        PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                            "node_id": self.server_instance.node_id,
+                            "widget_name": "data",
+                            "type": "STRING",
+                            "value": canvas_snapshot
+                        })
                     self.server_instance.confirm_event.set()
 
                     self.send_response(200)
@@ -175,13 +315,18 @@ class SnapshotAssetsNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "Data": ("STRING", {"default": "", "multiline": False}),
+                "data": ("STRING", {"default": "", "multiline": True}),
+                "enable_strength": ("BOOLEAN", {"default": False}),
+                "enable_prompt": ("BOOLEAN", {"default": False}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("DICT",)
-    RETURN_NAMES = ("Data",)
-    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("DICT", "STRING")
+    RETURN_NAMES = ("data", "prompt")
+    OUTPUT_IS_LIST = (True, False)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -190,17 +335,30 @@ class SnapshotAssetsNode:
         return float("nan")
 
     @staticmethod
-    def _decode_base64_image(data_url: str):
-        """Decode a base64 data URL to a ComfyUI-compatible torch tensor [B, H, W, C]."""
+    def _decode_image_data(image_data: str):
+        """Decode image data (base64 or URL) to a ComfyUI-compatible torch tensor [B, H, W, C]."""
         import numpy as np
         from PIL import Image
         import torch
 
-        if ',' in data_url:
-            data_url = data_url.split(',', 1)[1]
-
-        img_bytes = base64.b64decode(data_url)
-        img = Image.open(io.BytesIO(img_bytes))
+        # Handle URL paths (e.g., /assets/abc123.png)
+        if image_data.startswith('/assets/'):
+            # Get the absolute path from the URL
+            base_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+            filename = os.path.basename(image_data)
+            filepath = os.path.join(base_dir, filename)
+            if os.path.exists(filepath):
+                img = Image.open(filepath)
+            else:
+                raise ValueError(f"Image file not found: {filepath}")
+        elif image_data.startswith('data:'):
+            # Base64 data URL
+            if ',' in image_data:
+                image_data = image_data.split(',', 1)[1]
+            img_bytes = base64.b64decode(image_data)
+            img = Image.open(io.BytesIO(img_bytes))
+        else:
+            raise ValueError(f"Unsupported image data format: {image_data[:50]}...")
 
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -209,8 +367,20 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, Data):
-        server = SnapshotAssetsServer(input_data=Data)
+    def snapshot_assets(self, data="", enable_strength=False, enable_prompt=False, unique_id=None):
+        # data contains the tldraw snapshot JSON string
+        canvas_snapshot = None
+        try:
+            if data and data.strip():
+                # Validate it's a proper JSON
+                parsed = json.loads(data.strip())
+                if isinstance(parsed, dict):
+                    canvas_snapshot = data.strip()
+                    print(f"[SnapshotAssets] Loaded tldraw snapshot")
+        except Exception as e:
+            print(f"[SnapshotAssets] Failed to parse data: {e}")
+        
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_strength=enable_strength, enable_prompt=enable_prompt)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -243,17 +413,30 @@ class SnapshotAssetsNode:
         server.stop()
 
         selected_images = server.selected_images
+        
+        # Allow empty selection - return empty list if no images selected
         if not selected_images:
-            raise RuntimeError("[SnapshotAssets] No images selected")
+            print("[SnapshotAssets] No images selected, returning empty list")
+            prompt = server.prompt if server.prompt is not None else ''
+            return ([], prompt)
 
         result = []
-        for img_b64 in selected_images:
+        for img_data in selected_images:
             try:
-                tensor = self._decode_base64_image(img_b64)
-                result.append({"image": tensor})
+                if isinstance(img_data, dict):
+                    image_url = img_data.get('image', '')
+                    tensor = self._decode_image_data(image_url)
+                    item = {"image": tensor}
+                    if 'strength' in img_data:
+                        item['strength'] = img_data['strength']
+                    result.append(item)
+                else:
+                    tensor = self._decode_image_data(img_data)
+                    result.append({"image": tensor})
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to decode image: {e}")
                 raise RuntimeError(f"[SnapshotAssets] Failed to decode image: {e}")
 
-        print(f"[SnapshotAssets] Output {len(result)} images")
-        return (result,)
+        prompt = server.prompt if server.prompt is not None else ''
+        print(f"[SnapshotAssets] Output {len(result)} images, prompt type: {type(prompt)}, value: '{prompt[:50] if prompt else '(empty)'}'")
+        return (result, prompt)

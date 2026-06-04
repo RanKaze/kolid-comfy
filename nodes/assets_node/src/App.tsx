@@ -1,28 +1,33 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Tldraw, createTLStore, defaultShapeUtils, AssetRecordType, Editor } from '@tldraw/tldraw';
+import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
-
-interface ImageInfo {
-  id: string;
-  name: string;
-  dataUrl: string;
-  assetId: string;
-  shapeId: string;
-}
+import Panel, { PanelHandle, ImageInfo } from './components/Panel';
 
 const App: React.FC = () => {
-  const [images, setImages] = useState<ImageInfo[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
   const [inputData, setInputData] = useState('');
   const editorRef = useRef<Editor | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const idCounterRef = useRef(0);
+  const [panelHeight, setPanelHeight] = useState(0);
+  const [pendingSnapshot, setPendingSnapshot] = useState<string | null>(null);
+  const [enableStrength, setEnableStrength] = useState(false);
+  const [enablePrompt, setEnablePrompt] = useState(false);
+  const panelHandleRef = useRef<PanelHandle>(null);
 
   useEffect(() => {
     fetch('/input_data')
       .then((res) => res.json())
       .then((data) => {
         setInputData(data.input_data || '');
+
+        // Set node input flags
+        setEnableStrength(data.enable_strength || false);
+        setEnablePrompt(data.enable_prompt || false);
+
+        // Restore canvas snapshot if available
+        const snapshot = data.canvas_snapshot;
+        if (snapshot) {
+          console.log('[SnapshotAssets] Received snapshot from server');
+          setPendingSnapshot(snapshot);
+        }
       })
       .catch((err) => console.error('Failed to load input data:', err));
   }, []);
@@ -33,13 +38,53 @@ const App: React.FC = () => {
     })
   ).current;
 
+  const restoreSnapshot = useCallback((snapshot: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    try {
+      const parsed = JSON.parse(snapshot);
+      console.log('[SnapshotAssets] Restoring snapshot...', parsed);
+
+      // Restore document records (shapes, assets, pages, document)
+      if (parsed.store) {
+        const records = Object.values(parsed.store) as any[];
+        editor.store.put(records);
+      }
+
+      // Restore panel selected images
+      if (parsed.panelImages && Array.isArray(parsed.panelImages)) {
+        panelHandleRef.current?.setImages(parsed.panelImages);
+      }
+
+      // Note: enableStrength and enablePrompt are controlled by node inputs, not snapshot
+
+      // Restore prompt text
+      if (typeof parsed.prompt === 'string') {
+        panelHandleRef.current?.setPrompt?.(parsed.prompt);
+      }
+
+      // Restore camera position and zoom
+      if (parsed.camera) {
+        editor.setCamera({
+          x: parsed.camera.x,
+          y: parsed.camera.y,
+          z: parsed.camera.z,
+        });
+      }
+
+      console.log('[SnapshotAssets] Snapshot restored successfully');
+    } catch (err) {
+      console.error('Failed to restore snapshot:', err);
+    }
+  }, []);
+
   const addImage = useCallback(async (file: File, x: number, y: number) => {
     if (!file.type.startsWith('image/')) return;
 
     const editor = editorRef.current;
     if (!editor) return;
 
-    const id = `img_${++idCounterRef.current}`;
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result as string);
@@ -65,7 +110,7 @@ const App: React.FC = () => {
       },
     ]);
 
-    const shapeId = `shape:${id}`;
+    const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
     editor.createShape({
       id: shapeId,
       type: 'image',
@@ -78,76 +123,76 @@ const App: React.FC = () => {
       },
     });
 
-    setImages((prev) => [...prev, { id, name: file.name, dataUrl, assetId, shapeId }]);
+    // Do NOT add to images list automatically - user must click + button
   }, []);
 
-  const removeImage = useCallback(
-    (id: string) => {
-      const editor = editorRef.current;
-      if (!editor) return;
+  const handleConfirm = useCallback(async ({ images, enableStrength, prompt }: { images: ImageInfo[]; enableStrength: boolean; prompt: string }) => {
+    const editor = editorRef.current;
+    if (!editor) return;
 
-      const info = images.find((img) => img.id === id);
-      if (!info) return;
+    // Get tldraw snapshot - structure is { store: {...}, schema: {...} }
+    const snapshot = editor.store.getSnapshot();
 
-      editor.deleteShape(info.shapeId);
-      try {
-        editor.deleteAsset(info.assetId);
-      } catch (e) {
-        // ignore
+    // Filter out instance state records (camera, instance, etc.) to avoid UI issues
+    const filteredStore: Record<string, any> = {};
+    for (const [key, value] of Object.entries(snapshot.store)) {
+      const record = value as any;
+      // Keep document, page, shape, asset records; skip instance state
+      if (record.typeName === 'instance' || record.typeName === 'instance_page_state' ||
+          record.typeName === 'camera' || record.typeName === 'pointer') {
+        continue;
       }
-      setImages((prev) => prev.filter((img) => img.id !== id));
-    },
-    [images]
-  );
-
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    if (e.relatedTarget === null) {
-      setIsDragging(false);
+      filteredStore[key] = record;
     }
-  }, []);
 
-  const handleDrop = useCallback(
-    async (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragging(false);
+    // Save panel selected images info (include strength)
+    const panelImages = images.map((img) => ({
+      id: img.id,
+      name: img.name,
+      dataUrl: img.dataUrl,
+      assetId: img.assetId,
+      shapeId: img.shapeId,
+      strength: img.strength,
+    }));
 
-      const files = Array.from(e.dataTransfer.files);
-      const rect = containerRef.current?.getBoundingClientRect();
-      const dropX = rect ? e.clientX - rect.left : 100;
-      const dropY = rect ? e.clientY - rect.top : 100;
+    // Save camera position and zoom
+    const camera = editor.getCamera();
 
-      let offset = 0;
-      for (const file of files) {
-        await addImage(file, dropX + offset, dropY + offset);
-        offset += 20;
-      }
-    },
-    [addImage]
-  );
+    const canvasState = {
+      store: filteredStore,
+      schema: snapshot.schema,
+      panelImages: panelImages,
+      enableStrength,
+      prompt,
+      camera: {
+        x: camera.x,
+        y: camera.y,
+        z: camera.z,
+      },
+    };
 
-  const handleConfirm = useCallback(async () => {
-    const selectedImages = images.map((img) => img.dataUrl);
+    const snapshotJson = JSON.stringify(canvasState);
+
     try {
+      const selectedImages = images.map((img) => ({
+        image: img.dataUrl,
+        strength: enableStrength ? (img.strength ?? 1.0) : undefined,
+      }));
+      console.log('[App] handleConfirm sending prompt:', prompt);
       await fetch('/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images: selectedImages }),
+        body: JSON.stringify({
+          images: selectedImages,  // Selected images for output
+          prompt: prompt || '',  // User prompt text (ensure string)
+          canvas_snapshot: snapshotJson  // Full canvas state for persistence
+        }),
       });
     } catch (err) {
       console.error('Confirm failed:', err);
     }
     window.close();
-  }, [images]);
+  }, []);
 
   useEffect(() => {
     const onBeforeUnload = () => {
@@ -157,6 +202,31 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
 
+  const handleMount = useCallback(
+    (editor: Editor) => {
+      console.log('[SnapshotAssets] Editor mounted');
+      editorRef.current = editor;
+      editor.updateInstanceState({ isDebugMode: false });
+
+      // Enable dot grid background that moves with camera
+      editor.user.updateUserPreferences({
+        colorScheme: 'light',
+      });
+
+      // Enable grid mode to show dot grid
+      editor.updateInstanceState({ isGridMode: true });
+    },
+    [store]
+  );
+
+  // Restore snapshot when both editor and snapshot are ready
+  useEffect(() => {
+    if (editorRef.current && pendingSnapshot) {
+      console.log('[SnapshotAssets] Restoring pending snapshot...');
+      restoreSnapshot(pendingSnapshot);
+    }
+  }, [pendingSnapshot, restoreSnapshot]);
+
   return (
     <div
       style={{
@@ -165,111 +235,39 @@ const App: React.FC = () => {
         width: '100vw',
         height: '100vh',
         overflow: 'hidden',
+        background: '#fafafa',
       }}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
-      {isDragging && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(74, 158, 255, 0.15)',
-            border: '3px dashed #4a9eff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 9999,
-            pointerEvents: 'none',
-          }}
-        >
-          <span style={{ fontSize: 24, color: '#4a9eff', fontWeight: 600 }}>
-            Drop images here
-          </span>
-        </div>
-      )}
-
-      <div
-        ref={containerRef}
-        style={{ flex: 1, position: 'relative', minHeight: 0, background: '#111' }}
-      >
+      <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
         <Tldraw
           store={store}
-          onMount={(editor) => {
-            editorRef.current = editor;
-            editor.updateInstanceState({ isDebugMode: false });
-          }}
+          onMount={handleMount}
         />
+        <style>{`
+          .tlui-toolbar-container {
+            bottom: ${panelHeight}px !important;
+          }
+          .tlui-toolbar__tools {
+            bottom: ${panelHeight}px !important;
+          }
+          /* Change selection outline color to green */
+          .tl-selection-outline {
+            stroke: #4ade80 !important;
+          }
+          .tl-selection-background {
+            fill: #4ade80 !important;
+          }
+        `}</style>
       </div>
 
-      <div
-        style={{
-          height: 56,
-          background: '#2a2a2a',
-          borderTop: '1px solid #3a3a3a',
-          display: 'flex',
-          alignItems: 'center',
-          padding: '0 16px',
-          gap: 12,
-          flexShrink: 0,
-        }}
-      >
-        <label
-          htmlFor="image-select"
-          style={{ fontSize: 14, color: '#ccc', whiteSpace: 'nowrap' }}
-        >
-          Selected ({images.length}):
-        </label>
-        <select
-          id="image-select"
-          multiple
-          style={{
-            flex: 1,
-            minWidth: 0,
-            height: 36,
-            background: '#1a1a1a',
-            color: '#f5f5f5',
-            border: '1px solid #444',
-            borderRadius: 6,
-            padding: '0 8px',
-            fontSize: 14,
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Delete' || e.key === 'Backspace') {
-              const selected = Array.from(e.currentTarget.selectedOptions).map(
-                (o) => o.value
-              );
-              selected.forEach((id) => removeImage(id));
-            }
-          }}
-        >
-          {images.map((img) => (
-            <option key={img.id} value={img.id} selected>
-              {img.name}
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={handleConfirm}
-          disabled={images.length === 0}
-          style={{
-            height: 36,
-            padding: '0 20px',
-            background: images.length === 0 ? '#555' : '#4a9eff',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 6,
-            fontSize: 14,
-            fontWeight: 600,
-            cursor: images.length === 0 ? 'not-allowed' : 'pointer',
-            transition: 'background 0.2s',
-          }}
-        >
-          Confirm
-        </button>
-      </div>
+      <Panel
+        ref={panelHandleRef}
+        editor={editorRef}
+        onHeightChange={setPanelHeight}
+        onConfirm={handleConfirm}
+        enableStrength={enableStrength}
+        enablePrompt={enablePrompt}
+      />
 
       {inputData && (
         <div
