@@ -1,17 +1,16 @@
 {
-  "name": "@kolid/nodes",
-  "private": true,
+  "name": "kolid-assets-node",
   "version": "1.0.0",
-  "workspaces": [
-    "packages/*",
-    "prompt_node",
-    "sampler_node",
-    "switch_node",
-    "assets_node"
-  ],
-  "devDependencies": {
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "@tldraw/tldraw": "^3.0.0"
+  },
+  "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
