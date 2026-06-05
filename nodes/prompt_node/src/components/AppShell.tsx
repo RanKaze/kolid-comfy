@@ -2307,7 +2307,7 @@ export function AppShell() {
                                 ) : group ? (
                                   <div className="selected-card">
                                     <div className="selected-card-content">{tagsToDisplayName(group)}</div>
-                                    <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter(g => g !== group)); }}>{iconX}</button>
+                                    <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter((_, gi) => gi !== selectedTags.findIndex(sg => sg === group))); }}>{iconX}</button>
                                   </div>
                                 ) : null
                               ) : null}
@@ -2441,7 +2441,7 @@ export function AppShell() {
                               {group ? (
                                 <div className="selected-card">
                                   <div className="selected-card-content">{tagsToDisplayName(group)}</div>
-                                  <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter(g => g !== group)); }}>{iconX}</button>
+                                  <button className="selected-card-delete" onClick={e => { e.stopPropagation(); setSelectedTags(prev => prev.filter((_, gi) => gi !== selectedTags.findIndex(sg => sg === group))); }}>{iconX}</button>
                                 </div>
                               ) : null}
                             </div>
@@ -2620,12 +2620,25 @@ export function AppShell() {
                         <span className="remove" onClick={() => removeTemporaryTag(i)}>{iconX}</span>
                       </span>
                     ))
-                    : selectedTags.map((group, i) => (
-                      <span className="tag" key={i}>
-                        {tagsToDisplayName(group)}
-                        <span className="remove" onClick={() => removeTag(i)}>{iconX}</span>
-                      </span>
-                    ))}
+                    : selectedTags.map((group, i) => {
+                      const baseStrength = group[0]?.strength ?? 1.0;
+                      const showStrength = baseStrength !== 1.0;
+                      return (
+                        <TagStrengthEditor
+                          key={i}
+                          displayName={tagsToDisplayName(group)}
+                          strength={baseStrength}
+                          showStrength={showStrength}
+                          onStrengthChange={(v) => {
+                            setSelectedTags(prev => prev.map((g, idx) => {
+                              if (idx !== i) return g;
+                              return g.map(t => ({ ...t, strength: v }));
+                            }));
+                          }}
+                          onRemove={() => removeTag(i)}
+                        />
+                      );
+                    })}
                 </div>
               </>
             ) : null}
@@ -3230,6 +3243,79 @@ function ImageSection({
     </div>
   </>);
 }
+function TagStrengthEditor({
+  displayName,
+  strength,
+  showStrength,
+  onStrengthChange,
+  onRemove,
+}: {
+  displayName: string;
+  strength: number;
+  showStrength: boolean;
+  onStrengthChange: (v: number) => void;
+  onRemove: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [tempValue, setTempValue] = useState(String(strength));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const startEdit = () => {
+    setTempValue(String(strength));
+    setEditing(true);
+  };
+
+  const commit = () => {
+    const v = parseFloat(tempValue);
+    if (!isNaN(v)) {
+      onStrengthChange(v);
+    }
+    setEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      commit();
+    } else if (e.key === 'Escape') {
+      setEditing(false);
+    }
+  };
+
+  return (
+    <span className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}`} onClick={startEdit}>
+      <span className="tag-strength-overlay">
+        {showStrength ? `:${strength}` : ''}
+      </span>
+      <span className="tag-content">
+        {displayName}
+      </span>
+      <span className="remove" onClick={(e) => { e.stopPropagation(); onRemove(); }}>{iconX}</span>
+      {editing ? (
+        <span className="tag-strength-editor" onClick={(e) => e.stopPropagation()}>
+          <input
+            ref={inputRef}
+            type="number"
+            step="0.1"
+            min="0"
+            max="10"
+            value={tempValue}
+            onChange={(e) => setTempValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onBlur={commit}
+          />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function TagInput({label, tags, setTags}: {label:string; tags:string[]; setTags:(t:string[])=>void}) {
   const [val, setVal] = useState('');
   const add = () => { const v = val.trim(); if(v && !tags.includes(v)) { setTags([...tags, v]); } setVal(''); };

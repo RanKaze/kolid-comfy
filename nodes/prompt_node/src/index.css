@@ -156,6 +156,72 @@ body {
 .tag .remove { cursor: pointer; opacity: 0.7; }
 .tag .remove:hover { opacity: 1; }
 
+/* Tag strength input */
+.tag.tag-with-strength {
+    position: relative;
+    cursor: pointer;
+    overflow: hidden;
+}
+.tag.tag-with-strength .tag-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.tag.tag-with-strength .remove {
+    position: relative;
+    z-index: 2;
+}
+.tag.tag-with-strength .tag-strength-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.35);
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    z-index: 1;
+}
+.tag.tag-with-strength:hover .tag-strength-overlay,
+.tag.tag-with-strength.has-strength .tag-strength-overlay {
+    opacity: 1;
+}
+.tag.tag-with-strength .tag-strength-editor {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #007aff;
+    border-radius: 20px;
+    z-index: 3;
+}
+.tag.tag-with-strength .tag-strength-editor input[type="number"] {
+    width: 50px;
+    height: 24px;
+    padding: 0 4px;
+    border: none;
+    border-radius: 4px;
+    background: rgba(0,0,0,0.4);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+    outline: none;
+    cursor: text;
+    -moz-appearance: textfield;
+}
+.tag.tag-with-strength .tag-strength-editor input[type="number"]::-webkit-outer-spin-button,
+.tag.tag-with-strength .tag-strength-editor input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
 /* ========== Categories Container ========== */
 .categories-container {
     display: flex;
