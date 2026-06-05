@@ -324,9 +324,9 @@ class SnapshotAssetsNode:
             },
         }
 
-    RETURN_TYPES = ("DICT", "STRING")
-    RETURN_NAMES = ("data", "prompt")
-    OUTPUT_IS_LIST = (True, False)
+    RETURN_TYPES = ("IMAGE", "FLOAT", "STRING")
+    RETURN_NAMES = ("image", "strength", "prompt")
+    OUTPUT_IS_LIST = (True, True, False)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -413,30 +413,29 @@ class SnapshotAssetsNode:
         server.stop()
 
         selected_images = server.selected_images
+        prompt = server.prompt if server.prompt is not None else ''
         
         # Allow empty selection - return empty list if no images selected
         if not selected_images:
             print("[SnapshotAssets] No images selected, returning empty list")
-            prompt = server.prompt if server.prompt is not None else ''
-            return ([], prompt)
+            return ([], [], prompt)
 
-        result = []
+        images = []
+        strengths = []
         for img_data in selected_images:
             try:
                 if isinstance(img_data, dict):
                     image_url = img_data.get('image', '')
                     tensor = self._decode_image_data(image_url)
-                    item = {"image": tensor}
-                    if 'strength' in img_data:
-                        item['strength'] = img_data['strength']
-                    result.append(item)
+                    images.append(tensor)
+                    strengths.append(img_data.get('strength', 1.0))
                 else:
                     tensor = self._decode_image_data(img_data)
-                    result.append({"image": tensor})
+                    images.append(tensor)
+                    strengths.append(1.0)
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to decode image: {e}")
                 raise RuntimeError(f"[SnapshotAssets] Failed to decode image: {e}")
 
-        prompt = server.prompt if server.prompt is not None else ''
-        print(f"[SnapshotAssets] Output {len(result)} images, prompt type: {type(prompt)}, value: '{prompt[:50] if prompt else '(empty)'}'")
-        return (result, prompt)
+        print(f"[SnapshotAssets] Output {len(images)} images, {len(strengths)} strengths, prompt: '{prompt[:50] if prompt else '(empty)'}'")
+        return (images, strengths, prompt)
