@@ -229,13 +229,15 @@ class ReferenceData:
     def __init__(self):
         self.reference_latents = []
         self.reference_controls = []
+        self.reference_ipadapters = []
         self.positive_guidance = None
         self.negative_guidance = None
-    
+
     def copy(self):
         new = ReferenceData()
         new.reference_latents = self.reference_latents.copy()
         new.reference_controls = self.reference_controls.copy()
+        new.reference_ipadapters = self.reference_ipadapters.copy()
         new.positive_guidance = self.positive_guidance
         new.negative_guidance = self.negative_guidance
         return new
@@ -253,7 +255,7 @@ class SamplerCache:
         new._cache = self._cache.copy()
         return new
 
-    def get_model_clip(self, model, clip, loras: list = None):
+    def get_model_clip(self, model, clip, loras: list = None, reference: ReferenceData = None):
         if model is None:
             raise ValueError("传入的 model 不能为空")
 
@@ -264,76 +266,132 @@ class SamplerCache:
 
         if cache_key in self._cache:
             print(f"✓ LoRA model cache hit")
-            return self._cache[cache_key]
+            model_patcher, clip_patcher = self._cache[cache_key]
+        else:
+            model_patcher = model
+            clip_patcher = clip
 
-        model_patcher = model
-        clip_patcher = clip
+            if loras:
+                print(f"Loading LoRAs: {loras}")
 
-        if not loras:
+                for item in loras:
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+
+                    lora_str = item.strip()
+
+                    try:
+                        if lora_str.startswith("lora_path:"):
+                            # Direct path mode: path may contain ':' (Windows drive letter)
+                            # Format: lora_path:path:strength  — split from the rightmost ':'
+                            body = lora_str[len("lora_path:"):]
+                            last_colon = body.rfind(":")
+                            if last_colon == -1:
+                                print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                                continue
+                            lora_path = body[:last_colon].strip()
+                            strength = float(body[last_colon+1:].strip())
+                            lora_name = lora_path.replace("/", "\\").split("\\")[-1]
+                        elif lora_str.startswith("lora:"):
+                            # Normal mode: lora:name:strength
+                            parts = lora_str.split(":", 2)
+                            if len(parts) != 3:
+                                print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                                continue
+                            lora_name = parts[1].strip()
+                            strength = float(parts[2].strip())
+                            lora_path = _lora_path_cache.get(lora_name)
+                            if lora_path is None:
+                                for key in _lora_path_cache:
+                                    if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
+                                        lora_path = _lora_path_cache[key]
+                                        break
+                            if lora_path is None:
+                                print(f"Warning: 未找到 LoRA 文件: {lora_name}")
+                                continue
+                        else:
+                            print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
+                            continue
+
+                        # === 关键修复：先加载 state_dict，再传入 load_lora_for_models ===
+                        lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
+
+                        model_patcher, clip_patcher = comfy.sd.load_lora_for_models(
+                            model_patcher,
+                            clip_patcher,
+                            lora_dict,          # ← 这里必须传 dict，而不是路径
+                            strength,
+                            strength
+                        )
+
+                        print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
+
+                    except Exception as e:
+                        print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
+
             result = (model_patcher, clip_patcher)
             self._cache[cache_key] = result
-            return result
 
-        print(f"Loading LoRAs: {loras}")
-
-        for item in loras:
-            if not isinstance(item, str) or not item.strip():
-                continue
-
-            lora_str = item.strip()
-
+        # ========== 应用 Reference IPAdapter ==========
+        if reference is not None and reference.reference_ipadapters:
             try:
-                if lora_str.startswith("lora_path:"):
-                    # Direct path mode: path may contain ':' (Windows drive letter)
-                    # Format: lora_path:path:strength  — split from the rightmost ':'
-                    body = lora_str[len("lora_path:"):]
-                    last_colon = body.rfind(":")
-                    if last_colon == -1:
-                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
-                        continue
-                    lora_path = body[:last_colon].strip()
-                    strength = float(body[last_colon+1:].strip())
-                    lora_name = lora_path.replace("/", "\\").split("\\")[-1]
-                elif lora_str.startswith("lora:"):
-                    # Normal mode: lora:name:strength
-                    parts = lora_str.split(":", 2)
-                    if len(parts) != 3:
-                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
-                        continue
-                    lora_name = parts[1].strip()
-                    strength = float(parts[2].strip())
-                    lora_path = _lora_path_cache.get(lora_name)
-                    if lora_path is None:
-                        for key in _lora_path_cache:
-                            if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
-                                lora_path = _lora_path_cache[key]
-                                break
-                    if lora_path is None:
-                        print(f"Warning: 未找到 LoRA 文件: {lora_name}")
-                        continue
-                else:
-                    print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
+                from nodes import NODE_CLASS_MAPPINGS as ALL_NODE_CLASS_MAPPINGS
+            except Exception:
+                ALL_NODE_CLASS_MAPPINGS = {}
+
+            for ipa_cfg in reference.reference_ipadapters:
+                preset = ipa_cfg.get("preset")
+                weight_style = ipa_cfg.get("weight_style", 1.0)
+                weight_composition = ipa_cfg.get("weight_composition", 1.0)
+                expand_style = ipa_cfg.get("expand_style", False)
+                combine_embeds = ipa_cfg.get("combine_embeds", "average")
+                start_at = ipa_cfg.get("start_at", 0.0)
+                end_at = ipa_cfg.get("end_at", 1.0)
+                embeds_scaling = ipa_cfg.get("embeds_scaling", "V only")
+                cache_mode = ipa_cfg.get("cache_mode", "all")
+                image_style = ipa_cfg.get("image_style")
+                image_composition = ipa_cfg.get("image_composition")
+                image_negative = ipa_cfg.get("image_negative")
+                attn_mask = ipa_cfg.get("attn_mask")
+                clip_vision = ipa_cfg.get("clip_vision")
+
+                if image_style is None:
                     continue
 
-                # === 关键修复：先加载 state_dict，再传入 load_lora_for_models ===
-                lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                # 委托给 ComfyUI-Easy-Use 的 ipadapterStyleComposition 逻辑
+                easy_ipa_class = None
+                for key in ["easy ipadapterStyleComposition", "ipadapterStyleComposition"]:
+                    if key in ALL_NODE_CLASS_MAPPINGS:
+                        easy_ipa_class = ALL_NODE_CLASS_MAPPINGS[key]
+                        break
 
-                model_patcher, clip_patcher = comfy.sd.load_lora_for_models(
-                    model_patcher, 
-                    clip_patcher, 
-                    lora_dict,          # ← 这里必须传 dict，而不是路径
-                    strength, 
-                    strength
-                )
+                if easy_ipa_class is not None:
+                    try:
+                        ipa_instance = easy_ipa_class()
+                        model_patcher, _ = ipa_instance.apply(
+                            model=model_patcher,
+                            preset=preset,
+                            weight_style=weight_style,
+                            weight_composition=weight_composition,
+                            expand_style=expand_style,
+                            combine_embeds=combine_embeds,
+                            start_at=start_at,
+                            end_at=end_at,
+                            embeds_scaling=embeds_scaling,
+                            cache_mode=cache_mode,
+                            image_style=image_style,
+                            image_composition=image_composition,
+                            image_negative=image_negative,
+                            clip_vision=clip_vision,
+                            attn_mask=attn_mask,
+                        )
+                        print(f"✓ Applied Reference IPAdapter: preset={preset}, weight_style={weight_style}, weight_composition={weight_composition}")
+                    except Exception as e:
+                        print(f"Failed to apply Reference IPAdapter (preset={preset}): {type(e).__name__} - {e}")
+                else:
+                    print(f"Warning: ComfyUI-Easy-Use 的 ipadapterStyleComposition 节点未找到，跳过 Reference IPAdapter 应用")
 
-                print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
-
-            except Exception as e:
-                print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
-
-        result = (model_patcher, clip_patcher)
-        self._cache[cache_key] = result
-        return result
+        return (model_patcher, clip_patcher)
 
 
 # ====================== PipelineData 类（只返回 condition） ======================
@@ -714,12 +772,12 @@ class ReferenceGuidanceNode:
                 "negative_guidance": ("FLOAT", {"forceInput": True}),
             }
         }
-        
+
     RETURN_TYPES = ("REFERENCE_DATA",)
     RETURN_NAMES = ("reference",)
     FUNCTION = "process"
     CATEGORY = "sampling/custom"
-    
+
     def process(self,
                 reference : ReferenceData = None,
                 positive_guidance=None,
@@ -728,13 +786,160 @@ class ReferenceGuidanceNode:
             reference = ReferenceData()
         else:
             reference = reference.copy()
-        
+
         if positive_guidance is not None:
             reference.positive_guidance = positive_guidance
         if negative_guidance is not None:
-            reference.negative_guidance = negative_guidance 
-            
+            reference.negative_guidance = negative_guidance
+
         return (reference,)
+
+class ReferenceIPAdapterNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "preset": ([
+                    'LIGHT - SD1.5 only (low strength)',
+                    'STANDARD (medium strength)',
+                    'VIT-G (medium strength)',
+                    'PLUS (high strength)',
+                    'PLUS (kolors genernal)',
+                    'REGULAR - FLUX and SD3.5 only (high strength)',
+                    'PLUS FACE (portraits)',
+                    'FULL FACE - SD1.5 only (portraits stronger)',
+                    'COMPOSITION'
+                ],),
+                "weight_style": ("FLOAT", {"default": 1.0, "min": -1, "max": 5, "step": 0.05}),
+                "weight_composition": ("FLOAT", {"default": 1.0, "min": -1, "max": 5, "step": 0.05}),
+                "expand_style": ("BOOLEAN", {"default": False}),
+                "combine_embeds": (["concat", "add", "subtract", "average", "norm average"], {"default": "average"}),
+                "start_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "end_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001}),
+                "embeds_scaling": (['V only', 'K+V', 'K+V w/ C penalty', 'K+mean(V) w/ C penalty'],),
+                "cache_mode": (["insightface only", "clip_vision only", "ipadapter only", "all", "none"], {"default": "all"}),
+            },
+            "optional": {
+                "reference": ("REFERENCE_DATA",),
+                "image_style": ("IMAGE",),
+                "image_composition": ("IMAGE",),
+                "image_negative": ("IMAGE",),
+                "attn_mask": ("MASK",),
+                "clip_vision": ("CLIP_VISION",),
+            }
+        }
+
+    RETURN_TYPES = ("REFERENCE_DATA",)
+    RETURN_NAMES = ("reference",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    INPUT_IS_LIST = True
+
+    def _normalize_list(self, value, max_len):
+        """将值标准化为长度为 max_len 的列表，单值则复制补齐。"""
+        if value is None:
+            return [None] * max_len
+        if not isinstance(value, list):
+            return [value] * max_len
+        if len(value) >= max_len:
+            return value[:max_len]
+        # 单元素列表则复制补齐
+        if len(value) == 1:
+            return value * max_len
+        # 多元素但不足，用最后一个值补齐
+        return value + [value[-1]] * (max_len - len(value))
+
+    def _list_len(self, value):
+        """获取列表长度，非列表返回 1（表示单个值），None 返回 0。"""
+        if value is None:
+            return 0
+        if isinstance(value, list):
+            return len(value)
+        return 1
+
+    def process(self,
+                preset,
+                weight_style,
+                weight_composition,
+                expand_style,
+                combine_embeds,
+                start_at,
+                end_at,
+                embeds_scaling,
+                cache_mode,
+                reference=None,
+                image_style=None,
+                image_composition=None,
+                image_negative=None,
+                attn_mask=None,
+                clip_vision=None):
+        # 以 image_style 和 image_composition 两者最大长度为准
+        max_len = max(self._list_len(image_style), self._list_len(image_composition))
+
+        # 如果两者都为空（max_len == 0），直接返回 reference 或空 ReferenceData
+        if max_len == 0:
+            if reference is None:
+                return (ReferenceData(),)
+            return (reference.copy() if isinstance(reference, ReferenceData) else reference[0].copy(),)
+
+        preset = self._normalize_list(preset, max_len)
+        weight_style = self._normalize_list(weight_style, max_len)
+        weight_composition = self._normalize_list(weight_composition, max_len)
+        expand_style = self._normalize_list(expand_style, max_len)
+        combine_embeds = self._normalize_list(combine_embeds, max_len)
+        start_at = self._normalize_list(start_at, max_len)
+        end_at = self._normalize_list(end_at, max_len)
+        embeds_scaling = self._normalize_list(embeds_scaling, max_len)
+        cache_mode = self._normalize_list(cache_mode, max_len)
+        reference = self._normalize_list(reference, max_len)
+        image_style = self._normalize_list(image_style, max_len)
+        image_composition = self._normalize_list(image_composition, max_len)
+        image_negative = self._normalize_list(image_negative, max_len)
+        attn_mask = self._normalize_list(attn_mask, max_len)
+        clip_vision = self._normalize_list(clip_vision, max_len)
+
+        # 取第一个 reference 作为基础
+        first_ref = reference[0]
+        if first_ref is None:
+            base_ref = ReferenceData()
+        else:
+            base_ref = first_ref.copy()
+
+        # 逐个追加 ipadapter 配置
+        for i in range(max_len):
+            # 如果 image_style 和 image_composition 都为 None 则跳过
+            if image_style[i] is None and image_composition[i] is None:
+                continue
+
+            ref = reference[i]
+            if ref is not None and ref is not first_ref:
+                # 合并其他 reference 的已有数据
+                base_ref.reference_latents.extend(ref.reference_latents)
+                base_ref.reference_controls.extend(ref.reference_controls)
+                base_ref.reference_ipadapters.extend(ref.reference_ipadapters)
+                if ref.positive_guidance is not None:
+                    base_ref.positive_guidance = ref.positive_guidance
+                if ref.negative_guidance is not None:
+                    base_ref.negative_guidance = ref.negative_guidance
+
+            base_ref.reference_ipadapters.append({
+                "preset": preset[i],
+                "weight_style": weight_style[i],
+                "weight_composition": weight_composition[i],
+                "expand_style": expand_style[i],
+                "combine_embeds": combine_embeds[i],
+                "start_at": start_at[i],
+                "end_at": end_at[i],
+                "embeds_scaling": embeds_scaling[i],
+                "cache_mode": cache_mode[i],
+                "image_style": image_style[i],
+                "image_composition": image_composition[i],
+                "image_negative": image_negative[i],
+                "attn_mask": attn_mask[i],
+                "clip_vision": clip_vision[i],
+            })
+
+        return (base_ref,)
 
 # ====================== PipelineDataNode ======================
 class PipelineNode:
@@ -978,9 +1183,10 @@ class PipelineSamplerNode:
         model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
-            loras=context_loras
+            loras=context_loras,
+            reference=next_pipeline.reference
         )
-            
+
         # 获取 condition（使用新的 get_conditioning）
         positive_condition = next_pipeline.get_conditioning(
             mode="positive",
@@ -1110,9 +1316,10 @@ class PipelineSamplerAdvancedNode:
         model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
-            loras=context_loras
+            loras=context_loras,
+            reference=next_pipeline.reference
         )
-        
+
         # 获取 condition（使用新的 get_conditioning）
         positive_condition = next_pipeline.get_conditioning(
             mode="positive",
@@ -1439,9 +1646,10 @@ class PipelineDetailerAdvancedNode:
             model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
                 model=next_pipeline.model,
                 clip=next_pipeline.clip,
-                loras=current_loras
+                loras=current_loras,
+                reference=next_pipeline.reference
             )
-            
+
             tmp_latent = tmp_latents[processing_index]
             
             positive_condition = next_pipeline.get_conditioning(
@@ -1871,7 +2079,8 @@ class PipelineSamplerDataNode:
         model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
-            loras=loras
+            loras=loras,
+            reference=next_pipeline.reference
         )
         
         # 获取 latent
@@ -2319,7 +2528,8 @@ class PipelineVideoSamplerAdvancedNode:
                 
                 
             model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
-                model=next_pipeline.model, clip=next_pipeline.clip, loras=current_loras
+                model=next_pipeline.model, clip=next_pipeline.clip, loras=current_loras,
+                reference=reference
             )
             
             positive_condition = next_pipeline.get_conditioning(

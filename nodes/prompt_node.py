@@ -2392,9 +2392,9 @@ class SnapshotPromptNode:
             prefab_prompts_cleaned.extend(cleaned)
             prefab_loras.extend(l)
 
-        if server.window_closed or (not server.selected_prompts and not server.custom_prompts and not prefab_prompts_raw and not prefab_loras):
-            print(f"[PREFAB_DEBUG] THROWING ERROR: window_closed={server.window_closed}, selected_prompts={server.selected_prompts}, custom_prompts={server.custom_prompts}, prefab_prompts_raw={prefab_prompts_raw}, prefab_loras={prefab_loras}")
-            raise RuntimeError("[SnapshotPrompt] Window closed or no prompts selected")
+        if server.window_closed:
+            print(f"[PREFAB_DEBUG] THROWING ERROR: window_closed={server.window_closed}")
+            raise RuntimeError("[SnapshotPrompt] Window closed")
 
         # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入
         cleaned_prompts = []

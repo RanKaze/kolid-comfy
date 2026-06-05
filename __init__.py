@@ -144,7 +144,8 @@ NODE_CONFIG = {
     
     "ReferenceLatentNode": {"class": ReferenceLatentNode, "name": "ReferenceLatentNode"},
     "ReferenceContolNetNode": {"class": ReferenceContolNetNode, "name": "ReferenceContolNetNode"},
-    "ReferenceGuidanceNode": {"class": ReferenceGuidanceNode, "name": "ReferenceGuidanceNode"}, 
+    "ReferenceGuidanceNode": {"class": ReferenceGuidanceNode, "name": "ReferenceGuidanceNode"},
+    "ReferenceIPAdapterNode": {"class": ReferenceIPAdapterNode, "name": "ReferenceIPAdapterNode"}, 
     
     "ConfigNode": {"class": ConfigNode, "name": "ConfigNode"},
     "ConfigGetNode": {"class": ConfigGetNode, "name": "ConfigGetNode"},
