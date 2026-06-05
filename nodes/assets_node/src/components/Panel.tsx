@@ -8,7 +8,7 @@ export interface ImageInfo {
   dataUrl: string;
   assetId: string;
   shapeId: string;
-  strength?: number;
+  strengths?: Record<string, number>;
 }
 
 export interface PanelHandle {
@@ -22,9 +22,10 @@ interface PanelProps {
   onConfirm: (data: { images: ImageInfo[]; enableStrength: boolean; prompt: string }) => void;
   enableStrength: boolean;
   enablePrompt: boolean;
+  strengthDefs?: { name: string; default: number }[];
 }
 
-const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableStrength, enablePrompt }, ref) => {
+const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableStrength, enablePrompt, strengthDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [prompt, setPrompt] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
@@ -89,9 +90,13 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
     [editorRef, images]
   );
 
-  const updateStrength = useCallback((id: string, strength: number) => {
+  const updateStrength = useCallback((id: string, name: string, value: number) => {
     setImages((prev) =>
-      prev.map((img) => (img.id === id ? { ...img, strength } : img))
+      prev.map((img) =>
+        img.id === id
+          ? { ...img, strengths: { ...img.strengths, [name]: value } }
+          : img
+      )
     );
   }, []);
 
@@ -130,7 +135,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
           {/* Image thumbnails row with + button at the end */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <ThumbnailList images={images} onRemove={removeImage} enableStrength={enableStrength} onStrengthChange={updateStrength} />
+            <ThumbnailList images={images} onRemove={removeImage} enableStrength={enableStrength} strengthDefs={strengthDefs} onStrengthChange={updateStrength} />
             <button
               onClick={() => {
                 const editor = editorRef.current;
@@ -167,7 +172,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
                       dataUrl: src,
                       assetId: assetId as string,
                       shapeId: shape.id as string,
-                      strength: 1.0,
+                      strengths: strengthDefs.reduce((acc, d) => ({ ...acc, [d.name]: d.default }), {} as Record<string, number>),
                     },
                   ]);
                   newShapeIds.push(shape.id as string);

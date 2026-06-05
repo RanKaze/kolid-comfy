@@ -10,6 +10,7 @@ const App: React.FC = () => {
   const [pendingSnapshot, setPendingSnapshot] = useState<string | null>(null);
   const [enableStrength, setEnableStrength] = useState(false);
   const [enablePrompt, setEnablePrompt] = useState(false);
+  const [strengthDefs, setStrengthDefs] = useState<{ name: string; default: number }[]>([]);
   const panelHandleRef = useRef<PanelHandle>(null);
 
   useEffect(() => {
@@ -21,6 +22,7 @@ const App: React.FC = () => {
         // Set node input flags
         setEnableStrength(data.enable_strength || false);
         setEnablePrompt(data.enable_prompt || false);
+        setStrengthDefs(data.strength_defs || []);
 
         // Restore canvas snapshot if available
         const snapshot = data.canvas_snapshot;
@@ -145,14 +147,14 @@ const App: React.FC = () => {
       filteredStore[key] = record;
     }
 
-    // Save panel selected images info (include strength)
+    // Save panel selected images info (include strengths)
     const panelImages = images.map((img) => ({
       id: img.id,
       name: img.name,
       dataUrl: img.dataUrl,
       assetId: img.assetId,
       shapeId: img.shapeId,
-      strength: img.strength,
+      strengths: img.strengths,
     }));
 
     // Save camera position and zoom
@@ -176,7 +178,7 @@ const App: React.FC = () => {
     try {
       const selectedImages = images.map((img) => ({
         image: img.dataUrl,
-        strength: enableStrength ? (img.strength ?? 1.0) : undefined,
+        strengths: enableStrength ? img.strengths : undefined,
       }));
       console.log('[App] handleConfirm sending prompt:', prompt);
       await fetch('/confirm', {
@@ -267,6 +269,7 @@ const App: React.FC = () => {
         onConfirm={handleConfirm}
         enableStrength={enableStrength}
         enablePrompt={enablePrompt}
+        strengthDefs={strengthDefs}
       />
 
       {inputData && (

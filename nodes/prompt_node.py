@@ -533,6 +533,9 @@ class SnapshotPromptServer:
                             tag = dict(tag)
                             tag['prompt'] = name_to_prompt[tag_name]
                             tag_prompt = tag['prompt']
+                        # Preserve strength field if present
+                        if 'strength' in tag and tag['strength'] is not None:
+                            tag = dict(tag)
                         new_group.append(tag)
                     else:
                         new_group.append(tag)
@@ -2090,7 +2093,7 @@ class SnapshotPromptNode:
             print(f"  [DECO] level={level} no match found")
             return None
 
-        def _try_decompose(words):
+        def _try_decompose(words, strength=None):
             """Given a list of words (segment), try to decompose into
             decorations + base_prompt following the chain matching rule.
             Return the bracket string or None."""
@@ -2118,21 +2121,24 @@ class SnapshotPromptNode:
                     level += 1
 
                 if ok:
-                    return _build_bracket_output(base_prompt, decoration_levels)
+                    return _build_bracket_output(base_prompt, decoration_levels, strength)
                 else:
                     print(f"  [TRY] chain failed for base='{base_prompt}'")
             return None
 
-        def _build_bracket_output(base_prompt, decoration_levels):
+        def _build_bracket_output(base_prompt, decoration_levels, strength=None):
             """Convert decoration levels into bracket notation.
             Rightmost = level 1 = [word], next = level 2 = [[word]], etc."""
             if not decoration_levels:
-                return base_prompt
-            parts = []
-            for lvl, text in decoration_levels:
-                parts.append(('[' * lvl) + text + (']' * lvl))
-            parts.reverse()
-            result = ' '.join(parts) + ' ' + base_prompt
+                result = base_prompt
+            else:
+                parts = []
+                for lvl, text in decoration_levels:
+                    parts.append(('[' * lvl) + text + (']' * lvl))
+                parts.reverse()
+                result = ' '.join(parts) + ' ' + base_prompt
+            if strength is not None and strength != 1.0:
+                result = f"({result}:{strength})"
             print(f"  [OUT] {result}")
             return result
 
@@ -2146,8 +2152,24 @@ class SnapshotPromptNode:
                 continue
 
             matched = None
-            seg_lower = seg.lower()
-            print(f"\n[PARSE] segment='{seg}'")
+            strength = None
+            seg_body = seg
+
+            # Check for strength wrapper: (content:strength)
+            if seg.startswith('(') and seg.endswith(')'):
+                inner = seg[1:-1]
+                colon_idx = inner.rfind(':')
+                if colon_idx > 0:
+                    try:
+                        s_val = float(inner[colon_idx + 1:])
+                        strength = s_val
+                        seg_body = inner[:colon_idx]
+                        print(f"  [PARSE] strength detected: {strength}, body='{seg_body}'")
+                    except ValueError:
+                        pass
+
+            seg_lower = seg_body.lower()
+            print(f"\n[PARSE] segment='{seg}' body='{seg_body}'")
 
             # 1) Exact whole-segment match
             if seg_lower in prompt_index_lower:
@@ -2156,12 +2178,22 @@ class SnapshotPromptNode:
 
             # 2) Multi-word: decompose via chain matching
             if matched is None:
-                words = seg.split()
+                words = seg_body.split()
                 print(f"  [PARSE] words={words}")
                 if len(words) > 1:
-                    matched = _try_decompose(words)
+                    matched = _try_decompose(words, strength)
 
-            # 3) Decide
+            # 3) Single word with strength wrapper (e.g. (thighhighs:1.5))
+            if matched is None and strength is not None:
+                # seg_body might be a single prompt without brackets
+                if seg_lower in prompt_index_lower:
+                    matched = _build_bracket_output(prompt_index_lower[seg_lower], [], strength)
+                else:
+                    # Keep as custom but preserve strength wrapper
+                    custom_parts.append(seg)
+                    continue
+
+            # 4) Decide
             if matched is not None:
                 print(f"  [RESULT] matched='{matched}'")
                 last_selected.append(matched)
@@ -2332,15 +2364,20 @@ class SnapshotPromptNode:
                         if isinstance(tag, dict):
                             deco = tag.get('decoration_num') or 0
                             prompt_text = tag.get('prompt', '')
+                            strength = tag.get('strength', 1.0)
                             if deco > 0:
-                                parts.append('[' * deco + prompt_text + ']' * deco)
+                                text = '[' * deco + prompt_text + ']' * deco
                             else:
-                                parts.append(prompt_text)
+                                text = prompt_text
+                            if strength != 1.0:
+                                text = f"({text}:{strength})"
+                            parts.append(text)
                     if parts:
                         prompt_str = ' '.join(parts)
+                        cleaned_str = prompt_str.replace('[', '').replace(']', '')
                         if prompt_str not in prompts_raw:
                             prompts_raw.append(prompt_str)
-                            prompts_cleaned.append(prompt_str.replace('[', '').replace(']', ''))
+                            prompts_cleaned.append(cleaned_str)
             
             # Collect custom_prompts
             cp = pf.get('custom_prompts', '')
@@ -2396,14 +2433,14 @@ class SnapshotPromptNode:
             print(f"[PREFAB_DEBUG] THROWING ERROR: window_closed={server.window_closed}")
             raise RuntimeError("[SnapshotPrompt] Window closed")
 
-        # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入
+        # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入和 '()' 包裹的强度
         cleaned_prompts = []
         for p in server.selected_prompts:
             # 检查是否是 <> 包裹的自定义输入(兼容旧数据)
             if p.startswith('<') and p.endswith('>'):
                 cleaned = p[1:-1]
             else:
-                # 去掉 [ 和 ]
+                # 去掉 [ 和 ]，但保留 () 强度包裹
                 cleaned = p.replace('[', '').replace(']', '')
             cleaned_prompts.append(cleaned)
 

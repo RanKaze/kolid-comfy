@@ -32,7 +32,7 @@ def check_interrupted():
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_strength=False, enable_prompt=False):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_strength=False, enable_prompt=False, strength_mapping=""):
         self.port = None
         self.server = None
         self.started = False
@@ -46,6 +46,7 @@ class SnapshotAssetsServer:
         self.node_id = node_id  # Node ID for persistence
         self.enable_strength = enable_strength
         self.enable_prompt = enable_prompt
+        self.strength_mapping = strength_mapping
         self.should_stop = False
         # Use data/assets directory for image cache (persistent storage)
         self.image_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
@@ -163,11 +164,32 @@ class SnapshotAssetsServer:
                     return
 
             elif self.path == '/input_data':
+                # Parse strength_mapping into list of {name, default} dicts
+                # Format: "strength0:0.1,strength1:1" or "strength0,strength1" (defaults to 0)
+                strength_defs = []
+                if self.server_instance and self.server_instance.strength_mapping:
+                    for part in self.server_instance.strength_mapping.split(','):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        if ':' in part:
+                            name, default_str = part.split(':', 1)
+                            name = name.strip()
+                            try:
+                                default_val = float(default_str.strip())
+                            except ValueError:
+                                default_val = 0.0
+                        else:
+                            name = part
+                            default_val = 0.0
+                        if name:
+                            strength_defs.append({'name': name, 'default': default_val})
                 data = {
                     'input_data': self.server_instance.input_data if self.server_instance else '',
                     'canvas_snapshot': self.server_instance.canvas_snapshot if self.server_instance else None,
                     'enable_strength': self.server_instance.enable_strength if self.server_instance else False,
                     'enable_prompt': self.server_instance.enable_prompt if self.server_instance else False,
+                    'strength_defs': strength_defs,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -251,7 +273,10 @@ class SnapshotAssetsServer:
                                 if url:
                                     image_url = url
                             item = {"image": image_url}
-                            if 'strength' in img_data and img_data['strength'] is not None:
+                            # Support both single strength and multiple strengths dict
+                            if 'strengths' in img_data and img_data['strengths'] is not None:
+                                item['strengths'] = img_data['strengths']
+                            elif 'strength' in img_data and img_data['strength'] is not None:
                                 item['strength'] = img_data['strength']
                             selected_image_items.append(item)
                         elif isinstance(img_data, str):
@@ -318,15 +343,16 @@ class SnapshotAssetsNode:
                 "data": ("STRING", {"default": "", "multiline": True}),
                 "enable_strength": ("BOOLEAN", {"default": False}),
                 "enable_prompt": ("BOOLEAN", {"default": False}),
+                "strength_mapping": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "FLOAT", "STRING")
+    RETURN_TYPES = ("IMAGE", "*", "STRING")
     RETURN_NAMES = ("image", "strength", "prompt")
-    OUTPUT_IS_LIST = (True, True, False)
+    OUTPUT_IS_LIST = (True, False, False)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -367,7 +393,7 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_strength=False, enable_prompt=False, unique_id=None):
+    def snapshot_assets(self, data="", enable_strength=False, enable_prompt=False, strength_mapping="", unique_id=None):
         # data contains the tldraw snapshot JSON string
         canvas_snapshot = None
         try:
@@ -380,7 +406,7 @@ class SnapshotAssetsNode:
         except Exception as e:
             print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_strength=enable_strength, enable_prompt=enable_prompt)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_strength=enable_strength, enable_prompt=enable_prompt, strength_mapping=strength_mapping)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -421,21 +447,58 @@ class SnapshotAssetsNode:
             return ([], [], prompt)
 
         images = []
-        strengths = []
+        # Parse strength definitions from mapping: "name:default,name:default"
+        strength_defs = []
+        if strength_mapping:
+            for part in strength_mapping.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                if ':' in part:
+                    name, default_str = part.split(':', 1)
+                    name = name.strip()
+                    try:
+                        default_val = float(default_str.strip())
+                    except ValueError:
+                        default_val = 0.0
+                else:
+                    name = part
+                    default_val = 0.0
+                if name:
+                    strength_defs.append({'name': name, 'default': default_val})
+        if enable_strength and not strength_defs:
+            strength_defs = [{'name': 'strength0', 'default': 0.0}]
+
+        strength_names = [d['name'] for d in strength_defs]
+        strength_defaults = {d['name']: d['default'] for d in strength_defs}
+
+        # Initialize strengths as 2D list: each inner list is one named strength across all images
+        strengths_2d = [[] for _ in strength_names] if enable_strength and strength_names else []
+
         for img_data in selected_images:
             try:
                 if isinstance(img_data, dict):
                     image_url = img_data.get('image', '')
                     tensor = self._decode_image_data(image_url)
                     images.append(tensor)
-                    strengths.append(img_data.get('strength', 1.0))
+                    if enable_strength and strength_names:
+                        # Get strengths dict from frontend
+                        strengths_dict = img_data.get('strengths', {})
+                        for idx, name in enumerate(strength_names):
+                            if isinstance(strengths_dict, dict) and name in strengths_dict:
+                                val = float(strengths_dict[name])
+                            else:
+                                val = strength_defaults.get(name, 0.0)
+                            strengths_2d[idx].append(val)
                 else:
                     tensor = self._decode_image_data(img_data)
                     images.append(tensor)
-                    strengths.append(1.0)
+                    if enable_strength and strength_names:
+                        for idx, name in enumerate(strength_names):
+                            strengths_2d[idx].append(strength_defaults.get(name, 0.0))
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to decode image: {e}")
                 raise RuntimeError(f"[SnapshotAssets] Failed to decode image: {e}")
 
-        print(f"[SnapshotAssets] Output {len(images)} images, {len(strengths)} strengths, prompt: '{prompt[:50] if prompt else '(empty)'}'")
-        return (images, strengths, prompt)
+        print(f"[SnapshotAssets] Output {len(images)} images, {len(strengths_2d)} strength arrays, prompt: '{prompt[:50] if prompt else '(empty)'}'")
+        return (images, strengths_2d, prompt)

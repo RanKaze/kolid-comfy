@@ -2,18 +2,30 @@ import { useState, useCallback } from 'react';
 import type { Tag, TagGroup, PromptData, AllPrompts, TemporaryContext } from '../types';
 
 export function tagsToDisplayName(tags: Tag[]): string {
-  return tags.map(t => t.name || t.prompt).join(' ');
+  const names = tags.map(t => t.name || t.prompt);
+  const nameStr = names.join(' ');
+  const strength = tags[0]?.strength ?? 1.0;
+  if (strength !== 1.0) {
+    return `${nameStr}:${strength}`;
+  }
+  return nameStr;
 }
 
 export function tagsToDisplayString(tags: Tag[]): string {
-  return tags.map(tag => {
+  const parts = tags.map(tag => {
     if (tag.decoration_num > 0) {
       const brackets = '['.repeat(tag.decoration_num);
       const closing = ']'.repeat(tag.decoration_num);
       return `${brackets}${tag.prompt}${closing}`;
     }
     return tag.prompt;
-  }).join(' ');
+  });
+  const text = parts.join(' ');
+  const strength = tags[0]?.strength ?? 1.0;
+  if (strength !== 1.0) {
+    return `(${text}:${strength})`;
+  }
+  return text;
 }
 
 function findPromptName(promptText: string, allPrompts: AllPrompts): string {
@@ -26,15 +38,28 @@ function findPromptName(promptText: string, allPrompts: AllPrompts): string {
   return promptText;
 }
 
-function createTag(decorationNum: number, promptText: string, allPrompts: AllPrompts): Tag {
+function createTag(decorationNum: number, promptText: string, allPrompts: AllPrompts, strength?: number): Tag {
   return {
     decoration_num: decorationNum,
     name: findPromptName(promptText, allPrompts),
     prompt: promptText,
+    strength,
   };
 }
 
 export function parseStringToTags(str: string, allPrompts: AllPrompts): Tag[] {
+  // First, check if the entire string is wrapped in (content:strength)
+  const fullStrengthMatch = str.match(/^\((.*):(\d*\.?\d+)\)$/);
+  if (fullStrengthMatch) {
+    const innerContent = fullStrengthMatch[1].trim();
+    const strength = parseFloat(fullStrengthMatch[2]);
+    const innerTags = parseStringToTagsImpl(innerContent, allPrompts);
+    return innerTags.map(t => ({ ...t, strength }));
+  }
+  return parseStringToTagsImpl(str, allPrompts);
+}
+
+function parseStringToTagsImpl(str: string, allPrompts: AllPrompts): Tag[] {
   const tags: Tag[] = [];
   let pos = 0;
   while (pos < str.length) {

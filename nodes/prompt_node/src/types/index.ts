@@ -20,6 +20,7 @@ export interface Tag {
   decoration_num: number;
   name: string;
   prompt: string;
+  strength?: number;
 }
 
 export type TagGroup = Tag[];
