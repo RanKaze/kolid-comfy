@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Outpaint Mask</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0d0d0d;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #mainContainer {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 20px;
+            margin-bottom: 0;
+        }
+        #previewCanvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+        #status {
+            position: absolute;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            pointer-events: none;
+            background: rgba(28, 28, 30, 0.55);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            padding: 8px 20px;
+            border-radius: 20px;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 500;
+            text-align: center;
+            z-index: 50;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+            letter-spacing: 0.2px;
+            transition: all 0.3s ease;
+        }
+        #status.success {
+            background: rgba(48, 209, 88, 0.2);
+            border-color: rgba(48, 209, 88, 0.3);
+            color: #30d158;
+        }
+
+        .controls {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: rgba(28, 28, 30, 0.6);
+            backdrop-filter: blur(24px) saturate(180%);
+            -webkit-backdrop-filter: blur(24px) saturate(180%);
+            padding: 16px;
+            border-radius: 20px;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 220px;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+        }
+
+        .controls-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 4px;
+            letter-spacing: 0.3px;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 13px;
+            font-weight: 500;
+        }
+        .control-row label {
+            min-width: 44px;
+            font-weight: 500;
+        }
+        .control-row input[type="range"] {
+            flex: 1;
+            cursor: pointer;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255, 255, 255, 0.15);
+            outline: none;
+        }
+        .control-row input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+            margin-top: -6px;
+        }
+        .control-row input[type="range"]::-webkit-slider-runnable-track {
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255, 255, 255, 0.15);
+        }
+        .control-row span {
+            min-width: 36px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .confirm-bar {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 50;
+            display: flex;
+            gap: 10px;
+        }
+        .confirm-btn {
+            padding: 12px 40px;
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+            border: none;
+            border-radius: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            letter-spacing: 0.3px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+            background: rgba(48, 209, 88, 0.9);
+        }
+        .confirm-btn:hover {
+            background: rgba(48, 209, 88, 1.0);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(48, 209, 88, 0.35);
+        }
+
+        .dimension-info {
+            position: absolute;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            pointer-events: none;
+            background: rgba(28, 28, 30, 0.55);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            padding: 8px 20px;
+            border-radius: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 12px;
+            font-weight: 500;
+            text-align: center;
+            z-index: 50;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25);
+            letter-spacing: 0.2px;
+        }
+    </style>
+</head>
+<body>
+    <div id="mainContainer">
+        <canvas id="previewCanvas"></canvas>
+        <div id="status">Loading...</div>
+        <div class="dimension-info" id="dimensionInfo">0 x 0</div>
+        <div class="controls">
+            <div class="controls-title">Outpaint</div>
+            <div class="control-row">
+                <label>Top</label>
+                <input type="range" id="topPad" min="0" max="1024" value="0" step="1">
+                <span id="topPadValue">0</span>
+            </div>
+            <div class="control-row">
+                <label>Bottom</label>
+                <input type="range" id="bottomPad" min="0" max="1024" value="0" step="1">
+                <span id="bottomPadValue">0</span>
+            </div>
+            <div class="control-row">
+                <label>Left</label>
+                <input type="range" id="leftPad" min="0" max="1024" value="0" step="1">
+                <span id="leftPadValue">0</span>
+            </div>
+            <div class="control-row">
+                <label>Right</label>
+                <input type="range" id="rightPad" min="0" max="1024" value="0" step="1">
+                <span id="rightPadValue">0</span>
+            </div>
+        </div>
+    </div>
+    <div class="confirm-bar">
+        <button class="confirm-btn" id="confirmButton">Confirm</button>
+    </div>
+
+    <script>
+        const previewCanvas = document.getElementById('previewCanvas');
+        const ctx = previewCanvas.getContext('2d');
+        const status = document.getElementById('status');
+        const dimensionInfo = document.getElementById('dimensionInfo');
+
+        const topPadInput = document.getElementById('topPad');
+        const bottomPadInput = document.getElementById('bottomPad');
+        const leftPadInput = document.getElementById('leftPad');
+        const rightPadInput = document.getElementById('rightPad');
+
+        let originalImage = null;
+        let originalWidth = 0;
+        let originalHeight = 0;
+        let displayScale = 1;
+
+        async function loadImage() {
+            try {
+                const response = await fetch('/image_data', { cache: 'no-store' });
+                const data = await response.json();
+
+                const img = new Image();
+                img.onload = () => {
+                    originalImage = img;
+                    originalWidth = img.width;
+                    originalHeight = img.height;
+                    status.textContent = 'Ready';
+                    updatePreview();
+                };
+                img.src = data.image;
+            } catch (error) {
+                console.error('Error loading image:', error);
+                status.textContent = 'Error loading image';
+            }
+        }
+
+        function updatePreview() {
+            if (!originalImage) return;
+
+            const top = parseInt(topPadInput.value, 10);
+            const bottom = parseInt(bottomPadInput.value, 10);
+            const left = parseInt(leftPadInput.value, 10);
+            const right = parseInt(rightPadInput.value, 10);
+
+            document.getElementById('topPadValue').textContent = top;
+            document.getElementById('bottomPadValue').textContent = bottom;
+            document.getElementById('leftPadValue').textContent = left;
+            document.getElementById('rightPadValue').textContent = right;
+
+            const newWidth = originalWidth + left + right;
+            const newHeight = originalHeight + top + bottom;
+
+            // Calculate display scale to fit in container while maintaining aspect ratio
+            const container = document.getElementById('mainContainer');
+            const containerW = container.clientWidth - 40;
+            const containerH = container.clientHeight - 40;
+            displayScale = Math.min(containerW / newWidth, containerH / newHeight, 1);
+
+            const drawW = Math.floor(newWidth * displayScale);
+            const drawH = Math.floor(newHeight * displayScale);
+
+            previewCanvas.width = drawW;
+            previewCanvas.height = drawH;
+            previewCanvas.style.width = drawW + 'px';
+            previewCanvas.style.height = drawH + 'px';
+
+            // Clear background (black = new area)
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, drawW, drawH);
+
+            // Draw original image in center
+            const imgX = Math.floor(left * displayScale);
+            const imgY = Math.floor(top * displayScale);
+            const imgW = Math.floor(originalWidth * displayScale);
+            const imgH = Math.floor(originalHeight * displayScale);
+
+            ctx.drawImage(originalImage, imgX, imgY, imgW, imgH);
+
+            // Draw semi-transparent overlay on new areas (red tint for outpaint area)
+            ctx.fillStyle = 'rgba(255, 50, 50, 0.25)';
+            // Top
+            if (top > 0) ctx.fillRect(0, 0, drawW, Math.floor(top * displayScale));
+            // Bottom
+            if (bottom > 0) ctx.fillRect(0, drawH - Math.floor(bottom * displayScale), drawW, Math.floor(bottom * displayScale));
+            // Left
+            if (left > 0) ctx.fillRect(0, Math.floor(top * displayScale), Math.floor(left * displayScale), drawH - Math.floor(top * displayScale) - Math.floor(bottom * displayScale));
+            // Right
+            if (right > 0) ctx.fillRect(drawW - Math.floor(right * displayScale), Math.floor(top * displayScale), Math.floor(right * displayScale), drawH - Math.floor(top * displayScale) - Math.floor(bottom * displayScale));
+
+            // Draw original image border
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeRect(imgX, imgY, imgW, imgH);
+            ctx.setLineDash([]);
+
+            dimensionInfo.textContent = `${newWidth} x ${newHeight} (was ${originalWidth} x ${originalHeight})`;
+        }
+
+        // Update preview on slider change
+        [topPadInput, bottomPadInput, leftPadInput, rightPadInput].forEach(input => {
+            input.addEventListener('input', updatePreview);
+        });
+
+        // Handle resize
+        window.addEventListener('resize', updatePreview);
+
+        // Keyboard shortcut: Enter to confirm
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('confirmButton').click();
+            }
+        });
+
+        // Notify server when window is closed
+        window.addEventListener('beforeunload', async () => {
+            try {
+                await fetch('/window_closed', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ closed: true })
+                });
+            } catch (error) {
+                console.error('Error notifying window close:', error);
+            }
+        });
+
+        // Confirm button
+        document.getElementById('confirmButton').addEventListener('click', async () => {
+            const top = parseInt(topPadInput.value, 10);
+            const bottom = parseInt(bottomPadInput.value, 10);
+            const left = parseInt(leftPadInput.value, 10);
+            const right = parseInt(rightPadInput.value, 10);
+
+            try {
+                const response = await fetch('/confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ top, bottom, left, right })
+                });
+                if (response.ok) {
+                    status.textContent = 'Confirmed!';
+                    status.classList.add('success');
+                } else {
+                    status.textContent = 'Error confirming';
+                    status.classList.remove('success');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                status.textContent = 'Error confirming';
+                status.classList.remove('success');
+            }
+        });
+
+        function init() {
+            loadImage();
+        }
+        if (document.readyState === 'complete') {
+            init();
+        } else {
+            window.addEventListener('load', init);
+        }
+    </script>
+</body>
+</html>
