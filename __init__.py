@@ -141,6 +141,7 @@ NODE_CONFIG = {
     
     "ImageToBase64Node": {"class": ImageToBase64Node, "name": "ImageToBase64Node"},
     "Base64ToImageNode": {"class": Base64ToImageNode, "name": "Base64ToImageNode"},
+    "SnapshotOutpaintMaskNode": {"class": SnapshotOutpaintMaskNode, "name": "SnapshotOutpaintMaskNode"},
     
     "ReferenceLatentNode": {"class": ReferenceLatentNode, "name": "ReferenceLatentNode"},
     "ReferenceContolNetNode": {"class": ReferenceContolNetNode, "name": "ReferenceContolNetNode"},

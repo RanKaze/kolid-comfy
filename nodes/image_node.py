@@ -2292,3 +2292,224 @@ class SnapshotMaskNode:
             raise ValueError("Window closed without drawing mask")
         
         return (result_mask[0],)
+
+
+class SnapshotOutpaintMaskNodeServer:
+    """Temporary HTTP server to serve the outpaint mask page and handle user confirmation."""
+
+    def __init__(self, image):
+        self._image = image
+        self.server = None
+        self.started = False
+        self.confirm_event = threading.Event()
+        self.window_closed = False
+        self.browser_url = None
+        self.result = None
+
+    def start(self):
+        class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            pass
+        for port in range(8080, 9000):
+            try:
+                self.server = ThreadingTCPServer(('localhost', port), self.OutpaintMaskHandler)
+                self.server.node_server = self
+                self.started = True
+                print(f"[SnapshotOutpaintMask] Server started on port {port}")
+                break
+            except Exception:
+                continue
+
+        self.browser_url = f"http://localhost:{port}/outpaint_mask_node.html"
+
+        if not self.started:
+            print("[SnapshotOutpaintMask] Failed to start server")
+            return
+
+        try:
+            self.server.serve_forever()
+        except Exception:
+            pass
+
+    def stop(self):
+        if self.server:
+            print("[SnapshotOutpaintMask] Stopping server")
+            self.server.shutdown()
+            self.server.server_close()
+
+    def wait_for_selection(self):
+        if not waitSnapShot(self.confirm_event):
+            raise Exception("Canceled")
+
+    class OutpaintMaskHandler(http.server.SimpleHTTPRequestHandler):
+        @property
+        def server_instance(self):
+            return getattr(self.server, 'node_server', None)
+
+        def do_GET(self):
+            path = self.path.split('?')[0]
+            if path == '/outpaint_mask_node.html':
+                file_path = os.path.join(os.path.dirname(__file__), 'web', 'outpaint_mask_node.html')
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "File not found")
+            elif path == '/image_data':
+                if self.server_instance:
+                    try:
+                        image_base64 = image_to_base64(self.server_instance.get_image())
+                        response = {'image': image_base64}
+                        response_data = json.dumps(response).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Content-Length', str(len(response_data)))
+                        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                        self.send_header('Pragma', 'no-cache')
+                        self.send_header('Expires', '0')
+                        self.end_headers()
+                        self.wfile.write(response_data)
+                    except Exception as e:
+                        self.send_error(500, f"Error processing image data: {e}")
+                        return
+                else:
+                    self.send_error(500, "Server error")
+            else:
+                super().do_GET()
+
+        def do_POST(self):
+            if self.path == '/confirm':
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    self.server_instance.result = {
+                        'top': data.get('top', 0),
+                        'bottom': data.get('bottom', 0),
+                        'left': data.get('left', 0),
+                        'right': data.get('right', 0),
+                    }
+                    self.server_instance.confirm_event.set()
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+            elif self.path == '/window_closed':
+                if self.server_instance:
+                    self.server_instance.window_closed = True
+                    self.server_instance.confirm_event.set()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+            else:
+                super().do_POST()
+
+        def log_message(self, format, *args):
+            pass
+
+    def get_image(self):
+        return self._image
+
+
+class SnapshotOutpaintMaskNode:
+    """Open an image in a browser, allow user to set outpaint padding, and return the expanded image and mask."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {
+                    "tooltip": "Input image to set outpaint area on",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "IMAGE")
+    RETURN_NAMES = ("mask", "image")
+    FUNCTION = "outpaint_mask"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def IS_CHANGED(s):
+        return float("nan")
+
+    def outpaint_mask(self, image):
+        focused_window = None
+        if has_win32gui:
+            focused_window = win32gui.GetForegroundWindow()
+
+        # Start a temporary HTTP server to serve the outpaint page
+        server = SnapshotOutpaintMaskNodeServer(image)
+
+        server_thread = threading.Thread(target=server.start)
+        server_thread.daemon = True
+        server_thread.start()
+
+        start_time = time.time()
+        timeout = 10
+        while not server.started:
+            if time.time() - start_time > timeout:
+                raise RuntimeError(f"[SnapshotOutpaintMask] Server startup timeout after {timeout} seconds")
+            time.sleep(0.1)
+
+        print(f"[SnapshotOutpaintMask] Opening browser at: {server.browser_url}")
+        webbrowser.open(server.browser_url)
+
+        # Wait for user confirmation
+        print("[SnapshotOutpaintMask] Waiting for user confirmation...")
+        server.wait_for_selection()
+
+        # Stop the server
+        server.stop()
+
+        # Restore window focus
+        if has_win32gui and focused_window:
+            time.sleep(0.5)
+            focus_window(focused_window)
+
+        if server.window_closed or server.result is None:
+            raise ValueError("Window closed without confirming outpaint")
+
+        # Process the result
+        top = server.result['top']
+        bottom = server.result['bottom']
+        left = server.result['left']
+        right = server.result['right']
+
+        # Get original dimensions
+        if len(image.shape) == 4:
+            b, orig_h, orig_w, c = image.shape
+        elif len(image.shape) == 3:
+            b, orig_h, orig_w = image.shape
+            c = 3
+        else:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+
+        new_h = orig_h + top + bottom
+        new_w = orig_w + left + right
+
+        print(f"[SnapshotOutpaintMask] Original: {orig_w}x{orig_h}, New: {new_w}x{new_h}, padding: T={top}, B={bottom}, L={left}, R={right}")
+
+        # Create expanded image (black padding)
+        if len(image.shape) == 4:
+            expanded_image = torch.zeros((b, new_h, new_w, c), dtype=image.dtype, device=image.device)
+            expanded_image[:, top:top + orig_h, left:left + orig_w, :] = image
+        else:
+            expanded_image = torch.zeros((b, new_h, new_w), dtype=image.dtype, device=image.device)
+            expanded_image[:, top:top + orig_h, left:left + orig_w] = image
+
+        # Create mask: new area = 1, original area = 0
+        mask = torch.ones((b, new_h, new_w), dtype=torch.float32, device=image.device)
+        mask[:, top:top + orig_h, left:left + orig_w] = 0.0
+
+        return (mask, expanded_image)
