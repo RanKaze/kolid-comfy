@@ -164,6 +164,7 @@ NODE_CONFIG = {
     "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},
     "PipelineGetPromptNode": {"class": PipelineGetPromptNode, "name": "PipelineGetPromptNode"},
     "PipelineSamplerDataNode": {"class": PipelineSamplerDataNode, "name": "PipelineSamplerDataNode"},
+    "ApplyLorasNode": {"class": ApplyLorasNode, "name": "ApplyLorasNode"},
     "PipelineVideoSamplerAdvancedNode": {"class": PipelineVideoSamplerAdvancedNode, "name": "PipelineVideoSamplerAdvancedNode"},
     
 }

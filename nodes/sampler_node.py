@@ -2105,6 +2105,98 @@ class PipelineSamplerDataNode:
         
         return (next_pipeline, model_to_use, positive_condition, negative_condition, latent)
 
+class ApplyLorasNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "loras": ("STRING", {"forceInput": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "apply_loras"
+    CATEGORY = "sampling/custom"
+    INPUT_IS_LIST = True
+
+    def apply_loras(self, model, loras):
+        # INPUT_IS_LIST=True 时所有输入都是列表
+        if not model:
+            raise ValueError("model 输入不能为空")
+        model_patcher = model[0]
+
+        # 收集所有 lora 配置（支持逗号分隔和列表混合）
+        all_lora_items = []
+        for lora_str in loras:
+            if not isinstance(lora_str, str) or not lora_str.strip():
+                continue
+            for item in lora_str.split(","):
+                item = item.strip()
+                if item:
+                    all_lora_items.append(item)
+
+        if not all_lora_items:
+            return (model_patcher,)
+
+        print(f"Loading LoRAs: {all_lora_items}")
+
+        for item in all_lora_items:
+            if not isinstance(item, str) or not item.strip():
+                continue
+
+            lora_str = item.strip()
+
+            try:
+                if lora_str.startswith("lora_path:"):
+                    # Direct path mode: path may contain ':' (Windows drive letter)
+                    # Format: lora_path:path:strength  — split from the rightmost ':'
+                    body = lora_str[len("lora_path:"):]
+                    last_colon = body.rfind(":")
+                    if last_colon == -1:
+                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                        continue
+                    lora_path = body[:last_colon].strip()
+                    strength = float(body[last_colon+1:].strip())
+                    lora_name = lora_path.replace("/", "\\").split("\\")[-1]
+                elif lora_str.startswith("lora:"):
+                    # Normal mode: lora:name:strength
+                    parts = lora_str.split(":", 2)
+                    if len(parts) != 3:
+                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                        continue
+                    lora_name = parts[1].strip()
+                    strength = float(parts[2].strip())
+                    lora_path = _lora_path_cache.get(lora_name)
+                    if lora_path is None:
+                        for key in _lora_path_cache:
+                            if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
+                                lora_path = _lora_path_cache[key]
+                                break
+                    if lora_path is None:
+                        print(f"Warning: 未找到 LoRA 文件: {lora_name}")
+                        continue
+                else:
+                    print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
+                    continue
+
+                lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                model_patcher, _ = comfy.sd.load_lora_for_models(
+                    model_patcher,
+                    None,
+                    lora_dict,
+                    strength,
+                    strength
+                )
+
+                print(f"Applied LoRA: {lora_name} (strength={strength})")
+
+            except Exception as e:
+                print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
+
+        return (model_patcher,)
+
 class PipelineTagNode:
     @classmethod
     def INPUT_TYPES(s):
