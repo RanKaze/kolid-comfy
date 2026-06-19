@@ -754,21 +754,39 @@ class SnapshotDetailerSamplerNode:
             selected_image = None
             for h in selected_history:
                 if h.get('key') == selected:
-                    src = h.get('src', '')
-                    b64_data = src.split(',', 1)[1] if ',' in src else src
-                    img_bytes = base64.b64decode(b64_data)
-                    img = Image.open(io.BytesIO(img_bytes))
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    arr = np.array(img).astype(np.float32) / 255.0
-                    selected_image = torch.from_numpy(arr).unsqueeze(0)
+                    try:
+                        src = h.get('src', '')
+                        # 处理 data URL 格式 (data:image/jpeg;base64,... 或 data:image/png;base64,...)
+                        if ',' in src:
+                            b64_data = src.split(',', 1)[1]
+                        else:
+                            b64_data = src
+                        
+                        img_bytes = base64.b64decode(b64_data)
+                        img = Image.open(io.BytesIO(img_bytes))
+                        
+                        # 转换为 RGB 模式
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        # 转换为 tensor [1, H, W, 3] 格式，值范围 [0, 1]
+                        arr = np.array(img).astype(np.float32) / 255.0
+                        selected_image = torch.from_numpy(arr).unsqueeze(0)
+                        
+                        print(f"[SnapshotDetailerSampler] Successfully loaded history image: shape={selected_image.shape}, key={selected}")
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                        print(f"[SnapshotDetailerSampler] Failed to load history image: {e}, key={selected}")
+                        selected_image = None
                     break
+            
             if selected_image is not None:
                 pipeline.image = selected_image
                 print(f"[SnapshotDetailerSampler] User selected history image: {selected}")
             else:
                 pipeline.image = detailed_image.clone() if detailed_image is not None else None
-                print(f"[SnapshotDetailerSampler] Unknown selection '{selected}', fallback to detailed")
+                print(f"[SnapshotDetailerSampler] Unknown or failed selection '{selected}', fallback to detailed")
         return pipeline
 
     # -------------------------------------------------------------------------

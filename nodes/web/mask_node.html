@@ -345,6 +345,7 @@
             </div>
             <div class="control-row" style="justify-content: center; gap: 8px;">
                 <button class="control-button" id="clearButton">Clear</button>
+                <button class="control-button primary" id="fullButton">Full</button>
                 <button class="control-button warning" id="growButton">Grow</button>
             </div>
             <div class="control-row">
@@ -624,6 +625,15 @@
             } catch (err) {
                 console.error('Clear failed:', err);
             }
+        });
+
+        // Full - fill entire canvas with mask
+        document.getElementById('fullButton').addEventListener('click', () => {
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            status.textContent = 'Full mask applied';
+            status.classList.add('success');
         });
 
         // Grow size slider
