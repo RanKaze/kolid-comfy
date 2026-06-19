@@ -27,6 +27,7 @@ interface PanelProps {
 
 const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableStrength, enablePrompt, strengthDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
+  const [videos, setVideos] = useState<string[]>([]);
   const [prompt, setPrompt] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
 

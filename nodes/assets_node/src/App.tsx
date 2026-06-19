@@ -81,8 +81,10 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const addImage = useCallback(async (file: File, x: number, y: number) => {
-    if (!file.type.startsWith('image/')) return;
+  const addMedia = useCallback(async (file: File, x: number, y: number) => {
+    const isImage = file.type.startsWith('image/');
+    const isVideo = file.type.startsWith('video/');
+    if (!isImage && !isVideo) return;
 
     const editor = editorRef.current;
     if (!editor) return;
@@ -95,37 +97,39 @@ const App: React.FC = () => {
     });
 
     const assetId = AssetRecordType.createId();
+    const assetType = isVideo ? 'video' : 'image';
+    
     editor.createAssets([
       {
         id: assetId,
         typeName: 'asset',
-        type: 'image',
+        type: assetType as any,
         meta: {},
         props: {
           name: file.name,
           src: dataUrl,
           w: 300,
-          h: 300,
+          h: isVideo ? 200 : 300,
           mimeType: file.type,
           isAnimated: false,
         },
-      },
+      } as any,
     ]);
 
     const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
     editor.createShape({
       id: shapeId,
-      type: 'image',
+      type: assetType,
       x,
       y,
       props: {
         w: 300,
-        h: 300,
+        h: isVideo ? 200 : 300,
         assetId,
       },
-    });
+    } as any);
 
-    // Do NOT add to images list automatically - user must click + button
+    // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
   const handleConfirm = useCallback(async ({ images, enableStrength, prompt }: { images: ImageInfo[]; enableStrength: boolean; prompt: string }) => {
