@@ -10,6 +10,7 @@ import urllib.parse
 import io
 import comfy.model_management as mm
 from server import PromptServer
+from comfy_api.latest import InputImpl
 
 
 def check_interrupted():
@@ -40,6 +41,7 @@ class SnapshotAssetsServer:
         self.window_closed = False
         self.browser_url = None
         self.selected_images = []
+        self.selected_videos = []
         self.prompt = ""
         self.input_data = input_data
         self.canvas_snapshot = canvas_snapshot  # tldraw snapshot JSON string
@@ -48,9 +50,9 @@ class SnapshotAssetsServer:
         self.enable_prompt = enable_prompt
         self.strength_mapping = strength_mapping
         self.should_stop = False
-        # Use data/assets directory for image cache (persistent storage)
-        self.image_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
-        os.makedirs(self.image_cache_dir, exist_ok=True)
+        # Use data/assets directory for both image and video cache (persistent storage)
+        self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+        os.makedirs(self.asset_cache_dir, exist_ok=True)
 
     def save_base64_image(self, data_url):
         """Save base64 image to cache directory and return URL path."""
@@ -74,7 +76,7 @@ class SnapshotAssetsServer:
             # Generate unique filename
             import hashlib
             filename = hashlib.md5(base64_data.encode()).hexdigest() + ext
-            filepath = os.path.join(self.image_cache_dir, filename)
+            filepath = os.path.join(self.asset_cache_dir, filename)
             
             # Save file if not exists
             if not os.path.exists(filepath):
@@ -86,6 +88,43 @@ class SnapshotAssetsServer:
             return f"/assets/{filename}"
         except Exception as e:
             print(f"[SnapshotAssets] Failed to save image: {e}")
+            return None
+
+    def save_base64_video(self, data_url):
+        """Save base64 video to cache directory and return URL path."""
+        try:
+            # Extract base64 data
+            if ',' in data_url:
+                header, base64_data = data_url.split(',', 1)
+            else:
+                base64_data = data_url
+                header = "data:video/mp4;base64"
+            
+            # Determine extension from mime type
+            ext = ".mp4"
+            if "video/webm" in header:
+                ext = ".webm"
+            elif "video/avi" in header:
+                ext = ".avi"
+            elif "video/mov" in header or "video/quicktime" in header:
+                ext = ".mov"
+            
+            # Generate unique filename
+            import hashlib
+            filename = hashlib.md5(base64_data.encode()).hexdigest() + ext
+            filepath = os.path.join(self.asset_cache_dir, filename)
+            
+            # Save file if not exists
+            if not os.path.exists(filepath):
+                video_bytes = base64.b64decode(base64_data)
+                with open(filepath, 'wb') as f:
+                    f.write(video_bytes)
+                print(f"[SnapshotAssets] Saved video to: {filepath}")
+            
+            # Return URL path (relative to server root)
+            return f"/assets/{filename}"
+        except Exception as e:
+            print(f"[SnapshotAssets] Failed to save video: {e}")
             return None
 
     def start(self):
@@ -199,21 +238,36 @@ class SnapshotAssetsServer:
                 return
 
             elif self.path.startswith('/assets/'):
-                # Serve cached images
+                # Serve cached images and videos from asset_cache_dir
                 if self.server_instance:
                     filename = os.path.basename(self.path)
-                    filepath = os.path.join(self.server_instance.image_cache_dir, filename)
+                    filepath = os.path.join(self.server_instance.asset_cache_dir, filename)
                     if os.path.exists(filepath):
                         self.send_response(200)
                         # Determine content type from extension
                         ext = os.path.splitext(filename)[1].lower()
-                        content_type = 'image/png'
-                        if ext == '.jpg' or ext == '.jpeg':
-                            content_type = 'image/jpeg'
-                        elif ext == '.webp':
-                            content_type = 'image/webp'
-                        elif ext == '.gif':
-                            content_type = 'image/gif'
+                        content_type = 'application/octet-stream'
+                        # Image types
+                        if ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
+                            if ext == '.png':
+                                content_type = 'image/png'
+                            elif ext in ['.jpg', '.jpeg']:
+                                content_type = 'image/jpeg'
+                            elif ext == '.webp':
+                                content_type = 'image/webp'
+                            elif ext == '.gif':
+                                content_type = 'image/gif'
+                        # Video types
+                        elif ext in ['.mp4', '.webm', '.avi', '.mov']:
+                            if ext == '.mp4':
+                                content_type = 'video/mp4'
+                            elif ext == '.webm':
+                                content_type = 'video/webm'
+                            elif ext == '.avi':
+                                content_type = 'video/x-msvideo'
+                            elif ext == '.mov':
+                                content_type = 'video/quicktime'
+                        
                         self.send_header('Content-type', content_type)
                         self.send_header("Access-Control-Allow-Origin", "*")
                         self.send_header('Cache-Control', 'public, max-age=31536000')
@@ -221,7 +275,7 @@ class SnapshotAssetsServer:
                         with open(filepath, 'rb') as f:
                             self.wfile.write(f.read())
                         return
-                self.send_error(404, "Image not found")
+                self.send_error(404, "Asset not found")
                 return
 
             self.send_error(404, "Not found")
@@ -233,11 +287,12 @@ class SnapshotAssetsServer:
                 data = json.loads(post_data)
 
                 if self.server_instance:
-                    # Get selected images and tldraw snapshot from frontend
+                    # Get selected images, videos and tldraw snapshot from frontend
                     selected_images = data.get('images', [])
+                    selected_videos_data = data.get('videos', [])
                     canvas_snapshot = data.get('canvas_snapshot', '')
                     
-                    # Process base64 images in snapshot: convert to URLs
+                    # Process base64 images/videos in snapshot: convert to URLs/paths
                     if canvas_snapshot:
                         try:
                             snapshot = json.loads(canvas_snapshot)
@@ -247,7 +302,10 @@ class SnapshotAssetsServer:
                                     if isinstance(record, dict) and record.get('typeName') == 'asset' and 'props' in record:
                                         props = record['props']
                                         if 'src' in props and props['src'].startswith('data:'):
-                                            url = self.server_instance.save_base64_image(props['src'])
+                                            if props.get('mimeType', '').startswith('video/'):
+                                                url = self.server_instance.save_base64_video(props['src'])
+                                            else:
+                                                url = self.server_instance.save_base64_image(props['src'])
                                             if url:
                                                 props['src'] = url
                             # Process panelImages - convert base64 dataUrl to URLs
@@ -259,6 +317,21 @@ class SnapshotAssetsServer:
                                             url = self.server_instance.save_base64_image(data_url)
                                             if url:
                                                 panel_img['dataUrl'] = url
+                            # Process panelVideos - convert base64 dataUrl to URL paths (same as images)
+                            if 'panelVideos' in snapshot and isinstance(snapshot['panelVideos'], list):
+                                for panel_vid in snapshot['panelVideos']:
+                                    if isinstance(panel_vid, dict) and 'dataUrl' in panel_vid:
+                                        data_url = panel_vid['dataUrl']
+                                        if isinstance(data_url, str) and data_url.startswith('data:'):
+                                            # Save video and get URL
+                                            url = self.server_instance.save_base64_video(data_url)
+                                            if url:
+                                                panel_vid['dataUrl'] = url
+                                        elif isinstance(data_url, str) and not data_url.startswith('/assets/'):
+                                            # If it's already a file path (from previous save), convert to URL
+                                            if os.path.isabs(data_url):
+                                                filename = os.path.basename(data_url)
+                                                panel_vid['dataUrl'] = f"/assets/{filename}"
                             canvas_snapshot = json.dumps(snapshot)
                         except Exception as e:
                             print(f"[SnapshotAssets] Failed to process snapshot: {e}")
@@ -289,7 +362,50 @@ class SnapshotAssetsServer:
                             else:
                                 selected_image_items.append({"image": img_data})
 
+                    # Convert selected videos if they are base64 or file paths (统一使用 /assets/ URL)
+                    selected_video_items = []
+                    print(f"[SnapshotAssets] Received {len(selected_videos_data)} video items from frontend")
+                    for vid_data in selected_videos_data:
+                        print(f"[SnapshotAssets] Processing video item: type={type(vid_data).__name__}, data={str(vid_data)[:100]}")
+                        if isinstance(vid_data, dict) and 'video' in vid_data:
+                            video_url = vid_data['video']
+                            if video_url.startswith('data:'):
+                                print(f"[SnapshotAssets] Converting base64 video to file...")
+                                url = self.server_instance.save_base64_video(video_url)
+                                if url:
+                                    video_url = url
+                                    print(f"[SnapshotAssets] Saved video, got URL: {video_url}")
+                                else:
+                                    video_url = vid_data['video']  # Keep original if save failed
+                            elif not video_url.startswith('/assets/') and os.path.isabs(video_url):
+                                # Convert absolute file path to URL
+                                filename = os.path.basename(video_url)
+                                video_url = f"/assets/{filename}"
+                            item = {"video": video_url}
+                            selected_video_items.append(item)
+                        elif isinstance(vid_data, str):
+                            if vid_data.startswith('data:'):
+                                url = self.server_instance.save_base64_video(vid_data)
+                                if url:
+                                    selected_video_items.append({"video": url})
+                                else:
+                                    selected_video_items.append({"video": vid_data})
+                            elif vid_data.startswith('/assets/'):
+                                # Already a URL
+                                selected_video_items.append({"video": vid_data})
+                            elif os.path.isabs(vid_data):
+                                # Absolute file path, convert to URL
+                                filename = os.path.basename(vid_data)
+                                selected_video_items.append({"video": f"/assets/{filename}"})
+                            else:
+                                selected_video_items.append({"video": vid_data})
+
+                    print(f"[SnapshotAssets] Final selected_video_items: {len(selected_video_items)} items")
+                    for item in selected_video_items:
+                        print(f"[SnapshotAssets]   Video item: {item}")
+                    
                     self.server_instance.selected_images = selected_image_items
+                    self.server_instance.selected_videos = selected_video_items
                     prompt_value = data.get('prompt', '')
                     print(f"[SnapshotAssets] Received prompt: '{prompt_value}'")
                     self.server_instance.prompt = prompt_value if prompt_value is not None else ''
@@ -350,9 +466,9 @@ class SnapshotAssetsNode:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "*", "STRING")
-    RETURN_NAMES = ("image", "strength", "prompt")
-    OUTPUT_IS_LIST = (True, False, False)
+    RETURN_TYPES = ("IMAGE", "VIDEO", "FLOAT", "STRING")
+    RETURN_NAMES = ("image", "video", "strength", "prompt")
+    OUTPUT_IS_LIST = (True, True, True, False)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -439,13 +555,19 @@ class SnapshotAssetsNode:
         server.stop()
 
         selected_images = server.selected_images
+        selected_videos = server.selected_videos if hasattr(server, 'selected_videos') else []
         prompt = server.prompt if server.prompt is not None else ''
         
-        # Allow empty selection - return empty list if no images selected
-        if not selected_images:
-            print("[SnapshotAssets] No images selected, returning empty list")
-            return ([], [], prompt)
+        print(f"[SnapshotAssets] After confirm: {len(selected_images)} images, {len(selected_videos)} videos")
+        for vid in selected_videos:
+            print(f"[SnapshotAssets]   Selected video: {vid}")
+        
+        # Allow empty selection - return empty list if no images/videos selected
+        if not selected_images and not selected_videos:
+            print("[SnapshotAssets] No images or videos selected, returning empty lists")
+            return ([], [], [], prompt)
 
+        # Process images
         images = []
         # Parse strength definitions from mapping: "name:default,name:default"
         strength_defs = []
@@ -470,7 +592,7 @@ class SnapshotAssetsNode:
             strength_defs = [{'name': 'strength0', 'default': 0.0}]
 
         strength_names = [d['name'] for d in strength_defs]
-        strength_defaults = {d['name']: d['default'] for d in strength_defs}
+        strength_defaults_map = {d['name']: d['default'] for d in strength_defs}
 
         # Initialize strengths as 2D list: each inner list is one named strength across all images
         strengths_2d = [[] for _ in strength_names] if enable_strength and strength_names else []
@@ -488,17 +610,66 @@ class SnapshotAssetsNode:
                             if isinstance(strengths_dict, dict) and name in strengths_dict:
                                 val = float(strengths_dict[name])
                             else:
-                                val = strength_defaults.get(name, 0.0)
+                                val = strength_defaults_map.get(name, 0.0)
                             strengths_2d[idx].append(val)
                 else:
                     tensor = self._decode_image_data(img_data)
                     images.append(tensor)
                     if enable_strength and strength_names:
                         for idx, name in enumerate(strength_names):
-                            strengths_2d[idx].append(strength_defaults.get(name, 0.0))
+                            strengths_2d[idx].append(strength_defaults_map.get(name, 0.0))
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to decode image: {e}")
                 raise RuntimeError(f"[SnapshotAssets] Failed to decode image: {e}")
 
-        print(f"[SnapshotAssets] Output {len(images)} images, {len(strengths_2d)} strength arrays, prompt: '{prompt[:50] if prompt else '(empty)'}'")
-        return (images, strengths_2d, prompt)
+        # Process videos (video URLs from frontend, convert to file paths for VideoFromFile)
+        videos = []
+        # Get asset_cache_dir from server instance
+        asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+        
+        print(f"[SnapshotAssets] Processing {len(selected_videos)} video items")
+        for vid_data in selected_videos:
+            try:
+                video_url = None
+                if isinstance(vid_data, dict):
+                    video_url = vid_data.get('video', '')
+                elif isinstance(vid_data, str):
+                    video_url = vid_data
+                
+                if not video_url:
+                    print(f"[SnapshotAssets] Skipping empty video URL")
+                    continue
+                    
+                print(f"[SnapshotAssets] Processing video URL: {video_url[:100]}...")
+                
+                # Convert URL to file path
+                if video_url.startswith('/assets/'):
+                    filename = os.path.basename(video_url)
+                    video_path = os.path.join(asset_cache_dir, filename)
+                    print(f"[SnapshotAssets] Converted URL to path: {video_path}")
+                else:
+                    video_path = video_url
+                
+                # Check if file exists
+                if not os.path.exists(video_path):
+                    print(f"[SnapshotAssets] Warning: Video file does not exist: {video_path}")
+                    continue
+                
+                # Create VideoFromFile object
+                print(f"[SnapshotAssets] Creating VideoFromFile for: {video_path}")
+                video_obj = InputImpl.VideoFromFile(video_path)
+                videos.append(video_obj)
+                print(f"[SnapshotAssets] Successfully loaded video: {video_path}")
+            except Exception as e:
+                print(f"[SnapshotAssets] Failed to load video: {e}")
+                import traceback
+                traceback.print_exc()
+                # Skip failed videos
+
+        print(f"[SnapshotAssets] Output {len(images)} images, {len(videos)} videos, {len(strengths_2d)} strength arrays, prompt: '{prompt[:50] if prompt else '(empty)'}'")
+        
+        # Debug: Verify video objects
+        for i, vid in enumerate(videos):
+            print(f"[SnapshotAssets] Video[{i}]: type={type(vid).__name__}, repr={repr(vid)[:200]}")
+        
+        return (images, videos, strengths_2d, prompt)

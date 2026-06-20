@@ -3,6 +3,14 @@ import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType } fro
 import '@tldraw/tldraw/tldraw.css';
 import Panel, { PanelHandle, ImageInfo } from './components/Panel';
 
+export interface VideoInfo {
+  id: string;
+  name: string;
+  dataUrl: string;
+  assetId: string;
+  shapeId: string;
+}
+
 const App: React.FC = () => {
   const [inputData, setInputData] = useState('');
   const editorRef = useRef<Editor | null>(null);
@@ -54,9 +62,12 @@ const App: React.FC = () => {
         editor.store.put(records);
       }
 
-      // Restore panel selected images
+      // Restore panel selected images and videos
       if (parsed.panelImages && Array.isArray(parsed.panelImages)) {
         panelHandleRef.current?.setImages(parsed.panelImages);
+      }
+      if (parsed.panelVideos && Array.isArray(parsed.panelVideos)) {
+        panelHandleRef.current?.setVideos?.(parsed.panelVideos);
       }
 
       // Note: enableStrength and enablePrompt are controlled by node inputs, not snapshot
@@ -132,7 +143,7 @@ const App: React.FC = () => {
     // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
-  const handleConfirm = useCallback(async ({ images, enableStrength, prompt }: { images: ImageInfo[]; enableStrength: boolean; prompt: string }) => {
+  const handleConfirm = useCallback(async ({ images, videos, enableStrength, prompt }: { images: ImageInfo[]; videos: VideoInfo[]; enableStrength: boolean; prompt: string }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -161,6 +172,15 @@ const App: React.FC = () => {
       strengths: img.strengths,
     }));
 
+    // Save panel selected videos info
+    const panelVideos = videos.map((vid) => ({
+      id: vid.id,
+      name: vid.name,
+      dataUrl: vid.dataUrl,
+      assetId: vid.assetId,
+      shapeId: vid.shapeId,
+    }));
+
     // Save camera position and zoom
     const camera = editor.getCamera();
 
@@ -168,6 +188,7 @@ const App: React.FC = () => {
       store: filteredStore,
       schema: snapshot.schema,
       panelImages: panelImages,
+      panelVideos: panelVideos,
       enableStrength,
       prompt,
       camera: {
@@ -184,12 +205,16 @@ const App: React.FC = () => {
         image: img.dataUrl,
         strengths: enableStrength ? img.strengths : undefined,
       }));
+      const selectedVideos = videos.map((vid) => ({
+        video: vid.dataUrl,
+      }));
       console.log('[App] handleConfirm sending prompt:', prompt);
       await fetch('/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           images: selectedImages,  // Selected images for output
+          videos: selectedVideos,  // Selected videos for output
           prompt: prompt || '',  // User prompt text (ensure string)
           canvas_snapshot: snapshotJson  // Full canvas state for persistence
         }),
@@ -304,3 +329,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+export type { VideoInfo };
