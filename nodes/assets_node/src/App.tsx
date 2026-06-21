@@ -16,9 +16,13 @@ const App: React.FC = () => {
   const editorRef = useRef<Editor | null>(null);
   const [panelHeight, setPanelHeight] = useState(0);
   const [pendingSnapshot, setPendingSnapshot] = useState<string | null>(null);
-  const [enableStrength, setEnableStrength] = useState(false);
+  const [enableImageStrength, setEnableImageStrength] = useState(false);
   const [enablePrompt, setEnablePrompt] = useState(false);
+  const [enableImage, setEnableImage] = useState(true);  // Image area enabled by default
+  const [enableVideo, setEnableVideo] = useState(true);  // Video area enabled by default
   const [strengthDefs, setStrengthDefs] = useState<{ name: string; default: number }[]>([]);
+  const [enableSlot, setEnableSlot] = useState(false);
+  const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
   const panelHandleRef = useRef<PanelHandle>(null);
 
   useEffect(() => {
@@ -28,9 +32,13 @@ const App: React.FC = () => {
         setInputData(data.input_data || '');
 
         // Set node input flags
-        setEnableStrength(data.enable_strength || false);
+        setEnableImageStrength(data.enable_image_strength || false);
         setEnablePrompt(data.enable_prompt || false);
+        setEnableImage(data.enable_image !== undefined ? data.enable_image : true);
+        setEnableVideo(data.enable_video !== undefined ? data.enable_video : true);
         setStrengthDefs(data.strength_defs || []);
+        setEnableSlot(data.enable_slot || false);
+        setSlotDefs(data.slot_defs || []);
 
         // Restore canvas snapshot if available
         const snapshot = data.canvas_snapshot;
@@ -69,8 +77,11 @@ const App: React.FC = () => {
       if (parsed.panelVideos && Array.isArray(parsed.panelVideos)) {
         panelHandleRef.current?.setVideos?.(parsed.panelVideos);
       }
+      if (parsed.panelSlots && Array.isArray(parsed.panelSlots)) {
+        panelHandleRef.current?.setSlots?.(parsed.panelSlots);
+      }
 
-      // Note: enableStrength and enablePrompt are controlled by node inputs, not snapshot
+      // Note: enableImageStrength and enablePrompt are controlled by node inputs, not snapshot
 
       // Restore prompt text
       if (typeof parsed.prompt === 'string') {
@@ -143,7 +154,7 @@ const App: React.FC = () => {
     // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
-  const handleConfirm = useCallback(async ({ images, videos, enableStrength, prompt }: { images: ImageInfo[]; videos: VideoInfo[]; enableStrength: boolean; prompt: string }) => {
+  const handleConfirm = useCallback(async ({ images, videos, enableImageStrength, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; enableImageStrength: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -181,6 +192,34 @@ const App: React.FC = () => {
       shapeId: vid.shapeId,
     }));
 
+    // Save panel selected slots info
+    const panelSlots = slots.map((slot) => {
+      const item = slot.data;
+      if (!item) return { type: slot.type, data: null };
+      if (slot.type === 'Image') {
+        return {
+          type: 'Image',
+          data: {
+            id: item.id,
+            name: item.name,
+            dataUrl: item.dataUrl,
+            assetId: item.assetId,
+            shapeId: item.shapeId,
+          },
+        };
+      }
+      return {
+        type: 'Video',
+        data: {
+          id: item.id,
+          name: item.name,
+          dataUrl: item.dataUrl,
+          assetId: item.assetId,
+          shapeId: item.shapeId,
+        },
+      };
+    });
+
     // Save camera position and zoom
     const camera = editor.getCamera();
 
@@ -189,7 +228,8 @@ const App: React.FC = () => {
       schema: snapshot.schema,
       panelImages: panelImages,
       panelVideos: panelVideos,
-      enableStrength,
+      panelSlots: panelSlots,
+      enableImageStrength,
       prompt,
       camera: {
         x: camera.x,
@@ -203,11 +243,18 @@ const App: React.FC = () => {
     try {
       const selectedImages = images.map((img) => ({
         image: img.dataUrl,
-        strengths: enableStrength ? img.strengths : undefined,
+        strengths: enableImageStrength ? img.strengths : undefined,
       }));
       const selectedVideos = videos.map((vid) => ({
         video: vid.dataUrl,
       }));
+      const selectedSlots = slots.map((slot) => {
+        if (!slot.data) return { type: slot.type, data: null };
+        if (slot.type === 'Image') {
+          return { type: 'Image', data: { image: slot.data.dataUrl } };
+        }
+        return { type: 'Video', data: { video: slot.data.dataUrl } };
+      });
       console.log('[App] handleConfirm sending prompt:', prompt);
       await fetch('/confirm', {
         method: 'POST',
@@ -215,6 +262,7 @@ const App: React.FC = () => {
         body: JSON.stringify({
           images: selectedImages,  // Selected images for output
           videos: selectedVideos,  // Selected videos for output
+          slots: selectedSlots,  // Selected slots for output
           prompt: prompt || '',  // User prompt text (ensure string)
           canvas_snapshot: snapshotJson  // Full canvas state for persistence
         }),
@@ -296,9 +344,13 @@ const App: React.FC = () => {
         editor={editorRef}
         onHeightChange={setPanelHeight}
         onConfirm={handleConfirm}
-        enableStrength={enableStrength}
+        enableImageStrength={enableImageStrength}
         enablePrompt={enablePrompt}
+        enableImage={enableImage}
+        enableVideo={enableVideo}
         strengthDefs={strengthDefs}
+        enableSlot={enableSlot}
+        slotDefs={slotDefs}
       />
 
       {inputData && (

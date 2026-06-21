@@ -17,22 +17,32 @@ export interface VideoInfo {
   dataUrl: string;
   assetId: string;
   shapeId: string;
-  aspectRatio?: number; // width / height
+  aspectRatio?: number;
+}
+
+export interface SlotItem {
+  type: string;  // 'Image' | 'Video'
+  data: ImageInfo | VideoInfo | null;
 }
 
 export interface PanelHandle {
   setImages: (images: ImageInfo[]) => void;
   setVideos: (videos: VideoInfo[]) => void;
+  setSlots: (slots: SlotItem[]) => void;
   setPrompt: (prompt: string) => void;
 }
 
 interface PanelProps {
   editor: React.RefObject<Editor | null>;
   onHeightChange: (height: number) => void;
-  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; enableStrength: boolean; prompt: string }) => void;
-  enableStrength: boolean;
+  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; enableImageStrength: boolean; prompt: string; slots: SlotItem[] }) => void;
+  enableImageStrength: boolean;
   enablePrompt: boolean;
+  enableImage?: boolean;  // Show/hide image area (default true)
+  enableVideo?: boolean;  // Show/hide video area (default true)
   strengthDefs?: { name: string; default: number }[];
+  enableSlot?: boolean;
+  slotDefs?: { type: string; name: string }[];
 }
 
 // Video Card Component with dynamic width based on aspect ratio
@@ -143,18 +153,330 @@ const VideoCard: React.FC<{
   );
 };
 
-const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableStrength, enablePrompt, strengthDefs = [] }, ref) => {
+// Slot Card Component - shows a slot with type indicator
+const SlotCard: React.FC<{
+  slot: SlotItem;
+  slotIndex: number;
+  slotName: string;
+  editorRef: React.RefObject<Editor | null>;
+  onFill: (index: number, item: ImageInfo | VideoInfo) => void;
+  onClear: (index: number) => void;
+}> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear }) => {
+  const SLOT_HEIGHT = 280; // Aligned with VideoCard CARD_HEIGHT
+  const [mediaAspect, setMediaAspect] = useState<number>(1); // Default 1:1 for image, 16:9 for video
+
+  const handleAdd = useCallback(() => {
+    console.log('[SlotCard] handleAdd START — slotIndex:', slotIndex, 'slot.type:', slot.type, 'slot.data:', slot.data);
+    const editor = editorRef.current;
+    if (!editor) {
+      console.warn('[SlotCard] No editor! Returning.');
+      return;
+    }
+
+    const selectedShapeIds = editor.getSelectedShapeIds();
+    console.log('[SlotCard] selectedShapeIds count:', selectedShapeIds.length, 'ids:', selectedShapeIds);
+    const targetType = slot.type.toLowerCase();
+    console.log('[SlotCard] targetType:', targetType);
+    
+    // Log all selected shapes for debugging
+    const allShapes = selectedShapeIds.map((id) => editor.getShape(id));
+    console.log('[SlotCard] all selected shapes:', allShapes.map(s => ({ id: s?.id, type: s?.type })));
+    
+    const matchingShapes = allShapes.filter((shape) => shape?.type === targetType);
+    console.log('[SlotCard] matchingShapes count:', matchingShapes.length);
+
+    if (matchingShapes.length === 0) {
+      alert(`No ${slot.type} selected. Click on a ${slot.type.toLowerCase()} on the canvas to select it first.`);
+      return;
+    }
+
+    // Take the first matching shape
+    const shape = matchingShapes[0];
+    console.log('[SlotCard] shape:', shape);
+    const assetId = (shape.props as any).assetId;
+    console.log('[SlotCard] assetId:', assetId);
+    if (!assetId) {
+      console.warn('[SlotCard] No assetId on shape!');
+      return;
+    }
+
+    const asset = editor.getAsset(assetId) as any;
+    console.log('[SlotCard] asset:', asset, 'asset.type:', asset?.type);
+    if (!asset || asset.type !== targetType) {
+      console.warn('[SlotCard] Asset missing or type mismatch');
+      return;
+    }
+
+    const src = (asset.props as any).src as string;
+    const name = (asset.props as any).name as string || targetType;
+    console.log('[SlotCard] Creating item with src:', src?.substring(0, 50), 'name:', name);
+
+    const item: ImageInfo = {
+      id: `slot_${slotIndex}_${Date.now()}`,
+      name,
+      dataUrl: src,
+      assetId: assetId as string,
+      shapeId: (shape as any).id as string,
+    };
+    console.log('[SlotCard] Calling onFill with item:', item);
+    onFill(slotIndex, item);
+    console.log('[SlotCard] onFill called successfully');
+  }, [editorRef, slotIndex, slot.type, onFill]);
+
+  const item = slot.data;
+  const filled = item !== null;
+
+  // Load media aspect ratio when slot is filled
+  useEffect(() => {
+    if (!item) {
+      setMediaAspect(1);
+      return;
+    }
+    if (slot.type === 'Video') {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.src = item.dataUrl;
+      video.onloadedmetadata = () => {
+        if (video.videoWidth && video.videoHeight) {
+          setMediaAspect(video.videoWidth / video.videoHeight);
+        } else {
+          setMediaAspect(16 / 9);
+        }
+      };
+      return () => { video.src = ''; };
+    } else {
+      const image = new Image();
+      image.onload = () => {
+        if (image.naturalWidth && image.naturalHeight) {
+          setMediaAspect(image.naturalWidth / image.naturalHeight);
+        }
+      };
+      image.src = item.dataUrl;
+      return () => { image.src = ''; };
+    }
+  }, [item, slot.type]);
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        alignItems: 'center',
+      }}
+    >
+      {/* Slot label */}
+      <div
+        style={{
+          fontSize: 10,
+          color: '#888',
+          textAlign: 'center',
+          maxWidth: 120,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          fontWeight: 600,
+        }}
+        title={`${slotName} (${slot.type})`}
+      >
+        {slotName}
+      </div>
+
+      {/* Slot body */}
+      {filled ? (
+        /* Filled: show preview */
+        (() => {
+          const isVideo = slot.type === 'Video';
+          const slotWidth = Math.round(SLOT_HEIGHT * mediaAspect);
+          const slotHeight = SLOT_HEIGHT;
+          return (
+        <div
+          style={{
+            position: 'relative',
+            width: slotWidth,
+            height: slotHeight,
+            borderRadius: 6,
+            overflow: 'hidden',
+            border: `2px solid ${isVideo ? '#60a5fa' : '#4ade80'}`,
+            background: isVideo ? '#000' : '#f0f0f0',
+            flexShrink: 0,
+          }}
+        >
+          {isVideo ? (
+            <video
+              src={item!.dataUrl}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'contain',
+              }}
+              controls
+              preload="metadata"
+              playsInline
+              muted
+            />
+          ) : (
+            <img
+              src={item!.dataUrl}
+              alt={item!.name}
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                pointerEvents: 'none',
+              }}
+              draggable={false}
+            />
+          )}
+          {/* Remove button */}
+          <button
+            onClick={() => onClear(slotIndex)}
+            style={{
+              position: 'absolute',
+              top: 2,
+              right: 2,
+              width: 18,
+              height: 18,
+              borderRadius: '50%',
+              border: 'none',
+              background: 'rgba(0,0,0,0.7)',
+              color: '#fff',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 12,
+              lineHeight: 1,
+              padding: 0,
+              zIndex: 10,
+              transition: 'background 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255,0,0,0.8)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(0,0,0,0.7)';
+            }}
+            title={`Remove from slot ${slotName}`}
+          >
+            ×
+          </button>
+          {/* File name */}
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              padding: '2px 4px',
+              fontSize: 9,
+              color: '#fff',
+              background: 'linear-gradient(transparent, rgba(0,0,0,0.7))',
+              pointerEvents: 'none',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {item!.name}
+          </div>
+        </div>
+          );
+        })()
+      ) : (
+        /* Empty: show + button */
+        <button
+          onClick={handleAdd}
+          style={{
+            width: 160,
+            height: SLOT_HEIGHT,
+            borderRadius: 6,
+            border: '2px dashed #ccc',
+            background: '#fafafa',
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            fontSize: 36,
+            color: '#aaa',
+            transition: 'all 0.2s',
+            flexShrink: 0,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = '#f0f0f0';
+            e.currentTarget.style.borderColor = '#999';
+            e.currentTarget.style.color = '#666';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = '#fafafa';
+            e.currentTarget.style.borderColor = '#ccc';
+            e.currentTarget.style.color = '#aaa';
+          }}
+          title={`Add ${slot.type} to slot ${slotName}`}
+        >
+          <span>+</span>
+          <span style={{ fontSize: 11, color: '#999' }}>{slot.type}</span>
+        </button>
+      )}
+    </div>
+  );
+};
+
+const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageStrength, enablePrompt, enableImage = true, enableVideo = true, strengthDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [videos, setVideos] = useState<VideoInfo[]>([]);
+  const [slots, setSlots] = useState<SlotItem[]>(() =>
+    enableSlot ? slotDefs.map((d) => ({ type: d.type, data: null })) : []
+  );
   const [prompt, setPrompt] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Expose setImages, setVideos and setPrompt to parent for snapshot restore
+  // Expose setImages, setVideos, setSlots and setPrompt to parent for snapshot restore
   useImperativeHandle(ref, () => ({
     setImages: (newImages: ImageInfo[]) => setImages(newImages),
     setVideos: (newVideos: VideoInfo[]) => setVideos(newVideos),
+    setSlots: handleSetSlots,
     setPrompt: (newPrompt: string) => setPrompt(newPrompt),
   }));
+
+  // Slot initialization - syncs with slotDefs prop (which arrives asynchronously from fetch)
+  // Uses a ref to track whether we've already initialized from slotDefs to avoid overwriting
+  // externally set data (e.g., from snapshot restore)
+  const slotsInitializedRef = useRef(false);
+  // Counter to force re-sync after external setSlots
+  const [slotSyncCounter, setSlotSyncCounter] = useState(0);
+  
+  useEffect(() => {
+    if (enableSlot && slotDefs.length > 0) {
+      // Always ensure slots array length matches slotDefs
+      setSlots((prev) => {
+        if (prev.length !== slotDefs.length) {
+          console.log('[Panel] Syncing slots length, prev:', prev.length, 'new:', slotDefs.length);
+          return slotDefs.map((d, i) => {
+            if (i < prev.length && prev[i]?.type === d.type) {
+              return prev[i];  // Preserve existing data for matching type+index
+            }
+            return { type: d.type, data: null };
+          });
+        }
+        return prev;
+      });
+      slotsInitializedRef.current = true;
+    } else if (!enableSlot) {
+      slotsInitializedRef.current = false;
+    }
+  }, [enableSlot, slotDefs, slotSyncCounter]);
+
+  // Handle external setSlots (from snapshot restore via useImperativeHandle)
+  const handleSetSlots = useCallback((newSlots: SlotItem[]) => {
+    console.log('[Panel] External setSlots called with', newSlots.length, 'slots');
+    if (newSlots.length > 0) {
+      setSlots(newSlots);
+      setSlotSyncCounter(c => c + 1);  // Trigger useEffect to check length
+    }
+  }, []);
 
   // Measure panel height and report to parent
   useEffect(() => {
@@ -256,9 +578,35 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
     );
   }, []);
 
+  // Slot handlers
+  const fillSlot = useCallback((index: number, item: ImageInfo | VideoInfo) => {
+    console.log('[Panel] fillSlot called with index:', index, 'item:', { id: item.id, name: item.name, dataUrl: item.dataUrl?.substring(0, 30) });
+    setSlots((prev) => {
+      console.log('[Panel] fillSlot prev slots:', prev.length, 'items');
+      const next = [...prev];
+      if (index < next.length) {
+        next[index] = { ...next[index], data: item };
+        console.log('[Panel] fillSlot updated index', index, 'to', { type: next[index].type, hasData: !!next[index].data });
+      } else {
+        console.warn('[Panel] fillSlot index', index, 'out of bounds, length:', next.length);
+      }
+      return next;
+    });
+  }, []);
+
+  const clearSlot = useCallback((index: number) => {
+    setSlots((prev) => {
+      const next = [...prev];
+      if (index < next.length) {
+        next[index] = { ...next[index], data: null };
+      }
+      return next;
+    });
+  }, []);
+
   const handleLocalConfirm = useCallback(() => {
-    onConfirm({ images, videos, enableStrength, prompt });
-  }, [images, videos, enableStrength, prompt, onConfirm]);
+    onConfirm({ images, videos, enableImageStrength, prompt, slots });
+  }, [images, videos, enableImageStrength, prompt, slots, onConfirm]);
 
   return (
     <div
@@ -285,7 +633,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
           gap: 12,
         }}
       >
-        {/* Image thumbnails row */}
+        {/* Image thumbnails row — only shown when enableImage is true */}
+        {enableImage && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div
             style={{
@@ -300,7 +649,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
               msOverflowStyle: 'none', // IE/Edge
             }}
           >
-            <ThumbnailList images={images} onRemove={removeImage} enableStrength={enableStrength} strengthDefs={strengthDefs} onStrengthChange={updateStrength} />
+            <ThumbnailList images={images} onRemove={removeImage} enableStrength={enableImageStrength} strengthDefs={strengthDefs} onStrengthChange={updateStrength} />
           </div>
           <button
             onClick={() => {
@@ -380,8 +729,10 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
             +
           </button>
         </div>
+        )}
 
-        {/* Video thumbnails row */}
+        {/* Video thumbnails row — only shown when enableVideo is true */}
+        {enableVideo !== false && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div
             style={{
@@ -477,6 +828,24 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
             +
           </button>
         </div>
+        )}
+
+        {/* Slot row - only show when enableSlot is true */}
+        {enableSlot && slotDefs.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, overflowX: 'auto', paddingBottom: 4 }}>
+            {slotDefs.map((def, index) => (
+              <SlotCard
+                key={`${def.type}-${def.name}-${index}`}
+                slot={slots[index] || { type: def.type, data: null }}
+                slotIndex={index}
+                slotName={def.name}
+                editorRef={editorRef}
+                onFill={fillSlot}
+                onClear={clearSlot}
+              />
+            ))}
+          </div>
+        )}
 
         {/* Prompt input row - only show when enablePrompt is true */}
         {enablePrompt && (

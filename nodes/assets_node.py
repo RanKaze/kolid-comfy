@@ -33,7 +33,7 @@ def check_interrupted():
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_strength=False, enable_prompt=False, strength_mapping=""):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True):
         self.port = None
         self.server = None
         self.started = False
@@ -42,13 +42,18 @@ class SnapshotAssetsServer:
         self.browser_url = None
         self.selected_images = []
         self.selected_videos = []
+        self.selected_slots = []  # List ordered by slot index: [{"type": "Image"/"Video", "data": {...}}]
         self.prompt = ""
         self.input_data = input_data
         self.canvas_snapshot = canvas_snapshot  # tldraw snapshot JSON string
         self.node_id = node_id  # Node ID for persistence
-        self.enable_strength = enable_strength
+        self.enable_image_strength = enable_image_strength
         self.enable_prompt = enable_prompt
-        self.strength_mapping = strength_mapping
+        self.image_strength_config = image_strength_config
+        self.enable_slot = enable_slot
+        self.slot_config = slot_config
+        self.enable_image = enable_image
+        self.enable_video = enable_video
         self.should_stop = False
         # Use data/assets directory for both image and video cache (persistent storage)
         self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
@@ -203,11 +208,11 @@ class SnapshotAssetsServer:
                     return
 
             elif self.path == '/input_data':
-                # Parse strength_mapping into list of {name, default} dicts
+                # Parse image_strength_config into list of {name, default} dicts
                 # Format: "strength0:0.1,strength1:1" or "strength0,strength1" (defaults to 0)
                 strength_defs = []
-                if self.server_instance and self.server_instance.strength_mapping:
-                    for part in self.server_instance.strength_mapping.split(','):
+                if self.server_instance and self.server_instance.image_strength_config:
+                    for part in self.server_instance.image_strength_config.split(','):
                         part = part.strip()
                         if not part:
                             continue
@@ -223,12 +228,31 @@ class SnapshotAssetsServer:
                             default_val = 0.0
                         if name:
                             strength_defs.append({'name': name, 'default': default_val})
+                # Parse slot_config into list of {type, name} dicts
+                # Format: "Image:Test,Video:Test1,Image:Test2"
+                slot_defs = []
+                if self.server_instance and self.server_instance.enable_slot and self.server_instance.slot_config:
+                    for part in self.server_instance.slot_config.split(','):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        if ':' in part:
+                            slot_type, slot_name = part.split(':', 1)
+                            slot_type = slot_type.strip().capitalize()
+                            slot_name = slot_name.strip()
+                            if slot_type in ('Image', 'Video') and slot_name:
+                                slot_defs.append({'type': slot_type, 'name': slot_name})
+                
                 data = {
                     'input_data': self.server_instance.input_data if self.server_instance else '',
                     'canvas_snapshot': self.server_instance.canvas_snapshot if self.server_instance else None,
-                    'enable_strength': self.server_instance.enable_strength if self.server_instance else False,
+                    'enable_image_strength': self.server_instance.enable_image_strength if self.server_instance else False,
                     'enable_prompt': self.server_instance.enable_prompt if self.server_instance else False,
                     'strength_defs': strength_defs,
+                    'enable_slot': self.server_instance.enable_slot if self.server_instance else False,
+                    'enable_image': self.server_instance.enable_image if self.server_instance else True,
+                    'enable_video': self.server_instance.enable_video if self.server_instance else True,
+                    'slot_defs': slot_defs,
                 }
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
@@ -290,6 +314,7 @@ class SnapshotAssetsServer:
                     # Get selected images, videos and tldraw snapshot from frontend
                     selected_images = data.get('images', [])
                     selected_videos_data = data.get('videos', [])
+                    selected_slots_data = data.get('slots', [])  # Array of {type, data} per slot
                     canvas_snapshot = data.get('canvas_snapshot', '')
                     
                     # Process base64 images/videos in snapshot: convert to URLs/paths
@@ -332,6 +357,24 @@ class SnapshotAssetsServer:
                                             if os.path.isabs(data_url):
                                                 filename = os.path.basename(data_url)
                                                 panel_vid['dataUrl'] = f"/assets/{filename}"
+                            # Process panelSlots - convert base64 dataUrl to URLs
+                            if 'panelSlots' in snapshot and isinstance(snapshot['panelSlots'], list):
+                                for panel_slot in snapshot['panelSlots']:
+                                    if isinstance(panel_slot, dict) and panel_slot.get('data'):
+                                        slot_data = panel_slot['data']
+                                        if isinstance(slot_data, dict) and 'dataUrl' in slot_data:
+                                            data_url = slot_data['dataUrl']
+                                            if isinstance(data_url, str) and data_url.startswith('data:'):
+                                                if panel_slot.get('type') == 'Video':
+                                                    url = self.server_instance.save_base64_video(data_url)
+                                                else:
+                                                    url = self.server_instance.save_base64_image(data_url)
+                                                if url:
+                                                    slot_data['dataUrl'] = url
+                                            elif isinstance(data_url, str) and not data_url.startswith('/assets/'):
+                                                if os.path.isabs(data_url):
+                                                    filename = os.path.basename(data_url)
+                                                    slot_data['dataUrl'] = f"/assets/{filename}"
                             canvas_snapshot = json.dumps(snapshot)
                         except Exception as e:
                             print(f"[SnapshotAssets] Failed to process snapshot: {e}")
@@ -404,8 +447,70 @@ class SnapshotAssetsServer:
                     for item in selected_video_items:
                         print(f"[SnapshotAssets]   Video item: {item}")
                     
+                    # Process selected slots if any
+                    selected_slot_items = []
+                    if selected_slots_data:
+                        print(f"[SnapshotAssets] Received {len(selected_slots_data)} slot items from frontend")
+                        for slot_item in selected_slots_data:
+                            slot_type = slot_item.get('type', '')
+                            slot_data = slot_item.get('data')
+                            
+                            if slot_data is None:
+                                # Empty slot
+                                selected_slot_items.append({'type': slot_type, 'data': None})
+                                print(f"[SnapshotAssets]   Slot: type={slot_type}, empty")
+                                continue
+                            
+                            if slot_type == 'Image':
+                                # Process image slot data
+                                if isinstance(slot_data, dict) and 'image' in slot_data:
+                                    image_url = slot_data['image']
+                                elif isinstance(slot_data, str):
+                                    image_url = slot_data
+                                else:
+                                    image_url = str(slot_data)
+                                
+                                if image_url.startswith('data:'):
+                                    url = self.server_instance.save_base64_image(image_url)
+                                    if url:
+                                        image_url = url
+                                    else:
+                                        image_url = slot_data.get('image', image_url) if isinstance(slot_data, dict) else image_url
+                                elif image_url.startswith('/assets/'):
+                                    pass  # Already a URL
+                                
+                                selected_slot_items.append({'type': 'Image', 'data': {'image': image_url}})
+                                print(f"[SnapshotAssets]   Slot Image: {image_url[:80]}...")
+                            
+                            elif slot_type == 'Video':
+                                # Process video slot data
+                                if isinstance(slot_data, dict) and 'video' in slot_data:
+                                    video_url = slot_data['video']
+                                elif isinstance(slot_data, str):
+                                    video_url = slot_data
+                                else:
+                                    video_url = str(slot_data)
+                                
+                                if video_url.startswith('data:'):
+                                    url = self.server_instance.save_base64_video(video_url)
+                                    if url:
+                                        video_url = url
+                                    else:
+                                        video_url = slot_data.get('video', video_url) if isinstance(slot_data, dict) else video_url
+                                elif video_url.startswith('/assets/'):
+                                    pass  # Already a URL
+                                elif not video_url.startswith('/assets/') and os.path.isabs(video_url):
+                                    filename = os.path.basename(video_url)
+                                    video_url = f"/assets/{filename}"
+                                
+                                selected_slot_items.append({'type': 'Video', 'data': {'video': video_url}})
+                                print(f"[SnapshotAssets]   Slot Video: {video_url[:80]}...")
+                            else:
+                                selected_slot_items.append({'type': slot_type, 'data': slot_data})
+                    
                     self.server_instance.selected_images = selected_image_items
                     self.server_instance.selected_videos = selected_video_items
+                    self.server_instance.selected_slots = selected_slot_items
                     prompt_value = data.get('prompt', '')
                     print(f"[SnapshotAssets] Received prompt: '{prompt_value}'")
                     self.server_instance.prompt = prompt_value if prompt_value is not None else ''
@@ -457,18 +562,22 @@ class SnapshotAssetsNode:
         return {
             "required": {
                 "data": ("STRING", {"default": "", "multiline": True}),
-                "enable_strength": ("BOOLEAN", {"default": False}),
                 "enable_prompt": ("BOOLEAN", {"default": False}),
-                "strength_mapping": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
+                "enable_image": ("BOOLEAN", {"default": True}),
+                "enable_image_strength": ("BOOLEAN", {"default": False}),
+                "image_strength_config": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
+                "enable_video": ("BOOLEAN", {"default": True}),
+                "enable_slot": ("BOOLEAN", {"default": False}),
+                "slot_config": ("STRING", {"default": "", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "VIDEO", "FLOAT", "STRING")
-    RETURN_NAMES = ("image", "video", "strength", "prompt")
-    OUTPUT_IS_LIST = (True, True, True, False)
+    RETURN_TYPES = ("IMAGE", "VIDEO", "FLOAT", "STRING", "*")
+    RETURN_NAMES = ("image", "video", "strength", "prompt", "slot")
+    OUTPUT_IS_LIST = (True, True, True, False, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -509,7 +618,7 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_strength=False, enable_prompt=False, strength_mapping="", unique_id=None):
+    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, unique_id=None):
         # data contains the tldraw snapshot JSON string
         canvas_snapshot = None
         try:
@@ -522,7 +631,7 @@ class SnapshotAssetsNode:
         except Exception as e:
             print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_strength=enable_strength, enable_prompt=enable_prompt, strength_mapping=strength_mapping)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -556,23 +665,24 @@ class SnapshotAssetsNode:
 
         selected_images = server.selected_images
         selected_videos = server.selected_videos if hasattr(server, 'selected_videos') else []
+        selected_slots = server.selected_slots if hasattr(server, 'selected_slots') else []
         prompt = server.prompt if server.prompt is not None else ''
         
-        print(f"[SnapshotAssets] After confirm: {len(selected_images)} images, {len(selected_videos)} videos")
+        print(f"[SnapshotAssets] After confirm: {len(selected_images)} images, {len(selected_videos)} videos, {len(selected_slots)} slots")
         for vid in selected_videos:
             print(f"[SnapshotAssets]   Selected video: {vid}")
         
         # Allow empty selection - return empty list if no images/videos selected
-        if not selected_images and not selected_videos:
-            print("[SnapshotAssets] No images or videos selected, returning empty lists")
-            return ([], [], [], prompt)
+        if not selected_images and not selected_videos and not selected_slots:
+            print("[SnapshotAssets] No images, videos or slots selected, returning empty lists")
+            return ([], [], [], prompt, [])
 
         # Process images
         images = []
-        # Parse strength definitions from mapping: "name:default,name:default"
+        # Parse strength definitions from image_strength_config: "name:default,name:default"
         strength_defs = []
-        if strength_mapping:
-            for part in strength_mapping.split(','):
+        if image_strength_config:
+            for part in image_strength_config.split(','):
                 part = part.strip()
                 if not part:
                     continue
@@ -588,14 +698,14 @@ class SnapshotAssetsNode:
                     default_val = 0.0
                 if name:
                     strength_defs.append({'name': name, 'default': default_val})
-        if enable_strength and not strength_defs:
+        if enable_image_strength and not strength_defs:
             strength_defs = [{'name': 'strength0', 'default': 0.0}]
 
         strength_names = [d['name'] for d in strength_defs]
         strength_defaults_map = {d['name']: d['default'] for d in strength_defs}
 
         # Initialize strengths as 2D list: each inner list is one named strength across all images
-        strengths_2d = [[] for _ in strength_names] if enable_strength and strength_names else []
+        strengths_2d = [[] for _ in strength_names] if enable_image_strength and strength_names else []
 
         for img_data in selected_images:
             try:
@@ -603,7 +713,7 @@ class SnapshotAssetsNode:
                     image_url = img_data.get('image', '')
                     tensor = self._decode_image_data(image_url)
                     images.append(tensor)
-                    if enable_strength and strength_names:
+                    if enable_image_strength and strength_names:
                         # Get strengths dict from frontend
                         strengths_dict = img_data.get('strengths', {})
                         for idx, name in enumerate(strength_names):
@@ -615,7 +725,7 @@ class SnapshotAssetsNode:
                 else:
                     tensor = self._decode_image_data(img_data)
                     images.append(tensor)
-                    if enable_strength and strength_names:
+                    if enable_image_strength and strength_names:
                         for idx, name in enumerate(strength_names):
                             strengths_2d[idx].append(strength_defaults_map.get(name, 0.0))
             except Exception as e:
@@ -672,4 +782,41 @@ class SnapshotAssetsNode:
         for i, vid in enumerate(videos):
             print(f"[SnapshotAssets] Video[{i}]: type={type(vid).__name__}, repr={repr(vid)[:200]}")
         
-        return (images, videos, strengths_2d, prompt)
+        # Process slots if enabled
+        slot_outputs = []
+        if enable_slot and selected_slots:
+            print(f"[SnapshotAssets] Processing {len(selected_slots)} slot items")
+            for slot_item in selected_slots:
+                slot_type = slot_item.get('type', '')
+                slot_data = slot_item.get('data')
+                
+                if slot_data is None:
+                    # Empty slot - output None
+                    slot_outputs.append(None)
+                    print(f"[SnapshotAssets] Slot output: None (empty)")
+                    continue
+                
+                try:
+                    if slot_type == 'Image':
+                        image_url = slot_data.get('image', '')
+                        tensor = self._decode_image_data(image_url)
+                        slot_outputs.append(tensor)
+                        print(f"[SnapshotAssets] Slot output: Image tensor")
+                    elif slot_type == 'Video':
+                        video_url = slot_data.get('video', '')
+                        if video_url.startswith('/assets/'):
+                            filename = os.path.basename(video_url)
+                            video_path = os.path.join(asset_cache_dir, filename)
+                        else:
+                            video_path = video_url
+                        video_obj = InputImpl.VideoFromFile(video_path)
+                        slot_outputs.append(video_obj)
+                        print(f"[SnapshotAssets] Slot output: VideoFromFile")
+                    else:
+                        slot_outputs.append(None)
+                except Exception as e:
+                    print(f"[SnapshotAssets] Failed to process slot item: {e}")
+                    slot_outputs.append(None)
+        
+        print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(slot_outputs)} slots")
+        return (images, videos, strengths_2d, prompt, slot_outputs)

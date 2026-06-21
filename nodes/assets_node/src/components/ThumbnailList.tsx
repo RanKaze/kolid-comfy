@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ImageInfo } from './Panel';
 
 interface ThumbnailListProps {
@@ -78,7 +78,7 @@ const StrengthBar: React.FC<{
         style={{
           position: 'relative',
           width: 24,
-          height: 60,
+          height: 260, // Scaled to match 280px thumbnail
           borderRadius: 4,
           overflow: 'hidden',
           background: '#e0e0e0',
@@ -117,11 +117,11 @@ const StrengthBar: React.FC<{
         <div
           style={{
             position: 'absolute',
-            bottom: 2,
+            bottom: 4,
             left: 0,
             right: 0,
             textAlign: 'center',
-            fontSize: 9,
+            fontSize: 12,
             color: '#333',
             pointerEvents: 'none',
             fontWeight: 600,
@@ -133,7 +133,7 @@ const StrengthBar: React.FC<{
       {/* Name label */}
       <div
         style={{
-          fontSize: 8,
+          fontSize: 10,
           color: '#666',
           textAlign: 'center',
           maxWidth: 28,
@@ -156,6 +156,23 @@ const ThumbnailItem: React.FC<{
   strengthDefs?: { name: string; default: number }[];
   onStrengthChange: (id: string, name: string, value: number) => void;
 }> = ({ img, onRemove, enableStrength, strengthDefs = [], onStrengthChange }) => {
+  const THUMB_HEIGHT = 280; // Aligned with VideoCard CARD_HEIGHT
+  const [aspectRatio, setAspectRatio] = useState<number>(1); // Default 1:1
+
+  // Load image metadata to get aspect ratio
+  useEffect(() => {
+    const image = new Image();
+    image.onload = () => {
+      if (image.naturalWidth && image.naturalHeight) {
+        setAspectRatio(image.naturalWidth / image.naturalHeight);
+      }
+    };
+    image.src = img.dataUrl;
+    return () => { image.src = ''; };
+  }, [img.dataUrl]);
+
+  const thumbWidth = Math.round(THUMB_HEIGHT * aspectRatio);
+
   return (
     <div
       style={{
@@ -163,20 +180,21 @@ const ThumbnailItem: React.FC<{
         display: 'flex',
         flexDirection: 'row',
         gap: 6,
-        alignItems: 'flex-start',
+        alignItems: 'stretch',
         padding: 6,
         borderRadius: 8,
         background: '#f9f9f9',
         border: '1px solid #eee',
         flexShrink: 0,
+        height: THUMB_HEIGHT + 12, // +padding
       }}
     >
       {/* Image thumbnail */}
       <div
         style={{
           position: 'relative',
-          width: 80,
-          height: 80,
+          width: thumbWidth,
+          height: THUMB_HEIGHT,
           borderRadius: 6,
           overflow: 'hidden',
           background: '#eee',
@@ -204,10 +222,10 @@ const ThumbnailItem: React.FC<{
           }}
           style={{
             position: 'absolute',
-            top: 2,
-            right: 2,
-            width: 18,
-            height: 18,
+            top: 4,
+            right: 4,
+            width: 22,
+            height: 22,
             borderRadius: '50%',
             border: 'none',
             background: 'rgba(0,0,0,0.5)',
@@ -216,7 +234,7 @@ const ThumbnailItem: React.FC<{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: 14,
+            fontSize: 16,
             lineHeight: 1,
             padding: 0,
             zIndex: 10,
@@ -227,7 +245,7 @@ const ThumbnailItem: React.FC<{
         </button>
       </div>
 
-      {/* Strength bars */}
+      {/* Strength bars — height matches thumbnail */}
       {enableStrength && strengthDefs.length > 0 && (
         <div
           style={{
