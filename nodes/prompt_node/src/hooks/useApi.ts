@@ -13,7 +13,6 @@ export function useApi() {
   const [categoryDisplayModes, setCategoryDisplayModes] = useState<CategoryDisplayModes>({});
   const [categorySizeModes, setCategorySizeModes] = useState<CategorySizeModes>({});
   const [customPrompts, setCustomPrompts] = useState('');
-  const [promptFoldout, setPromptFoldout] = useState(false);
   const [lastSelected, setLastSelected] = useState<string[]>([]);
   const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
   const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
@@ -27,7 +26,6 @@ export function useApi() {
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
     setCategorySizeModes(data.category_size_modes || {});
-    setPromptFoldout(data.prompt_foldout || false);
     setLastSelected(data.last_selected || []);
     setLastSelectedLoras(data.last_selected_loras || []);
     setLastSelectedPrefabs(data.last_selected_prefabs || []);
@@ -67,7 +65,7 @@ export function useApi() {
     categoryDisplayModes, setCategoryDisplayModes,
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
-    promptFoldout, lastSelected, lastSelectedLoras, lastSelectedPrefabs,
+    lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData, loraRegex,
     loadData, submitSelection, closeWindow, loadLoraData,
   };

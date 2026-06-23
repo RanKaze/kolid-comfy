@@ -279,16 +279,6 @@ export function AppShell() {
     }
     setCustomPrompts(cp);
 
-    if (data.prompt_foldout) {
-      const expanded = new Set<string>();
-      for (const [cat, catData] of Object.entries(data.categories)) {
-        const prompts: PromptData[] = (catData as { prompts?: PromptData[] }).prompts || [];
-        if (prompts.some(p => tags.some(g => g.some(t => t.decoration_num === 0 && t.prompt === p.prompt)))) {
-          expanded.add(cat);
-        }
-      }
-      setExpandedCategories(expanded);
-    }
     return data;
   }, [apiLoadData, setCustomPrompts, setSelectedTags]);
 

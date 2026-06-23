@@ -101,7 +101,6 @@ export interface PointsResponse {
   last_selected: string[];
   category_display_modes: CategoryDisplayModes;
   category_size_modes: CategorySizeModes;
-  prompt_foldout: boolean;
   custom_prompts: string;
   last_selected_prefabs?: { guid: string; active?: boolean }[];
 }
