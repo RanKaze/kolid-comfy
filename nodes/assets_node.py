@@ -263,41 +263,68 @@ class SnapshotAssetsServer:
 
             elif self.path.startswith('/assets/'):
                 # Serve cached images and videos from asset_cache_dir
+                # Supports HTTP Range requests for video streaming
                 if self.server_instance:
                     filename = os.path.basename(self.path)
                     filepath = os.path.join(self.server_instance.asset_cache_dir, filename)
                     if os.path.exists(filepath):
-                        self.send_response(200)
+                        file_size = os.path.getsize(filepath)
                         # Determine content type from extension
                         ext = os.path.splitext(filename)[1].lower()
                         content_type = 'application/octet-stream'
-                        # Image types
                         if ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif']:
-                            if ext == '.png':
-                                content_type = 'image/png'
-                            elif ext in ['.jpg', '.jpeg']:
-                                content_type = 'image/jpeg'
-                            elif ext == '.webp':
-                                content_type = 'image/webp'
-                            elif ext == '.gif':
-                                content_type = 'image/gif'
-                        # Video types
+                            if ext == '.png': content_type = 'image/png'
+                            elif ext in ['.jpg', '.jpeg']: content_type = 'image/jpeg'
+                            elif ext == '.webp': content_type = 'image/webp'
+                            elif ext == '.gif': content_type = 'image/gif'
                         elif ext in ['.mp4', '.webm', '.avi', '.mov']:
-                            if ext == '.mp4':
-                                content_type = 'video/mp4'
-                            elif ext == '.webm':
-                                content_type = 'video/webm'
-                            elif ext == '.avi':
-                                content_type = 'video/x-msvideo'
-                            elif ext == '.mov':
-                                content_type = 'video/quicktime'
-                        
-                        self.send_header('Content-type', content_type)
-                        self.send_header("Access-Control-Allow-Origin", "*")
-                        self.send_header('Cache-Control', 'public, max-age=31536000')
-                        self.end_headers()
-                        with open(filepath, 'rb') as f:
-                            self.wfile.write(f.read())
+                            if ext == '.mp4': content_type = 'video/mp4'
+                            elif ext == '.webm': content_type = 'video/webm'
+                            elif ext == '.avi': content_type = 'video/x-msvideo'
+                            elif ext == '.mov': content_type = 'video/quicktime'
+
+                        # Parse Range header for video streaming
+                        range_header = self.headers.get('Range')
+                        if range_header and range_header.startswith('bytes='):
+                            # Parse "bytes=start-end"
+                            range_str = range_header[6:]
+                            parts = range_str.split('-')
+                            start = int(parts[0]) if parts[0] else 0
+                            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+                            if start >= file_size:
+                                self.send_error(416, "Range Not Satisfiable")
+                                return
+                            end = min(end, file_size - 1)
+                            content_len = end - start + 1
+                            
+                            self.send_response(206)
+                            self.send_header('Content-type', content_type)
+                            self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+                            self.send_header('Content-Length', str(content_len))
+                            self.send_header('Accept-Ranges', 'bytes')
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.end_headers()
+                            with open(filepath, 'rb') as f:
+                                f.seek(start)
+                                remaining = content_len
+                                while remaining > 0:
+                                    chunk = f.read(min(64 * 1024, remaining))
+                                    if not chunk: break
+                                    self.wfile.write(chunk)
+                                    remaining -= len(chunk)
+                        else:
+                            self.send_response(200)
+                            self.send_header('Content-type', content_type)
+                            self.send_header('Content-Length', str(file_size))
+                            self.send_header('Accept-Ranges', 'bytes')
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.send_header('Cache-Control', 'public, max-age=31536000')
+                            self.end_headers()
+                            with open(filepath, 'rb') as f:
+                                while True:
+                                    chunk = f.read(64 * 1024)
+                                    if not chunk: break
+                                    self.wfile.write(chunk)
                         return
                 self.send_error(404, "Asset not found")
                 return
@@ -533,6 +560,61 @@ class SnapshotAssetsServer:
                     self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
+                return
+
+            elif self.path == '/upload_asset':
+                # Handle raw binary file upload for large videos.
+                # Sends the file directly as request body (no multipart).
+                # Streams chunks to disk while computing MD5 hash in one pass.
+                content_length = int(self.headers.get('Content-Length', 0))
+                if content_length == 0:
+                    self.send_error(400, "Empty body")
+                    return
+                
+                # Filename from custom header (URL-encoded)
+                raw_name = self.headers.get('X-Filename', 'upload.mp4')
+                original_name = urllib.parse.unquote(raw_name)
+                # Sanitize: keep only the base filename
+                original_name = os.path.basename(original_name) or 'upload.mp4'
+                ext = os.path.splitext(original_name)[1] or '.mp4'
+                
+                if not self.server_instance:
+                    self.send_error(500, "Server error")
+                    return
+                
+                cache_dir = self.server_instance.asset_cache_dir
+                # Write to temp file while computing hash in chunks
+                temp_name = f'_tmp_{hashlib.md5(str(time.time()).encode()).hexdigest()}{ext}'
+                temp_path = os.path.join(cache_dir, temp_name)
+                
+                md5_hash = hashlib.md5()
+                total = 0
+                with open(temp_path, 'wb') as f:
+                    while total < content_length:
+                        chunk_size = min(256 * 1024, content_length - total)
+                        chunk = self.rfile.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        md5_hash.update(chunk)
+                        total += len(chunk)
+                
+                filename = md5_hash.hexdigest() + ext
+                filepath = os.path.join(cache_dir, filename)
+                # Remove existing file if any, then rename
+                if os.path.exists(filepath):
+                    os.remove(temp_path)
+                else:
+                    os.rename(temp_path, filepath)
+                
+                print(f"[SnapshotAssets] Uploaded file: {filepath} ({total} bytes, {total / 1024 / 1024:.1f} MB)")
+                
+                url = f"/assets/{filename}"
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'url': url, 'name': original_name}).encode('utf-8'))
                 return
 
             elif self.path == '/window_closed':

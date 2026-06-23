@@ -294,9 +294,89 @@ const App: React.FC = () => {
 
       // Enable grid mode to show dot grid
       editor.updateInstanceState({ isGridMode: true });
+
+      // Override uploadAsset: for videos, upload via server to avoid
+      // base64-encoding huge files which freezes the browser.
+      const origUpload = (editor as any).uploadAsset.bind(editor) as (
+        asset: any, file: File, abortSignal?: AbortSignal
+      ) => Promise<{ src: string }>;
+      (editor as any).uploadAsset = async (asset: any, file: File, abortSignal?: AbortSignal) => {
+        if (file.type.startsWith('video/')) {
+          const result = await uploadVideoToServer(file, abortSignal);
+          return { src: result.url };
+        }
+        // For images, keep default base64 behavior
+        return origUpload(asset, file, abortSignal);
+      };
+
+      // Also intercept the external content handler for video files.
+      // tldraw's default handler calls getVideoSize(file) before uploadAsset,
+      // which reads the entire 437MB file locally and hangs the browser.
+      // By overriding the "files" handler, we bypass that entirely.
+      // Note: registerExternalContentHandler returns `this` (editor), NOT the old handler.
+      // We must read the old handler from editor.externalContentHandlers before replacing.
+      const editorExt = editor as any;
+      const defaultHandler = editorExt.externalContentHandlers?.['files'];
+      const handleFile = async (content: any) => {
+        const files: File[] = content?.files || [];
+        const videoFile = files.find((f: File) => f.type?.startsWith('video/'));
+        
+        if (videoFile && files.length === 1) {
+          // Handle single video: upload to server, create asset with default dims
+          console.log('[SnapshotAssets] Intercepted video drop, uploading via server...');
+          try {
+            const result = await uploadVideoToServer(videoFile);
+            const assetId = AssetRecordType.createId();
+            editor.createAssets([{
+              id: assetId, typeName: 'asset', type: 'video', meta: {},
+              props: {
+                name: videoFile.name, src: result.url,
+                w: 640, h: 360, fileSize: videoFile.size,
+                mimeType: videoFile.type, isAnimated: true,
+              },
+            } as any]);
+            const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
+            const point = content?.point;
+            editor.createShape({
+              id: shapeId, type: 'video',
+              x: point?.x ?? 0, y: point?.y ?? 0,
+              props: { w: 640, h: 360, assetId },
+            } as any);
+            console.log('[SnapshotAssets] Video shape created with URL:', result.url);
+            return;
+          } catch (err) {
+            console.error('[SnapshotAssets] Video interception failed:', err);
+            throw err;
+          }
+        }
+        // For non-video files, delegate to the default handler
+        if (defaultHandler) {
+          return defaultHandler(content);
+        }
+      };
+      editorExt.registerExternalContentHandler('files', handleFile);
     },
     [store]
   );
+
+  // Helper: upload video file to server via raw binary POST
+  async function uploadVideoToServer(file: File, abortSignal?: AbortSignal): Promise<{ url: string; name: string }> {
+    console.log('[SnapshotAssets] Uploading video via server:', file.name, (file.size / 1024 / 1024).toFixed(1), 'MB');
+    const resp = await fetch('/upload_asset', {
+      method: 'POST',
+      body: file,
+      headers: { 'X-Filename': encodeURIComponent(file.name) },
+      signal: abortSignal,
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('[SnapshotAssets] Upload failed, status:', resp.status, errText);
+      throw new Error(`Upload failed: ${resp.status}`);
+    }
+    const result = await resp.json();
+    console.log('[SnapshotAssets] Video uploaded, URL:', result.url);
+    return result;
+  }
 
   // Restore snapshot when both editor and snapshot are ready
   useEffect(() => {
