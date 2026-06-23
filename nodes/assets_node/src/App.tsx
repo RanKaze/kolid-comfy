@@ -321,6 +321,7 @@ const App: React.FC = () => {
         <Tldraw
           store={store}
           onMount={handleMount}
+          maxAssetSize={Infinity}
         />
         <style>{`
           .tlui-toolbar-container {
