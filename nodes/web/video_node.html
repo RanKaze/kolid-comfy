@@ -32,14 +32,15 @@
             background: #000;
             border-radius: 18px;
             overflow: hidden;
-            width: 100%;
-            max-height: 82vh;
+            height: 70vh;
+            max-width: 90vw;
+            display: inline-block;
             box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
         }
 
         video {
-            width: 100%;
-            height: auto;
+            width: auto;
+            height: 100%;
             display: block;
         }
 
@@ -60,7 +61,7 @@
 <body>
     <div class="container">
         <div class="video-wrapper">
-            <video id="video" controls autoplay></video>
+            <video id="video" controls autoplay loop></video>
         </div>
         
         <div class="prompt">
