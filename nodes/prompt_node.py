@@ -76,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, prompt_foldout=False, lora_regex="", last_selected_loras=None, last_selected_prefabs=None):
+    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None):
         self.port = port
         self.server = None
         self.started = False
@@ -86,7 +86,6 @@ class SnapshotPromptServer:
         self.selected_prompts = []
         self.custom_prompts = ''
         self.last_selected = last_selected or []
-        self.prompt_foldout = prompt_foldout
         self.should_stop = False
         self.lora_regex = lora_regex
         self.last_selected_loras = last_selected_loras or []
@@ -160,7 +159,7 @@ class SnapshotPromptServer:
         user_loras = ', '.join(lora_str_parts)
         return user_positive, user_loras
 
-    def get_active_loras_string(self, prefab_loras=None, prompt_separator=", ", lora_path_mode=False):
+    def get_active_loras_string(self, prefab_loras=None, lora_path_mode=False):
         """Compute active_loras output from user selections + prefab expansions."""
         all_loras = self.selected_loras + (prefab_loras or [])
         print(f"[get_active_loras_string] input: selected_loras={len(self.selected_loras)}, prefab_loras={len(prefab_loras or [])}, total={len(all_loras)}, lora_path_mode={lora_path_mode}")
@@ -196,7 +195,7 @@ class SnapshotPromptServer:
                 part = f"<lora:{file_name}:{strength}>"
                 active_lora_parts.append(part)
                 print(f"[get_active_loras_string] [{idx}] ACCEPT: {part}")
-        result = prompt_separator.join(active_lora_parts)
+        result = ", ".join(active_lora_parts)
         print(f"[get_active_loras_string] result: {result}")
         return result
 
@@ -686,7 +685,6 @@ class SnapshotPromptServer:
                     'last_selected': self.server_instance.last_selected,
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
-                    'prompt_foldout': self.server_instance.prompt_foldout,
                     'custom_prompts': self.server_instance.custom_prompts,
                     'last_selected_loras': self.server_instance.last_selected_loras,
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs,
@@ -1948,17 +1946,15 @@ class SnapshotPromptNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt_separator": ("STRING", {"default": ", ", "multiline": False}),
+                "prompt_cache": ("BOOLEAN", {"default": False}),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "prompt_parsing": ("STRING", {"default": "", "multiline": False}),
-                "prompt_foldout": ("BOOLEAN", {"default": False}),
-                "prompt_cache": ("BOOLEAN", {"default": False}),
                 "lora_cache": ("BOOLEAN", {"default": False}),
+                "lora_path_mode": ("BOOLEAN", {"default": False}),
                 "lora_regex": ("STRING", {"default": "", "multiline": False}),
                 "lora": ("STRING", {"default": "", "multiline": True}),
-                "lora_path_mode": ("BOOLEAN", {"default": False}),
-                "prefab": ("STRING", {"default": "", "multiline": True}),
                 "prefab_cache": ("BOOLEAN", {"default": False}),
+                "prefab": ("STRING", {"default": "", "multiline": True}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1971,7 +1967,7 @@ class SnapshotPromptNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, prefab, prefab_cache):
+    def IS_CHANGED(s, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab):
         return float("nan")
 
     @staticmethod
@@ -2204,7 +2200,7 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
-    def snapshot_prompt(self, prompt_separator, prompt, prompt_parsing, prompt_foldout, prompt_cache, lora_cache, lora_regex, lora, lora_path_mode, prefab, prefab_cache, unique_id):
+    def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2284,7 +2280,6 @@ class SnapshotPromptNode:
         
         server = SnapshotPromptServer(
             last_selected=last_selected,
-            prompt_foldout=prompt_foldout,
             lora_regex=lora_regex,
             last_selected_loras=last_selected_loras,
             last_selected_prefabs=last_selected_prefabs,
@@ -2453,13 +2448,13 @@ class SnapshotPromptNode:
         all_prompts_raw = server.selected_prompts + prefab_prompts_raw
         all_prompts_cleaned = cleaned_prompts + prefab_prompts_cleaned
         
-        result_prompt = prompt_separator.join(all_prompts_raw)
-        cleaned_result = prompt_separator.join(all_prompts_cleaned)
+        result_prompt = ", ".join(all_prompts_raw)
+        cleaned_result = ", ".join(all_prompts_cleaned)
         print(f"[SnapshotPrompt] Selected prompts: {result_prompt}")
         print(f"[SnapshotPrompt] Cleaned prompts: {cleaned_result}")
 
         # Compute active_loras output from user selections + prefab expansions
-        active_loras = server.get_active_loras_string(prefab_loras=prefab_loras, prompt_separator=prompt_separator, lora_path_mode=lora_path_mode)
+        active_loras = server.get_active_loras_string(prefab_loras=prefab_loras, lora_path_mode=lora_path_mode)
         print(f"[SnapshotPrompt] Active loras: {active_loras}")
 
         # Compute lora_trigger_words output from user selections + prefab expansions
@@ -2479,7 +2474,7 @@ class SnapshotPromptNode:
 
         # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
         # Only save user-direct selections, not prefab-expanded content
-        user_prompt_only = prompt_separator.join(server.selected_prompts)
+        user_prompt_only = ", ".join(server.selected_prompts)
         if prompt_cache:
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id, 
@@ -2506,5 +2501,5 @@ class SnapshotPromptNode:
 
         merged_prompt = cleaned_result
         if lora_trigger_words:
-            merged_prompt = cleaned_result + prompt_separator + lora_trigger_words
+            merged_prompt = cleaned_result + ", " + lora_trigger_words
         return (cleaned_result, active_loras, lora_trigger_words, merged_prompt)
