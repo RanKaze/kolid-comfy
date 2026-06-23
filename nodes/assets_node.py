@@ -568,16 +568,16 @@ class SnapshotAssetsNode:
                 "image_strength_config": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
                 "enable_video": ("BOOLEAN", {"default": True}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
-                "slot_config": ("STRING", {"default": "", "multiline": False}),
+                "slot_config": ("STRING", {"default": "Image:slot0,Video:slot1", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "VIDEO", "FLOAT", "STRING", "*")
-    RETURN_NAMES = ("image", "video", "strength", "prompt", "slot")
-    OUTPUT_IS_LIST = (True, True, True, False, True)
+    RETURN_TYPES = ("STRING", "IMAGE", "FLOAT", "VIDEO", "*")
+    RETURN_NAMES = ("prompt", "image", "image_strength", "video", "slot")
+    OUTPUT_IS_LIST = (False, True, True, True, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -675,7 +675,7 @@ class SnapshotAssetsNode:
         # Allow empty selection - return empty list if no images/videos selected
         if not selected_images and not selected_videos and not selected_slots:
             print("[SnapshotAssets] No images, videos or slots selected, returning empty lists")
-            return ([], [], [], prompt, [])
+            return (prompt, [], [], [], [])
 
         # Process images
         images = []
@@ -819,4 +819,4 @@ class SnapshotAssetsNode:
                     slot_outputs.append(None)
         
         print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(slot_outputs)} slots")
-        return (images, videos, strengths_2d, prompt, slot_outputs)
+        return (prompt, images, strengths_2d, videos, slot_outputs)
