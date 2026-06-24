@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import { createPortal } from 'react-dom';
 import { Editor, TLImageShape, TLVideoShape, TLAsset } from '@tldraw/tldraw';
 import ThumbnailList from './ThumbnailList';
 
@@ -45,11 +46,166 @@ interface PanelProps {
   slotDefs?: { type: string; name: string }[];
 }
 
+// Frame Capture Modal - allows capturing a frame from a video
+// iOS-style Frame Capture Modal — frosted glass background, centered
+const FrameCaptureModal: React.FC<{
+  videoUrl: string;
+  videoName: string;
+  onCapture: (imageInfo: ImageInfo) => void;
+  onClose: () => void;
+}> = ({ videoUrl, videoName, onCapture, onClose }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [visible, setVisible] = useState(false);
+
+  // Fade-in animation on mount
+  useEffect(() => { requestAnimationFrame(() => setVisible(true)); }, []);
+
+  const handleLoadedMetadata = useCallback(() => {
+    const video = videoRef.current;
+    if (video) setDuration(video.duration);
+  }, []);
+
+  const handleTimeUpdate = useCallback(() => {
+    const video = videoRef.current;
+    if (video) setCurrentTime(video.currentTime);
+  }, []);
+
+  const handleCapture = useCallback(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 360;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/png');
+    const imgInfo: ImageInfo = {
+      id: `capture_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+      name: `${videoName}_${formatTime(currentTime)}.png`,
+      dataUrl,
+      assetId: '',
+      shapeId: '',
+    };
+    onCapture(imgInfo);
+  }, [videoName, currentTime, onCapture]);
+
+  const formatTime = (t: number) => {
+    const m = Math.floor(t / 60);
+    const s = Math.floor(t % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // iOS system blue
+  const iosBlue = '#007AFF';
+
+  return (
+    <div
+      style={{
+        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+        zIndex: 2000,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        // Frosted glass background — blur + semi-transparent dark
+        background: 'rgba(0, 0, 0, 0.35)',
+        backdropFilter: 'blur(24px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+        opacity: visible ? 1 : 0,
+        transition: 'opacity 0.25s ease-out',
+      }}
+      onClick={onClose}
+    >
+      {/* iOS card — white rounded with shadow */}
+      <div
+        style={{
+          background: 'rgba(255, 255, 255, 0.95)',
+          borderRadius: 20,
+          padding: 0,
+          width: 'min(92vw, 720px)',
+          maxHeight: '90vh',
+          overflow: 'hidden',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '0 25px 60px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(0,0,0,0.12)',
+          transform: visible ? 'scale(1)' : 'scale(0.92)',
+          transition: 'transform 0.3s cubic-bezier(0.32, 0.72, 0, 1)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* iOS-style header */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '18px 20px 12px',
+          borderBottom: '1px solid rgba(0,0,0,0.08)',
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'none', border: 'none',
+              color: iosBlue, fontSize: 17, fontWeight: 400,
+              cursor: 'pointer', padding: '4px 0',
+              fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif',
+            }}
+          >取消</button>
+          <span style={{
+            fontSize: 16, fontWeight: 600,
+            color: '#1c1c1e',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif',
+            letterSpacing: '-0.2px',
+          }}>截取帧</span>
+          <button
+            onClick={handleCapture}
+            style={{
+              background: 'none', border: 'none',
+              color: iosBlue, fontSize: 17, fontWeight: 600,
+              cursor: 'pointer', padding: '4px 0',
+              fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif',
+            }}
+          >截取</button>
+        </div>
+
+        {/* Video player card */}
+        <div style={{ padding: '12px 16px' }}>
+          <div style={{
+            position: 'relative', background: '#000',
+            borderRadius: 12, overflow: 'hidden',
+            boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
+          }}>
+            <video
+              ref={videoRef} src={videoUrl}
+              style={{ width: '100%', display: 'block', borderRadius: 12 }}
+              controls={true}
+              crossOrigin="anonymous"
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
+              preload="auto"
+            />
+            <canvas ref={canvasRef} style={{ display: 'none' }} />
+          </div>
+        </div>
+
+        {/* Video name subtitle */}
+        <div style={{ padding: '0 20px 20px' }}>
+          <div style={{
+            fontSize: 13, color: '#8e8e93',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif',
+          }}>
+            {videoName}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Video Card Component with dynamic width based on aspect ratio
 const VideoCard: React.FC<{
   vid: VideoInfo;
   onRemove: (id: string) => void;
-}> = ({ vid, onRemove }) => {
+  onCaptureFrame?: (vid: VideoInfo) => void;
+}> = ({ vid, onRemove, onCaptureFrame }) => {
   const [aspectRatio, setAspectRatio] = useState<number>(16 / 9); // Default to 16:9
   const CARD_HEIGHT = 280; // Fixed height in pixels (increased for better viewing)
 
@@ -130,6 +286,44 @@ const VideoCard: React.FC<{
       >
         ×
       </button>
+      {/* Frame capture button */}
+      {onCaptureFrame && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onCaptureFrame(vid);
+          }}
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 32,
+            width: 22,
+            height: 22,
+            borderRadius: '50%',
+            border: 'none',
+            background: 'rgba(0,0,0,0.7)',
+            color: '#fff',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 13,
+            lineHeight: 1,
+            padding: 0,
+            zIndex: 10,
+            transition: 'background 0.2s',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'rgba(74,158,255,0.8)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'rgba(0,0,0,0.7)';
+          }}
+          title="Capture frame from video"
+        >
+          📷
+        </button>
+      )}
       <div
         style={{
           position: 'absolute',
@@ -161,7 +355,8 @@ const SlotCard: React.FC<{
   editorRef: React.RefObject<Editor | null>;
   onFill: (index: number, item: ImageInfo | VideoInfo) => void;
   onClear: (index: number) => void;
-}> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear }) => {
+  onCaptureRequest?: (vid: VideoInfo, slotIndex: number) => void;  // Open frame capture when video selected for Image slot
+}> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear, onCaptureRequest }) => {
   const SLOT_HEIGHT = 280; // Aligned with VideoCard CARD_HEIGHT
   const [mediaAspect, setMediaAspect] = useState<number>(1); // Default 1:1 for image, 16:9 for video
 
@@ -186,6 +381,24 @@ const SlotCard: React.FC<{
     console.log('[SlotCard] matchingShapes count:', matchingShapes.length);
 
     if (matchingShapes.length === 0) {
+      // If this is an Image slot and a video is selected, offer frame capture
+      if (slot.type === 'Image' && onCaptureRequest) {
+        const selectedVideos = allShapes.filter((s) => s?.type === 'video');
+        if (selectedVideos.length > 0) {
+          const vShape = selectedVideos[0]!;
+          const vAssetId = (vShape.props as any).assetId;
+          if (vAssetId) {
+            const vAsset = editor.getAsset(vAssetId) as any;
+            if (vAsset && vAsset.type === 'video') {
+              const vSrc = (vAsset.props as any).src as string;
+              const vName = (vAsset.props as any).name as string || 'video';
+              console.log('[SlotCard] opening frame capture for Image slot from video:', vName);
+              onCaptureRequest({ id: `vid_${Date.now()}`, name: vName, dataUrl: vSrc, assetId: vAssetId as string, shapeId: vShape.id as string }, slotIndex);
+              return;
+            }
+          }
+        }
+      }
       alert(`No ${slot.type} selected. Click on a ${slot.type.toLowerCase()} on the canvas to select it first.`);
       return;
     }
@@ -433,6 +646,29 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   const [prompt, setPrompt] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
 
+  // Frame capture modal state — uses fillSlotRef to avoid TDZ issue (fillSlot defined later)
+  const fillSlotRef = useRef<(index: number, item: ImageInfo | VideoInfo) => void>((index, item) => {
+    // Placeholder — will be replaced when fillSlot is defined below
+    console.warn('[Panel] fillSlotRef not set yet, ignoring slot fill');
+  });
+  const [captureTarget, setCaptureTarget] = useState<{ vid: VideoInfo; slotIndex?: number } | null>(null);
+  const handleStartCapture = useCallback((vid: VideoInfo, slotIndex?: number) => {
+    setCaptureTarget({ vid, slotIndex });
+  }, []);
+  const handleCaptureDone = useCallback((imgInfo: ImageInfo) => {
+    if (captureTarget?.slotIndex != null) {
+      // From a slot → fill the slot via ref
+      fillSlotRef.current(captureTarget.slotIndex, imgInfo);
+    } else {
+      // From image row / VideoCard → add to images list
+      setImages((prev) => [...prev, imgInfo]);
+    }
+    setCaptureTarget(null);
+  }, [captureTarget]);
+  const handleCaptureClose = useCallback(() => {
+    setCaptureTarget(null);
+  }, []);
+
   // Expose setImages, setVideos, setSlots and setPrompt to parent for snapshot restore
   useImperativeHandle(ref, () => ({
     setImages: (newImages: ImageInfo[]) => setImages(newImages),
@@ -593,6 +829,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
       return next;
     });
   }, []);
+  // Keep fillSlotRef in sync for handleCaptureDone
+  fillSlotRef.current = fillSlot;
 
   const clearSlot = useCallback((index: number) => {
     setSlots((prev) => {
@@ -609,6 +847,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   }, [images, videos, enableImageStrength, prompt, slots, onConfirm]);
 
   return (
+    <>
     <div
       ref={panelRef}
       style={{
@@ -657,6 +896,35 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
               if (!editor) return;
 
               const selectedShapeIds = editor.getSelectedShapeIds();
+              console.log('[Image+] selectedShapeIds:', selectedShapeIds);
+              
+              // Check if a video is selected → open frame capture for it
+              const allSelectedShapes = selectedShapeIds.map((id) => editor.getShape(id));
+              console.log('[Image+] allSelectedShapes:', allSelectedShapes.map(s => ({ id: s?.id, type: s?.type, hasAssetId: !!(s as any)?.props?.assetId })));
+              
+              const selectedVideoShapes = allSelectedShapes.filter(
+                (shape): shape is TLVideoShape => shape?.type === 'video'
+              );
+              console.log('[Image+] selectedVideoShapes count:', selectedVideoShapes.length);
+              
+              if (selectedVideoShapes.length > 0) {
+                const shape = selectedVideoShapes[0];
+                const assetId = shape.props.assetId;
+                console.log('[Image+] video shape assetId:', assetId);
+                if (assetId) {
+                  const asset = editor.getAsset(assetId) as TLAsset | undefined;
+                  console.log('[Image+] video asset:', asset?.type, asset?.id);
+                  if (asset && asset.type === 'video') {
+                    const src = (asset.props as any).src as string;
+                    const name = (asset.props as any).name as string || 'video';
+                    console.log('[Image+] opening frame capture for:', name);
+                    handleStartCapture({ id: `vid_${Date.now()}`, name, dataUrl: src, assetId: assetId as string, shapeId: shape.id as string });
+                    return;
+                  }
+                  console.warn('[Image+] video asset not found or type mismatch');
+                }
+              }
+
               const selectedImageShapes = selectedShapeIds
                 .map((id) => editor.getShape(id))
                 .filter((shape): shape is TLImageShape => shape?.type === 'image');
@@ -748,7 +1016,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
             }}
           >
             {videos.map((vid) => (
-              <VideoCard key={vid.id} vid={vid} onRemove={removeVideo} />
+              <VideoCard key={vid.id} vid={vid} onRemove={removeVideo} onCaptureFrame={handleStartCapture} />
             ))}
           </div>
           <button
@@ -842,6 +1110,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
                 editorRef={editorRef}
                 onFill={fillSlot}
                 onClear={clearSlot}
+                onCaptureRequest={(vid, idx) => handleStartCapture(vid, idx)}
               />
             ))}
           </div>
@@ -916,6 +1185,17 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
         }
       `}</style>
     </div>
+    {/* Frame capture modal — rendered via portal to body to escape Panel's transform */}
+    {captureTarget && createPortal(
+      <FrameCaptureModal
+        videoUrl={captureTarget.vid.dataUrl}
+        videoName={captureTarget.vid.name}
+        onCapture={handleCaptureDone}
+        onClose={handleCaptureClose}
+      />,
+      document.body
+    )}
+  </>
   );
 });
 

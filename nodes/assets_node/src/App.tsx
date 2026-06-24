@@ -104,8 +104,9 @@ const App: React.FC = () => {
   }, []);
 
   const addMedia = useCallback(async (file: File, x: number, y: number) => {
-    const isImage = file.type.startsWith('image/');
-    const isVideo = file.type.startsWith('video/');
+    const isGif = file.type === 'image/gif';
+    const isImage = file.type.startsWith('image/') && !isGif;
+    const isVideo = file.type.startsWith('video/') || isGif;
     if (!isImage && !isVideo) return;
 
     const editor = editorRef.current;
@@ -301,7 +302,7 @@ const App: React.FC = () => {
         asset: any, file: File, abortSignal?: AbortSignal
       ) => Promise<{ src: string }>;
       (editor as any).uploadAsset = async (asset: any, file: File, abortSignal?: AbortSignal) => {
-        if (file.type.startsWith('video/')) {
+        if (file.type.startsWith('video/') || file.type === 'image/gif') {
           const result = await uploadVideoToServer(file, abortSignal);
           return { src: result.url };
         }
@@ -319,19 +320,23 @@ const App: React.FC = () => {
       const defaultHandler = editorExt.externalContentHandlers?.['files'];
       const handleFile = async (content: any) => {
         const files: File[] = content?.files || [];
-        const videoFile = files.find((f: File) => f.type?.startsWith('video/'));
+        const videoFile = files.find((f: File) => f.type?.startsWith('video/') || f.type === 'image/gif');
         
         if (videoFile && files.length === 1) {
-          // Handle single video: upload to server, create asset with default dims
+          // Handle single video: upload to server, get actual dimensions, create asset
           console.log('[SnapshotAssets] Intercepted video drop, uploading via server...');
           try {
             const result = await uploadVideoToServer(videoFile);
+            // Get actual video dimensions from URL (metadata, not the local file)
+            console.log('[SnapshotAssets] Getting video dimensions from URL...');
+            const { w, h } = await getVideoDim(result.url);
+            console.log('[SnapshotAssets] Video dimensions:', w, 'x', h);
             const assetId = AssetRecordType.createId();
             editor.createAssets([{
               id: assetId, typeName: 'asset', type: 'video', meta: {},
               props: {
                 name: videoFile.name, src: result.url,
-                w: 640, h: 360, fileSize: videoFile.size,
+                w, h, fileSize: videoFile.size,
                 mimeType: videoFile.type, isAnimated: true,
               },
             } as any]);
@@ -340,7 +345,7 @@ const App: React.FC = () => {
             editor.createShape({
               id: shapeId, type: 'video',
               x: point?.x ?? 0, y: point?.y ?? 0,
-              props: { w: 640, h: 360, assetId },
+              props: { w, h, assetId },
             } as any);
             console.log('[SnapshotAssets] Video shape created with URL:', result.url);
             return;
@@ -376,6 +381,32 @@ const App: React.FC = () => {
     const result = await resp.json();
     console.log('[SnapshotAssets] Video uploaded, URL:', result.url);
     return result;
+  }
+
+  // Helper: get video dimensions from URL using metadata loading
+  async function getVideoDim(url: string, timeoutMs = 5000): Promise<{ w: number; h: number }> {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.muted = true;
+      const timer = setTimeout(() => {
+        video.src = '';
+        resolve({ w: 640, h: 360 });
+      }, timeoutMs);
+      video.onloadedmetadata = () => {
+        clearTimeout(timer);
+        const w = video.videoWidth || 640;
+        const h = video.videoHeight || 360;
+        video.src = '';
+        resolve({ w, h });
+      };
+      video.onerror = () => {
+        clearTimeout(timer);
+        video.src = '';
+        resolve({ w: 640, h: 360 });
+      };
+      video.src = url;
+    });
   }
 
   // Restore snapshot when both editor and snapshot are ready
