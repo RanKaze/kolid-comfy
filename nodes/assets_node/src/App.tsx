@@ -1,15 +1,63 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType } from '@tldraw/tldraw';
+import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType, TLVideoShape, TLAsset, DefaultContextMenu, useEditor } from '@tldraw/tldraw';
+import type { TLComponents } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
-import Panel, { PanelHandle, ImageInfo } from './components/Panel';
+import Panel, { PanelHandle, ImageInfo, VideoInfo } from './components/Panel';
 
-export interface VideoInfo {
-  id: string;
-  name: string;
-  dataUrl: string;
-  assetId: string;
-  shapeId: string;
-}
+// Module-level ref to PanelHandle so CustomContextMenu can trigger capture
+let _panelHandle: PanelHandle | null = null;
+
+// Custom context menu that extends tldraw's default with a "采样" option for video shapes
+const CustomContextMenu: React.FC = () => {
+  const editor = useEditor();
+  const selectedShapes = editor.getSelectedShapes();
+  const videoShape = selectedShapes.find((s): s is TLVideoShape => s.type === 'video');
+
+  const handleSample = useCallback(() => {
+    if (!videoShape || !_panelHandle) return;
+    if (!videoShape.props.assetId) return;
+    const asset = editor.getAsset(videoShape.props.assetId) as TLAsset | undefined;
+    if (!asset) return;
+    const src = (asset.props as any)?.src || '';
+    const name = (asset.props as any)?.name || 'video';
+    _panelHandle.startCapture({
+      id: `vid_cm_${Date.now()}`,
+      name,
+      dataUrl: src,
+      assetId: videoShape.props.assetId as string,
+      shapeId: videoShape.id as string,
+    });
+  }, [editor, videoShape]);
+
+  // Render tldraw's default context menu, plus "采样" for videos
+  return (
+    <>
+      <DefaultContextMenu />
+      {videoShape && (
+        <button
+          onClick={handleSample}
+          className="tlui-button tlui-button__menu"
+          style={{
+            display: 'block',
+            width: '100%',
+            textAlign: 'left',
+            padding: '6px 12px',
+            border: 'none',
+            background: 'transparent',
+            cursor: 'pointer',
+            fontSize: 13,
+          }}
+        >
+          📷 采样
+        </button>
+      )}
+    </>
+  );
+};
+
+const components: TLComponents = {
+  ContextMenu: CustomContextMenu,
+};
 
 const App: React.FC = () => {
   const [inputData, setInputData] = useState('');
@@ -23,7 +71,13 @@ const App: React.FC = () => {
   const [strengthDefs, setStrengthDefs] = useState<{ name: string; default: number }[]>([]);
   const [enableSlot, setEnableSlot] = useState(false);
   const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
+  const [globalMode, setGlobalMode] = useState(false);  // Whether data is a name for disk persistence
   const panelHandleRef = useRef<PanelHandle>(null);
+
+  // Sync panelHandle to module-level ref for CustomContextMenu access
+  useEffect(() => {
+    _panelHandle = panelHandleRef.current;
+  });
 
   useEffect(() => {
     fetch('/input_data')
@@ -39,6 +93,7 @@ const App: React.FC = () => {
         setStrengthDefs(data.strength_defs || []);
         setEnableSlot(data.enable_slot || false);
         setSlotDefs(data.slot_defs || []);
+        setGlobalMode(data.global_mode || false);
 
         // Restore canvas snapshot if available
         const snapshot = data.canvas_snapshot;
@@ -433,6 +488,7 @@ const App: React.FC = () => {
           store={store}
           onMount={handleMount}
           maxAssetSize={Infinity}
+          components={components}
         />
         <style>{`
           .tlui-toolbar-container {
@@ -493,4 +549,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-export type { VideoInfo };
