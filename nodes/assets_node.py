@@ -69,14 +69,16 @@ class SnapshotAssetsServer:
                 base64_data = data_url
                 header = "data:image/png;base64"
             
+            # GIF files are treated as video
+            if "image/gif" in header:
+                return self.save_base64_video(data_url)
+            
             # Determine extension from mime type
             ext = ".png"
             if "image/jpeg" in header or "image/jpg" in header:
                 ext = ".jpg"
             elif "image/webp" in header:
                 ext = ".webp"
-            elif "image/gif" in header:
-                ext = ".gif"
             
             # Generate unique filename
             import hashlib
