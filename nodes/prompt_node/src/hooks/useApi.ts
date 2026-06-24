@@ -18,6 +18,7 @@ export function useApi() {
   const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
   const [loraData, setLoraData] = useState<LoraFolders>({});
   const [loraRegex, setLoraRegex] = useState('');
+  const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
@@ -31,6 +32,7 @@ export function useApi() {
     setLastSelectedPrefabs(data.last_selected_prefabs || []);
     setCustomPrompts(data.custom_prompts || '');
     setLoraRegex(data.lora_regex || '');
+    setParsedPrompts(data.parsed_prompts || []);
     return data;
   }, []);
 
@@ -66,7 +68,7 @@ export function useApi() {
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
-    loraData, setLoraData, loraRegex,
+    loraData, setLoraData, loraRegex, parsedPrompts,
     loadData, submitSelection, closeWindow, loadLoraData,
   };
 }

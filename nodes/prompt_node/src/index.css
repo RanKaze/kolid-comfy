@@ -156,6 +156,14 @@ body {
 .tag .remove { cursor: pointer; opacity: 0.7; }
 .tag .remove:hover { opacity: 1; }
 
+/* Parsed tag (from prompt_parsing) - purple */
+.tag.parsed-tag {
+    background: #8b5cf6;
+}
+.tag.parsed-tag .tag-strength-editor {
+    background: #8b5cf6;
+}
+
 /* Tag strength input */
 .tag.tag-with-strength {
     position: relative;
