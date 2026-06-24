@@ -156,17 +156,22 @@ class BranchSwitchesNode:
                     "min": 0,
                     "step": 1,
                 }),
+                "select_config": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "tooltip": "Format: <select_index>:<op>:<target>[,]. op: mute/!mute/bypass/!bypass. target: name:<node_name> or id:<node_id> or group:<group_name>"
+                }),
             },
             "optional": dyn_inputs,
         }
 
-    RETURN_TYPES = ("*",)
-    RETURN_NAMES = ("output",)
+    RETURN_TYPES = ("*", "STRING", "INT")
+    RETURN_NAMES = ("output", "select", "select_index")
     FUNCTION = "switch"
     CATEGORY = "custom/branch"
 
     @classmethod
-    def VALIDATE_INPUTS(cls, select, select_input, **kwargs):
+    def VALIDATE_INPUTS(cls, select, select_input, select_config, **kwargs):
         return True
 
     def check_lazy_status(self, select, select_input, **kwargs):
@@ -183,4 +188,4 @@ class BranchSwitchesNode:
         if select_input <= 0 or selected_key not in kwargs:
             raise ValueError(f"select_input {select_input} is out of range for input keys {input_keys}")
         input = kwargs[selected_key]
-        return (input,)        
+        return (input, select, select_input)
