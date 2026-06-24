@@ -34,6 +34,22 @@ app.registerExtension({
         }
     )
     }
+    items.push(
+        {
+            content: "CopyNodeId",
+            callback: () => {
+                navigator.clipboard.writeText(String(node.id));
+            }
+        }
+    )
+    items.push(
+        {
+            content: "CopyNodeName",
+            callback: () => {
+                navigator.clipboard.writeText(node.comfyClass || node.type);
+            }
+        }
+    )
     return items
   }
 })

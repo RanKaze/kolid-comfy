@@ -667,6 +667,9 @@ app.registerExtension({
                 selectInputWidget = node.addWidget("number", "select_input", 0);
             }
 
+            // select_config widget
+            const selectConfigWidget = node.widgets.find(w => w.name === "select_config");
+
             function addDynamicInput() {
                 let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
                 const idx = dynamicInputs.length + 1;
@@ -724,6 +727,145 @@ app.registerExtension({
                     selectInputWidget.value = 0;
                 }
             }
+
+            // ==================== select_config 解析与操作 ====================
+            // 防重入：避免多个 BranchSwitchesNode 相互触发
+            const _selectConfigGuard = new Set();
+
+            function applyNodeOp(graph, targetType, targetValue, op) {
+                let targetNodes = [];
+                if (targetType === "name") {
+                    targetNodes = graph.nodes.filter(n => n.title === targetValue || n.type === targetValue);
+                } else if (targetType === "id") {
+                    const n = graph.getNodeById(parseInt(targetValue));
+                    if (n) targetNodes = [n];
+                } else if (targetType === "group") {
+                    const groups = graph._groups || graph.groups || [];
+                    const matchedGroup = groups.find(g => g.title === targetValue);
+                    if (!matchedGroup) {
+                        console.warn("[select_config] group not found:", targetValue, "available:", groups.map(g => g.title));
+                    } else {
+                        // 调试：打印 group 和第一个节点的结构
+                        console.log("[select_config] group keys:", Object.keys(matchedGroup), "has _nodes:", !!matchedGroup._nodes, "has nodes:", !!matchedGroup.nodes);
+                        if (graph.nodes.length > 0) {
+                            console.log("[select_config] first node keys:", Object.keys(graph.nodes[0]), "node.group:", graph.nodes[0].group);
+                        }
+
+                        // 策略1: group 自己的 _nodes / nodes 数组（最可靠）
+                        const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes;
+                        if (groupNodeIds && groupNodeIds.length > 0) {
+                            const idSet = new Set(groupNodeIds);
+                            targetNodes = graph.nodes.filter(n => idSet.has(n.id));
+                        }
+
+                        // 策略2: 通过 node.group 属性匹配（如果策略1没找到）
+                        if (targetNodes.length === 0) {
+                            const groupId = matchedGroup._id != null ? matchedGroup._id : matchedGroup.id;
+                            targetNodes = graph.nodes.filter(n => {
+                                if (n.group == null) return false;
+                                if (typeof n.group === "number") return n.group === groupId;
+                                return n.group === matchedGroup || (n.group._id != null && n.group._id === groupId) || (n.group.id != null && n.group.id === groupId);
+                            });
+                        }
+
+                        // 策略3: 空间包含（如果前两种都没找到）
+                        if (targetNodes.length === 0) {
+                            const bound = matchedGroup._bounding || matchedGroup.bounding;
+                            if (bound && bound.length >= 4) {
+                                const [gx, gy, gw, gh] = bound;
+                                targetNodes = graph.nodes.filter(n => {
+                                    if (!n.pos || !n.size) return false;
+                                    const [nx, ny] = n.pos;
+                                    const [nw, nh] = n.size;
+                                    return nx >= gx && ny >= gy && nx + nw <= gx + gw && ny + nh <= gy + gh;
+                                });
+                            }
+                        }
+
+                        console.log("[select_config] group:", targetValue, "nodes:", targetNodes.length, targetNodes.map(n => n.title || n.type));
+                    }
+                }
+                for (const n of targetNodes) {
+                    switch (op) {
+                        case "mute":
+                            n.mode = LiteGraph.NEVER;
+                            break;
+                        case "!mute":
+                            n.mode = LiteGraph.ALWAYS;
+                            break;
+                        case "bypass":
+                            n.mode = 2;
+                            break;
+                        case "!bypass":
+                            n.mode = LiteGraph.ALWAYS;
+                            break;
+                    }
+                    // 如果目标是 BranchSwitchesNode，触发其 select_config 联动
+                    const isSwitch = n.comfyClass === "BranchSwitchesNode" || n.type === "BranchSwitchesNode";
+                    if (isSwitch && n._processSelectConfig && !_selectConfigGuard.has(n.id)) {
+                        if (op === "mute" || op === "bypass") {
+                            // mute → 模拟 select=0，所有规则取反
+                            n._processSelectConfig(0);
+                        } else {
+                            // !mute / !bypass → 恢复当前 select 对应的状态
+                            const siWidget = n.widgets.find(w => w.name === "select_input");
+                            const curSelect = siWidget ? (siWidget.value || 0) : 0;
+                            n._processSelectConfig(curSelect);
+                        }
+                    }
+                }
+                if (targetNodes.length > 0) {
+                    graph.setDirtyCanvas(true, true);
+                    if (graph.change) graph.change();
+                }
+            }
+
+            function processSelectConfig(selectIndex) {
+                // 防重入
+                if (_selectConfigGuard.has(node.id)) return;
+                _selectConfigGuard.add(node.id);
+                try {
+                    const configWidget = node.widgets.find(w => w.name === "select_config");
+                    if (!configWidget) return;
+                    const configStr = (configWidget.value || "").trim();
+                    if (!configStr) return;
+
+                    const graph = node.graph;
+                    if (!graph) return;
+
+                    const OPPOSITE_OPS = {
+                        "mute": "!mute",
+                        "!mute": "mute",
+                        "bypass": "!bypass",
+                        "!bypass": "bypass"
+                    };
+
+                    const segments = configStr.split(",").map(s => s.trim()).filter(s => s);
+                    for (const seg of segments) {
+                        const parts = seg.split(":");
+                        if (parts.length < 4) continue;
+
+                        const segSelectIndex = parseInt(parts[0]);
+                        if (isNaN(segSelectIndex)) continue;
+
+                        const op = parts[1];
+                        if (!OPPOSITE_OPS.hasOwnProperty(op)) continue;
+
+                        const targetType = parts[2];
+                        const targetValue = parts.slice(3).join(":");
+
+                        const matches = (selectIndex === segSelectIndex);
+                        const effectiveOp = matches ? op : OPPOSITE_OPS[op];
+
+                        applyNodeOp(graph, targetType, targetValue, effectiveOp);
+                    }
+                } finally {
+                    _selectConfigGuard.delete(node.id);
+                }
+            }
+
+            // 暴露到 node 上，供其他 node 在联动时调用
+            node._processSelectConfig = processSelectConfig;
 
             // 连接/断开处理
             const origOnConnectionsChange = node.onConnectionsChange;
@@ -824,7 +966,7 @@ app.registerExtension({
                 node.setDirtyCanvas(true, true);
             };
 
-            // Combo 回调 - 选择后同步到 selectInputWidget
+            // Combo 回调 - 选择后同步到 selectInputWidget + 处理 select_config
             const origSelectCallback = selectWidget.callback;
             selectWidget.callback = function (value) {
                 if (origSelectCallback) {
@@ -832,7 +974,11 @@ app.registerExtension({
                 }
                 const match = value.match(/\[(\d+)\]/);
                 if (match) {
-                    selectInputWidget.value = parseInt(match[1]);
+                    const idx = parseInt(match[1]);
+                    selectInputWidget.value = idx;
+                    processSelectConfig(idx);
+                } else {
+                    processSelectConfig(0);
                 }
             };
 
@@ -908,6 +1054,8 @@ app.registerExtension({
                 } else {
                     selectInputWidget.value = 0;
                 }
+                // 恢复时也处理 select_config
+                processSelectConfig(selectInputWidget.value || 0);
             };
 
             // 初始化：恢复已有连接状态，确保端口数量 = 已连接数 + 1
