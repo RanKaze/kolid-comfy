@@ -76,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None):
+    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None):
         self.port = port
         self.server = None
         self.started = False
@@ -92,6 +92,7 @@ class SnapshotPromptServer:
         self.selected_loras = []
         self.last_selected_prefabs = last_selected_prefabs or []
         self.selected_prefabs = []
+        self.parsed_prompts = parsed_prompts or []
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -688,6 +689,7 @@ class SnapshotPromptServer:
                     'custom_prompts': self.server_instance.custom_prompts,
                     'last_selected_loras': self.server_instance.last_selected_loras,
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs,
+                    'parsed_prompts': self.server_instance.parsed_prompts,
                     'lora_regex': self.server_instance.lora_regex,
                 }
                 self.send_response(200)
@@ -2218,8 +2220,10 @@ class SnapshotPromptNode:
         custom_prompts = ''
 
         # Parse prompt_parsing if provided — this is the raw text to parse
+        parsed_prompts_list = []
         if prompt_parsing and prompt_parsing.strip():
             parsed_selected, parsed_custom = self._parse_raw_prompt(prompt_parsing.strip())
+            parsed_prompts_list = list(parsed_selected)
             last_selected.extend(parsed_selected)
             if parsed_custom:
                 custom_prompts = parsed_custom
@@ -2283,6 +2287,7 @@ class SnapshotPromptNode:
             lora_regex=lora_regex,
             last_selected_loras=last_selected_loras,
             last_selected_prefabs=last_selected_prefabs,
+            parsed_prompts=parsed_prompts_list,
         )
         server.custom_prompts = custom_prompts
         server_thread = threading.Thread(target=server.start)

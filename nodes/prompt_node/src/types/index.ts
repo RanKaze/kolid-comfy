@@ -102,6 +102,7 @@ export interface PointsResponse {
   category_display_modes: CategoryDisplayModes;
   category_size_modes: CategorySizeModes;
   custom_prompts: string;
+  parsed_prompts?: string[];
   last_selected_prefabs?: { guid: string; active?: boolean }[];
 }
 

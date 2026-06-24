@@ -82,7 +82,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
-    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs,
+    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, parsedPrompts,
   } = api;
 
   const isLoraFiltered = useCallback((item: LoraItemData) => {
@@ -110,6 +110,16 @@ export function AppShell() {
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
   const [selectedPrefabs, setSelectedPrefabs] = useState<SelectedPrefabItem[]>([]);
   const prefabRestoredRef = useRef(false);
+
+  // Tags that came from prompt_parsing (displayed in purple)
+  const parsedTagKeys = useMemo(() => {
+    const set = new Set<string>();
+    for (const str of parsedPrompts) {
+      const tags = parseStringToTags(str, allPrompts);
+      set.add(tagsToDisplayString(tags));
+    }
+    return set;
+  }, [parsedPrompts, allPrompts]);
 
   // Listen for auto-tag messages from parent window
   useEffect(() => {
@@ -2613,12 +2623,15 @@ export function AppShell() {
                     : selectedTags.map((group, i) => {
                       const baseStrength = group[0]?.strength ?? 1.0;
                       const showStrength = baseStrength !== 1.0;
+                      const displayStr = tagsToDisplayString(group);
+                      const fromParsing = parsedTagKeys.has(displayStr);
                       return (
                         <TagStrengthEditor
                           key={i}
                           displayName={tagsToDisplayName(group)}
                           strength={baseStrength}
                           showStrength={showStrength}
+                          fromParsing={fromParsing}
                           onStrengthChange={(v) => {
                             setSelectedTags(prev => prev.map((g, idx) => {
                               if (idx !== i) return g;
@@ -3237,12 +3250,14 @@ function TagStrengthEditor({
   displayName,
   strength,
   showStrength,
+  fromParsing,
   onStrengthChange,
   onRemove,
 }: {
   displayName: string;
   strength: number;
   showStrength: boolean;
+  fromParsing: boolean;
   onStrengthChange: (v: number) => void;
   onRemove: () => void;
 }) {
@@ -3279,7 +3294,7 @@ function TagStrengthEditor({
   };
 
   return (
-    <span className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}`} onClick={startEdit}>
+    <span className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}`} onClick={startEdit}>
       <span className="tag-strength-overlay">
         {showStrength ? `:${strength}` : ''}
       </span>
