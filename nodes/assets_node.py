@@ -33,7 +33,7 @@ def check_interrupted():
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, global_mode=False):
         self.port = None
         self.server = None
         self.started = False
@@ -42,11 +42,11 @@ class SnapshotAssetsServer:
         self.browser_url = None
         self.selected_images = []
         self.selected_videos = []
-        self.selected_slots = []  # List ordered by slot index: [{"type": "Image"/"Video", "data": {...}}]
+        self.selected_slots = []
         self.prompt = ""
         self.input_data = input_data
-        self.canvas_snapshot = canvas_snapshot  # tldraw snapshot JSON string
-        self.node_id = node_id  # Node ID for persistence
+        self.canvas_snapshot = canvas_snapshot
+        self.node_id = node_id
         self.enable_image_strength = enable_image_strength
         self.enable_prompt = enable_prompt
         self.image_strength_config = image_strength_config
@@ -54,10 +54,13 @@ class SnapshotAssetsServer:
         self.slot_config = slot_config
         self.enable_image = enable_image
         self.enable_video = enable_video
+        self.global_mode = global_mode
         self.should_stop = False
-        # Use data/assets directory for both image and video cache (persistent storage)
         self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
         os.makedirs(self.asset_cache_dir, exist_ok=True)
+        # Snapshot save directory for global_mode
+        self.snapshot_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
+        os.makedirs(self.snapshot_cache_dir, exist_ok=True)
 
     def save_base64_image(self, data_url):
         """Save base64 image to cache directory and return URL path."""
@@ -254,6 +257,7 @@ class SnapshotAssetsServer:
                     'enable_slot': self.server_instance.enable_slot if self.server_instance else False,
                     'enable_image': self.server_instance.enable_image if self.server_instance else True,
                     'enable_video': self.server_instance.enable_video if self.server_instance else True,
+                    'global_mode': self.server_instance.global_mode if self.server_instance else False,
                     'slot_defs': slot_defs,
                 }
                 self.send_response(200)
@@ -545,8 +549,17 @@ class SnapshotAssetsServer:
                     self.server_instance.prompt = prompt_value if prompt_value is not None else ''
                     self.server_instance.canvas_snapshot = canvas_snapshot
                     
-                    # Save tldraw snapshot to data widget using send_sync
-                    if self.server_instance.node_id and canvas_snapshot:
+                    # Save tldraw snapshot
+                    if self.server_instance.global_mode and canvas_snapshot and self.server_instance.input_data.strip():
+                        # global_mode: save snapshot to disk using data as name
+                        snap_dir = self.server_instance.snapshot_cache_dir
+                        snap_name = self.server_instance.input_data.strip()
+                        snap_path = os.path.join(snap_dir, f"{snap_name}.json")
+                        with open(snap_path, 'w', encoding='utf-8') as f:
+                            f.write(canvas_snapshot)
+                        print(f"[SnapshotAssets] Saved snapshot to disk: {snap_path}")
+                    elif self.server_instance.node_id and canvas_snapshot:
+                        # Normal mode: save snapshot to data widget
                         PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                             "node_id": self.server_instance.node_id,
                             "widget_name": "data",
@@ -646,6 +659,7 @@ class SnapshotAssetsNode:
         return {
             "required": {
                 "data": ("STRING", {"default": "", "multiline": True}),
+                "global_mode": ("BOOLEAN", {"default": False}),
                 "enable_prompt": ("BOOLEAN", {"default": False}),
                 "enable_image": ("BOOLEAN", {"default": True}),
                 "enable_image_strength": ("BOOLEAN", {"default": False}),
@@ -702,20 +716,30 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, unique_id=None):
-        # data contains the tldraw snapshot JSON string
+    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, global_mode=False, unique_id=None):
+        # data contains the tldraw snapshot JSON string (normal mode) or a name (global_mode)
         canvas_snapshot = None
-        try:
-            if data and data.strip():
-                # Validate it's a proper JSON
+        if global_mode and data and data.strip():
+            # global_mode: load snapshot from disk using data as name
+            snap_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
+            snap_path = os.path.join(snap_dir, f"{data.strip()}.json")
+            if os.path.exists(snap_path):
+                with open(snap_path, 'r', encoding='utf-8') as f:
+                    canvas_snapshot = f.read()
+                print(f"[SnapshotAssets] Loaded snapshot from disk: {snap_path}")
+            else:
+                print(f"[SnapshotAssets] Snapshot file not found: {snap_path}, starting fresh")
+        elif data and data.strip():
+            # Normal mode: parse data as snapshot JSON
+            try:
                 parsed = json.loads(data.strip())
                 if isinstance(parsed, dict):
                     canvas_snapshot = data.strip()
                     print(f"[SnapshotAssets] Loaded tldraw snapshot")
-        except Exception as e:
-            print(f"[SnapshotAssets] Failed to parse data: {e}")
+            except Exception as e:
+                print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, global_mode=global_mode)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()

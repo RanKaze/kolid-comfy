@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
-import { Editor, TLImageShape, TLVideoShape, TLAsset } from '@tldraw/tldraw';
+import { Editor, TLImageShape, TLVideoShape, TLAsset, AssetRecordType } from '@tldraw/tldraw';
 import ThumbnailList from './ThumbnailList';
 
 export interface ImageInfo {
@@ -9,6 +9,8 @@ export interface ImageInfo {
   dataUrl: string;
   assetId: string;
   shapeId: string;
+  width?: number;
+  height?: number;
   strengths?: Record<string, number>;
 }
 
@@ -31,6 +33,7 @@ export interface PanelHandle {
   setVideos: (videos: VideoInfo[]) => void;
   setSlots: (slots: SlotItem[]) => void;
   setPrompt: (prompt: string) => void;
+  startCapture: (vid: VideoInfo) => void;
 }
 
 interface PanelProps {
@@ -74,23 +77,33 @@ const FrameCaptureModal: React.FC<{
   }, []);
 
   const handleCapture = useCallback(() => {
+    console.log('[DEBUG:FrameCaptureModal] handleCapture START');
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas) return;
+    console.log('[DEBUG:FrameCaptureModal] video:', !!video, 'videoWidth:', video?.videoWidth, 'videoHeight:', video?.videoHeight);
+    console.log('[DEBUG:FrameCaptureModal] canvas:', !!canvas);
+    if (!video || !canvas) { console.warn('[DEBUG:FrameCaptureModal] Missing video or canvas, aborting'); return; }
     canvas.width = video.videoWidth || 640;
     canvas.height = video.videoHeight || 360;
+    console.log('[DEBUG:FrameCaptureModal] canvas set to:', canvas.width, 'x', canvas.height);
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) { console.warn('[DEBUG:FrameCaptureModal] No 2d context'); return; }
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/png');
+    console.log('[DEBUG:FrameCaptureModal] dataUrl length:', dataUrl.length, 'prefix:', dataUrl.substring(0, 40));
     const imgInfo: ImageInfo = {
       id: `capture_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
       name: `${videoName}_${formatTime(currentTime)}.png`,
       dataUrl,
       assetId: '',
       shapeId: '',
+      width: canvas.width,
+      height: canvas.height,
     };
+    console.log('[DEBUG:FrameCaptureModal] imgInfo created:', { id: imgInfo.id, name: imgInfo.name, w: imgInfo.width, h: imgInfo.height });
+    console.log('[DEBUG:FrameCaptureModal] calling onCapture... typeof onCapture:', typeof onCapture);
     onCapture(imgInfo);
+    console.log('[DEBUG:FrameCaptureModal] onCapture returned');
   }, [videoName, currentTime, onCapture]);
 
   const formatTime = (t: number) => {
@@ -405,6 +418,10 @@ const SlotCard: React.FC<{
 
     // Take the first matching shape
     const shape = matchingShapes[0];
+    if (!shape) {
+      console.warn('[SlotCard] No matching shape found');
+      return;
+    }
     console.log('[SlotCard] shape:', shape);
     const assetId = (shape.props as any).assetId;
     console.log('[SlotCard] assetId:', assetId);
@@ -653,29 +670,161 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   });
   const [captureTarget, setCaptureTarget] = useState<{ vid: VideoInfo; slotIndex?: number } | null>(null);
   const handleStartCapture = useCallback((vid: VideoInfo, slotIndex?: number) => {
+    console.log('[DEBUG:handleStartCapture] Called with vid:', {
+      id: vid.id, name: vid.name, shapeId: vid.shapeId, assetId: vid.assetId,
+      dataUrlLen: vid.dataUrl?.length, slotIndex
+    });
     setCaptureTarget({ vid, slotIndex });
+    console.log('[DEBUG:handleStartCapture] captureTarget state set');
   }, []);
   const handleCaptureDone = useCallback((imgInfo: ImageInfo) => {
+    console.log('[DEBUG:handleCaptureDone] ========== ENTER ==========');
+    console.log('[DEBUG:handleCaptureDone] imgInfo:', {
+      id: imgInfo.id, name: imgInfo.name,
+      w: imgInfo.width, h: imgInfo.height,
+      dataUrlLen: imgInfo.dataUrl?.length,
+      dataUrlPrefix: imgInfo.dataUrl?.substring(0, 40),
+    });
+    console.log('[DEBUG:handleCaptureDone] captureTarget:', captureTarget ? {
+      vidId: captureTarget.vid?.id,
+      vidShapeId: captureTarget.vid?.shapeId,
+      vidAssetId: captureTarget.vid?.assetId,
+      slotIndex: captureTarget.slotIndex,
+    } : 'NULL');
+
+    const editor = editorRef.current;
+    console.log('[DEBUG:handleCaptureDone] editor available:', !!editor);
+
+    // Create a card (image shape) on the tldraw canvas
+    if (editor) {
+      try {
+        console.log('[DEBUG:handleCaptureDone] Starting asset/shape creation...');
+        const assetId = AssetRecordType.createId();
+        const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
+        console.log('[DEBUG:handleCaptureDone] Generated IDs — assetId:', assetId, 'shapeId:', shapeId);
+
+        // Use actual captured frame dimensions, fallback to 300
+        const imgW = imgInfo.width || 300;
+        const imgH = imgInfo.height || 300;
+
+        // Position the new card next to the source video shape, with offset
+        const sourceVid = captureTarget?.vid;
+        let x = 0;
+        let y = 0;
+        console.log('[DEBUG:handleCaptureDone] sourceVid shapeId:', sourceVid?.shapeId);
+        if (sourceVid?.shapeId) {
+          const vidShape = editor.getShape(sourceVid.shapeId as any);
+          console.log('[DEBUG:handleCaptureDone] vidShape found:', !!vidShape, vidShape ? { x: vidShape.x, y: vidShape.y, w: (vidShape.props as any).w } : null);
+          if (vidShape) {
+            x = vidShape.x + ((vidShape.props as any).w || 300) + 40;
+            y = vidShape.y;
+          }
+        }
+        console.log('[DEBUG:handleCaptureDone] Position:', { x, y });
+
+        // Check store state before creating
+        const shapeCountBefore = editor.store.allRecords().filter((r: any) => r.typeName === 'shape').length;
+        const assetCountBefore = editor.store.allRecords().filter((r: any) => r.typeName === 'asset').length;
+        console.log('[DEBUG:handleCaptureDone] Store before — shapes:', shapeCountBefore, 'assets:', assetCountBefore);
+
+        editor.createAssets([{
+          id: assetId,
+          typeName: 'asset',
+          type: 'image' as any,
+          meta: {},
+          props: {
+            name: imgInfo.name,
+            src: imgInfo.dataUrl,
+            w: imgW,
+            h: imgH,
+            mimeType: 'image/png',
+            isAnimated: false,
+          },
+        } as any]);
+        console.log('[DEBUG:handleCaptureDone] createAssets called');
+
+        editor.createShape({
+          id: shapeId,
+          type: 'image',
+          x,
+          y,
+          props: {
+            w: imgW,
+            h: imgH,
+            assetId,
+          },
+        } as any);
+        console.log('[DEBUG:handleCaptureDone] createShape called');
+
+        // Verify the asset and shape were created
+        const createdAsset = editor.getAsset(assetId as any);
+        const createdShape = editor.getShape(shapeId as any);
+        console.log('[DEBUG:handleCaptureDone] Verification — asset exists:', !!createdAsset, 'shape exists:', !!createdShape);
+        if (createdShape) {
+          console.log('[DEBUG:handleCaptureDone] Shape details:', {
+            id: createdShape.id, type: createdShape.type,
+            x: createdShape.x, y: createdShape.y,
+            props: createdShape.props,
+          });
+        } else {
+          console.error('[DEBUG:handleCaptureDone] SHAPE NOT FOUND after createShape!');
+        }
+
+        const shapeCountAfter = editor.store.allRecords().filter((r: any) => r.typeName === 'shape').length;
+        const assetCountAfter = editor.store.allRecords().filter((r: any) => r.typeName === 'asset').length;
+        console.log('[DEBUG:handleCaptureDone] Store after — shapes:', shapeCountAfter, 'assets:', assetCountAfter);
+
+        // Update imgInfo with the new asset/shape IDs for tracking
+        imgInfo.assetId = assetId as string;
+        imgInfo.shapeId = shapeId as string;
+
+        console.log('[DEBUG:handleCaptureDone] Frame capture card created OK');
+      } catch (err) {
+        console.error('[DEBUG:handleCaptureDone] FAILED to create capture card:', err);
+        console.error('[DEBUG:handleCaptureDone] Error stack:', (err as Error).stack);
+      }
+    } else {
+      console.warn('[DEBUG:handleCaptureDone] NO EDITOR available — cannot create canvas card!');
+    }
+
+    console.log('[DEBUG:handleCaptureDone] captureTarget.slotIndex:', captureTarget?.slotIndex);
     if (captureTarget?.slotIndex != null) {
       // From a slot → fill the slot via ref
+      console.log('[DEBUG:handleCaptureDone] Filling slot index:', captureTarget.slotIndex);
       fillSlotRef.current(captureTarget.slotIndex, imgInfo);
     } else {
       // From image row / VideoCard → add to images list
-      setImages((prev) => [...prev, imgInfo]);
+      console.log('[DEBUG:handleCaptureDone] Adding to images list');
+      setImages((prev) => {
+        console.log('[DEBUG:handleCaptureDone] setImages — prev count:', prev.length, '→ new count:', prev.length + 1);
+        return [...prev, imgInfo];
+      });
     }
+    console.log('[DEBUG:handleCaptureDone] Setting captureTarget to null (closing modal)');
     setCaptureTarget(null);
-  }, [captureTarget]);
+    console.log('[DEBUG:handleCaptureDone] ========== EXIT ==========');
+  }, [captureTarget, editorRef]);
   const handleCaptureClose = useCallback(() => {
     setCaptureTarget(null);
   }, []);
 
-  // Expose setImages, setVideos, setSlots and setPrompt to parent for snapshot restore
+  // Handle external setSlots (from snapshot restore via useImperativeHandle)
+  const handleSetSlots = useCallback((newSlots: SlotItem[]) => {
+    console.log('[Panel] External setSlots called with', newSlots.length, 'slots');
+    if (newSlots.length > 0) {
+      setSlots(newSlots);
+      setSlotSyncCounter(c => c + 1);  // Trigger useEffect to check length
+    }
+  }, []);
+
+  // Expose setImages, setVideos, setSlots, setPrompt, and startCapture to parent
   useImperativeHandle(ref, () => ({
     setImages: (newImages: ImageInfo[]) => setImages(newImages),
     setVideos: (newVideos: VideoInfo[]) => setVideos(newVideos),
     setSlots: handleSetSlots,
     setPrompt: (newPrompt: string) => setPrompt(newPrompt),
-  }));
+    startCapture: (vid: VideoInfo) => handleStartCapture(vid),
+  }), [handleStartCapture, handleSetSlots]);
 
   // Slot initialization - syncs with slotDefs prop (which arrives asynchronously from fetch)
   // Uses a ref to track whether we've already initialized from slotDefs to avoid overwriting
@@ -704,15 +853,6 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
       slotsInitializedRef.current = false;
     }
   }, [enableSlot, slotDefs, slotSyncCounter]);
-
-  // Handle external setSlots (from snapshot restore via useImperativeHandle)
-  const handleSetSlots = useCallback((newSlots: SlotItem[]) => {
-    console.log('[Panel] External setSlots called with', newSlots.length, 'slots');
-    if (newSlots.length > 0) {
-      setSlots(newSlots);
-      setSlotSyncCounter(c => c + 1);  // Trigger useEffect to check length
-    }
-  }, []);
 
   // Measure panel height and report to parent
   useEffect(() => {
