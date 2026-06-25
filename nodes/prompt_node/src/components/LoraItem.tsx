@@ -12,13 +12,19 @@ export function LoraItem({ item, isSelected, isFiltered, onToggle }: LoraItemPro
     ? `/lora_images/${encodeURIComponent(item.preview_url)}`
     : '';
 
+  const isVideo = previewSrc ? /\.(mp4|webm|mov|avi|mkv)$/i.test(previewSrc) : false;
+
   const tags = item.tags || [];
 
   return (
     <div className={`lora-item${isSelected ? ' selected' : ''}${isFiltered ? ' filtered' : ''}`} onMouseDown={onToggle}>
       <div className="lora-image-layer">
         {previewSrc ? (
-          <img src={previewSrc} alt={item.name} loading="lazy" />
+          isVideo ? (
+            <video src={previewSrc} muted loop autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ) : (
+            <img src={previewSrc} alt={item.name} loading="lazy" />
+          )
         ) : (
           <div className="lora-no-image">No Image</div>
         )}
