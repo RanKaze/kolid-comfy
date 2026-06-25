@@ -10,6 +10,7 @@ export interface PromptData {
 
 export interface CategoryData {
   bg_image?: string;
+  bg_video?: string;
   tags?: string[];
   decorations?: string[];
   prompts?: PromptData[];
@@ -63,6 +64,7 @@ export interface PrefabData {
 
 export interface LibraryData {
   bg_image?: string;
+  bg_video?: string;
   prompt_ids?: string[];
   display_mode?: string;
   size_mode?: string;

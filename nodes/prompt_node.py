@@ -99,6 +99,7 @@ class SnapshotPromptServer:
         self.images_dir = os.path.join(self.data_dir, "images")
         self.prompt_json = os.path.join(self.data_dir, "prompt.json")
         self.library_json = os.path.join(self.data_dir, "library.json")
+        self.lora_folder_meta_json = os.path.join(self.data_dir, "lora_folder_meta.json")
 
         self.prompts_data = self._load_prompts()
         self.libraries_data = self._load_libraries()
@@ -113,6 +114,7 @@ class SnapshotPromptServer:
         
         # Scan Lora metadata files (return all for display, but keep regex for output filtering)
         self.lora_data = self._scan_loras()
+        self.lora_folder_meta = self._load_lora_folder_meta()
         # Build a set of valid lora paths for output filtering (active_loras / lora_trigger_words)
         import re as _re
         compiled_re = _re.compile(self.lora_regex) if self.lora_regex else None
@@ -422,6 +424,26 @@ class SnapshotPromptServer:
         except:
             pass
 
+    def _load_lora_folder_meta(self):
+        """Load lora folder meta data (bg_image/bg_video per folder)."""
+        self._ensure_dirs()
+        if os.path.exists(self.lora_folder_meta_json):
+            try:
+                with open(self.lora_folder_meta_json, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+
+    def _save_lora_folder_meta(self, data):
+        """Save lora folder meta data."""
+        self._ensure_dirs()
+        try:
+            with open(self.lora_folder_meta_json, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
     def _load_prompts(self):
         self._ensure_dirs()
         
@@ -585,6 +607,22 @@ class SnapshotPromptServer:
             print(f"[SnapshotPrompt] Failed to save image: {e}")
             return ""
 
+    def _save_video(self, video_bytes):
+        """Save video data to disk and return filename."""
+        self._ensure_dirs()
+        try:
+            vid_id = hashlib.md5(video_bytes).hexdigest()[:12]
+            vid_filename = f"{vid_id}.mp4"
+            vid_path = os.path.join(self.images_dir, vid_filename)
+            
+            with open(vid_path, 'wb') as f:
+                f.write(video_bytes)
+            
+            return vid_filename
+        except Exception as e:
+            print(f"[SnapshotPrompt] Failed to save video: {e}")
+            return ""
+
     def start(self):
         import socketserver
         class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -723,6 +761,7 @@ class SnapshotPromptServer:
             elif self.path == '/lora_data':
                 data = {
                     'folders': self.server_instance.lora_data if self.server_instance else {},
+                    'folder_meta': self.server_instance.lora_folder_meta if self.server_instance else {},
                     'last_selected_loras': self.server_instance.last_selected_loras if self.server_instance else [],
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs if self.server_instance else [],
                     'lora_regex': self.server_instance.lora_regex if self.server_instance else '',
@@ -1308,6 +1347,57 @@ class SnapshotPromptServer:
                 else:
                     self.send_error(500, "Server error")
 
+            elif self.path == '/upload_video':
+                content_length = int(self.headers['Content-Length'])
+                video_bytes = self.rfile.read(content_length)
+                
+                if self.server_instance:
+                    filename = self.server_instance._save_video(video_bytes)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'filename': filename, 'success': True}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_lora_folder_meta':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    folder_name = data.get('folder_name', '').strip()
+                    image_data = data.get('image')
+                    video_data = data.get('video')
+
+                    if folder_name:
+                        meta = self.server_instance.lora_folder_meta.get(folder_name, {})
+                        if image_data is not None:
+                            if image_data == '':
+                                meta['bg_image'] = ''
+                            else:
+                                meta['bg_image'] = self.server_instance._save_image(image_data)
+                        if video_data is not None:
+                            if video_data == '':
+                                meta['bg_video'] = ''
+                            else:
+                                meta['bg_video'] = video_data
+                        self.server_instance.lora_folder_meta[folder_name] = meta
+                        self.server_instance._save_lora_folder_meta(self.server_instance.lora_folder_meta)
+
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    result = {'success': True}
+                    if folder_name in self.server_instance.lora_folder_meta:
+                        result['bg_image'] = self.server_instance.lora_folder_meta[folder_name].get('bg_image', '')
+                        result['bg_video'] = self.server_instance.lora_folder_meta[folder_name].get('bg_video', '')
+                    self.wfile.write(json.dumps(result).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             elif self.path == '/add_category':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -1345,6 +1435,7 @@ class SnapshotPromptServer:
                     old_name = data.get('old_name', '').strip()
                     new_name = data.get('new_name', '').strip()
                     image_data = data.get('image')
+                    video_data = data.get('video')
                     tags = data.get('tags')
                     decorations = data.get('decorations')
                     
@@ -1358,6 +1449,13 @@ class SnapshotPromptServer:
                                 cat_data["bg_image"] = ""
                             else:
                                 cat_data["bg_image"] = self.server_instance._save_image(image_data)
+                        
+                        # 处理背景视频
+                        if video_data is not None:
+                            if video_data == '':
+                                cat_data["bg_video"] = ""
+                            else:
+                                cat_data["bg_video"] = video_data
                         
                         # 处理 tags
                         if tags is not None:
@@ -1639,6 +1737,7 @@ class SnapshotPromptServer:
                     old_name = data.get('old_name', '').strip()
                     new_name = data.get('new_name', '').strip()
                     image_data = data.get('image', '')
+                    video_data = data.get('video')
                     prompt_ids = data.get('prompt_ids', None)
 
                     if old_name and new_name and old_name in self.server_instance.libraries_data:
@@ -1647,6 +1746,11 @@ class SnapshotPromptServer:
                             lib_data['bg_image'] = self.server_instance._save_image(image_data)
                         elif image_data == '':
                             lib_data['bg_image'] = ''
+                        if video_data is not None:
+                            if video_data == '':
+                                lib_data['bg_video'] = ''
+                            else:
+                                lib_data['bg_video'] = video_data
                         if prompt_ids is not None:
                             lib_data['prompt_ids'] = prompt_ids
                         self.server_instance.libraries_data[new_name] = lib_data
