@@ -163,6 +163,24 @@ body {
 .tag.parsed-tag .tag-strength-editor {
     background: #8b5cf6;
 }
+.tag.parsed-tag.tag-with-strength .tag-strength-editor {
+    background: #8b5cf6;
+}
+.tag.parsed-tag.tag-with-strength .tag-strength-overlay {
+    background: rgba(139, 92, 246, 0.35);
+}
+
+/* Tag drag reorder */
+.tag.tag-with-strength.dragging {
+    opacity: 0.4;
+}
+.tag.tag-with-strength.drag-over {
+    box-shadow: 0 0 0 2px #007aff;
+    transform: scale(1.08);
+}
+.tag.tag-with-strength.parsed-tag.drag-over {
+    box-shadow: 0 0 0 2px #8b5cf6;
+}
 
 /* Tag strength input */
 .tag.tag-with-strength {
