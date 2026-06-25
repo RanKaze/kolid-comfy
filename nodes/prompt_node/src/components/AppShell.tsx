@@ -787,6 +787,15 @@ export function AppShell() {
     setSelectedTags(prev => prev.filter((_, i) => i !== idx));
   }, []);
 
+  const reorderTags = useCallback((fromIndex: number, toIndex: number) => {
+    setSelectedTags(prev => {
+      const next = [...prev];
+      const [item] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, item);
+      return next;
+    });
+  }, []);
+
   const removeTemporaryTag = useCallback((tgIdx: number) => {
     tempCtx.removeTagGroup(tgIdx);
   }, [tempCtx]);
@@ -2745,6 +2754,8 @@ export function AppShell() {
                           strength={baseStrength}
                           showStrength={showStrength}
                           fromParsing={fromParsing}
+                          dragIndex={i}
+                          onReorder={(toIdx) => reorderTags(i, toIdx)}
                           onStrengthChange={(v) => {
                             setSelectedTags(prev => prev.map((g, idx) => {
                               if (idx !== i) return g;
@@ -3381,6 +3392,8 @@ function TagStrengthEditor({
   strength,
   showStrength,
   fromParsing,
+  dragIndex,
+  onReorder,
   onStrengthChange,
   onRemove,
 }: {
@@ -3388,12 +3401,16 @@ function TagStrengthEditor({
   strength: number;
   showStrength: boolean;
   fromParsing: boolean;
+  dragIndex: number;
+  onReorder: (toIdx: number) => void;
   onStrengthChange: (v: number) => void;
   onRemove: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [tempValue, setTempValue] = useState(String(strength));
+  const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const spanRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     if (editing && inputRef.current) {
@@ -3424,7 +3441,34 @@ function TagStrengthEditor({
   };
 
   return (
-    <span className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}`} onClick={startEdit}>
+    <span
+      ref={spanRef}
+      className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${dragOver ? ' drag-over' : ''}`}
+      onClick={editing ? undefined : startEdit}
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.dataTransfer.setData('text/plain', String(dragIndex));
+        e.dataTransfer.effectAllowed = 'move';
+        spanRef.current?.classList.add('dragging');
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        const fromIdx = parseInt(e.dataTransfer.getData('text/plain'));
+        if (!isNaN(fromIdx) && fromIdx !== dragIndex) {
+          onReorder(fromIdx);
+        }
+      }}
+      onDragEnd={() => {
+        spanRef.current?.classList.remove('dragging');
+      }}
+    >
       <span className="tag-strength-overlay">
         {showStrength ? `:${strength}` : ''}
       </span>
