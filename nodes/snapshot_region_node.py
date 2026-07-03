@@ -276,11 +276,12 @@ def _caption_to_boxes(cap):
 class SnapshotRegionServer:
     """Temporary HTTP server to serve the region editor page and handle results."""
 
-    def __init__(self, image, width, height, config):
+    def __init__(self, image, width, height, config, prompt_server=None):
         self.image = image
         self.width = width
         self.height = height
         self.config = config
+        self.prompt_server = prompt_server
         self.result = None
         self.server = None
         self.started = False
@@ -358,6 +359,7 @@ class SnapshotRegionServer:
                             'output_format': cfg.get('output_format', 'compact'),
                             'bg_brightness': cfg.get('bg_brightness', 25),
                             'initial_boxes': cfg.get('initial_boxes', ''),
+                            'prompt_url': cfg.get('prompt_url', None),
                         }
                         data = json.dumps(response).encode('utf-8')
                         self.send_response(200)
@@ -370,6 +372,25 @@ class SnapshotRegionServer:
                         self.send_error(500, f"Error: {e}")
                 else:
                     self.send_error(500, "Server error")
+            elif self.path == '/prompt_result':
+                # Check if the prompt server has a confirmed result
+                ps = self.server_instance.prompt_server if self.server_instance else None
+                has_result = ps is not None and ps.prompt_event.is_set()
+                result = None
+                if has_result:
+                    result = {
+                        'prompts': ps.selected_prompts,
+                        'custom_prompts': ps.custom_prompts,
+                        'loras': ps.selected_loras,
+                        'prefabs': ps.selected_prefabs,
+                    }
+                data = json.dumps({'has_result': has_result, 'result': result}).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+                self.end_headers()
+                self.wfile.write(data)
             else:
                 super().do_GET()
 
@@ -392,6 +413,41 @@ class SnapshotRegionServer:
             elif self.path == '/window_closed':
                 self.server_instance.window_closed = True
                 self.server_instance.result_event.set()
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+            elif self.path == '/switch_context':
+                # Update prompt server's context for the newly selected region
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length)
+                ctx = json.loads(post_data) if post_data else {}
+                ps = self.server_instance.prompt_server if self.server_instance else None
+                if ps:
+                    ps.last_selected = ctx.get('prompts', [])
+                    ps.last_selected_loras = ctx.get('loras', [])
+                    ps.last_selected_prefabs = ctx.get('prefabs', [])
+                    # Clear any pending result so the frontend doesn't re-apply stale data
+                    ps.prompt_event.clear()
+                    ps.selected_prompts = []
+                    ps.custom_prompts = ''
+                    ps.selected_loras = []
+                    ps.selected_prefabs = []
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+            elif self.path == '/reset_prompt':
+                # Clear the prompt result so frontend can detect new confirmation
+                ps = self.server_instance.prompt_server if self.server_instance else None
+                if ps:
+                    ps.prompt_event.clear()
+                    ps.selected_prompts = []
+                    ps.custom_prompts = ''
+                    ps.selected_loras = []
+                    ps.selected_prefabs = []
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -492,6 +548,10 @@ class SnapshotRegionNode:
                     "multiline": False,
                     "tooltip": "Cached region data from previous run (auto-updated when data_cache is on)",
                 }),
+                "enable_snapshot_prompt": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Embed SnapshotPromptNode editor in the left panel for configuring region prompts",
+                }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -525,6 +585,7 @@ class SnapshotRegionNode:
         bg_brightness: int = 25,
         data_cache: bool = True,
         cached_data: str = "",
+        enable_snapshot_prompt: bool = False,
         unique_id: str = None,
     ):
         # Save foreground window for focus restoration
@@ -561,8 +622,31 @@ class SnapshotRegionNode:
             'initial_boxes': initial_boxes_str,
         }
 
-        # Start server
-        server = SnapshotRegionServer(image, width, height, config)
+        # Start prompt server if enabled
+        prompt_server = None
+        if enable_snapshot_prompt:
+            from .prompt_node import SnapshotPromptServer
+            prompt_server = SnapshotPromptServer()
+            prompt_server_thread = threading.Thread(target=prompt_server.start)
+            prompt_server_thread.daemon = True
+            prompt_server_thread.start()
+
+            # Wait for prompt server to be ready
+            ps_start = time.time()
+            ps_timeout = 10
+            while not prompt_server.started:
+                if time.time() - ps_start > ps_timeout:
+                    print("[SnapshotRegion] Prompt server startup timeout, continuing without it")
+                    prompt_server = None
+                    break
+                time.sleep(0.1)
+
+            if prompt_server and prompt_server.started:
+                config['prompt_url'] = prompt_server.browser_url
+                print(f"[SnapshotRegion] Prompt server started at: {prompt_server.browser_url}")
+
+        # Start region server
+        server = SnapshotRegionServer(image, width, height, config, prompt_server=prompt_server)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -584,6 +668,10 @@ class SnapshotRegionNode:
 
         # Stop server
         server.stop()
+
+        # Stop prompt server if running
+        if prompt_server:
+            prompt_server.stop()
 
         # Restore window focus
         if has_win32gui and focused_window:

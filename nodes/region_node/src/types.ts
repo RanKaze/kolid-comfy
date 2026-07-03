@@ -1,3 +1,10 @@
+export interface PromptContext {
+  prompts: string[];
+  custom_prompts: string;
+  loras: any[];
+  prefabs: any[];
+}
+
 export interface Box {
   x: number;
   y: number;
@@ -9,6 +16,7 @@ export interface Box {
   palette: string[];
   locked?: boolean;
   nobbox?: boolean;
+  promptContext?: PromptContext | null;
 }
 
 export interface ServerConfig {
@@ -26,6 +34,7 @@ export interface ServerConfig {
   output_format: 'compact' | 'pretty';
   bg_brightness: number;
   initial_boxes: string;
+  prompt_url: string | null;
 }
 
 export interface ConfirmPayload {

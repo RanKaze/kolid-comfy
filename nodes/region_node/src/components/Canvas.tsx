@@ -283,6 +283,39 @@ const Canvas: React.FC<CanvasProps> = ({
             ctx.fillText(ln, x1 + 5, ty);
             ty += 16;
           }
+
+          // Prompt context components (prefabs, loras, prompts, custom)
+          const ctxData = b.promptContext;
+          if (ctxData) {
+            const chips: { label: string; color: string }[] = [];
+            const prefabs = ctxData.prefabs || [];
+            if (prefabs.length) chips.push({ label: `Prefabs: ${prefabs.length}`, color: '#bf5af2' });
+            const loras = ctxData.loras || [];
+            const activeLoras = loras.filter((l: any) => l.active !== false);
+            if (activeLoras.length) chips.push({ label: `LoRAs: ${activeLoras.length}`, color: '#ff9f0a' });
+            const prompts = ctxData.prompts || [];
+            if (prompts.length) chips.push({ label: `Prompts: ${prompts.length}`, color: '#30d158' });
+            const custom = ctxData.custom_prompts || '';
+            if (custom.trim()) chips.push({ label: 'Custom', color: '#0a84ff' });
+
+            if (chips.length && ty < y2) {
+              ctx.font = `bold 10px ${iosFont}`;
+              let cx = x1 + 5;
+              for (const chip of chips) {
+                if (ty > y2) break;
+                const chipText = chip.label;
+                const chipW = ctx.measureText(chipText).width + 10;
+                if (cx + chipW > x2 - 4) { cx = x1 + 5; ty += 14; if (ty > y2) break; }
+                ctx.fillStyle = chip.color + 'cc';
+                ctx.beginPath();
+                ctx.roundRect(cx, ty, chipW, 12, 6);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.fillText(chipText, cx + 5, ty + 9);
+                cx += chipW + 4;
+              }
+            }
+          }
           ctx.restore();
         }
       }
@@ -320,7 +353,16 @@ const Canvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     const onResize = () => fitCanvas();
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    // Also observe the container itself for layout changes (e.g. iframe split)
+    let ro: ResizeObserver | null = null;
+    if (wrapRef.current && typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => fitCanvas());
+      ro.observe(wrapRef.current);
+    }
+    return () => {
+      window.removeEventListener('resize', onResize);
+      ro?.disconnect();
+    };
   }, [fitCanvas]);
 
   useEffect(() => {
@@ -486,7 +528,7 @@ const Canvas: React.FC<CanvasProps> = ({
   return (
     <div ref={wrapRef} style={{
       flex: '1 1 auto', minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      overflow: 'hidden', position: 'relative', padding: '8px',
+      overflow: 'hidden', position: 'relative', padding: '4px',
     }}>
       <canvas
         ref={canvasRef}

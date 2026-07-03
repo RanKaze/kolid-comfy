@@ -414,6 +414,56 @@ export function AppShell() {
     prefabRestoredRef.current = true;
   }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid]);
 
+  // Listen for context switch from parent (iframe embedding) + notify ready
+  const isReloadingRef = useRef(false);
+  useEffect(() => {
+    const reloadHandler = (e: MessageEvent) => {
+      if (e.data?.type === 'kolid-reload-data') {
+        isReloadingRef.current = true;
+        loraRestoredRef.current = false;
+        prefabRestoredRef.current = false;
+        setSelectedLoras([]);
+        setLoraSelections({});
+        setSelectedPrefabs([]);
+        setSelectedTags([]);
+        setCustomPrompts('');
+        Promise.all([loadData(), loadLoraData()]).then(() => {
+          isReloadingRef.current = false;
+        });
+      }
+    };
+    window.addEventListener('message', reloadHandler);
+    try { window.parent?.postMessage({ type: 'kolid-prompt-ready' }, '*'); } catch {}
+    return () => window.removeEventListener('message', reloadHandler);
+  }, [loadData, loadLoraData]);
+
+  // Live context push: whenever selections change, notify parent immediately
+  // Skip while reloading to avoid overwriting saved context with cleared state
+  useEffect(() => {
+    if (window.parent === window) return;
+    if (isReloadingRef.current) return;
+    const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+    const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+      const sel = loraSelections[l.file_path];
+      return {
+        file_path: l.file_path,
+        name: l.name,
+        strength: sel?.strength ?? 1.0,
+        active_tags: sel?.activeTags ?? [],
+        active: sel?.active ?? true,
+        split_mode: sel?.split_mode,
+      };
+    });
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    window.parent.postMessage({
+      type: 'kolid-prompt-live',
+      prompts: promptsToSend,
+      custom_prompts: customPrompts,
+      loras: lorasPayload,
+      prefabs: prefabsPayload,
+    }, '*');
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs]);
+
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
   const [modalStack, setModalStack] = useState<string[]>([]);
@@ -2784,7 +2834,6 @@ export function AppShell() {
               </div>
 
               <div className="footer">
-                <button className="btn btn-secondary" onClick={closeWindow}>Cancel</button>
                 <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>
               </div>
             </>
