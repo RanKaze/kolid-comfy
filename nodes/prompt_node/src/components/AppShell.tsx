@@ -23,6 +23,7 @@ import { LoraFolderCard } from './LoraFolderCard';
 import { Lora } from './Lora';
 import { TextToggle } from './TextToggle';
 import RegionCanvas from './RegionCanvas';
+import { RegionFormatManager } from '../RegionFormatManager';
 
 /* ========== Inline SVG Icons (no emoji) ========== */
 const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
@@ -229,6 +230,13 @@ export function AppShell() {
   const [imgVersion, setImgVersion] = useState(0);
   // Region state
   const [enableRegion, setEnableRegion] = useState(false);
+  const [regionFormat, setRegionFormat] = useState('');
+  const [formatSlots, setFormatSlots] = useState<any[]>([]);
+  const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
+  const activeSlotIdRef = useRef<string | null>(null);
+  useEffect(() => { activeSlotIdRef.current = activeSlotId; }, [activeSlotId]);
+  const formatSlotContextsRef = useRef<Map<string, PromptContextBase>>(new Map());
+  const formatManagerRef = useRef<RegionFormatManager | null>(null);
   const [regionImage, setRegionImage] = useState('');
   const [regionW, setRegionW] = useState(1024);
   const [regionH, setRegionH] = useState(1024);
@@ -320,7 +328,34 @@ export function AppShell() {
       if(d.image){setRegionImage(d.image);}
       setRegionW(d.width||1024); setRegionH(d.height||1024); setRegionBg(d.bg_brightness||25);
       setEnableRegion(!!d.enable_region);
-      try{const ib=JSON.parse(d.initial_boxes||'[]');if(Array.isArray(ib))setRegionBoxes(ib);}catch{}
+      if (d.region_format) {
+        setRegionFormat(d.region_format);
+        const mgr = new RegionFormatManager(d.region_format);
+        formatManagerRef.current = mgr;
+        const slots = mgr.getContextSlots();
+        setFormatSlots(slots);
+        console.log('[RegionFormat] Parsed format:', d.region_format.substring(0, 100), 'slots:', slots);
+      } else if (d.enable_region) {
+        console.log('[RegionFormat] No region_format provided in config');
+      }
+      try {
+        const cd = JSON.parse(d.initial_boxes || '[]');
+        if (Array.isArray(cd)) {
+          // Old format: just boxes
+          setRegionBoxes(cd);
+        } else if (cd && typeof cd === 'object') {
+          // New format: { boxes, format_slots, background_context }
+          if (Array.isArray(cd.boxes)) setRegionBoxes(cd.boxes);
+          if (cd.format_slots && typeof cd.format_slots === 'object') {
+            for (const [k, v] of Object.entries(cd.format_slots)) {
+              formatSlotContextsRef.current.set(k, v as PromptContextBase);
+            }
+          }
+          if (cd.background_context) {
+            backgroundContextRef.current = cd.background_context;
+          }
+        }
+      } catch {}
     }).catch(()=>{});
   }, []);
 
@@ -344,6 +379,11 @@ export function AppShell() {
 
   useEffect(() => {
     if (!enableRegion) return;
+    // Skip if a format slot is active (format slots manage their own context switching)
+    if (activeSlotId !== null) {
+      prevRegionActiveRef.current = regionActiveIdx;
+      return;
+    }
     if (regionActiveIdx === prevRegionActiveRef.current) return;
     const prevIdx = prevRegionActiveRef.current;
     prevRegionActiveRef.current = regionActiveIdx;
@@ -561,6 +601,21 @@ export function AppShell() {
     if (!enableRegion) return;
     if (isRegionReloadingRef.current) return;
     const idx = regionActiveRef.current;
+    // If a format slot is active, store to formatSlotContextsRef instead
+    if (activeSlotIdRef.current) {
+      const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+      const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+        const sel = loraSelections[l.file_path];
+        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+      });
+      const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+      const ctx: PromptContextBase = {
+        prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
+        label: activeSlotIdRef.current,
+      };
+      formatSlotContextsRef.current.set(activeSlotIdRef.current, ctx);
+      return;
+    }
     const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
     const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
@@ -661,7 +716,7 @@ export function AppShell() {
       if (backgroundContextRef.current && JSON.stringify(backgroundContextRef.current) === JSON.stringify(bgCtx)) return;
       backgroundContextRef.current = bgCtx;
     }
-  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, enableRegion, findPrefabByGuid]);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, enableRegion, findPrefabByGuid, activeSlotId]);
 
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
@@ -1345,9 +1400,67 @@ export function AppShell() {
         regionBoxesRef.current = nbs;
         void prefabsPayload;
       }
+      // Assemble region_prompt using RegionFormatManager
+      let assembledPrompt = '';
+      const mgr = formatManagerRef.current;
+      if (mgr && mgr.hasTemplate()) {
+        // Save current active slot context before assembling
+        if (activeSlotId) {
+          const currentCtx: PromptContextBase = {
+            prompts: selectedTags.map(g => tagsToDisplayString(g)),
+            custom_prompts: customPrompts,
+            loras: selectedLoras.map(l => {
+              const sel = loraSelections[l.file_path];
+              return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+            }),
+            prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children })),
+            label: activeSlotId,
+          };
+          formatSlotContextsRef.current.set(activeSlotId, currentCtx);
+        }
+        // Build context values from saved slots
+        const contextValues = new Map<string, string>();
+        for (const slot of mgr.getContextSlots()) {
+          const ctx = formatSlotContextsRef.current.get(slot.id);
+          if (ctx) {
+            // Build prompt text (same as desc logic)
+            const parts: string[] = [];
+            for (const p of ctx.prompts) { const c = p.replace(/\[/g, '').replace(/\]/g, ''); if (c) parts.push(c); }
+            if (ctx.custom_prompts.trim()) parts.push(ctx.custom_prompts.trim());
+            contextValues.set(slot.id, parts.join(', '));
+          }
+        }
+        // Build background prompt
+        const bgCtx = backgroundContextRef.current;
+        let bgPrompt = '';
+        if (bgCtx) {
+          const bgParts: string[] = [];
+          for (const p of bgCtx.prompts) { const c = p.replace(/\[/g, '').replace(/\]/g, ''); if (c) bgParts.push(c); }
+          if (bgCtx.custom_prompts.trim()) bgParts.push(bgCtx.custom_prompts.trim());
+          bgPrompt = bgParts.join(', ');
+        }
+        // Build regions array
+        const regions = regionBoxesRef.current
+          .filter(b => !b.nobbox)
+          .map(box => ({
+            bbox: [
+              Math.round(box.y * 1000),
+              Math.round(box.x * 1000),
+              Math.round((box.y + box.h) * 1000),
+              Math.round((box.x + box.w) * 1000),
+            ],
+            prompt: box.desc || '',
+          }));
+        assembledPrompt = mgr.assemble(contextValues, bgPrompt, regions);
+      }
       fetch('/region_confirm', {
         method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ boxes: regionBoxesRef.current }),
+        body: JSON.stringify({
+          boxes: regionBoxesRef.current,
+          region_prompt: assembledPrompt,
+          format_slots: Object.fromEntries(formatSlotContextsRef.current),
+          background_context: backgroundContextRef.current,
+        }),
       }).catch(()=>{});
     }
 
@@ -2531,7 +2644,7 @@ export function AppShell() {
             bgBrightness={regionBg}
             boxOpacity={regionOpacity}
             onBoxesChange={setRegionBoxes}
-            onActiveIdxChange={setRegionActiveIdx}
+            onActiveIdxChange={(idx) => { activeSlotIdRef.current = null; setActiveSlotId(null); setRegionActiveIdx(idx); }}
           />
           {/* Region control bar */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px 14px', borderTop: '0.5px solid #38383a', background: 'rgba(28,28,30,0.85)', backdropFilter: 'blur(20px)', flexShrink: 0, fontFamily: `-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif` }}>
@@ -2567,6 +2680,77 @@ export function AppShell() {
                 <span>No region selected — drag on canvas to draw</span>
               )}
             </div>
+            {/* Context slot buttons from region_format */}
+            {formatSlots.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', padding: '6px 14px', borderTop: '0.5px solid #38383a' }}>
+                {formatSlots.map(slot => {
+                  const isActive = slot.type === 'background'
+                    ? (activeSlotId === null && regionActiveIdx < 0)
+                    : (activeSlotId === slot.id);
+                  return (
+                  <button
+                    key={slot.id}
+                    onClick={() => {
+                      // Save current context, then load this slot's context
+                      const currentCtx: PromptContextBase = {
+                        prompts: selectedTags.map(g => tagsToDisplayString(g)),
+                        custom_prompts: customPrompts,
+                        loras: selectedLoras.map(l => {
+                          const sel = loraSelections[l.file_path];
+                          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+                        }),
+                        prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children })),
+                        label: slot.label,
+                      };
+                      // Save to current slot/region/background
+                      if (activeSlotIdRef.current) {
+                        formatSlotContextsRef.current.set(activeSlotIdRef.current, currentCtx);
+                      } else if (regionActiveRef.current >= 0) {
+                        const nbs = [...regionBoxesRef.current];
+                        nbs[regionActiveRef.current] = { ...nbs[regionActiveRef.current], promptContext: currentCtx };
+                        regionBoxesRef.current = nbs;
+                        setRegionBoxes(nbs);
+                      } else {
+                        backgroundContextRef.current = { ...currentCtx, isBackground: true };
+                      }
+                      // Load target slot
+                      const targetCtx = slot.type === 'background'
+                        ? backgroundContextRef.current
+                        : formatSlotContextsRef.current.get(slot.id);
+                      // For background slot, clear activeSlotId; otherwise set it
+                      // Update ref immediately to prevent live-store from writing to wrong slot
+                      const newSlotId = slot.type === 'background' ? null : slot.id;
+                      activeSlotIdRef.current = newSlotId;
+                      setActiveSlotId(newSlotId);
+                      setRegionActiveIdx(-1);
+                      if (targetCtx) {
+                        isRegionReloadingRef.current = true;
+                        fetch('/switch_context', {
+                          method: 'POST', headers: {'Content-Type':'application/json'},
+                          body: JSON.stringify(targetCtx),
+                        }).then(async () => {
+                          loraRestoredRef.current = false;
+                          prefabRestoredRef.current = false;
+                          setSelectedLoras([]); setLoraSelections({});
+                          setSelectedPrefabs([]); setSelectedTags([]); setCustomPrompts('');
+                          await Promise.all([loadData(), loadLoraData()]);
+                          isRegionReloadingRef.current = false;
+                        }).catch(() => { isRegionReloadingRef.current = false; });
+                      }
+                    }}
+                    style={{
+                      padding: '4px 10px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                      background: isActive ? '#0a84ff' : '#2c2c2e',
+                      color: isActive ? '#fff' : '#8e8e93',
+                      fontSize: 12, fontFamily: `-apple-system, BlinkMacSystemFont, sans-serif`,
+                    }}
+                  >
+                    {slot.label}
+                  </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       ) : null}
