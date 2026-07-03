@@ -154,7 +154,6 @@ class SnapshotDetailerSamplerServer:
         self.prompt_server = SnapshotPromptServer(
             port=None,
             last_selected=[],
-            prompt_foldout=False,
             lora_regex=self.lora_regex,
             last_selected_loras=[],
             last_selected_prefabs=[],

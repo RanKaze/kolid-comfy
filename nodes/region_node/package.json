@@ -1,18 +1,19 @@
 {
-  "name": "@kolid/nodes",
+  "name": "kolid-region-node",
   "private": true,
   "version": "1.0.0",
-  "workspaces": [
-    "packages/*",
-    "prompt_node",
-    "sampler_node",
-    "switch_node",
-    "assets_node",
-    "region_node"
-  ],
-  "devDependencies": {
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "@kolid/ui-utils": "*"
+  },
+  "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

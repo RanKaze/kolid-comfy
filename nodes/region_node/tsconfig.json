@@ -1,0 +1,9 @@
+{
+  "extends": "@kolid/ui-utils/tsconfig.base",
+  "compilerOptions": {
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
