@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Canvas from './components/Canvas';
 import RegionPanel from './components/RegionPanel';
 import { ToolbarTop, ToolbarBottom } from './components/Toolbar';
-import type { Box, ServerConfig, ConfirmPayload } from './types';
+import type { Box, ServerConfig, ConfirmPayload, PromptContext } from './types';
 
 const iosFont = `-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, sans-serif`;
 
@@ -12,6 +12,8 @@ const App: React.FC = () => {
   const [imageSrc, setImageSrc] = useState('');
   const [canvasW, setCanvasW] = useState(1024);
   const [canvasH, setCanvasH] = useState(1024);
+  const [promptUrl, setPromptUrl] = useState<string | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [activeIdx, setActiveIdx] = useState(-1);
@@ -30,7 +32,9 @@ const App: React.FC = () => {
 
   const [confirming, setConfirming] = useState(false);
   const boxesRef = useRef(boxes);
+  const activeIdxRef = useRef(activeIdx);
   useEffect(() => { boxesRef.current = boxes; }, [boxes]);
+  useEffect(() => { activeIdxRef.current = activeIdx; }, [activeIdx]);
 
   useEffect(() => {
     fetch('/config')
@@ -45,6 +49,7 @@ const App: React.FC = () => {
         setAesthetics(data.aesthetics || '');
         setLighting(data.lighting || '');
         setMedium(data.medium || '');
+        setPromptUrl(data.prompt_url || null);
         try {
           const sp = JSON.parse(data.style_palette || '[]');
           if (Array.isArray(sp)) setStylePalette(sp);
@@ -57,6 +62,61 @@ const App: React.FC = () => {
       })
       .catch((e) => { setError('Failed to load: ' + e.message); setLoading(false); });
   }, []);
+
+  // Listen for live prompt context updates from the prompt iframe
+  useEffect(() => {
+    if (!promptUrl) return;
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'kolid-prompt-live') {
+        const idx = activeIdxRef.current;
+        if (idx >= 0) {
+          const ctx: PromptContext = {
+            prompts: e.data.prompts || [],
+            custom_prompts: e.data.custom_prompts || '',
+            loras: e.data.loras || [],
+            prefabs: e.data.prefabs || [],
+          };
+          setBoxes((prev) => {
+            const next = [...prev];
+            if (idx >= 0 && idx < next.length) {
+              next[idx] = { ...next[idx], promptContext: ctx };
+            }
+            return next;
+          });
+        }
+      } else if (e.data?.type === 'kolid-prompt-ready') {
+        // Prompt app loaded — if we have a context, tell it to reload
+        if (activeIdxRef.current >= 0) {
+          try {
+            iframeRef.current?.contentWindow?.postMessage({ type: 'kolid-reload-data' }, '*');
+          } catch {}
+        }
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [promptUrl]);
+
+  // Context switching: when activeIdx changes, push the new region's context
+  // to the prompt server and tell the iframe to reload its data.
+  const prevActiveRef = useRef(-1);
+  useEffect(() => {
+    if (!promptUrl) return;
+    if (activeIdx === prevActiveRef.current) return;
+    prevActiveRef.current = activeIdx;
+
+    const newBox = boxesRef.current[activeIdx];
+    const ctx = newBox?.promptContext;
+    fetch('/switch_context', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ctx || { prompts: [], custom_prompts: '', loras: [], prefabs: [] }),
+    }).then(() => {
+      try {
+        iframeRef.current?.contentWindow?.postMessage({ type: 'kolid-reload-data' }, '*');
+      } catch {}
+    }).catch(() => {});
+  }, [activeIdx, promptUrl]);
 
   useEffect(() => {
     const handler = () => {
@@ -114,14 +174,30 @@ const App: React.FC = () => {
 
   const deleteActiveBox = useCallback(() => {
     setBoxes((prev) => prev.filter((_, i) => i !== activeIdx));
-    setActiveIdx((prev) => Math.max(0, Math.min(prev, boxesRef.current.length - 2)));
-  }, [activeIdx]);
+    const newIdx = Math.max(-1, Math.min(activeIdx, boxesRef.current.length - 2));
+    // Force context switch by resetting prevActiveRef
+    prevActiveRef.current = -2;
+    setActiveIdx(newIdx);
+    // Immediately push empty context to clear the prompt editor,
+    // then load the new active region's context if one exists
+    if (promptUrl) {
+      const ctx = newIdx >= 0 ? (boxesRef.current[newIdx]?.promptContext) : null;
+      fetch('/switch_context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ctx || { prompts: [], custom_prompts: '', loras: [], prefabs: [] }),
+      }).then(() => {
+        try { iframeRef.current?.contentWindow?.postMessage({ type: 'kolid-reload-data' }, '*'); } catch {}
+      }).catch(() => {});
+    }
+  }, [activeIdx, promptUrl]);
 
   const duplicateActiveBox = useCallback(() => {
     if (!activeBox) return;
     const clone: Box = {
       ...activeBox, x: clamp01(activeBox.x + 0.03), y: clamp01(activeBox.y + 0.03),
       palette: [...(activeBox.palette || [])],
+      promptContext: activeBox.promptContext ? { ...activeBox.promptContext } : null,
     };
     setBoxes((prev) => [...prev, clone]);
     setActiveIdx(boxesRef.current.length);
@@ -141,19 +217,45 @@ const App: React.FC = () => {
     );
   }
 
+  const hasPrompt = !!promptUrl;
+
   return (
     <div style={{
       display: 'flex', height: '100vh', overflow: 'hidden',
       background: '#000', fontFamily: iosFont,
     }}>
-      {/* Left: canvas */}
-      <Canvas
-        imageSrc={imageSrc} boxes={boxes} activeIdx={activeIdx}
-        canvasWidth={canvasW} canvasHeight={canvasH}
-        bgBrightness={bgBrightness} showBoxText={showBoxText}
-        textStroke={textStroke} boxOpacity={boxOpacity}
-        onBoxesChange={setBoxes} onActiveIdxChange={setActiveIdx}
-      />
+      {hasPrompt ? (
+        <>
+          {/* Prompt iframe — 50% */}
+          <div style={{ flex: '1 1 0', minWidth: 0, borderRight: '0.5px solid #38383a' }}>
+            <iframe
+              ref={iframeRef}
+              src={promptUrl!}
+              style={{ width: '100%', height: '100%', border: 'none' }}
+              title="Prompt Editor"
+            />
+          </div>
+
+          {/* Canvas — 50% */}
+          <div style={{ flex: '1 1 0', minWidth: 0 }}>
+            <Canvas
+              imageSrc={imageSrc} boxes={boxes} activeIdx={activeIdx}
+              canvasWidth={canvasW} canvasHeight={canvasH}
+              bgBrightness={bgBrightness} showBoxText={showBoxText}
+              textStroke={textStroke} boxOpacity={boxOpacity}
+              onBoxesChange={setBoxes} onActiveIdxChange={setActiveIdx}
+            />
+          </div>
+        </>
+      ) : (
+        <Canvas
+          imageSrc={imageSrc} boxes={boxes} activeIdx={activeIdx}
+          canvasWidth={canvasW} canvasHeight={canvasH}
+          bgBrightness={bgBrightness} showBoxText={showBoxText}
+          textStroke={textStroke} boxOpacity={boxOpacity}
+          onBoxesChange={setBoxes} onActiveIdxChange={setActiveIdx}
+        />
+      )}
 
       {/* Vertical splitter */}
       <div style={{
@@ -174,7 +276,6 @@ const App: React.FC = () => {
         backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
         borderLeft: '0.5px solid #38383a',
       }}>
-        {/* Scrollable: style palette + caption fields + region panel */}
         <div style={{ flex: '1 1 auto', overflowY: 'auto', minHeight: 0 }}>
           <ToolbarTop
             stylePalette={stylePalette}
@@ -193,7 +294,6 @@ const App: React.FC = () => {
           />
         </div>
 
-        {/* Fixed bottom control bar */}
         <ToolbarBottom
           boxes={boxes} bgBrightness={bgBrightness}
           showBoxText={showBoxText} textStroke={textStroke} boxOpacity={boxOpacity}
