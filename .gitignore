@@ -51,3 +51,5 @@ nodes/web/supersplat/build/
 cookies/
 data/prompt/
 data/switch/
+
+.codely-cli/**
