@@ -185,3 +185,49 @@ export interface LoraSelectionData {
 export interface LoraFolders {
   [folder: string]: LoraItemData[];
 }
+
+// ═══ Region Context ═══
+
+/** Base context — shared by all context types (background, region, etc.) */
+export interface PromptContextBase {
+  prompts: string[];
+  custom_prompts: string;
+  loras: LoraSelectionData[];
+  prefabs: SelectedPrefabItem[];
+  /** Human-readable label for this context (e.g. "Background", "Region 01") */
+  label: string;
+}
+
+/** A region's prompt context — extends base with spatial data */
+export interface RegionContext extends PromptContextBase {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  type: 'obj' | 'text';
+  text: string;
+  desc: string;
+  palette: string[];
+  locked?: boolean;
+  nobbox?: boolean;
+}
+
+/** A region box on the canvas — its promptContext is the base context */
+export interface RegionBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  type: 'obj' | 'text';
+  text: string;
+  desc: string;
+  palette: string[];
+  locked?: boolean;
+  nobbox?: boolean;
+  promptContext?: PromptContextBase | null;
+}
+
+/** Singleton background context */
+export interface BackgroundContext extends PromptContextBase {
+  isBackground: true;
+}

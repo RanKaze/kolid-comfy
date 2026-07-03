@@ -4,6 +4,7 @@ import type {
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData,
   LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
+  PromptContextBase, RegionContext, RegionBox, BackgroundContext,
 } from '../types';
 import {
   categoryGroup, libraryGroup, categoryDisplay, libraryDisplay,
@@ -21,6 +22,7 @@ import { CustomPromptsEditor } from './CustomPromptsEditor';
 import { LoraFolderCard } from './LoraFolderCard';
 import { Lora } from './Lora';
 import { TextToggle } from './TextToggle';
+import RegionCanvas from './RegionCanvas';
 
 /* ========== Inline SVG Icons (no emoji) ========== */
 const iconPalette = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>;
@@ -225,6 +227,19 @@ export function AppShell() {
   []);
 
   const [imgVersion, setImgVersion] = useState(0);
+  // Region state
+  const [enableRegion, setEnableRegion] = useState(false);
+  const [regionImage, setRegionImage] = useState('');
+  const [regionW, setRegionW] = useState(1024);
+  const [regionH, setRegionH] = useState(1024);
+  const [regionBg, setRegionBg] = useState(25);
+  const [regionOpacity, setRegionOpacity] = useState(14);
+  const [regionBoxes, setRegionBoxes] = useState<RegionBox[]>([]);
+  const [regionActiveIdx, setRegionActiveIdx] = useState(-1);
+  const regionBoxesRef = useRef<RegionBox[]>([]);
+  const regionActiveRef = useRef(-1);
+  useEffect(() => { regionBoxesRef.current = regionBoxes; }, [regionBoxes]);
+  useEffect(() => { regionActiveRef.current = regionActiveIdx; }, [regionActiveIdx]);
   const imgUrl = useCallback((path: string) => path ? `/images/${path}?v=${imgVersion}` : '', [imgVersion]);
   const [, forceRender] = useState(0);
   const rerender = useCallback(() => forceRender(n => n + 1), []);
@@ -300,7 +315,83 @@ export function AppShell() {
       try { const s = localStorage.getItem('kolid_category_focus_points'); if (s) setCategoryFocusPoints(JSON.parse(s)); } catch {}
     });
     loadLoraData();
+    // Fetch region config
+    fetch('/region_config').then(r=>r.json()).then(d=>{
+      if(d.image){setRegionImage(d.image);}
+      setRegionW(d.width||1024); setRegionH(d.height||1024); setRegionBg(d.bg_brightness||25);
+      setEnableRegion(!!d.enable_region);
+      try{const ib=JSON.parse(d.initial_boxes||'[]');if(Array.isArray(ib))setRegionBoxes(ib);}catch{}
+    }).catch(()=>{});
   }, []);
+
+  // POST region data on changes
+  const regionConfirmTimer = useRef<any>(null);
+  useEffect(() => {
+    if (!enableRegion) return;
+    if (regionConfirmTimer.current) clearTimeout(regionConfirmTimer.current);
+    regionConfirmTimer.current = setTimeout(() => {
+      fetch('/region_confirm', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ boxes: regionBoxesRef.current }),
+      }).catch(()=>{});
+    }, 500);
+  }, [regionBoxes, enableRegion]);
+
+  // Context switching for regions
+  const prevRegionActiveRef = useRef(-2);
+  const isRegionReloadingRef = useRef(false);
+  const backgroundContextRef = useRef<BackgroundContext | null>(null);
+
+  useEffect(() => {
+    if (!enableRegion) return;
+    if (regionActiveIdx === prevRegionActiveRef.current) return;
+    const prevIdx = prevRegionActiveRef.current;
+    prevRegionActiveRef.current = regionActiveIdx;
+
+    // Save current prompt selection to the previous context
+    const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+    const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+      const sel = loraSelections[l.file_path];
+      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+    });
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    const currentCtx: PromptContextBase = {
+      prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
+      label: prevIdx >= 0 ? `Region ${String(prevIdx + 1).padStart(2, '0')}` : 'Background',
+    };
+
+    if (prevIdx >= 0 && prevIdx < regionBoxesRef.current.length) {
+      const nbs = [...regionBoxesRef.current];
+      nbs[prevIdx] = { ...nbs[prevIdx], promptContext: currentCtx };
+      setRegionBoxes(nbs);
+      regionBoxesRef.current = nbs;
+    } else if (prevIdx < 0) {
+      backgroundContextRef.current = { ...currentCtx, isBackground: true };
+    }
+
+    let ctxToLoad: PromptContextBase | null = null;
+    if (regionActiveIdx >= 0) {
+      ctxToLoad = regionBoxesRef.current[regionActiveIdx]?.promptContext || null;
+    } else {
+      ctxToLoad = backgroundContextRef.current;
+    }
+
+    isRegionReloadingRef.current = true;
+    fetch('/switch_context', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(ctxToLoad || { prompts: [], custom_prompts: '', loras: [], prefabs: [] }),
+    }).then(async () => {
+      loraRestoredRef.current = false;
+      prefabRestoredRef.current = false;
+      setSelectedLoras([]);
+      setLoraSelections({});
+      setSelectedPrefabs([]);
+      setSelectedTags([]);
+      setCustomPrompts('');
+      await Promise.all([loadData(), loadLoraData()]);
+      isRegionReloadingRef.current = false;
+    }).catch(() => { isRegionReloadingRef.current = false; });
+  }, [regionActiveIdx, enableRegion]);
 
   // Restore selected loras from last_selected_loras after loraData loads
   useEffect(() => {
@@ -442,6 +533,7 @@ export function AppShell() {
   useEffect(() => {
     if (window.parent === window) return;
     if (isReloadingRef.current) return;
+    if (isRegionReloadingRef.current) return;
     const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
     const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
@@ -463,6 +555,113 @@ export function AppShell() {
       prefabs: prefabsPayload,
     }, '*');
   }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs]);
+
+  // When enable_region, store current prompt selection to the active region's promptContext
+  useEffect(() => {
+    if (!enableRegion) return;
+    if (isRegionReloadingRef.current) return;
+    const idx = regionActiveRef.current;
+    const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+    const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+      const sel = loraSelections[l.file_path];
+      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+    });
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    const ctx: PromptContextBase = {
+      prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
+      label: idx >= 0 ? `Region ${String(idx + 1).padStart(2, '0')}` : 'Background',
+    };
+    // Build desc to match the server's `prompt` output: raw prompt strings (with brackets)
+    // joined by ", " — each tag group stays as one entry, NOT split into individual tags.
+    const descParts: string[] = [];
+    // 1. Direct prompts — strip [ and ] like server's cleaned_prompts
+    for (const p of promptsToSend) {
+      const cleaned = p.replace(/\[/g, '').replace(/\]/g, '');
+      if (cleaned) descParts.push(cleaned);
+    }
+    // 2. Prefab prompts — expand tree using saved data + prefab lookup
+    function expandPrefabPrompts(items: any[]): string[] {
+      const result: string[] = [];
+      for (const item of items) {
+        if (item.active === false) continue;
+        const prefab = findPrefabByGuid(item.guid);
+        if (prefab && prefab.tags) {
+          const savedTags = item.tags || [];
+          for (const group of prefab.tags) {
+            if (!Array.isArray(group)) continue;
+            const names = group.map((t: any) => t.name || t.prompt || '');
+            let key = names.join(' ');
+            const strength = group[0]?.strength ?? 1.0;
+            if (strength !== 1.0) key = `${key}:${strength}`;
+            const saved = savedTags.find((st: any) => st.key === key);
+            if (saved && saved.active === false) continue;
+            const parts: string[] = [];
+            for (const tag of group) {
+              const promptText = tag.prompt || '';
+              if (!promptText) continue;
+              const deco = tag.decoration_num || 0;
+              const str = tag.strength ?? 1.0;
+              let text: string;
+              if (deco > 0) text = '['.repeat(deco) + promptText + ']'.repeat(deco);
+              else text = promptText;
+              if (str !== 1.0) text = `(${text}:${str})`;
+              parts.push(text);
+            }
+            if (parts.length) {
+              const promptStr = parts.join(' ');
+              // Strip [ and ] exactly like server: prompt_str.replace('[', '').replace(']', '')
+              const cleanedStr = promptStr.replace(/\[/g, '').replace(/\]/g, '');
+              result.push(cleanedStr);
+            }
+          }
+        }
+        if (prefab && prefab.custom_prompts) {
+          result.push(prefab.custom_prompts);
+        }
+        if (item.children) result.push(...expandPrefabPrompts(item.children));
+      }
+      return result;
+    }
+    descParts.push(...expandPrefabPrompts(prefabsPayload));
+    // 3. Custom prompts
+    if (customPrompts.trim()) descParts.push(customPrompts.trim());
+    // 4. Lora trigger words (active_tags from all active loras, including prefab loras)
+    for (const l of lorasPayload) {
+      if (l.active === false) continue;
+      descParts.push(...(l.active_tags || []));
+    }
+    function expandPrefabLoraTags(items: any[]): string[] {
+      const result: string[] = [];
+      for (const item of items) {
+        if (item.active === false) continue;
+        const prefab = findPrefabByGuid(item.guid);
+        if (prefab && prefab.loras) {
+          for (const pl of prefab.loras) {
+            if (pl.active === false) continue;
+            result.push(...(pl.active_tags || []));
+          }
+        }
+        if (item.children) result.push(...expandPrefabLoraTags(item.children));
+      }
+      return result;
+    }
+    descParts.push(...expandPrefabLoraTags(prefabsPayload));
+    const desc = descParts.filter(Boolean).join(', ');
+
+    if (idx >= 0 && idx < regionBoxesRef.current.length) {
+      // Save to active region
+      const nbs = [...regionBoxesRef.current];
+      if (nbs[idx].promptContext && JSON.stringify(nbs[idx].promptContext) === JSON.stringify(ctx) && nbs[idx].desc === desc) return;
+      nbs[idx] = { ...nbs[idx], promptContext: ctx, desc };
+      regionBoxesRef.current = nbs;
+      setRegionBoxes(nbs);
+    } else {
+      // Save to background context (singleton)
+      const bgCtx: BackgroundContext = { ...ctx, isBackground: true };
+      if (backgroundContextRef.current && JSON.stringify(backgroundContextRef.current) === JSON.stringify(bgCtx)) return;
+      backgroundContextRef.current = bgCtx;
+    }
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, enableRegion, findPrefabByGuid]);
 
   // ========== Modal state ==========
   const [modal, setModal] = useState<{type:string;data?:any}|null>(null);
@@ -1125,32 +1324,70 @@ export function AppShell() {
 
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
-    const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
-    const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
-      const sel = loraSelections[l.file_path];
-      return {
-        file_path: l.file_path,
-        name: l.name,
-        strength: sel?.strength ?? 1.0,
-        active_tags: sel?.activeTags ?? [],
-        active: sel?.active ?? true,
-        split_mode: sel?.split_mode,
-      };
-    });
-    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    // Flush pending region confirm (don't wait for debounce timer)
+    if (enableRegion) {
+      if (regionConfirmTimer.current) clearTimeout(regionConfirmTimer.current);
+      // Save current prompt selection to active region's promptContext + desc before flushing
+      const idx = regionActiveRef.current;
+      if (idx >= 0 && idx < regionBoxesRef.current.length) {
+        const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
+        const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
+          const sel = loraSelections[l.file_path];
+          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+        });
+        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+        const ctx: PromptContextBase = {
+          prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
+          label: idx >= 0 ? `Region ${String(idx + 1).padStart(2, '0')}` : 'Background',
+        };
+        const nbs = [...regionBoxesRef.current];
+        nbs[idx] = { ...nbs[idx], promptContext: ctx };
+        regionBoxesRef.current = nbs;
+        void prefabsPayload;
+      }
+      fetch('/region_confirm', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ boxes: regionBoxesRef.current }),
+      }).catch(()=>{});
+    }
+
+    // The prompt/active_loras/lora_trigger_words/merged_prompt outputs must reflect
+    // the BACKGROUND context, not the currently selected context.
+    let submitPrompts: string[];
+    let submitCustom: string;
+    let submitLoras: LoraSelectionData[];
+    let submitPrefabs: { guid: string; active: boolean; tags: any[]; loras: any[]; children: any[] }[];
+
+    if (enableRegion && backgroundContextRef.current) {
+      // Use background context
+      const bg = backgroundContextRef.current;
+      submitPrompts = bg.prompts;
+      submitCustom = bg.custom_prompts;
+      submitLoras = bg.loras;
+      submitPrefabs = bg.prefabs;
+    } else {
+      // No region mode — use current selections
+      submitPrompts = selectedTags.map(g => tagsToDisplayString(g));
+      submitCustom = customPrompts;
+      submitLoras = selectedLoras.map(l => {
+        const sel = loraSelections[l.file_path];
+        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+      });
+      submitPrefabs = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    }
+
     submitSelection(
-      promptsToSend,
-      customPrompts,
-      lorasPayload,
-      prefabsPayload,
+      submitPrompts,
+      submitCustom,
+      submitLoras,
+      submitPrefabs,
       () => {
-        // Notify parent window (sampler) that prompt is confirmed
         if (window.parent !== window) {
           window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
         }
       }
     );
-  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection]);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, submitSelection, enableRegion]);
 
   // ========== Delete Prompt ==========
   const deletePrompt = useCallback(async (id: string) => {
@@ -2282,6 +2519,58 @@ export function AppShell() {
 
   return (
     <div className="app-container">
+      {/* Region canvas panel — leftmost when enable_region is on */}
+      {enableRegion ? (
+        <div style={{ width: '50%', flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border-color)', background: '#000' }}>
+          <RegionCanvas
+            imageSrc={regionImage}
+            canvasWidth={regionW}
+            canvasHeight={regionH}
+            boxes={regionBoxes}
+            activeIdx={regionActiveIdx}
+            bgBrightness={regionBg}
+            boxOpacity={regionOpacity}
+            onBoxesChange={setRegionBoxes}
+            onActiveIdxChange={setRegionActiveIdx}
+          />
+          {/* Region control bar */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', padding: '8px 14px', borderTop: '0.5px solid #38383a', background: 'rgba(28,28,30,0.85)', backdropFilter: 'blur(20px)', flexShrink: 0, fontFamily: `-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif` }}>
+            <style>{`
+              .kolid-range { -webkit-appearance:none; appearance:none; height:4px; border-radius:2px; background:#48484a; outline:none; width:56px; }
+              .kolid-range::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,0.3); cursor:pointer; }
+              .kolid-range::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:#fff; border:none; box-shadow:0 1px 2px rgba(0,0,0,0.3); cursor:pointer; }
+              .kolid-range::-moz-range-track { height:4px; border-radius:2px; background:#48484a; }
+            `}</style>
+            {/* Row 1: BG + Fill sliders */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <span style={{ fontSize: 11, color: '#8e8e93' }}>BG</span>
+                <input type="range" className="kolid-range" min="0" max="100" step="1" value={regionBg}
+                  onChange={(e) => setRegionBg(parseInt(e.target.value))} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                <span style={{ fontSize: 11, color: '#8e8e93' }}>Fill</span>
+                <input type="range" className="kolid-range" min="0" max="100" step="1" value={regionOpacity}
+                  onChange={(e) => setRegionOpacity(parseInt(e.target.value))} />
+              </label>
+            </div>
+            {/* Row 2: active region info */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: 12, color: '#8e8e93' }}>
+              {regionActiveIdx >= 0 ? (
+                <>
+                  <span style={{ color: '#0a84ff', fontWeight: 600 }}>Region {String(regionActiveIdx + 1).padStart(2, '0')}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                    {regionBoxes[regionActiveIdx]?.desc || '(no description)'}
+                  </span>
+                </>
+              ) : (
+                <span>No region selected — drag on canvas to draw</span>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="main-wrapper">
         <div className="scroll-container">
           <div className="container">
@@ -2763,7 +3052,13 @@ export function AppShell() {
                             isMissing={lora.metadata?.missing === true}
                             isFiltered={isLoraFiltered(lora)}
                             onChange={(data) => {
-                              setLoraSelections(prev => ({ ...prev, [lora.file_path]: data }));
+                              setLoraSelections(prev => {
+                                const existing = prev[lora.file_path];
+                                // During region context restore, loraSelections is pre-set from saved active_tags.
+                                // Only update if the data actually changed (user interaction), not mount notify.
+                                if (existing && JSON.stringify(existing) === JSON.stringify(data)) return prev;
+                                return { ...prev, [lora.file_path]: data };
+                              });
                             }}
                             onRemove={() => {
                               removeLora(lora.file_path);

@@ -93,6 +93,14 @@ class SnapshotPromptServer:
         self.last_selected_prefabs = last_selected_prefabs or []
         self.selected_prefabs = []
         self.parsed_prompts = parsed_prompts or []
+        # Region fields
+        self.image = None
+        self.width = 1024
+        self.height = 1024
+        self.bg_brightness = 25
+        self.initial_boxes = ""
+        self.region_result = None
+        self.enable_region = False
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -800,6 +808,39 @@ class SnapshotPromptServer:
                 except Exception as e:
                     self.send_error(500, str(e))
                     return
+
+            elif self.path == '/region_config':
+                si = self.server_instance
+                if si and si.enable_region:
+                    try:
+                        from .snapshot_region_node import image_to_base64
+                        img_b64 = image_to_base64(si.image) if si.image is not None else None
+                        response = {
+                            'image': img_b64,
+                            'width': si.width,
+                            'height': si.height,
+                            'bg_brightness': si.bg_brightness,
+                            'initial_boxes': si.initial_boxes,
+                            'enable_region': True,
+                        }
+                        data = json.dumps(response).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.end_headers()
+                        self.wfile.write(data)
+                    except Exception as e:
+                        self.send_error(500, str(e))
+                else:
+                    data = json.dumps({'image': None, 'enable_region': False}).encode('utf-8')
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Content-Length', str(len(data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(data)
+                return
 
         def do_POST(self):
             if self.path == '/select_prompt':
@@ -2038,6 +2079,34 @@ class SnapshotPromptServer:
                 self.end_headers()
                 self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
 
+            elif self.path == '/region_confirm':
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    self.server_instance.region_result = data
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+
+            elif self.path == '/switch_context':
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+                ctx = json.loads(post_data) if post_data else {}
+                si = self.server_instance
+                if si:
+                    si.last_selected = ctx.get('prompts', [])
+                    si.last_selected_loras = ctx.get('loras', [])
+                    si.last_selected_prefabs = ctx.get('prefabs', [])
+                    si.custom_prompts = ctx.get('custom_prompts', '')
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+
             else:
                 super().do_POST()
 
@@ -2062,18 +2131,26 @@ class SnapshotPromptNode:
                 "prefab_cache": ("BOOLEAN", {"default": False}),
                 "prefab": ("STRING", {"default": "", "multiline": True}),
             },
+            "optional": {
+                "enable_region": ("BOOLEAN", {"default": False, "tooltip": "Enable bbox region editor + caption JSON output"}),
+                "image": ("IMAGE", {"tooltip": "Optional image for bbox region editing"}),
+                "width": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 16}),
+                "height": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 16}),
+                "bg_brightness": ("INT", {"default": 25, "min": 0, "max": 100}),
+                "cached_data": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
+            },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("prompt", "active_loras", "lora_trigger_words", "merged_prompt")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "IMAGE", "BBOX", "INT", "INT")
+    RETURN_NAMES = ("prompt", "active_loras", "lora_trigger_words", "merged_prompt", "region_prompt", "region_active_loras", "preview", "bboxes", "width", "height")
     FUNCTION = "snapshot_prompt"
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab):
+    def IS_CHANGED(s, **kwargs):
         return float("nan")
 
     @staticmethod
@@ -2306,7 +2383,8 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
-    def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id):
+    def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id,
+                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, cached_data=""):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2394,6 +2472,13 @@ class SnapshotPromptNode:
             parsed_prompts=parsed_prompts_list,
         )
         server.custom_prompts = custom_prompts
+        # Region fields
+        server.enable_region = enable_region
+        server.image = image
+        server.width = width
+        server.height = height
+        server.bg_brightness = bg_brightness
+        server.initial_boxes = cached_data
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -2611,4 +2696,115 @@ class SnapshotPromptNode:
         merged_prompt = cleaned_result
         if lora_trigger_words:
             merged_prompt = cleaned_result + ", " + lora_trigger_words
-        return (cleaned_result, active_loras, lora_trigger_words, merged_prompt)
+
+        # Build region outputs (region_prompt, region_active_loras, preview, bboxes) if enable_region
+        region_prompt = ""
+        region_active_loras = ""
+        preview = torch.zeros(1, 64, 64, 3) if 'torch' in dir() else None
+        bboxes_out = []
+        if enable_region and server.region_result:
+            from .snapshot_region_node import (_render_preview, _norm_bbox, _palette, _dumps,
+                                                _loads_caption, _caption_to_boxes)
+            import numpy as np
+            from PIL import Image as PILImage
+
+            rr = server.region_result
+            boxes = rr.get('boxes', [])
+            sp = rr.get('style_palette', [])
+            bg_text = cleaned_result  # background = prompt output
+            hld = rr.get('high_level_description', '')
+            aest_r = rr.get('aesthetics', '')
+            light_r = rr.get('lighting', '')
+            med_r = rr.get('medium', '')
+
+            caption = {}
+            if hld.strip():
+                caption["high_level_description"] = hld
+            palette = _palette(sp)
+            if palette or aest_r.strip() or light_r.strip() or med_r.strip():
+                sd = {"aesthetics": aest_r, "lighting": light_r, "medium": med_r}
+                if palette:
+                    sd["color_palette"] = palette
+                caption["style_description"] = sd
+            elements = []
+            for box in boxes:
+                if not isinstance(box, dict):
+                    continue
+                etype = "text" if box.get("type") == "text" else "obj"
+                elem = {"type": etype}
+                if not box.get("nobbox"):
+                    elem["bbox"] = _norm_bbox(box, 1000, 1000, "yx")
+                if etype == "text":
+                    elem["text"] = box.get("text", "")
+                elem["desc"] = box.get("desc", "")
+                epal = _palette(box.get("palette", []))
+                if epal:
+                    elem["color_palette"] = epal[:5]
+                elements.append(elem)
+            caption["compositional_deconstruction"] = {"background": bg_text, "elements": elements}
+            region_prompt = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
+
+            # Build region_active_loras: collect all loras from all region promptContexts + background
+            all_region_loras = []
+            for box in boxes:
+                pc = box.get("promptContext") if isinstance(box, dict) else None
+                if pc and pc.get("loras"):
+                    for lora in pc["loras"]:
+                        if lora.get("active", True) is False:
+                            continue
+                        # Dedup by file_path
+                        fp = lora.get("file_path", "") or lora.get("file_name", "")
+                        if fp and not any(al.get("file_path") == fp or al.get("file_name") == fp for al in all_region_loras):
+                            all_region_loras.append(lora)
+            # Build lora string like active_loras format
+            region_lora_parts = []
+            for lora_item in all_region_loras:
+                fp = lora_item.get("file_path", "") or lora_item.get("file_name", "")
+                if not fp:
+                    continue
+                np_ = fp.replace("\\", "/")
+                if np_ not in server._valid_lora_paths and fp not in server._valid_lora_paths:
+                    continue
+                strength = lora_item.get("strength", 1.0)
+                file_name = lora_item.get("file_name", "") or fp.split("/")[-1].split("\\")[-1]
+                split_mode = lora_item.get("split_mode", False)
+                active_tags = lora_item.get("active_tags", [])
+                if split_mode and active_tags:
+                    for tag in active_tags:
+                        region_lora_parts.append(f"<lora:{fp}:{strength}:{tag}>")
+                else:
+                    region_lora_parts.append(f"<lora:{file_name}:{strength}>")
+            region_active_loras = ", ".join(region_lora_parts)
+
+            # Preview
+            bg_pil = None
+            if image is not None:
+                try:
+                    bg_pil = PILImage.fromarray((image[0].detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8))
+                except Exception:
+                    bg_pil = None
+            preview = _render_preview(boxes, width, height, bg_pil, bg_brightness if bg_pil else 50)
+
+            # BBOX output
+            bbox_dicts = []
+            for box in boxes:
+                if not isinstance(box, dict) or box.get("nobbox"):
+                    continue
+                x, y = box.get("x", 0.0), box.get("y", 0.0)
+                bw, bh = box.get("w", 0.0), box.get("h", 0.0)
+                if bw < 0: x += bw; bw = -bw
+                if bh < 0: y += bh; bh = -bh
+                bbox_dicts.append({"x": round(x * width), "y": round(y * height),
+                                   "width": round(bw * width), "height": round(bh * height)})
+            bboxes_out = [bbox_dicts] if bbox_dicts else []
+
+            # Cache region data
+            try:
+                PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                    "node_id": unique_id, "widget_name": "cached_data",
+                    "type": "STRING", "value": json.dumps(boxes, ensure_ascii=False),
+                })
+            except Exception:
+                pass
+
+        return (cleaned_result, active_loras, lora_trigger_words, merged_prompt, region_prompt, region_active_loras, preview, bboxes_out, width, height)
