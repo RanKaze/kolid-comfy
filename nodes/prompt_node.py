@@ -101,6 +101,7 @@ class SnapshotPromptServer:
         self.initial_boxes = ""
         self.region_result = None
         self.enable_region = False
+        self.region_format = ""
         
         # 数据路径改为当前文件夹下的 data/prompt
         self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
@@ -822,6 +823,7 @@ class SnapshotPromptServer:
                             'bg_brightness': si.bg_brightness,
                             'initial_boxes': si.initial_boxes,
                             'enable_region': True,
+                            'region_format': si.region_format,
                         }
                         data = json.dumps(response).encode('utf-8')
                         self.send_response(200)
@@ -2138,6 +2140,7 @@ class SnapshotPromptNode:
                 "height": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 16}),
                 "bg_brightness": ("INT", {"default": 25, "min": 0, "max": 100}),
                 "cached_data": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
+                "region_format": ("STRING", {"default": "", "multiline": True, "tooltip": "JSON template with placeholders"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2384,7 +2387,7 @@ class SnapshotPromptNode:
         return last_selected, custom
 
     def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id,
-                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, cached_data=""):
+                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, cached_data="", region_format=""):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2479,6 +2482,8 @@ class SnapshotPromptNode:
         server.height = height
         server.bg_brightness = bg_brightness
         server.initial_boxes = cached_data
+        server.region_format = region_format
+        print(f"[SnapshotPrompt] region_format={repr(region_format[:200]) if region_format else 'EMPTY'}")
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -2710,39 +2715,23 @@ class SnapshotPromptNode:
 
             rr = server.region_result
             boxes = rr.get('boxes', [])
-            sp = rr.get('style_palette', [])
-            bg_text = cleaned_result  # background = prompt output
-            hld = rr.get('high_level_description', '')
-            aest_r = rr.get('aesthetics', '')
-            light_r = rr.get('lighting', '')
-            med_r = rr.get('medium', '')
-
-            caption = {}
-            if hld.strip():
-                caption["high_level_description"] = hld
-            palette = _palette(sp)
-            if palette or aest_r.strip() or light_r.strip() or med_r.strip():
-                sd = {"aesthetics": aest_r, "lighting": light_r, "medium": med_r}
-                if palette:
-                    sd["color_palette"] = palette
-                caption["style_description"] = sd
-            elements = []
-            for box in boxes:
-                if not isinstance(box, dict):
-                    continue
-                etype = "text" if box.get("type") == "text" else "obj"
-                elem = {"type": etype}
-                if not box.get("nobbox"):
-                    elem["bbox"] = _norm_bbox(box, 1000, 1000, "yx")
-                if etype == "text":
-                    elem["text"] = box.get("text", "")
-                elem["desc"] = box.get("desc", "")
-                epal = _palette(box.get("palette", []))
-                if epal:
-                    elem["color_palette"] = epal[:5]
-                elements.append(elem)
-            caption["compositional_deconstruction"] = {"background": bg_text, "elements": elements}
-            region_prompt = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
+            # Use pre-assembled region_prompt from frontend if available, otherwise build from boxes
+            region_prompt = rr.get('region_prompt', '')
+            if not region_prompt:
+                # Fallback: build simple caption from boxes + background
+                caption = {"compositional_deconstruction": {"background": cleaned_result, "elements": []}}
+                for box in boxes:
+                    if not isinstance(box, dict):
+                        continue
+                    etype = "text" if box.get("type") == "text" else "obj"
+                    elem = {"type": etype}
+                    if not box.get("nobbox"):
+                        elem["bbox"] = _norm_bbox(box, 1000, 1000, "yx")
+                    if etype == "text":
+                        elem["text"] = box.get("text", "")
+                    elem["desc"] = box.get("desc", "")
+                    caption["compositional_deconstruction"]["elements"].append(elem)
+                region_prompt = json.dumps(caption, ensure_ascii=False, separators=(",", ":"))
 
             # Build region_active_loras: collect all loras from all region promptContexts + background
             all_region_loras = []
@@ -2798,11 +2787,16 @@ class SnapshotPromptNode:
                                    "width": round(bw * width), "height": round(bh * height)})
             bboxes_out = [bbox_dicts] if bbox_dicts else []
 
-            # Cache region data
+            # Cache region data (boxes + format slots + background context) in cached_data
             try:
+                cache_payload = {
+                    "boxes": boxes,
+                    "format_slots": rr.get('format_slots', {}),
+                    "background_context": rr.get('background_context', None),
+                }
                 PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                     "node_id": unique_id, "widget_name": "cached_data",
-                    "type": "STRING", "value": json.dumps(boxes, ensure_ascii=False),
+                    "type": "STRING", "value": json.dumps(cache_payload, ensure_ascii=False),
                 })
             except Exception:
                 pass
