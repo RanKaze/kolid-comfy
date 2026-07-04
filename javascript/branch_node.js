@@ -1,6 +1,8 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+console.log("[kolid-comfy] branch_node.js loaded");
+
 /**
  * 从节点 widget 中读取值，找不到时返回默认值。
  * 替代原先通过 node.properties 读取的方式。
@@ -8,6 +10,16 @@ import { api } from "../../scripts/api.js";
 function getWidgetValue(node, name, defaultValue) {
     const widget = node.widgets?.find(w => w.name === name);
     return widget ? widget.value : defaultValue;
+}
+
+/**
+ * 从 graph 中获取 link 对象，兼容新旧 litegraph（Map vs array）
+ */
+function getLink(graph, linkId) {
+    if (!graph || linkId == null) return null;
+    if (graph._links) return graph._links.get(linkId);
+    if (graph.links) return graph.links[linkId];
+    return null;
 }
 
 /**
@@ -108,6 +120,172 @@ function escapeRegExp(string) {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * 根据 targetType 和 targetValue 解析目标节点列表
+ */
+function resolveTargetNodes(graph, targetType, targetValue) {
+    let targetNodes = [];
+    if (targetType === "name") {
+        targetNodes = graph.nodes.filter(n => n.title === targetValue || n.type === targetValue);
+    } else if (targetType === "id") {
+        const n = graph.getNodeById(parseInt(targetValue));
+        if (n) targetNodes = [n];
+    } else if (targetType === "group") {
+        const groups = graph._groups || graph.groups || [];
+        const matchedGroup = groups.find(g => g.title === targetValue);
+        if (!matchedGroup) {
+            console.warn("[active_config] group not found:", targetValue);
+        } else {
+            // 策略1: group 自己的 _nodes / nodes 数组
+            const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes;
+            if (groupNodeIds && groupNodeIds.length > 0) {
+                const idSet = new Set(groupNodeIds);
+                targetNodes = graph.nodes.filter(n => idSet.has(n.id));
+            }
+            // 策略2: 通过 node.group 属性匹配
+            if (targetNodes.length === 0) {
+                const groupId = matchedGroup._id != null ? matchedGroup._id : matchedGroup.id;
+                targetNodes = graph.nodes.filter(n => {
+                    if (n.group == null) return false;
+                    if (typeof n.group === "number") return n.group === groupId;
+                    return n.group === matchedGroup || (n.group._id != null && n.group._id === groupId) || (n.group.id != null && n.group.id === groupId);
+                });
+            }
+            // 策略3: 空间包含
+            if (targetNodes.length === 0) {
+                const bound = matchedGroup._bounding || matchedGroup.bounding;
+                if (bound && bound.length >= 4) {
+                    const [gx, gy, gw, gh] = bound;
+                    targetNodes = graph.nodes.filter(n => {
+                        if (!n.pos || !n.size) return false;
+                        const [nx, ny] = n.pos;
+                        const [nw, nh] = n.size;
+                        return nx >= gx && ny >= gy && nx + nw <= gx + gw && ny + nh <= gy + gh;
+                    });
+                }
+            }
+        }
+    }
+    return targetNodes;
+}
+
+const BRANCH_OPPOSITE_OPS = {
+    "mute": "!mute",
+    "!mute": "mute",
+    "bypass": "!bypass",
+    "!bypass": "bypass",
+    "foldout": "!foldout",
+    "!foldout": "foldout",
+    "expand": "!expand",
+    "!expand": "expand",
+    "set": "!set",
+    "!set": "set",
+};
+
+/**
+ * 对目标节点应用单个操作
+ */
+function applyBranchOp(graph, targetType, targetValue, op) {
+    let targetNodes = resolveTargetNodes(graph, targetType, targetValue);
+    for (const n of targetNodes) {
+        switch (op) {
+            case "mute":
+                n.mode = LiteGraph.NEVER;
+                break;
+            case "!mute":
+                n.mode = LiteGraph.ALWAYS;
+                break;
+            case "bypass":
+                n.mode = 2;
+                break;
+            case "!bypass":
+                n.mode = LiteGraph.ALWAYS;
+                break;
+            case "foldout":
+                if (!n.collapsed) n.collapse();
+                break;
+            case "!foldout":
+                if (n.collapsed) n.collapse();
+                break;
+            case "set":
+            case "!set":
+                if (n.comfyClass === "BranchSwitchNode" || n.comfyClass === "BranchBooleanNode") {
+                    const newVal = (op === "set");
+                    if (n.widgets[0].value !== newVal) {
+                        n.widgets[0].value = newVal;
+                        if (n.widgets[0].callback) {
+                            n.widgets[0].callback(newVal);
+                        }
+                    }
+                }
+                break;
+            // expand/!expand 不在这里处理，由 ExpandNode 布局逻辑读取
+        }
+    }
+    if (targetNodes.length > 0) {
+        graph.setDirtyCanvas(true, true);
+        if (graph.change) graph.change();
+    }
+}
+
+/**
+ * 解析 active_config 并根据 toggle 值应用操作
+ */
+function processActiveConfig(node, toggleValue) {
+    const configStr = getWidgetValue(node, 'active_config', '').trim();
+    if (!configStr) return;
+
+    const graph = node.graph;
+    if (!graph) return;
+
+    const segments = configStr.split(",").map(s => s.trim()).filter(s => s);
+    for (const seg of segments) {
+        const parts = seg.split(":");
+        if (parts.length < 3) continue;
+
+        const op = parts[0];
+        if (!BRANCH_OPPOSITE_OPS.hasOwnProperty(op)) continue;
+
+        const targetType = parts[1];
+        const targetValue = parts.slice(2).join(":");
+
+        const effectiveOp = toggleValue ? op : BRANCH_OPPOSITE_OPS[op];
+        applyBranchOp(graph, targetType, targetValue, effectiveOp);
+    }
+}
+
+/**
+ * 从 active_config 中提取 expand 操作的目标节点列表
+ * 仅返回 expand（非 !expand）的目标节点，且仅当 toggle 为 true 时
+ */
+function getExpandTargets(node) {
+    const configStr = getWidgetValue(node, 'active_config', '').trim();
+    if (!configStr) return [];
+
+    const graph = node.graph;
+    if (!graph) return [];
+
+    const toggleValue = node.widgets[0].value;
+    if (!toggleValue) return [];
+
+    let targets = [];
+    const segments = configStr.split(",").map(s => s.trim()).filter(s => s);
+    for (const seg of segments) {
+        const parts = seg.split(":");
+        if (parts.length < 3) continue;
+
+        const op = parts[0];
+        if (op !== "expand") continue;
+
+        const targetType = parts[1];
+        const targetValue = parts.slice(2).join(":");
+
+        const nodes = resolveTargetNodes(graph, targetType, targetValue);
+        targets.push(...nodes);
+    }
+    return targets;
+}
+
 function initUpdateSet(node, updateSet) {
     // 如果已经放入了updateSet那么就返回.
     //如果node是列表，那么就遍历列表，递归调用initUpdateSet
@@ -182,22 +360,7 @@ function updateBranchNode(node){
 function updateActiveAndFoldout(){
     for (let index = 0; index < window.kolid_data.branchNodes.length; index++) {
         const branchNode = window.kolid_data.branchNodes[index];
-        // 初始化activeNodes
-        let activeNodes = getWidgetValue(branchNode, 'active_nodes', '');
-        if(activeNodes){
-            for(let activeNode of getNodes(branchNode, activeNodes)){
-                activeNode.mode = branchNode.widgets[0].value ? 0 : 2;
-            }
-        }
-        // 初始化foldoutNodes
-        let foldoutNodes = getWidgetValue(branchNode, 'foldout_nodes', '');
-        if(foldoutNodes){
-            for(let foldoutNode of getNodes(branchNode, foldoutNodes)){
-                if(foldoutNode.collapsed == branchNode.widgets[0].value) {
-                    foldoutNode.collapse();
-                }
-            }
-        }
+        processActiveConfig(branchNode, branchNode.widgets[0].value);
     }
 }
 
@@ -222,12 +385,6 @@ function* ExpandNode(currentNode, expandNode, processedNodes, indent) {
     }
     processedNodes.add(expandNode.id);
     
-    let addFlag = true;
-    let hide = false;
-    if(getWidgetValue(expandNode, 'hide', false)){
-        addFlag = false;
-        hide = true;
-    }
     let added = false;
 
     let block = {
@@ -235,27 +392,24 @@ function* ExpandNode(currentNode, expandNode, processedNodes, indent) {
         id: expandNode.id,
     };
     
-    // 如果展开的节点是BranchToggleNode或BranchBooleanNode，递归展开它的expand_nodes
+    // 如果展开的节点是BranchToggleNode或BranchBooleanNode，递归展开它的expand目标
     let value = layoutValue(expandNode);
     if(value !== undefined){
         if (value) {
-            let expandNodes = getWidgetValue(expandNode, 'expand_nodes', '');
-            if(expandNodes){
-                if(addFlag){
-                    added = true;
-                    block.indent = indent + 1;
-                    block.split = true;
-                    yield block;
-                }
-                let nextIndent = hide ? indent : indent + 1;
-                for(let subExpandNode of getNodes(expandNode, expandNodes)){
-                    yield* ExpandNode(expandNode, subExpandNode, processedNodes, nextIndent);
+            let expandTargets = getExpandTargets(expandNode);
+            if(expandTargets.length > 0){
+                added = true;
+                block.indent = indent + 1;
+                block.split = true;
+                yield block;
+                for(let subExpandNode of expandTargets){
+                    yield* ExpandNode(expandNode, subExpandNode, processedNodes, indent + 1);
                 }
             }
         }
     }
 
-    if(addFlag && !added){
+    if(!added){
         yield block;
     }
 }
@@ -298,34 +452,6 @@ function updateRelayGraph(){
             }
             window.kolid_data.branchRelayMap.set(node, relayNodes);
             window.kolid_data.branchNodes.push(node);
-
-            // 初始化activeNodes
-            let activeNodes = getWidgetValue(node, 'active_nodes', '');
-            if(activeNodes){
-                let nodeNames = activeNodes.split('/');
-                for(let nodeName of nodeNames){
-                    let activeNode = node.graph.nodes.find(n => n.title === nodeName || n.type === nodeName);
-                    if(activeNode){
-                        // 设置节点mode: true时为0，false时为2
-                        activeNode.mode = node.widgets[0].value ? 0 : 2;
-                    }
-                }
-            }
-
-            // 初始化foldoutNodes
-            let foldoutNodes = getWidgetValue(node, 'foldout_nodes', '');
-            if(foldoutNodes){
-                let nodeNames = foldoutNodes.split('/');
-                for(let nodeName of nodeNames){
-                    let foldoutNode = node.graph.nodes.find(n => n.title === nodeName || n.type === nodeName);
-                    if(foldoutNode){
-                        // 控制节点折叠状态
-                        if(foldoutNode.collapsed == node.widgets[0].value) {
-                            foldoutNode.collapse();
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -385,20 +511,12 @@ function updateBranchGroupNode(node){
     // Default模式：保持原有逻辑，每个节点作为独立的toggle控件显示
     if (layoutBranchMode === 'Default' || filteredBranchNodes.length === 0) {
         for (const targetNode of filteredBranchNodes) {
-            let addFlag = true;
-
-            if(getWidgetValue(targetNode, 'hide', false)) {
-                addFlag = false;
-            }
-
-            if(addFlag){
-                node.addWidget("toggle",targetNode.title,targetNode.widgets[0].value,(value)=>{
-                    targetNode.widgets[0].value = value; 
-                    if(targetNode.widgets[0].callback){
-                        targetNode.widgets[0].callback(targetNode.widgets[0].value);
-                    }
-                });
-            }
+            node.addWidget("toggle",targetNode.title,targetNode.widgets[0].value,(value)=>{
+                targetNode.widgets[0].value = value; 
+                if(targetNode.widgets[0].callback){
+                    targetNode.widgets[0].callback(targetNode.widgets[0].value);
+                }
+            });
         }
     }
     // AlwaysOne模式：将所有BranchNode打包成一个combo控件
@@ -406,8 +524,7 @@ function updateBranchGroupNode(node){
         if (filteredBranchNodes.length > 0) {
             let allNodes = filteredBranchNodes;
             
-            // 收集仅hide为false的节点标题，用于combo控件
-            let visibleNodeTitles = allNodes.filter(n => !getWidgetValue(n, 'hide', false)).map(n => n.title);
+            let visibleNodeTitles = allNodes.map(n => n.title);
             
             // 找出当前选中的节点
             let selectedNode = allNodes.find(n => n.widgets[0].value);
@@ -434,21 +551,7 @@ function updateBranchGroupNode(node){
                 updateActiveAndFoldout();
             }
             if(expandNode){
-                // 初始化activeNodes
-                let activeNodes = getWidgetValue(expandNode, 'active_nodes', '');
-                if(activeNodes){
-                    for(let activeNode of getNodes(node, activeNodes)){
-                        activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
-                    }
-                }
-                let foldoutNodes = getWidgetValue(expandNode, 'foldout_nodes', '');
-                if(foldoutNodes){
-                    for(let foldoutNode of getNodes(node, foldoutNodes)){
-                        if(foldoutNode.collapsed == expandNode.widgets[0].value) {
-                            foldoutNode.collapse();
-                        }
-                    }
-                }
+                processActiveConfig(expandNode, expandNode.widgets[0].value);
             }
 
             node.addWidget("combo",`${node.title}`,currentValue,(value)=>{
@@ -465,16 +568,12 @@ function updateBranchGroupNode(node){
     // MaxOne模式：确保最多只有一个节点被选中
     else if (layoutBranchMode === 'MaxOne') {
         if (filteredBranchNodes.length > 0) {
-            // 收集所有节点，包括hide为true的节点
             let allNodes = filteredBranchNodes;
             
             let visibleNodeTitles = [];
 
-            // 收集仅hide为false的节点标题，用于combo控件
             visibleNodeTitles.push('[None]');
-            let tempTitles = allNodes
-                .filter(n => !getWidgetValue(n, 'hide', false))
-                .map(n => n.title);
+            let tempTitles = allNodes.map(n => n.title);
             visibleNodeTitles.push(...tempTitles);
             
             // 找出当前选中的节点
@@ -496,21 +595,7 @@ function updateBranchGroupNode(node){
             // 自动展开选中节点的子节点
             let expandNode = allNodes.find(n => n.title === currentValue);
             if(expandNode){
-                // 初始化activeNodes
-                let activeNodes = getWidgetValue(expandNode, 'active_nodes', '');
-                if(activeNodes){
-                    for(let activeNode of getNodes(node, activeNodes)){
-                        activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
-                    }
-                }
-                let foldoutNodes = getWidgetValue(expandNode, 'foldout_nodes', '');
-                if(foldoutNodes){
-                    for(let foldoutNode of getNodes(node, foldoutNodes)){
-                        if(foldoutNode.collapsed == expandNode.widgets[0].value) {
-                            foldoutNode.collapse();
-                        }
-                    }
-                }
+                processActiveConfig(expandNode, expandNode.widgets[0].value);
             }
             
             node.addWidget("combo",`${node.title}`,currentValue,(value)=>{
@@ -545,8 +630,8 @@ function wrapOnPropertyChanged(node, updateFn) {
 
 function nodeInit(node, is_create){
     if (node.comfyClass === "BranchSwitchNode" || node.comfyClass === "BranchBooleanNode") {
-        // Wrap widget callbacks so that changing relay/expand/active/foldout/hide rebuilds the relay graph
-        for (const name of ['relay_expression', 'expand_nodes', 'active_nodes', 'foldout_nodes', 'hide']) {
+        // Wrap widget callbacks so that changing relay/active_config rebuilds the relay graph
+        for (const name of ['relay_expression', 'active_config']) {
             const widget = node.widgets?.find(w => w.name === name);
             if (widget) {
                 const original = widget.callback;
@@ -642,10 +727,13 @@ app.registerExtension({
     }
 })
 
+console.log("[kolid-comfy] about to register BranchSwitchesNode extension");
+
 app.registerExtension({
     name: "KleinBlue.BranchSwitchesNode",
 
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        console.log("[kolid-comfy] beforeRegisterNodeDef", nodeData?.name);
         if (nodeData.name !== "BranchSwitchesNode") return;
 
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
@@ -654,11 +742,14 @@ app.registerExtension({
             origOnNodeCreated?.apply(this, arguments);
             const node = this;
 
+            console.log("[BranchSwitchesNode] onNodeCreated fired", { widgets: node.widgets?.map(w => w.name), inputs: node.inputs?.map(i => i.name) });
+
             let currentType = "*";
             let currentConnected = false;
 
             // ==================== 显示用的 Combo ====================
             const selectWidget = node.widgets.find(w => w.name === "select") || node.widgets[0];
+            console.log("[BranchSwitchesNode] selectWidget", selectWidget?.name, "options:", selectWidget?.options);
 
             // ==================== 隐藏的真实 select_input ====================
             // 先尝试查找是否已存在（防止重复添加）
@@ -694,10 +785,11 @@ app.registerExtension({
                 const options = [];
                 let connectedCount = 0;
                 let dynamicInputs = node.inputs.filter(inp => inp.name.startsWith("input"));
+                console.log("[BranchSwitchesNode] updateComboOptions", { dynamicInputs: dynamicInputs.map(i => ({name: i.name, link: i.link})), allInputs: node.inputs.map(i => i.name) });
                 dynamicInputs.forEach((input, idx) => {
                     if (input.link != null) {
                         connectedCount++;
-                        const link = node.graph.links[input.link];
+                        const link = getLink(node.graph, input.link);
                         const upstream = link ? node.graph.getNodeById(link.origin_id) : null;
                         const name = upstream ? (upstream.title || upstream.type || "未知节点") : "未知节点";
                         options.push(`[${idx + 1}] ${name}`);
@@ -705,6 +797,7 @@ app.registerExtension({
                 });
 
                 selectWidget.options.values = connectedCount > 0 ? options : ["[None]"];
+                console.log("[BranchSwitchesNode] updateComboOptions result", { connectedCount, options, selectWidgetValues: selectWidget.options.values, selectWidgetValue: selectWidget.value });
                 
                 const targetNum = selectInputWidget.value || 0;
                 if (connectedCount > 0) {
@@ -885,6 +978,7 @@ app.registerExtension({
             // 连接/断开处理
             const origOnConnectionsChange = node.onConnectionsChange;
             node.onConnectionsChange = function (type, slot, connected, link_info) {
+                console.log("[BranchSwitchesNode] onConnectionsChange", { type, slot, connected, link_info, LiteGraphINPUT: LiteGraph.INPUT, inputs: node.inputs?.map(i => ({name: i.name, link: i.link})) });
                 if (origOnConnectionsChange) {
                     origOnConnectionsChange.apply(this, arguments);
                 }
@@ -901,14 +995,15 @@ app.registerExtension({
                         // 如果正在连接第一个动态端口,并且没有连接类.
                         if(connectedCount === 1 && !currentConnected){
                             currentConnected = true;
-                            const input = node.inputs[slot];
-                            const link = node.graph.links[input.link];
-                            const upstreamNode = node.graph.getNodeById(link.origin_id);
-                            if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
-                                const outputInfo = upstreamNode.outputs[link.origin_slot];
-                                currentType = outputInfo.type;
-                                updateInputsType();
-                                updateOutputsType();
+                            const link = link_info || getLink(node.graph, node.inputs[slot].link);
+                            if (link) {
+                                const upstreamNode = node.graph.getNodeById(link.origin_id);
+                                if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
+                                    const outputInfo = upstreamNode.outputs[link.origin_slot];
+                                    currentType = outputInfo.type;
+                                    updateInputsType();
+                                    updateOutputsType();
+                                }
                             }
                         }
                         if (unconnectedCount === 0){
@@ -957,14 +1052,15 @@ app.registerExtension({
                         // 如果正在连接输出端口,并且没有连接类.
                         if(slot === 0 && !currentConnected){
                             currentConnected = true;
-                            const output = node.outputs[slot];
-                            const link = node.graph.links[output.links[0]];
-                            const downstreamNode = node.graph.getNodeById(link.target_id);
-                            if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
-                                const inputInfo = downstreamNode.inputs[link.target_slot];
-                                currentType = inputInfo.type;
-                                updateInputsType();
-                                updateOutputsType();
+                            const link = link_info || (node.outputs[0] && node.outputs[0].links ? getLink(node.graph, node.outputs[0].links[0]) : null);
+                            if (link) {
+                                const downstreamNode = node.graph.getNodeById(link.target_id);
+                                if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
+                                    const inputInfo = downstreamNode.inputs[link.target_slot];
+                                    currentType = inputInfo.type;
+                                    updateInputsType();
+                                    updateOutputsType();
+                                }
                             }
                         }
                     }else{
@@ -1012,19 +1108,23 @@ app.registerExtension({
                 if (connectedInputs.length > 0) {
                     currentConnected = true;
                     const first = connectedInputs[0];
-                    const link = node.graph.links[first.link];
-                    const upstreamNode = link ? node.graph.getNodeById(link.origin_id) : null;
-                    if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
-                        currentType = upstreamNode.outputs[link.origin_slot].type;
+                    const link = getLink(node.graph, first.link);
+                    if (link) {
+                        const upstreamNode = link ? node.graph.getNodeById(link.origin_id) : null;
+                        if (upstreamNode && upstreamNode.outputs && link.origin_slot < upstreamNode.outputs.length) {
+                            currentType = upstreamNode.outputs[link.origin_slot].type;
+                        }
                     }
                 }
                 let outputConnected = node.outputs[0] && node.outputs[0].links && node.outputs[0].links.length > 0;
                 if (!currentConnected && outputConnected) {
                     currentConnected = true;
-                    const link = node.graph.links[node.outputs[0].links[0]];
-                    const downstreamNode = link ? node.graph.getNodeById(link.target_id) : null;
-                    if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
-                        currentType = downstreamNode.inputs[link.target_slot].type;
+                    const link = getLink(node.graph, node.outputs[0].links[0]);
+                    if (link) {
+                        const downstreamNode = node.graph.getNodeById(link.target_id);
+                        if (downstreamNode && downstreamNode.inputs && link.target_slot < downstreamNode.inputs.length) {
+                            currentType = downstreamNode.inputs[link.target_slot].type;
+                        }
                     }
                 }
                 updateInputsType();
