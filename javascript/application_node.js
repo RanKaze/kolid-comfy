@@ -305,8 +305,9 @@ function buildHighlightedHTML(text, graph, selfNodeId) {
 /**
  * Create a syntax-highlighted textarea editor overlay.
  * Returns { container, textarea, update }.
+ * Does NOT reference the original widget — value is stored in the textarea itself.
  */
-function createHighlightEditor(collectNodesWidget, node) {
+function createHighlightEditor(initialValue, node) {
     const container = document.createElement("div");
     container.className = "kolid-app-editor";
 
@@ -316,7 +317,7 @@ function createHighlightEditor(collectNodesWidget, node) {
 
     const textarea = document.createElement("textarea");
     textarea.className = "kolid-app-editor-input";
-    textarea.value = collectNodesWidget.value || "";
+    textarea.value = initialValue || "";
     textarea.placeholder = "id:234,regex:test,name:TT,id:6743(select=>[测试],select_input)";
     container.appendChild(textarea);
 
@@ -326,7 +327,6 @@ function createHighlightEditor(collectNodesWidget, node) {
 
     let rebuildTimer = null;
     textarea.addEventListener("input", () => {
-        collectNodesWidget.value = textarea.value;
         updateHighlight();
         clearTimeout(rebuildTimer);
         rebuildTimer = setTimeout(() => {
@@ -433,12 +433,69 @@ function parseWidgetFilter(filterStr) {
 }
 
 /**
- * Collect nodes from graph based on parsed criteria, deduplicate, sort by name.
- * Returns [{node, widgetFilter}, ...] where widgetFilter is null or string[].
+ * Combine two widget filters. Outer filter takes precedence (overrides inner).
+ * - outer null → use inner
+ * - outer not null → use outer
  */
-function collectNodes(graph, parseResult, selfNodeId) {
-    const collected = new Map(); // id -> {node, widgetFilter}
+function combineFilters(outer, inner) {
+    if (outer != null) return outer;
+    return inner;
+}
+
+/**
+ * Merge an entry into the collected map, combining widget filters and parent app node ids.
+ * null wins (all widgets), otherwise union with existing labels taking priority.
+ */
+function mergeCollectedEntry(collected, entry) {
+    if (collected.has(entry.node.id)) {
+        const existing = collected.get(entry.node.id);
+        if (existing.widgetFilter === null || entry.widgetFilter === null) {
+            existing.widgetFilter = null;
+        } else {
+            for (const [k, v] of entry.widgetFilter) {
+                if (!existing.widgetFilter.has(k)) {
+                    existing.widgetFilter.set(k, v);
+                }
+            }
+        }
+        // Union parent app node ids
+        if (entry.parentAppNodeIds) {
+            for (const id of entry.parentAppNodeIds) {
+                existing.parentAppNodeIds.add(id);
+            }
+        }
+    } else {
+        collected.set(entry.node.id, {
+            node: entry.node,
+            widgetFilter: entry.widgetFilter,
+            parentAppNodeIds: new Set(entry.parentAppNodeIds || []),
+        });
+    }
+}
+
+/**
+ * Check if a node is an ApplicationNode.
+ */
+function isApplicationNode(n) {
+    return n && (n.comfyClass === "ApplicationNode" || n.type === "ApplicationNode");
+}
+
+/**
+ * Collect nodes from graph based on parsed criteria, deduplicate, sort by name.
+ * Recursively expands nested ApplicationNodes with cycle detection.
+ * Returns { entries: [{node, widgetFilter}], expandedAppNodes: [node] }.
+ */
+function collectNodes(graph, parseResult, selfNodeId, expandingAppNodes, parentWidgetFilter) {
+    if (!expandingAppNodes) expandingAppNodes = new Set();
+    expandingAppNodes.add(selfNodeId);
+
+    const collected = new Map();
+    const expandedAppNodes = [];
+    const expandedAppNodeIds = new Set();
+
     for (const { type, value, widgetFilter } of parseResult) {
+        const combinedFilter = combineFilters(parentWidgetFilter, widgetFilter);
+
         let matchedNodes = [];
         if (type === "id") {
             const id = parseInt(value);
@@ -463,28 +520,48 @@ function collectNodes(graph, parseResult, selfNodeId) {
         }
 
         for (const n of matchedNodes) {
-            if (collected.has(n.id)) {
-                // Merge widget filters: null wins (all widgets), otherwise merge Maps
-                const existing = collected.get(n.id);
-                if (existing.widgetFilter === null || widgetFilter === null) {
-                    existing.widgetFilter = null;
-                } else {
-                    for (const [k, v] of widgetFilter) {
-                        if (!existing.widgetFilter.has(k)) {
-                            existing.widgetFilter.set(k, v);
-                        }
-                    }
+            if (isApplicationNode(n)) {
+                // Cycle detection: skip if already on the expansion path
+                if (expandingAppNodes.has(n.id)) continue;
+
+                expandingAppNodes.add(n.id);
+                if (!expandedAppNodeIds.has(n.id)) {
+                    expandedAppNodeIds.add(n.id);
+                    expandedAppNodes.push(n);
+                }
+
+                // Read nested ApplicationNode's collect_nodes value
+                const nestedWidget = n.widgets?.find(w => w.name === "collect_nodes");
+                const nestedValue = nestedWidget
+                    ? (nestedWidget.getValue ? nestedWidget.getValue() : nestedWidget.value)
+                    : "";
+                const nestedParseResult = parseCollectNodes(nestedValue);
+                const { entries: nestedEntries } = collectNodes(
+                    graph, nestedParseResult, n.id, expandingAppNodes, combinedFilter
+                );
+
+                expandingAppNodes.delete(n.id);
+
+                for (const entry of nestedEntries) {
+                    // Add the nested ApplicationNode as a parent
+                    entry.parentAppNodeIds.add(n.id);
+                    mergeCollectedEntry(collected, entry);
                 }
             } else {
-                collected.set(n.id, { node: n, widgetFilter });
+                mergeCollectedEntry(collected, { node: n, widgetFilter: combinedFilter, parentAppNodeIds: [] });
             }
         }
     }
-    return Array.from(collected.values()).sort((a, b) => {
+
+    expandingAppNodes.delete(selfNodeId);
+
+    const entries = Array.from(collected.values()).sort((a, b) => {
         const na = a.node.title || a.node.type || "";
         const nb = b.node.title || b.node.type || "";
         return na.localeCompare(nb);
     });
+
+    return { entries, expandedAppNodes };
 }
 
 /**
@@ -492,6 +569,7 @@ function collectNodes(graph, parseResult, selfNodeId) {
  * @param {object} targetWidget - The original ComfyUI widget
  * @param {object} targetNode - The node that owns the widget
  * @param {string|null} displayLabel - null = use original name, "" = hide label, string = custom label
+ * @returns {{row: HTMLElement, sync: Function}} The row element and a sync function to update from original widget.
  */
 function createWidgetControl(targetWidget, targetNode, displayLabel) {
     const row = document.createElement("div");
@@ -515,35 +593,48 @@ function createWidgetControl(targetWidget, targetNode, displayLabel) {
         row.appendChild(label);
     }
 
-    if (type === "combo") {
-        const select = document.createElement("select");
-        select.className = "kolid-app-ctrl";
+    // The control element we create (for sync back)
+    let ctrlEl = null;
+    // Whether the widget is a combo-like (has options.values)
+    const isCombo = type === "combo" || (Array.isArray(opts.values) && opts.values.length > 0);
+
+    if (isCombo) {
+        ctrlEl = document.createElement("select");
+        ctrlEl.className = "kolid-app-ctrl";
         const values = opts.values || [];
         for (const v of values) {
             const opt = document.createElement("option");
             opt.value = v;
             opt.textContent = v;
-            select.appendChild(opt);
+            ctrlEl.appendChild(opt);
         }
-        select.value = targetWidget.value;
-        select.addEventListener("change", () => {
-            targetWidget.value = select.value;
-            if (targetWidget.callback) targetWidget.callback.call(targetNode, select.value);
+        // Ensure current value is always selectable (may not be in values list yet)
+        const currentVal = String(targetWidget.value ?? "");
+        if (currentVal && !values.includes(currentVal)) {
+            const opt = document.createElement("option");
+            opt.value = currentVal;
+            opt.textContent = currentVal;
+            ctrlEl.appendChild(opt);
+        }
+        ctrlEl.value = currentVal;
+        ctrlEl.addEventListener("change", () => {
+            targetWidget.value = ctrlEl.value;
+            if (targetWidget.callback) targetWidget.callback.call(targetNode, ctrlEl.value);
             targetNode.setDirtyCanvas(true, true);
         });
-        row.appendChild(select);
+        row.appendChild(ctrlEl);
 
     } else if (type === "toggle" || type === "boolean") {
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.className = "kolid-app-ctrl";
-        cb.checked = !!targetWidget.value;
-        cb.addEventListener("change", () => {
-            targetWidget.value = cb.checked;
-            if (targetWidget.callback) targetWidget.callback.call(targetNode, cb.checked);
+        ctrlEl = document.createElement("input");
+        ctrlEl.type = "checkbox";
+        ctrlEl.className = "kolid-app-ctrl";
+        ctrlEl.checked = !!targetWidget.value;
+        ctrlEl.addEventListener("change", () => {
+            targetWidget.value = ctrlEl.checked;
+            if (targetWidget.callback) targetWidget.callback.call(targetNode, ctrlEl.checked);
             targetNode.setDirtyCanvas(true, true);
         });
-        row.appendChild(cb);
+        row.appendChild(ctrlEl);
 
     } else if (type === "button") {
         const btn = document.createElement("button");
@@ -556,55 +647,195 @@ function createWidgetControl(targetWidget, targetNode, displayLabel) {
         // Button replaces the label
         if (label) row.removeChild(label);
         row.appendChild(btn);
+        // No sync needed for buttons
+        return { row, sync: () => {} };
 
     } else if (type === "number" || type === "slider" || type === "INT" || type === "FLOAT") {
-        const input = document.createElement("input");
-        input.type = "number";
-        input.className = "kolid-app-ctrl";
-        input.value = targetWidget.value;
-        if (opts.min !== undefined) input.min = opts.min;
-        if (opts.max !== undefined) input.max = opts.max;
-        if (opts.step !== undefined) input.step = opts.step;
-        input.addEventListener("change", () => {
-            let v = parseFloat(input.value);
+        ctrlEl = document.createElement("input");
+        ctrlEl.type = "number";
+        ctrlEl.className = "kolid-app-ctrl";
+        ctrlEl.value = targetWidget.value;
+        if (opts.min !== undefined) ctrlEl.min = opts.min;
+        if (opts.max !== undefined) ctrlEl.max = opts.max;
+        if (opts.step !== undefined) ctrlEl.step = opts.step;
+        ctrlEl.addEventListener("change", () => {
+            let v = parseFloat(ctrlEl.value);
             if (isNaN(v)) v = 0;
             if (opts.round) v = Math.round(v / opts.round) * opts.round;
             targetWidget.value = v;
             if (targetWidget.callback) targetWidget.callback.call(targetNode, v);
             targetNode.setDirtyCanvas(true, true);
         });
-        row.appendChild(input);
+        row.appendChild(ctrlEl);
 
     } else if (opts.multiline) {
-        const ta = document.createElement("textarea");
-        ta.className = "kolid-app-ctrl";
-        ta.value = targetWidget.value || "";
-        ta.rows = Math.min(8, Math.max(2, (ta.value.match(/\n/g) || []).length + 1));
-        ta.addEventListener("change", () => {
-            targetWidget.value = ta.value;
-            if (targetWidget.callback) targetWidget.callback.call(targetNode, ta.value);
+        ctrlEl = document.createElement("textarea");
+        ctrlEl.className = "kolid-app-ctrl";
+        ctrlEl.value = targetWidget.value || "";
+        ctrlEl.rows = Math.min(8, Math.max(2, (ctrlEl.value.match(/\n/g) || []).length + 1));
+        ctrlEl.addEventListener("change", () => {
+            targetWidget.value = ctrlEl.value;
+            if (targetWidget.callback) targetWidget.callback.call(targetNode, ctrlEl.value);
             targetNode.setDirtyCanvas(true, true);
         });
-        row.appendChild(ta);
+        row.appendChild(ctrlEl);
 
     } else {
         // default: text input
-        const input = document.createElement("input");
-        input.type = "text";
-        input.className = "kolid-app-ctrl";
-        input.value = targetWidget.value !== undefined ? String(targetWidget.value) : "";
-        input.addEventListener("change", () => {
-            let v = input.value;
+        ctrlEl = document.createElement("input");
+        ctrlEl.type = "text";
+        ctrlEl.className = "kolid-app-ctrl";
+        ctrlEl.value = targetWidget.value !== undefined ? String(targetWidget.value) : "";
+        ctrlEl.addEventListener("change", () => {
+            let v = ctrlEl.value;
             // try to preserve original type
             if (typeof targetWidget.value === "number") v = parseFloat(v) || 0;
             targetWidget.value = v;
             if (targetWidget.callback) targetWidget.callback.call(targetNode, v);
             targetNode.setDirtyCanvas(true, true);
         });
-        row.appendChild(input);
+        row.appendChild(ctrlEl);
     }
 
-    return row;
+    // Sync function: update control from original widget (skip if user is focused)
+    function sync() {
+        if (!ctrlEl) return;
+        if (document.activeElement === ctrlEl) return;
+
+        if (isCombo) {
+            const currentVal = String(targetWidget.value ?? "");
+            // Add value to options if missing
+            const existingOpts = Array.from(ctrlEl.options).map(o => o.value);
+            if (currentVal && !existingOpts.includes(currentVal)) {
+                const opt = document.createElement("option");
+                opt.value = currentVal;
+                opt.textContent = currentVal;
+                ctrlEl.appendChild(opt);
+            }
+            // Refresh options list from source (may have changed, e.g. new images uploaded)
+            const srcValues = (targetWidget.options && targetWidget.options.values) || [];
+            const ctrlValues = Array.from(ctrlEl.options).map(o => o.value);
+            for (const sv of srcValues) {
+                if (!ctrlValues.includes(sv)) {
+                    const opt = document.createElement("option");
+                    opt.value = sv;
+                    opt.textContent = sv;
+                    // Insert before the "extra" current-value option (last)
+                    ctrlEl.insertBefore(opt, ctrlEl.lastOption || null);
+                }
+            }
+            ctrlEl.value = currentVal;
+        } else if (ctrlEl.type === "checkbox") {
+            ctrlEl.checked = !!targetWidget.value;
+        } else {
+            ctrlEl.value = targetWidget.value !== undefined ? String(targetWidget.value) : "";
+        }
+    }
+
+    return { row, sync };
+}
+
+/**
+ * Wrap a target widget's callback so that when the original widget changes
+ * (user interacts with the original node), the wrapper control syncs immediately.
+ * Supports multiple watchers. Returns a cleanup function.
+ */
+function hookWidgetCallback(targetWidget, targetNode, syncFn) {
+    if (!targetWidget._kolidHooked) {
+        targetWidget._kolidHooked = true;
+        targetWidget._kolidOrigCallback = targetWidget.callback;
+        targetWidget._kolidSyncFns = [];
+        targetWidget.callback = function (value) {
+            if (targetWidget._kolidOrigCallback) {
+                targetWidget._kolidOrigCallback.call(targetNode, value);
+            }
+            for (const fn of targetWidget._kolidSyncFns) {
+                fn();
+            }
+        };
+    }
+    targetWidget._kolidSyncFns.push(syncFn);
+    return () => {
+        const idx = targetWidget._kolidSyncFns.indexOf(syncFn);
+        if (idx !== -1) targetWidget._kolidSyncFns.splice(idx, 1);
+        if (targetWidget._kolidSyncFns.length === 0) {
+            targetWidget.callback = targetWidget._kolidOrigCallback;
+            delete targetWidget._kolidHooked;
+            delete targetWidget._kolidOrigCallback;
+            delete targetWidget._kolidSyncFns;
+        }
+    };
+}
+
+/**
+ * Watch a target node's `mode` for changes via lightweight polling.
+ * Supports multiple watchers. Returns a cleanup function.
+ */
+function hookNodeMode(targetNode, onModeChange) {
+    if (!targetNode._kolidModeWatchers) {
+        targetNode._kolidModeWatchers = [];
+        targetNode._kolidLastMode = targetNode.mode;
+        targetNode._kolidModeInterval = setInterval(() => {
+            if (targetNode._kolidLastMode !== targetNode.mode) {
+                targetNode._kolidLastMode = targetNode.mode;
+                for (const w of targetNode._kolidModeWatchers) {
+                    w(targetNode.mode);
+                }
+            }
+        }, 100);
+    }
+    targetNode._kolidModeWatchers.push(onModeChange);
+    return () => {
+        const idx = targetNode._kolidModeWatchers.indexOf(onModeChange);
+        if (idx !== -1) targetNode._kolidModeWatchers.splice(idx, 1);
+        if (targetNode._kolidModeWatchers.length === 0) {
+            clearInterval(targetNode._kolidModeInterval);
+            delete targetNode._kolidModeWatchers;
+            delete targetNode._kolidLastMode;
+            delete targetNode._kolidModeInterval;
+        }
+    };
+}
+
+/**
+ * Hook graph-level events (node added/removed) to trigger rebuilds
+ * and highlight updates for all ApplicationNodes in the graph.
+ */
+function hookGraphEvents(graph, node) {
+    if (!graph._kolidAppNodes) {
+        graph._kolidAppNodes = new Set();
+    }
+    graph._kolidAppNodes.add(node);
+
+    if (graph._kolidAppGraphHooked) return;
+    graph._kolidAppGraphHooked = true;
+
+    const origOnNodeRemoved = graph.onNodeRemoved;
+    graph.onNodeRemoved = function (removedNode) {
+        if (origOnNodeRemoved) origOnNodeRemoved.call(this, removedNode);
+        for (const appNode of graph._kolidAppNodes) {
+            if (appNode._kolidAppContainer) {
+                rebuildApplicationWidget(appNode);
+            }
+            if (appNode._kolidAppUpdateHighlight) {
+                appNode._kolidAppUpdateHighlight();
+            }
+        }
+    };
+
+    const origOnNodeAdded = graph.onNodeAdded;
+    graph.onNodeAdded = function (addedNode) {
+        if (origOnNodeAdded) origOnNodeAdded.call(this, addedNode);
+        for (const appNode of graph._kolidAppNodes) {
+            if (appNode._kolidAppUpdateHighlight) {
+                appNode._kolidAppUpdateHighlight();
+            }
+            clearTimeout(appNode._kolidRebuildTimer);
+            appNode._kolidRebuildTimer = setTimeout(() => {
+                rebuildApplicationWidget(appNode);
+            }, 100);
+        }
+    };
 }
 
 /**
@@ -613,6 +844,12 @@ function createWidgetControl(targetWidget, targetNode, displayLabel) {
 function rebuildApplicationWidget(node) {
     const container = node._kolidAppContainer;
     if (!container) return;
+
+    // Clean up previous hooks (widget callbacks + mode patches)
+    if (node._kolidCleanups) {
+        for (const cleanup of node._kolidCleanups) cleanup();
+    }
+    node._kolidCleanups = [];
 
     container.innerHTML = "";
 
@@ -628,8 +865,31 @@ function rebuildApplicationWidget(node) {
         return;
     }
 
-    const parseResult = parseCollectNodes(collectNodesWidget.value);
-    const collectedEntries = collectNodes(graph, parseResult, node.id);
+    // Ensure graph-level hooks are set up
+    hookGraphEvents(graph, node);
+
+    const collectValue = collectNodesWidget.getValue
+        ? collectNodesWidget.getValue()
+        : collectNodesWidget.value;
+    const parseResult = parseCollectNodes(collectValue);
+    const { entries: collectedEntries, expandedAppNodes } = collectNodes(graph, parseResult, node.id);
+
+    // Hook nested ApplicationNodes' editor textareas so outer rebuilds when inner changes
+    for (const appNode of expandedAppNodes) {
+        const innerTextarea = appNode._kolidAppEditorTextarea;
+        if (innerTextarea) {
+            const onInnerChange = () => {
+                clearTimeout(node._kolidRebuildTimer);
+                node._kolidRebuildTimer = setTimeout(() => {
+                    rebuildApplicationWidget(node);
+                }, 300);
+            };
+            innerTextarea.addEventListener("input", onInnerChange);
+            node._kolidCleanups.push(() => {
+                innerTextarea.removeEventListener("input", onInnerChange);
+            });
+        }
+    }
 
     if (collectedEntries.length === 0) {
         container.innerHTML = '<div class="kolid-app-empty">No nodes matched. Use format: id:234,regex:test,name:TT</div>';
@@ -637,7 +897,9 @@ function rebuildApplicationWidget(node) {
         return;
     }
 
-    for (const { node: targetNode, widgetFilter } of collectedEntries) {
+    for (const entry of collectedEntries) {
+        const targetNode = entry.node;
+        const widgetFilter = entry.widgetFilter;
         const section = document.createElement("div");
         section.className = "kolid-app-section";
         section._targetNodeId = targetNode.id;
@@ -676,9 +938,14 @@ function rebuildApplicationWidget(node) {
                     if (!widgetFilter.has(targetWidget.name)) continue;
                     // null = original name, "" = hide, string = custom
                     const displayLabel = widgetFilter.get(targetWidget.name);
-                    body.appendChild(createWidgetControl(targetWidget, targetNode, displayLabel));
+                    const { row, sync } = createWidgetControl(targetWidget, targetNode, displayLabel);
+                    body.appendChild(row);
+                    // Hook original widget callback for immediate sync
+                    node._kolidCleanups.push(hookWidgetCallback(targetWidget, targetNode, sync));
                 } else {
-                    body.appendChild(createWidgetControl(targetWidget, targetNode, null));
+                    const { row, sync } = createWidgetControl(targetWidget, targetNode, null);
+                    body.appendChild(row);
+                    node._kolidCleanups.push(hookWidgetCallback(targetWidget, targetNode, sync));
                 }
             }
             if (body.children.length === 0) {
@@ -688,76 +955,35 @@ function rebuildApplicationWidget(node) {
 
         section.appendChild(body);
 
-        // Apply initial visibility based on node mode
-        const isMutedOrBypassed = targetNode.mode === 2 || targetNode.mode === 4;
-        section.style.display = isMutedOrBypassed ? "none" : "";
+        // Collect all nodes whose mode affects this section's visibility:
+        // the target node itself + any parent ApplicationNodes it was expanded from
+        const modeWatchNodes = [targetNode];
+        if (entry.parentAppNodeIds && entry.parentAppNodeIds.size > 0) {
+            for (const parentId of entry.parentAppNodeIds) {
+                const parent = graph.getNodeById(parentId);
+                if (parent) modeWatchNodes.push(parent);
+            }
+        }
+
+        // Check visibility: hidden if target OR any parent ApplicationNode is muted/bypassed
+        function updateSectionVisibilityByMode() {
+            const hidden = modeWatchNodes.some(n => n.mode === 2 || n.mode === 4);
+            section.style.display = hidden ? "none" : "";
+            requestAnimationFrame(() => node.setSize(node.computeSize()));
+        }
+
+        // Apply initial visibility
+        updateSectionVisibilityByMode();
+
+        // Hook mode changes on all watched nodes
+        for (const watchNode of modeWatchNodes) {
+            node._kolidCleanups.push(hookNodeMode(watchNode, updateSectionVisibilityByMode));
+        }
 
         container.appendChild(section);
     }
 
     requestAnimationFrame(() => node.setSize(node.computeSize()));
-}
-
-/**
- * Update section visibility based on collected nodes' mode (mute/bypass).
- */
-function updateSectionVisibility(node) {
-    const container = node._kolidAppContainer;
-    if (!container || !node.graph) return;
-
-    const sections = container.querySelectorAll(".kolid-app-section");
-    let changed = false;
-    for (const section of sections) {
-        const targetNode = node.graph.getNodeById(section._targetNodeId);
-        if (!targetNode) {
-            // Node was deleted, rebuild
-            if (!changed) {
-                changed = true;
-            }
-            continue;
-        }
-        const isMutedOrBypassed = targetNode.mode === 2 || targetNode.mode === 4;
-        const shouldBeVisible = !isMutedOrBypassed;
-        const isVisible = section.style.display !== "none";
-        if (shouldBeVisible !== isVisible) {
-            section.style.display = shouldBeVisible ? "" : "none";
-            changed = true;
-        }
-    }
-    if (changed) {
-        requestAnimationFrame(() => node.setSize(node.computeSize()));
-    }
-}
-
-/**
- * Full rebuild + visibility check, called periodically.
- */
-function periodicCheck(node) {
-    if (!node.graph) return;
-
-    const container = node._kolidAppContainer;
-    if (!container) return;
-
-    // Check if any collected node was deleted
-    const sections = container.querySelectorAll(".kolid-app-section");
-    let needsRebuild = false;
-    for (const section of sections) {
-        if (!node.graph.getNodeById(section._targetNodeId)) {
-            needsRebuild = true;
-            break;
-        }
-    }
-    if (needsRebuild) {
-        rebuildApplicationWidget(node);
-        return;
-    }
-
-    updateSectionVisibility(node);
-
-    // Refresh syntax highlighting (nodes may have been added/removed/renamed)
-    if (node._kolidAppUpdateHighlight) {
-        node._kolidAppUpdateHighlight();
-    }
 }
 
 // ── Extension registration ─────────────────────────────────────────
@@ -777,32 +1003,48 @@ app.registerExtension({
             if (node._kolidAppSetup) return;
             node._kolidAppSetup = true;
 
-            // Hide original collect_nodes widget, replace with syntax-highlighted editor
+            // Replace original collect_nodes widget with syntax-highlighted editor
             const collectNodesWidget = node.widgets.find(w => w.name === "collect_nodes");
             let editorRef = null;
             if (collectNodesWidget) {
-                collectNodesWidget.hidden = true;
+                // Save the value before removing the widget
+                const savedValue = collectNodesWidget.value || "";
 
+                // Remove the original widget entirely (DOM widgets ignore hidden flag)
+                const idx = node.widgets.indexOf(collectNodesWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+                // Clean up its DOM element if it has one
+                if (collectNodesWidget.inputEl && collectNodesWidget.inputEl.parentElement) {
+                    collectNodesWidget.inputEl.parentElement.removeChild(collectNodesWidget.inputEl);
+                }
+                if (collectNodesWidget.element && collectNodesWidget.element.parentElement) {
+                    collectNodesWidget.element.parentElement.removeChild(collectNodesWidget.element);
+                }
+
+                // Create the syntax-highlighted editor
                 const { container: editorContainer, textarea: editorTextarea, update: updateHighlight } =
-                    createHighlightEditor(collectNodesWidget, node);
+                    createHighlightEditor(savedValue, node);
                 editorRef = { textarea: editorTextarea, update: updateHighlight };
                 node._kolidAppUpdateHighlight = updateHighlight;
+                node._kolidAppEditorTextarea = editorTextarea;
 
+                // Add as DOM widget with the SAME name "collect_nodes" so it serializes correctly
                 const editorWidget = node.addDOMWidget(
-                    "collect_nodes_editor",
+                    "collect_nodes",
                     "kolid_collect_editor",
                     editorContainer,
                     {
-                        getValue: () => collectNodesWidget.value,
+                        getValue: () => editorTextarea.value,
                         setValue: (v) => {
-                            collectNodesWidget.value = v;
                             editorTextarea.value = v;
                             updateHighlight();
                         },
                         hideOnZoom: false,
                     }
                 );
-                editorWidget.serialize = false;
+                // Restore the saved value
+                editorTextarea.value = savedValue;
+                updateHighlight();
             }
 
             // Create container element for collected widgets
@@ -823,6 +1065,22 @@ app.registerExtension({
             );
             appWidget.serialize = false;
 
+            // Hook ApplicationNode's own mode for hiding collected_widgets when muted/bypassed
+            const updateAppWidgetVisibility = () => {
+                const hidden = node.mode === 2 || node.mode === 4;
+                if (appWidget.element) {
+                    appWidget.element.style.display = hidden ? "none" : "";
+                }
+                requestAnimationFrame(() => node.setSize(node.computeSize()));
+            };
+
+            // Apply initial state
+            updateAppWidgetVisibility();
+
+            // Store separately so rebuildApplicationWidget doesn't clear it
+            node._kolidPersistentCleanups = node._kolidPersistentCleanups || [];
+            node._kolidPersistentCleanups.push(hookNodeMode(node, updateAppWidgetVisibility));
+
             // Hook onAdded — node is now in the graph (graph available)
             const origOnAdded = node.onAdded;
             node.onAdded = function () {
@@ -835,21 +1093,30 @@ app.registerExtension({
             node.onConfigure = function () {
                 origOnConfigure?.apply(this, arguments);
                 if (editorRef) {
-                    editorRef.textarea.value = collectNodesWidget.value || "";
+                    // Find the current widget (may have been recreated during configure)
+                    const w = node.widgets.find(w => w.name === "collect_nodes");
+                    const v = w ? (w.getValue ? w.getValue() : w.value) : "";
+                    editorRef.textarea.value = v || "";
                     editorRef.update();
                 }
                 rebuildApplicationWidget(node);
             };
 
-            // Periodic visibility check (mute/bypass detection + deleted node detection)
-            const intervalId = setInterval(() => {
-                periodicCheck(node);
-            }, 300);
-
-            // Clean up on removal
+            // Clean up on removal: restore all hooks
             const origOnRemoved = node.onRemoved;
             node.onRemoved = function () {
-                clearInterval(intervalId);
+                if (node._kolidCleanups) {
+                    for (const cleanup of node._kolidCleanups) cleanup();
+                    node._kolidCleanups = [];
+                }
+                if (node._kolidPersistentCleanups) {
+                    for (const cleanup of node._kolidPersistentCleanups) cleanup();
+                    node._kolidPersistentCleanups = [];
+                }
+                if (node.graph && node.graph._kolidAppNodes) {
+                    node.graph._kolidAppNodes.delete(node);
+                }
+                clearTimeout(node._kolidRebuildTimer);
                 if (origOnRemoved) origOnRemoved.apply(this, arguments);
             };
 
