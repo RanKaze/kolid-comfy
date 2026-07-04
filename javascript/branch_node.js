@@ -2,6 +2,15 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 /**
+ * 从节点 widget 中读取值，找不到时返回默认值。
+ * 替代原先通过 node.properties 读取的方式。
+ */
+function getWidgetValue(node, name, defaultValue) {
+    const widget = node.widgets?.find(w => w.name === name);
+    return widget ? widget.value : defaultValue;
+}
+
+/**
  * 
  * @param {*} node 
  * @param {*} key 
@@ -145,7 +154,8 @@ function updateRelays(node, updateSet) {
             if(!updateSet.has(beRelayed)) continue;
             // 正常更新
             updateSet.delete(beRelayed);
-            let relayMarks = extractVariables(beRelayed.properties.relay_expression);
+            let expr = getWidgetValue(beRelayed, 'relay_expression', '');
+            let relayMarks = extractVariables(expr);
 
             let parameters = new Map();
             for (let j = 0; j < relayMarks.length; j++) {
@@ -154,7 +164,7 @@ function updateRelays(node, updateSet) {
                 parameters.set(relayMark, relayNode.widgets[0].value)
             }
 
-            beRelayed.widgets[0].value = solveExpression(beRelayed.properties.relay_expression, parameters);
+            beRelayed.widgets[0].value = solveExpression(expr, parameters);
 
             updateRelays(beRelayed, updateSet);
         }
@@ -173,14 +183,14 @@ function updateActiveAndFoldout(){
     for (let index = 0; index < window.kolid_data.branchNodes.length; index++) {
         const branchNode = window.kolid_data.branchNodes[index];
         // 初始化activeNodes
-        let activeNodes = branchNode.properties.active_nodes;
+        let activeNodes = getWidgetValue(branchNode, 'active_nodes', '');
         if(activeNodes){
             for(let activeNode of getNodes(branchNode, activeNodes)){
                 activeNode.mode = branchNode.widgets[0].value ? 0 : 2;
             }
         }
         // 初始化foldoutNodes
-        let foldoutNodes = branchNode.properties.foldout_nodes;
+        let foldoutNodes = getWidgetValue(branchNode, 'foldout_nodes', '');
         if(foldoutNodes){
             for(let foldoutNode of getNodes(branchNode, foldoutNodes)){
                 if(foldoutNode.collapsed == branchNode.widgets[0].value) {
@@ -214,7 +224,7 @@ function* ExpandNode(currentNode, expandNode, processedNodes, indent) {
     
     let addFlag = true;
     let hide = false;
-    if('hide' in expandNode.properties && expandNode.properties.hide){
+    if(getWidgetValue(expandNode, 'hide', false)){
         addFlag = false;
         hide = true;
     }
@@ -229,7 +239,7 @@ function* ExpandNode(currentNode, expandNode, processedNodes, indent) {
     let value = layoutValue(expandNode);
     if(value !== undefined){
         if (value) {
-            let expandNodes = expandNode.properties.expand_nodes;
+            let expandNodes = getWidgetValue(expandNode, 'expand_nodes', '');
             if(expandNodes){
                 if(addFlag){
                     added = true;
@@ -276,7 +286,7 @@ function updateRelayGraph(){
 
     for(let node of allNodes(app.graph)){
         if(node.comfyClass === "BranchSwitchNode" || node.comfyClass === "BranchBooleanNode"){
-            const expr = node.properties.relay_expression;
+            const expr = getWidgetValue(node, 'relay_expression', '');
             const relayExpreesions = extractVariables(expr);
             let relayNodes = [];
             // 这个节点依赖的其他节点
@@ -290,7 +300,7 @@ function updateRelayGraph(){
             window.kolid_data.branchNodes.push(node);
 
             // 初始化activeNodes
-            let activeNodes = node.properties.active_nodes;
+            let activeNodes = getWidgetValue(node, 'active_nodes', '');
             if(activeNodes){
                 let nodeNames = activeNodes.split('/');
                 for(let nodeName of nodeNames){
@@ -303,7 +313,7 @@ function updateRelayGraph(){
             }
 
             // 初始化foldoutNodes
-            let foldoutNodes = node.properties.foldout_nodes;
+            let foldoutNodes = getWidgetValue(node, 'foldout_nodes', '');
             if(foldoutNodes){
                 let nodeNames = foldoutNodes.split('/');
                 for(let nodeName of nodeNames){
@@ -377,7 +387,7 @@ function updateBranchGroupNode(node){
         for (const targetNode of filteredBranchNodes) {
             let addFlag = true;
 
-            if('hide' in targetNode.properties && targetNode.properties.hide) {
+            if(getWidgetValue(targetNode, 'hide', false)) {
                 addFlag = false;
             }
 
@@ -397,7 +407,7 @@ function updateBranchGroupNode(node){
             let allNodes = filteredBranchNodes;
             
             // 收集仅hide为false的节点标题，用于combo控件
-            let visibleNodeTitles = allNodes.filter(n => !n.properties.hide).map(n => n.title);
+            let visibleNodeTitles = allNodes.filter(n => !getWidgetValue(n, 'hide', false)).map(n => n.title);
             
             // 找出当前选中的节点
             let selectedNode = allNodes.find(n => n.widgets[0].value);
@@ -425,13 +435,13 @@ function updateBranchGroupNode(node){
             }
             if(expandNode){
                 // 初始化activeNodes
-                let activeNodes = expandNode.properties.active_nodes;
+                let activeNodes = getWidgetValue(expandNode, 'active_nodes', '');
                 if(activeNodes){
                     for(let activeNode of getNodes(node, activeNodes)){
                         activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
                     }
                 }
-                let foldoutNodes = expandNode.properties.foldout_nodes;
+                let foldoutNodes = getWidgetValue(expandNode, 'foldout_nodes', '');
                 if(foldoutNodes){
                     for(let foldoutNode of getNodes(node, foldoutNodes)){
                         if(foldoutNode.collapsed == expandNode.widgets[0].value) {
@@ -463,7 +473,7 @@ function updateBranchGroupNode(node){
             // 收集仅hide为false的节点标题，用于combo控件
             visibleNodeTitles.push('[None]');
             let tempTitles = allNodes
-                .filter(n => !n.properties.hide)
+                .filter(n => !getWidgetValue(n, 'hide', false))
                 .map(n => n.title);
             visibleNodeTitles.push(...tempTitles);
             
@@ -487,13 +497,13 @@ function updateBranchGroupNode(node){
             let expandNode = allNodes.find(n => n.title === currentValue);
             if(expandNode){
                 // 初始化activeNodes
-                let activeNodes = expandNode.properties.active_nodes;
+                let activeNodes = getWidgetValue(expandNode, 'active_nodes', '');
                 if(activeNodes){
                     for(let activeNode of getNodes(node, activeNodes)){
                         activeNode.mode = expandNode.widgets[0].value ? 0 : 2;
                     }
                 }
-                let foldoutNodes = expandNode.properties.foldout_nodes;
+                let foldoutNodes = getWidgetValue(expandNode, 'foldout_nodes', '');
                 if(foldoutNodes){
                     for(let foldoutNode of getNodes(node, foldoutNodes)){
                         if(foldoutNode.collapsed == expandNode.widgets[0].value) {
@@ -535,31 +545,21 @@ function wrapOnPropertyChanged(node, updateFn) {
 
 function nodeInit(node, is_create){
     if (node.comfyClass === "BranchSwitchNode" || node.comfyClass === "BranchBooleanNode") {
-        if (!('relay_expression' in node.properties)) {
-            node.setProperty('relay_expression', '');
-        }
-        if (!('expand_nodes' in node.properties)) {
-            node.setProperty('expand_nodes', '');
-        }
-        if (!('active_nodes' in node.properties)) {
-            node.setProperty('active_nodes', '');
-        }
-        if (!('foldout_nodes' in node.properties)) {
-            node.setProperty('foldout_nodes', '');
-        }
-        if (!('hide' in node.properties)) {
-            node.setProperty('hide', false);
+        // Wrap widget callbacks so that changing relay/expand/active/foldout/hide rebuilds the relay graph
+        for (const name of ['relay_expression', 'expand_nodes', 'active_nodes', 'foldout_nodes', 'hide']) {
+            const widget = node.widgets?.find(w => w.name === name);
+            if (widget) {
+                const original = widget.callback;
+                widget.callback = function(value) {
+                    if (original) original.call(this, value);
+                    updateRelayGraph();
+                    updateActiveAndFoldout();
+                };
+            }
         }
 
-        // 创建需要重建
         if(is_create){
             updateRelayGraph();
-            node.onConfigure = () => {
-                // Property改变也需要重建
-                wrapOnPropertyChanged(node, updateRelayGraph);
-            }
-        }else{
-            wrapOnPropertyChanged(node, updateRelayGraph);
         }
         
         const originalCallback = node.widgets[0].callback;
@@ -799,6 +799,19 @@ app.registerExtension({
                         case "!bypass":
                             n.mode = LiteGraph.ALWAYS;
                             break;
+                        case "set":
+                        case "!set":
+                            // 只对 BranchSwitchNode / BranchBooleanNode 生效
+                            if (n.comfyClass === "BranchSwitchNode" || n.comfyClass === "BranchBooleanNode") {
+                                const newVal = (op === "set");
+                                if (n.widgets[0].value !== newVal) {
+                                    n.widgets[0].value = newVal;
+                                    if (n.widgets[0].callback) {
+                                        n.widgets[0].callback(newVal);
+                                    }
+                                }
+                            }
+                            break;
                     }
                     // 如果目标是 BranchSwitchesNode，触发其 select_config 联动
                     const isSwitch = n.comfyClass === "BranchSwitchesNode" || n.type === "BranchSwitchesNode";
@@ -837,7 +850,9 @@ app.registerExtension({
                         "mute": "!mute",
                         "!mute": "mute",
                         "bypass": "!bypass",
-                        "!bypass": "bypass"
+                        "!bypass": "bypass",
+                        "set": "!set",
+                        "!set": "set"
                     };
 
                     const segments = configStr.split(",").map(s => s.trim()).filter(s => s);

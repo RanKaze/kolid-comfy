@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 // ── CSS injection (once) ──────────────────────────────────────────
 const STYLE_ID = "kolid-application-node-styles";
@@ -8,8 +9,7 @@ if (!document.getElementById(STYLE_ID)) {
     style.textContent = `
 .kolid-app-container {
     width: 100%;
-    max-height: 500px;
-    overflow-y: auto;
+    overflow-y: visible;
     overflow-x: hidden;
     box-sizing: border-box;
     padding: 2px;
@@ -107,6 +107,21 @@ if (!document.getElementById(STYLE_ID)) {
     color: #888;
     padding: 6px;
     text-align: center;
+}
+.kolid-app-img-preview {
+    margin-top: 4px;
+    padding: 2px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.kolid-app-img-preview img,
+.kolid-app-img-preview video {
+    object-fit: contain;
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 3px;
 }
 
 /* ── Syntax-highlighted editor ── */
@@ -569,7 +584,7 @@ function collectNodes(graph, parseResult, selfNodeId, expandingAppNodes, parentW
  * @param {object} targetWidget - The original ComfyUI widget
  * @param {object} targetNode - The node that owns the widget
  * @param {string|null} displayLabel - null = use original name, "" = hide label, string = custom label
- * @returns {{row: HTMLElement, sync: Function}} The row element and a sync function to update from original widget.
+ * @returns {{row: HTMLElement, sync: Function, cleanup?: Function}} The row element, a sync function, and optional cleanup.
  */
 function createWidgetControl(targetWidget, targetNode, displayLabel) {
     const row = document.createElement("div");
@@ -598,7 +613,52 @@ function createWidgetControl(targetWidget, targetNode, displayLabel) {
     // Whether the widget is a combo-like (has options.values)
     const isCombo = type === "combo" || (Array.isArray(opts.values) && opts.values.length > 0);
 
-    if (isCombo) {
+    // ── DOM widget (e.g. image preview, upload button) ──
+    // These widgets have an .element property that is an HTMLElement.
+    // We clone the element and keep it in sync via MutationObserver.
+    // Skip image preview DOM widgets — handled separately via node.imgs
+    if (targetWidget.element instanceof HTMLElement &&
+        !targetWidget.element.classList.contains("comfy-img-preview")) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "kolid-app-ctrl";
+        wrapper.style.padding = "0";
+        wrapper.style.border = "none";
+        wrapper.style.background = "transparent";
+
+        const clone = targetWidget.element.cloneNode(true);
+        clone.style.maxWidth = "100%";
+        clone.style.display = "";
+        wrapper.appendChild(clone);
+        row.appendChild(wrapper);
+
+        // Keep clone in sync with original element
+        const observer = new MutationObserver(() => {
+            // Re-clone attributes
+            for (const attr of targetWidget.element.attributes) {
+                clone.setAttribute(attr.name, attr.value);
+            }
+            // Re-clone children
+            clone.innerHTML = targetWidget.element.innerHTML;
+        });
+        observer.observe(targetWidget.element, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+            characterData: true,
+        });
+
+        // Also sync on widget callback (e.g. image selection change)
+        function domSync() {
+            if (document.activeElement === wrapper) return;
+            for (const attr of targetWidget.element.attributes) {
+                clone.setAttribute(attr.name, attr.value);
+            }
+            clone.innerHTML = targetWidget.element.innerHTML;
+        }
+
+        return { row, sync: domSync, cleanup: () => observer.disconnect() };
+
+    } else if (isCombo) {
         ctrlEl = document.createElement("select");
         ctrlEl.className = "kolid-app-ctrl";
         const values = opts.values || [];
@@ -927,24 +987,185 @@ function rebuildApplicationWidget(node) {
         const body = document.createElement("div");
         body.className = "kolid-app-body";
 
+        // ── Media preview (images + videos) ──
+        // Extracts media URLs from multiple sources and creates self-contained
+        // <img> or <video> elements.
+        const mediaPreviewDiv = document.createElement("div");
+        mediaPreviewDiv.className = "kolid-app-img-preview";
+        mediaPreviewDiv.style.display = "none";
+
+        function getMediaUrls() {
+            const results = [];
+
+            // Source 1: node.imgs (Preview Image, Save Image, Load Image, etc.)
+            if (targetNode.imgs) {
+                for (const img of targetNode.imgs) {
+                    if (img instanceof HTMLImageElement && img.src) {
+                        results.push({ url: img.src, type: "image" });
+                    }
+                }
+            }
+
+            // Source 2: VHS videopreview widget (Load Video, Video Combine, etc.)
+            if (targetNode.widgets) {
+                for (const w of targetNode.widgets) {
+                    if (w.name === "videopreview" && w.videoEl && !w.videoEl.hidden && w.videoEl.src) {
+                        results.push({ url: w.videoEl.src, type: "video" });
+                    }
+                    if (w.name === "videopreview" && w.imgEl && !w.imgEl.hidden && w.imgEl.src) {
+                        results.push({ url: w.imgEl.src, type: "image" });
+                    }
+                    if (w.name === "audiopreview" && w.element && w.element.src) {
+                        results.push({ url: w.element.src, type: "audio" });
+                    }
+                }
+            }
+
+            // Source 3: comfy-img-preview DOM widget
+            if (targetNode.widgets) {
+                for (const w of targetNode.widgets) {
+                    if (w.element instanceof HTMLElement) {
+                        for (const img of w.element.querySelectorAll("img")) {
+                            if (img.src) {
+                                const url = img.src;
+                                if (!results.some(r => r.url === url)) {
+                                    results.push({ url, type: "image" });
+                                }
+                            }
+                        }
+                        for (const vid of w.element.querySelectorAll("video")) {
+                            if (vid.src) {
+                                const url = vid.src;
+                                if (!results.some(r => r.url === url)) {
+                                    results.push({ url, type: "video" });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Source 4: VHS videopreview widget value.params -> construct /view URL
+            if (results.length === 0 && targetNode.widgets) {
+                const vhsWidget = targetNode.widgets.find(w => w.name === "videopreview");
+                if (vhsWidget && vhsWidget.value && vhsWidget.value.params) {
+                    const params = { ...vhsWidget.value.params, timestamp: Date.now() };
+                    if (params.filename) {
+                        const format = params.format || "video/mp4";
+                        const isImage = format.startsWith("image");
+                        const url = api.apiURL("/view?" + new URLSearchParams(params));
+                        results.push({ url, type: isImage ? "image" : "video" });
+                    }
+                }
+            }
+
+            // Source 5: image widget value -> construct /view URL (Load Image)
+            if (results.length === 0 && targetNode.widgets) {
+                const imageWidget = targetNode.widgets.find(w => w.name === "image");
+                if (imageWidget && imageWidget.value) {
+                    const val = String(imageWidget.value);
+                    let filename = val;
+                    let subfolder = "";
+                    let imgType = "input";
+                    const tagMatch = val.match(/\s\[(.+)\]$/);
+                    if (tagMatch) {
+                        filename = val.substring(0, val.length - tagMatch[0].length);
+                        subfolder = tagMatch[1];
+                    }
+                    const slashIdx = filename.lastIndexOf("/");
+                    if (slashIdx !== -1) {
+                        subfolder = filename.substring(0, slashIdx);
+                        filename = filename.substring(slashIdx + 1);
+                    }
+                    const url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=${imgType}`);
+                    results.push({ url, type: "image" });
+                }
+            }
+
+            // Source 6: VHS video/audio widget value -> construct /view URL
+            if (results.length === 0 && targetNode.widgets) {
+                const videoWidget = targetNode.widgets.find(w => w.name === "video");
+                if (videoWidget && videoWidget.value) {
+                    const val = String(videoWidget.value);
+                    const ext = val.slice(val.lastIndexOf(".") + 1).toLowerCase();
+                    const isImage = ["gif", "webp", "avif"].includes(ext);
+                    const url = api.apiURL(`/view?filename=${encodeURIComponent(val)}&type=input`);
+                    results.push({ url, type: isImage ? "image" : "video" });
+                }
+            }
+
+            return results;
+        }
+
+        function syncMedia() {
+            const media = getMediaUrls();
+            if (media.length === 0) {
+                mediaPreviewDiv.style.display = "none";
+                mediaPreviewDiv.innerHTML = "";
+                return;
+            }
+            mediaPreviewDiv.style.display = "";
+            // Only rebuild if media changed
+            const current = Array.from(mediaPreviewDiv.children).map(el =>
+                el.tagName === "VIDEO" ? `video:${el.src}` : `image:${el.src}`
+            );
+            const newSig = media.map(m => `${m.type}:${m.url}`).join("|");
+            const oldSig = current.join("|");
+            if (newSig === oldSig) return;
+
+            mediaPreviewDiv.innerHTML = "";
+            for (const m of media) {
+                if (m.type === "video") {
+                    const video = document.createElement("video");
+                    video.src = m.url;
+                    video.controls = true;
+                    video.loop = true;
+                    video.muted = true;
+                    video.style.width = "100%";
+                    video.style.height = "auto";
+                    video.style.display = "block";
+                    video.style.borderRadius = "3px";
+                    video.style.marginBottom = "2px";
+                    mediaPreviewDiv.appendChild(video);
+                } else if (m.type === "audio") {
+                    const audio = document.createElement("audio");
+                    audio.src = m.url;
+                    audio.controls = true;
+                    audio.style.width = "100%";
+                    audio.style.marginBottom = "2px";
+                    mediaPreviewDiv.appendChild(audio);
+                } else {
+                    const img = document.createElement("img");
+                    img.src = m.url;
+                    img.style.width = "100%";
+                    img.style.height = "auto";
+                    img.style.display = "block";
+                    img.style.borderRadius = "3px";
+                    img.style.marginBottom = "2px";
+                    mediaPreviewDiv.appendChild(img);
+                }
+            }
+        }
+
         if (!targetNode.widgets || targetNode.widgets.length === 0) {
             body.innerHTML = '<div class="kolid-app-empty" style="padding:2px;">No widgets</div>';
         } else {
             for (const targetWidget of targetNode.widgets) {
                 // Skip hidden widgets
                 if (targetWidget.hidden) continue;
+
                 // Apply widget filter if specified
                 if (widgetFilter) {
                     if (!widgetFilter.has(targetWidget.name)) continue;
-                    // null = original name, "" = hide, string = custom
                     const displayLabel = widgetFilter.get(targetWidget.name);
-                    const { row, sync } = createWidgetControl(targetWidget, targetNode, displayLabel);
+                    const { row, sync, cleanup } = createWidgetControl(targetWidget, targetNode, displayLabel);
                     body.appendChild(row);
-                    // Hook original widget callback for immediate sync
+                    if (cleanup) node._kolidCleanups.push(cleanup);
                     node._kolidCleanups.push(hookWidgetCallback(targetWidget, targetNode, sync));
                 } else {
-                    const { row, sync } = createWidgetControl(targetWidget, targetNode, null);
+                    const { row, sync, cleanup } = createWidgetControl(targetWidget, targetNode, null);
                     body.appendChild(row);
+                    if (cleanup) node._kolidCleanups.push(cleanup);
                     node._kolidCleanups.push(hookWidgetCallback(targetWidget, targetNode, sync));
                 }
             }
@@ -952,6 +1173,22 @@ function rebuildApplicationWidget(node) {
                 body.innerHTML = '<div class="kolid-app-empty" style="padding:2px;">No visible widgets</div>';
             }
         }
+
+        // Always append media preview at the end of body
+        syncMedia();
+        body.appendChild(mediaPreviewDiv);
+
+        // Poll for media changes
+        let lastMediaSig = getMediaUrls().map(m => `${m.type}:${m.url}`).join("|");
+        const mediaInterval = setInterval(() => {
+            const sig = getMediaUrls().map(m => `${m.type}:${m.url}`).join("|");
+            if (sig !== lastMediaSig) {
+                lastMediaSig = sig;
+                syncMedia();
+                requestAnimationFrame(() => node.setSize(node.computeSize()));
+            }
+        }, 200);
+        node._kolidCleanups.push(() => clearInterval(mediaInterval));
 
         section.appendChild(body);
 
