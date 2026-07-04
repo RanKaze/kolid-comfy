@@ -5,7 +5,7 @@ import type { PromptContextBase } from './types';
 export type SlotType = 'context' | 'background' | 'region_prompt' | 'region_bbox';
 
 export interface ContextSlot {
-  id: string;           // unique id (e.g. "slot_0")
+  id: string;           // stable id based on path (e.g. "ctx:high_level_description")
   path: string;         // dot-separated JSON path (e.g. "style_description.aesthetics")
   label: string;        // human-readable label for button
   type: SlotType;
@@ -52,16 +52,23 @@ export class RegionFormatManager {
     }
 
     // Replace placeholders with sentinel strings, then parse JSON
-    const placeholders: { sentinel: string; type: SlotType }[] = [];
+    const placeholders: { sentinel: string; type: SlotType; id: string }[] = [];
     let slotIdx = 0;
 
-    const processed = str.replace(/<(ContextPrompt|BackGroundPrompt|RegionPrompt|RegionBbox)>/g, (_, tag) => {
+    // First pass: replace placeholders with sentinels and record their position
+    const sentinelToInfo = new Map<string, { type: SlotType; id: string }>();
+
+    const processed = str.replace(/<(ContextPrompt|BackGroundPrompt|RegionPrompt|RegionBbox)>/g, (match, tag) => {
       const type: SlotType = tag === 'ContextPrompt' ? 'context'
         : tag === 'BackGroundPrompt' ? 'background'
         : tag === 'RegionPrompt' ? 'region_prompt'
         : 'region_bbox';
-      const sentinel = `"__PLACEHOLDER_${slotIdx}__"`;
-      placeholders.push({ sentinel: `__PLACEHOLDER_${slotIdx}__`, type });
+      // Use a unique sentinel that encodes the index
+      const sentinelKey = `__PH_${slotIdx}__`;
+      const sentinel = `"${sentinelKey}"`;
+      // ID will be assigned later in extractSlots based on path — for now use sentinel as temp ID
+      placeholders.push({ sentinel: sentinelKey, type, id: sentinelKey });
+      sentinelToInfo.set(sentinelKey, { type, id: sentinelKey });
       slotIdx++;
       return sentinel;
     });
@@ -98,16 +105,11 @@ export class RegionFormatManager {
     }
   }
 
-  private markPlaceholders(obj: any, placeholders: { sentinel: string; type: SlotType }[]): TemplateValue {
+  private markPlaceholders(obj: any, placeholders: { sentinel: string; type: SlotType; id: string }[]): TemplateValue {
     if (typeof obj === 'string') {
       const found = placeholders.find(p => obj === p.sentinel);
       if (found) {
         return { __placeholder__: true, slotId: found.sentinel, type: found.type } as PlaceholderNode;
-      }
-      // Check if string contains placeholder but doesn't match exactly
-      const partial = placeholders.find(p => obj.includes(p.sentinel));
-      if (partial) {
-        console.warn('[RegionFormatManager] String contains placeholder but doesn\'t match exactly:', JSON.stringify(obj), 'vs', JSON.stringify(partial.sentinel));
       }
       return obj;
     }
@@ -128,11 +130,19 @@ export class RegionFormatManager {
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
       const node = value as PlaceholderNode;
       if (node.__placeholder__) {
-        const slotId = node.slotId;
-        const existing = this.slots.find(s => s.id === slotId);
+        const oldId = node.slotId;
+        // Generate a stable ID based on type + path
+        const stableId = node.type === 'background' ? 'ctx:__background__'
+          : node.type === 'region_prompt' ? 'ctx:__region_prompt__'
+          : node.type === 'region_bbox' ? 'ctx:__region_bbox__'
+          : `ctx:${path}`;
+        // Update the node's slotId to the stable ID
+        node.slotId = stableId;
+        const existing = this.slots.find(s => s.id === stableId);
         if (!existing) {
-          const label = path.split('.').pop() || path || 'Context';
-          this.slots.push({ id: slotId, path, label, type: node.type });
+          const label = node.type === 'background' ? 'Background'
+            : path.split('.').pop() || path || 'Context';
+          this.slots.push({ id: stableId, path, label, type: node.type });
         }
         return;
       }
