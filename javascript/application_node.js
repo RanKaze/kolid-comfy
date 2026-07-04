@@ -108,11 +108,238 @@ if (!document.getElementById(STYLE_ID)) {
     padding: 6px;
     text-align: center;
 }
+
+/* ── Syntax-highlighted editor ── */
+.kolid-app-editor {
+    position: relative;
+    width: 100%;
+}
+.kolid-app-editor-highlight {
+    margin: 0;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    font-family: monospace;
+    font-size: 10px;
+    line-height: 1.4;
+    pointer-events: none;
+    width: 100%;
+    min-height: 40px;
+}
+.kolid-app-editor-input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 4px;
+    border: 1px solid #444;
+    border-radius: 3px;
+    background: transparent;
+    color: transparent;
+    caret-color: #fff;
+    font-family: monospace;
+    font-size: 10px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    resize: none;
+    outline: none;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+.kolid-app-editor-input::placeholder { color: #666; }
+.kolid-app-editor-input:focus { border-color: #777; }
+.kolid-seg-error { color: #ff4444; }
+.kolid-seg-warning { color: #ffaa00; }
+.kolid-seg-ok { color: #44dd44; }
+.kolid-seg-separator { color: #666; }
 `;
     document.head.appendChild(style);
 }
 
-// ── Helpers ────────────────────────────────────────────────────────
+// ── Syntax highlighting helpers ───────────────────────────────────
+
+function escapeHTML(str) {
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#039;');
+}
+
+/**
+ * Validate a single segment. Returns "error", "warning", or "ok".
+ * - error: syntax problem (bad type, missing colon, bad id, invalid regex, unbalanced brackets)
+ * - warning: valid syntax but no matching node found in graph
+ * - ok: valid syntax and at least one matching node
+ */
+function validateSegment(seg, graph, selfNodeId) {
+    // Extract and validate the () filter part
+    let mainPart = seg;
+    const parenIdx = seg.indexOf("(");
+    if (parenIdx !== -1) {
+        const closeIdx = seg.lastIndexOf(")");
+        if (closeIdx === -1 || closeIdx < parenIdx) return "error";
+        mainPart = seg.substring(0, parenIdx).trim();
+        const filterStr = seg.substring(parenIdx + 1, closeIdx);
+        if (filterStr.trim()) {
+            const parts = [];
+            let depth = 0;
+            let current = "";
+            for (const ch of filterStr) {
+                if (ch === "[") { depth++; current += ch; }
+                else if (ch === "]") { depth--; current += ch; }
+                else if (ch === "," && depth === 0) {
+                    parts.push(current.trim());
+                    current = "";
+                } else {
+                    current += ch;
+                }
+            }
+            if (current.trim()) parts.push(current.trim());
+
+            for (const part of parts) {
+                const arrowIdx = part.indexOf("=>[");
+                if (arrowIdx !== -1) {
+                    const bracketClose = part.lastIndexOf("]");
+                    if (bracketClose === -1 || bracketClose < arrowIdx + 3) return "error";
+                    const name = part.substring(0, arrowIdx).trim();
+                    if (!name) return "error";
+                } else {
+                    if (part.includes("=>")) return "error";
+                    if (!part.trim()) return "error";
+                }
+            }
+        }
+    }
+
+    // Check type:value structure
+    const colonIdx = mainPart.indexOf(":");
+    if (colonIdx === -1) return "error";
+
+    const type = mainPart.substring(0, colonIdx).trim().toLowerCase();
+    const value = mainPart.substring(colonIdx + 1).trim();
+
+    if (!type || !value) return "error";
+    if (!["id", "regex", "name"].includes(type)) return "error";
+
+    if (type === "id") {
+        const id = parseInt(value);
+        if (isNaN(id)) return "error";
+        if (!graph) return "warning";
+        const n = graph.getNodeById(id);
+        if (!n || n.id === selfNodeId) return "warning";
+        return "ok";
+    } else if (type === "regex") {
+        try {
+            const re = new RegExp(value);
+            if (!graph) return "warning";
+            const matched = graph.nodes.some(n =>
+                n.id !== selfNodeId && re.test(n.title || n.type || "")
+            );
+            return matched ? "ok" : "warning";
+        } catch (e) {
+            return "error";
+        }
+    } else if (type === "name") {
+        if (!graph) return "warning";
+        const matched = graph.nodes.some(n =>
+            n.id !== selfNodeId && (n.title || n.type || "") === value
+        );
+        return matched ? "ok" : "warning";
+    }
+
+    return "error";
+}
+
+/**
+ * Build colored HTML from the raw text.
+ * Splits by top-level commas (respecting () and []), validates each segment,
+ * wraps in colored spans.
+ */
+function buildHighlightedHTML(text, graph, selfNodeId) {
+    if (!text) return "";
+
+    const segments = [];
+    let depth = 0;
+    let current = "";
+    for (const ch of text) {
+        if (ch === "(" || ch === "[") { depth++; current += ch; }
+        else if (ch === ")" || ch === "]") { depth--; current += ch; }
+        else if (ch === "," && depth === 0) {
+            segments.push(current);
+            segments.push(",");
+            current = "";
+        } else {
+            current += ch;
+        }
+    }
+    if (current) segments.push(current);
+
+    let html = "";
+    for (const seg of segments) {
+        if (seg === ",") {
+            html += '<span class="kolid-seg-separator">,</span>';
+        } else {
+            const trimmed = seg.trim();
+            if (!trimmed) {
+                html += escapeHTML(seg);
+            } else {
+                const status = validateSegment(trimmed, graph, selfNodeId);
+                html += `<span class="kolid-seg-${status}">${escapeHTML(seg)}</span>`;
+            }
+        }
+    }
+    // Trailing newline: add a space so the <pre> shows the last empty line
+    if (text.endsWith("\n")) html += " ";
+    return html;
+}
+
+/**
+ * Create a syntax-highlighted textarea editor overlay.
+ * Returns { container, textarea, update }.
+ */
+function createHighlightEditor(collectNodesWidget, node) {
+    const container = document.createElement("div");
+    container.className = "kolid-app-editor";
+
+    const highlight = document.createElement("pre");
+    highlight.className = "kolid-app-editor-highlight";
+    container.appendChild(highlight);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "kolid-app-editor-input";
+    textarea.value = collectNodesWidget.value || "";
+    textarea.placeholder = "id:234,regex:test,name:TT,id:6743(select=>[测试],select_input)";
+    container.appendChild(textarea);
+
+    function updateHighlight() {
+        highlight.innerHTML = buildHighlightedHTML(textarea.value, node.graph, node.id);
+    }
+
+    let rebuildTimer = null;
+    textarea.addEventListener("input", () => {
+        collectNodesWidget.value = textarea.value;
+        updateHighlight();
+        clearTimeout(rebuildTimer);
+        rebuildTimer = setTimeout(() => {
+            rebuildApplicationWidget(node);
+        }, 300);
+    });
+
+    updateHighlight();
+
+    return { container, textarea, update: updateHighlight };
+}
+
+// ── Widget builder ─────────────────────────────────────────────────
 
 /**
  * Parse "id:234,id:145,regex:test,name:TT,id:6743(select=>[测试],select_input)" into [{type,value,widgetFilter}, ...]
@@ -526,6 +753,11 @@ function periodicCheck(node) {
     }
 
     updateSectionVisibility(node);
+
+    // Refresh syntax highlighting (nodes may have been added/removed/renamed)
+    if (node._kolidAppUpdateHighlight) {
+        node._kolidAppUpdateHighlight();
+    }
 }
 
 // ── Extension registration ─────────────────────────────────────────
@@ -545,7 +777,35 @@ app.registerExtension({
             if (node._kolidAppSetup) return;
             node._kolidAppSetup = true;
 
-            // Create container element
+            // Hide original collect_nodes widget, replace with syntax-highlighted editor
+            const collectNodesWidget = node.widgets.find(w => w.name === "collect_nodes");
+            let editorRef = null;
+            if (collectNodesWidget) {
+                collectNodesWidget.hidden = true;
+
+                const { container: editorContainer, textarea: editorTextarea, update: updateHighlight } =
+                    createHighlightEditor(collectNodesWidget, node);
+                editorRef = { textarea: editorTextarea, update: updateHighlight };
+                node._kolidAppUpdateHighlight = updateHighlight;
+
+                const editorWidget = node.addDOMWidget(
+                    "collect_nodes_editor",
+                    "kolid_collect_editor",
+                    editorContainer,
+                    {
+                        getValue: () => collectNodesWidget.value,
+                        setValue: (v) => {
+                            collectNodesWidget.value = v;
+                            editorTextarea.value = v;
+                            updateHighlight();
+                        },
+                        hideOnZoom: false,
+                    }
+                );
+                editorWidget.serialize = false;
+            }
+
+            // Create container element for collected widgets
             const container = document.createElement("div");
             container.className = "kolid-app-container";
             node._kolidAppContainer = container;
@@ -563,16 +823,6 @@ app.registerExtension({
             );
             appWidget.serialize = false;
 
-            // Hook collect_nodes widget callback
-            const collectNodesWidget = node.widgets.find(w => w.name === "collect_nodes");
-            if (collectNodesWidget) {
-                const origCallback = collectNodesWidget.callback;
-                collectNodesWidget.callback = function (value) {
-                    if (origCallback) origCallback.call(this, value);
-                    rebuildApplicationWidget(node);
-                };
-            }
-
             // Hook onAdded — node is now in the graph (graph available)
             const origOnAdded = node.onAdded;
             node.onAdded = function () {
@@ -584,6 +834,10 @@ app.registerExtension({
             const origOnConfigure = node.onConfigure;
             node.onConfigure = function () {
                 origOnConfigure?.apply(this, arguments);
+                if (editorRef) {
+                    editorRef.textarea.value = collectNodesWidget.value || "";
+                    editorRef.update();
+                }
                 rebuildApplicationWidget(node);
             };
 
