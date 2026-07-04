@@ -121,6 +121,25 @@ function escapeRegExp(string) {
 }
 
 /**
+ * 解析 relay_expression 中的 {id}==[N] 或 {id}!=[N] 语法
+ * 判断指定 id 的 BranchSwitchesNode 的 select_input 是否等于 N
+ * 将匹配的部分替换为 true/false 后返回新表达式
+ */
+function resolveSwitchesInExpression(expr, node) {
+    const regex = /\{(\d+)\}\s*(==|!=)\s*\[(\d+)\]/g;
+    return expr.replace(regex, (match, nodeId, op, expectedIdx) => {
+        const targetNode = node.graph.getNodeById(parseInt(nodeId));
+        if (!targetNode) return 'false';
+        const siWidget = targetNode.widgets?.find(w => w.name === "select_input");
+        const actualIdx = siWidget ? (siWidget.value || 0) : 0;
+        const expected = parseInt(expectedIdx);
+        const isEqual = (actualIdx === expected);
+        const result = (op === '==') ? isEqual : !isEqual;
+        return result ? 'true' : 'false';
+    });
+}
+
+/**
  * 根据 targetType 和 targetValue 解析目标节点列表
  */
 function resolveTargetNodes(graph, targetType, targetValue) {
@@ -333,13 +352,17 @@ function updateRelays(node, updateSet) {
             // 正常更新
             updateSet.delete(beRelayed);
             let expr = getWidgetValue(beRelayed, 'relay_expression', '');
+            expr = resolveSwitchesInExpression(expr, beRelayed);
             let relayMarks = extractVariables(expr);
 
             let parameters = new Map();
             for (let j = 0; j < relayMarks.length; j++) {
                 const relayMark = relayMarks[j];
+                if (relayMark === 'true' || relayMark === 'false') continue;
                 const relayNode = getNodeFromExpression(relayMark, node);
-                parameters.set(relayMark, relayNode.widgets[0].value)
+                if(relayNode){
+                    parameters.set(relayMark, relayNode.widgets[0].value);
+                }
             }
 
             beRelayed.widgets[0].value = solveExpression(expr, parameters);
@@ -1091,6 +1114,8 @@ app.registerExtension({
                 } else {
                     processSelectConfig(0);
                 }
+                updateBranchNode(node);
+                updateActiveAndFoldout();
             };
 
             // select_input 被手动修改后同步回 combo
