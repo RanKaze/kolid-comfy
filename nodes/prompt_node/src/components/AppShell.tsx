@@ -80,6 +80,74 @@ function snapshotZoom() {
   }
 }
 
+// Build prompt text from a PromptContextBase — same logic as region desc:
+// direct prompts (strip brackets) + prefab expansion (strip brackets) + custom + lora trigger words
+function buildPromptText(ctx: PromptContextBase, findPrefabByGuid: (guid: string) => PrefabData | null): string {
+  const parts: string[] = [];
+  // 1. Direct prompts — strip [ and ]
+  for (const p of (ctx.prompts || [])) {
+    const cleaned = p.replace(/\[/g, '').replace(/\]/g, '');
+    if (cleaned) parts.push(cleaned);
+  }
+  // 2. Prefab prompts — expand tree, strip brackets
+  function expandPrefabPrompts(items: any[]): string[] {
+    const result: string[] = [];
+    for (const item of items) {
+      if (item.active === false) continue;
+      const prefab = findPrefabByGuid(item.guid);
+      if (prefab && prefab.tags) {
+        const savedTags = item.tags || [];
+        for (const group of prefab.tags) {
+          if (!Array.isArray(group)) continue;
+          const names = group.map((t: any) => t.name || t.prompt || '');
+          let key = names.join(' ');
+          const str = group[0]?.strength ?? 1.0;
+          if (str !== 1.0) key = `${key}:${str}`;
+          const saved = savedTags.find((st: any) => st.key === key);
+          if (saved && saved.active === false) continue;
+          const pp: string[] = [];
+          for (const tag of group) {
+            const pt = tag.prompt || ''; if (!pt) continue;
+            const d = tag.decoration_num || 0; const s = tag.strength ?? 1.0;
+            let t: string; if (d > 0) t = '['.repeat(d) + pt + ']'.repeat(d); else t = pt;
+            if (s !== 1.0) t = `(${t}:${s})`; pp.push(t);
+          }
+          if (pp.length) { const ps = pp.join(' '); result.push(ps.replace(/\[/g, '').replace(/\]/g, '')); }
+        }
+      }
+      if (prefab && prefab.custom_prompts) result.push(prefab.custom_prompts);
+      if (item.children) result.push(...expandPrefabPrompts(item.children));
+    }
+    return result;
+  }
+  parts.push(...expandPrefabPrompts(ctx.prefabs || []));
+  // 3. Custom prompts
+  if ((ctx.custom_prompts || '').trim()) parts.push(ctx.custom_prompts.trim());
+  // 4. Lora trigger words
+  for (const l of (ctx.loras || [])) {
+    if (l.active === false) continue;
+    parts.push(...(l.active_tags || []));
+  }
+  // 5. Prefab lora tags
+  function expandPrefabLoraTags(items: any[]): string[] {
+    const result: string[] = [];
+    for (const item of items) {
+      if (item.active === false) continue;
+      const prefab = findPrefabByGuid(item.guid);
+      if (prefab && prefab.loras) {
+        for (const pl of prefab.loras) {
+          if (pl.active === false) continue;
+          result.push(...(pl.active_tags || []));
+        }
+      }
+      if (item.children) result.push(...expandPrefabLoraTags(item.children));
+    }
+    return result;
+  }
+  parts.push(...expandPrefabLoraTags(ctx.prefabs || []));
+  return parts.filter(Boolean).join(', ');
+}
+
 export function AppShell() {
   const api = useApi();
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
@@ -1418,26 +1486,19 @@ export function AppShell() {
           };
           formatSlotContextsRef.current.set(activeSlotId, currentCtx);
         }
-        // Build context values from saved slots
+        // Build context values from saved slots — each slot's prompt is built the same way as region desc
         const contextValues = new Map<string, string>();
         for (const slot of mgr.getContextSlots()) {
           const ctx = formatSlotContextsRef.current.get(slot.id);
           if (ctx) {
-            // Build prompt text (same as desc logic)
-            const parts: string[] = [];
-            for (const p of ctx.prompts) { const c = p.replace(/\[/g, '').replace(/\]/g, ''); if (c) parts.push(c); }
-            if (ctx.custom_prompts.trim()) parts.push(ctx.custom_prompts.trim());
-            contextValues.set(slot.id, parts.join(', '));
+            contextValues.set(slot.id, buildPromptText(ctx, findPrefabByGuid));
           }
         }
         // Build background prompt
         const bgCtx = backgroundContextRef.current;
         let bgPrompt = '';
         if (bgCtx) {
-          const bgParts: string[] = [];
-          for (const p of bgCtx.prompts) { const c = p.replace(/\[/g, '').replace(/\]/g, ''); if (c) bgParts.push(c); }
-          if (bgCtx.custom_prompts.trim()) bgParts.push(bgCtx.custom_prompts.trim());
-          bgPrompt = bgParts.join(', ');
+          bgPrompt = buildPromptText(bgCtx, findPrefabByGuid);
         }
         // Build regions array
         const regions = regionBoxesRef.current
@@ -2731,8 +2792,23 @@ export function AppShell() {
                         }).then(async () => {
                           loraRestoredRef.current = false;
                           prefabRestoredRef.current = false;
-                          setSelectedLoras([]); setLoraSelections({});
-                          setSelectedPrefabs([]); setSelectedTags([]); setCustomPrompts('');
+                          // Pre-restore loraSelections from targetCtx so Lora components
+                          // get correct initialActiveTags on mount (prevents "all tags active" default)
+                          const preSel: Record<string, any> = {};
+                          for (const l of (targetCtx.loras || [])) {
+                            const fp = (l as any).file_path || (l as any).file_name || '';
+                            if (fp) preSel[fp] = {
+                              activeTags: l.active_tags || [],
+                              strength: l.strength ?? 1.0,
+                              active: l.active ?? true,
+                              split_mode: l.split_mode,
+                            };
+                          }
+                          setSelectedLoras([]);
+                          setLoraSelections(preSel);
+                          setSelectedPrefabs([]);
+                          setSelectedTags([]);
+                          setCustomPrompts('');
                           await Promise.all([loadData(), loadLoraData()]);
                           isRegionReloadingRef.current = false;
                         }).catch(() => { isRegionReloadingRef.current = false; });
