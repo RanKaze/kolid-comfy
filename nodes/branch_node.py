@@ -91,7 +91,7 @@ class BranchGroupNode:
 
 _branch_optional = {
     "relay_expression": ("STRING", {"default": "", "multiline": True, "tooltip": "Relay expression for boolean logic between nodes. Variables are other Branch Switch/Boolean node titles or types. e.g: '(!NodeA&&NodeB)||NodeC'. Supports '..' to go up to parent graph, '{id}' to match by node id, and ':' to enter subgraphs: e.g: '..SubGraphNode:NodeA'", "advanced": True}),
-    "active_config": ("STRING", {"default": "", "multiline": True, "advanced": True, "tooltip": "Format: <op>:<target_type>:<target_value>[,]. op: mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand/hide/!hide. target_type: name/id/group. target_value: node name, node id, or group name. Applied when toggle=true, inverted when toggle=false. e.g: 'mute:name:NodeA,expand:name:NodeB'"}),
+    "active_config": ("STRING", {"default": "", "multiline": True, "advanced": True, "tooltip": "Format: <op>:<target_type>:<target_value>[,]. op: mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand. target_type: name/id/group. target_value: node name, node id, or group name. Applied when toggle=true, inverted when toggle=false. e.g: 'mute:name:NodeA,foldout:name:NodeB,expand:name:NodeC'"}),
 }
 
 class BranchSwitchNode:
