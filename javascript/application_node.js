@@ -115,20 +115,21 @@ if (!document.getElementById(STYLE_ID)) {
 // ── Helpers ────────────────────────────────────────────────────────
 
 /**
- * Parse "id:234,id:145,regex:test,name:TT,id:6743(select,select_input)" into [{type,value,widgetFilter}, ...]
- * widgetFilter is null (all widgets) or an array of widget name strings.
+ * Parse "id:234,id:145,regex:test,name:TT,id:6743(select=>[测试],select_input)" into [{type,value,widgetFilter}, ...]
+ * widgetFilter is null (all widgets) or a Map<widgetName, label>
+ * where label is: null (use original name), "" (hide label), or a custom string.
  */
 function parseCollectNodes(str) {
     const result = [];
     if (!str) return result;
 
-    // Split by commas at depth 0 (respect parentheses)
+    // Split top-level by commas at depth 0 (respect () and [])
     const segments = [];
     let depth = 0;
     let current = "";
     for (const ch of str) {
-        if (ch === "(") { depth++; current += ch; }
-        else if (ch === ")") { depth--; current += ch; }
+        if (ch === "(" || ch === "[") { depth++; current += ch; }
+        else if (ch === ")" || ch === "]") { depth--; current += ch; }
         else if (ch === "," && depth === 0) {
             segments.push(current.trim());
             current = "";
@@ -149,7 +150,7 @@ function parseCollectNodes(str) {
                 mainPart = seg.substring(0, parenIdx).trim();
                 const filterStr = seg.substring(parenIdx + 1, closeIdx).trim();
                 if (filterStr) {
-                    widgetFilter = filterStr.split(",").map(s => s.trim()).filter(s => s);
+                    widgetFilter = parseWidgetFilter(filterStr);
                 }
             }
         }
@@ -161,6 +162,47 @@ function parseCollectNodes(str) {
         result.push({ type, value, widgetFilter });
     }
     return result;
+}
+
+/**
+ * Parse "select=>[测试],select_input" into Map<name, label|null>
+ * - "widgetName" → label = null (use original name)
+ * - "widgetName=>[custom]" → label = "custom"
+ * - "widgetName=>[]" → label = "" (hide label)
+ */
+function parseWidgetFilter(filterStr) {
+    const map = new Map();
+    // Split by commas at depth 0 (respect [])
+    const parts = [];
+    let depth = 0;
+    let current = "";
+    for (const ch of filterStr) {
+        if (ch === "[") { depth++; current += ch; }
+        else if (ch === "]") { depth--; current += ch; }
+        else if (ch === "," && depth === 0) {
+            parts.push(current.trim());
+            current = "";
+        } else {
+            current += ch;
+        }
+    }
+    if (current.trim()) parts.push(current.trim());
+
+    for (const part of parts) {
+        const arrowIdx = part.indexOf("=>[");
+        if (arrowIdx !== -1) {
+            const closeIdx = part.lastIndexOf("]");
+            if (closeIdx !== -1 && closeIdx > arrowIdx) {
+                const name = part.substring(0, arrowIdx).trim();
+                const label = part.substring(arrowIdx + 3, closeIdx);
+                if (name) map.set(name, label);
+            }
+        } else {
+            const name = part.trim();
+            if (name) map.set(name, null);
+        }
+    }
+    return map;
 }
 
 /**
@@ -195,12 +237,16 @@ function collectNodes(graph, parseResult, selfNodeId) {
 
         for (const n of matchedNodes) {
             if (collected.has(n.id)) {
-                // Merge widget filters: null wins (all widgets), otherwise union
+                // Merge widget filters: null wins (all widgets), otherwise merge Maps
                 const existing = collected.get(n.id);
                 if (existing.widgetFilter === null || widgetFilter === null) {
                     existing.widgetFilter = null;
                 } else {
-                    existing.widgetFilter = [...new Set([...existing.widgetFilter, ...widgetFilter])];
+                    for (const [k, v] of widgetFilter) {
+                        if (!existing.widgetFilter.has(k)) {
+                            existing.widgetFilter.set(k, v);
+                        }
+                    }
                 }
             } else {
                 collected.set(n.id, { node: n, widgetFilter });
@@ -216,20 +262,31 @@ function collectNodes(graph, parseResult, selfNodeId) {
 
 /**
  * Create an HTML control that mirrors a ComfyUI widget, syncing changes back.
+ * @param {object} targetWidget - The original ComfyUI widget
+ * @param {object} targetNode - The node that owns the widget
+ * @param {string|null} displayLabel - null = use original name, "" = hide label, string = custom label
  */
-function createWidgetControl(targetWidget, targetNode) {
+function createWidgetControl(targetWidget, targetNode, displayLabel) {
     const row = document.createElement("div");
     row.className = "kolid-app-row";
 
-    // Label
-    const label = document.createElement("span");
-    label.className = "kolid-app-label";
-    label.textContent = targetWidget.name || "?";
-    label.title = targetWidget.name || "";
-    row.appendChild(label);
-
     const type = targetWidget.type || "";
     const opts = targetWidget.options || {};
+
+    // Resolve the label text to show
+    const labelText = displayLabel === null
+        ? (targetWidget.name || "?")
+        : displayLabel; // "" means hide, string means custom
+
+    // Create label element (unless hidden)
+    let label = null;
+    if (labelText !== "") {
+        label = document.createElement("span");
+        label.className = "kolid-app-label";
+        label.textContent = labelText;
+        label.title = targetWidget.name || "";
+        row.appendChild(label);
+    }
 
     if (type === "combo") {
         const select = document.createElement("select");
@@ -264,13 +321,13 @@ function createWidgetControl(targetWidget, targetNode) {
     } else if (type === "button") {
         const btn = document.createElement("button");
         btn.className = "kolid-app-btn";
-        btn.textContent = targetWidget.name || "button";
+        btn.textContent = labelText !== "" ? labelText : (targetWidget.name || "button");
         btn.addEventListener("click", () => {
             if (targetWidget.callback) targetWidget.callback.call(targetNode);
             targetNode.setDirtyCanvas(true, true);
         });
-        // Replace the label with the button
-        row.removeChild(label);
+        // Button replaces the label
+        if (label) row.removeChild(label);
         row.appendChild(btn);
 
     } else if (type === "number" || type === "slider" || type === "INT" || type === "FLOAT") {
@@ -388,8 +445,14 @@ function rebuildApplicationWidget(node) {
                 // Skip hidden widgets
                 if (targetWidget.hidden) continue;
                 // Apply widget filter if specified
-                if (widgetFilter && !widgetFilter.includes(targetWidget.name)) continue;
-                body.appendChild(createWidgetControl(targetWidget, targetNode));
+                if (widgetFilter) {
+                    if (!widgetFilter.has(targetWidget.name)) continue;
+                    // null = original name, "" = hide, string = custom
+                    const displayLabel = widgetFilter.get(targetWidget.name);
+                    body.appendChild(createWidgetControl(targetWidget, targetNode, displayLabel));
+                } else {
+                    body.appendChild(createWidgetControl(targetWidget, targetNode, null));
+                }
             }
             if (body.children.length === 0) {
                 body.innerHTML = '<div class="kolid-app-empty" style="padding:2px;">No visible widgets</div>';
