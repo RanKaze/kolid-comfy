@@ -906,7 +906,89 @@ class ImageLimitPixelNode:
             return limit_pixels(image, pixels, mask, align)
         except Exception as e:
             raise Exception(f"Failed to limit pixels: {e}")
-        
+
+
+class LimitPixelNode:
+    """Compute limited pixel dimensions without resizing an image."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {
+                    "default": 1024,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Original width"
+                }),
+                "height": ("INT", {
+                    "default": 1024,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Original height"
+                }),
+                "pixels": ("INT", {
+                    "default": 1024 * 1024,  # 1MP
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Maximum allowed pixel count"
+                }),
+                "align": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 1024 * 1024 * 1024,
+                    "tooltip": "Align the resized dimensions to the nearest pixel grid"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT")
+    RETURN_NAMES = ("width", "height")
+    FUNCTION = "limit_pixels"
+    CATEGORY = "Kolid-Toolkit"
+
+    def limit_pixels(self, width, height, pixels, align):
+        """Compute new width/height that fit within the pixel limit, preserving aspect ratio."""
+        try:
+            current_pixels = width * height
+
+            if abs(current_pixels - pixels) < 100:
+                return (width, height)
+
+            aspect_ratio = width / height if height != 0 else 1.0
+
+            if current_pixels < pixels:
+                ideal_width = (pixels * aspect_ratio) ** 0.5
+                ideal_height = ideal_width / aspect_ratio
+
+                new_width = max(align, round(ideal_width / align) * align)
+                new_height = max(align, round(ideal_height / align) * align)
+
+                while new_width * new_height > pixels + 100:
+                    new_width = max(align, new_width - align)
+                    new_height = max(align, new_height - align)
+
+                new_width = max(64, new_width)
+                new_height = max(64, new_height)
+            else:
+                ideal_width = (pixels * aspect_ratio) ** 0.5
+                ideal_height = ideal_width / aspect_ratio
+
+                new_width = max(align, round(ideal_width / align) * align)
+                new_height = max(align, round(ideal_height / align) * align)
+
+                while new_width * new_height > pixels:
+                    new_width = max(align, new_width - align)
+                    new_height = max(align, new_height - align)
+
+                new_width = max(16, new_width)
+                new_height = max(16, new_height)
+
+            return (new_width, new_height)
+        except Exception as e:
+            raise Exception(f"Failed to limit pixels: {e}")
+
+
 class ImageRecoverResizeNode:
     """Recover image to original size using resize info."""
 

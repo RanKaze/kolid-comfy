@@ -134,6 +134,7 @@ NODE_CONFIG = {
     "ApplicationNode": {"class": ApplicationNode, "name": "ApplicationNode"},
 
     "ImageLimitPixelNode": {"class": ImageLimitPixelNode, "name": "ImageLimitPixelNode"},
+    "LimitPixelNode": {"class": LimitPixelNode, "name": "LimitPixelNode"},
     "ImageRecoverResizeNode": {"class": ImageRecoverResizeNode, "name": "ImageRecoverResizeNode"},
     "ImageCropMaskNode": {"class": ImageCropMaskNode, "name": "ImageCropMaskNode"},
     "ImageRecoverCropNode": {"class": ImageRecoverCropNode, "name": "ImageRecoverCropNode"},
