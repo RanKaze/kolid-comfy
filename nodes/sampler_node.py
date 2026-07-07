@@ -279,6 +279,8 @@ class SamplerCache:
                         continue
 
                     lora_str = item.strip()
+                    if lora_str.startswith("<") and lora_str.endswith(">"):
+                        lora_str = lora_str[1:-1].strip()
 
                     try:
                         if lora_str.startswith("lora_path:"):
@@ -1100,7 +1102,7 @@ class ConfigGetNode:
             }
         }
         
-    RETURN_TYPES = ("STRING",)
+    RETURN_TYPES = ("*",)
     RETURN_NAMES = ("value",)
     FUNCTION = "process"
     CATEGORY = "sampling/custom"
@@ -1109,12 +1111,10 @@ class ConfigGetNode:
                 key="",
                 config : ConfigData = None):
         if config is None:
-            return ("",)
+            return (None,)
         
-        value = config.get(key, "")
-        if value is None:
-            value = ""
-        return (str(value),)
+        value = config.get(key, None)
+        return (value,)
 
 # ====================== SamplerNode ======================
 class PipelineSamplerNode:
@@ -2147,6 +2147,8 @@ class ApplyLorasNode:
                 continue
 
             lora_str = item.strip()
+            if lora_str.startswith("<") and lora_str.endswith(">"):
+                lora_str = lora_str[1:-1].strip()
 
             try:
                 if lora_str.startswith("lora_path:"):
@@ -2190,7 +2192,7 @@ class ApplyLorasNode:
                     strength
                 )
 
-                print(f"Applied LoRA: {lora_name} (strength={strength})")
+                print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
 
             except Exception as e:
                 print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")

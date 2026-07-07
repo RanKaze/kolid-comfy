@@ -110,7 +110,7 @@ class BranchSwitchNode:
     FUNCTION = "execute"
     CATEGORY = "Kolid-Toolkit"
 
-    def check_lazy_status(self, value, toggle):
+    def check_lazy_status(self, value, toggle, **kwargs):
         if toggle:
             return ["value"]
         return []
