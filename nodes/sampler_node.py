@@ -226,7 +226,6 @@ class ContextData:
         return (positive, negative, loras, )
 
 from ..architecture import Krea2 as arch_krea2
-from ..architecture import SDXL as arch_sdxl
 from ..architecture import Flux2Klein as arch_flux2klein
 
 
@@ -526,8 +525,6 @@ class PipelineData:
 
         if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
             arch_module = arch_krea2
-        elif architecture and re.search(r"SDXL", architecture, re.IGNORECASE):
-            arch_module = arch_sdxl
         elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
             arch_module = arch_flux2klein
         else:
@@ -2046,10 +2043,7 @@ class PipelineEnableEditNode:
 
         if enable and next_pipeline.model is not None:
             architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
-            if architecture and re.search(r"SDXL", architecture, re.IGNORECASE):
-                next_pipeline.model = arch_sdxl.apply_model_patch(next_pipeline.model)
-                print("[EnableEdit] SDXL reference-only attention patch applied")
-            elif architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
+            if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
                 next_pipeline.model = arch_krea2.apply_model_patch(next_pipeline.model)
                 print("[EnableEdit] Krea2 reference latent patch applied")
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):

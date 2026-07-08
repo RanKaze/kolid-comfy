@@ -27,6 +27,7 @@ from .nodes.audio_node import *
 from .nodes.prompt_node import *
 from .nodes.switch_node import *
 from .nodes.sampler_node import *
+from .nodes.train_node import *
 from .nodes.snapshot_sampler_node import *
 from .nodes.application_node import *
 from .nodes.assets_node import *
@@ -173,6 +174,7 @@ NODE_CONFIG = {
     "PipelineSamplerDataNode": {"class": PipelineSamplerDataNode, "name": "PipelineSamplerDataNode"},
     "ApplyLorasNode": {"class": ApplyLorasNode, "name": "ApplyLorasNode"},
     "PipelineVideoSamplerAdvancedNode": {"class": PipelineVideoSamplerAdvancedNode, "name": "PipelineVideoSamplerAdvancedNode"},
+    "TrainEditLoraNode": {"class": TrainEditLoraNode, "name": "TrainEditLoraNode"},
     
 }
 
