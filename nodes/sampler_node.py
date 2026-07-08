@@ -6,6 +6,7 @@ import os
 import torch
 import gc
 import json
+import math
 import time
 from PIL import Image
 from nodes import common_ksampler, VAEEncode, VAEEncodeForInpaint, KSamplerAdvanced, VAEDecode, SetLatentNoiseMask, CLIPTextEncode
@@ -224,6 +225,10 @@ class ContextData:
         negative = ",".join(negative_parts).strip(",")
         return (positive, negative, loras, )
 
+from ..architecture import Krea2 as arch_krea2
+from ..architecture import SDXL as arch_sdxl
+from ..architecture import Flux2Klein as arch_flux2klein
+
 
 class ReferenceData:
     def __init__(self):
@@ -245,6 +250,7 @@ class ReferenceData:
 
 class ConfigData(dict):
     pass
+
 
 class SamplerCache:
     def __init__(self):
@@ -515,25 +521,31 @@ class PipelineData:
             raise ValueError("PipelineData 中 cache 为空")
         if prompt is None:
             prompt = ""
-        cache_key = (
-            id(clip),
-            prompt
-        )
-        
-        if cache_key in self._conditioning_cache:
-            print(f"✓ Conditioning cache hit")
-            condition = self._conditioning_cache[cache_key]
-        else:
-            print(f"x Conditioning cache miss")
-            condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]  
-            self._conditioning_cache[cache_key] = condition
-        
-        if reference_latent is not None:
-            condition = conditioning_set_values(condition, {"reference_latents": [reference_latent["samples"]]}, append=True)
 
-        if reference.reference_latents is not None:
-            for lat in reference.reference_latents:
-                condition = conditioning_set_values(condition, {"reference_latents": [lat["samples"]]}, append=True)
+        architecture = self.config.get("architecture") if self.config else None
+
+        if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
+            arch_module = arch_krea2
+        elif architecture and re.search(r"SDXL", architecture, re.IGNORECASE):
+            arch_module = arch_sdxl
+        elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
+            arch_module = arch_flux2klein
+        else:
+            # 默认: 无 reference 处理
+            cache_key = (id(clip), prompt)
+            if cache_key in self._conditioning_cache:
+                print(f"✓ Conditioning cache hit")
+                condition = self._conditioning_cache[cache_key]
+            else:
+                print(f"x Conditioning cache miss")
+                condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
+                self._conditioning_cache[cache_key] = condition
+            return condition
+
+        condition = arch_module.get_conditioning(
+            self, mode, clip, vae, prompt, reference_latent, reference_image,
+            reference, conditioning_set_values, VAEDecode
+        )
         
         if reference.reference_controls is not None:
             for control in reference.reference_controls:
@@ -695,6 +707,8 @@ class ContextQueryNode:
         return (context,)
 
 class ReferenceLatentNode:
+    INPUT_IS_LIST = True
+
     @classmethod
     def INPUT_TYPES(s):
         _build_lora_cache()
@@ -713,15 +727,53 @@ class ReferenceLatentNode:
     CATEGORY = "sampling/custom"
     
     def process(self,
-                reference : ReferenceData = None,
+                reference=None,
                 latent=None):
         if reference is None:
             reference = ReferenceData()
         else:
-            reference = reference.copy()
+            reference = reference[0].copy() if isinstance(reference, list) else reference.copy()
         
         if latent is not None:
-            reference.reference_latents.append(latent)
+            for lat in (latent if isinstance(latent, list) else [latent]):
+                reference.reference_latents.append(lat)
+        return (reference,)
+
+class ReferenceImageNode:
+    INPUT_IS_LIST = True
+
+    @classmethod
+    def INPUT_TYPES(s):
+        _build_lora_cache()
+        return{
+            "required": {
+            },
+            "optional": {
+                "reference": ("REFERENCE_DATA",),
+                "image": ("IMAGE",),
+                "vae": ("VAE",),
+            }
+        }
+        
+    RETURN_TYPES = ("REFERENCE_DATA",)
+    RETURN_NAMES = ("reference",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+    
+    def process(self,
+                reference=None,
+                image=None,
+                vae=None):
+        if reference is None:
+            reference = ReferenceData()
+        else:
+            reference = reference[0].copy() if isinstance(reference, list) else reference.copy()
+        
+        if image is not None:
+            vae = vae[0] if isinstance(vae, list) else vae
+            for img in (image if isinstance(image, list) else [image]):
+                latent = VAEEncode().encode(vae=vae, pixels=img)[0]
+                reference.reference_latents.append(latent)
         return (reference,)
 
 class ReferenceContolNetNode:
@@ -1969,6 +2021,41 @@ class PipelineToggleMaskInpaintNode:
             grow_mask_by=grow_mask_by
         )[0]
             
+        return (next_pipeline,)
+    
+
+# ====================== PipelineEnableEditNode ======================
+class PipelineEnableEditNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "enable": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "enable_edit"
+    CATEGORY = "sampling/custom"
+
+    def enable_edit(self, pipeline, enable):
+        next_pipeline = pipeline.copy()
+        next_pipeline.config["enable_edit"] = enable
+
+        if enable and next_pipeline.model is not None:
+            architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+            if architecture and re.search(r"SDXL", architecture, re.IGNORECASE):
+                next_pipeline.model = arch_sdxl.apply_model_patch(next_pipeline.model)
+                print("[EnableEdit] SDXL reference-only attention patch applied")
+            elif architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
+                next_pipeline.model = arch_krea2.apply_model_patch(next_pipeline.model)
+                print("[EnableEdit] Krea2 reference latent patch applied")
+            elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
+                next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
+                print("[EnableEdit] Flux2Klein: no model patch needed")
+
         return (next_pipeline,)
     
     
