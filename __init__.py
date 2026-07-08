@@ -148,6 +148,7 @@ NODE_CONFIG = {
     "SnapshotOutpaintMaskNode": {"class": SnapshotOutpaintMaskNode, "name": "SnapshotOutpaintMaskNode"},
     
     "ReferenceLatentNode": {"class": ReferenceLatentNode, "name": "ReferenceLatentNode"},
+    "ReferenceImageNode": {"class": ReferenceImageNode, "name": "ReferenceImageNode"},
     "ReferenceContolNetNode": {"class": ReferenceContolNetNode, "name": "ReferenceContolNetNode"},
     "ReferenceGuidanceNode": {"class": ReferenceGuidanceNode, "name": "ReferenceGuidanceNode"},
     "ReferenceIPAdapterNode": {"class": ReferenceIPAdapterNode, "name": "ReferenceIPAdapterNode"}, 
@@ -164,6 +165,7 @@ NODE_CONFIG = {
     "PipelineRecoverResizeNode": {"class": PipelineRecoverResizeNode, "name": "PipelineRecoverResizeNode"},
     "PipelineAddNoiseNode": {"class": PipelineAddNoiseNode, "name": "PipelineAddNoiseNode"},
     "PipelineToggleMaskInpaintNode": {"class": PipelineToggleMaskInpaintNode, "name": "PipelineToggleMaskInpaintNode"},
+    "PipelineEnableEditNode": {"class": PipelineEnableEditNode, "name": "PipelineEnableEditNode"},
     "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
     "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
     "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},
