@@ -511,6 +511,21 @@ class DiskImagesToVideoNode:
         return get_folder_hash(folder_name)
 
 
+import math
+
+def _sanitize_json(obj):
+    """Convert NaN/Infinity to None so the result is valid JSON for JS consumers."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 class SaveDataToNode:
     """Encode dict data into the latest generated PNG image as metadata (A1111-style)."""
 
@@ -550,7 +565,7 @@ class SaveDataToNode:
             return (None,)
 
         try:
-            data_json = json.dumps(data, ensure_ascii=False)
+            data_json = json.dumps(_sanitize_json(data), ensure_ascii=False)
         except Exception as e:
             print(f"[SaveDataToNode] Failed to encode data: {e}")
             return (None,)

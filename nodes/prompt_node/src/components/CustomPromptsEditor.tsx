@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useCallback } from 'react';
+import { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import type { AllPrompts, TagGroup } from '../types';
 import { tryParseLine } from '../hooks/useSelection';
 
@@ -37,12 +37,16 @@ const dropdownStyle: React.CSSProperties = {
   marginBottom: 4,
   zIndex: 100,
   boxShadow: '0 -4px 16px rgba(0,0,0,0.4)',
-};
+  scrollbarWidth: 'thin',
+  scrollbarColor: '#48484a transparent',
+} as React.CSSProperties;
 
 export function CustomPromptsEditor({
   value, onChange, allPrompts, onParsed, placeholder,
 }: CustomPromptsEditorProps) {
   const ref = useRef<HTMLTextAreaElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const selItemRef = useRef<HTMLDivElement>(null);
   const [showDropdown, setShowDropdown] = useState(false);
   const [selIdx, setSelIdx] = useState(-1);
   const [query, setQuery] = useState('');
@@ -65,6 +69,13 @@ export function CustomPromptsEditor({
       text.toLowerCase().includes(q) || name.toLowerCase().includes(q)
     ).slice(0, 50);
   }, [suggestions, query]);
+
+  // Scroll selected autocomplete item into view
+  useEffect(() => {
+    if (showDropdown && selIdx >= 0 && selItemRef.current) {
+      selItemRef.current.scrollIntoView({ block: 'nearest' });
+    }
+  }, [selIdx, showDropdown]);
 
   const getWordBeforeCursor = useCallback((ta: HTMLTextAreaElement): string => {
     const pos = ta.selectionStart;
@@ -234,10 +245,11 @@ export function CustomPromptsEditor({
         style={baseStyle}
       />
       {showDropdown && filtered.length > 0 ? (
-        <div style={dropdownStyle}>
+        <div ref={dropdownRef} className="kolid-dropdown-scroll" style={dropdownStyle}>
           {filtered.map(([text, name], i) => (
             <div
               key={text}
+              ref={i === selIdx ? selItemRef : null}
               onMouseDown={e => { e.preventDefault(); replaceWord(text); }}
               style={{
                 padding: '8px 14px', fontSize: 14, cursor: 'pointer',
@@ -246,8 +258,8 @@ export function CustomPromptsEditor({
                 display: 'flex', alignItems: 'center',
               }}
             >
-              <span style={{ flex: 1 }}>{text}</span>
-              {name !== text ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12 }}>{name}</span> : null}
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+              {name !== text ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{name}</span> : null}
             </div>
           ))}
         </div>

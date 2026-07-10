@@ -49,6 +49,8 @@ const dropdownStyle = {
   marginTop: 4,
   zIndex: 100,
   boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+  scrollbarWidth: 'thin' as const,
+  scrollbarColor: '#48484a transparent',
 };
 
 const optionStyle = (selected: boolean) => ({
@@ -126,7 +128,7 @@ function SearchableSelect({
         ) : null}
       </div>
       {open ? (
-        <div style={dropdownStyle}>
+        <div className="kolid-dropdown-scroll" style={dropdownStyle}>
           <div
             onClick={handleClear}
             style={optionStyle(value === '')}
