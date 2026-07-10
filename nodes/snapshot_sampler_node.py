@@ -881,10 +881,12 @@ class SnapshotDetailerSamplerNode:
         if tmp_loras is not None:
             current_loras.extend(tmp_loras)
 
-        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+        model_negative = next_pipeline.config.get("model_negative")
+        model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
-            loras=current_loras
+            loras=current_loras,
+            model_negative=model_negative
         )
 
         positive_condition = next_pipeline.get_conditioning(
@@ -907,20 +909,23 @@ class SnapshotDetailerSamplerNode:
             reference=next_pipeline.reference
         )
 
-        sampled_latent = KSamplerAdvanced().sample(
+        from .sampler_node import _ksampler
+        sampled_latent = _ksampler(
             model=model_to_use,
-            add_noise=add_noise,
-            noise_seed=seed,
+            seed=seed,
             steps=steps,
             cfg=cfg,
             sampler_name=sampler_name,
             scheduler=scheduler,
             positive=positive_condition,
             negative=negative_condition,
-            latent_image=tmp_latent,
-            start_at_step=start_at_step,
-            end_at_step=end_at_step,
-            return_with_leftover_noise='disable'
+            latent=tmp_latent,
+            disable_noise=(add_noise == "disable"),
+            start_step=start_at_step,
+            last_step=end_at_step,
+            force_full_denoise=True,
+            sigmas=next_pipeline.config.get("sigmas"),
+            model_negative=model_negative_to_use,
         )[0]
 
         decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
