@@ -755,7 +755,10 @@ class SnapshotPromptServer:
                         with open(img_path, 'rb') as f:
                             content = f.read()
                         self.send_response(200)
-                        self.send_header('Content-type', 'image/png')
+                        if img_filename.lower().endswith('.mp4'):
+                            self.send_header('Content-type', 'video/mp4')
+                        else:
+                            self.send_header('Content-type', 'image/png')
                         self.send_header("Access-Control-Allow-Origin", "*")
                         self.end_headers()
                         self.wfile.write(content)
