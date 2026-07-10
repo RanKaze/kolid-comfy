@@ -14,11 +14,12 @@ interface LoraFolderCardProps {
   isItemSelected?: (item: LoraItemData) => boolean;
   bgImage?: string;
   bgVideo?: string;
+  videoVolume?: number;
   imgUrl: (path: string) => string;
   onEdit?: () => void;
 }
 
-export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, bgImage, bgVideo, imgUrl, onEdit }: LoraFolderCardProps) {
+export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, bgImage, bgVideo, videoVolume, imgUrl, onEdit }: LoraFolderCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const filtered = searchQuery
@@ -35,7 +36,7 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
     <div className={`category lora-folder ${expanded ? 'expanded' : 'collapsed'}`}>
       {expanded && bgVideo ? (
         <div className="category-background-mask">
-          <video className="category-background-video" src={getBgUrl(bgVideo)} muted loop autoPlay playsInline />
+          <video className="category-background-video" src={getBgUrl(bgVideo)} muted={!((videoVolume ?? 0) > 0)} loop autoPlay playsInline ref={el => { if (el) el.volume = videoVolume ?? 0; }} />
         </div>
       ) : expanded && bgImage ? (
         <div className="category-background-mask">

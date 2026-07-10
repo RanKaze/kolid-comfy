@@ -1026,6 +1026,19 @@ body {
     color: var(--text-secondary); font-size: 13px;
 }
 .modal-content .image-input-row .btn { flex: 0 0 auto; padding: 10px 15px; white-space: nowrap; }
+.modal-content .video-volume-row {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+}
+.modal-content .video-volume-row .video-volume-label {
+    flex: 0 0 auto; color: var(--text-secondary); font-size: 13px; white-space: nowrap;
+}
+.modal-content .video-volume-row input[type="range"] {
+    flex: 1; height: 6px; -webkit-appearance: none; appearance: none;
+    background: var(--border-color); border-radius: 3px; outline: none;
+}
+.modal-content .video-volume-row .video-volume-value {
+    flex: 0 0 auto; color: var(--text-secondary); font-size: 13px; min-width: 36px; text-align: right;
+}
 .modal-content .image-input-row .paste-image-btn { background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 8px; cursor: pointer; font-size: 14px; transition: background 0.2s; }
 .modal-content .image-input-row .paste-image-btn:hover { background: var(--bg-card-hover); }
 .modal-content .modal-buttons { display: flex; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.08); }
