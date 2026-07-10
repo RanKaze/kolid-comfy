@@ -171,6 +171,7 @@ export function AppShell() {
   const [focusPoints, setFocusPoints] = useState<FocusPoints>({});
   const [categoryFocusPoints, setCategoryFocusPoints] = useState<Record<string, {x:number;y:number}>>({});
   const [videoVolumes, setVideoVolumes] = useState<Record<string, number>>({});
+  const [clarityPoints, setClarityPoints] = useState<Record<string, Array<{x:number;y:number}>>>({});
   const tempCtx = useTempContext();
   interface LoraSelectionState {
     activeTags: string[];
@@ -391,6 +392,7 @@ export function AppShell() {
       try { const s = localStorage.getItem('kolid_focus_points'); if (s) setFocusPoints(JSON.parse(s)); } catch {}
       try { const s = localStorage.getItem('kolid_category_focus_points'); if (s) setCategoryFocusPoints(JSON.parse(s)); } catch {}
       try { const s = localStorage.getItem('kolid_video_volumes'); if (s) setVideoVolumes(JSON.parse(s)); } catch {}
+      try { const s = localStorage.getItem('kolid_clarity_points'); if (s) setClarityPoints(JSON.parse(s)); } catch {}
     });
     loadLoraData();
     // Fetch region config
@@ -830,6 +832,8 @@ export function AppShell() {
   const [modalVideoFilename, setModalVideoFilename] = useState('');
   const [modalFileName, setModalFileName] = useState('');
   const [modalVideoVolume, setModalVideoVolume] = useState(0);
+  const [modalClarityPoints, setModalClarityPoints] = useState<Array<{x:number;y:number}>>([]);
+  const videoUploadRef = useRef<Promise<string | null>>(Promise.resolve(null));
   const [errorModal, setErrorModal] = useState<{ title: string; message: string }|null>(null);
 
   // Tag autocomplete for editPrefab modal
@@ -915,14 +919,16 @@ export function AppShell() {
       setModalPreviewVisible(false);
       setModalVideoUrl(URL.createObjectURL(file));
       setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
+      setModalVideoFilename('');
       // Upload video
-      (async () => {
+      videoUploadRef.current = (async () => {
         try {
           const buf = await file.arrayBuffer();
           const res = await fetch('/upload_video', { method: 'POST', body: buf });
           const data = await res.json();
-          if (data.success) setModalVideoFilename(data.filename);
+          if (data.success) { setModalVideoFilename(data.filename); return data.filename; }
         } catch(e) { console.error('Video upload failed:', e); }
+        return null;
       })();
     } else {
       // Image file
@@ -945,6 +951,11 @@ export function AppShell() {
     setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
   }, []);
 
+  const getUploadedVideoFilename = useCallback(async () => {
+    const fn = await videoUploadRef.current;
+    return fn;
+  }, []);
+
   const handlePreviewClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
     const img = e.currentTarget;
     const rect = img.getBoundingClientRect();
@@ -958,6 +969,31 @@ export function AppShell() {
     setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
   }, []);
 
+  const handlePreviewCtrlClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+    setModalClarityPoints(prev => [...prev, { x, y }]);
+  }, []);
+
+  const handlePreviewCtrlRightClick = useCallback((e: React.MouseEvent) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
+    setModalClarityPoints(prev => {
+      if (prev.length === 0) return prev;
+      let bestIdx = -1, bestDist = Infinity;
+      prev.forEach((p, i) => { const d = (p.x - x) ** 2 + (p.y - y) ** 2; if (d < bestDist) { bestDist = d; bestIdx = i; } });
+      return prev.filter((_, i) => i !== bestIdx);
+    });
+  }, []);
+
   const clearImageFields = useCallback(() => {
     setModalPreviewUrl(''); setModalPreviewVisible(false);
     setModalFocusX(0); setModalFocusY(0); setModalFocusVisible(false);
@@ -965,6 +1001,8 @@ export function AppShell() {
     setModalVideoFile(null); setModalVideoUrl(''); setModalVideoFilename('');
     setModalFileName('');
     setModalVideoVolume(0);
+    setModalClarityPoints([]);
+    videoUploadRef.current = Promise.resolve(null);
   }, []);
 
   // ========== Clear zoom before opening modals ==========
@@ -1007,6 +1045,14 @@ export function AppShell() {
 
   const removeModalVideoVolume = useCallback((key: string) => {
     setVideoVolumes(prev => { if(!(key in prev)) return prev; const n = {...prev}; delete n[key]; localStorage.setItem('kolid_video_volumes', JSON.stringify(n)); return n; });
+  }, []);
+
+  const saveModalClarityPoints = useCallback((key: string) => {
+    setClarityPoints(prev => { const n = {...prev, [key]: modalClarityPoints}; localStorage.setItem('kolid_clarity_points', JSON.stringify(n)); return n; });
+  }, [modalClarityPoints]);
+
+  const removeModalClarityPoints = useCallback((key: string) => {
+    setClarityPoints(prev => { if(!(key in prev)) return prev; const n = {...prev}; delete n[key]; localStorage.setItem('kolid_clarity_points', JSON.stringify(n)); return n; });
   }, []);
 
   const removeModalFocus = useCallback((key: string, isCategory: boolean) => {
@@ -1642,7 +1688,8 @@ export function AppShell() {
     if (!newName) { alert('Please enter category name'); return; }
     let imageData: string|null = null;
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
-    const videoData = modalVideoFilename || (modalVideoFile ? '' : null);
+    let videoData: string|null = null;
+    if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
     try {
       const result = await categoryGroup.update(oldName, newName, {
         tags: modalTags, decorations: modalDecorations, image: imageData, video: videoData
@@ -1651,10 +1698,11 @@ export function AppShell() {
         if (imageData || videoData) setImgVersion(v => v + 1);
         saveModalFocus(newName, true);
         saveModalVideoVolume(newName);
+        saveModalClarityPoints(newName);
         setAllPrompts((prev: AllPrompts) => {
           const catData = prev[oldName];
           if (!catData) return prev;
-          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: result.bg_image !== undefined ? result.bg_image : (catData as CategoryData).bg_image };
+          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: result.bg_image !== undefined ? result.bg_image : (catData as CategoryData).bg_image, bg_video: videoData !== null ? videoData : (catData as CategoryData).bg_video };
           if (newName !== oldName) {
             const next: AllPrompts = {};
             for (const k of Object.keys(prev)) {
@@ -1680,7 +1728,7 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); alert('Failed to update category'); }
-  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, modalImageFile, modalVideoFile, modalVideoFilename, saveModalFocus, saveModalVideoVolume, setAllPrompts, setCategoryDisplayModes, setCategorySizeModes]);
+  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllPrompts, setCategoryDisplayModes, setCategorySizeModes]);
 
   const removeCategoryBg = useCallback(async () => {
     const oldName = modalOldName;
@@ -1691,6 +1739,7 @@ export function AppShell() {
         setImgVersion(v => v + 1);
         removeModalFocus(newName, true);
         removeModalVideoVolume(newName);
+        removeModalClarityPoints(newName);
         setAllPrompts((prev: AllPrompts) => {
           const catData = prev[oldName];
           if (!catData) return prev;
@@ -1708,7 +1757,7 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, removeModalFocus, removeModalVideoVolume, setAllPrompts]);
+  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, removeModalFocus, removeModalVideoVolume, removeModalClarityPoints, setAllPrompts]);
 
   // ========== Update Library ==========
   const updateLibrary = useCallback(async () => {
@@ -1718,17 +1767,19 @@ export function AppShell() {
     const pids = modalPromptIds ? modalPromptIds.split(',').map((s: string) => s.trim()).filter((s: string) => s) : [];
     let imageData: string|null = null;
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
-    const videoData = modalVideoFilename || (modalVideoFile ? '' : null);
+    let videoData: string|null = null;
+    if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
     try {
       const result = await libraryGroup.update(oldName, newName, { prompt_ids: pids, image: imageData, video: videoData });
       if (result.success) {
         if (imageData !== null || videoData !== null) setImgVersion(v => v + 1);
         saveModalFocus(newName, true);
         saveModalVideoVolume(newName);
+        saveModalClarityPoints(newName);
         setAllLibraries((prev: AllLibraries) => {
           const libData = prev[oldName];
           if (!libData) return prev;
-          const updated: LibraryData = { ...libData, prompt_ids: pids, bg_image: result.bg_image !== undefined ? result.bg_image : libData.bg_image };
+          const updated: LibraryData = { ...libData, prompt_ids: pids, bg_image: result.bg_image !== undefined ? result.bg_image : libData.bg_image, bg_video: videoData !== null ? videoData : libData.bg_video };
           if (newName !== oldName) {
             const next: AllLibraries = {};
             for (const k of Object.keys(prev)) {
@@ -1742,7 +1793,7 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); alert('Failed to update library'); }
-  }, [closeModal, modalOldName, modalName, modalPromptIds, modalImageFile, modalVideoFile, modalVideoFilename, saveModalFocus, saveModalVideoVolume, setAllLibraries]);
+  }, [closeModal, modalOldName, modalName, modalPromptIds, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllLibraries]);
 
   // ========== Update Lora Folder Meta ==========
   const updateLoraFolder = useCallback(async () => {
@@ -1750,7 +1801,8 @@ export function AppShell() {
     if (!folderName) return;
     let imageData: string|null = null;
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
-    const videoData = modalVideoFilename || (modalVideoFile ? '' : null);
+    let videoData: string|null = null;
+    if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
     try {
       const res = await fetch('/update_lora_folder_meta', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({folder_name:folderName, image:imageData, video:videoData}) });
       const result = await res.json();
@@ -1761,10 +1813,11 @@ export function AppShell() {
           [folderName]: { bg_image: result.bg_image !== undefined ? result.bg_image : prev[folderName]?.bg_image, bg_video: result.bg_video !== undefined ? result.bg_video : prev[folderName]?.bg_video },
         }));
         saveModalVideoVolume(folderName);
+        saveModalClarityPoints(folderName);
         closeModal();
       }
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalImageFile, modalVideoFile, modalVideoFilename, setImgVersion, saveModalVideoVolume]);
+  }, [closeModal, modalOldName, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, setImgVersion, saveModalVideoVolume, saveModalClarityPoints]);
 
   const removeLoraFolderBg = useCallback(async () => {
     const folderName = modalOldName;
@@ -1776,10 +1829,11 @@ export function AppShell() {
         setImgVersion(v => v + 1);
         setLoraFolderMeta((prev: Record<string, {bg_image?: string; bg_video?: string}>) => ({ ...prev, [folderName]: { bg_image: '', bg_video: '' } }));
         removeModalVideoVolume(folderName);
+        removeModalClarityPoints(folderName);
         closeModal();
       }
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, setImgVersion, removeModalVideoVolume]);
+  }, [closeModal, modalOldName, setImgVersion, removeModalVideoVolume, removeModalClarityPoints]);
 
   // ========== Delete Library ==========
   const deleteLibrary = useCallback(async () => {
@@ -2909,6 +2963,7 @@ export function AppShell() {
                       bgImage={folderMeta.bg_image}
                       bgVideo={folderMeta.bg_video}
                       videoVolume={videoVolumes[folder] || 0}
+                      clarityPoints={clarityPoints[folder]}
                       imgUrl={imgUrl}
                       onEdit={() => {
                         resetModalForm();
@@ -2922,10 +2977,12 @@ export function AppShell() {
                           setModalPreviewVisible(true);
                           setModalFileName(bgVid);
                           setModalVideoVolume(videoVolumes[folder] ?? 0);
+                          setModalClarityPoints(clarityPoints[folder] ? [...clarityPoints[folder]] : []);
                         } else if (bg) {
                           setModalPreviewUrl(imgUrl(bg));
                           setModalPreviewVisible(true);
                           setModalFileName(bg);
+                          setModalClarityPoints(clarityPoints[folder] ? [...clarityPoints[folder]] : []);
                         }
                         setModal({ type: 'editLoraFolder', data: { folder } });
                       }}
@@ -2980,7 +3037,7 @@ export function AppShell() {
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
 
                 return (
-                  <div key={cat} className={`category ${expanded ? 'expanded' : 'collapsed'}${catHasDuplicate ? ' duplicate' : ''}`} id={`category-${cat}`}>
+                  <div key={cat} className={`category ${expanded ? 'expanded' : 'collapsed'}${catHasDuplicate ? ' duplicate' : ''}`} id={`category-${cat}`} onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); const mx = e.clientX - r.left; const my = e.clientY - r.top; const pts = clarityPoints[cat] || []; const circles = pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join(''); const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${circles}<circle cx="${mx}" cy="${my}" r="70" fill="black"/></svg>`; const blurEl = e.currentTarget.querySelector<HTMLDivElement>('.category-background-blur'); if (blurEl) { const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; blurEl.style.maskImage = url; blurEl.style.webkitMaskImage = url; } }}>
                     {expanded && bgVideo ? (
                       <div className="category-background-mask">
                         <video className="category-background-video" src={imgUrl(bgVideo)} muted={!(videoVolumes[cat] > 0)} loop autoPlay playsInline ref={el => { if (el) el.volume = videoVolumes[cat] || 0; }} style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} />
@@ -2989,6 +3046,9 @@ export function AppShell() {
                       <div className="category-background-mask">
                         <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})`, backgroundPosition: categoryFocusPoints[cat] ? `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` : 'center' }} />
                       </div>
+                    ) : null}
+                    {expanded && (bgVideo || bgImage) ? (
+                      <div className="category-background-blur" style={(() => { const pts = clarityPoints[cat]; if (!pts || pts.length === 0) return undefined; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join('')}</svg>`; const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; return { maskImage: url, WebkitMaskImage: url }; })()} />
                     ) : null}
                     <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(cat); }}>
                       {!expanded && bgVideo ? <video className="bg-video" src={imgUrl(bgVideo)} muted loop autoPlay playsInline style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : !expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : null}
@@ -3001,7 +3061,7 @@ export function AppShell() {
                           {(catTags.length > 0 || catDeco.length > 0) && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}{catDeco.map(d => <span className="decoration-tag" key={d}>{d}</span>)}</div>}
                           {selCount > 0 && <span className="count-badge">{selCount}</span>}
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(cat); setModalMode(categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries)); setModalSize(categoryDisplay.getSize(cat, categorySizeModes, allLibraries)); setModalIsCat(true); setModal({type:'displayMode',data:{name:cat,isCat:true}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[cat] ?? 0); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[cat] ?? 0); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteCategoryDirect(cat); }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
@@ -3066,7 +3126,7 @@ export function AppShell() {
                   </div>
                 );
               })}
-              <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addCategory'}); }}><span>{iconPlus} Add Category</span></div>
+              <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addCategory'}); }}>{iconPlus}</div>
             </div>
             ) : null}
 
@@ -3135,7 +3195,7 @@ export function AppShell() {
                 const libHasDuplicate = prompts.some(p => duplicateSet.has(p.prompt));
 
                 return (
-                  <div key={lib} className={`category ${expanded ? 'expanded' : 'collapsed'}${libHasDuplicate ? ' duplicate' : ''}`} id={`library-${lib}`}>
+                  <div key={lib} className={`category ${expanded ? 'expanded' : 'collapsed'}${libHasDuplicate ? ' duplicate' : ''}`} id={`library-${lib}`} onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); const mx = e.clientX - r.left; const my = e.clientY - r.top; const pts = clarityPoints[lib] || []; const circles = pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join(''); const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${circles}<circle cx="${mx}" cy="${my}" r="70" fill="black"/></svg>`; const blurEl = e.currentTarget.querySelector<HTMLDivElement>('.category-background-blur'); if (blurEl) { const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; blurEl.style.maskImage = url; blurEl.style.webkitMaskImage = url; } }}>
                     {expanded && bgVideo ? (
                       <div className="category-background-mask">
                         <video className="category-background-video" src={imgUrl(bgVideo)} muted={!(videoVolumes[lib] > 0)} loop autoPlay playsInline ref={el => { if (el) el.volume = videoVolumes[lib] || 0; }} style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} />
@@ -3144,6 +3204,9 @@ export function AppShell() {
                       <div className="category-background-mask">
                         <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})`, backgroundPosition: categoryFocusPoints[lib] ? `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` : 'center' }} />
                       </div>
+                    ) : null}
+                    {expanded && (bgVideo || bgImage) ? (
+                      <div className="category-background-blur" style={(() => { const pts = clarityPoints[lib]; if (!pts || pts.length === 0) return undefined; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join('')}</svg>`; const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; return { maskImage: url, WebkitMaskImage: url }; })()} />
                     ) : null}
                     <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleLibrary(lib); }}>
                       {!expanded && bgVideo ? <video className="bg-video" src={imgUrl(bgVideo)} muted loop autoPlay playsInline style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} /> : !expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[lib] ? { objectPosition: `${categoryFocusPoints[lib].x}% ${categoryFocusPoints[lib].y}%` } : {}} /> : null}
@@ -3154,7 +3217,7 @@ export function AppShell() {
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(lib); setModalMode(libraryDisplay.getMode(lib, categoryDisplayModes, allLibraries)); setModalSize(libraryDisplay.getSize(lib, categorySizeModes, allLibraries)); setModalIsCat(false); setModal({type:'displayMode',data:{name:lib,isCat:false}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const ld = allLibraries[lib]||{} as any; setModalOldName(lib); setModalName(lib); setModalPromptIds((ld.prompt_ids||[]).join(', ')); const bg = ld.bg_image||''; const bgVid = ld.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[lib] ?? 0); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg){ setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editLibrary',data:{name:lib}}); }}>{iconGear}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const ld = allLibraries[lib]||{} as any; setModalOldName(lib); setModalName(lib); setModalPromptIds((ld.prompt_ids||[]).join(', ')); const bg = ld.bg_image||''; const bgVid = ld.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[lib] ?? 0); setModalClarityPoints(clarityPoints[lib] ? [...clarityPoints[lib]] : []); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg){ setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[lib] ? [...clarityPoints[lib]] : []); const pt = categoryFocusPoints[lib]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editLibrary',data:{name:lib}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteLibraryDirect(lib); }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
@@ -3210,14 +3273,14 @@ export function AppShell() {
                           />
                         ))}
                         {selectedTags.length > 0 ? (
-                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer', fontSize:12 }} onMouseDown={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus} Add Prefab</div></div>
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus}</div></div>
                         ) : null}
                       </div>
                     ) : null}
                   </div>
                 );
               })}
-              <div className="add-library-card" onMouseDown={() => { resetModalForm(); setModal({type:'addLibrary'}); }}><span>{iconPlus} Add Library</span></div>
+              <div className="add-library-card" onMouseDown={() => { resetModalForm(); setModal({type:'addLibrary'}); }}>{iconPlus}</div>
             </div>) : null}
 
           </div>
@@ -3456,7 +3519,7 @@ export function AppShell() {
             <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
             <TagInput label="Mute Decorations" tags={modalMuteDecorations} setTags={setModalMuteDecorations} />
             <input type="text" placeholder="Category (default: 杂项)" value={modalCategory} onChange={e => setModalCategory(e.target.value)} />
-             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
              <div className="modal-buttons">
                <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
                <button className="btn btn-primary" onClick={async () => {
@@ -3492,7 +3555,7 @@ export function AppShell() {
               <option value="">Keep current category</option>
               {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
             </select>
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-primary" onClick={updatePrompt}>Update</button>
@@ -3506,7 +3569,7 @@ export function AppShell() {
             <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
             <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-danger" onClick={removeCategoryBg}>Remove BG</button>
@@ -3521,7 +3584,7 @@ export function AppShell() {
             <input type="text" placeholder="Library name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <label>Select Prompt IDs (comma separated)</label>
             <input type="text" placeholder="e.g. prompt_id1, prompt_id2" value={modalPromptIds} onChange={e => setModalPromptIds(e.target.value)} />
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-danger" onClick={deleteLibrary}>Delete</button>
@@ -3534,7 +3597,7 @@ export function AppShell() {
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Lora Folder Background</h2>
             <label>Folder: {modalOldName}</label>
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-danger" onClick={removeLoraFolderBg}>Remove BG</button>
@@ -3567,7 +3630,7 @@ export function AppShell() {
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add Prefab</h2>
             <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-primary" onClick={e => { e.stopPropagation(); e.preventDefault(); addPrefab(); }}>Save Prefab</button>
@@ -3590,7 +3653,7 @@ export function AppShell() {
                 </div>
                 <div className="edit-prefab-section">
                   <label>Preview Image</label>
-                  <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} />
+                  <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
                 </div>
               </div>
               <div className="edit-prefab-right">
@@ -3931,15 +3994,19 @@ function getPrefabClass(
 function ImageSection({
   previewUrl, previewVisible, focusX, focusY, focusVisible,
   videoUrl, isVideo, fileName, videoVolume, onVideoVolumeChange,
-  onImageSelect, onPreviewClick, onRemoveFocus, onPasteImage,
+  clarityPoints,
+  onImageSelect, onPreviewClick, onRemoveFocus, onPasteImage, onPreviewCtrlClick, onPreviewCtrlRightClick,
 }: {
   previewUrl: string; previewVisible: boolean; focusX: number; focusY: number; focusVisible: boolean;
   videoUrl?: string; isVideo?: boolean; fileName?: string;
   videoVolume?: number; onVideoVolumeChange?: (v: number) => void;
+  clarityPoints?: Array<{x:number;y:number}>;
   onImageSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onPreviewClick: (e: React.MouseEvent<HTMLElement>) => void;
   onRemoveFocus: (e: React.MouseEvent) => void;
   onPasteImage?: (file: File) => void;
+  onPreviewCtrlClick?: (e: React.MouseEvent<HTMLElement>) => void;
+  onPreviewCtrlRightClick?: (e: React.MouseEvent) => void;
 }) {
   const markerLeft = focusX;
   const markerTop = focusY;
@@ -4013,11 +4080,16 @@ function ImageSection({
     <div className="image-preview-container">
       {isVideo && videoUrl ? <video
         className={`image-preview${previewVisible ? ' visible' : ''}`} src={videoUrl} muted loop autoPlay
-        onClick={onPreviewClick} onContextMenu={onRemoveFocus}
+        onClick={e => { if (e.ctrlKey || e.metaKey) { onPreviewCtrlClick?.(e); } else { onPreviewClick(e); } }}
+        onContextMenu={e => { if (e.ctrlKey || e.metaKey) { onPreviewCtrlRightClick?.(e); } else { onRemoveFocus(e); } }}
       /> : previewUrl ? <img
         className={`image-preview${previewVisible ? ' visible' : ''}`} src={previewUrl} alt="Preview"
-        onClick={onPreviewClick} onContextMenu={onRemoveFocus}
+        onClick={e => { if (e.ctrlKey || e.metaKey) { onPreviewCtrlClick?.(e); } else { onPreviewClick(e); } }}
+        onContextMenu={e => { if (e.ctrlKey || e.metaKey) { onPreviewCtrlRightClick?.(e); } else { onRemoveFocus(e); } }}
       /> : null}
+      {(clarityPoints || []).map((p, i) => (
+        <div key={i} className="clarity-marker" style={{ left: `${p.x}%`, top: `${p.y}%` }} />
+      ))}
       <div className="focus-marker" style={{
         left: `${markerLeft}%`, top: `${markerTop}%`,
         display: focusVisible ? 'block' : 'none',

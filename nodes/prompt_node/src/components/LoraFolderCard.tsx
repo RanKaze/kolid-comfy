@@ -15,11 +15,12 @@ interface LoraFolderCardProps {
   bgImage?: string;
   bgVideo?: string;
   videoVolume?: number;
+  clarityPoints?: Array<{x:number;y:number}>;
   imgUrl: (path: string) => string;
   onEdit?: () => void;
 }
 
-export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, bgImage, bgVideo, videoVolume, imgUrl, onEdit }: LoraFolderCardProps) {
+export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, bgImage, bgVideo, videoVolume, clarityPoints, imgUrl, onEdit }: LoraFolderCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const filtered = searchQuery
@@ -33,7 +34,7 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
   const getBgUrl = (name: string) => name ? imgUrl(name) : '';
 
   return (
-    <div className={`category lora-folder ${expanded ? 'expanded' : 'collapsed'}`}>
+    <div className={`category lora-folder ${expanded ? 'expanded' : 'collapsed'}`} onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); const mx = e.clientX - r.left; const my = e.clientY - r.top; const pts = clarityPoints || []; const circles = pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join(''); const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${circles}<circle cx="${mx}" cy="${my}" r="70" fill="black"/></svg>`; const blurEl = e.currentTarget.querySelector<HTMLDivElement>('.category-background-blur'); if (blurEl) { const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; blurEl.style.maskImage = url; blurEl.style.webkitMaskImage = url; } }}>
       {expanded && bgVideo ? (
         <div className="category-background-mask">
           <video className="category-background-video" src={getBgUrl(bgVideo)} muted={!((videoVolume ?? 0) > 0)} loop autoPlay playsInline ref={el => { if (el) el.volume = videoVolume ?? 0; }} />
@@ -42,6 +43,9 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
         <div className="category-background-mask">
           <div className="category-background" style={{ backgroundImage: `url(${getBgUrl(bgImage)})` }} />
         </div>
+      ) : null}
+      {expanded && (bgVideo || bgImage) ? (
+        <div className="category-background-blur" style={(() => { if (!clarityPoints || clarityPoints.length === 0) return undefined; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${clarityPoints.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join('')}</svg>`; const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; return { maskImage: url, WebkitMaskImage: url }; })()} />
       ) : null}
       <div
         className="category-header"
