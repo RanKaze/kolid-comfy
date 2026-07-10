@@ -18,6 +18,151 @@ from ..libs.mask_utils import combine_masks, create_empty_mask, expand_mask, inv
 from ..libs.caption_utils import get_tag, get_similarity
 from decord import VideoReader, cpu
 from ..libs.image_utils import draw_mask_on_image, draw_mask, batch_images
+import comfy.sampler_helpers
+import latent_preview
+
+
+# ====================== Dual Model CFG Guider ======================
+class DualModelCFGGuider(comfy.samplers.CFGGuider):
+    """使用两个不同 model 的 CFG Guider：正向用 model，负向用 model_negative"""
+
+    def __init__(self, model_patcher, model_patcher_negative):
+        super().__init__(model_patcher)
+        self.model_patcher_negative = model_patcher_negative
+        self.inner_model_negative = None
+        self.model_options_negative = model_patcher_negative.model_options
+
+    def outer_sample(self, noise, latent_image, sampler, sigmas,
+                     denoise_mask=None, callback=None, disable_pbar=False,
+                     seed=None, latent_shapes=None):
+        self.inner_model, self.conds, self.loaded_models = \
+            comfy.sampler_helpers.prepare_sampling(
+                self.model_patcher, noise.shape, self.conds, self.model_options)
+
+        self.inner_model_negative, _, loaded_models_neg = \
+            comfy.sampler_helpers.prepare_sampling(
+                self.model_patcher_negative, noise.shape,
+                self.conds, self.model_options_negative)
+        self.loaded_models.extend(loaded_models_neg)
+
+        device = self.model_patcher.load_device
+        noise = noise.to(device=device, dtype=torch.float32)
+        latent_image = latent_image.to(device=device, dtype=torch.float32)
+        sigmas = sigmas.to(device)
+        comfy.samplers.cast_to_load_options(
+            self.model_options, device=device,
+            dtype=self.model_patcher.model_dtype())
+        comfy.samplers.cast_to_load_options(
+            self.model_options_negative, device=device,
+            dtype=self.model_patcher_negative.model_dtype())
+
+        try:
+            self.model_patcher.pre_run()
+            self.model_patcher_negative.pre_run()
+            output = self.inner_sample(
+                noise, latent_image, device, sampler, sigmas,
+                denoise_mask, callback, disable_pbar, seed,
+                latent_shapes=latent_shapes)
+        finally:
+            self.model_patcher.cleanup()
+            self.model_patcher_negative.cleanup()
+
+        comfy.sampler_helpers.cleanup_models(self.conds, self.loaded_models)
+        del self.inner_model
+        del self.inner_model_negative
+        del self.loaded_models
+        return output
+
+    def predict_noise(self, x, timestep, model_options={}, seed=None):
+        positive_cond = self.conds.get("positive", None)
+        negative_cond = self.conds.get("negative", None)
+
+        if math.isclose(self.cfg, 1.0) and \
+           model_options.get("disable_cfg1_optimization", False) == False:
+            out = comfy.samplers.calc_cond_batch(
+                self.inner_model, [positive_cond], x, timestep, model_options)
+            return out[0]
+
+        out_pos = comfy.samplers.calc_cond_batch(
+            self.inner_model, [positive_cond], x, timestep, model_options)
+        out_neg = comfy.samplers.calc_cond_batch(
+            self.inner_model_negative, [negative_cond], x, timestep,
+            self.model_options_negative)
+
+        return comfy.samplers.cfg_function(
+            self.inner_model, out_pos[0], out_neg[0], self.cfg,
+            x, timestep, model_options=model_options,
+            cond=positive_cond, uncond=negative_cond)
+
+
+def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
+              latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None,
+              force_full_denoise=False, sigmas=None, model_negative=None):
+    """统一采样函数：支持 custom sigmas 和 dual model CFG"""
+    latent_image = latent["samples"]
+    latent_image = comfy.sample.fix_empty_latent_channels(
+        model, latent_image,
+        latent.get("downscale_ratio_spacial", None),
+        latent.get("downscale_ratio_temporal", None))
+
+    if disable_noise:
+        noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype,
+                             layout=latent_image.layout, device="cpu")
+    else:
+        batch_inds = latent.get("batch_index", None)
+        noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+
+    noise_mask = None
+    if "noise_mask" in latent:
+        noise_mask = latent["noise_mask"]
+
+    # 计算 sigmas：若外部传入则直接使用，否则从 steps/scheduler/denoise 计算
+    if sigmas is not None:
+        actual_steps = len(sigmas) - 1
+    else:
+        ksampler = comfy.samplers.KSampler(
+            model, steps=steps, device=model.load_device,
+            sampler=sampler_name, scheduler=scheduler, denoise=denoise,
+            model_options=model.model_options)
+        sigmas = ksampler.sigmas
+        actual_steps = steps
+
+    # 截断 sigmas（与 KSampler.sample 逻辑一致）
+    if last_step is not None and last_step < (len(sigmas) - 1):
+        sigmas = sigmas[:last_step + 1]
+        if force_full_denoise:
+            sigmas[-1] = 0
+    if start_step is not None:
+        if start_step < (len(sigmas) - 1):
+            sigmas = sigmas[start_step:]
+        else:
+            out = latent.copy()
+            out.pop("downscale_ratio_spacial", None)
+            out.pop("downscale_ratio_temporal", None)
+            out["samples"] = latent_image
+            return (out,)
+
+    sampler_obj = comfy.samplers.sampler_object(sampler_name)
+    callback = latent_preview.prepare_callback(model, actual_steps)
+    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+
+    if model_negative is not None:
+        guider = DualModelCFGGuider(model, model_negative)
+    else:
+        guider = comfy.samplers.CFGGuider(model)
+    guider.set_conds(positive, negative)
+    guider.set_cfg(cfg)
+    samples = guider.sample(noise, latent_image, sampler_obj, sigmas,
+                            denoise_mask=noise_mask, callback=callback,
+                            disable_pbar=disable_pbar, seed=seed)
+    samples = samples.to(device=comfy.model_management.intermediate_device(),
+                         dtype=comfy.model_management.intermediate_dtype())
+
+    out = latent.copy()
+    out.pop("downscale_ratio_spacial", None)
+    out.pop("downscale_ratio_temporal", None)
+    out["samples"] = samples
+    return (out,)
 
 
 # ====================== 全局 LoRA 路径缓存（脚本加载时自动构建） ======================
@@ -260,84 +405,98 @@ class SamplerCache:
         new._cache = self._cache.copy()
         return new
 
-    def get_model_clip(self, model, clip, loras: list = None, reference: ReferenceData = None):
+    @staticmethod
+    def _apply_loras(model_patcher, clip_patcher, loras):
+        """对 model_patcher / clip_patcher 应用 LoRA 列表，返回 (model_patcher, clip_patcher)"""
+        if not loras:
+            return model_patcher, clip_patcher
+
+        print(f"Loading LoRAs: {loras}")
+
+        for item in loras:
+            if not isinstance(item, str) or not item.strip():
+                continue
+
+            lora_str = item.strip()
+            if lora_str.startswith("<") and lora_str.endswith(">"):
+                lora_str = lora_str[1:-1].strip()
+
+            try:
+                if lora_str.startswith("lora_path:"):
+                    body = lora_str[len("lora_path:"):]
+                    last_colon = body.rfind(":")
+                    if last_colon == -1:
+                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                        continue
+                    lora_path = body[:last_colon].strip()
+                    strength = float(body[last_colon+1:].strip())
+                    lora_name = lora_path.replace("/", "\\").split("\\")[-1]
+                elif lora_str.startswith("lora:"):
+                    parts = lora_str.split(":", 2)
+                    if len(parts) != 3:
+                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                        continue
+                    lora_name = parts[1].strip()
+                    strength = float(parts[2].strip())
+                    lora_path = _lora_path_cache.get(lora_name)
+                    if lora_path is None:
+                        for key in _lora_path_cache:
+                            if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
+                                lora_path = _lora_path_cache[key]
+                                break
+                    if lora_path is None:
+                        print(f"Warning: 未找到 LoRA 文件: {lora_name}")
+                        continue
+                else:
+                    print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
+                    continue
+
+                lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
+
+                model_patcher, clip_patcher = comfy.sd.load_lora_for_models(
+                    model_patcher,
+                    clip_patcher,
+                    lora_dict,
+                    strength,
+                    strength
+                )
+
+                print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
+
+            except Exception as e:
+                print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
+
+        return model_patcher, clip_patcher
+
+    def get_model_clip(self, model, clip, loras: list = None, reference: ReferenceData = None, model_negative=None):
         if model is None:
             raise ValueError("传入的 model 不能为空")
 
         if loras is None:
             loras = []
 
+        # ---- 正向 model + clip ----
         cache_key = (id(model), id(clip) if clip is not None else None, frozenset(loras))
 
         if cache_key in self._cache:
             print(f"✓ LoRA model cache hit")
             model_patcher, clip_patcher = self._cache[cache_key]
         else:
-            model_patcher = model
-            clip_patcher = clip
-
-            if loras:
-                print(f"Loading LoRAs: {loras}")
-
-                for item in loras:
-                    if not isinstance(item, str) or not item.strip():
-                        continue
-
-                    lora_str = item.strip()
-                    if lora_str.startswith("<") and lora_str.endswith(">"):
-                        lora_str = lora_str[1:-1].strip()
-
-                    try:
-                        if lora_str.startswith("lora_path:"):
-                            # Direct path mode: path may contain ':' (Windows drive letter)
-                            # Format: lora_path:path:strength  — split from the rightmost ':'
-                            body = lora_str[len("lora_path:"):]
-                            last_colon = body.rfind(":")
-                            if last_colon == -1:
-                                print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
-                                continue
-                            lora_path = body[:last_colon].strip()
-                            strength = float(body[last_colon+1:].strip())
-                            lora_name = lora_path.replace("/", "\\").split("\\")[-1]
-                        elif lora_str.startswith("lora:"):
-                            # Normal mode: lora:name:strength
-                            parts = lora_str.split(":", 2)
-                            if len(parts) != 3:
-                                print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
-                                continue
-                            lora_name = parts[1].strip()
-                            strength = float(parts[2].strip())
-                            lora_path = _lora_path_cache.get(lora_name)
-                            if lora_path is None:
-                                for key in _lora_path_cache:
-                                    if key == lora_name or key.endswith("/" + lora_name) or key.endswith("\\" + lora_name):
-                                        lora_path = _lora_path_cache[key]
-                                        break
-                            if lora_path is None:
-                                print(f"Warning: 未找到 LoRA 文件: {lora_name}")
-                                continue
-                        else:
-                            print(f"Warning: 必须以 lora: 或 lora_path: 开头: {lora_str}")
-                            continue
-
-                        # === 关键修复：先加载 state_dict，再传入 load_lora_for_models ===
-                        lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
-
-                        model_patcher, clip_patcher = comfy.sd.load_lora_for_models(
-                            model_patcher,
-                            clip_patcher,
-                            lora_dict,          # ← 这里必须传 dict，而不是路径
-                            strength,
-                            strength
-                        )
-
-                        print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
-
-                    except Exception as e:
-                        print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
-
+            model_patcher, clip_patcher = self._apply_loras(model, clip, loras)
             result = (model_patcher, clip_patcher)
             self._cache[cache_key] = result
+
+        # ---- 负向 model (也应用相同 LoRA) ----
+        model_negative_patcher = None
+        if model_negative is not None:
+            neg_cache_key = (id(model_negative), None, frozenset(loras))
+
+            if neg_cache_key in self._cache:
+                print(f"✓ LoRA model_negative cache hit")
+                model_negative_patcher, _ = self._cache[neg_cache_key]
+            else:
+                model_negative_patcher, _ = self._apply_loras(model_negative, None, loras)
+                self._cache[neg_cache_key] = (model_negative_patcher, None)
 
         # ========== 应用 Reference IPAdapter ==========
         if reference is not None and reference.reference_ipadapters:
@@ -365,7 +524,6 @@ class SamplerCache:
                 if image_style is None:
                     continue
 
-                # 委托给 ComfyUI-Easy-Use 的 ipadapterStyleComposition 逻辑
                 easy_ipa_class = None
                 for key in ["easy ipadapterStyleComposition", "ipadapterStyleComposition"]:
                     if key in ALL_NODE_CLASS_MAPPINGS:
@@ -398,7 +556,7 @@ class SamplerCache:
                 else:
                     print(f"Warning: ComfyUI-Easy-Use 的 ipadapterStyleComposition 节点未找到，跳过 Reference IPAdapter 应用")
 
-        return (model_patcher, clip_patcher)
+        return (model_patcher, clip_patcher, model_negative_patcher)
 
 
 # ====================== PipelineData 类（只返回 condition） ======================
@@ -1176,8 +1334,7 @@ class PipelineSamplerNode:
                 "need_reference_latent": ("BOOLEAN", {"default": False}),
                 "context_regex": ("STRING", {"default": ".+"}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "step_rate": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
             },
             "optional": {
                 "tagger": ("*",),
@@ -1189,11 +1346,8 @@ class PipelineSamplerNode:
     FUNCTION = "sample"
     CATEGORY = "sampling/custom"
 
-    def sample(self, pipeline: PipelineData, bypass, need_reference_latent, context_regex, denoise, seed, step_rate, tagger=None):
+    def sample(self, pipeline: PipelineData, bypass, need_reference_latent, context_regex, denoise, seed, tagger=None):
         if bypass:
-            return (pipeline,)
-        
-        if step_rate <= 0:
             return (pipeline,)
         
         next_pipeline = pipeline.copy()
@@ -1221,19 +1375,21 @@ class PipelineSamplerNode:
             tagger_positive = ''
             
         tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, image)
-        if tmp_positive is not None:
+        if tmp_positive:
             context_positive = tmp_positive
-        if tmp_negative is not None:
+        if tmp_negative:
             context_negative = tmp_negative
-        if tmp_loras is not None:
+        if tmp_loras:
             context_loras.extend(tmp_loras)
             
-        # 获取打过 LoRA 的 model 和 clip
-        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+        # 获取打过 LoRA 的 model 和 clip（以及可选的 model_negative）
+        model_negative = next_pipeline.config.get("model_negative")
+        model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
             loras=context_loras,
-            reference=next_pipeline.reference
+            reference=next_pipeline.reference,
+            model_negative=model_negative
         )
 
         # 获取 condition（使用新的 get_conditioning）
@@ -1260,11 +1416,9 @@ class PipelineSamplerNode:
         scheduler    = next_pipeline.scheduler    if next_pipeline.scheduler    is not None else "normal"
         steps        = next_pipeline.steps        if next_pipeline.steps         is not None else 20
         cfg          = next_pipeline.cfg          if next_pipeline.cfg          is not None else 8.0
-        
-        steps = int(step_rate * steps)
-        
+
         # 执行采样
-        sampled_latent = common_ksampler(
+        sampled_latent = _ksampler(
             model=model_to_use,
             seed=seed,
             steps=steps,
@@ -1274,7 +1428,9 @@ class PipelineSamplerNode:
             positive=positive_condition,
             negative=negative_condition,
             latent=latent,
-            denoise=denoise
+            denoise=denoise,
+            sigmas=next_pipeline.config.get("sigmas"),
+            model_negative=model_negative_to_use,
         )[0]
 
         next_pipeline.latent = sampled_latent
@@ -1344,11 +1500,11 @@ class PipelineSamplerAdvancedNode:
             tagger_positive = ''
             
         tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, image)
-        if tmp_positive is not None:
+        if tmp_positive:
             context_positive = tmp_positive
-        if tmp_negative is not None:
+        if tmp_negative:
             context_negative = tmp_negative
-        if tmp_loras is not None:
+        if tmp_loras:
             context_loras.extend(tmp_loras)
             
         sampler_name = next_pipeline.sampler_name if next_pipeline.sampler_name is not None else "euler"
@@ -1361,12 +1517,14 @@ class PipelineSamplerAdvancedNode:
         if end_at_step < start_at_step:
             end_at_step = start_at_step
             
-        # 获取打过 LoRA 的 model 和 clip
-        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+        # 获取打过 LoRA 的 model 和 clip（以及可选的 model_negative）
+        model_negative = next_pipeline.config.get("model_negative")
+        model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
             loras=context_loras,
-            reference=next_pipeline.reference
+            reference=next_pipeline.reference,
+            model_negative=model_negative
         )
 
         # 获取 condition（使用新的 get_conditioning）
@@ -1389,20 +1547,22 @@ class PipelineSamplerAdvancedNode:
             reference=next_pipeline.reference
         )
 
-        sampled_latent = KSamplerAdvanced().sample(
+        sampled_latent = _ksampler(
             model=model_to_use,
-            add_noise=add_noise,
-            noise_seed=seed,
+            seed=seed,
             steps=steps,
             cfg=cfg,
             sampler_name=sampler_name,
             scheduler=scheduler,
             positive=positive_condition,
             negative=negative_condition,
-            latent_image=latent,
-            start_at_step=start_at_step,
-            end_at_step=end_at_step,
-            return_with_leftover_noise=return_with_leftover_noise
+            latent=latent,
+            disable_noise=(add_noise == "disable"),
+            start_step=start_at_step,
+            last_step=end_at_step,
+            force_full_denoise=(return_with_leftover_noise == "disable"),
+            sigmas=next_pipeline.config.get("sigmas"),
+            model_negative=model_negative_to_use,
         )[0]
 
         next_pipeline.latent = sampled_latent
@@ -1685,18 +1845,20 @@ class PipelineDetailerAdvancedNode:
             #spatial_rate = crop_infos[processing_index].get("spatial_rate", 1.0)
             
             tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, tagger_image)
-            if tmp_positive is not None:
+            if tmp_positive:
                 current_positive += ',' + tmp_positive
-            if tmp_negative is not None:
+            if tmp_negative:
                 current_negative += ',' + tmp_negative
-            if tmp_loras is not None:
+            if tmp_loras:
                 current_loras.extend(tmp_loras)
             
-            model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model_negative = next_pipeline.config.get("model_negative")
+            model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
                 model=next_pipeline.model,
                 clip=next_pipeline.clip,
                 loras=current_loras,
-                reference=next_pipeline.reference
+                reference=next_pipeline.reference,
+                model_negative=model_negative
             )
 
             tmp_latent = tmp_latents[processing_index]
@@ -1721,20 +1883,22 @@ class PipelineDetailerAdvancedNode:
                 reference=next_pipeline.reference
             )
             
-            tmp_latents[processing_index] = KSamplerAdvanced().sample(
+            tmp_latents[processing_index] = _ksampler(
                 model=model_to_use,
-                add_noise=add_noise,
-                noise_seed=seed,
+                seed=seed,
                 steps=steps,
                 cfg=cfg,
                 sampler_name=sampler_name,
                 scheduler=scheduler,
                 positive=positive_condition,
                 negative=negative_condition,
-                latent_image=tmp_latent,
-                start_at_step=start_at_step,
-                end_at_step=end_at_step,
-                return_with_leftover_noise=return_with_leftover_noise
+                latent=tmp_latent,
+                disable_noise=(add_noise == "disable"),
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=(return_with_leftover_noise == "disable"),
+                sigmas=next_pipeline.config.get("sigmas"),
+                model_negative=model_negative_to_use,
             )[0]
         
         # ==================== Decode ====================
@@ -2046,6 +2210,10 @@ class PipelineEnableEditNode:
             if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
                 next_pipeline.model = arch_krea2.apply_model_patch(next_pipeline.model)
                 print("[EnableEdit] Krea2 reference latent patch applied")
+                model_neg = next_pipeline.config.get("model_negative")
+                if model_neg is not None:
+                    next_pipeline.config["model_negative"] = arch_krea2.apply_model_patch(model_neg)
+                    print("[EnableEdit] Krea2 reference latent patch applied to model_negative")
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
                 next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
                 print("[EnableEdit] Flux2Klein: no model patch needed")
@@ -2157,11 +2325,13 @@ class PipelineSamplerDataNode:
         positive_str, negative_str, loras = next_pipeline.context.get_context(context_regex)
         
         # 获取 model 和 clip（应用 loras）
-        model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+        model_negative = next_pipeline.config.get("model_negative")
+        model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
             model=next_pipeline.model,
             clip=next_pipeline.clip,
             loras=loras,
-            reference=next_pipeline.reference
+            reference=next_pipeline.reference,
+            model_negative=model_negative
         )
         
         # 获取 latent
@@ -2694,17 +2864,19 @@ class PipelineVideoSamplerAdvancedNode:
             current_loras = context_loras.copy()
             
             tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context(tagger_positive, tagger_image)
-            if tmp_positive is not None:
+            if tmp_positive:
                 current_positive += (',' + tmp_positive)
-            if tmp_negative is not None:
+            if tmp_negative:
                 current_negative += (',' + tmp_negative)
-            if tmp_loras is not None:
+            if tmp_loras:
                 current_loras.extend(tmp_loras)
                 
                 
-            model_to_use, clip_to_use = next_pipeline.cache.get_model_clip(
+            model_negative = next_pipeline.config.get("model_negative")
+            model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
                 model=next_pipeline.model, clip=next_pipeline.clip, loras=current_loras,
-                reference=reference
+                reference=reference,
+                model_negative=model_negative
             )
             
             positive_condition = next_pipeline.get_conditioning(
@@ -2723,20 +2895,22 @@ class PipelineVideoSamplerAdvancedNode:
                 reference=reference
             )
             
-            sampled = KSamplerAdvanced().sample(
+            sampled = _ksampler(
                 model=model_to_use,
-                add_noise=add_noise,
-                noise_seed=seed,
+                seed=seed,
                 steps=steps,
                 cfg=cfg,
                 sampler_name=sampler_name,
                 scheduler=scheduler,
                 positive=positive_condition,
                 negative=negative_condition,
-                latent_image=tmp_latent,
-                start_at_step=actual_start_step,
-                end_at_step=actual_end_step,
-                return_with_leftover_noise=return_with_leftover_noise
+                latent=tmp_latent,
+                disable_noise=(add_noise == "disable"),
+                start_step=actual_start_step,
+                last_step=actual_end_step,
+                force_full_denoise=(return_with_leftover_noise == "disable"),
+                sigmas=next_pipeline.config.get("sigmas"),
+                model_negative=model_negative_to_use,
             )[0]
             
             tmp_latents.append(sampled.detach() if hasattr(sampled, 'detach') else sampled)

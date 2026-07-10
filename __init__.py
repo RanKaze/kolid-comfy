@@ -156,6 +156,12 @@ NODE_CONFIG = {
     
     "ConfigNode": {"class": ConfigNode, "name": "ConfigNode"},
     "ConfigGetNode": {"class": ConfigGetNode, "name": "ConfigGetNode"},
+    "ConfigModelNegativeNode": {"class": ConfigModelNegativeNode, "name": "ConfigModelNegativeNode"},
+    "ConfigSigmasNode": {"class": ConfigSigmasNode, "name": "ConfigSigmasNode"},
+    "ConfigArchitectureNode": {"class": ConfigArchitectureNode, "name": "ConfigArchitectureNode"},
+    "ConfigPrintTagNode": {"class": ConfigPrintTagNode, "name": "ConfigPrintTagNode"},
+    "ConfigPreviewImageNode": {"class": ConfigPreviewImageNode, "name": "ConfigPreviewImageNode"},
+    "ConfigPreviewMaskNode": {"class": ConfigPreviewMaskNode, "name": "ConfigPreviewMaskNode"},
     "ContextNode": {"class": ContextNode, "name": "ContextNode"},
     "ContextQueryNode": {"class": ContextQueryNode, "name": "ContextQueryNode"},
     "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},
