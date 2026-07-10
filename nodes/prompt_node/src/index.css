@@ -998,7 +998,7 @@ body {
     color: var(--text-primary);
 }
 .modal-content textarea { resize: vertical; min-height: 80px; }
-.modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: -8px; display: block; }
+.modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; margin-top: 8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
 .modal-content .tag-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
