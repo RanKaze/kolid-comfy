@@ -1,8 +1,10 @@
 import os
+import json
 import random
 import re
 import requests
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import io
 import torch
 import comfy.utils
@@ -12,6 +14,9 @@ import folder_paths
 import numpy as np
 import cv2
 from ..libs.video_utils import disk_images_to_video
+from ..libs.utils import AlwaysEqualProxy
+
+any_type = AlwaysEqualProxy("*")
 
 class LocalImageLoaderNode:
     @classmethod
@@ -504,3 +509,72 @@ class DiskImagesToVideoNode:
     @classmethod
     def IS_CHANGED(cls, folder_name, file_name, fps, crf, audio=None):
         return get_folder_hash(folder_name)
+
+
+class SaveDataToNode:
+    """Encode dict data into the latest generated PNG image as metadata (A1111-style)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "signal": (any_type,),
+                "data": ("DICT",),
+            }
+        }
+
+    RETURN_TYPES = (any_type,)
+    RETURN_NAMES = ("signal",)
+    FUNCTION = "save_data_to_image"
+    CATEGORY = "image/DiskIO"
+    OUTPUT_NODE = True
+
+    def save_data_to_image(self, signal, data):
+        output_dir = folder_paths.output_directory
+        latest_file = None
+        latest_mtime = 0.0
+        for dirpath, dirnames, filenames in os.walk(output_dir):
+            for f in filenames:
+                if f.lower().endswith('.png'):
+                    fp = os.path.join(dirpath, f)
+                    try:
+                        mtime = os.path.getmtime(fp)
+                        if mtime > latest_mtime:
+                            latest_mtime = mtime
+                            latest_file = fp
+                    except OSError:
+                        continue
+
+        if not latest_file:
+            print("[SaveDataToNode] No PNG file found in output directory")
+            return (None,)
+
+        try:
+            data_json = json.dumps(data, ensure_ascii=False)
+        except Exception as e:
+            print(f"[SaveDataToNode] Failed to encode data: {e}")
+            return (None,)
+
+        try:
+            img = Image.open(latest_file)
+            img.load()
+            mode = img.mode
+
+            metadata = PngInfo()
+            for key, value in img.info.items():
+                if key in ('icc_profile', 'gamma', 'chromaticity', 'exif'):
+                    continue
+                if isinstance(value, (str, bytes)):
+                    metadata.add_text(key, value if isinstance(value, str) else value.decode('utf-8', errors='replace'))
+            metadata.add_text("parameters", data_json)
+
+            img.save(latest_file, format="PNG", pnginfo=metadata, compress_level=4)
+            print(f"[SaveDataToNode] Encoded data into {latest_file}")
+        except Exception as e:
+            print(f"[SaveDataToNode] Failed to encode data into {latest_file}: {e}")
+
+        return (None,)
+
+    @classmethod
+    def IS_CHANGED(cls, signal, data):
+        return float("nan")

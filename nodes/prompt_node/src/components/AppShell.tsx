@@ -37,6 +37,7 @@ const iconChevronUp = <svg width="12" height="12" viewBox="0 0 24 24" fill="none
 const iconChevronDown = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M6 9l6 6 6-6"/></svg>;
 const iconX = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M18 6L6 18M6 6l12 12"/></svg>;
 const iconClipboard = <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'4px'}}><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>;
+const iconLoadFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>;
 const iconPlus = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M5 12h14"/></svg>;
 
 const ZOOM_DELAY = 2000;
@@ -183,6 +184,8 @@ export function AppShell() {
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
   const [selectedPrefabs, setSelectedPrefabs] = useState<SelectedPrefabItem[]>([]);
   const prefabRestoredRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [loadFromImageData, setLoadFromImageData] = useState<any>(null);
 
   // Tags that came from prompt_parsing (displayed in purple)
   const parsedTagKeys = useMemo(() => {
@@ -1506,6 +1509,176 @@ export function AppShell() {
     setLoraSelections(newLoraSelections);
   }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, setSelectedLoras, setLoraSelections]);
 
+  // ========== Load From Image ==========
+  const handleLoadFromImageClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleImageSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await fetch('/load_from_image', { method: 'POST', body: buffer });
+      const result = await res.json();
+      if (result.success && result.data) {
+        setLoadFromImageData(result.data);
+      } else {
+        alert(result.error || 'Failed to load data from image');
+      }
+    } catch (err) {
+      alert('Failed to load image: ' + String(err));
+    }
+    // Reset input so the same file can be selected again
+    e.target.value = '';
+  }, []);
+
+  const applyLoadedData = useCallback((mode: 'merge' | 'replace') => {
+    const loaded = loadFromImageData;
+    if (!loaded) return;
+    setLoadFromImageData(null);
+
+    // --- Parse prompt string ---
+    const promptStr: string = loaded.prompt || '';
+    const segments: string[] = [];
+    {
+      let current = '';
+      let angleDepth = 0;
+      for (const ch of promptStr) {
+        if (ch === '<') { angleDepth++; current += ch; }
+        else if (ch === '>') { angleDepth--; current += ch; }
+        else if (ch === ',' && angleDepth === 0) {
+          const t = current.trim();
+          if (t) segments.push(t);
+          current = '';
+        } else { current += ch; }
+      }
+      const t = current.trim();
+      if (t) segments.push(t);
+    }
+
+    const regularSegments = segments.filter(s => !(s.startsWith('<') && s.endsWith('>')));
+    const customSegments = segments.filter(s => s.startsWith('<') && s.endsWith('>')).map(s => s.slice(1, -1));
+    const newTags = regularSegments.map(s => parseStringToTags(s, allPrompts));
+
+    // --- Parse lora data ---
+    let newLoras: LoraItemData[] = [];
+    let newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }> = {};
+    try {
+      const loraArr = JSON.parse(loaded.lora || '[]');
+      const available = new Map<string, LoraItemData>();
+      for (const items of Object.values(loraData)) {
+        for (const item of items) { available.set(item.file_path, item); }
+      }
+      for (const saved of loraArr) {
+        const lookupKey = saved.file_path || saved.file_name;
+        const item = available.get(lookupKey);
+        if (item) {
+          newLoras.push(item);
+          newLoraSelections[item.file_path] = {
+            activeTags: saved.active_tags || [],
+            strength: saved.strength ?? 1.0,
+            active: saved.active ?? true,
+            split_mode: saved.split_mode,
+          };
+        } else {
+          const derivedName = lookupKey.includes('/') ? lookupKey.split('/').pop()! : lookupKey;
+          newLoras.push({
+            name: saved.name || derivedName,
+            file_name: derivedName,
+            file_path: lookupKey,
+            preview_url: '',
+            tags: saved.active_tags || [],
+            metadata: { missing: true },
+          });
+          newLoraSelections[lookupKey] = {
+            activeTags: saved.active_tags || [],
+            strength: saved.strength ?? 1.0,
+            active: saved.active ?? true,
+            split_mode: saved.split_mode,
+          };
+        }
+      }
+    } catch {}
+
+    // --- Parse prefab data ---
+    let newPrefabs: SelectedPrefabItem[] = [];
+    try {
+      const prefabArr = JSON.parse(loaded.prefab || '[]');
+      function restoreTree(
+        node: { guid: string; active?: boolean; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
+        visited: Set<string>,
+      ): SelectedPrefabItem | null {
+        if (visited.has(node.guid)) return null;
+        const prefab = findPrefabByGuid(node.guid);
+        if (!prefab) return null;
+        visited.add(node.guid);
+        const savedTags = (node.tags || []) as SelectedPrefabTagState[];
+        const tags: SelectedPrefabTagState[] = (prefab.tags || []).map(g => {
+          const key = tagsToDisplayName(g as any);
+          const saved = savedTags.find(st => st.key === key);
+          return { key, active: saved ? saved.active !== false : true };
+        });
+        const savedLoras = (node.loras || []) as SelectedPrefabLoraState[];
+        const loras: SelectedPrefabLoraState[] = (prefab.loras || []).map(l => {
+          const fp = l.file_path || (l as any).file_name || '';
+          const saved = savedLoras.find(sl => sl.file_path === fp);
+          return { file_path: fp, active: saved ? saved.active !== false : true };
+        });
+        const savedChildren = (node.children || []) as any[];
+        const children: SelectedPrefabItem[] = (prefab.selected_prefabs || [])
+          .map(nested => {
+            const saved = savedChildren.find(sc => sc.guid === nested.guid);
+            return restoreTree(saved || nested, new Set(visited));
+          })
+          .filter(Boolean) as SelectedPrefabItem[];
+        return { guid: node.guid, active: node.active !== false, tags, loras, children };
+      }
+      for (const sp of prefabArr) {
+        const item = restoreTree(sp, new Set());
+        if (item) newPrefabs.push(item);
+      }
+    } catch {}
+
+    if (mode === 'replace') {
+      setSelectedTags(newTags);
+      setCustomPrompts(customSegments.join('\n'));
+      setSelectedLoras(newLoras);
+      setLoraSelections(newLoraSelections);
+      setSelectedPrefabs(newPrefabs);
+    } else {
+      // Merge prompts
+      setSelectedTags(prev => {
+        const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+        const toAdd = newTags.filter(g => !existing.has(tagsToDisplayString(g)));
+        return [...prev, ...toAdd];
+      });
+      // Merge custom prompts
+      setCustomPrompts(prev => {
+        const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
+        const toAdd = customSegments.filter(s => !existing.includes(s));
+        return [...existing, ...toAdd].join('\n');
+      });
+      // Merge loras
+      setSelectedLoras(prev => {
+        const existing = new Set(prev.map(l => l.file_path));
+        const toAdd = newLoras.filter(l => !existing.has(l.file_path));
+        return [...prev, ...toAdd];
+      });
+      setLoraSelections(prev => ({ ...prev, ...newLoraSelections }));
+      // Merge prefabs
+      setSelectedPrefabs(prev => {
+        const existing = new Set<string>();
+        const walk = (items: SelectedPrefabItem[]) => {
+          for (const item of items) { existing.add(item.guid); walk(item.children); }
+        };
+        walk(prev);
+        const toAdd = newPrefabs.filter(p => !existing.has(p.guid));
+        return [...prev, ...toAdd];
+      });
+    }
+  }, [loadFromImageData, allPrompts, loraData, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs]);
+
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
     // Flush pending region confirm (don't wait for debounce timer)
@@ -1880,12 +2053,26 @@ export function AppShell() {
     try {
       const result = await mod.save(name, modalMode, modalSize);
       if (result.success) {
-        mod.setLocal(name, modalMode, modalSize, categoryDisplayModes, categorySizeModes, allLibraries);
+        if (modalIsCat) {
+          setCategoryDisplayModes(prev => ({ ...prev, [name]: modalMode }));
+          setCategorySizeModes(prev => ({ ...prev, [name]: modalSize }));
+        } else {
+          setAllLibraries(prev => {
+            if (!prev[name]) return prev;
+            return { ...prev, [name]: { ...prev[name], display_mode: modalMode, size_mode: modalSize } };
+          });
+        }
         closeModal();
         rerender();
+      } else {
+        console.error('updateDisplayMode: server returned non-success', result);
+        closeModal();
       }
-    } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalMode, modalSize, modalIsCat, categoryDisplayModes, categorySizeModes, allLibraries, rerender]);
+    } catch(e) {
+      console.error('updateDisplayMode error:', e);
+      closeModal();
+    }
+  }, [closeModal, modalOldName, modalMode, modalSize, modalIsCat, setCategoryDisplayModes, setCategorySizeModes, setAllLibraries, rerender]);
 
   // ========== Update Prompt ==========
   const updatePrompt = useCallback(async () => {
@@ -2440,19 +2627,44 @@ export function AppShell() {
 
       // === Prefab drop ===
       if (snapType === 'prefab') {
-        console.log('[D&D] drop prefab, snapLibrary:', snapLibrary, 'snapIndex:', snapIndex, 'target:', target);
         const pi = target.closest('.prompt-item[data-prefab]:not(.add-prompt-btn)') as HTMLElement;
-        console.log('[D&D] drop prefab, pi:', pi, 'pi?.dataset:', pi?.dataset);
         if (pi && snapLibrary != null && snapIndex != null) {
           const tl = pi.dataset.library;
           const ti = parseInt(pi.dataset.prefabIndex!);
-          console.log('[D&D] drop prefab, target lib:', tl, 'target index:', ti);
           if (tl && !isNaN(ti) && snapLibrary === tl) {
+            // Optimistic local reorder within same library
+            setAllLibraries((prev: AllLibraries) => {
+              const lib = prev[tl];
+              if (!lib) return prev;
+              const prefabs = [...(lib.prefabs || [])];
+              if (snapIndex < 0 || snapIndex >= prefabs.length) return prev;
+              const [moved] = prefabs.splice(snapIndex, 1);
+              const insertAt = ti >= prefabs.length ? prefabs.length : ti;
+              prefabs.splice(insertAt, 0, moved);
+              return { ...prev, [tl]: { ...lib, prefabs } };
+            });
             fetch('/reorder_library_prefabs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ library: tl, from_index: snapIndex, to_index: ti }),
             }).catch(console.error);
           } else if (tl && snapLibrary !== tl) {
+            // Optimistic local move across libraries
+            setAllLibraries((prev: AllLibraries) => {
+              const fromLib = prev[snapLibrary];
+              const toLib = prev[tl];
+              if (!fromLib || !toLib) return prev;
+              const fromPrefabs = [...(fromLib.prefabs || [])];
+              if (snapIndex < 0 || snapIndex >= fromPrefabs.length) return prev;
+              const [moved] = fromPrefabs.splice(snapIndex, 1);
+              const toPrefabs = [...(toLib.prefabs || [])];
+              const insertAt = ti >= 0 && ti <= toPrefabs.length ? ti : toPrefabs.length;
+              toPrefabs.splice(insertAt, 0, moved);
+              return {
+                ...prev,
+                [snapLibrary]: { ...fromLib, prefabs: fromPrefabs },
+                [tl]: { ...toLib, prefabs: toPrefabs },
+              };
+            });
             fetch('/move_prefab_to_library', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ from_library: snapLibrary, to_library: tl, from_index: snapIndex, to_index: ti }),
@@ -2464,11 +2676,36 @@ export function AppShell() {
         if (addBtn && snapLibrary != null && snapIndex != null) {
           const tl = addBtn.dataset.library;
           if (tl && snapLibrary === tl) {
+            // Optimistic local reorder to end
+            setAllLibraries((prev: AllLibraries) => {
+              const lib = prev[tl];
+              if (!lib) return prev;
+              const prefabs = [...(lib.prefabs || [])];
+              if (snapIndex < 0 || snapIndex >= prefabs.length) return prev;
+              const [moved] = prefabs.splice(snapIndex, 1);
+              prefabs.push(moved);
+              return { ...prev, [tl]: { ...lib, prefabs } };
+            });
             fetch('/reorder_library_prefabs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ library: tl, from_index: snapIndex, to_index: -1 }),
             }).catch(console.error);
           } else if (tl && snapLibrary !== tl) {
+            // Optimistic local move to end of other library
+            setAllLibraries((prev: AllLibraries) => {
+              const fromLib = prev[snapLibrary];
+              const toLib = prev[tl];
+              if (!fromLib || !toLib) return prev;
+              const fromPrefabs = [...(fromLib.prefabs || [])];
+              if (snapIndex < 0 || snapIndex >= fromPrefabs.length) return prev;
+              const [moved] = fromPrefabs.splice(snapIndex, 1);
+              const toPrefabs = [...(toLib.prefabs || []), moved];
+              return {
+                ...prev,
+                [snapLibrary]: { ...fromLib, prefabs: fromPrefabs },
+                [tl]: { ...toLib, prefabs: toPrefabs },
+              };
+            });
             fetch('/move_prefab_to_library', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ from_library: snapLibrary, to_library: tl, from_index: snapIndex, to_index: -1 }),
@@ -2909,7 +3146,20 @@ export function AppShell() {
         <div className="scroll-container">
           <div className="container">
             <div className="header">
-              <h1>{iconPalette} Prompt Snapshot</h1>
+              <button
+                className="btn btn-primary"
+                onClick={handleLoadFromImageClick}
+                style={{ display: 'flex', alignItems: 'center', fontSize: '16px', fontWeight: 'bold', padding: '8px 16px', border: 'none', borderRadius: '8px', cursor: 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff' }}
+              >
+                {iconLoadFromImage} Load From Image
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg"
+                style={{ display: 'none' }}
+                onChange={handleImageSelected}
+              />
               <SearchBar
                 searchQuery={searchQuery}
                 onSearchChange={handleSearch}
@@ -3939,6 +4189,22 @@ export function AppShell() {
             <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>{errorModal.message}</p>
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Close</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {loadFromImageData ? (
+        <div className="modal visible" onMouseDown={() => setLoadFromImageData(null)}>
+          <div className="modal-content" style={{ maxWidth: 400 }} onMouseDown={e => e.stopPropagation()}>
+            <h2>Load From Image</h2>
+            <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>
+              Choose how to load the data from the image:
+            </p>
+            <div className="modal-buttons" style={{ justifyContent: 'center', gap: 12 }}>
+              <button className="btn btn-success" onClick={() => applyLoadedData('merge')}>Merge</button>
+              <button className="btn btn-primary" onClick={() => applyLoadedData('replace')}>Replace</button>
+              <button className="btn btn-secondary" onClick={() => setLoadFromImageData(null)}>Cancel</button>
             </div>
           </div>
         </div>

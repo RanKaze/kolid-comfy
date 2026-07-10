@@ -1848,11 +1848,7 @@ class SnapshotPromptServer:
                     self.send_header('Content-type', 'application/json')
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
-                    result = {'success': True}
-                    if old_name and new_name:
-                        bg = self.server_instance.libraries_data.get(new_name, {}).get('bg_image', '')
-                        result['bg_image'] = bg if bg else ''
-                    self.wfile.write(json.dumps(result).encode('utf-8'))
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -2112,6 +2108,29 @@ class SnapshotPromptServer:
                 self.end_headers()
                 self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
 
+            elif self.path == '/load_from_image':
+                content_length = int(self.headers.get('Content-Length', 0))
+                image_bytes = self.rfile.read(content_length) if content_length > 0 else b''
+                result = {'success': False}
+                try:
+                    from PIL import Image as PILImage
+                    import io as _io
+                    img = PILImage.open(_io.BytesIO(image_bytes))
+                    img.load()
+                    params = img.info.get('parameters', '')
+                    if params:
+                        data = json.loads(params)
+                        result = {'success': True, 'data': data}
+                    else:
+                        result = {'success': False, 'error': 'No parameters metadata found in image'}
+                except Exception as e:
+                    result = {'success': False, 'error': str(e)}
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+
             else:
                 super().do_POST()
 
@@ -2142,7 +2161,7 @@ class SnapshotPromptNode:
                 "width": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 16}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 16}),
                 "bg_brightness": ("INT", {"default": 25, "min": 0, "max": 100}),
-                "cached_data": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
+                "region": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
                 "region_format": ("STRING", {"default": "", "multiline": True, "tooltip": "JSON template with placeholders"}),
             },
             "hidden": {
@@ -2150,8 +2169,8 @@ class SnapshotPromptNode:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "IMAGE", "BBOX", "INT", "INT")
-    RETURN_NAMES = ("prompt", "active_loras", "lora_trigger_words", "merged_prompt", "region_prompt", "region_active_loras", "preview", "bboxes", "width", "height")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "IMAGE", "BBOX", "INT", "INT", "DICT")
+    RETURN_NAMES = ("prompt", "active_loras", "lora_trigger_words", "merged_prompt", "region_prompt", "region_active_loras", "preview", "bboxes", "width", "height", "cache")
     FUNCTION = "snapshot_prompt"
     CATEGORY = "Kolid-Toolkit"
 
@@ -2390,7 +2409,7 @@ class SnapshotPromptNode:
         return last_selected, custom
 
     def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id,
-                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, cached_data="", region_format=""):
+                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, region="", region_format=""):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2484,7 +2503,7 @@ class SnapshotPromptNode:
         server.width = width
         server.height = height
         server.bg_brightness = bg_brightness
-        server.initial_boxes = cached_data
+        server.initial_boxes = region
         server.region_format = region_format
         print(f"[SnapshotPrompt] region_format={repr(region_format[:200]) if region_format else 'EMPTY'}")
         server_thread = threading.Thread(target=server.start)
@@ -2790,7 +2809,7 @@ class SnapshotPromptNode:
                                    "width": round(bw * width), "height": round(bh * height)})
             bboxes_out = [bbox_dicts] if bbox_dicts else []
 
-            # Cache region data (boxes + format slots + background context) in cached_data
+            # Cache region data (boxes + format slots + background context) in region widget
             try:
                 cache_payload = {
                     "boxes": boxes,
@@ -2798,10 +2817,23 @@ class SnapshotPromptNode:
                     "background_context": rr.get('background_context', None),
                 }
                 PromptServer.instance.send_sync("kolid-comfy-widget-set", {
-                    "node_id": unique_id, "widget_name": "cached_data",
+                    "node_id": unique_id, "widget_name": "region",
                     "type": "STRING", "value": json.dumps(cache_payload, ensure_ascii=False),
                 })
             except Exception:
                 pass
 
-        return (cleaned_result, active_loras, lora_trigger_words, merged_prompt, region_prompt, region_active_loras, preview, bboxes_out, width, height)
+        # Build cache output dict
+        cache_data = {
+            "prompt": user_prompt_only,
+            "lora": json.dumps(server.selected_loras, ensure_ascii=False),
+            "prefab": json.dumps(server.selected_prefabs, ensure_ascii=False),
+            "region": "",
+        }
+        if enable_region and server.region_result:
+            try:
+                cache_data["region"] = json.dumps(cache_payload, ensure_ascii=False)
+            except Exception:
+                cache_data["region"] = ""
+
+        return (cleaned_result, active_loras, lora_trigger_words, merged_prompt, region_prompt, region_active_loras, preview, bboxes_out, width, height, cache_data)
