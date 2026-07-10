@@ -844,13 +844,15 @@ export function AppShell() {
   const [tagInputShowDropdown, setTagInputShowDropdown] = useState(false);
   const [tagInputSelIdx, setTagInputSelIdx] = useState(-1);
   const tagInputRef = useRef<HTMLInputElement>(null);
+  const tagDropdownRef = useRef<HTMLDivElement>(null);
+  const selItemRef = useRef<HTMLDivElement>(null);
 
   const tagAutocompleteSuggestions = useMemo(() => {
     const map = new Map<string, string>();
     for (const cd of Object.values(allPrompts)) {
       const prompts = ((cd as any).prompts || []) as { name: string; prompt: string }[];
       for (const p of prompts) {
-        if (p.name && !map.has(p.name)) map.set(p.name, p.prompt || p.name);
+        if (p.prompt && !map.has(p.prompt)) map.set(p.prompt, p.name || p.prompt);
       }
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh-CN'));
@@ -859,39 +861,59 @@ export function AppShell() {
   const filteredTagSuggestions = useMemo(() => {
     if (!tagInputQuery) return tagAutocompleteSuggestions.slice(0, 50);
     const q = tagInputQuery.toLowerCase();
-    return tagAutocompleteSuggestions.filter(([name, prompt]) =>
-      name.toLowerCase().includes(q) || prompt.toLowerCase().includes(q)
+    return tagAutocompleteSuggestions.filter(([text, name]) =>
+      text.toLowerCase().includes(q) || name.toLowerCase().includes(q)
     ).slice(0, 50);
   }, [tagAutocompleteSuggestions, tagInputQuery]);
 
-  const selectTagSuggestion = useCallback((name: string) => {
+  const selectTagSuggestion = useCallback((text: string) => {
     const input = tagInputRef.current;
     if (!input) return;
+    const pos = input.selectionStart ?? input.value.length;
     const val = input.value;
-    const lastCommaIdx = val.lastIndexOf(',');
-    const prefix = lastCommaIdx >= 0 ? val.slice(0, lastCommaIdx + 1) : '';
-    input.value = prefix + name;
+    let s = pos - 1;
+    while (s >= 0 && val[s] !== ',' && val[s] !== ' ') s--;
+    const newVal = val.slice(0, s + 1) + text + (pos >= val.length || val[pos] === ' ' ? '' : ' ') + val.slice(pos);
+    input.value = newVal;
+    const nc = s + 1 + text.length;
+    setTimeout(() => { input.selectionStart = input.selectionEnd = nc; input.focus(); }, 0);
     setTagInputShowDropdown(false);
     setTagInputQuery('');
     setTagInputSelIdx(-1);
-    setTimeout(() => input.focus(), 0);
   }, []);
 
   const handleTagInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    const parts = val.split(',');
-    const lastPart = parts[parts.length - 1].trim();
-    setTagInputQuery(lastPart);
-    setTagInputShowDropdown(lastPart.length >= 1);
-    setTagInputSelIdx(-1);
+    const input = e.target;
+    const pos = input.selectionStart ?? input.value.length;
+    const val = input.value;
+    if (pos === 0) { setTagInputShowDropdown(false); return; }
+    let s = pos - 1;
+    while (s >= 0 && val[s] !== ',' && val[s] !== ' ') s--;
+    const word = val.slice(s + 1, pos);
+    if (word.length >= 1) {
+      setTagInputQuery(word);
+      setTagInputShowDropdown(true);
+      setTagInputSelIdx(-1);
+    } else {
+      setTagInputShowDropdown(false);
+    }
   }, []);
 
   const handleTagInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (tagInputShowDropdown && filteredTagSuggestions.length > 0) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setTagInputSelIdx(i => Math.min(i + 1, filteredTagSuggestions.length - 1)); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setTagInputSelIdx(i => Math.max(i - 1, 0)); return; }
-      if (e.key === 'Tab') { e.preventDefault(); selectTagSuggestion(filteredTagSuggestions[tagInputSelIdx >= 0 ? tagInputSelIdx : 0][0]); return; }
-      if (e.key === 'Enter' && tagInputSelIdx >= 0) { e.preventDefault(); selectTagSuggestion(filteredTagSuggestions[tagInputSelIdx][0]); return; }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const idx = tagInputSelIdx >= 0 ? tagInputSelIdx : 0;
+        if (idx < filteredTagSuggestions.length) selectTagSuggestion(filteredTagSuggestions[idx][0]);
+        return;
+      }
+      if (e.key === 'Enter' && tagInputSelIdx >= 0) {
+        e.preventDefault();
+        if (tagInputSelIdx < filteredTagSuggestions.length) selectTagSuggestion(filteredTagSuggestions[tagInputSelIdx][0]);
+        return;
+      }
       if (e.key === 'Escape') { setTagInputShowDropdown(false); return; }
     }
     if (e.key === 'Enter') {
@@ -908,6 +930,13 @@ export function AppShell() {
       }
     }
   }, [tagInputShowDropdown, filteredTagSuggestions, tagInputSelIdx, selectTagSuggestion, setModalPrefabTags]);
+
+  // Scroll selected autocomplete item into view
+  useEffect(() => {
+    if (tagInputShowDropdown && tagInputSelIdx >= 0 && selItemRef.current) {
+      selItemRef.current.scrollIntoView({ block: 'nearest' });
+    }
+  }, [tagInputSelIdx, tagInputShowDropdown]);
 
   // ========== Image helpers ==========
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1320,9 +1349,26 @@ export function AppShell() {
     const prefabLoras = pf.loras || [];
     const prefabSelectedPrefabs = pf.selected_prefabs || [];
 
+    // Collect all nested prefab guids recursively
+    function collectNestedGuids(pfDef: PrefabData, visited = new Set<string>()): string[] {
+      const guids: string[] = [];
+      for (const sp of pfDef.selected_prefabs || []) {
+        if (!visited.has(sp.guid)) {
+          visited.add(sp.guid);
+          guids.push(sp.guid);
+          const nestedPf = findPrefabByGuid(sp.guid);
+          if (nestedPf) {
+            guids.push(...collectNestedGuids(nestedPf, visited));
+          }
+        }
+      }
+      return guids;
+    }
+
     // Overall content matching: all prompts AND all loras must be present to count as "fully matched"
     const hasPrompts = prefabTags.length > 0;
     const hasLoras = prefabLoras.length > 0;
+    const hasNestedPrefabs = prefabSelectedPrefabs.length > 0;
 
     let allPromptsMatched = true, anyPromptsMatched = false;
     for (const group of prefabTags) {
@@ -1338,8 +1384,26 @@ export function AppShell() {
       else { allLorasMatched = false; }
     }
 
-    const allContentMatched = (!hasPrompts || allPromptsMatched) && (!hasLoras || allLorasMatched) && (hasPrompts || hasLoras);
-    const anyContentMatched = anyPromptsMatched || anyLorasMatched;
+    // Check if all nested prefabs are already selected
+    const nestedGuids = collectNestedGuids(pf);
+    let allNestedPrefabsMatched = true, anyNestedPrefabMatched = false;
+    {
+      const existingGuids = new Set<string>();
+      function walkExisting(items: SelectedPrefabItem[]) {
+        for (const item of items) {
+          existingGuids.add(item.guid);
+          walkExisting(item.children);
+        }
+      }
+      walkExisting(selectedPrefabs);
+      for (const guid of nestedGuids) {
+        if (existingGuids.has(guid)) { anyNestedPrefabMatched = true; }
+        else { allNestedPrefabsMatched = false; }
+      }
+    }
+
+    const allContentMatched = (!hasPrompts || allPromptsMatched) && (!hasLoras || allLorasMatched) && (!hasNestedPrefabs || allNestedPrefabsMatched) && (hasPrompts || hasLoras || hasNestedPrefabs);
+    const anyContentMatched = anyPromptsMatched || anyLorasMatched || anyNestedPrefabMatched;
 
     setSelectedTags(prev => {
       const next = prev.map(g => g.map(t => ({...t})));
@@ -1418,22 +1482,6 @@ export function AppShell() {
     });
 
     // Merge nested prefabs into selectedPrefabs (partial = add, full = remove)
-    function collectNestedGuids(pfDef: PrefabData, visited = new Set<string>()): string[] {
-      const guids: string[] = [];
-      for (const sp of pfDef.selected_prefabs || []) {
-        if (!visited.has(sp.guid)) {
-          visited.add(sp.guid);
-          guids.push(sp.guid);
-          const nestedPf = findPrefabByGuid(sp.guid);
-          if (nestedPf) {
-            guids.push(...collectNestedGuids(nestedPf, visited));
-          }
-        }
-      }
-      return guids;
-    }
-
-    const nestedGuids = collectNestedGuids(pf);
     setSelectedPrefabs(prev => {
       if (allContentMatched && anyContentMatched) {
         // Full merge: remove all nested prefabs (and their descendants) from selectedPrefabs
@@ -3522,9 +3570,7 @@ export function AppShell() {
                             onDelete={() => deletePrefab(lib, i)}
                           />
                         ))}
-                        {selectedTags.length > 0 ? (
-                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus}</div></div>
-                        ) : null}
+                        <div className={`prompt-item add-prompt-btn ${modeClass}`} data-library={lib} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModal({type:'addPrefab',data:{lib}}); }}><div>{iconPlus}</div></div>
                       </div>
                     ) : null}
                   </div>
@@ -3929,11 +3975,12 @@ export function AppShell() {
                         onBlur={() => setTimeout(() => setTagInputShowDropdown(false), 200)}
                       />
                       {tagInputShowDropdown && filteredTagSuggestions.length > 0 ? (
-                        <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, maxHeight: 180, overflowY: 'auto', background: '#2c2c2e', borderRadius: 10, marginBottom: 4, zIndex: 100, boxShadow: '0 -4px 16px rgba(0,0,0,0.4)' }}>
-                          {filteredTagSuggestions.map(([name, prompt], i) => (
+                        <div ref={tagDropdownRef} className="kolid-dropdown-scroll" style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, maxHeight: 180, overflowY: 'auto', background: '#2c2c2e', borderRadius: 10, marginBottom: 4, zIndex: 100, boxShadow: '0 -4px 16px rgba(0,0,0,0.4)' }}>
+                          {filteredTagSuggestions.map(([text, name], i) => (
                             <div
-                              key={name}
-                              onMouseDown={e => { e.preventDefault(); selectTagSuggestion(name); }}
+                              key={text}
+                              ref={i === tagInputSelIdx ? selItemRef : null}
+                              onMouseDown={e => { e.preventDefault(); selectTagSuggestion(text); }}
                               style={{
                                 padding: '8px 14px', fontSize: 14, cursor: 'pointer',
                                 color: '#fff', background: i === tagInputSelIdx ? '#3a3a3c' : 'transparent',
@@ -3941,8 +3988,8 @@ export function AppShell() {
                                 display: 'flex', alignItems: 'center',
                               }}
                             >
-                              <span style={{ flex: 1 }}>{name}</span>
-                              {prompt !== name ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12 }}>{prompt}</span> : null}
+                              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+                              {name !== text ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{name}</span> : null}
                             </div>
                           ))}
                         </div>

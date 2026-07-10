@@ -2116,13 +2116,39 @@ class SnapshotPromptServer:
                     from PIL import Image as PILImage
                     import io as _io
                     img = PILImage.open(_io.BytesIO(image_bytes))
-                    img.load()
+                    print(f"[load_from_image] PIL info keys: {list(img.info.keys())}")
+                    # Access info before load() — PIL stores PNG text chunks in img.info
                     params = img.info.get('parameters', '')
+                    if not params:
+                        # Try loading and check again
+                        img.load()
+                        params = img.info.get('parameters', '')
+                    if not params:
+                        # Try alternative keys (some tools use different names)
+                        for k, v in img.info.items():
+                            if isinstance(v, (str, bytes)):
+                                v_str = v if isinstance(v, str) else v.decode('utf-8', errors='replace')
+                                if v_str.strip().startswith('{'):
+                                    params = v_str
+                                    break
                     if params:
-                        data = json.loads(params)
-                        result = {'success': True, 'data': data}
+                        try:
+                            data = json.loads(params)
+                            import math as _math
+                            def _sanitize(o):
+                                if isinstance(o, float):
+                                    return None if (_math.isnan(o) or _math.isinf(o)) else o
+                                if isinstance(o, dict):
+                                    return {k: _sanitize(v) for k, v in o.items()}
+                                if isinstance(o, (list, tuple)):
+                                    return [_sanitize(v) for v in o]
+                                return o
+                            data = _sanitize(data)
+                            result = {'success': True, 'data': data}
+                        except (json.JSONDecodeError, ValueError):
+                            result = {'success': False, 'error': 'Image metadata is not in JSON format. Only images saved by SaveDataToNode are supported.'}
                     else:
-                        result = {'success': False, 'error': 'No parameters metadata found in image'}
+                        result = {'success': False, 'error': f'No parameters metadata found. Available keys: {list(img.info.keys())}'}
                 except Exception as e:
                     result = {'success': False, 'error': str(e)}
                 self.send_response(200)
