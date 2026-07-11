@@ -38,10 +38,34 @@ function findPromptName(promptText: string, allPrompts: AllPrompts): string {
   return promptText;
 }
 
+function findPromptByName(nameText: string, allPrompts: AllPrompts): { name: string; prompt: string } | null {
+  for (const [, catData] of Object.entries(allPrompts)) {
+    const prompts = (catData as { prompts?: PromptData[] }).prompts || [];
+    for (const p of prompts) {
+      if (p.name === nameText) return { name: p.name, prompt: p.prompt };
+    }
+  }
+  return null;
+}
+
 function createTag(decorationNum: number, promptText: string, allPrompts: AllPrompts, strength?: number): Tag {
+  // First try matching by prompt text
+  const name = findPromptName(promptText, allPrompts);
+  // If name === promptText (no match), try matching by name to get the actual prompt
+  if (name === promptText) {
+    const byName = findPromptByName(promptText, allPrompts);
+    if (byName) {
+      return {
+        decoration_num: decorationNum,
+        name: byName.name,
+        prompt: byName.prompt,
+        strength,
+      };
+    }
+  }
   return {
     decoration_num: decorationNum,
-    name: findPromptName(promptText, allPrompts),
+    name,
     prompt: promptText,
     strength,
   };

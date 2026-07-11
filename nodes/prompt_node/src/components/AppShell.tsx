@@ -13,6 +13,7 @@ import {
   parseStringToTags, tagsToDisplayName, tagsToDisplayString,
   findPromptData, getPromptDecorations, combineTagGroups,
   isBasePromptSelectedInTags, findTagGroupByBasePrompt,
+  tryParseLine,
 } from '../hooks/useSelection';
 import { useApi } from '../hooks/useApi';
 import { useTempContext } from '../hooks/useTempContext';
@@ -921,15 +922,23 @@ export function AppShell() {
       if (!input) return;
       const val = input.value.trim();
       if (val) {
-        const newTags = val.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ decoration_num: 0, name, prompt: name }));
-        if (newTags.length > 0) setModalPrefabTags(prev => [...prev, newTags]);
+        const segments = val.split(',').map(s => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+          const result = tryParseLine(seg, allPrompts);
+          if (result) {
+            setModalPrefabTags(prev => [...prev, result.tagGroup]);
+          } else {
+            // No match: create a plain tag
+            setModalPrefabTags(prev => [...prev, [{ decoration_num: 0, name: seg, prompt: seg }]]);
+          }
+        }
         input.value = '';
         setTagInputShowDropdown(false);
         setTagInputQuery('');
         setTagInputSelIdx(-1);
       }
     }
-  }, [tagInputShowDropdown, filteredTagSuggestions, tagInputSelIdx, selectTagSuggestion, setModalPrefabTags]);
+  }, [tagInputShowDropdown, filteredTagSuggestions, tagInputSelIdx, selectTagSuggestion, setModalPrefabTags, allPrompts]);
 
   // Scroll selected autocomplete item into view
   useEffect(() => {
