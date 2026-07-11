@@ -129,6 +129,10 @@ if (!document.getElementById(STYLE_ID)) {
     position: relative;
     width: 100%;
 }
+.kolid-app-editor-wrap {
+    position: relative;
+    width: 100%;
+}
 .kolid-app-editor-highlight {
     margin: 0;
     padding: 4px;
@@ -175,6 +179,36 @@ if (!document.getElementById(STYLE_ID)) {
 .kolid-seg-warning { color: #ffaa00; }
 .kolid-seg-ok { color: #44dd44; }
 .kolid-seg-separator { color: #666; }
+
+.kolid-jump-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    margin-top: 2px;
+    padding: 2px 0;
+    font-family: monospace;
+    font-size: 10px;
+}
+.kolid-jump-sep { color: #666; }
+.kolid-jump-placeholder { color: #333; }
+.kolid-jump-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    user-select: none;
+    line-height: 1.4;
+}
+.kolid-jump-btn:hover { background: #3a3a3a; border-color: #0a84ff; color: #fff; }
+.kolid-jump-btn-arrow { color: #0a84ff; font-size: 9px; }
 `;
     document.head.appendChild(style);
 }
@@ -187,6 +221,41 @@ function escapeHTML(str) {
               .replace(/>/g, '&gt;')
               .replace(/"/g, '&quot;')
               .replace(/'/g, '&#039;');
+}
+
+/**
+ * Resolve a single segment to a list of matched node objects.
+ */
+function resolveSegmentNodes(seg, graph, selfNodeId) {
+    if (!graph || !seg) return [];
+    let mainPart = seg;
+    const parenIdx = seg.indexOf("(");
+    if (parenIdx !== -1) {
+        const closeIdx = seg.lastIndexOf(")");
+        if (closeIdx !== -1 && closeIdx > parenIdx) {
+            mainPart = seg.substring(0, parenIdx).trim();
+        }
+    }
+    const colonIdx = mainPart.indexOf(":");
+    if (colonIdx === -1) return [];
+    const type = mainPart.substring(0, colonIdx).trim().toLowerCase();
+    const value = mainPart.substring(colonIdx + 1).trim();
+    if (!type || !value) return [];
+    if (type === "id") {
+        const id = parseInt(value);
+        if (isNaN(id)) return [];
+        const n = graph.getNodeById(id);
+        if (n && n.id !== selfNodeId) return [n];
+        return [];
+    } else if (type === "regex") {
+        try {
+            const re = new RegExp(value);
+            return graph.nodes.filter(n => n.id !== selfNodeId && re.test(n.title || n.type || ""));
+        } catch (e) { return []; }
+    } else if (type === "name") {
+        return graph.nodes.filter(n => n.id !== selfNodeId && (n.title || n.type || "") === value);
+    }
+    return [];
 }
 
 /**
@@ -318,6 +387,42 @@ function buildHighlightedHTML(text, graph, selfNodeId) {
 }
 
 /**
+ * Build jump buttons list from parsed segments — one entry per matched node.
+ */
+function buildJumpButtons(text, graph, selfNodeId) {
+    if (!text || !graph) return [];
+    const segments = [];
+    let depth = 0;
+    let current = "";
+    for (const ch of text) {
+        if (ch === "(" || ch === "[") { depth++; current += ch; }
+        else if (ch === ")" || ch === "]") { depth--; current += ch; }
+        else if (ch === "," && depth === 0) {
+            segments.push(current.trim());
+            current = "";
+        } else {
+            current += ch;
+        }
+    }
+    if (current.trim()) segments.push(current.trim());
+
+    const buttons = [];
+    const seenIds = new Set();
+    for (const seg of segments) {
+        if (!seg) continue;
+        const status = validateSegment(seg, graph, selfNodeId);
+        if (status !== "ok") continue;
+        const nodes = resolveSegmentNodes(seg, graph, selfNodeId);
+        for (const n of nodes) {
+            if (seenIds.has(n.id)) continue;
+            seenIds.add(n.id);
+            buttons.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` });
+        }
+    }
+    return buttons;
+}
+
+/**
  * Create a syntax-highlighted textarea editor overlay.
  * Returns { container, textarea, update }.
  * Does NOT reference the original widget — value is stored in the textarea itself.
@@ -326,18 +431,91 @@ function createHighlightEditor(initialValue, node) {
     const container = document.createElement("div");
     container.className = "kolid-app-editor";
 
+    const editorWrap = document.createElement("div");
+    editorWrap.className = "kolid-app-editor-wrap";
+    container.appendChild(editorWrap);
+
     const highlight = document.createElement("pre");
     highlight.className = "kolid-app-editor-highlight";
-    container.appendChild(highlight);
+    editorWrap.appendChild(highlight);
 
     const textarea = document.createElement("textarea");
     textarea.className = "kolid-app-editor-input";
     textarea.value = initialValue || "";
     textarea.placeholder = "id:234,regex:test,name:TT,id:6743(select=>[测试],select_input)";
-    container.appendChild(textarea);
+    editorWrap.appendChild(textarea);
+
+    const jumpBar = document.createElement("div");
+    jumpBar.className = "kolid-jump-bar";
+    container.appendChild(jumpBar);
+
+    function jumpToNode(targetId) {
+        if (!node.graph) return;
+        const target = node.graph.getNodeById(targetId);
+        if (!target) return;
+        // Center on target node then select it
+        if (app.canvas) {
+            app.canvas.centerOnNode(target);
+            app.canvas.selectNode(target);
+            app.canvas.setDirty(true, true);
+        }
+    }
 
     function updateHighlight() {
         highlight.innerHTML = buildHighlightedHTML(textarea.value, node.graph, node.id);
+
+        // Rebuild inline jump buttons
+        jumpBar.innerHTML = "";
+
+        // Split segments the same way as buildHighlightedHTML
+        const segments = [];
+        let depth = 0;
+        let current = "";
+        const text = textarea.value;
+        for (const ch of text) {
+            if (ch === "(" || ch === "[") { depth++; current += ch; }
+            else if (ch === ")" || ch === "]") { depth--; current += ch; }
+            else if (ch === "," && depth === 0) {
+                segments.push(current.trim());
+                segments.push(",");
+                current = "";
+            } else {
+                current += ch;
+            }
+        }
+        if (current.trim()) segments.push(current.trim());
+
+        const seenIds = new Set();
+        for (const seg of segments) {
+            if (seg === ",") {
+                const sep = document.createElement("span");
+                sep.className = "kolid-jump-sep";
+                sep.textContent = ",";
+                jumpBar.appendChild(sep);
+                continue;
+            }
+            if (!seg) continue;
+            const status = validateSegment(seg, node.graph, node.id);
+            if (status === "ok") {
+                const nodes = resolveSegmentNodes(seg, node.graph, node.id);
+                for (const n of nodes) {
+                    if (seenIds.has(n.id)) continue;
+                    seenIds.add(n.id);
+                    const btn = document.createElement("span");
+                    btn.className = "kolid-jump-btn";
+                    btn.title = `Jump to ${n.title || n.type} (id:${n.id})`;
+                    btn.innerHTML = `<span class="kolid-jump-btn-arrow">→</span>${escapeHTML(n.title || n.type || `Node ${n.id}`)}`;
+                    btn.addEventListener("click", () => jumpToNode(n.id));
+                    jumpBar.appendChild(btn);
+                }
+            } else {
+                // Placeholder to keep alignment
+                const ph = document.createElement("span");
+                ph.className = "kolid-jump-placeholder";
+                ph.textContent = '·';
+                jumpBar.appendChild(ph);
+            }
+        }
     }
 
     let rebuildTimer = null;
