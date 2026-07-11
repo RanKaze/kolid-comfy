@@ -3,6 +3,393 @@ import { api } from "../../scripts/api.js";
 
 console.log("[kolid-comfy] branch_node.js loaded");
 
+// ── CSS injection for syntax-highlighted editors ─────────────────
+const BRANCH_STYLE_ID = "kolid-branch-node-styles";
+if (!document.getElementById(BRANCH_STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = BRANCH_STYLE_ID;
+    style.textContent = `
+.kolid-branch-editor {
+    position: relative;
+    width: 100%;
+}
+.kolid-branch-editor-wrap {
+    position: relative;
+    width: 100%;
+}
+.kolid-branch-editor-highlight {
+    margin: 0;
+    padding: 4px;
+    border: 1px solid #444;
+    border-radius: 3px;
+    box-sizing: border-box;
+    background: #1a1a1a;
+    color: #ccc;
+    font-family: monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    pointer-events: none;
+    width: 100%;
+    min-height: 30px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+.kolid-branch-editor-input {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: transparent;
+    color: transparent;
+    caret-color: #fff;
+    font-family: monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    resize: none;
+    outline: none;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+.kolid-branch-editor-input::placeholder { color: #666; }
+.kolid-branch-editor-input:focus { border-color: #777; }
+
+.kolid-branch-seg-ok { color: #44dd44; }
+.kolid-branch-seg-warn { color: #ffaa00; }
+.kolid-branch-seg-error { color: #ff4444; }
+.kolid-branch-seg-op { color: #6c8aff; }
+.kolid-branch-seg-sep { color: #666; }
+
+.kolid-jump-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    margin-top: 2px;
+    padding: 2px 0;
+    font-family: monospace;
+    font-size: 10px;
+}
+.kolid-jump-sep { color: #666; }
+.kolid-jump-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    user-select: none;
+    line-height: 1.4;
+}
+.kolid-jump-btn:hover { background: #3a3a3a; border-color: #0a84ff; color: #fff; }
+.kolid-jump-btn-arrow { color: #0a84ff; font-size: 9px; }
+.kolid-jump-btn-ref {
+    background: #2a220a;
+    border-color: #554400;
+}
+.kolid-jump-btn-ref:hover { background: #3a3410; border-color: #ffaa00; color: #fff; }
+.kolid-jump-btn-ref .kolid-jump-btn-arrow { color: #ffaa00; }
+`;
+    document.head.appendChild(style);
+}
+
+function escapeHTML(str) {
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#039;');
+}
+
+function jumpToNode(targetId) {
+    if (!app.graph) return;
+    const target = app.graph.getNodeById(targetId);
+    if (!target) return;
+    if (app.canvas) {
+        app.canvas.centerOnNode(target);
+        app.canvas.selectNode(target);
+        app.canvas.setDirty(true, true);
+    }
+}
+
+/**
+ * Parse relay_expression and resolve variable names to nodes.
+ * Returns [{segments: [...html...], jumps: [{id, title}]}]
+ */
+function parseRelayExpression(text, graph, selfNodeId) {
+    if (!text || !text.trim()) return { html: '', jumps: [], refs: [] };
+    const jumps = [];
+    const seenIds = new Set();
+
+    // Extract variables from the expression
+    const vars = extractVariables(text);
+    let html = escapeHTML(text);
+
+    for (const v of vars) {
+        const trimmed = v.trim();
+        if (!trimmed) continue;
+
+        // Check for {id} syntax
+        const idMatch = trimmed.match(/^\{(\d+)\}$/);
+        let targetNode = null;
+        if (idMatch) {
+            const id = parseInt(idMatch[1]);
+            if (graph) targetNode = graph.getNodeById(id);
+        } else if (graph) {
+            targetNode = graph.nodes.find(n => n.id !== selfNodeId && (n.title === trimmed || n.type === trimmed));
+        }
+
+        // Highlight in HTML
+        const escapedVar = escapeHTML(trimmed);
+        if (targetNode) {
+            html = html.replace(new RegExp(escapeRegExp(escapedVar), 'g'),
+                `<span class="kolid-branch-seg-ok">${escapedVar}</span>`);
+            if (!seenIds.has(targetNode.id)) {
+                seenIds.add(targetNode.id);
+                jumps.push({ id: targetNode.id, title: targetNode.title || targetNode.type || `Node ${targetNode.id}` });
+            }
+        } else {
+            html = html.replace(new RegExp(escapeRegExp(escapedVar), 'g'),
+                `<span class="kolid-branch-seg-warn">${escapedVar}</span>`);
+        }
+    }
+
+    return { html, jumps, refs: [] };
+}
+
+/**
+ * Parse active_config / select_config and resolve targets to nodes.
+ * Format: <op>:<target_type>:<target_value>[,] or <select_index>:<op>:<target_type>:<target_value>[,]
+ */
+function parseConfigExpression(text, graph, selfNodeId) {
+    if (!text || !text.trim()) return { html: '', jumps: [], refs: [] };
+    const segments = text.split(',').map(s => s.trim()).filter(Boolean);
+    const jumps = [];
+    const seenIds = new Set();
+    let htmlParts = [];
+
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        // Parse: optional select_index:op:target_type:target_value OR op:target_type:target_value
+        const parts = seg.split(':');
+        let op, targetType, targetValue;
+
+        if (parts.length >= 4 && /^\d+$/.test(parts[0].trim())) {
+            // select_index:op:target_type:target_value
+            op = parts[1].trim();
+            targetType = parts[2].trim();
+            targetValue = parts.slice(3).join(':').trim();
+        } else if (parts.length >= 3) {
+            op = parts[0].trim();
+            targetType = parts[1].trim();
+            targetValue = parts.slice(2).join(':').trim();
+        } else {
+            htmlParts.push(`<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`);
+            if (i < segments.length) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
+            continue;
+        }
+
+        // Resolve target nodes
+        let targetNodes = [];
+        if (graph) {
+            if (targetType === 'name') {
+                targetNodes = graph.nodes.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
+            } else if (targetType === 'id') {
+                const n = graph.getNodeById(parseInt(targetValue));
+                if (n && n.id !== selfNodeId) targetNodes = [n];
+            } else if (targetType === 'group') {
+                const groups = graph._groups || graph.groups || [];
+                const matchedGroup = groups.find(g => g.title === targetValue);
+                if (matchedGroup) {
+                    const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
+                    targetNodes = graph.nodes.filter(n => groupNodeIds.includes(n.id));
+                }
+            }
+        }
+
+        const opClass = /^(mute|!mute|bypass|!bypass|foldout|!foldout|expand|!expand|set|!set)$/.test(op) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
+        const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
+
+        htmlParts.push(`<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`);
+
+        for (const n of targetNodes) {
+            if (!seenIds.has(n.id)) {
+                seenIds.add(n.id);
+                jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` });
+            }
+        }
+
+        if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
+    }
+
+    return { html: htmlParts.join(''), jumps, refs: [] };
+}
+
+/**
+ * Find all branch nodes that reference this node in their relay_expression / active_config / select_config.
+ * Returns [{id, title}] of referencing nodes.
+ */
+function findReferrers(nodeId, graph) {
+    if (!graph) return [];
+    const referrers = [];
+    const seenIds = new Set();
+
+    for (const n of graph.nodes) {
+        if (n.id === nodeId) continue;
+        const comfClass = n.comfyClass;
+        if (comfClass !== 'BranchSwitchNode' && comfClass !== 'BranchBooleanNode' && comfClass !== 'BranchSwitchesNode') continue;
+
+        let referencesThis = false;
+
+        // Check relay_expression
+        const relayWidget = n.widgets?.find(w => w.name === 'relay_expression');
+        if (relayWidget && relayWidget.value) {
+            // Check if this node's title/type/id appears in the expression
+            const node = graph.getNodeById(nodeId);
+            if (node) {
+                const title = node.title || '';
+                const type = node.type || '';
+                const expr = relayWidget.value;
+                if (title && expr.includes(title)) referencesThis = true;
+                if (!referencesThis && type && expr.includes(type)) referencesThis = true;
+                if (!referencesThis && expr.includes(`{${nodeId}}`)) referencesThis = true;
+            }
+        }
+
+        // Check active_config and select_config
+        if (!referencesThis) {
+            for (const cfgName of ['active_config', 'select_config']) {
+                const cfgWidget = n.widgets?.find(w => w.name === cfgName);
+                if (!cfgWidget || !cfgWidget.value) continue;
+                const node = graph.getNodeById(nodeId);
+                if (!node) continue;
+                const title = node.title || '';
+                const type = node.type || '';
+                const expr = cfgWidget.value;
+                if (title && expr.includes(`name:${title}`)) referencesThis = true;
+                if (!referencesThis && expr.includes(`id:${nodeId}`)) referencesThis = true;
+            }
+        }
+
+        if (referencesThis && !seenIds.has(n.id)) {
+            seenIds.add(n.id);
+            referrers.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` });
+        }
+    }
+
+    return referrers;
+}
+
+/**
+ * Create a syntax-highlighted editor for a branch node widget.
+ */
+function createBranchEditor(widget, node, parserFn) {
+    const container = document.createElement("div");
+    container.className = "kolid-branch-editor";
+
+    const editorWrap = document.createElement("div");
+    editorWrap.className = "kolid-branch-editor-wrap";
+    container.appendChild(editorWrap);
+
+    const highlight = document.createElement("pre");
+    highlight.className = "kolid-branch-editor-highlight";
+    editorWrap.appendChild(highlight);
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "kolid-branch-editor-input";
+    textarea.value = widget.value || "";
+    editorWrap.appendChild(textarea);
+
+    const jumpBar = document.createElement("div");
+    jumpBar.className = "kolid-jump-bar";
+    container.appendChild(jumpBar);
+
+    function update() {
+        const text = textarea.value;
+        const result = parserFn(text, node.graph, node.id);
+        highlight.innerHTML = result.html;
+
+        // Build jump buttons
+        jumpBar.innerHTML = "";
+        for (const j of result.jumps) {
+            const btn = document.createElement("span");
+            btn.className = "kolid-jump-btn";
+            btn.title = `Jump to ${j.title} (id:${j.id})`;
+            btn.innerHTML = `<span class="kolid-jump-btn-arrow">→</span>${escapeHTML(j.title)}`;
+            btn.addEventListener("click", () => jumpToNode(j.id));
+            jumpBar.appendChild(btn);
+        }
+    }
+
+    // Sync textarea -> widget
+    let syncTimer = null;
+    textarea.addEventListener("input", () => {
+        widget.value = textarea.value;
+        update();
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(() => {
+            if (widget.callback) widget.callback(widget.value);
+        }, 300);
+    });
+
+    // Sync widget -> textarea (when widget changes externally)
+    const origWidgetCallback = widget.callback;
+    widget.callback = function(v) {
+        if (textarea.value !== v) {
+            textarea.value = v || "";
+            update();
+        }
+        if (origWidgetCallback) origWidgetCallback.call(this, v);
+    };
+
+    update();
+
+    return { container, textarea, update };
+}
+
+/**
+ * Create a "Referenced by" jump bar for a node.
+ */
+function createReferrerBar(node) {
+    const container = document.createElement("div");
+    container.className = "kolid-jump-bar";
+    container.style.marginTop = "2px";
+
+    function update() {
+        const refs = findReferrers(node.id, node.graph);
+        container.innerHTML = "";
+        if (refs.length === 0) return;
+        const label = document.createElement("span");
+        label.style.color = "#8e8e93";
+        label.style.fontSize = "9px";
+        label.textContent = "←";
+        container.appendChild(label);
+        for (const r of refs) {
+            const btn = document.createElement("span");
+            btn.className = "kolid-jump-btn kolid-jump-btn-ref";
+            btn.title = `Referenced by ${r.title} (id:${r.id})`;
+            btn.innerHTML = `<span class="kolid-jump-btn-arrow">←</span>${escapeHTML(r.title)}`;
+            btn.addEventListener("click", () => jumpToNode(r.id));
+            container.appendChild(btn);
+        }
+    }
+
+    update();
+    return { container, update };
+}
+
 /**
  * 从节点 widget 中读取值，找不到时返回默认值。
  * 替代原先通过 node.properties 读取的方式。
@@ -493,6 +880,13 @@ function updateRelayGraph(){
 
     // 对BranchToggleNode进行排序
     window.kolid_data.branchNodes.sort((n0,n1)=>n0.title.localeCompare(n1.title));
+
+    // Update referrer bars on all branch nodes
+    for (const node of allNodes(app.graph)) {
+        if ((node.comfyClass === "BranchSwitchNode" || node.comfyClass === "BranchBooleanNode" || node.comfyClass === "BranchSwitchesNode") && node._kolidRefBar) {
+            node._kolidRefBar.update();
+        }
+    }
 }
 
 function updateBranchGroupNode(node){
@@ -666,6 +1060,40 @@ function nodeInit(node, is_create){
             }
         }
 
+        // Replace relay_expression and active_config widgets with syntax-highlighted editors
+        if (node.widgets) {
+            const relayWidget = node.widgets.find(w => w.name === 'relay_expression');
+            if (relayWidget) {
+                const editor = createBranchEditor(relayWidget, node, parseRelayExpression);
+                relayWidget.type = "hidden";
+                relayWidget.serialize = false;
+                // Add editor as DOM widget
+                node.addDOMWidget("relay_expression_editor", "kolid_branch_editor", editor.container, {
+                    getValue: () => relayWidget.value,
+                    setValue: (v) => { relayWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                });
+                if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
+                node._kolidBranchEditors.push(editor);
+            }
+            const configWidget = node.widgets.find(w => w.name === 'active_config');
+            if (configWidget) {
+                const editor = createBranchEditor(configWidget, node, parseConfigExpression);
+                configWidget.type = "hidden";
+                configWidget.serialize = false;
+                node.addDOMWidget("active_config_editor", "kolid_branch_editor", editor.container, {
+                    getValue: () => configWidget.value,
+                    setValue: (v) => { configWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                });
+                if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
+                node._kolidBranchEditors.push(editor);
+            }
+        }
+
+        // Add "referenced by" bar
+        const refBar = createReferrerBar(node);
+        node.addDOMWidget("ref_bar", "kolid_ref_bar", refBar.container, { getValue: () => "", setValue: () => {} });
+        node._kolidRefBar = refBar;
+
         if(is_create){
             updateRelayGraph();
         }
@@ -683,7 +1111,28 @@ function nodeInit(node, is_create){
                 updateActiveAndFoldout();
             }
         }
-    }else if (node.comfyClass === "BranchGroupNode") {
+    } else if (node.comfyClass === "BranchSwitchesNode") {
+        // Replace select_config widget with syntax-highlighted editor
+        if (node.widgets) {
+            const configWidget = node.widgets.find(w => w.name === 'select_config');
+            if (configWidget) {
+                const editor = createBranchEditor(configWidget, node, parseConfigExpression);
+                configWidget.type = "hidden";
+                configWidget.serialize = false;
+                node.addDOMWidget("select_config_editor", "kolid_branch_editor", editor.container, {
+                    getValue: () => configWidget.value,
+                    setValue: (v) => { configWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                });
+                if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
+                node._kolidBranchEditors.push(editor);
+            }
+        }
+
+        // Add "referenced by" bar
+        const refBar = createReferrerBar(node);
+        node.addDOMWidget("ref_bar", "kolid_ref_bar", refBar.container, { getValue: () => "", setValue: () => {} });
+        node._kolidRefBar = refBar;
+    } else if (node.comfyClass === "BranchGroupNode") {
         initNodeProperty(node, "branch_mode", {
             default: "Default",
             type: "combo",
