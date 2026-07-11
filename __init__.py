@@ -68,6 +68,7 @@ NODE_CONFIG = {
     "BranchSwitchNode" : {"class": BranchSwitchNode, "name": "BranchSwitchNode"},
     "BranchSwitchesNode" : {"class": BranchSwitchesNode, "name": "BranchSwitchesNode"},
     "BranchBooleanNode" : {"class": BranchBooleanNode, "name": "BranchBooleanNode"},
+    "BranchManagerNode" : {"class": BranchManagerNode, "name": "BranchManagerNode"},
     
     "TypeDebugNode" : {"class": TypeDebugNode, "name": "TypeDebugNode"},
     
