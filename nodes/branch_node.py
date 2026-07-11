@@ -90,8 +90,8 @@ class BranchGroupNode:
         return ()    
 
 _branch_optional = {
-    "relay_expression": ("STRING", {"default": "", "multiline": True, "tooltip": "Relay expression for boolean logic between nodes. Variables are other Branch Switch/Boolean node titles or types. e.g: '(!NodeA&&NodeB)||NodeC'. Supports '..' to go up to parent graph, '{id}' to match by node id, and ':' to enter subgraphs: e.g: '..SubGraphNode:NodeA'. Also supports BranchSwitchesNode select check: '{id}==[N]' or '{id}!=[N]' evaluates true when the node's select_index equals/does not equal N. e.g: '{6982}==[1]&&NodeA'", "advanced": True}),
-    "active_config": ("STRING", {"default": "", "multiline": True, "advanced": True, "tooltip": "Format: <op>:<target_type>:<target_value>[,]. op: mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand. target_type: name/id/group. target_value: node name, node id, or group name. Applied when toggle=true, inverted when toggle=false. e.g: 'mute:name:NodeA,foldout:name:NodeB,expand:name:NodeC'"}),
+    "relay_expression": ("STRING", {"default": "", "multiline": True, "tooltip": "Relay expression for boolean logic between nodes. Variables are other Branch Switch/Boolean node titles or types. e.g: '(!NodeA&&NodeB)||NodeC'. Supports '..' to go up to parent graph, '{id}' to match by node id, and ':' to enter subgraphs: e.g: '..SubGraphNode:NodeA'. Also supports BranchSwitchesNode select check: '{id}==[N]' or '{id}!=[N]' evaluates true when the node's select_index equals/does not equal N. e.g: '{6982}==[1]&&NodeA'"}),
+    "active_config": ("STRING", {"default": "", "multiline": True, "tooltip": "Format: <op>:<target_type>:<target_value>[,]. op: mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand. target_type: name/id/group. target_value: node name, node id, or group name. Applied when toggle=true, inverted when toggle=false. e.g: 'mute:name:NodeA,foldout:name:NodeB,expand:name:NodeC'"}),
 }
 
 class BranchSwitchNode:
@@ -166,7 +166,6 @@ class BranchSwitchesNode:
                 "select_config": ("STRING", {
                     "default": "",
                     "multiline": True,
-                    "advanced": True,
                     "tooltip": "Format: <select_index>:<op>:<target>[,]. op: mute/!mute/bypass/!bypass/set/!set. target: name:<node_name> or id:<node_id> or group:<group_name>. set/!set only applies to Branch Switch/Boolean nodes, setting their toggle to true/false"
                 }),
             },
@@ -197,3 +196,21 @@ class BranchSwitchesNode:
             raise ValueError(f"select_input {select_input} is out of range for input keys {input_keys}")
         input = kwargs[selected_key]
         return (input, select, select_input)
+
+
+class BranchManagerNode:
+    """Pure frontend node. Displays a dependency graph of all branch nodes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    def execute(self):
+        return ()

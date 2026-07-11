@@ -10,12 +10,16 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
     style.id = BRANCH_STYLE_ID;
     style.textContent = `
 .kolid-branch-editor {
-    position: relative;
+    display: flex;
+    flex-direction: column;
     width: 100%;
+    height: 100%;
 }
 .kolid-branch-editor-wrap {
     position: relative;
     width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 .kolid-branch-editor-highlight {
     margin: 0;
@@ -30,10 +34,11 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
     line-height: 1.4;
     pointer-events: none;
     width: 100%;
-    min-height: 30px;
+    height: 100%;
     white-space: pre-wrap;
     word-wrap: break-word;
     overflow-wrap: break-word;
+    overflow: auto;
 }
 .kolid-branch-editor-input {
     position: absolute;
@@ -55,7 +60,7 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
     overflow-wrap: break-word;
     resize: none;
     outline: none;
-    overflow: hidden;
+    overflow: auto;
     box-sizing: border-box;
 }
 .kolid-branch-editor-input::placeholder { color: #666; }
@@ -68,15 +73,16 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
 .kolid-branch-seg-sep { color: #666; }
 
 .kolid-jump-bar {
-    display: flex;
+    display: none;
     flex-wrap: wrap;
     align-items: center;
     gap: 2px;
     margin-top: 2px;
-    padding: 2px 0;
-    font-family: monospace;
+    padding: 0;
     font-size: 10px;
 }
+.kolid-jump-bar:empty { display: none; }
+.kolid-jump-bar:not(:empty) { display: flex; }
 .kolid-jump-sep { color: #666; }
 .kolid-jump-btn {
     display: inline-flex;
@@ -125,56 +131,51 @@ function jumpToNode(targetId) {
 }
 
 /**
- * Parse relay_expression and resolve variable names to nodes.
- * Returns [{segments: [...html...], jumps: [{id, title}]}]
+ * Parse relay_expression (BranchSwitchNode/BranchBooleanNode).
+ * Boolean expression: '(!NodeA&&NodeB)||NodeC' or '{id}==[N]&&NodeA'
+ * Variables are node titles/types/{id}.
  */
 function parseRelayExpression(text, graph, selfNodeId) {
-    if (!text || !text.trim()) return { html: '', jumps: [], refs: [] };
+    if (!text || !text.trim()) return { html: '', jumps: [] };
+    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
     const jumps = [];
     const seenIds = new Set();
-
-    // Extract variables from the expression
-    const vars = extractVariables(text);
     let html = escapeHTML(text);
 
+    // Use getNodeFromExpression to resolve variables (handles .., {id}, :, etc.)
+    const vars = extractVariables(text);
     for (const v of vars) {
         const trimmed = v.trim();
         if (!trimmed) continue;
+        // Skip operators and syntax
+        if (['&&', '||', '!', '(', ')', '==', '!='].includes(trimmed)) continue;
 
-        // Check for {id} syntax
-        const idMatch = trimmed.match(/^\{(\d+)\}$/);
-        let targetNode = null;
-        if (idMatch) {
-            const id = parseInt(idMatch[1]);
-            if (graph) targetNode = graph.getNodeById(id);
-        } else if (graph) {
-            targetNode = graph.nodes.find(n => n.id !== selfNodeId && (n.title === trimmed || n.type === trimmed));
-        }
-
-        // Highlight in HTML
+        const target = getNodeFromExpression(trimmed, { graph, id: selfNodeId });
         const escapedVar = escapeHTML(trimmed);
-        if (targetNode) {
+        if (target) {
             html = html.replace(new RegExp(escapeRegExp(escapedVar), 'g'),
                 `<span class="kolid-branch-seg-ok">${escapedVar}</span>`);
-            if (!seenIds.has(targetNode.id)) {
-                seenIds.add(targetNode.id);
-                jumps.push({ id: targetNode.id, title: targetNode.title || targetNode.type || `Node ${targetNode.id}` });
+            if (!seenIds.has(target.id)) {
+                seenIds.add(target.id);
+                jumps.push({ id: target.id, title: target.title || target.type || `Node ${target.id}` });
             }
         } else {
             html = html.replace(new RegExp(escapeRegExp(escapedVar), 'g'),
                 `<span class="kolid-branch-seg-warn">${escapedVar}</span>`);
         }
     }
-
-    return { html, jumps, refs: [] };
+    return { html, jumps };
 }
 
 /**
- * Parse active_config / select_config and resolve targets to nodes.
- * Format: <op>:<target_type>:<target_value>[,] or <select_index>:<op>:<target_type>:<target_value>[,]
+ * Parse active_config (BranchSwitchNode/BranchBooleanNode).
+ * Format: op:target_type:target_value[,]
+ * ops: mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand/set/!set
+ * target_type: name/id/group
  */
-function parseConfigExpression(text, graph, selfNodeId) {
-    if (!text || !text.trim()) return { html: '', jumps: [], refs: [] };
+function parseActiveConfig(text, graph, selfNodeId) {
+    if (!text || !text.trim()) return { html: '', jumps: [] };
+    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
     const segments = text.split(',').map(s => s.trim()).filter(Boolean);
     const jumps = [];
     const seenIds = new Set();
@@ -182,30 +183,21 @@ function parseConfigExpression(text, graph, selfNodeId) {
 
     for (let i = 0; i < segments.length; i++) {
         const seg = segments[i];
-        // Parse: optional select_index:op:target_type:target_value OR op:target_type:target_value
         const parts = seg.split(':');
-        let op, targetType, targetValue;
-
-        if (parts.length >= 4 && /^\d+$/.test(parts[0].trim())) {
-            // select_index:op:target_type:target_value
-            op = parts[1].trim();
-            targetType = parts[2].trim();
-            targetValue = parts.slice(3).join(':').trim();
-        } else if (parts.length >= 3) {
-            op = parts[0].trim();
-            targetType = parts[1].trim();
-            targetValue = parts.slice(2).join(':').trim();
-        } else {
+        // Format: op:target_type:target_value
+        if (parts.length < 3) {
             htmlParts.push(`<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`);
-            if (i < segments.length) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
+            if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
             continue;
         }
+        const op = parts[0].trim();
+        const targetType = parts[1].trim();
+        const targetValue = parts.slice(2).join(':').trim();
 
-        // Resolve target nodes
         let targetNodes = [];
         if (graph) {
             if (targetType === 'name') {
-                targetNodes = graph.nodes.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
+                targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
             } else if (targetType === 'id') {
                 const n = graph.getNodeById(parseInt(targetValue));
                 if (n && n.id !== selfNodeId) targetNodes = [n];
@@ -214,7 +206,7 @@ function parseConfigExpression(text, graph, selfNodeId) {
                 const matchedGroup = groups.find(g => g.title === targetValue);
                 if (matchedGroup) {
                     const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
-                    targetNodes = graph.nodes.filter(n => groupNodeIds.includes(n.id));
+                    targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
                 }
             }
         }
@@ -225,16 +217,69 @@ function parseConfigExpression(text, graph, selfNodeId) {
         htmlParts.push(`<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`);
 
         for (const n of targetNodes) {
-            if (!seenIds.has(n.id)) {
-                seenIds.add(n.id);
-                jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` });
+            if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
+        }
+        if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
+    }
+    return { html: htmlParts.join(''), jumps };
+}
+
+/**
+ * Parse select_config (BranchSwitchesNode).
+ * Format: select_index:op:target_type:target_value[,]
+ * ops: mute/!mute/bypass/!bypass/set/!set
+ */
+function parseSelectConfig(text, graph, selfNodeId) {
+    if (!text || !text.trim()) return { html: '', jumps: [] };
+    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
+    const segments = text.split(',').map(s => s.trim()).filter(Boolean);
+    const jumps = [];
+    const seenIds = new Set();
+    let htmlParts = [];
+
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i];
+        const parts = seg.split(':');
+        // Format: select_index:op:target_type:target_value (4+ parts)
+        if (parts.length < 4 || !/^\d+$/.test(parts[0].trim())) {
+            htmlParts.push(`<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`);
+            if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
+            continue;
+        }
+        const selectIndex = parts[0].trim();
+        const op = parts[1].trim();
+        const targetType = parts[2].trim();
+        const targetValue = parts.slice(3).join(':').trim();
+
+        let targetNodes = [];
+        if (graph) {
+            if (targetType === 'name') {
+                targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
+            } else if (targetType === 'id') {
+                const n = graph.getNodeById(parseInt(targetValue));
+                if (n && n.id !== selfNodeId) targetNodes = [n];
+            } else if (targetType === 'group') {
+                const groups = graph._groups || graph.groups || [];
+                const matchedGroup = groups.find(g => g.title === targetValue);
+                if (matchedGroup) {
+                    const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
+                    targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
+                }
             }
         }
 
+        const idxClass = 'kolid-branch-seg-sep';
+        const opClass = /^(mute|!mute|bypass|!bypass|set|!set)$/.test(op) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
+        const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
+
+        htmlParts.push(`<span class="${idxClass}">${escapeHTML(selectIndex)}</span>:<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`);
+
+        for (const n of targetNodes) {
+            if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
+        }
         if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
     }
-
-    return { html: htmlParts.join(''), jumps, refs: [] };
+    return { html: htmlParts.join(''), jumps };
 }
 
 /**
@@ -243,40 +288,41 @@ function parseConfigExpression(text, graph, selfNodeId) {
  */
 function findReferrers(nodeId, graph) {
     if (!graph) return [];
+    const allNodesList = graph._nodes || graph.nodes || [];
     const referrers = [];
     const seenIds = new Set();
+    const node = graph.getNodeById(nodeId);
+    if (!node) return [];
+    const title = node.title || '';
+    const type = node.type || '';
 
-    for (const n of graph.nodes) {
+    for (const n of allNodesList) {
         if (n.id === nodeId) continue;
         const comfClass = n.comfyClass;
-        if (comfClass !== 'BranchSwitchNode' && comfClass !== 'BranchBooleanNode' && comfClass !== 'BranchSwitchesNode') continue;
-
         let referencesThis = false;
 
-        // Check relay_expression
-        const relayWidget = n.widgets?.find(w => w.name === 'relay_expression');
-        if (relayWidget && relayWidget.value) {
-            // Check if this node's title/type/id appears in the expression
-            const node = graph.getNodeById(nodeId);
-            if (node) {
-                const title = node.title || '';
-                const type = node.type || '';
+        if (comfClass === 'BranchSwitchNode' || comfClass === 'BranchBooleanNode') {
+            // Check relay_expression (boolean expression with node titles/types/{id})
+            const relayWidget = n.widgets?.find(w => w.name === 'relay_expression');
+            if (relayWidget && relayWidget.value) {
                 const expr = relayWidget.value;
                 if (title && expr.includes(title)) referencesThis = true;
                 if (!referencesThis && type && expr.includes(type)) referencesThis = true;
                 if (!referencesThis && expr.includes(`{${nodeId}}`)) referencesThis = true;
             }
-        }
-
-        // Check active_config and select_config
-        if (!referencesThis) {
-            for (const cfgName of ['active_config', 'select_config']) {
-                const cfgWidget = n.widgets?.find(w => w.name === cfgName);
-                if (!cfgWidget || !cfgWidget.value) continue;
-                const node = graph.getNodeById(nodeId);
-                if (!node) continue;
-                const title = node.title || '';
-                const type = node.type || '';
+            // Check active_config (op:target_type:target_value)
+            if (!referencesThis) {
+                const cfgWidget = n.widgets?.find(w => w.name === 'active_config');
+                if (cfgWidget && cfgWidget.value) {
+                    const expr = cfgWidget.value;
+                    if (title && expr.includes(`name:${title}`)) referencesThis = true;
+                    if (!referencesThis && expr.includes(`id:${nodeId}`)) referencesThis = true;
+                }
+            }
+        } else if (comfClass === 'BranchSwitchesNode') {
+            // Check select_config (select_index:op:target_type:target_value)
+            const cfgWidget = n.widgets?.find(w => w.name === 'select_config');
+            if (cfgWidget && cfgWidget.value) {
                 const expr = cfgWidget.value;
                 if (title && expr.includes(`name:${title}`)) referencesThis = true;
                 if (!referencesThis && expr.includes(`id:${nodeId}`)) referencesThis = true;
@@ -288,14 +334,13 @@ function findReferrers(nodeId, graph) {
             referrers.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` });
         }
     }
-
     return referrers;
 }
 
 /**
  * Create a syntax-highlighted editor for a branch node widget.
  */
-function createBranchEditor(widget, node, parserFn) {
+function createBranchEditor(widget, node, parserFn, placeholderText) {
     const container = document.createElement("div");
     container.className = "kolid-branch-editor";
 
@@ -310,6 +355,7 @@ function createBranchEditor(widget, node, parserFn) {
     const textarea = document.createElement("textarea");
     textarea.className = "kolid-branch-editor-input";
     textarea.value = widget.value || "";
+    textarea.placeholder = placeholderText || "";
     editorWrap.appendChild(textarea);
 
     const jumpBar = document.createElement("div");
@@ -317,9 +363,10 @@ function createBranchEditor(widget, node, parserFn) {
     container.appendChild(jumpBar);
 
     function update() {
-        const text = textarea.value;
-        const result = parserFn(text, node.graph, node.id);
-        highlight.innerHTML = result.html;
+        const result = parserFn(textarea.value, node.graph, node.id);
+        // Show syntax-highlighted content, or placeholder text to set base height
+        const displayText = textarea.value || textarea.placeholder || '';
+        highlight.innerHTML = result.html || escapeHTML(displayText);
 
         // Build jump buttons
         jumpBar.innerHTML = "";
@@ -365,11 +412,13 @@ function createBranchEditor(widget, node, parserFn) {
 function createReferrerBar(node) {
     const container = document.createElement("div");
     container.className = "kolid-jump-bar";
-    container.style.marginTop = "2px";
 
     function update() {
         const refs = findReferrers(node.id, node.graph);
         container.innerHTML = "";
+        // Hide the ComfyUI widget slot when empty
+        const slot = container.closest('[class*="lg-slot"]');
+        if (slot) slot.style.display = refs.length === 0 ? "none" : "";
         if (refs.length === 0) return;
         const label = document.createElement("span");
         label.style.color = "#8e8e93";
@@ -396,7 +445,10 @@ function createReferrerBar(node) {
  */
 function getWidgetValue(node, name, defaultValue) {
     const widget = node.widgets?.find(w => w.name === name);
-    return widget ? widget.value : defaultValue;
+    if (widget) return widget.value;
+    // Check stored original widgets (removed from node.widgets for custom rendering)
+    if (node._kolidOriginalWidgets?.[name]) return node._kolidOriginalWidgets[name].value;
+    return defaultValue;
 }
 
 /**
@@ -1064,25 +1116,41 @@ function nodeInit(node, is_create){
         if (node.widgets) {
             const relayWidget = node.widgets.find(w => w.name === 'relay_expression');
             if (relayWidget) {
-                const editor = createBranchEditor(relayWidget, node, parseRelayExpression);
-                relayWidget.type = "hidden";
-                relayWidget.serialize = false;
-                // Add editor as DOM widget
+                const savedValue = relayWidget.value || "";
+                // Store ref on node and remove from widgets list to prevent ComfyUI rendering
+                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
+                node._kolidOriginalWidgets['relay_expression'] = relayWidget;
+                const idx = node.widgets.indexOf(relayWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+
+                const editor = createBranchEditor(relayWidget, node, parseRelayExpression,
+                    "Boolean expression: (!NodeA&&NodeB)||NodeC\nAlso: {id}==[N] or ..Parent:NodeA");
+                relayWidget.value = savedValue;
+                editor.textarea.value = savedValue;
+                editor.update();
                 node.addDOMWidget("relay_expression_editor", "kolid_branch_editor", editor.container, {
                     getValue: () => relayWidget.value,
-                    setValue: (v) => { relayWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                    setValue: (v) => { relayWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
                 });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
             }
             const configWidget = node.widgets.find(w => w.name === 'active_config');
             if (configWidget) {
-                const editor = createBranchEditor(configWidget, node, parseConfigExpression);
-                configWidget.type = "hidden";
-                configWidget.serialize = false;
+                const savedValue = configWidget.value || "";
+                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
+                node._kolidOriginalWidgets['active_config'] = configWidget;
+                const idx = node.widgets.indexOf(configWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+
+                const editor = createBranchEditor(configWidget, node, parseActiveConfig,
+                    "op:target_type:target_value, e.g: mute:name:NodeA, foldout:id:123");
+                configWidget.value = savedValue;
+                editor.textarea.value = savedValue;
+                editor.update();
                 node.addDOMWidget("active_config_editor", "kolid_branch_editor", editor.container, {
                     getValue: () => configWidget.value,
-                    setValue: (v) => { configWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                    setValue: (v) => { configWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
                 });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
@@ -1116,12 +1184,20 @@ function nodeInit(node, is_create){
         if (node.widgets) {
             const configWidget = node.widgets.find(w => w.name === 'select_config');
             if (configWidget) {
-                const editor = createBranchEditor(configWidget, node, parseConfigExpression);
-                configWidget.type = "hidden";
-                configWidget.serialize = false;
+                const savedValue = configWidget.value || "";
+                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
+                node._kolidOriginalWidgets['select_config'] = configWidget;
+                const idx = node.widgets.indexOf(configWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+
+                const editor = createBranchEditor(configWidget, node, parseSelectConfig,
+                    "select_index:op:target_type:target_value, e.g: 1:mute:name:NodeA, 2:set:id:123");
+                configWidget.value = savedValue;
+                editor.textarea.value = savedValue;
+                editor.update();
                 node.addDOMWidget("select_config_editor", "kolid_branch_editor", editor.container, {
                     getValue: () => configWidget.value,
-                    setValue: (v) => { configWidget.value = v; editor.textarea.value = v || ''; editor.update(); },
+                    setValue: (v) => { configWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
                 });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
@@ -1403,7 +1479,7 @@ app.registerExtension({
                 if (_selectConfigGuard.has(node.id)) return;
                 _selectConfigGuard.add(node.id);
                 try {
-                    const configWidget = node.widgets.find(w => w.name === "select_config");
+                    const configWidget = node._kolidOriginalWidgets?.['select_config'] || node.widgets.find(w => w.name === "select_config");
                     if (!configWidget) return;
                     const configStr = (configWidget.value || "").trim();
                     if (!configStr) return;
@@ -1651,6 +1727,621 @@ app.registerExtension({
             initFromConnections();
             ensureInputCount();
             updateComboOptions();
+        };
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// BranchManagerNode — dependency graph visualizer
+// ═══════════════════════════════════════════════════════════════════
+
+const MGR_STYLE_ID = "kolid-branch-manager-styles";
+if (!document.getElementById(MGR_STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = MGR_STYLE_ID;
+    style.textContent = `
+.kolid-mgr-container {
+    width: 100%;
+    height: 400px;
+    overflow: hidden;
+    position: relative;
+    background: #0d0d0d;
+    border: 1px solid #333;
+    border-radius: 4px;
+}
+.kolid-mgr-svg {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+}
+.kolid-mgr-svg:active { cursor: grabbing; }
+.kolid-mgr-node {
+    cursor: pointer;
+    transition: filter 0.15s;
+}
+.kolid-mgr-node:hover { filter: brightness(1.3); }
+.kolid-mgr-node circle {
+    stroke-width: 2;
+    transition: stroke-width 0.15s;
+}
+.kolid-mgr-node:hover circle { stroke-width: 3; }
+.kolid-mgr-node text {
+    fill: #ccc;
+    font-size: 10px;
+    pointer-events: none;
+    text-anchor: middle;
+    dominant-baseline: middle;
+}
+.kolid-mgr-edge {
+    fill: none;
+    stroke-width: 1.5;
+    pointer-events: stroke;
+    cursor: pointer;
+    transition: stroke-width 0.15s;
+}
+.kolid-mgr-edge:hover { stroke-width: 3; }
+.kolid-mgr-edge-label {
+    fill: #888;
+    font-size: 8px;
+    pointer-events: none;
+    text-anchor: middle;
+}
+.kolid-mgr-tooltip {
+    position: absolute;
+    background: rgba(20,20,22,0.95);
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #ccc;
+    max-width: 300px;
+    max-height: 200px;
+    overflow-y: auto;
+    pointer-events: none;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.kolid-mgr-tooltip .tt-title {
+    font-weight: bold;
+    color: #fff;
+    margin-bottom: 4px;
+    font-size: 12px;
+}
+.kolid-mgr-tooltip .tt-type { color: #6c8aff; font-size: 10px; }
+.kolid-mgr-tooltip .tt-section { color: #8e8e93; font-size: 10px; margin-top: 4px; }
+.kolid-mgr-tooltip .tt-expr { color: #44dd44; font-family: monospace; }
+.kolid-mgr-tooltip .tt-relay { color: #ffaa00; font-family: monospace; }
+.kolid-mgr-toolbar {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 4px;
+    z-index: 10;
+}
+.kolid-mgr-btn {
+    background: #2a2a2a;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+.kolid-mgr-btn:hover { background: #3a3a3a; border-color: #0a84ff; color: #fff; }
+.kolid-mgr-btn.active { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+`;
+    document.head.appendChild(style);
+}
+
+const NODE_COLORS = {
+    'BranchSwitchNode': '#0a84ff',
+    'BranchBooleanNode': '#34c759',
+    'BranchSwitchesNode': '#ff9500',
+    '_target': '#ff6b6b',  // non-branch nodes affected by config
+};
+
+/**
+ * Collect all branch nodes and their dependency edges from the graph.
+ * Also includes non-branch nodes that are targeted by active_config/select_config.
+ */
+function collectBranchGraph(graph) {
+    if (!graph) return { nodes: [], edges: [] };
+    const allNodesList = graph._nodes || graph.nodes || [];
+    const branchTypes = ['BranchSwitchNode', 'BranchBooleanNode', 'BranchSwitchesNode'];
+    const branchNodes = allNodesList.filter(n => branchTypes.includes(n.comfyClass));
+    const targetNodes = []; // non-branch nodes targeted by config
+    const targetNodeIds = new Set();
+
+    const edges = [];
+    const branchNodeIds = new Set(branchNodes.map(n => n.id));
+
+    // Helper: resolve target and add as node if non-branch
+    function addTargetNode(t) {
+        if (!branchTypes.includes(t.comfyClass) && !targetNodeIds.has(t.id)) {
+            targetNodeIds.add(t.id);
+            targetNodes.push(t);
+        }
+    }
+
+    // 1. Use existing relay graph data from window.kolid_data.branchRelayMap
+    if (window.kolid_data?.branchRelayMap) {
+        for (const [sourceNode, relayNodes] of window.kolid_data.branchRelayMap) {
+            for (const target of relayNodes) {
+                if (branchNodeIds.has(target.id)) {
+                    const expr = getWidgetValue(sourceNode, 'relay_expression', '');
+                    edges.push({ from: sourceNode.id, to: target.id, label: 'relay', expr: expr.trim() });
+                }
+            }
+        }
+    }
+    // Fallback: parse relay_expression ourselves if no relay map
+    if (edges.filter(e => e.label === 'relay').length === 0) {
+        for (const node of branchNodes) {
+            const expr = getWidgetValue(node, 'relay_expression', '');
+            if (!expr || !expr.trim()) continue;
+            const vars = extractVariables(expr);
+            for (const v of vars) {
+                const target = getNodeFromExpression(v, node);
+                if (target && branchNodeIds.has(target.id) && target.id !== node.id) {
+                    edges.push({ from: node.id, to: target.id, label: 'relay', expr: expr.trim() });
+                }
+            }
+        }
+    }
+
+    // 2. Parse active_config (BranchSwitchNode/BranchBooleanNode only)
+    //    Format: op:target_type:target_value
+    for (const node of branchNodes) {
+        if (node.comfyClass !== 'BranchSwitchNode' && node.comfyClass !== 'BranchBooleanNode') continue;
+        const config = getWidgetValue(node, 'active_config', '');
+        if (!config || !config.trim()) continue;
+        const segments = config.split(',').map(s => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+            const parts = seg.split(':');
+            if (parts.length < 3) continue;
+            const targetType = parts[1].trim();
+            const targetValue = parts.slice(2).join(':').trim();
+
+            let targets = [];
+            if (targetType === 'name') {
+                targets = allNodesList.filter(n => n.title === targetValue || n.type === targetValue);
+            } else if (targetType === 'id') {
+                const n = graph.getNodeById(parseInt(targetValue));
+                if (n) targets = [n];
+            }
+            for (const t of targets) {
+                if (t.id !== node.id) {
+                    edges.push({ from: node.id, to: t.id, label: 'config', expr: seg });
+                    addTargetNode(t);
+                }
+            }
+        }
+    }
+
+    // 3. Parse select_config (BranchSwitchesNode only)
+    //    Format: select_index:op:target_type:target_value
+    for (const node of branchNodes) {
+        if (node.comfyClass !== 'BranchSwitchesNode') continue;
+        const selectConfig = getWidgetValue(node, 'select_config', '');
+        if (!selectConfig || !selectConfig.trim()) continue;
+        const segments = selectConfig.split(',').map(s => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+            const parts = seg.split(':');
+            if (parts.length < 4 || !/^\d+$/.test(parts[0].trim())) continue;
+            const targetType = parts[2].trim();
+            const targetValue = parts.slice(3).join(':').trim();
+
+            let targets = [];
+            if (targetType === 'name') {
+                targets = allNodesList.filter(n => n.title === targetValue || n.type === targetValue);
+            } else if (targetType === 'id') {
+                const n = graph.getNodeById(parseInt(targetValue));
+                if (n) targets = [n];
+            }
+            for (const t of targets) {
+                if (t.id !== node.id) {
+                    edges.push({ from: node.id, to: t.id, label: 'select', expr: seg });
+                    addTargetNode(t);
+                }
+            }
+        }
+    }
+
+    const nodes = [...branchNodes, ...targetNodes];
+    return { nodes, edges };
+}
+
+/**
+ * Simple force-directed layout for the graph.
+ */
+function layoutGraph(nodes, edges, width, height) {
+    if (nodes.length === 0) return;
+
+    const cx = width / 2;
+    const cy = height / 2;
+    const padding = 40;
+    const usableW = Math.max(width - padding * 2, 100);
+    const usableH = Math.max(height - padding * 2, 100);
+    const radius = Math.min(usableW, usableH) * 0.4;
+
+    // Initialize: circular layout
+    nodes.forEach((n, i) => {
+        const angle = (i / nodes.length) * Math.PI * 2;
+        n._gx = cx + Math.cos(angle) * radius;
+        n._gy = cy + Math.sin(angle) * radius;
+        n._vx = 0;
+        n._vy = 0;
+    });
+
+    // Simple force-directed iterations
+    const k = Math.max(150, Math.min(width, height) / Math.max(nodes.length + 1, 2));
+    const gravity = 0.05;
+    const iterations = 120;
+    const minDist = 60; // minimum distance between nodes
+
+    for (let iter = 0; iter < iterations; iter++) {
+        // Repulsive forces between all nodes
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                let dx = nodes[i]._gx - nodes[j]._gx;
+                let dy = nodes[i]._gy - nodes[j]._gy;
+                let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+                // Stronger repulsion when too close
+                let force = (k * k) / (dist * dist);
+                if (dist < minDist) force *= (minDist / dist);
+                let fx = (dx / dist) * force * 0.4;
+                let fy = (dy / dist) * force * 0.4;
+                nodes[i]._vx += fx;
+                nodes[i]._vy += fy;
+                nodes[j]._vx -= fx;
+                nodes[j]._vy -= fy;
+            }
+        }
+
+        // Attractive forces for edges — strong pull to group connected nodes
+        for (const edge of edges) {
+            const from = nodes.find(n => n.id === edge.from);
+            const to = nodes.find(n => n.id === edge.to);
+            if (!from || !to) continue;
+            let dx = from._gx - to._gx;
+            let dy = from._gy - to._gy;
+            let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            let force = (dist / k) * 3; // Stronger attraction
+            let fx = (dx / dist) * force;
+            let fy = (dy / dist) * force;
+            from._vx -= fx;
+            from._vy -= fy;
+            to._vx += fx;
+            to._vy += fy;
+        }
+
+        // Apply velocity with damping + gravity toward center
+        const damping = 0.9 - (iter / iterations) * 0.3;
+        for (const n of nodes) {
+            // Gravity toward center
+            n._vx += (cx - n._gx) * gravity;
+            n._vy += (cy - n._gy) * gravity;
+            n._vx *= damping;
+            n._vy *= damping;
+            n._gx += n._vx * 0.15;
+            n._gy += n._vy * 0.15;
+            // Keep within bounds (soft clamp)
+            n._gx = Math.max(padding, Math.min(width - padding, n._gx));
+            n._gy = Math.max(padding, Math.min(height - padding, n._gy));
+        }
+    }
+}
+
+/**
+ * Build the BranchManagerNode graph UI.
+ */
+function buildBranchManagerGraph(node) {
+    const container = document.createElement("div");
+    container.className = "kolid-mgr-container";
+
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "kolid-mgr-svg");
+    container.appendChild(svg);
+
+    // Toolbar
+    const toolbar = document.createElement("div");
+    toolbar.className = "kolid-mgr-toolbar";
+    container.appendChild(toolbar);
+
+    const refreshBtn = document.createElement("button");
+    refreshBtn.className = "kolid-mgr-btn";
+    refreshBtn.textContent = "↻";
+    refreshBtn.title = "Refresh graph";
+    toolbar.appendChild(refreshBtn);
+
+    const fitBtn = document.createElement("button");
+    fitBtn.className = "kolid-mgr-btn";
+    fitBtn.textContent = "⊡";
+    fitBtn.title = "Fit to view";
+    toolbar.appendChild(fitBtn);
+
+    // Tooltip (floating on body to avoid clipping by ComfyUI widget wrappers)
+    const tooltip = document.createElement("div");
+    tooltip.className = "kolid-mgr-tooltip";
+    tooltip.style.display = "none";
+    tooltip.style.position = "fixed";
+    document.body.appendChild(tooltip);
+
+    // Pan/zoom state
+    let panX = 0, panY = 0, scale = 1;
+    let isDragging = false, lastX = 0, lastY = 0;
+
+    function render() {
+        // Ensure relay graph data is up to date
+        if (typeof updateRelayGraph === 'function' && node.graph) {
+            updateRelayGraph();
+        }
+        const rect = container.getBoundingClientRect();
+        const w = rect.width || 400;
+        const h = rect.height || 400;
+        svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+        svg.setAttribute("width", w);
+        svg.setAttribute("height", h);
+
+        const { nodes: graphNodes, edges: graphEdges } = collectBranchGraph(node.graph);
+
+        // Layout
+        layoutGraph(graphNodes, graphEdges, w, h);
+
+        // Clear
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+        // Defs for arrow markers
+        const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+        const edgeColors = { relay: '#0a84ff', config: '#ff9500', select: '#34c759' };
+        for (const [name, color] of Object.entries(edgeColors)) {
+            const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+            marker.setAttribute("id", `arrow-${name}`);
+            marker.setAttribute("viewBox", "0 0 10 10");
+            marker.setAttribute("refX", "10");
+            marker.setAttribute("refY", "5");
+            marker.setAttribute("markerWidth", "6");
+            marker.setAttribute("markerHeight", "6");
+            marker.setAttribute("orient", "auto");
+            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            path.setAttribute("d", "M0,0 L10,5 L0,10 Z");
+            path.setAttribute("fill", color);
+            marker.appendChild(path);
+            defs.appendChild(marker);
+        }
+        svg.appendChild(defs);
+
+        const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        g.setAttribute("transform", `translate(${panX},${panY}) scale(${scale})`);
+        svg.appendChild(g);
+
+        // Draw edges
+        for (const edge of graphEdges) {
+            const from = graphNodes.find(n => n.id === edge.from);
+            const to = graphNodes.find(n => n.id === edge.to);
+            if (!from || !to) continue;
+
+            const dx = to._gx - from._gx;
+            const dy = to._gy - from._gy;
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const nodeR = 18 * scale; // account for counter-scaled node group
+            // Shorten line so it doesn't overlap with node circles
+            const x1 = from._gx + (dx / dist) * nodeR;
+            const y1 = from._gy + (dy / dist) * nodeR;
+            const x2 = to._gx - (dx / dist) * (nodeR + 4);
+            const y2 = to._gy - (dy / dist) * (nodeR + 4);
+
+            const color = edgeColors[edge.label] || '#666';
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("x1", x1);
+            line.setAttribute("y1", y1);
+            line.setAttribute("x2", x2);
+            line.setAttribute("y2", y2);
+            line.setAttribute("class", "kolid-mgr-edge");
+            line.setAttribute("stroke", color);
+            line.setAttribute("marker-end", `url(#arrow-${edge.label})`);
+            line.setAttribute("stroke-dasharray", edge.label === 'config' ? '4,2' : 'none');
+
+            // Hover on edge
+            line.addEventListener("mouseenter", (e) => {
+                tooltip.innerHTML = `<div class="tt-type">${edge.label}</div><div class="tt-expr">${escapeHTML(edge.expr)}</div>`;
+                tooltip.style.left = (e.clientX + 15) + 'px';
+                tooltip.style.top = (e.clientY + 15) + 'px';
+                tooltip.style.display = 'block';
+            });
+            line.addEventListener("mouseleave", () => { tooltip.style.display = 'none'; });
+
+            g.appendChild(line);
+        }
+
+        // Draw nodes — size independent of zoom
+        const fixedR = 18 / scale; // counter-scale so screen size stays constant
+        for (const n of graphNodes) {
+            const color = NODE_COLORS[n.comfyClass] || NODE_COLORS['_target'];
+            const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            group.setAttribute("class", "kolid-mgr-node");
+            group.setAttribute("transform", `translate(${n._gx},${n._gy}) scale(${1/scale})`);
+
+            const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            circle.setAttribute("r", 18);
+            circle.setAttribute("fill", color + "33");
+            circle.setAttribute("stroke", color);
+            group.appendChild(circle);
+
+            // Short label (first 6 chars)
+            const title = n.title || n.type || `Node ${n.id}`;
+            const shortLabel = title.length > 8 ? title.substring(0, 7) + '…' : title;
+            const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            text.textContent = shortLabel;
+            group.appendChild(text);
+
+            // Click to jump
+            group.addEventListener("click", () => jumpToNode(n.id));
+
+            // Hover for tooltip with full dependency info
+            group.addEventListener("mouseenter", (e) => {
+                const relayExpr = getWidgetValue(n, 'relay_expression', '');
+                const activeCfg = getWidgetValue(n, 'active_config', '');
+                const selectCfg = getWidgetValue(n, 'select_config', '');
+
+                let html = `<div class="tt-title">${escapeHTML(title)}</div>`;
+                html += `<div class="tt-type">${n.comfyClass}</div>`;
+
+                // Find what this node depends on
+                const deps = graphEdges.filter(ed => ed.from === n.id);
+                if (deps.length > 0) {
+                    html += `<div class="tt-section">Depends on (${deps.length}):</div>`;
+                    for (const dep of deps) {
+                        const depNode = graphNodes.find(nn => nn.id === dep.to);
+                        const depTitle = depNode ? (depNode.title || depNode.type) : `Node ${dep.to}`;
+                        html += `<div class="tt-expr">  ${dep.label}: ${escapeHTML(depTitle)}</div>`;
+                    }
+                }
+
+                // Find what depends on this node
+                const dependents = graphEdges.filter(ed => ed.to === n.id);
+                if (dependents.length > 0) {
+                    html += `<div class="tt-section">Referenced by (${dependents.length}):</div>`;
+                    for (const dep of dependents) {
+                        const depNode = graphNodes.find(nn => nn.id === dep.from);
+                        const depTitle = depNode ? (depNode.title || depNode.type) : `Node ${dep.from}`;
+                        html += `<div class="tt-relay">  ${dep.label}: ${escapeHTML(depTitle)}</div>`;
+                    }
+                }
+
+                if (relayExpr) html += `<div class="tt-section">Relay expression:</div><div class="tt-expr">${escapeHTML(relayExpr)}</div>`;
+                if (activeCfg) html += `<div class="tt-section">Active config:</div><div class="tt-expr">${escapeHTML(activeCfg)}</div>`;
+                if (selectCfg) html += `<div class="tt-section">Select config:</div><div class="tt-expr">${escapeHTML(selectCfg)}</div>`;
+
+                if (deps.length === 0 && dependents.length === 0 && !relayExpr && !activeCfg && !selectCfg) {
+                    html += `<div class="tt-section">No dependencies</div>`;
+                }
+
+                tooltip.innerHTML = html;
+                tooltip.style.left = Math.min(e.clientX + 15, window.innerWidth - 330) + 'px';
+                tooltip.style.top = Math.min(e.clientY + 15, window.innerHeight - 120) + 'px';
+                tooltip.style.display = 'block';
+            });
+            group.addEventListener("mouseleave", () => { tooltip.style.display = 'none'; });
+
+            g.appendChild(group);
+        }
+
+        // Legend
+        const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        legend.setAttribute("transform", `translate(8, ${h - 90})`);
+        let ly = 0;
+        for (const [name, color] of Object.entries(NODE_COLORS)) {
+            const lc = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            lc.setAttribute("cx", 6);
+            lc.setAttribute("cy", ly);
+            lc.setAttribute("r", 4);
+            lc.setAttribute("fill", color + "33");
+            lc.setAttribute("stroke", color);
+            legend.appendChild(lc);
+            const lt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            lt.setAttribute("x", 14);
+            lt.setAttribute("y", ly + 1);
+            lt.setAttribute("fill", "#888");
+            lt.setAttribute("font-size", "9");
+            lt.textContent = name === '_target' ? 'Target' : name.replace('Node', '');
+            legend.appendChild(lt);
+            ly += 14;
+        }
+        // Edge legend
+        for (const [name, color] of Object.entries(edgeColors)) {
+            const ll = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            ll.setAttribute("x1", 2);
+            ll.setAttribute("y1", ly);
+            ll.setAttribute("x2", 12);
+            ll.setAttribute("y2", ly);
+            ll.setAttribute("stroke", color);
+            ll.setAttribute("stroke-width", 2);
+            if (name === 'config') ll.setAttribute("stroke-dasharray", "4,2");
+            legend.appendChild(ll);
+            const lt2 = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            lt2.setAttribute("x", 14);
+            lt2.setAttribute("y", ly + 1);
+            lt2.setAttribute("fill", "#888");
+            lt2.setAttribute("font-size", "9");
+            lt2.textContent = name;
+            legend.appendChild(lt2);
+            ly += 14;
+        }
+        g.appendChild(legend);
+    }
+
+    // Pan
+    svg.addEventListener("mousedown", (e) => {
+        if (e.target.tagName === 'circle' || e.target.tagName === 'text' || e.target.tagName === 'line') return;
+        isDragging = true;
+        lastX = e.clientX;
+        lastY = e.clientY;
+    });
+    document.addEventListener("mousemove", (e) => {
+        if (!isDragging) return;
+        panX += e.clientX - lastX;
+        panY += e.clientY - lastY;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        const g = svg.querySelector("g");
+        if (g) g.setAttribute("transform", `translate(${panX},${panY}) scale(${scale})`);
+    });
+    document.addEventListener("mouseup", () => { isDragging = false; });
+
+    // Zoom
+    svg.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        scale = Math.max(0.2, Math.min(3, scale * delta));
+        const g = svg.querySelector("g");
+        if (g) g.setAttribute("transform", `translate(${panX},${panY}) scale(${scale})`);
+    });
+
+    refreshBtn.addEventListener("click", () => { panX = 0; panY = 0; scale = 1; render(); });
+    fitBtn.addEventListener("click", () => { panX = 0; panY = 0; scale = 1; render(); });
+
+    // Render on visibility / size change
+    const observer = new MutationObserver(() => render());
+    observer.observe(container, { attributes: true, attributeFilter: ['style'] });
+
+    // Initial render
+    setTimeout(() => render(), 100);
+
+    return { container, render };
+}
+
+// Register BranchManagerNode extension
+app.registerExtension({
+    name: "KleinBlue.BranchManagerNode",
+
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (nodeData.name !== "BranchManagerNode") return;
+
+        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            origOnNodeCreated?.apply(this, arguments);
+            const node = this;
+            if (node._kolidMgrSetup) return;
+            node._kolidMgrSetup = true;
+
+            const { container, render } = buildBranchManagerGraph(node);
+
+            node.addDOMWidget("branch_graph", "kolid_branch_manager", container, {
+                getValue: () => "",
+                setValue: () => {},
+            });
+
+            // Re-render when graph changes
+            const origOnAdded = node.onAdded;
+            node.onAdded = function () {
+                origOnAdded?.apply(this, arguments);
+                setTimeout(() => render(), 200);
+            };
         };
     }
 });
