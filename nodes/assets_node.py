@@ -30,10 +30,73 @@ def check_interrupted():
     return False
 
 
+def parse_image_config(config_str):
+    """Parse image config string into list of dicts.
+    
+    Format: name:type:default(min,max,step),name:type:default,...
+    Types: Float, Int, Boolean, String
+    Only Float/Int have (min,max,step); omitted defaults to (0.0,1.0,0.01) for Float, (0,1024,1) for Int.
+    """
+    import re
+    defs = []
+    if not config_str:
+        return defs
+    for part in config_str.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        # Match: name:type:value(optional params)
+        m = re.match(r'^(\w+):(Float|Int|Boolean|String):(.+?)(\(([^)]*)\))?$', part)
+        if not m:
+            continue
+        name = m.group(1)
+        val_type = m.group(2)
+        value_str = m.group(3).strip()
+        params_str = m.group(5)  # may be None
+        
+        entry = {'name': name, 'type': val_type}
+        
+        if val_type == 'Float':
+            try:
+                entry['default'] = float(value_str)
+            except ValueError:
+                entry['default'] = 0.0
+            if params_str:
+                p = [s.strip() for s in params_str.split(',')]
+                entry['min'] = float(p[0]) if len(p) > 0 and p[0] else 0.0
+                entry['max'] = float(p[1]) if len(p) > 1 and p[1] else 1.0
+                entry['step'] = float(p[2]) if len(p) > 2 and p[2] else 0.01
+            else:
+                entry['min'] = 0.0
+                entry['max'] = 1.0
+                entry['step'] = 0.01
+        elif val_type == 'Int':
+            try:
+                entry['default'] = int(value_str)
+            except ValueError:
+                entry['default'] = 0
+            if params_str:
+                p = [s.strip() for s in params_str.split(',')]
+                entry['min'] = int(p[0]) if len(p) > 0 and p[0] else 0
+                entry['max'] = int(p[1]) if len(p) > 1 and p[1] else 1024
+                entry['step'] = int(p[2]) if len(p) > 2 and p[2] else 1
+            else:
+                entry['min'] = 0
+                entry['max'] = 1024
+                entry['step'] = 1
+        elif val_type == 'Boolean':
+            entry['default'] = value_str.lower() in ('true', '1', 'yes')
+        elif val_type == 'String':
+            entry['default'] = value_str
+        
+        defs.append(entry)
+    return defs
+
+
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False):
         self.port = None
         self.server = None
         self.started = False
@@ -47,9 +110,9 @@ class SnapshotAssetsServer:
         self.input_data = input_data
         self.canvas_snapshot = canvas_snapshot
         self.node_id = node_id
-        self.enable_image_strength = enable_image_strength
+        self.enable_image_config = enable_image_config
         self.enable_prompt = enable_prompt
-        self.image_strength_config = image_strength_config
+        self.image_config = image_config
         self.enable_slot = enable_slot
         self.slot_config = slot_config
         self.enable_image = enable_image
@@ -253,26 +316,10 @@ class SnapshotAssetsServer:
                     return
 
             elif self.path == '/input_data':
-                # Parse image_strength_config into list of {name, default} dicts
-                # Format: "strength0:0.1,strength1:1" or "strength0,strength1" (defaults to 0)
-                strength_defs = []
-                if self.server_instance and self.server_instance.image_strength_config:
-                    for part in self.server_instance.image_strength_config.split(','):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        if ':' in part:
-                            name, default_str = part.split(':', 1)
-                            name = name.strip()
-                            try:
-                                default_val = float(default_str.strip())
-                            except ValueError:
-                                default_val = 0.0
-                        else:
-                            name = part
-                            default_val = 0.0
-                        if name:
-                            strength_defs.append({'name': name, 'default': default_val})
+                # Parse image_config into list of config defs
+                image_config_defs = []
+                if self.server_instance and self.server_instance.image_config:
+                    image_config_defs = parse_image_config(self.server_instance.image_config)
                 # Parse slot_config into list of {type, name} dicts
                 # Format: "Image:Test,Video:Test1,Image:Test2"
                 slot_defs = []
@@ -291,9 +338,9 @@ class SnapshotAssetsServer:
                 data = {
                     'input_data': self.server_instance.input_data if self.server_instance else '',
                     'canvas_snapshot': self.server_instance.canvas_snapshot if self.server_instance else None,
-                    'enable_image_strength': self.server_instance.enable_image_strength if self.server_instance else False,
+                    'enable_image_config': self.server_instance.enable_image_config if self.server_instance else False,
                     'enable_prompt': self.server_instance.enable_prompt if self.server_instance else False,
-                    'strength_defs': strength_defs,
+                    'image_config_defs': image_config_defs,
                     'enable_slot': self.server_instance.enable_slot if self.server_instance else False,
                     'enable_image': self.server_instance.enable_image if self.server_instance else True,
                     'enable_video': self.server_instance.enable_video if self.server_instance else True,
@@ -482,11 +529,13 @@ class SnapshotAssetsServer:
                                 if url:
                                     image_url = url
                             item = {"image": image_url}
-                            # Support both single strength and multiple strengths dict
-                            if 'strengths' in img_data and img_data['strengths'] is not None:
-                                item['strengths'] = img_data['strengths']
+                            # Support image_infos dict (new) and legacy strengths dict
+                            if 'image_infos' in img_data and img_data['image_infos'] is not None:
+                                item['image_infos'] = img_data['image_infos']
+                            elif 'strengths' in img_data and img_data['strengths'] is not None:
+                                item['image_infos'] = img_data['strengths']
                             elif 'strength' in img_data and img_data['strength'] is not None:
-                                item['strength'] = img_data['strength']
+                                item['image_infos'] = {'strength': img_data['strength']}
                             selected_image_items.append(item)
                         elif isinstance(img_data, str):
                             if img_data.startswith('data:'):
@@ -780,8 +829,8 @@ class SnapshotAssetsNode:
                 "global_mode": ("BOOLEAN", {"default": False}),
                 "enable_prompt": ("BOOLEAN", {"default": False}),
                 "enable_image": ("BOOLEAN", {"default": True}),
-                "enable_image_strength": ("BOOLEAN", {"default": False}),
-                "image_strength_config": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
+                "enable_image_config": ("BOOLEAN", {"default": False}),
+                "image_config": ("STRING", {"default": "test0:Float:1.0(0.0,1.0,0.1),test1:Float:0.5(0.0,1.0,0.1)", "multiline": False}),
                 "enable_video": ("BOOLEAN", {"default": True}),
                 "enable_audio": ("BOOLEAN", {"default": True}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
@@ -792,8 +841,8 @@ class SnapshotAssetsNode:
             },
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "FLOAT", "VIDEO", "AUDIO", "*")
-    RETURN_NAMES = ("prompt", "image", "image_strength", "video", "audio", "slot")
+    RETURN_TYPES = ("STRING", "IMAGE", "*", "VIDEO", "AUDIO", "*")
+    RETURN_NAMES = ("prompt", "image", "image_infos", "video", "audio", "slot")
     OUTPUT_IS_LIST = (False, True, True, True, True, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
@@ -835,7 +884,7 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False, unique_id=None):
+    def snapshot_assets(self, data="", enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False, unique_id=None):
         # data contains the tldraw snapshot JSON string (normal mode) or a name (global_mode)
         canvas_snapshot = None
         if global_mode and data and data.strip():
@@ -858,7 +907,7 @@ class SnapshotAssetsNode:
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, enable_audio=enable_audio, global_mode=global_mode)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_config=enable_image_config, enable_prompt=enable_prompt, image_config=image_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, enable_audio=enable_audio, global_mode=global_mode)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -905,33 +954,15 @@ class SnapshotAssetsNode:
 
         # Process images
         images = []
-        # Parse strength definitions from image_strength_config: "name:default,name:default"
-        strength_defs = []
-        if image_strength_config:
-            for part in image_strength_config.split(','):
-                part = part.strip()
-                if not part:
-                    continue
-                if ':' in part:
-                    name, default_str = part.split(':', 1)
-                    name = name.strip()
-                    try:
-                        default_val = float(default_str.strip())
-                    except ValueError:
-                        default_val = 0.0
-                else:
-                    name = part
-                    default_val = 0.0
-                if name:
-                    strength_defs.append({'name': name, 'default': default_val})
-        if enable_image_strength and not strength_defs:
-            strength_defs = [{'name': 'strength0', 'default': 0.0}]
+        # Parse image config definitions
+        # Parse image config
+        config_defs = parse_image_config(image_config)
+        if enable_image_config and not config_defs:
+            config_defs = [{'name': 'config0', 'type': 'Float', 'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}]
+        config_defaults_map = {d['name']: d['default'] for d in config_defs}
 
-        strength_names = [d['name'] for d in strength_defs]
-        strength_defaults_map = {d['name']: d['default'] for d in strength_defs}
-
-        # Initialize strengths as 2D list: each inner list is one named strength across all images
-        strengths_2d = [[] for _ in strength_names] if enable_image_strength and strength_names else []
+        # Collect image_infos as list of dicts
+        image_infos_list = []
 
         for img_data in selected_images:
             try:
@@ -939,21 +970,32 @@ class SnapshotAssetsNode:
                     image_url = img_data.get('image', '')
                     tensor = self._decode_image_data(image_url)
                     images.append(tensor)
-                    if enable_image_strength and strength_names:
-                        # Get strengths dict from frontend
-                        strengths_dict = img_data.get('strengths', {})
-                        for idx, name in enumerate(strength_names):
-                            if isinstance(strengths_dict, dict) and name in strengths_dict:
-                                val = float(strengths_dict[name])
+                    if enable_image_config and config_defs:
+                        infos_dict = img_data.get('image_infos', img_data.get('strengths', {}))
+                        info_item = {}
+                        for d in config_defs:
+                            name = d['name']
+                            if isinstance(infos_dict, dict) and name in infos_dict:
+                                val = infos_dict[name]
+                                # Cast to correct type
+                                if d['type'] == 'Float':
+                                    val = float(val)
+                                elif d['type'] == 'Int':
+                                    val = int(val)
+                                elif d['type'] == 'Boolean':
+                                    val = bool(val)
+                                info_item[name] = val
                             else:
-                                val = strength_defaults_map.get(name, 0.0)
-                            strengths_2d[idx].append(val)
+                                info_item[name] = config_defaults_map.get(name, d['default'])
+                        image_infos_list.append(info_item)
                 else:
                     tensor = self._decode_image_data(img_data)
                     images.append(tensor)
-                    if enable_image_strength and strength_names:
-                        for idx, name in enumerate(strength_names):
-                            strengths_2d[idx].append(strength_defaults_map.get(name, 0.0))
+                    if enable_image_config and config_defs:
+                        info_item = {}
+                        for d in config_defs:
+                            info_item[d['name']] = config_defaults_map.get(d['name'], d['default'])
+                        image_infos_list.append(info_item)
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to decode image: {e}")
                 raise RuntimeError(f"[SnapshotAssets] Failed to decode image: {e}")
@@ -1002,7 +1044,7 @@ class SnapshotAssetsNode:
                 traceback.print_exc()
                 # Skip failed videos
 
-        print(f"[SnapshotAssets] Output {len(images)} images, {len(videos)} videos, {len(strengths_2d)} strength arrays, prompt: '{prompt[:50] if prompt else '(empty)'}'")
+        print(f"[SnapshotAssets] Output {len(images)} images, {len(image_infos_list)} image_infos, {len(videos)} videos, prompt: '{prompt[:50] if prompt else '(empty)'}'")
         
         # Debug: Verify video objects
         for i, vid in enumerate(videos):
@@ -1093,4 +1135,4 @@ class SnapshotAssetsNode:
                     slot_outputs.append(None)
         
         print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(audios)} audios, {len(slot_outputs)} slots")
-        return (prompt, images, strengths_2d, videos, audios, slot_outputs)
+        return (prompt, images, image_infos_list, videos, audios, slot_outputs)

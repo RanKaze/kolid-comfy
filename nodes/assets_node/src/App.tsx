@@ -122,12 +122,12 @@ const App: React.FC = () => {
   const editorRef = useRef<Editor | null>(null);
   const [panelHeight, setPanelHeight] = useState(0);
   const [pendingSnapshot, setPendingSnapshot] = useState<string | null>(null);
-  const [enableImageStrength, setEnableImageStrength] = useState(false);
+  const [enableImageConfig, setEnableImageConfig] = useState(false);
   const [enablePrompt, setEnablePrompt] = useState(false);
   const [enableImage, setEnableImage] = useState(true);  // Image area enabled by default
   const [enableVideo, setEnableVideo] = useState(true);  // Video area enabled by default
   const [enableAudio, setEnableAudio] = useState(true);  // Audio area enabled by default
-  const [strengthDefs, setStrengthDefs] = useState<{ name: string; default: number }[]>([]);
+  const [imageConfigDefs, setImageConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
   const [enableSlot, setEnableSlot] = useState(false);
   const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
   const [globalMode, setGlobalMode] = useState(false);  // Whether data is a name for disk persistence
@@ -145,12 +145,12 @@ const App: React.FC = () => {
         setInputData(data.input_data || '');
 
         // Set node input flags
-        setEnableImageStrength(data.enable_image_strength || false);
+        setEnableImageConfig(data.enable_image_config || false);
         setEnablePrompt(data.enable_prompt || false);
         setEnableImage(data.enable_image !== undefined ? data.enable_image : true);
         setEnableVideo(data.enable_video !== undefined ? data.enable_video : true);
         setEnableAudio(data.enable_audio !== undefined ? data.enable_audio : true);
-        setStrengthDefs(data.strength_defs || []);
+        setImageConfigDefs(data.image_config_defs || []);
         setEnableSlot(data.enable_slot || false);
         setSlotDefs(data.slot_defs || []);
         setGlobalMode(data.global_mode || false);
@@ -199,7 +199,7 @@ const App: React.FC = () => {
         panelHandleRef.current?.setSlots?.(parsed.panelSlots);
       }
 
-      // Note: enableImageStrength and enablePrompt are controlled by node inputs, not snapshot
+      // Note: enableImageConfig and enablePrompt are controlled by node inputs, not snapshot
 
       // Restore prompt text
       if (typeof parsed.prompt === 'string') {
@@ -273,7 +273,7 @@ const App: React.FC = () => {
     // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
-  const handleConfirm = useCallback(async ({ images, videos, audios, enableImageStrength, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageStrength: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
+  const handleConfirm = useCallback(async ({ images, videos, audios, enableImageConfig, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -299,7 +299,7 @@ const App: React.FC = () => {
       dataUrl: img.dataUrl,
       assetId: img.assetId,
       shapeId: img.shapeId,
-      strengths: img.strengths,
+      image_infos: img.image_infos,
     }));
 
     // Save panel selected videos info
@@ -352,7 +352,7 @@ const App: React.FC = () => {
       panelVideos: panelVideos,
       panelAudios: panelAudios,
       panelSlots: panelSlots,
-      enableImageStrength,
+      enableImageConfig,
       prompt,
       camera: {
         x: camera.x,
@@ -366,7 +366,7 @@ const App: React.FC = () => {
     try {
       const selectedImages = images.map((img) => ({
         image: img.dataUrl,
-        strengths: enableImageStrength ? img.strengths : undefined,
+        image_infos: enableImageConfig ? img.image_infos : undefined,
       }));
       const selectedVideos = videos.map((vid) => ({
         video: vid.dataUrl,
@@ -608,12 +608,12 @@ const App: React.FC = () => {
         editor={editorRef}
         onHeightChange={setPanelHeight}
         onConfirm={handleConfirm}
-        enableImageStrength={enableImageStrength}
+        enableImageConfig={enableImageConfig}
         enablePrompt={enablePrompt}
         enableImage={enableImage}
         enableVideo={enableVideo}
         enableAudio={enableAudio}
-        strengthDefs={strengthDefs}
+        imageConfigDefs={imageConfigDefs}
         enableSlot={enableSlot}
         slotDefs={slotDefs}
       />
