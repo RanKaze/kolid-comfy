@@ -11,7 +11,7 @@ export interface ImageInfo {
   shapeId: string;
   width?: number;
   height?: number;
-  strengths?: Record<string, number>;
+  image_infos?: Record<string, any>;
 }
 
 export interface VideoInfo {
@@ -48,13 +48,13 @@ export interface PanelHandle {
 interface PanelProps {
   editor: React.RefObject<Editor | null>;
   onHeightChange: (height: number) => void;
-  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageStrength: boolean; prompt: string; slots: SlotItem[] }) => void;
-  enableImageStrength: boolean;
+  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; prompt: string; slots: SlotItem[] }) => void;
+  enableImageConfig: boolean;
   enablePrompt: boolean;
   enableImage?: boolean;
   enableVideo?: boolean;
   enableAudio?: boolean;
-  strengthDefs?: { name: string; default: number }[];
+  imageConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
   enableSlot?: boolean;
   slotDefs?: { type: string; name: string }[];
 }
@@ -754,7 +754,7 @@ const AudioCard: React.FC<{
   );
 };
 
-const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageStrength, enablePrompt, enableImage = true, enableVideo = true, enableAudio = true, strengthDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
+const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageConfig, enablePrompt, enableImage = true, enableVideo = true, enableAudio = true, imageConfigDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [audios, setAudios] = useState<AudioInfo[]>([]);
@@ -1046,11 +1046,11 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
     [editorRef, videos]
   );
 
-  const updateStrength = useCallback((id: string, name: string, value: number) => {
+  const updateImageInfo = useCallback((id: string, name: string, value: any) => {
     setImages((prev) =>
       prev.map((img) =>
         img.id === id
-          ? { ...img, strengths: { ...img.strengths, [name]: value } }
+          ? { ...img, image_infos: { ...img.image_infos, [name]: value } }
           : img
       )
     );
@@ -1105,8 +1105,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   }, []);
 
   const handleLocalConfirm = useCallback(() => {
-    onConfirm({ images, videos, audios, enableImageStrength, prompt, slots });
-  }, [images, videos, audios, enableImageStrength, prompt, slots, onConfirm]);
+    onConfirm({ images, videos, audios, enableImageConfig, prompt, slots });
+  }, [images, videos, audios, enableImageConfig, prompt, slots, onConfirm]);
 
   return (
     <>
@@ -1150,7 +1150,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
               msOverflowStyle: 'none', // IE/Edge
             }}
           >
-            <ThumbnailList images={images} onRemove={removeImage} enableStrength={enableImageStrength} strengthDefs={strengthDefs} onStrengthChange={updateStrength} />
+            <ThumbnailList images={images} onRemove={removeImage} enableImageConfig={enableImageConfig} imageConfigDefs={imageConfigDefs} onImageInfoChange={updateImageInfo} />
           </div>
           <button
             onClick={() => {
@@ -1217,7 +1217,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
                     dataUrl: src,
                     assetId: assetId as string,
                     shapeId: shape.id as string,
-                    strengths: strengthDefs.reduce((acc, d) => ({ ...acc, [d.name]: d.default }), {} as Record<string, number>),
+                    image_infos: imageConfigDefs.reduce((acc, d) => ({ ...acc, [d.name]: d.default }), {} as Record<string, any>),
                   },
                 ]);
                 newShapeIds.push(shape.id as string);

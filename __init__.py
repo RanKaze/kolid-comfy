@@ -31,6 +31,7 @@ from .nodes.train_node import *
 from .nodes.snapshot_sampler_node import *
 from .nodes.application_node import *
 from .nodes.assets_node import *
+from .nodes.assets_info_collect_node import *
     
 
 NODE_CONFIG = {
@@ -134,6 +135,7 @@ NODE_CONFIG = {
     "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
     "SnapshotDetailerSamplerNode": {"class": SnapshotDetailerSamplerNode, "name": "SnapshotDetailerSamplerNode"},
     "SnapshotAssetsNode": {"class": SnapshotAssetsNode, "name": "SnapshotAssetsNode"},
+    "AssetsInfoCollectNode": {"class": AssetsInfoCollectNode, "name": "AssetsInfoCollectNode"},
 
     "ApplicationNode": {"class": ApplicationNode, "name": "ApplicationNode"},
 
