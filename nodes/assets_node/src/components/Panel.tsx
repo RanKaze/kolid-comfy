@@ -23,14 +23,23 @@ export interface VideoInfo {
   aspectRatio?: number;
 }
 
+export interface AudioInfo {
+  id: string;
+  name: string;
+  dataUrl: string;
+  assetId: string;
+  shapeId: string;
+}
+
 export interface SlotItem {
-  type: string;  // 'Image' | 'Video'
-  data: ImageInfo | VideoInfo | null;
+  type: string;  // 'Image' | 'Video' | 'Audio'
+  data: ImageInfo | VideoInfo | AudioInfo | null;
 }
 
 export interface PanelHandle {
   setImages: (images: ImageInfo[]) => void;
   setVideos: (videos: VideoInfo[]) => void;
+  setAudios: (audios: AudioInfo[]) => void;
   setSlots: (slots: SlotItem[]) => void;
   setPrompt: (prompt: string) => void;
   startCapture: (vid: VideoInfo) => void;
@@ -39,11 +48,12 @@ export interface PanelHandle {
 interface PanelProps {
   editor: React.RefObject<Editor | null>;
   onHeightChange: (height: number) => void;
-  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; enableImageStrength: boolean; prompt: string; slots: SlotItem[] }) => void;
+  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageStrength: boolean; prompt: string; slots: SlotItem[] }) => void;
   enableImageStrength: boolean;
   enablePrompt: boolean;
-  enableImage?: boolean;  // Show/hide image area (default true)
-  enableVideo?: boolean;  // Show/hide video area (default true)
+  enableImage?: boolean;
+  enableVideo?: boolean;
+  enableAudio?: boolean;
   strengthDefs?: { name: string; default: number }[];
   enableSlot?: boolean;
   slotDefs?: { type: string; name: string }[];
@@ -366,7 +376,7 @@ const SlotCard: React.FC<{
   slotIndex: number;
   slotName: string;
   editorRef: React.RefObject<Editor | null>;
-  onFill: (index: number, item: ImageInfo | VideoInfo) => void;
+  onFill: (index: number, item: ImageInfo | VideoInfo | AudioInfo) => void;
   onClear: (index: number) => void;
   onCaptureRequest?: (vid: VideoInfo, slotIndex: number) => void;  // Open frame capture when video selected for Image slot
 }> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear, onCaptureRequest }) => {
@@ -423,6 +433,26 @@ const SlotCard: React.FC<{
       return;
     }
     console.log('[SlotCard] shape:', shape);
+
+    // Audio shapes store src/name directly in props (no asset lookup needed)
+    if (slot.type === 'Audio') {
+      const src = (shape.props as any).src as string;
+      const name = (shape.props as any).name as string || 'audio';
+      if (!src) {
+        console.warn('[SlotCard] No src on audio shape!');
+        return;
+      }
+      const item: AudioInfo = {
+        id: `slot_${slotIndex}_${Date.now()}`,
+        name,
+        dataUrl: src,
+        assetId: '',
+        shapeId: (shape as any).id as string,
+      };
+      onFill(slotIndex, item);
+      return;
+    }
+
     const assetId = (shape.props as any).assetId;
     console.log('[SlotCard] assetId:', assetId);
     if (!assetId) {
@@ -517,8 +547,9 @@ const SlotCard: React.FC<{
         /* Filled: show preview */
         (() => {
           const isVideo = slot.type === 'Video';
-          const slotWidth = Math.round(SLOT_HEIGHT * mediaAspect);
-          const slotHeight = SLOT_HEIGHT;
+          const isAudio = slot.type === 'Audio';
+          const slotWidth = isAudio ? 280 : Math.round(SLOT_HEIGHT * mediaAspect);
+          const slotHeight = isAudio ? 60 : SLOT_HEIGHT;
           return (
         <div
           style={{
@@ -527,9 +558,13 @@ const SlotCard: React.FC<{
             height: slotHeight,
             borderRadius: 6,
             overflow: 'hidden',
-            border: `2px solid ${isVideo ? '#60a5fa' : '#4ade80'}`,
-            background: isVideo ? '#000' : '#f0f0f0',
+            border: `2px solid ${isVideo ? '#60a5fa' : isAudio ? '#fbbf24' : '#4ade80'}`,
+            background: isVideo ? '#000' : isAudio ? '#fff' : '#f0f0f0',
             flexShrink: 0,
+            display: isAudio ? 'flex' : undefined,
+            alignItems: isAudio ? 'center' : undefined,
+            gap: isAudio ? 6 : undefined,
+            padding: isAudio ? '0 8px' : undefined,
           }}
         >
           {isVideo ? (
@@ -545,6 +580,16 @@ const SlotCard: React.FC<{
               playsInline
               muted
             />
+          ) : isAudio ? (
+            <>
+              <span style={{ fontSize: 20, flexShrink: 0 }}>🎵</span>
+              <audio
+                src={item!.dataUrl}
+                style={{ flex: 1, height: 32, minWidth: 0 }}
+                controls
+                preload="metadata"
+              />
+            </>
           ) : (
             <img
               src={item!.dataUrl}
@@ -654,9 +699,65 @@ const SlotCard: React.FC<{
   );
 };
 
-const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageStrength, enablePrompt, enableImage = true, enableVideo = true, strengthDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
+// Audio Card Component
+const AudioCard: React.FC<{
+  aud: AudioInfo;
+  onRemove: (id: string) => void;
+}> = ({ aud, onRemove }) => {
+  return (
+    <div
+      style={{
+        position: 'relative',
+        width: 280,
+        height: 60,
+        borderRadius: 8,
+        overflow: 'hidden',
+        border: '1px solid #ddd',
+        background: '#f5f5f5',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        paddingLeft: 8,
+        paddingRight: 32,
+      }}
+    >
+      <span style={{ fontSize: 20, marginRight: 6, flexShrink: 0 }}>🎵</span>
+      <audio
+        src={aud.dataUrl}
+        style={{ flex: 1, height: 32 }}
+        controls
+        preload="metadata"
+      />
+      <button
+        onClick={(e) => { e.stopPropagation(); onRemove(aud.id); }}
+        style={{
+          position: 'absolute', top: 4, right: 4, width: 22, height: 22,
+          borderRadius: '50%', border: 'none', background: 'rgba(0,0,0,0.7)',
+          color: '#fff', cursor: 'pointer', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', fontSize: 16,
+          lineHeight: 1, padding: 0, zIndex: 10, transition: 'background 0.2s',
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,0,0,0.8)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; }}
+        title="Remove audio"
+      >×</button>
+      <div
+        style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0, padding: '2px 8px',
+          fontSize: 11, color: '#fff',
+          background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
+          pointerEvents: 'none', overflow: 'hidden',
+          textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >{aud.name}</div>
+    </div>
+  );
+};
+
+const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageStrength, enablePrompt, enableImage = true, enableVideo = true, enableAudio = true, strengthDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [videos, setVideos] = useState<VideoInfo[]>([]);
+  const [audios, setAudios] = useState<AudioInfo[]>([]);
   const [slots, setSlots] = useState<SlotItem[]>(() =>
     enableSlot ? slotDefs.map((d) => ({ type: d.type, data: null })) : []
   );
@@ -821,6 +922,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   useImperativeHandle(ref, () => ({
     setImages: (newImages: ImageInfo[]) => setImages(newImages),
     setVideos: (newVideos: VideoInfo[]) => setVideos(newVideos),
+    setAudios: (newAudios: AudioInfo[]) => setAudios(newAudios),
     setSlots: handleSetSlots,
     setPrompt: (newPrompt: string) => setPrompt(newPrompt),
     startCapture: (vid: VideoInfo) => handleStartCapture(vid),
@@ -870,7 +972,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
 
     window.addEventListener('resize', measurePanel);
     return () => window.removeEventListener('resize', measurePanel);
-  }, [images, videos, onHeightChange]);
+  }, [images, videos, audios, onHeightChange]);
 
   const removeImage = useCallback(
     (id: string) => {
@@ -954,8 +1056,28 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
     );
   }, []);
 
+  const removeAudio = useCallback(
+    (id: string) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const info = audios.find((aud) => aud.id === id);
+      if (!info) return;
+      try {
+        const currentSelectedIds = editor.getSelectedShapeIds();
+        const newSelectedIds = currentSelectedIds.filter((sid) => sid !== info.shapeId);
+        if (newSelectedIds.length !== currentSelectedIds.length) {
+          (editor as any).selectShapes(newSelectedIds);
+        }
+      } catch (err) {
+        console.error('[Panel] removeAudio deselect error:', err);
+      }
+      setAudios((prev) => prev.filter((aud) => aud.id !== id));
+    },
+    [editorRef, audios]
+  );
+
   // Slot handlers
-  const fillSlot = useCallback((index: number, item: ImageInfo | VideoInfo) => {
+  const fillSlot = useCallback((index: number, item: ImageInfo | VideoInfo | AudioInfo) => {
     console.log('[Panel] fillSlot called with index:', index, 'item:', { id: item.id, name: item.name, dataUrl: item.dataUrl?.substring(0, 30) });
     setSlots((prev) => {
       console.log('[Panel] fillSlot prev slots:', prev.length, 'items');
@@ -983,8 +1105,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   }, []);
 
   const handleLocalConfirm = useCallback(() => {
-    onConfirm({ images, videos, enableImageStrength, prompt, slots });
-  }, [images, videos, enableImageStrength, prompt, slots, onConfirm]);
+    onConfirm({ images, videos, audios, enableImageStrength, prompt, slots });
+  }, [images, videos, audios, enableImageStrength, prompt, slots, onConfirm]);
 
   return (
     <>
@@ -1235,6 +1357,105 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
           >
             +
           </button>
+        </div>
+        )}
+
+        {/* Audio thumbnails row — only shown when enableAudio is true */}
+        {enableAudio !== false && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              paddingBottom: 4,
+              flex: '1 1 0',
+              minWidth: 0,
+              scrollbarWidth: 'thin',
+              msOverflowStyle: 'none',
+            }}
+          >
+            {audios.map((aud) => (
+              <AudioCard key={aud.id} aud={aud} onRemove={removeAudio} />
+            ))}
+          </div>
+          <button
+            onClick={() => {
+              const editor = editorRef.current;
+              if (!editor) return;
+
+              const selectedShapeIds = editor.getSelectedShapeIds();
+              const allSelectedShapes = selectedShapeIds.map((id) => editor.getShape(id));
+
+              let addedCount = 0;
+              const newShapeIds: string[] = [];
+
+              // 1. Look for 'audio' type shapes (src stored directly in props)
+              for (const shape of allSelectedShapes) {
+                if (!shape || shape.type !== 'audio') continue;
+                if (audios.some((aud) => aud.shapeId === shape.id)) continue;
+
+                const src = (shape.props as any).src as string;
+                const name = (shape.props as any).name as string || 'audio';
+
+                setAudios((prev) => [
+                  ...prev,
+                  {
+                    id: `aud_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    name, dataUrl: src,
+                    assetId: '',
+                    shapeId: shape.id as string,
+                  },
+                ]);
+                newShapeIds.push(shape.id as string);
+                addedCount++;
+              }
+
+              // 2. Look for video shapes (mp4-as-audio)
+              const selectedVideoShapes = allSelectedShapes.filter(
+                (shape): shape is TLVideoShape => shape?.type === 'video'
+              );
+              for (const shape of selectedVideoShapes) {
+                if (audios.some((aud) => aud.shapeId === shape.id)) continue;
+                const assetId = shape.props.assetId;
+                if (!assetId) continue;
+                const asset = editor.getAsset(assetId) as TLAsset | undefined;
+                if (!asset || asset.type !== 'video') continue;
+                const src = (asset.props as any).src as string;
+                const name = (asset.props as any).name as string || 'audio';
+
+                setAudios((prev) => [
+                  ...prev,
+                  {
+                    id: `aud_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                    name, dataUrl: src,
+                    assetId: assetId as string,
+                    shapeId: shape.id as string,
+                  },
+                ]);
+                newShapeIds.push(shape.id as string);
+                addedCount++;
+              }
+
+              if (newShapeIds.length > 0) {
+                (editor as any).selectShapes(newShapeIds);
+              }
+              if (addedCount === 0) {
+                alert('No audio selected. Drop audio files on the canvas or select a video to use as audio.');
+              }
+            }}
+            style={{
+              width: 32, height: 32, borderRadius: 8, border: 'none',
+              background: '#f0f0f0', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 18, color: '#666', fontWeight: 300,
+              transition: 'background 0.2s', flexShrink: 0,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = '#e0e0e0'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = '#f0f0f0'; }}
+            title="Add audio from canvas"
+          >+</button>
         </div>
         )}
 

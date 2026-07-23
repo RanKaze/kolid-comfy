@@ -117,6 +117,69 @@ def extract_audio_segment(audio, start_timestamp, start_frame_offset, end_timest
     return audio_segment
 
 
+def load_audio_from_any_file(audio_path: str) -> dict:
+    """Load audio from any format file path (mp3, flac, wav, ogg, m4a, etc.) using FFmpeg.
+
+    If the file is already a WAV, loads directly. Otherwise converts to WAV
+    (pcm_s16le, 44100Hz, stereo) with caching, then loads.
+    """
+    import os
+    import subprocess
+    import hashlib
+    from .video_utils import FFMPEG_PATH, AUDIO_CACHE_DIR
+
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    # If already WAV, load directly
+    if audio_path.lower().endswith('.wav'):
+        return load_audio_from_file(audio_path)
+
+    if not os.path.exists(FFMPEG_PATH):
+        raise FileNotFoundError(f"FFmpeg not found at: {FFMPEG_PATH}")
+
+    # Generate cache key and filename
+    audio_key = hashlib.md5(audio_path.encode('utf-8')).hexdigest()
+    audio_name = os.path.splitext(os.path.basename(audio_path))[0]
+    cache_file = os.path.join(AUDIO_CACHE_DIR, f"{audio_name}_{audio_key[:8]}.wav")
+
+    # Check cache
+    if os.path.exists(cache_file):
+        try:
+            print(f"[AudioUtils] Loading audio from cache: {cache_file}")
+            return load_audio_from_file(cache_file)
+        except Exception as e:
+            print(f"[AudioUtils] Cache load failed: {e}, re-converting...")
+            try:
+                os.remove(cache_file)
+            except Exception:
+                pass
+
+    # Convert using FFmpeg
+    cmd = [
+        FFMPEG_PATH, '-i', audio_path,
+        '-vn',
+        '-acodec', 'pcm_s16le',
+        '-ar', '44100',
+        '-ac', '2',
+        '-f', 'wav',
+        '-y',
+        cache_file
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg failed: {result.stderr.strip()}")
+
+        audio_dict = load_audio_from_file(cache_file)
+        print(f"[AudioUtils] Audio loaded | Shape: {audio_dict['waveform'].shape} @ {audio_dict['sample_rate']}Hz")
+        return audio_dict
+    except Exception as e:
+        print(f"[AudioUtils] Conversion error: {e}")
+        raise
+
+
 def extract_audio_from_video(video):
     """Extract audio from video using FFmpeg with caching."""
     import os

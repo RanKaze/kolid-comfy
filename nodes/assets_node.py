@@ -33,7 +33,7 @@ def check_interrupted():
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, global_mode=False):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False):
         self.port = None
         self.server = None
         self.started = False
@@ -54,6 +54,7 @@ class SnapshotAssetsServer:
         self.slot_config = slot_config
         self.enable_image = enable_image
         self.enable_video = enable_video
+        self.enable_audio = enable_audio
         self.global_mode = global_mode
         self.should_stop = False
         self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
@@ -135,6 +136,45 @@ class SnapshotAssetsServer:
             return f"/assets/{filename}"
         except Exception as e:
             print(f"[SnapshotAssets] Failed to save video: {e}")
+            return None
+
+    def save_base64_audio(self, data_url):
+        """Save base64 audio to cache directory and return URL path."""
+        try:
+            if ',' in data_url:
+                header, base64_data = data_url.split(',', 1)
+            else:
+                base64_data = data_url
+                header = "data:audio/mpeg;base64"
+
+            ext = ".mp3"
+            if "audio/flac" in header:
+                ext = ".flac"
+            elif "audio/mpeg" in header or "audio/mp3" in header:
+                ext = ".mp3"
+            elif "audio/wav" in header or "audio/wave" in header or "audio/x-wav" in header:
+                ext = ".wav"
+            elif "audio/ogg" in header:
+                ext = ".ogg"
+            elif "audio/mp4" in header or "audio/m4a" in header or "audio/x-m4a" in header:
+                ext = ".m4a"
+            elif "audio/aac" in header:
+                ext = ".aac"
+            elif "video/mp4" in header:
+                ext = ".mp4"
+
+            filename = hashlib.md5(base64_data.encode()).hexdigest() + ext
+            filepath = os.path.join(self.asset_cache_dir, filename)
+
+            if not os.path.exists(filepath):
+                audio_bytes = base64.b64decode(base64_data)
+                with open(filepath, 'wb') as f:
+                    f.write(audio_bytes)
+                print(f"[SnapshotAssets] Saved audio to: {filepath}")
+
+            return f"/assets/{filename}"
+        except Exception as e:
+            print(f"[SnapshotAssets] Failed to save audio: {e}")
             return None
 
     def start(self):
@@ -245,7 +285,7 @@ class SnapshotAssetsServer:
                             slot_type, slot_name = part.split(':', 1)
                             slot_type = slot_type.strip().capitalize()
                             slot_name = slot_name.strip()
-                            if slot_type in ('Image', 'Video') and slot_name:
+                            if slot_type in ('Image', 'Video', 'Audio') and slot_name:
                                 slot_defs.append({'type': slot_type, 'name': slot_name})
                 
                 data = {
@@ -257,6 +297,7 @@ class SnapshotAssetsServer:
                     'enable_slot': self.server_instance.enable_slot if self.server_instance else False,
                     'enable_image': self.server_instance.enable_image if self.server_instance else True,
                     'enable_video': self.server_instance.enable_video if self.server_instance else True,
+                    'enable_audio': self.server_instance.enable_audio if self.server_instance else True,
                     'global_mode': self.server_instance.global_mode if self.server_instance else False,
                     'slot_defs': slot_defs,
                 }
@@ -288,6 +329,13 @@ class SnapshotAssetsServer:
                             elif ext == '.webm': content_type = 'video/webm'
                             elif ext == '.avi': content_type = 'video/x-msvideo'
                             elif ext == '.mov': content_type = 'video/quicktime'
+                        elif ext in ['.flac', '.mp3', '.wav', '.ogg', '.m4a', '.aac']:
+                            if ext == '.flac': content_type = 'audio/flac'
+                            elif ext == '.mp3': content_type = 'audio/mpeg'
+                            elif ext == '.wav': content_type = 'audio/wav'
+                            elif ext == '.ogg': content_type = 'audio/ogg'
+                            elif ext == '.m4a': content_type = 'audio/mp4'
+                            elif ext == '.aac': content_type = 'audio/aac'
 
                         # Parse Range header for video streaming
                         range_header = self.headers.get('Range')
@@ -347,6 +395,7 @@ class SnapshotAssetsServer:
                     # Get selected images, videos and tldraw snapshot from frontend
                     selected_images = data.get('images', [])
                     selected_videos_data = data.get('videos', [])
+                    selected_audios_data = data.get('audios', [])
                     selected_slots_data = data.get('slots', [])  # Array of {type, data} per slot
                     canvas_snapshot = data.get('canvas_snapshot', '')
                     
@@ -381,15 +430,26 @@ class SnapshotAssetsServer:
                                     if isinstance(panel_vid, dict) and 'dataUrl' in panel_vid:
                                         data_url = panel_vid['dataUrl']
                                         if isinstance(data_url, str) and data_url.startswith('data:'):
-                                            # Save video and get URL
                                             url = self.server_instance.save_base64_video(data_url)
                                             if url:
                                                 panel_vid['dataUrl'] = url
                                         elif isinstance(data_url, str) and not data_url.startswith('/assets/'):
-                                            # If it's already a file path (from previous save), convert to URL
                                             if os.path.isabs(data_url):
                                                 filename = os.path.basename(data_url)
                                                 panel_vid['dataUrl'] = f"/assets/{filename}"
+                            # Process panelAudios - convert base64 dataUrl to URL paths
+                            if 'panelAudios' in snapshot and isinstance(snapshot['panelAudios'], list):
+                                for panel_aud in snapshot['panelAudios']:
+                                    if isinstance(panel_aud, dict) and 'dataUrl' in panel_aud:
+                                        data_url = panel_aud['dataUrl']
+                                        if isinstance(data_url, str) and data_url.startswith('data:'):
+                                            url = self.server_instance.save_base64_audio(data_url)
+                                            if url:
+                                                panel_aud['dataUrl'] = url
+                                        elif isinstance(data_url, str) and not data_url.startswith('/assets/'):
+                                            if os.path.isabs(data_url):
+                                                filename = os.path.basename(data_url)
+                                                panel_aud['dataUrl'] = f"/assets/{filename}"
                             # Process panelSlots - convert base64 dataUrl to URLs
                             if 'panelSlots' in snapshot and isinstance(snapshot['panelSlots'], list):
                                 for panel_slot in snapshot['panelSlots']:
@@ -480,6 +540,37 @@ class SnapshotAssetsServer:
                     for item in selected_video_items:
                         print(f"[SnapshotAssets]   Video item: {item}")
                     
+                    # Convert selected audios
+                    selected_audio_items = []
+                    print(f"[SnapshotAssets] Received {len(selected_audios_data)} audio items from frontend")
+                    for aud_data in selected_audios_data:
+                        if isinstance(aud_data, dict) and 'audio' in aud_data:
+                            audio_url = aud_data['audio']
+                            if audio_url.startswith('data:'):
+                                url = self.server_instance.save_base64_audio(audio_url)
+                                if url:
+                                    audio_url = url
+                            elif not audio_url.startswith('/assets/') and os.path.isabs(audio_url):
+                                filename = os.path.basename(audio_url)
+                                audio_url = f"/assets/{filename}"
+                            selected_audio_items.append({"audio": audio_url})
+                        elif isinstance(aud_data, str):
+                            if aud_data.startswith('data:'):
+                                url = self.server_instance.save_base64_audio(aud_data)
+                                if url:
+                                    selected_audio_items.append({"audio": url})
+                                else:
+                                    selected_audio_items.append({"audio": aud_data})
+                            elif aud_data.startswith('/assets/'):
+                                selected_audio_items.append({"audio": aud_data})
+                            elif os.path.isabs(aud_data):
+                                filename = os.path.basename(aud_data)
+                                selected_audio_items.append({"audio": f"/assets/{filename}"})
+                            else:
+                                selected_audio_items.append({"audio": aud_data})
+
+                    print(f"[SnapshotAssets] Final selected_audio_items: {len(selected_audio_items)} items")
+                    
                     # Process selected slots if any
                     selected_slot_items = []
                     if selected_slots_data:
@@ -538,11 +629,33 @@ class SnapshotAssetsServer:
                                 
                                 selected_slot_items.append({'type': 'Video', 'data': {'video': video_url}})
                                 print(f"[SnapshotAssets]   Slot Video: {video_url[:80]}...")
+                            elif slot_type == 'Audio':
+                                # Process audio slot data
+                                if isinstance(slot_data, dict) and 'audio' in slot_data:
+                                    audio_url = slot_data['audio']
+                                elif isinstance(slot_data, str):
+                                    audio_url = slot_data
+                                else:
+                                    audio_url = str(slot_data)
+                                
+                                if audio_url.startswith('data:'):
+                                    url = self.server_instance.save_base64_audio(audio_url)
+                                    if url:
+                                        audio_url = url
+                                elif audio_url.startswith('/assets/'):
+                                    pass  # Already a URL
+                                elif os.path.isabs(audio_url):
+                                    filename = os.path.basename(audio_url)
+                                    audio_url = f"/assets/{filename}"
+                                
+                                selected_slot_items.append({'type': 'Audio', 'data': {'audio': audio_url}})
+                                print(f"[SnapshotAssets]   Slot Audio: {audio_url[:80]}...")
                             else:
                                 selected_slot_items.append({'type': slot_type, 'data': slot_data})
                     
                     self.server_instance.selected_images = selected_image_items
                     self.server_instance.selected_videos = selected_video_items
+                    self.server_instance.selected_audios = selected_audio_items
                     self.server_instance.selected_slots = selected_slot_items
                     prompt_value = data.get('prompt', '')
                     print(f"[SnapshotAssets] Received prompt: '{prompt_value}'")
@@ -592,6 +705,11 @@ class SnapshotAssetsServer:
                 # Sanitize: keep only the base filename
                 original_name = os.path.basename(original_name) or 'upload.mp4'
                 ext = os.path.splitext(original_name)[1] or '.mp4'
+                
+                # Normalize audio extensions
+                ext_lower = ext.lower()
+                if ext_lower in ('.flac', '.mp3', '.wav', '.ogg', '.m4a', '.aac'):
+                    ext = ext_lower
                 
                 if not self.server_instance:
                     self.send_error(500, "Server error")
@@ -665,6 +783,7 @@ class SnapshotAssetsNode:
                 "enable_image_strength": ("BOOLEAN", {"default": False}),
                 "image_strength_config": ("STRING", {"default": "test0:1.0,test1:0.5", "multiline": False}),
                 "enable_video": ("BOOLEAN", {"default": True}),
+                "enable_audio": ("BOOLEAN", {"default": True}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
                 "slot_config": ("STRING", {"default": "Image:slot0,Video:slot1", "multiline": False}),
             },
@@ -673,9 +792,9 @@ class SnapshotAssetsNode:
             },
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "FLOAT", "VIDEO", "*")
-    RETURN_NAMES = ("prompt", "image", "image_strength", "video", "slot")
-    OUTPUT_IS_LIST = (False, True, True, True, True)
+    RETURN_TYPES = ("STRING", "IMAGE", "FLOAT", "VIDEO", "AUDIO", "*")
+    RETURN_NAMES = ("prompt", "image", "image_strength", "video", "audio", "slot")
+    OUTPUT_IS_LIST = (False, True, True, True, True, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -716,7 +835,7 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, global_mode=False, unique_id=None):
+    def snapshot_assets(self, data="", enable_image_strength=False, enable_prompt=False, image_strength_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False, unique_id=None):
         # data contains the tldraw snapshot JSON string (normal mode) or a name (global_mode)
         canvas_snapshot = None
         if global_mode and data and data.strip():
@@ -739,7 +858,7 @@ class SnapshotAssetsNode:
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, global_mode=global_mode)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_strength=enable_image_strength, enable_prompt=enable_prompt, image_strength_config=image_strength_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, enable_audio=enable_audio, global_mode=global_mode)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -773,17 +892,16 @@ class SnapshotAssetsNode:
 
         selected_images = server.selected_images
         selected_videos = server.selected_videos if hasattr(server, 'selected_videos') else []
+        selected_audios = server.selected_audios if hasattr(server, 'selected_audios') else []
         selected_slots = server.selected_slots if hasattr(server, 'selected_slots') else []
         prompt = server.prompt if server.prompt is not None else ''
         
-        print(f"[SnapshotAssets] After confirm: {len(selected_images)} images, {len(selected_videos)} videos, {len(selected_slots)} slots")
-        for vid in selected_videos:
-            print(f"[SnapshotAssets]   Selected video: {vid}")
+        print(f"[SnapshotAssets] After confirm: {len(selected_images)} images, {len(selected_videos)} videos, {len(selected_audios)} audios, {len(selected_slots)} slots")
         
-        # Allow empty selection - return empty list if no images/videos selected
-        if not selected_images and not selected_videos and not selected_slots:
-            print("[SnapshotAssets] No images, videos or slots selected, returning empty lists")
-            return (prompt, [], [], [], [])
+        # Allow empty selection
+        if not selected_images and not selected_videos and not selected_audios and not selected_slots:
+            print("[SnapshotAssets] No images, videos, audios or slots selected, returning empty lists")
+            return (prompt, [], [], [], [], [])
 
         # Process images
         images = []
@@ -890,6 +1008,39 @@ class SnapshotAssetsNode:
         for i, vid in enumerate(videos):
             print(f"[SnapshotAssets] Video[{i}]: type={type(vid).__name__}, repr={repr(vid)[:200]}")
         
+        # Process audios
+        audios = []
+        print(f"[SnapshotAssets] Processing {len(selected_audios)} audio items")
+        for aud_data in selected_audios:
+            try:
+                audio_url = None
+                if isinstance(aud_data, dict):
+                    audio_url = aud_data.get('audio', '')
+                elif isinstance(aud_data, str):
+                    audio_url = aud_data
+                
+                if not audio_url:
+                    continue
+                
+                if audio_url.startswith('/assets/'):
+                    filename = os.path.basename(audio_url)
+                    audio_path = os.path.join(asset_cache_dir, filename)
+                else:
+                    audio_path = audio_url
+                
+                if not os.path.exists(audio_path):
+                    print(f"[SnapshotAssets] Warning: Audio file does not exist: {audio_path}")
+                    continue
+                
+                from ..libs.audio_utils import load_audio_from_any_file
+                audio_obj = load_audio_from_any_file(audio_path)
+                audios.append(audio_obj)
+                print(f"[SnapshotAssets] Successfully loaded audio: {audio_path}")
+            except Exception as e:
+                print(f"[SnapshotAssets] Failed to load audio: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # Process slots if enabled
         slot_outputs = []
         if enable_slot and selected_slots:
@@ -920,11 +1071,26 @@ class SnapshotAssetsNode:
                         video_obj = InputImpl.VideoFromFile(video_path)
                         slot_outputs.append(video_obj)
                         print(f"[SnapshotAssets] Slot output: VideoFromFile")
+                    elif slot_type == 'Audio':
+                        audio_url = slot_data.get('audio', '')
+                        if audio_url.startswith('/assets/'):
+                            filename = os.path.basename(audio_url)
+                            audio_path = os.path.join(asset_cache_dir, filename)
+                        else:
+                            audio_path = audio_url
+                        if not os.path.exists(audio_path):
+                            print(f"[SnapshotAssets] Warning: Slot audio file not found: {audio_path}")
+                            slot_outputs.append(None)
+                            continue
+                        from ..libs.audio_utils import load_audio_from_any_file
+                        audio_obj = load_audio_from_any_file(audio_path)
+                        slot_outputs.append(audio_obj)
+                        print(f"[SnapshotAssets] Slot output: Audio")
                     else:
                         slot_outputs.append(None)
                 except Exception as e:
                     print(f"[SnapshotAssets] Failed to process slot item: {e}")
                     slot_outputs.append(None)
         
-        print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(slot_outputs)} slots")
-        return (prompt, images, strengths_2d, videos, slot_outputs)
+        print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(audios)} audios, {len(slot_outputs)} slots")
+        return (prompt, images, strengths_2d, videos, audios, slot_outputs)
