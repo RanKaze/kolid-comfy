@@ -133,7 +133,7 @@ const App: React.FC = () => {
   const [videoConfigDefs, setVideoConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
   const [audioConfigDefs, setAudioConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
   const [enableSlot, setEnableSlot] = useState(false);
-  const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
+  const [slotDefs, setSlotDefs] = useState<{ type: string; name: string; config_defs?: any[] }[]>([]);
   const [globalMode, setGlobalMode] = useState(false);  // Whether data is a name for disk persistence
   const panelHandleRef = useRef<PanelHandle>(null);
 
@@ -334,21 +334,22 @@ const App: React.FC = () => {
     const panelSlots = slots.map((slot) => {
       const item = slot.data;
       if (!item) return { type: slot.type, data: null };
+      const infos = (item as any).image_infos;
       if (slot.type === 'Image') {
         return {
           type: 'Image',
-          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
+          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId, image_infos: infos },
         };
       }
       if (slot.type === 'Audio') {
         return {
           type: 'Audio',
-          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
+          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId, image_infos: infos },
         };
       }
       return {
         type: 'Video',
-        data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
+        data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId, image_infos: infos },
       };
     });
 
@@ -389,14 +390,15 @@ const App: React.FC = () => {
         image_infos: enableAudioConfig ? aud.image_infos : undefined,
       }));
       const selectedSlots = slots.map((slot) => {
-        if (!slot.data) return { type: slot.type, data: null };
+        const infos = (slot.data as any)?.image_infos;
+        if (!slot.data) return { type: slot.type, data: null, image_infos: null };
         if (slot.type === 'Image') {
-          return { type: 'Image', data: { image: slot.data.dataUrl } };
+          return { type: 'Image', data: { image: slot.data.dataUrl }, image_infos: infos ?? null };
         }
         if (slot.type === 'Audio') {
-          return { type: 'Audio', data: { audio: slot.data.dataUrl } };
+          return { type: 'Audio', data: { audio: slot.data.dataUrl }, image_infos: infos ?? null };
         }
-        return { type: 'Video', data: { video: slot.data.dataUrl } };
+        return { type: 'Video', data: { video: slot.data.dataUrl }, image_infos: infos ?? null };
       });
       console.log('[App] handleConfirm sending prompt:', prompt);
       await fetch('/confirm', {
