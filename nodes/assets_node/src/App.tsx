@@ -124,10 +124,14 @@ const App: React.FC = () => {
   const [pendingSnapshot, setPendingSnapshot] = useState<string | null>(null);
   const [enableImageConfig, setEnableImageConfig] = useState(false);
   const [enablePrompt, setEnablePrompt] = useState(false);
-  const [enableImage, setEnableImage] = useState(true);  // Image area enabled by default
-  const [enableVideo, setEnableVideo] = useState(true);  // Video area enabled by default
-  const [enableAudio, setEnableAudio] = useState(true);  // Audio area enabled by default
+  const [enableImage, setEnableImage] = useState(true);
+  const [enableVideo, setEnableVideo] = useState(true);
+  const [enableAudio, setEnableAudio] = useState(true);
+  const [enableVideoConfig, setEnableVideoConfig] = useState(false);
+  const [enableAudioConfig, setEnableAudioConfig] = useState(false);
   const [imageConfigDefs, setImageConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
+  const [videoConfigDefs, setVideoConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
+  const [audioConfigDefs, setAudioConfigDefs] = useState<{ name: string; type: string; default: any; min?: number; max?: number; step?: number }[]>([]);
   const [enableSlot, setEnableSlot] = useState(false);
   const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
   const [globalMode, setGlobalMode] = useState(false);  // Whether data is a name for disk persistence
@@ -150,7 +154,11 @@ const App: React.FC = () => {
         setEnableImage(data.enable_image !== undefined ? data.enable_image : true);
         setEnableVideo(data.enable_video !== undefined ? data.enable_video : true);
         setEnableAudio(data.enable_audio !== undefined ? data.enable_audio : true);
+        setEnableVideoConfig(data.enable_video_config || false);
+        setEnableAudioConfig(data.enable_audio_config || false);
         setImageConfigDefs(data.image_config_defs || []);
+        setVideoConfigDefs(data.video_config_defs || []);
+        setAudioConfigDefs(data.audio_config_defs || []);
         setEnableSlot(data.enable_slot || false);
         setSlotDefs(data.slot_defs || []);
         setGlobalMode(data.global_mode || false);
@@ -273,7 +281,7 @@ const App: React.FC = () => {
     // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
-  const handleConfirm = useCallback(async ({ images, videos, audios, enableImageConfig, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
+  const handleConfirm = useCallback(async ({ images, videos, audios, enableImageConfig, enableVideoConfig, enableAudioConfig, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; enableVideoConfig: boolean; enableAudioConfig: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -309,6 +317,7 @@ const App: React.FC = () => {
       dataUrl: vid.dataUrl,
       assetId: vid.assetId,
       shapeId: vid.shapeId,
+      image_infos: vid.image_infos,
     }));
 
     // Save panel selected audios info
@@ -318,6 +327,7 @@ const App: React.FC = () => {
       dataUrl: aud.dataUrl,
       assetId: aud.assetId,
       shapeId: aud.shapeId,
+      image_infos: aud.image_infos,
     }));
 
     // Save panel selected slots info
@@ -353,6 +363,8 @@ const App: React.FC = () => {
       panelAudios: panelAudios,
       panelSlots: panelSlots,
       enableImageConfig,
+      enableVideoConfig,
+      enableAudioConfig,
       prompt,
       camera: {
         x: camera.x,
@@ -370,9 +382,11 @@ const App: React.FC = () => {
       }));
       const selectedVideos = videos.map((vid) => ({
         video: vid.dataUrl,
+        image_infos: enableVideoConfig ? vid.image_infos : undefined,
       }));
       const selectedAudios = audios.map((aud) => ({
         audio: aud.dataUrl,
+        image_infos: enableAudioConfig ? aud.image_infos : undefined,
       }));
       const selectedSlots = slots.map((slot) => {
         if (!slot.data) return { type: slot.type, data: null };
@@ -612,8 +626,12 @@ const App: React.FC = () => {
         enablePrompt={enablePrompt}
         enableImage={enableImage}
         enableVideo={enableVideo}
+        enableVideoConfig={enableVideoConfig}
         enableAudio={enableAudio}
+        enableAudioConfig={enableAudioConfig}
         imageConfigDefs={imageConfigDefs}
+        videoConfigDefs={videoConfigDefs}
+        audioConfigDefs={audioConfigDefs}
         enableSlot={enableSlot}
         slotDefs={slotDefs}
       />

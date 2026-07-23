@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ImageInfo } from './Panel';
 
-interface ImageConfigDef {
+export interface ImageConfigDef {
   name: string;
   type: string; // Float | Int | Boolean | String
   default: any;
@@ -19,7 +19,7 @@ interface ThumbnailListProps {
 }
 
 // Vertical slider bar for Float/Int values
-const SliderBar: React.FC<{
+export const SliderBar: React.FC<{
   name: string;
   value: number;
   min: number;
@@ -104,7 +104,7 @@ const SliderBar: React.FC<{
 };
 
 // Checkbox for Boolean values
-const BooleanControl: React.FC<{ name: string; value: boolean; onChange: (value: boolean) => void }> = ({ name, value, onChange }) => (
+export const BooleanControl: React.FC<{ name: string; value: boolean; onChange: (value: boolean) => void }> = ({ name, value, onChange }) => (
   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, width: 36 }}>
     <input
       type="checkbox"
@@ -118,7 +118,7 @@ const BooleanControl: React.FC<{ name: string; value: boolean; onChange: (value:
 );
 
 // Text input for String values
-const StringControl: React.FC<{ name: string; value: string; onChange: (value: string) => void }> = ({ name, value, onChange }) => (
+export const StringControl: React.FC<{ name: string; value: string; onChange: (value: string) => void }> = ({ name, value, onChange }) => (
   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, width: 60 }}>
     <input
       type="text"

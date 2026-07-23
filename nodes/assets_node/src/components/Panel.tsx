@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
 import { Editor, TLImageShape, TLVideoShape, TLAsset, AssetRecordType } from '@tldraw/tldraw';
-import ThumbnailList from './ThumbnailList';
+import ThumbnailList, { ImageConfigDef, SliderBar, BooleanControl, StringControl } from './ThumbnailList';
 
 export interface ImageInfo {
   id: string;
@@ -21,6 +21,7 @@ export interface VideoInfo {
   assetId: string;
   shapeId: string;
   aspectRatio?: number;
+  image_infos?: Record<string, any>;
 }
 
 export interface AudioInfo {
@@ -29,6 +30,7 @@ export interface AudioInfo {
   dataUrl: string;
   assetId: string;
   shapeId: string;
+  image_infos?: Record<string, any>;
 }
 
 export interface SlotItem {
@@ -48,13 +50,17 @@ export interface PanelHandle {
 interface PanelProps {
   editor: React.RefObject<Editor | null>;
   onHeightChange: (height: number) => void;
-  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; prompt: string; slots: SlotItem[] }) => void;
+  onConfirm: (data: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageConfig: boolean; enableVideoConfig: boolean; enableAudioConfig: boolean; prompt: string; slots: SlotItem[] }) => void;
   enableImageConfig: boolean;
   enablePrompt: boolean;
   enableImage?: boolean;
   enableVideo?: boolean;
+  enableVideoConfig?: boolean;
   enableAudio?: boolean;
+  enableAudioConfig?: boolean;
   imageConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
+  videoConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
+  audioConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
   enableSlot?: boolean;
   slotDefs?: { type: string; name: string }[];
 }
@@ -228,7 +234,10 @@ const VideoCard: React.FC<{
   vid: VideoInfo;
   onRemove: (id: string) => void;
   onCaptureFrame?: (vid: VideoInfo) => void;
-}> = ({ vid, onRemove, onCaptureFrame }) => {
+  enableConfig?: boolean;
+  configDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
+  onConfigChange?: (id: string, name: string, value: any) => void;
+}> = ({ vid, onRemove, onCaptureFrame, enableConfig = false, configDefs = [], onConfigChange }) => {
   const [aspectRatio, setAspectRatio] = useState<number>(16 / 9); // Default to 16:9
   const CARD_HEIGHT = 280; // Fixed height in pixels (increased for better viewing)
 
@@ -252,6 +261,20 @@ const VideoCard: React.FC<{
   const cardWidth = Math.round(CARD_HEIGHT * aspectRatio);
 
   return (
+    <div
+      style={{
+        position: 'relative',
+        display: 'flex',
+        flexDirection: 'row',
+        gap: 6,
+        padding: 6,
+        borderRadius: 8,
+        background: '#f9f9f9',
+        border: '1px solid #eee',
+        flexShrink: 0,
+        height: CARD_HEIGHT + 12,
+      }}
+    >
     <div
       style={{
         position: 'relative',
@@ -366,6 +389,23 @@ const VideoCard: React.FC<{
       >
         {vid.name}
       </div>
+    </div>
+      {enableConfig && configDefs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'row', gap: 4, alignItems: 'flex-start', paddingTop: 2 }}>
+          {configDefs.map((def) => {
+            const val = vid.image_infos?.[def.name] ?? def.default;
+            if (def.type === 'Float' || def.type === 'Int') {
+              return (
+                <SliderBar key={def.name} name={def.name} value={val} min={def.min ?? 0} max={def.max ?? 1} step={def.step ?? 0.01} isInt={def.type === 'Int'} onChange={(value) => onConfigChange?.(vid.id, def.name, value)} />
+              );
+            }
+            if (def.type === 'Boolean') {
+              return <BooleanControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(vid.id, def.name, value)} />;
+            }
+            return <StringControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(vid.id, def.name, value)} />;
+          })}
+        </div>
+      )}
     </div>
   );
 };
@@ -703,58 +743,57 @@ const SlotCard: React.FC<{
 const AudioCard: React.FC<{
   aud: AudioInfo;
   onRemove: (id: string) => void;
-}> = ({ aud, onRemove }) => {
+  enableConfig?: boolean;
+  configDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
+  onConfigChange?: (id: string, name: string, value: any) => void;
+}> = ({ aud, onRemove, enableConfig = false, configDefs = [], onConfigChange }) => {
   return (
     <div
       style={{
         position: 'relative',
-        width: 280,
-        height: 60,
-        borderRadius: 8,
-        overflow: 'hidden',
-        border: '1px solid #ddd',
-        background: '#f5f5f5',
-        flexShrink: 0,
         display: 'flex',
-        alignItems: 'center',
-        paddingLeft: 8,
-        paddingRight: 32,
+        flexDirection: 'column',
+        gap: 4,
+        padding: 6,
+        borderRadius: 8,
+        background: '#f9f9f9',
+        border: '1px solid #eee',
+        flexShrink: 0,
       }}
     >
-      <span style={{ fontSize: 20, marginRight: 6, flexShrink: 0 }}>🎵</span>
-      <audio
-        src={aud.dataUrl}
-        style={{ flex: 1, height: 32 }}
-        controls
-        preload="metadata"
-      />
-      <button
-        onClick={(e) => { e.stopPropagation(); onRemove(aud.id); }}
-        style={{
-          position: 'absolute', top: 4, right: 4, width: 22, height: 22,
-          borderRadius: '50%', border: 'none', background: 'rgba(0,0,0,0.7)',
-          color: '#fff', cursor: 'pointer', display: 'flex',
-          alignItems: 'center', justifyContent: 'center', fontSize: 16,
-          lineHeight: 1, padding: 0, zIndex: 10, transition: 'background 0.2s',
-        }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,0,0,0.8)'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; }}
-        title="Remove audio"
-      >×</button>
-      <div
-        style={{
-          position: 'absolute', bottom: 0, left: 0, right: 0, padding: '2px 8px',
-          fontSize: 11, color: '#fff',
-          background: 'linear-gradient(transparent, rgba(0,0,0,0.8))',
-          pointerEvents: 'none', overflow: 'hidden',
-          textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}
-      >{aud.name}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto', position: 'relative', width: 280, height: 60, borderRadius: 8, overflow: 'hidden', border: '1px solid #ddd', background: '#f5f5f5', paddingLeft: 8, paddingRight: 32 }}>
+        <span style={{ fontSize: 20, flexShrink: 0 }}>🎵</span>
+        <audio src={aud.dataUrl} style={{ flex: 1, height: 32 }} controls preload="metadata" />
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove(aud.id); }}
+          style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: '50%', border: 'none', background: 'rgba(0,0,0,0.7)', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, lineHeight: 1, padding: 0, zIndex: 10, transition: 'background 0.2s' }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,0,0,0.8)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; }}
+          title="Remove audio"
+        >×</button>
+        <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '2px 8px', fontSize: 11, color: '#fff', background: 'linear-gradient(transparent, rgba(0,0,0,0.8))', pointerEvents: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{aud.name}</div>
+      </div>
+      {enableConfig && configDefs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'row', gap: 4, alignItems: 'flex-start', paddingTop: 2 }}>
+          {configDefs.map((def) => {
+            const val = aud.image_infos?.[def.name] ?? def.default;
+            if (def.type === 'Float' || def.type === 'Int') {
+              return (
+                <SliderBar key={def.name} name={def.name} value={val} min={def.min ?? 0} max={def.max ?? 1} step={def.step ?? 0.01} isInt={def.type === 'Int'} onChange={(value) => onConfigChange?.(aud.id, def.name, value)} />
+              );
+            }
+            if (def.type === 'Boolean') {
+              return <BooleanControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(aud.id, def.name, value)} />;
+            }
+            return <StringControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(aud.id, def.name, value)} />;
+          })}
+        </div>
+      )}
     </div>
   );
 };
 
-const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageConfig, enablePrompt, enableImage = true, enableVideo = true, enableAudio = true, imageConfigDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
+const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeightChange, onConfirm, enableImageConfig, enablePrompt, enableImage = true, enableVideo = true, enableVideoConfig = false, enableAudio = true, enableAudioConfig = false, imageConfigDefs = [], videoConfigDefs = [], audioConfigDefs = [], enableSlot = false, slotDefs = [] }, ref) => {
   const [images, setImages] = useState<ImageInfo[]>([]);
   const [videos, setVideos] = useState<VideoInfo[]>([]);
   const [audios, setAudios] = useState<AudioInfo[]>([]);
@@ -1056,6 +1095,26 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
     );
   }, []);
 
+  const updateVideoInfo = useCallback((id: string, name: string, value: any) => {
+    setVideos((prev) =>
+      prev.map((vid) =>
+        vid.id === id
+          ? { ...vid, image_infos: { ...vid.image_infos, [name]: value } }
+          : vid
+      )
+    );
+  }, []);
+
+  const updateAudioInfo = useCallback((id: string, name: string, value: any) => {
+    setAudios((prev) =>
+      prev.map((aud) =>
+        aud.id === id
+          ? { ...aud, image_infos: { ...aud.image_infos, [name]: value } }
+          : aud
+      )
+    );
+  }, []);
+
   const removeAudio = useCallback(
     (id: string) => {
       const editor = editorRef.current;
@@ -1105,8 +1164,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   }, []);
 
   const handleLocalConfirm = useCallback(() => {
-    onConfirm({ images, videos, audios, enableImageConfig, prompt, slots });
-  }, [images, videos, audios, enableImageConfig, prompt, slots, onConfirm]);
+    onConfirm({ images, videos, audios, enableImageConfig, enableVideoConfig, enableAudioConfig, prompt, slots });
+  }, [images, videos, audios, enableImageConfig, enableVideoConfig, enableAudioConfig, prompt, slots, onConfirm]);
 
   return (
     <>
@@ -1278,7 +1337,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
             }}
           >
             {videos.map((vid) => (
-              <VideoCard key={vid.id} vid={vid} onRemove={removeVideo} onCaptureFrame={handleStartCapture} />
+              <VideoCard key={vid.id} vid={vid} onRemove={removeVideo} onCaptureFrame={handleStartCapture} enableConfig={enableVideoConfig} configDefs={videoConfigDefs} onConfigChange={updateVideoInfo} />
             ))}
           </div>
           <button
@@ -1377,7 +1436,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
             }}
           >
             {audios.map((aud) => (
-              <AudioCard key={aud.id} aud={aud} onRemove={removeAudio} />
+              <AudioCard key={aud.id} aud={aud} onRemove={removeAudio} enableConfig={enableAudioConfig} configDefs={audioConfigDefs} onConfigChange={updateAudioInfo} />
             ))}
           </div>
           <button
