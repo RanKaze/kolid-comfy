@@ -3,6 +3,8 @@ import subprocess
 import json
 import hashlib
 import torch
+import torchaudio
+import torch.nn.functional as F
 import numpy as np
 from ..libs.timestamp import parse_timestamp
 from ..libs.video_utils import FFMPEG_PATH, AUDIO_CACHE_DIR
@@ -67,6 +69,42 @@ class GetVideoAudioNode:
             raise Exception(f"Failed to extract audio: {e}")
 
 
+class GetAudioInfoNode:
+    """Get audio duration in seconds."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO", {
+                    "tooltip": "Audio object to get info from"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("duration",)
+    FUNCTION = "get_info"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def IS_CHANGED(s, audio):
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sample_rate")
+        if waveform is not None:
+            return f"{waveform.shape}_{sample_rate}"
+        return str(id(audio))
+
+    def get_info(self, audio):
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sample_rate")
+        if waveform is None or sample_rate is None:
+            raise ValueError("Audio object must contain waveform and sample_rate")
+        total_samples = waveform.shape[-1]
+        duration = total_samples / sample_rate
+        return (float(duration),)
+
+
 class GetAudioSegmentNode:
     """Extract audio segment based on timestamp and frame parameters."""
 
@@ -128,3 +166,75 @@ class GetAudioSegmentNode:
             return (audio_segment,)
         except Exception as e:
             raise Exception(f"Failed to extract audio segment: {e}")
+
+
+class VAEEncodeAudioTiled:
+    """Encode audio to latent using tiled VAE encoding."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO", {
+                    "tooltip": "Audio object to encode"
+                }),
+                "vae": ("VAE", {
+                    "tooltip": "VAE model to use for encoding"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "encode"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def IS_CHANGED(cls, audio, vae):
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sample_rate")
+        if waveform is not None:
+            return f"{waveform.shape}_{sample_rate}"
+        return str(id(audio))
+
+    def encode(self, vae, audio):
+        waveform = audio["waveform"]
+        sample_rate = audio["sample_rate"]
+
+        # --- vae_sr (SFT: getattr(vae, "audio_sample_rate", 48000)) ---
+        vae_sr = getattr(vae, "audio_sample_rate", 48000)
+
+        # --- duration & latent_length (SFT: _get_source_duration_seconds + generate) ---
+        sr = max(int(sample_rate), 1)
+        duration = waveform.shape[-1] / sr
+        latent_length = max(10, round(duration * vae_sr / 1920))
+
+        # --- normalize audio (SFT: _normalize_audio_to_stereo_48k) ---
+        if waveform.dim() == 2:
+            waveform = waveform.unsqueeze(0)
+        elif waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0).unsqueeze(0)
+
+        if waveform.dim() == 3 and waveform.shape[1] > waveform.shape[2] and waveform.shape[2] <= 8:
+            waveform = waveform.movedim(-1, 1)
+
+        if waveform.shape[1] == 1:
+            waveform = waveform.repeat(1, 2, 1)
+        elif waveform.shape[1] > 2:
+            waveform = waveform[:, :2, :]
+
+        if sample_rate != vae_sr:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, vae_sr)
+
+        waveform = torch.clamp(waveform, -1.0, 1.0)
+
+        # --- pad / truncate (SFT: _build_source_latent) ---
+        target_samples = latent_length * 1920
+        if waveform.shape[-1] < target_samples:
+            waveform = F.pad(waveform, (0, target_samples - waveform.shape[-1]))
+        elif waveform.shape[-1] > target_samples:
+            waveform = waveform[:, :, :target_samples]
+
+        # --- encode (SFT: _vae_encode_with_optional_tiling) ---
+        t = vae.encode_tiled(waveform.movedim(1, -1), tile_y=1)
+        return ({"samples": t},)
