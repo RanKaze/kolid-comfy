@@ -110,15 +110,15 @@ class BranchSwitchNode:
     FUNCTION = "execute"
     CATEGORY = "Kolid-Toolkit"
 
-    def check_lazy_status(self, value, toggle, **kwargs):
+    def check_lazy_status(self, value=None, toggle=None, **kwargs):
         if toggle:
             return ["value"]
         return []
 
     def execute(self, *args, **kwargs):
-        toggleValue = kwargs['toggle']
+        toggleValue = kwargs.get('toggle', False)
         if toggleValue:
-            return (kwargs['value'],)
+            return (kwargs.get('value'),)
         return (None,)
     
 
@@ -137,7 +137,7 @@ class BranchBooleanNode:
     FUNCTION = "execute"
     CATEGORY = "Kolid-Toolkit"
 
-    def execute(self, toggle, **kwargs):
+    def execute(self, toggle=None, **kwargs):
         return (toggle,)
     
 class BranchSwitchesNode:
@@ -192,7 +192,7 @@ class BranchSwitchesNode:
     def switch(self, select, select_input, **kwargs):
         input_keys = [k for k in kwargs if k.startswith('input')]
         selected_key = f"input{select_input}"
-        if select_input <= 0 or selected_key not in kwargs:
+        if select_input is None or select_input <= 0 or selected_key not in kwargs:
             raise ValueError(f"select_input {select_input} is out of range for input keys {input_keys}")
         input = kwargs[selected_key]
         return (input, select, select_input)
