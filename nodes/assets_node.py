@@ -96,7 +96,7 @@ def parse_image_config(config_str):
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
-    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False):
+    def __init__(self, input_data="", canvas_snapshot=None, node_id=None, enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_video_config=False, video_config="", enable_audio=True, enable_audio_config=False, audio_config="", global_mode=False):
         self.port = None
         self.server = None
         self.started = False
@@ -117,7 +117,11 @@ class SnapshotAssetsServer:
         self.slot_config = slot_config
         self.enable_image = enable_image
         self.enable_video = enable_video
+        self.enable_video_config = enable_video_config
+        self.video_config = video_config
         self.enable_audio = enable_audio
+        self.enable_audio_config = enable_audio_config
+        self.audio_config = audio_config
         self.global_mode = global_mode
         self.should_stop = False
         self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
@@ -320,20 +324,38 @@ class SnapshotAssetsServer:
                 image_config_defs = []
                 if self.server_instance and self.server_instance.image_config:
                     image_config_defs = parse_image_config(self.server_instance.image_config)
-                # Parse slot_config into list of {type, name} dicts
-                # Format: "Image:Test,Video:Test1,Image:Test2"
+                video_config_defs = []
+                if self.server_instance and self.server_instance.video_config:
+                    video_config_defs = parse_image_config(self.server_instance.video_config)
+                audio_config_defs = []
+                if self.server_instance and self.server_instance.audio_config:
+                    audio_config_defs = parse_image_config(self.server_instance.audio_config)
+                # Parse slot_config into list of {type, name, config_defs} dicts
+                # Format: "Image:slot0(test0:Float:1.0(0.0,1.0,0.1)),Video:slot1"
                 slot_defs = []
                 if self.server_instance and self.server_instance.enable_slot and self.server_instance.slot_config:
+                    import re
                     for part in self.server_instance.slot_config.split(','):
                         part = part.strip()
                         if not part:
                             continue
-                        if ':' in part:
-                            slot_type, slot_name = part.split(':', 1)
-                            slot_type = slot_type.strip().capitalize()
-                            slot_name = slot_name.strip()
-                            if slot_type in ('Image', 'Video', 'Audio') and slot_name:
-                                slot_defs.append({'type': slot_type, 'name': slot_name})
+                        # Match: Type:name(config_string) or Type:name
+                        m = re.match(r'^(Image|Video|Audio):(\S+?)\((.+)\)$', part)
+                        if m:
+                            slot_type = m.group(1).strip().capitalize()
+                            slot_name = m.group(2).strip()
+                            config_str = m.group(3)
+                            slot_config_defs = parse_image_config(config_str)
+                        else:
+                            if ':' in part:
+                                slot_type, slot_name = part.split(':', 1)
+                                slot_type = slot_type.strip().capitalize()
+                                slot_name = slot_name.strip()
+                            else:
+                                continue
+                            slot_config_defs = []
+                        if slot_type in ('Image', 'Video', 'Audio') and slot_name:
+                            slot_defs.append({'type': slot_type, 'name': slot_name, 'config_defs': slot_config_defs})
                 
                 data = {
                     'input_data': self.server_instance.input_data if self.server_instance else '',
@@ -341,6 +363,10 @@ class SnapshotAssetsServer:
                     'enable_image_config': self.server_instance.enable_image_config if self.server_instance else False,
                     'enable_prompt': self.server_instance.enable_prompt if self.server_instance else False,
                     'image_config_defs': image_config_defs,
+                    'enable_video_config': self.server_instance.enable_video_config if self.server_instance else False,
+                    'video_config_defs': video_config_defs,
+                    'enable_audio_config': self.server_instance.enable_audio_config if self.server_instance else False,
+                    'audio_config_defs': audio_config_defs,
                     'enable_slot': self.server_instance.enable_slot if self.server_instance else False,
                     'enable_image': self.server_instance.enable_image if self.server_instance else True,
                     'enable_video': self.server_instance.enable_video if self.server_instance else True,
@@ -567,6 +593,9 @@ class SnapshotAssetsServer:
                                 filename = os.path.basename(video_url)
                                 video_url = f"/assets/{filename}"
                             item = {"video": video_url}
+                            # Support video_infos dict
+                            if 'image_infos' in vid_data and vid_data['image_infos'] is not None:
+                                item['image_infos'] = vid_data['image_infos']
                             selected_video_items.append(item)
                         elif isinstance(vid_data, str):
                             if vid_data.startswith('data:'):
@@ -602,7 +631,10 @@ class SnapshotAssetsServer:
                             elif not audio_url.startswith('/assets/') and os.path.isabs(audio_url):
                                 filename = os.path.basename(audio_url)
                                 audio_url = f"/assets/{filename}"
-                            selected_audio_items.append({"audio": audio_url})
+                            audio_item = {"audio": audio_url}
+                            if 'image_infos' in aud_data and aud_data['image_infos'] is not None:
+                                audio_item['image_infos'] = aud_data['image_infos']
+                            selected_audio_items.append(audio_item)
                         elif isinstance(aud_data, str):
                             if aud_data.startswith('data:'):
                                 url = self.server_instance.save_base64_audio(aud_data)
@@ -832,7 +864,11 @@ class SnapshotAssetsNode:
                 "enable_image_config": ("BOOLEAN", {"default": False}),
                 "image_config": ("STRING", {"default": "test0:Float:1.0(0.0,1.0,0.1),test1:Float:0.5(0.0,1.0,0.1)", "multiline": False}),
                 "enable_video": ("BOOLEAN", {"default": True}),
+                "enable_video_config": ("BOOLEAN", {"default": False}),
+                "video_config": ("STRING", {"default": "vtest0:Float:1.0(0.0,1.0,0.1)", "multiline": False}),
                 "enable_audio": ("BOOLEAN", {"default": True}),
+                "enable_audio_config": ("BOOLEAN", {"default": False}),
+                "audio_config": ("STRING", {"default": "atest0:Float:1.0(0.0,1.0,0.1)", "multiline": False}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
                 "slot_config": ("STRING", {"default": "Image:slot0,Video:slot1", "multiline": False}),
             },
@@ -841,9 +877,9 @@ class SnapshotAssetsNode:
             },
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "*", "VIDEO", "AUDIO", "*")
-    RETURN_NAMES = ("prompt", "image", "image_infos", "video", "audio", "slot")
-    OUTPUT_IS_LIST = (False, True, True, True, True, True)
+    RETURN_TYPES = ("STRING", "IMAGE", "*", "VIDEO", "*", "AUDIO", "*", "*")
+    RETURN_NAMES = ("prompt", "image", "image_infos", "video", "video_infos", "audio", "audio_infos", "slot")
+    OUTPUT_IS_LIST = (False, True, True, True, True, True, True, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -884,7 +920,7 @@ class SnapshotAssetsNode:
         tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
         return tensor
 
-    def snapshot_assets(self, data="", enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_audio=True, global_mode=False, unique_id=None):
+    def snapshot_assets(self, data="", enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_video_config=False, video_config="", enable_audio=True, enable_audio_config=False, audio_config="", global_mode=False, unique_id=None):
         # data contains the tldraw snapshot JSON string (normal mode) or a name (global_mode)
         canvas_snapshot = None
         if global_mode and data and data.strip():
@@ -907,7 +943,7 @@ class SnapshotAssetsNode:
             except Exception as e:
                 print(f"[SnapshotAssets] Failed to parse data: {e}")
         
-        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_config=enable_image_config, enable_prompt=enable_prompt, image_config=image_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, enable_audio=enable_audio, global_mode=global_mode)
+        server = SnapshotAssetsServer(input_data=data, canvas_snapshot=canvas_snapshot, node_id=unique_id, enable_image_config=enable_image_config, enable_prompt=enable_prompt, image_config=image_config, enable_slot=enable_slot, slot_config=slot_config, enable_image=enable_image, enable_video=enable_video, enable_video_config=enable_video_config, video_config=video_config, enable_audio=enable_audio, enable_audio_config=enable_audio_config, audio_config=audio_config, global_mode=global_mode)
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
         server_thread.start()
@@ -950,7 +986,7 @@ class SnapshotAssetsNode:
         # Allow empty selection
         if not selected_images and not selected_videos and not selected_audios and not selected_slots:
             print("[SnapshotAssets] No images, videos, audios or slots selected, returning empty lists")
-            return (prompt, [], [], [], [], [])
+            return (prompt, [], [], [], [], [], [], [])
 
         # Process images
         images = []
@@ -1134,5 +1170,49 @@ class SnapshotAssetsNode:
                     print(f"[SnapshotAssets] Failed to process slot item: {e}")
                     slot_outputs.append(None)
         
-        print(f"[SnapshotAssets] Final output: {len(images)} images, {len(videos)} videos, {len(audios)} audios, {len(slot_outputs)} slots")
-        return (prompt, images, image_infos_list, videos, audios, slot_outputs)
+        # Process video configs
+        video_config_defs_parsed = parse_image_config(video_config)
+        if enable_video_config and not video_config_defs_parsed:
+            video_config_defs_parsed = [{'name': 'config0', 'type': 'Float', 'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}]
+        video_config_defaults_map = {d['name']: d['default'] for d in video_config_defs_parsed}
+        video_infos_list = []
+        for vid_data in selected_videos:
+            if isinstance(vid_data, dict) and enable_video_config and video_config_defs_parsed:
+                infos_dict = vid_data.get('image_infos', {})
+                info_item = {}
+                for d in video_config_defs_parsed:
+                    name = d['name']
+                    if isinstance(infos_dict, dict) and name in infos_dict:
+                        val = infos_dict[name]
+                        if d['type'] == 'Float': val = float(val)
+                        elif d['type'] == 'Int': val = int(val)
+                        elif d['type'] == 'Boolean': val = bool(val)
+                        info_item[name] = val
+                    else:
+                        info_item[name] = video_config_defaults_map.get(name, d['default'])
+                video_infos_list.append(info_item)
+
+        # Process audio configs
+        audio_config_defs_parsed = parse_image_config(audio_config)
+        if enable_audio_config and not audio_config_defs_parsed:
+            audio_config_defs_parsed = [{'name': 'config0', 'type': 'Float', 'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.01}]
+        audio_config_defaults_map = {d['name']: d['default'] for d in audio_config_defs_parsed}
+        audio_infos_list = []
+        for aud_data in selected_audios:
+            if isinstance(aud_data, dict) and enable_audio_config and audio_config_defs_parsed:
+                infos_dict = aud_data.get('image_infos', {})
+                info_item = {}
+                for d in audio_config_defs_parsed:
+                    name = d['name']
+                    if isinstance(infos_dict, dict) and name in infos_dict:
+                        val = infos_dict[name]
+                        if d['type'] == 'Float': val = float(val)
+                        elif d['type'] == 'Int': val = int(val)
+                        elif d['type'] == 'Boolean': val = bool(val)
+                        info_item[name] = val
+                    else:
+                        info_item[name] = audio_config_defaults_map.get(name, d['default'])
+                audio_infos_list.append(info_item)
+
+        print(f"[SnapshotAssets] Final output: {len(images)} images, {len(image_infos_list)} image_infos, {len(videos)} videos, {len(video_infos_list)} video_infos, {len(audios)} audios, {len(audio_infos_list)} audio_infos, {len(slot_outputs)} slots")
+        return (prompt, images, image_infos_list, videos, video_infos_list, audios, audio_infos_list, slot_outputs)
