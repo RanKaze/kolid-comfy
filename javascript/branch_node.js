@@ -73,16 +73,18 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
 .kolid-branch-seg-sep { color: #666; }
 
 .kolid-jump-bar {
-    display: none;
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 2px;
     margin-top: 2px;
     padding: 0;
+    flex-shrink: 0;
     font-size: 10px;
 }
-.kolid-jump-bar:empty { display: none; }
-.kolid-jump-bar:not(:empty) { display: flex; }
+.kolid-jump-bar:empty {
+    display: none;
+}
 .kolid-jump-sep { color: #666; }
 .kolid-jump-btn {
     display: inline-flex;
@@ -149,6 +151,34 @@ function parseRelayExpression(text, graph, selfNodeId) {
         if (!trimmed) continue;
         // Skip operators and syntax
         if (['&&', '||', '!', '(', ')', '==', '!='].includes(trimmed)) continue;
+
+        // Check for {id}==[N] or {id}!=[N] pattern (BranchSwitchesNode select check)
+        const switchMatch = trimmed.match(/^\{(\d+)\}(==|!=)\[(\d+)\]$/);
+        if (switchMatch && graph) {
+            const switchId = parseInt(switchMatch[1]);
+            const selectIndex = parseInt(switchMatch[3]);
+            const switchNode = graph.getNodeById(switchId);
+            if (switchNode) {
+                // Get the select option name at this index
+                let selectName = `[${selectIndex}]`;
+                const selectWidget = switchNode.widgets?.find(w => w.name === 'select');
+                if (selectWidget && selectWidget.options?.values) {
+                    const opt = selectWidget.options.values.find(o => {
+                        const m = o.match(/\[(\d+)\]/);
+                        return m && parseInt(m[1]) === selectIndex;
+                    });
+                    if (opt) selectName = opt;
+                }
+                const switchTitle = switchNode.title || switchNode.type || `Node ${switchId}`;
+                html = html.replace(new RegExp(escapeRegExp(escapeHTML(trimmed)), 'g'),
+                    `<span class="kolid-branch-seg-ok">${escapeHTML(trimmed)}</span>`);
+                if (!seenIds.has(switchId)) {
+                    seenIds.add(switchId);
+                    jumps.push({ id: switchId, title: `${switchTitle}:${selectName}` });
+                }
+                continue;
+            }
+        }
 
         const target = getNodeFromExpression(trimmed, { graph, id: selfNodeId });
         const escapedVar = escapeHTML(trimmed);
@@ -445,10 +475,7 @@ function createReferrerBar(node) {
  */
 function getWidgetValue(node, name, defaultValue) {
     const widget = node.widgets?.find(w => w.name === name);
-    if (widget) return widget.value;
-    // Check stored original widgets (removed from node.widgets for custom rendering)
-    if (node._kolidOriginalWidgets?.[name]) return node._kolidOriginalWidgets[name].value;
-    return defaultValue;
+    return widget ? widget.value : defaultValue;
 }
 
 /**
@@ -1117,11 +1144,7 @@ function nodeInit(node, is_create){
             const relayWidget = node.widgets.find(w => w.name === 'relay_expression');
             if (relayWidget) {
                 const savedValue = relayWidget.value || "";
-                // Store ref on node and remove from widgets list to prevent ComfyUI rendering
-                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
-                node._kolidOriginalWidgets['relay_expression'] = relayWidget;
-                const idx = node.widgets.indexOf(relayWidget);
-                if (idx !== -1) node.widgets.splice(idx, 1);
+                relayWidget.hidden = true;
 
                 const editor = createBranchEditor(relayWidget, node, parseRelayExpression,
                     "Boolean expression: (!NodeA&&NodeB)||NodeC\nAlso: {id}==[N] or ..Parent:NodeA");
@@ -1138,10 +1161,7 @@ function nodeInit(node, is_create){
             const configWidget = node.widgets.find(w => w.name === 'active_config');
             if (configWidget) {
                 const savedValue = configWidget.value || "";
-                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
-                node._kolidOriginalWidgets['active_config'] = configWidget;
-                const idx = node.widgets.indexOf(configWidget);
-                if (idx !== -1) node.widgets.splice(idx, 1);
+                configWidget.hidden = true;
 
                 const editor = createBranchEditor(configWidget, node, parseActiveConfig,
                     "op:target_type:target_value, e.g: mute:name:NodeA, foldout:id:123");
@@ -1180,15 +1200,12 @@ function nodeInit(node, is_create){
             }
         }
     } else if (node.comfyClass === "BranchSwitchesNode") {
-        // Replace select_config widget with syntax-highlighted editor
+        // Hide select_config widget and add syntax-highlighted editor
         if (node.widgets) {
             const configWidget = node.widgets.find(w => w.name === 'select_config');
             if (configWidget) {
                 const savedValue = configWidget.value || "";
-                node._kolidOriginalWidgets = node._kolidOriginalWidgets || {};
-                node._kolidOriginalWidgets['select_config'] = configWidget;
-                const idx = node.widgets.indexOf(configWidget);
-                if (idx !== -1) node.widgets.splice(idx, 1);
+                configWidget.hidden = true;
 
                 const editor = createBranchEditor(configWidget, node, parseSelectConfig,
                     "select_index:op:target_type:target_value, e.g: 1:mute:name:NodeA, 2:set:id:123");
@@ -1479,7 +1496,7 @@ app.registerExtension({
                 if (_selectConfigGuard.has(node.id)) return;
                 _selectConfigGuard.add(node.id);
                 try {
-                    const configWidget = node._kolidOriginalWidgets?.['select_config'] || node.widgets.find(w => w.name === "select_config");
+                    const configWidget = node.widgets.find(w => w.name === "select_config");
                     if (!configWidget) return;
                     const configStr = (configWidget.value || "").trim();
                     if (!configStr) return;

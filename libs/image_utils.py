@@ -226,7 +226,7 @@ def batch_image_mask_list(images, align=16, width=0, height=0, masks=None, fill_
     - 只设置 width > 0（height=0）：按 width 缩小后，target_h 自动向上对齐 align
     - 只设置 height > 0（width=0）：按 height 缩小后，target_w 自动向上对齐 align
     - 同时设置 width 和 height：强制使用指定尺寸（不强制 align）
-    - width=height=0：使用 align 进行倍数对齐
+    - width=height=0：基于所有图片的面积加权平均宽高比自动计算最优尺寸
     
     Args:
         images: list of (H, W, C) or (1, H, W, C) tensors
@@ -258,6 +258,23 @@ def batch_image_mask_list(images, align=16, width=0, height=0, masks=None, fill_
     device = processed_images[0].device
     dtype = processed_images[0].dtype
 
+    # 预计算 auto 模式（width=0, height=0）的最优目标尺寸
+    # 算法：面积加权平均宽高比 + 最大图片像素数作为像素预算
+    if width == 0 and height == 0:
+        all_dims = [(p.shape[1], p.shape[0], p.shape[1] * p.shape[0]) for p in processed_images]
+        total_area = sum(d[2] for d in all_dims)
+        if total_area > 0:
+            weighted_ar = sum((d[0] / d[1]) * d[2] for d in all_dims) / total_area
+        else:
+            weighted_ar = 1.0
+        target_pixels = max(d[2] for d in all_dims)
+        t_h = int((target_pixels / weighted_ar) ** 0.5)
+        t_w = int(t_h * weighted_ar)
+        if align > 1:
+            t_w = ((t_w + align - 1) // align) * align
+            t_h = ((t_h + align - 1) // align) * align
+        print(f"[batch_image_mask_list] auto mode: weighted_ar={weighted_ar:.4f}, target_pixels={target_pixels}, target={t_w}x{t_h}")
+
     # 第一步：计算每张图片缩小后的 new_h, new_w
     new_dims = []
     for img in processed_images:
@@ -270,11 +287,7 @@ def batch_image_mask_list(images, align=16, width=0, height=0, masks=None, fill_
         elif height > 0:
             scale = height / orig_h
         else:
-            # align 模式
-            max_orig_h = max(p.shape[0] for p in processed_images)
-            max_orig_w = max(p.shape[1] for p in processed_images)
-            t_h = ((max_orig_h + align - 1) // align) * align if align > 1 else max_orig_h
-            t_w = ((max_orig_w + align - 1) // align) * align if align > 1 else max_orig_w
+            # auto 模式：使用预计算的加权平均宽高比目标尺寸
             scale = min(t_w / orig_w, t_h / orig_h)
 
         new_h = int(orig_h * scale)
@@ -297,12 +310,9 @@ def batch_image_mask_list(images, align=16, width=0, height=0, masks=None, fill_
         content_max_w = max(nd[1] for nd in new_dims)
         target_w = ((content_max_w + align - 1) // align) * align if align > 1 else content_max_w
     else:
-        # 纯 align 模式
-        target_h = max(nd[0] for nd in new_dims)
-        target_w = max(nd[1] for nd in new_dims)
-        if align > 1:
-            target_h = ((target_h + align - 1) // align) * align
-            target_w = ((target_w + align - 1) // align) * align
+        # auto 模式：使用预计算的最优目标尺寸
+        target_h = t_h
+        target_w = t_w
 
     # 创建填充背景
     try:

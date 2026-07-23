@@ -697,8 +697,8 @@ class SnapshotImagePointsNode:
             },
         }
 
-    RETURN_TYPES = ("SAM3_POINTS_PROMPT", "SAM3_POINTS_PROMPT")
-    RETURN_NAMES = ("positive_points", "negative_points")
+    RETURN_TYPES = ("SAM3_POINTS_PROMPT", "SAM3_POINTS_PROMPT", "STRING", "STRING")
+    RETURN_NAMES = ("positive_points", "negative_points", "positive_coords", "negative_coords")
     FUNCTION = "select_points"
     CATEGORY = "Kolid-Toolkit"
     
@@ -861,7 +861,11 @@ class SnapshotImagePointsNode:
             negative_points_result["points"].append([normalized_x, normalized_y])
             negative_points_result["labels"].append(0)
         
-        return (positive_points_result, negative_points_result)
+        # Generate pixel coordinate JSON strings
+        positive_coords_json = json.dumps([{"x": p['x'], "y": p['y']} for p in selected_positive])
+        negative_coords_json = json.dumps([{"x": n['x'], "y": n['y']} for n in selected_negative])
+        
+        return (positive_points_result, negative_points_result, positive_coords_json, negative_coords_json)
 
 
 class ImageLimitPixelNode:
@@ -1154,7 +1158,7 @@ class ImageBatchNode:
     - 只设置 width > 0（height=0）：按 width 缩小后，target_h 自动向上对齐 align
     - 只设置 height > 0（width=0）：按 height 缩小后，target_w 自动向上对齐 align
     - 同时设置 width 和 height：强制使用指定尺寸（不强制 align）
-    - width=height=0：使用 align 进行倍数对齐
+    - width=height=0：基于所有图片的面积加权平均宽高比自动计算最适合的尺寸
     """
     
     @classmethod
