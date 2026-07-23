@@ -62,7 +62,7 @@ interface PanelProps {
   videoConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
   audioConfigDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
   enableSlot?: boolean;
-  slotDefs?: { type: string; name: string }[];
+  slotDefs?: { type: string; name: string; config_defs?: any[] }[];
 }
 
 // Frame Capture Modal - allows capturing a frame from a video
@@ -418,8 +418,10 @@ const SlotCard: React.FC<{
   editorRef: React.RefObject<Editor | null>;
   onFill: (index: number, item: ImageInfo | VideoInfo | AudioInfo) => void;
   onClear: (index: number) => void;
-  onCaptureRequest?: (vid: VideoInfo, slotIndex: number) => void;  // Open frame capture when video selected for Image slot
-}> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear, onCaptureRequest }) => {
+  onCaptureRequest?: (vid: VideoInfo, slotIndex: number) => void;
+  configDefs?: { name: string; type: string; default: any; min?: number; max?: number; step?: number }[];
+  onConfigChange?: (index: number, name: string, value: any) => void;
+}> = ({ slot, slotIndex, slotName, editorRef, onFill, onClear, onCaptureRequest, configDefs = [], onConfigChange }) => {
   const SLOT_HEIGHT = 280; // Aligned with VideoCard CARD_HEIGHT
   const [mediaAspect, setMediaAspect] = useState<number>(1); // Default 1:1 for image, 16:9 for video
 
@@ -563,6 +565,10 @@ const SlotCard: React.FC<{
         flexDirection: 'column',
         gap: 4,
         alignItems: 'center',
+        padding: 6,
+        borderRadius: 8,
+        background: '#f9f9f9',
+        border: '1px solid #eee',
       }}
     >
       {/* Slot label */}
@@ -582,7 +588,8 @@ const SlotCard: React.FC<{
         {slotName}
       </div>
 
-      {/* Slot body */}
+      {/* Slot body + config controls wrapper */}
+      <div style={{ display: 'flex', flexDirection: slot.type === 'Audio' ? 'column' : 'row', gap: slot.type === 'Audio' ? 4 : 6, alignItems: 'flex-start' }}>
       {filled ? (
         /* Filled: show preview */
         (() => {
@@ -735,6 +742,23 @@ const SlotCard: React.FC<{
           <span style={{ fontSize: 11, color: '#999' }}>{slot.type}</span>
         </button>
       )}
+      {filled && configDefs.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'row', gap: 4, alignItems: 'flex-start', paddingTop: 2 }}>
+          {configDefs.map((def) => {
+            const val = (item as any)?.image_infos?.[def.name] ?? def.default;
+            if (def.type === 'Float' || def.type === 'Int') {
+              return (
+                <SliderBar key={def.name} name={def.name} value={val} min={def.min ?? 0} max={def.max ?? 1} step={def.step ?? 0.01} isInt={def.type === 'Int'} onChange={(value) => onConfigChange?.(slotIndex, def.name, value)} />
+              );
+            }
+            if (def.type === 'Boolean') {
+              return <BooleanControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(slotIndex, def.name, value)} />;
+            }
+            return <StringControl key={def.name} name={def.name} value={val} onChange={(value) => onConfigChange?.(slotIndex, def.name, value)} />;
+          })}
+        </div>
+      )}
+      </div>
     </div>
   );
 };
@@ -1113,6 +1137,20 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
           : aud
       )
     );
+  }, []);
+
+  const updateSlotInfo = useCallback((index: number, name: string, value: any) => {
+    setSlots((prev) => {
+      const next = [...prev];
+      if (index < next.length) {
+        const item = next[index].data as any;
+        if (item) {
+          const infos = { ...(item.image_infos || {}), [name]: value };
+          next[index] = { ...next[index], data: { ...item, image_infos: infos } };
+        }
+      }
+      return next;
+    });
   }, []);
 
   const removeAudio = useCallback(
@@ -1531,6 +1569,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
                 onFill={fillSlot}
                 onClear={clearSlot}
                 onCaptureRequest={(vid, idx) => handleStartCapture(vid, idx)}
+                configDefs={def.config_defs}
+                onConfigChange={updateSlotInfo}
               />
             ))}
           </div>

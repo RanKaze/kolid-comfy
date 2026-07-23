@@ -93,6 +93,28 @@ def parse_image_config(config_str):
     return defs
 
 
+def split_slot_config(config_str):
+    """Split slot config on top-level commas (depth 0, not inside parentheses)."""
+    parts = []
+    current = []
+    depth = 0
+    for char in config_str:
+        if char == '(':
+            depth += 1
+            current.append(char)
+        elif char == ')':
+            depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0:
+            parts.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        parts.append(''.join(current).strip())
+    return parts
+
+
 class SnapshotAssetsServer:
     """HTTP server for SnapshotAssetsNode to let user drag/drop images and confirm selection."""
 
@@ -335,7 +357,9 @@ class SnapshotAssetsServer:
                 slot_defs = []
                 if self.server_instance and self.server_instance.enable_slot and self.server_instance.slot_config:
                     import re
-                    for part in self.server_instance.slot_config.split(','):
+                    # Split on top-level commas (not inside parentheses)
+                    slot_parts = split_slot_config(self.server_instance.slot_config)
+                    for part in slot_parts:
                         part = part.strip()
                         if not part:
                             continue
@@ -662,9 +686,12 @@ class SnapshotAssetsServer:
                             
                             if slot_data is None:
                                 # Empty slot
-                                selected_slot_items.append({'type': slot_type, 'data': None})
+                                selected_slot_items.append({'type': slot_type, 'data': None, 'image_infos': None})
                                 print(f"[SnapshotAssets]   Slot: type={slot_type}, empty")
                                 continue
+                            
+                            # Extract image_infos if present
+                            slot_infos = slot_data.get('image_infos') if isinstance(slot_data, dict) else None
                             
                             if slot_type == 'Image':
                                 # Process image slot data
@@ -684,7 +711,7 @@ class SnapshotAssetsServer:
                                 elif image_url.startswith('/assets/'):
                                     pass  # Already a URL
                                 
-                                selected_slot_items.append({'type': 'Image', 'data': {'image': image_url}})
+                                selected_slot_items.append({'type': 'Image', 'data': {'image': image_url}, 'image_infos': slot_infos})
                                 print(f"[SnapshotAssets]   Slot Image: {image_url[:80]}...")
                             
                             elif slot_type == 'Video':
@@ -708,7 +735,7 @@ class SnapshotAssetsServer:
                                     filename = os.path.basename(video_url)
                                     video_url = f"/assets/{filename}"
                                 
-                                selected_slot_items.append({'type': 'Video', 'data': {'video': video_url}})
+                                selected_slot_items.append({'type': 'Video', 'data': {'video': video_url}, 'image_infos': slot_infos})
                                 print(f"[SnapshotAssets]   Slot Video: {video_url[:80]}...")
                             elif slot_type == 'Audio':
                                 # Process audio slot data
@@ -729,10 +756,10 @@ class SnapshotAssetsServer:
                                     filename = os.path.basename(audio_url)
                                     audio_url = f"/assets/{filename}"
                                 
-                                selected_slot_items.append({'type': 'Audio', 'data': {'audio': audio_url}})
+                                selected_slot_items.append({'type': 'Audio', 'data': {'audio': audio_url}, 'image_infos': slot_infos})
                                 print(f"[SnapshotAssets]   Slot Audio: {audio_url[:80]}...")
                             else:
-                                selected_slot_items.append({'type': slot_type, 'data': slot_data})
+                                selected_slot_items.append({'type': slot_type, 'data': slot_data, 'image_infos': slot_infos})
                     
                     self.server_instance.selected_images = selected_image_items
                     self.server_instance.selected_videos = selected_video_items
@@ -870,16 +897,16 @@ class SnapshotAssetsNode:
                 "enable_audio_config": ("BOOLEAN", {"default": False}),
                 "audio_config": ("STRING", {"default": "atest0:Float:1.0(0.0,1.0,0.1)", "multiline": False}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
-                "slot_config": ("STRING", {"default": "Image:slot0,Video:slot1", "multiline": False}),
+                "slot_config": ("STRING", {"default": "Image:slot0(test0:Float:1.0(0.0,1.0,0.1)),Video:slot1", "multiline": False}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
             },
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "*", "VIDEO", "*", "AUDIO", "*", "*")
-    RETURN_NAMES = ("prompt", "image", "image_infos", "video", "video_infos", "audio", "audio_infos", "slot")
-    OUTPUT_IS_LIST = (False, True, True, True, True, True, True, True)
+    RETURN_TYPES = ("STRING", "IMAGE", "*", "VIDEO", "*", "AUDIO", "*", "*", "*")
+    RETURN_NAMES = ("prompt", "image", "image_infos", "video", "video_infos", "audio", "audio_infos", "slot", "slot_infos")
+    OUTPUT_IS_LIST = (False, True, True, True, True, True, True, True, True)
     FUNCTION = "snapshot_assets"
     CATEGORY = "Kolid-Toolkit"
 
@@ -986,7 +1013,7 @@ class SnapshotAssetsNode:
         # Allow empty selection
         if not selected_images and not selected_videos and not selected_audios and not selected_slots:
             print("[SnapshotAssets] No images, videos, audios or slots selected, returning empty lists")
-            return (prompt, [], [], [], [], [], [], [])
+            return (prompt, [], [], [], [], [], [], [], [])
 
         # Process images
         images = []
@@ -1121,11 +1148,60 @@ class SnapshotAssetsNode:
         
         # Process slots if enabled
         slot_outputs = []
+        slot_infos_list = []
+        # Parse slot_config to get per-slot config_defs
+        slot_config_parsed = []
+        if enable_slot and slot_config:
+            import re
+            # Split on top-level commas (not inside parentheses)
+            slot_parts = split_slot_config(slot_config)
+            for part in slot_parts:
+                part = part.strip()
+                if not part:
+                    continue
+                m = re.match(r'^(Image|Video|Audio):(\S+?)\((.+)\)$', part)
+                if m:
+                    slot_type = m.group(1).strip().capitalize()
+                    slot_name = m.group(2).strip()
+                    config_str = m.group(3)
+                    cfg_defs = parse_image_config(config_str)
+                else:
+                    if ':' in part:
+                        slot_type, slot_name = part.split(':', 1)
+                        slot_type = slot_type.strip().capitalize()
+                        slot_name = slot_name.strip()
+                    else:
+                        continue
+                    cfg_defs = []
+                if slot_type in ('Image', 'Video', 'Audio') and slot_name:
+                    slot_config_parsed.append({'type': slot_type, 'name': slot_name, 'config_defs': cfg_defs})
+        
         if enable_slot and selected_slots:
             print(f"[SnapshotAssets] Processing {len(selected_slots)} slot items")
-            for slot_item in selected_slots:
+            for i, slot_item in enumerate(selected_slots):
                 slot_type = slot_item.get('type', '')
                 slot_data = slot_item.get('data')
+                slot_infos = slot_item.get('image_infos')
+                
+                # Build slot_infos output
+                slot_cfg_defs = slot_config_parsed[i]['config_defs'] if i < len(slot_config_parsed) else []
+                if slot_cfg_defs:
+                    infos_dict = slot_infos if isinstance(slot_infos, dict) else {}
+                    cfg_defaults_map = {d['name']: d['default'] for d in slot_cfg_defs}
+                    info_item = {}
+                    for d in slot_cfg_defs:
+                        name = d['name']
+                        if isinstance(infos_dict, dict) and name in infos_dict:
+                            val = infos_dict[name]
+                            if d['type'] == 'Float': val = float(val)
+                            elif d['type'] == 'Int': val = int(val)
+                            elif d['type'] == 'Boolean': val = bool(val)
+                            info_item[name] = val
+                        else:
+                            info_item[name] = cfg_defaults_map.get(name, d['default'])
+                    slot_infos_list.append(info_item)
+                else:
+                    slot_infos_list.append(None)
                 
                 if slot_data is None:
                     # Empty slot - output None
@@ -1215,4 +1291,4 @@ class SnapshotAssetsNode:
                 audio_infos_list.append(info_item)
 
         print(f"[SnapshotAssets] Final output: {len(images)} images, {len(image_infos_list)} image_infos, {len(videos)} videos, {len(video_infos_list)} video_infos, {len(audios)} audios, {len(audio_infos_list)} audio_infos, {len(slot_outputs)} slots")
-        return (prompt, images, image_infos_list, videos, video_infos_list, audios, audio_infos_list, slot_outputs)
+        return (prompt, images, image_infos_list, videos, video_infos_list, audios, audio_infos_list, slot_outputs, slot_infos_list)
