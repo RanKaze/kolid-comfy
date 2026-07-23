@@ -123,7 +123,9 @@ NODE_CONFIG = {
     "TimestampForLengthNode": {"class": TimestampForLengthNode, "name": "TimestampForLengthNode"},
     
     "GetVideoAudioNode": {"class": GetVideoAudioNode, "name": "GetVideoAudioNode"},
+    "GetAudioInfoNode": {"class": GetAudioInfoNode, "name": "GetAudioInfoNode"},
     "GetAudioSegmentNode": {"class": GetAudioSegmentNode, "name": "GetAudioSegmentNode"},
+    "VAEEncodeAudioTiled": {"class": VAEEncodeAudioTiled, "name": "VAE Encode Audio (Tiled)"},
     "GetVideoSegmentNode": {"class": GetVideoSegmentNode, "name": "GetVideoSegmentNode"},
     "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
     "VideoFolderLoaderNode": {"class": VideoFolderLoaderNode, "name": "VideoFolderLoaderNode"},
@@ -164,6 +166,7 @@ NODE_CONFIG = {
     "ConfigPrintTagNode": {"class": ConfigPrintTagNode, "name": "ConfigPrintTagNode"},
     "ConfigPreviewImageNode": {"class": ConfigPreviewImageNode, "name": "ConfigPreviewImageNode"},
     "ConfigPreviewMaskNode": {"class": ConfigPreviewMaskNode, "name": "ConfigPreviewMaskNode"},
+    "ConfigKrea2EditNode": {"class": ConfigKrea2EditNode, "name": "ConfigKrea2EditNode"},
     "ContextNode": {"class": ContextNode, "name": "ContextNode"},
     "ContextQueryNode": {"class": ContextQueryNode, "name": "ContextQueryNode"},
     "PipelineNode": {"class": PipelineNode, "name": "PipelineNode"},
