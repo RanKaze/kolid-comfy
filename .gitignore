@@ -52,4 +52,6 @@ cookies/
 data/prompt/
 data/switch/
 
+.codely/**
 .codely-cli/**
+CODELY.md

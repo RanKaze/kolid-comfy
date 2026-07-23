@@ -1,8 +1,66 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType, TLVideoShape, TLAsset, DefaultContextMenu, useEditor } from '@tldraw/tldraw';
+import { Tldraw, createTLStore, defaultShapeUtils, Editor, AssetRecordType, TLVideoShape, TLAsset, DefaultContextMenu, useEditor, BaseBoxShapeUtil, HTMLContainer, T, TLBaseShape } from '@tldraw/tldraw';
 import type { TLComponents } from '@tldraw/tldraw';
 import '@tldraw/tldraw/tldraw.css';
-import Panel, { PanelHandle, ImageInfo, VideoInfo } from './components/Panel';
+import Panel, { PanelHandle, ImageInfo, VideoInfo, AudioInfo } from './components/Panel';
+
+// ── Custom audio shape ──────────────────────────────────────────────
+type AudioShape = TLBaseShape<'audio', { w: number; h: number; src: string; name: string }>;
+
+class AudioShapeUtil extends BaseBoxShapeUtil<AudioShape> {
+  static override type = 'audio' as const;
+  static override props = {
+    w: T.number,
+    h: T.number,
+    src: T.string,
+    name: T.string,
+  };
+  override getDefaultProps() {
+    return { w: 320, h: 80, src: '', name: 'audio' };
+  }
+  override component(shape: AudioShape) {
+    return (
+      <HTMLContainer
+        style={{
+          width: shape.props.w,
+          height: shape.props.h,
+          display: 'flex',
+          flexDirection: 'column',
+          background: '#fff',
+          border: '1px solid #d0d0d0',
+          borderRadius: 8,
+          overflow: 'hidden',
+          pointerEvents: 'all',
+          padding: '6px 8px 4px',
+          gap: 4,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 12,
+            color: '#333',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+            paddingLeft: 4,
+          }}
+        >
+          🎵 {shape.props.name}
+        </div>
+        <audio
+          src={shape.props.src}
+          controls
+          preload="metadata"
+          style={{ width: '100%', height: 32, minWidth: 0 }}
+        />
+      </HTMLContainer>
+    );
+  }
+  override indicator(shape: AudioShape) {
+    return <rect width={shape.props.w} height={shape.props.h} rx={8} ry={8} />;
+  }
+}
 
 // Module-level ref to PanelHandle so CustomContextMenu can trigger capture
 let _panelHandle: PanelHandle | null = null;
@@ -68,6 +126,7 @@ const App: React.FC = () => {
   const [enablePrompt, setEnablePrompt] = useState(false);
   const [enableImage, setEnableImage] = useState(true);  // Image area enabled by default
   const [enableVideo, setEnableVideo] = useState(true);  // Video area enabled by default
+  const [enableAudio, setEnableAudio] = useState(true);  // Audio area enabled by default
   const [strengthDefs, setStrengthDefs] = useState<{ name: string; default: number }[]>([]);
   const [enableSlot, setEnableSlot] = useState(false);
   const [slotDefs, setSlotDefs] = useState<{ type: string; name: string }[]>([]);
@@ -90,6 +149,7 @@ const App: React.FC = () => {
         setEnablePrompt(data.enable_prompt || false);
         setEnableImage(data.enable_image !== undefined ? data.enable_image : true);
         setEnableVideo(data.enable_video !== undefined ? data.enable_video : true);
+        setEnableAudio(data.enable_audio !== undefined ? data.enable_audio : true);
         setStrengthDefs(data.strength_defs || []);
         setEnableSlot(data.enable_slot || false);
         setSlotDefs(data.slot_defs || []);
@@ -107,7 +167,7 @@ const App: React.FC = () => {
 
   const store = useRef(
     createTLStore({
-      shapeUtils: defaultShapeUtils,
+      shapeUtils: [...defaultShapeUtils, AudioShapeUtil],
     })
   ).current;
 
@@ -131,6 +191,9 @@ const App: React.FC = () => {
       }
       if (parsed.panelVideos && Array.isArray(parsed.panelVideos)) {
         panelHandleRef.current?.setVideos?.(parsed.panelVideos);
+      }
+      if (parsed.panelAudios && Array.isArray(parsed.panelAudios)) {
+        panelHandleRef.current?.setAudios?.(parsed.panelAudios);
       }
       if (parsed.panelSlots && Array.isArray(parsed.panelSlots)) {
         panelHandleRef.current?.setSlots?.(parsed.panelSlots);
@@ -210,7 +273,7 @@ const App: React.FC = () => {
     // Do NOT add to images/videos list automatically - user must click + button
   }, []);
 
-  const handleConfirm = useCallback(async ({ images, videos, enableImageStrength, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; enableImageStrength: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
+  const handleConfirm = useCallback(async ({ images, videos, audios, enableImageStrength, prompt, slots }: { images: ImageInfo[]; videos: VideoInfo[]; audios: AudioInfo[]; enableImageStrength: boolean; prompt: string; slots: ({ type: string; data: any })[] }) => {
     const editor = editorRef.current;
     if (!editor) return;
 
@@ -248,6 +311,15 @@ const App: React.FC = () => {
       shapeId: vid.shapeId,
     }));
 
+    // Save panel selected audios info
+    const panelAudios = audios.map((aud) => ({
+      id: aud.id,
+      name: aud.name,
+      dataUrl: aud.dataUrl,
+      assetId: aud.assetId,
+      shapeId: aud.shapeId,
+    }));
+
     // Save panel selected slots info
     const panelSlots = slots.map((slot) => {
       const item = slot.data;
@@ -255,24 +327,18 @@ const App: React.FC = () => {
       if (slot.type === 'Image') {
         return {
           type: 'Image',
-          data: {
-            id: item.id,
-            name: item.name,
-            dataUrl: item.dataUrl,
-            assetId: item.assetId,
-            shapeId: item.shapeId,
-          },
+          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
+        };
+      }
+      if (slot.type === 'Audio') {
+        return {
+          type: 'Audio',
+          data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
         };
       }
       return {
         type: 'Video',
-        data: {
-          id: item.id,
-          name: item.name,
-          dataUrl: item.dataUrl,
-          assetId: item.assetId,
-          shapeId: item.shapeId,
-        },
+        data: { id: item.id, name: item.name, dataUrl: item.dataUrl, assetId: item.assetId, shapeId: item.shapeId },
       };
     });
 
@@ -284,6 +350,7 @@ const App: React.FC = () => {
       schema: snapshot.schema,
       panelImages: panelImages,
       panelVideos: panelVideos,
+      panelAudios: panelAudios,
       panelSlots: panelSlots,
       enableImageStrength,
       prompt,
@@ -304,10 +371,16 @@ const App: React.FC = () => {
       const selectedVideos = videos.map((vid) => ({
         video: vid.dataUrl,
       }));
+      const selectedAudios = audios.map((aud) => ({
+        audio: aud.dataUrl,
+      }));
       const selectedSlots = slots.map((slot) => {
         if (!slot.data) return { type: slot.type, data: null };
         if (slot.type === 'Image') {
           return { type: 'Image', data: { image: slot.data.dataUrl } };
+        }
+        if (slot.type === 'Audio') {
+          return { type: 'Audio', data: { audio: slot.data.dataUrl } };
         }
         return { type: 'Video', data: { video: slot.data.dataUrl } };
       });
@@ -316,11 +389,12 @@ const App: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          images: selectedImages,  // Selected images for output
-          videos: selectedVideos,  // Selected videos for output
-          slots: selectedSlots,  // Selected slots for output
-          prompt: prompt || '',  // User prompt text (ensure string)
-          canvas_snapshot: snapshotJson  // Full canvas state for persistence
+          images: selectedImages,
+          videos: selectedVideos,
+          audios: selectedAudios,
+          slots: selectedSlots,
+          prompt: prompt || '',
+          canvas_snapshot: snapshotJson,
         }),
       });
     } catch (err) {
@@ -357,7 +431,7 @@ const App: React.FC = () => {
         asset: any, file: File, abortSignal?: AbortSignal
       ) => Promise<{ src: string }>;
       (editor as any).uploadAsset = async (asset: any, file: File, abortSignal?: AbortSignal) => {
-        if (file.type.startsWith('video/') || file.type === 'image/gif') {
+        if (file.type.startsWith('video/') || file.type === 'image/gif' || file.type.startsWith('audio/')) {
           const result = await uploadVideoToServer(file, abortSignal);
           return { src: result.url };
         }
@@ -375,7 +449,28 @@ const App: React.FC = () => {
       const defaultHandler = editorExt.externalContentHandlers?.['files'];
       const handleFile = async (content: any) => {
         const files: File[] = content?.files || [];
+        const audioFile = files.find((f: File) => f.type?.startsWith('audio/'));
         const videoFile = files.find((f: File) => f.type?.startsWith('video/') || f.type === 'image/gif');
+        
+        // Handle single audio file: upload to server, create note shape with audioAssetId meta
+        if (audioFile && files.length === 1) {
+          console.log('[SnapshotAssets] Intercepted audio drop, uploading via server...');
+          try {
+            const result = await uploadVideoToServer(audioFile);
+            const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
+            const point = content?.point;
+            editor.createShape({
+              id: shapeId, type: 'audio',
+              x: point?.x ?? 0, y: point?.y ?? 0,
+              props: { w: 320, h: 60, src: result.url, name: audioFile.name },
+            } as any);
+            console.log('[SnapshotAssets] Audio shape created with URL:', result.url);
+            return;
+          } catch (err) {
+            console.error('[SnapshotAssets] Audio interception failed:', err);
+            throw err;
+          }
+        }
         
         if (videoFile && files.length === 1) {
           // Handle single video: upload to server, get actual dimensions, create asset
@@ -486,6 +581,7 @@ const App: React.FC = () => {
       <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
         <Tldraw
           store={store}
+          shapeUtils={[...defaultShapeUtils, AudioShapeUtil]}
           onMount={handleMount}
           maxAssetSize={Infinity}
           components={components}
@@ -516,6 +612,7 @@ const App: React.FC = () => {
         enablePrompt={enablePrompt}
         enableImage={enableImage}
         enableVideo={enableVideo}
+        enableAudio={enableAudio}
         strengthDefs={strengthDefs}
         enableSlot={enableSlot}
         slotDefs={slotDefs}
