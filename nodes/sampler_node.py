@@ -2208,12 +2208,17 @@ class PipelineEnableEditNode:
         if enable and next_pipeline.model is not None:
             architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
             if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
-                next_pipeline.model = arch_krea2.apply_model_patch(next_pipeline.model)
-                print("[EnableEdit] Krea2 reference latent patch applied")
+                ref_boost = next_pipeline.config.get("ref_boost", 1.0)
+                ref_boost_a = next_pipeline.config.get("ref_boost_a", 1.0)
+                ref_boost_mask = next_pipeline.config.get("ref_boost_mask", None)
+                next_pipeline.model = arch_krea2.apply_model_patch(
+                    next_pipeline.model, ref_boost, ref_boost_a, ref_boost_mask)
+                print(f"[EnableEdit] Krea2 edit source patch applied (ref_boost={ref_boost}, ref_boost_a={ref_boost_a})")
                 model_neg = next_pipeline.config.get("model_negative")
                 if model_neg is not None:
-                    next_pipeline.config["model_negative"] = arch_krea2.apply_model_patch(model_neg)
-                    print("[EnableEdit] Krea2 reference latent patch applied to model_negative")
+                    next_pipeline.config["model_negative"] = arch_krea2.apply_model_patch(
+                        model_neg, ref_boost, ref_boost_a, ref_boost_mask)
+                    print("[EnableEdit] Krea2 edit source patch applied to model_negative")
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
                 next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
                 print("[EnableEdit] Flux2Klein: no model patch needed")

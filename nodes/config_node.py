@@ -154,6 +154,41 @@ class ConfigPreviewMaskNode:
         return (config,)
 
 
+class ConfigKrea2EditNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "config": ("CONFIG_DATA",),
+                "ref_boost": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01, "round": 0.001,
+                                        "tooltip": "参考保真度调节: 乘以 target->reference 的注意力。1.0=关闭, >1 更贴近参考外观, <1 放松。"}),
+                "ref_boost_a": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01, "round": 0.001,
+                                           "tooltip": "第一个参考(场景)的 boost。单参考时无效。"}),
+                "ref_boost_mask": ("MASK", {"tooltip": "可选区域 mask, 限制最后一个参考的 boost 范围(如人脸)。空=整个参考。"}),
+                "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 64,
+                                         "tooltip": "VLM 输入图像最长边上限。0=原始分辨率。"}),
+            }
+        }
+
+    RETURN_TYPES = ("CONFIG_DATA",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+
+    def process(self, config=None, ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None, grounding_px=768):
+        from .sampler_node import ConfigData
+        if config is None:
+            config = ConfigData()
+        else:
+            config = config.copy()
+        config["ref_boost"] = ref_boost
+        config["ref_boost_a"] = ref_boost_a
+        config["grounding_px"] = grounding_px
+        if ref_boost_mask is not None:
+            config["ref_boost_mask"] = ref_boost_mask
+        return (config,)
+
+
 class SamplerConfigNode:
     @classmethod
     def INPUT_TYPES(cls):
