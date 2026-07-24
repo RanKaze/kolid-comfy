@@ -122,27 +122,27 @@ export const libraryGroup = new GroupModule('library');
 export const categoryDisplay = new DisplayModeModule('category');
 export const libraryDisplay = new DisplayModeModule('library');
 
-export class ApplicationModule {
-  async add(name: string, code: string, category: string) {
-    const resp = await fetch('/add_application', {
+export class ProgramModule {
+  async add(name: string, code: string, category: string, image: string | null = null) {
+    const resp = await fetch('/add_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, code, category }),
+      body: JSON.stringify({ name, code, category, image }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();
   }
 
-  async update(id: string, name: string, code: string) {
-    const resp = await fetch('/update_application', {
+  async update(id: string, name: string, code: string, image: string | null = null, video: string | null = null) {
+    const resp = await fetch('/update_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, code }),
+      body: JSON.stringify({ id, name, code, image, video }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();
   }
 
   async delete(id: string) {
-    const resp = await fetch('/delete_application', {
+    const resp = await fetch('/delete_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id }),
     });
@@ -151,7 +151,7 @@ export class ApplicationModule {
   }
 
   async reorder(from: number, to: number) {
-    const resp = await fetch('/reorder_applications', {
+    const resp = await fetch('/reorder_programs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ from, to }),
     });
@@ -160,7 +160,7 @@ export class ApplicationModule {
   }
 
   async updateCategory(oldName: string, newName: string, extra: Record<string, unknown> = {}) {
-    const resp = await fetch('/update_application_category', {
+    const resp = await fetch('/update_program_category', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ old_name: oldName, new_name: newName, ...extra }),
     });
@@ -169,7 +169,7 @@ export class ApplicationModule {
   }
 
   async updateDisplayMode(category: string, displayMode: string, sizeMode: string) {
-    const resp = await fetch('/update_application_display_mode', {
+    const resp = await fetch('/update_program_display_mode', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ category, display_mode: displayMode, size_mode: sizeMode }),
     });
@@ -178,4 +178,4 @@ export class ApplicationModule {
   }
 }
 
-export const applicationGroup = new ApplicationModule();
+export const programGroup = new ProgramModule();

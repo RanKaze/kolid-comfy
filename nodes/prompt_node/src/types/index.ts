@@ -22,6 +22,7 @@ export interface Tag {
   name: string;
   prompt: string;
   strength?: number;
+  is_from_parsing?: boolean;
 }
 
 export type TagGroup = Tag[];
@@ -234,15 +235,15 @@ export interface BackgroundContext extends PromptContextBase {
 
 // ═══ Application ═══
 
-export interface ApplicationData {
+export interface ProgramData {
   id: string;
   name: string;
   code: string;
   preview?: string;
 }
 
-export interface ApplicationCategoryData {
-  applications: ApplicationData[];
+export interface ProgramCategoryData {
+  programs: ProgramData[];
   bg_image?: string;
   bg_video?: string;
   display_mode?: string;
@@ -250,9 +251,9 @@ export interface ApplicationCategoryData {
   [key: string]: unknown;
 }
 
-export type AllApplications = { [category: string]: ApplicationCategoryData };
+export type AllPrograms = { [category: string]: ProgramCategoryData };
 
-export interface SelectedApplicationItem {
+export interface SelectedProgramItem {
   id: string;
   active: boolean;
 }

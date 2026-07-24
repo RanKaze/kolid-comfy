@@ -2,12 +2,12 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
-  PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ApplicationData, AllApplications, ApplicationCategoryData, SelectedApplicationItem,
+  PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem,
   LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
   PromptContextBase, RegionContext, RegionBox, BackgroundContext,
 } from '../types';
 import {
-  categoryGroup, libraryGroup, categoryDisplay, libraryDisplay, applicationGroup,
+  categoryGroup, libraryGroup, categoryDisplay, libraryDisplay, programGroup,
 } from '../modules';
 import {
   parseStringToTags, tagsToDisplayName, tagsToDisplayString,
@@ -17,6 +17,7 @@ import {
 } from '../hooks/useSelection';
 import { useApi } from '../hooks/useApi';
 import { useTempContext } from '../hooks/useTempContext';
+import { useProgram } from '../hooks/useProgram';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
@@ -157,7 +158,7 @@ export function AppShell() {
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
-    allApplications, setAllApplications, lastSelectedApplications,
+    allPrograms, setAllPrograms, lastSelectedPrograms,
   } = api;
 
   const isLoraFiltered = useCallback((item: LoraItemData) => {
@@ -187,12 +188,12 @@ export function AppShell() {
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
   const [selectedPrefabs, setSelectedPrefabs] = useState<SelectedPrefabItem[]>([]);
   const prefabRestoredRef = useRef(false);
-  const [selectedApplications, setSelectedApplications] = useState<SelectedApplicationItem[]>([]);
-  const applicationRestoredRef = useRef(false);
+  const [selectedPrograms, setSelectedPrograms] = useState<SelectedProgramItem[]>([]);
+  const programRestoredRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [loadFromImageData, setLoadFromImageData] = useState<any>(null);
 
-  // Tags that came from prompt_parsing (displayed in purple)
+  // Tags that came from prompt_parsing — used to mark is_from_parsing on tag objects during loadData
   const parsedTagKeys = useMemo(() => {
     const set = new Set<string>();
     for (const str of parsedPrompts) {
@@ -376,9 +377,21 @@ export function AppShell() {
   const loadData = useCallback(async () => {
     const data = await apiLoadData();
     const lastSelected = data.last_selected || [];
+
+    // Build parsed keys from loaded data to mark is_from_parsing
+    const loadedParsedKeys = new Set<string>();
+    for (const str of (data.parsed_prompts || [])) {
+      const tags = parseStringToTags(str, data.categories);
+      loadedParsedKeys.add(tagsToDisplayString(tags));
+    }
+
     const tags = lastSelected
       .filter(str => !str.startsWith('<') || !str.endsWith('>'))
-      .map(str => parseStringToTags(str, data.categories));
+      .map(str => {
+        const tg = parseStringToTags(str, data.categories);
+        const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
+        return tg.map(t => ({ ...t, is_from_parsing: isFromParsing }));
+      });
     setSelectedTags(tags);
 
     let cp = data.custom_prompts || '';
@@ -506,11 +519,11 @@ export function AppShell() {
     }).then(async () => {
       loraRestoredRef.current = false;
       prefabRestoredRef.current = false;
-      applicationRestoredRef.current = false;
+      programRestoredRef.current = false;
       setSelectedLoras([]);
       setLoraSelections({});
       setSelectedPrefabs([]);
-      setSelectedApplications([]);
+      setSelectedPrograms([]);
       setSelectedTags([]);
       setCustomPrompts('');
       setCustomAddedTagKeys(new Set());
@@ -633,25 +646,23 @@ export function AppShell() {
 
   // Restore selected applications from last_selected_applications
   useEffect(() => {
-    if (applicationRestoredRef.current) return;
-    const allAppEntries = Object.values(allApplications).flatMap(cd => cd.applications || []);
-    if (!allApplications || Object.keys(allApplications).length === 0) {
-      if (Object.keys(allApplications).length === 0 && lastSelectedApplications.length === 0) {
-        applicationRestoredRef.current = true;
-      }
+    if (programRestoredRef.current) return;
+    if (!allPrograms || Object.keys(allPrograms).length === 0) {
+      // Data not loaded yet — wait
       return;
     }
-    if (!lastSelectedApplications || lastSelectedApplications.length === 0) {
-      applicationRestoredRef.current = true;
+    const allAppEntries = Object.values(allPrograms).flatMap(cd => cd.programs || []);
+    if (!lastSelectedPrograms || lastSelectedPrograms.length === 0) {
+      programRestoredRef.current = true;
       return;
     }
     const appIds = new Set(allAppEntries.map(a => a.id));
-    const restored: SelectedApplicationItem[] = lastSelectedApplications
+    const restored: SelectedProgramItem[] = lastSelectedPrograms
       .filter(sa => appIds.has(sa.id))
       .map(sa => ({ id: sa.id, active: sa.active !== false }));
-    setSelectedApplications(restored);
-    applicationRestoredRef.current = true;
-  }, [allApplications, lastSelectedApplications]);
+    setSelectedPrograms(restored);
+    programRestoredRef.current = true;
+  }, [allPrograms, lastSelectedPrograms]);
 
   // Listen for context switch from parent (iframe embedding) + notify ready
   const isReloadingRef = useRef(false);
@@ -661,11 +672,11 @@ export function AppShell() {
         isReloadingRef.current = true;
         loraRestoredRef.current = false;
         prefabRestoredRef.current = false;
-        applicationRestoredRef.current = false;
+        programRestoredRef.current = false;
         setSelectedLoras([]);
         setLoraSelections({});
         setSelectedPrefabs([]);
-        setSelectedApplications([]);
+        setSelectedPrograms([]);
         setSelectedTags([]);
         setCustomPrompts('');
         setCustomAddedTagKeys(new Set());
@@ -1166,7 +1177,7 @@ export function AppShell() {
   const handleFilterChange = useCallback((f: string) => setSelectedFilter(f), []);
 
   const handleCustomPromptsParsed = useCallback((tagGroup: TagGroup, displayString: string) => {
-    setSelectedTags(prev => [...prev, tagGroup]);
+    setSelectedTags(prev => [...prev, tagGroup.map(t => ({ ...t, is_from_parsing: false }))]);
     setCustomAddedTagKeys(prev => new Set(prev).add(displayString));
   }, [setSelectedTags]);
 
@@ -1241,7 +1252,7 @@ export function AppShell() {
 
     setSelectedTags(prev => {
       const idx = prev.findIndex(g => g.some(t => t.decoration_num === 0 && t.prompt === prompt));
-      if (idx === -1) return [...prev, [{ decoration_num: 0, name: promptData.name, prompt }]];
+      if (idx === -1) return [...prev, [{ decoration_num: 0, name: promptData.name, prompt, is_from_parsing: false }]];
       return prev.filter((_, i) => i !== idx);
     });
   }, [tempCtx, allPrompts, setSelectedTags]);
@@ -1279,6 +1290,13 @@ export function AppShell() {
 
   const isTemporary = tempCtx.isActive;
   const currentCtx = tempCtx.current;
+
+  // ========== Program execution (JS, live preview) ==========
+  const programResult = useProgram(
+    selectedPrograms, allPrograms,
+    selectedTags, selectedLoras, loraSelections,
+    selectedPrefabs, customPrompts, allPrompts,
+  );
 
   // ========== Tag Selection Helper ==========
   const isTagSelected = useCallback((prompt: string) => {
@@ -1337,10 +1355,9 @@ export function AppShell() {
     setSelectedTags(prev => prev.filter(group => {
       const isFromCategory = group.some(tag => tag.decoration_num === 0 && promptSet.has(tag.prompt));
       if (!isFromCategory) return true;
-      const ds = tagsToDisplayString(group);
-      return !(parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds));
+      return group[0]?.is_from_parsing !== true;
     }));
-  }, [allPrompts, parsedTagKeys, customAddedTagKeys, setSelectedTags]);
+  }, [allPrompts, setSelectedTags]);
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
@@ -1418,24 +1435,24 @@ export function AppShell() {
   }, [toggleTreeTag]);
 
   // ========== Application Selection ==========
-  const toggleApplication = useCallback((id: string) => {
-    setSelectedApplications(prev => {
+  const toggleProgram = useCallback((id: string) => {
+    setSelectedPrograms(prev => {
       const exists = prev.some(a => a.id === id);
       if (exists) return prev.filter(a => a.id !== id);
       return [...prev, { id, active: true }];
     });
   }, []);
 
-  const toggleApplicationActive = useCallback((id: string) => {
-    setSelectedApplications(prev => prev.map(a => a.id === id ? { ...a, active: !a.active } : a));
+  const toggleProgramActive = useCallback((id: string) => {
+    setSelectedPrograms(prev => prev.map(a => a.id === id ? { ...a, active: !a.active } : a));
   }, []);
 
-  const removeApplication = useCallback((id: string) => {
-    setSelectedApplications(prev => prev.filter(a => a.id !== id));
+  const removeProgram = useCallback((id: string) => {
+    setSelectedPrograms(prev => prev.filter(a => a.id !== id));
   }, []);
 
-  const reorderApplications = useCallback((fromIdx: number, toIdx: number) => {
-    setSelectedApplications(prev => {
+  const reorderPrograms = useCallback((fromIdx: number, toIdx: number) => {
+    setSelectedPrograms(prev => {
       const next = [...prev];
       const [item] = next.splice(fromIdx, 1);
       next.splice(toIdx, 0, item);
@@ -1443,51 +1460,66 @@ export function AppShell() {
     });
   }, []);
 
-  const deleteApplication = useCallback(async (id: string) => {
+  const deleteProgram = useCallback(async (id: string) => {
     try {
-      await applicationGroup.delete(id);
-      setAllApplications(prev => {
-        const next: AllApplications = {};
+      await programGroup.delete(id);
+      setAllPrograms(prev => {
+        const next: AllPrograms = {};
         for (const [cat, catData] of Object.entries(prev)) {
-          const apps = (catData.applications || []).filter(a => a.id !== id);
-          next[cat] = { ...catData, applications: apps };
+          const apps = (catData.programs || []).filter(a => a.id !== id);
+          next[cat] = { ...catData, programs: apps };
         }
         return next;
       });
-      setSelectedApplications(prev => prev.filter(a => a.id !== id));
+      setSelectedPrograms(prev => prev.filter(a => a.id !== id));
+      setFocusPoints(prev => { if(!prev[id]) return prev; const n = {...prev}; delete n[id]; localStorage.setItem('kolid_focus_points', JSON.stringify(n)); return n; });
     } catch(e) { console.error(e); }
-  }, [setAllApplications]);
+  }, [setAllPrograms]);
 
-  const saveApplication = useCallback(async (id: string | null, name: string, code: string, category: string) => {
+  const saveProgram = useCallback(async (id: string | null, name: string, code: string, category: string, image: string | null = null, video: string | null = null, focusData: { x: number; y: number } | null = null) => {
     if (id) {
       try {
-        await applicationGroup.update(id, name, code);
-        setAllApplications(prev => {
-          const next: AllApplications = {};
+        const result = await programGroup.update(id, name, code, image, video);
+        setAllPrograms(prev => {
+          const next: AllPrograms = {};
           for (const [cat, catData] of Object.entries(prev)) {
             next[cat] = {
               ...catData,
-              applications: (catData.applications || []).map(a => a.id === id ? { ...a, name, code } : a),
+              programs: (catData.programs || []).map(a => {
+                if (a.id !== id) return a;
+                const updated: ProgramData = { ...a, name, code };
+                if (result.preview !== undefined && result.preview !== null) updated.preview = result.preview;
+                else if (image !== null) updated.preview = image;
+                return updated;
+              }),
             };
           }
           return next;
         });
+        if (image) setImgVersion(v => v + 1);
+        if (focusData && id) {
+          setFocusPoints(prev => { const n = {...prev, [id]: focusData}; localStorage.setItem('kolid_focus_points', JSON.stringify(n)); return n; });
+        }
       } catch(e) { console.error(e); }
     } else {
       try {
-        const result = await applicationGroup.add(name, code, category);
-        const newApp: ApplicationData = { id: result.id || `${Date.now()}`, name, code };
-        setAllApplications(prev => {
+        const result = await programGroup.add(name, code, category, image);
+        const newApp: ProgramData = { id: result.id || `${Date.now()}`, name, code, preview: result.preview || image || undefined };
+        setAllPrograms(prev => {
           const next = { ...prev };
-          if (!next[category]) next[category] = { applications: [] };
-          next[category] = { ...next[category], applications: [...(next[category].applications || []), newApp] };
+          if (!next[category]) next[category] = { programs: [] };
+          next[category] = { ...next[category], programs: [...(next[category].programs || []), newApp] };
           return next;
         });
+        if (image) setImgVersion(v => v + 1);
+        if (focusData && result.id) {
+          setFocusPoints(prev => { const n = {...prev, [result.id]: focusData}; localStorage.setItem('kolid_focus_points', JSON.stringify(n)); return n; });
+        }
       } catch(e) { console.error(e); }
     }
-  }, [setAllApplications]);
+  }, [setAllPrograms]);
 
-  const updateApplicationCategory = useCallback(async () => {
+  const updateProgramCategory = useCallback(async () => {
     const oldName = modalOldName;
     const newName = modalName.trim();
     if (!newName) { alert('Please enter a name'); return; }
@@ -1496,18 +1528,18 @@ export function AppShell() {
     let videoData: string|null = null;
     if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
     try {
-      const result = await applicationGroup.updateCategory(oldName, newName, { image: imageData, video: videoData });
+      const result = await programGroup.updateCategory(oldName, newName, { image: imageData, video: videoData });
       if (result.success || result.status === 'ok') {
         if (imageData || videoData) setImgVersion(v => v + 1);
         saveModalFocus(newName, true);
         saveModalVideoVolume(newName);
         saveModalClarityPoints(newName);
-        setAllApplications(prev => {
+        setAllPrograms(prev => {
           const catData = prev[oldName];
           if (!catData) return prev;
-          const updated: ApplicationCategoryData = { ...catData, bg_image: result.bg_image !== undefined ? result.bg_image : catData.bg_image, bg_video: videoData !== null ? videoData : catData.bg_video };
+          const updated: ProgramCategoryData = { ...catData, bg_image: result.bg_image !== undefined ? result.bg_image : catData.bg_image, bg_video: videoData !== null ? videoData : catData.bg_video };
           if (newName !== oldName) {
-            const next: AllApplications = {};
+            const next: AllPrograms = {};
             for (const k of Object.keys(prev)) next[k === oldName ? newName : k] = k === oldName ? updated : prev[k];
             return next;
           }
@@ -1516,24 +1548,24 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); alert('Failed to update program category'); }
-  }, [closeModal, modalOldName, modalName, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllApplications]);
+  }, [closeModal, modalOldName, modalName, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllPrograms]);
 
-  const removeApplicationCategoryBg = useCallback(async () => {
+  const removeProgramCategoryBg = useCallback(async () => {
     const oldName = modalOldName;
     const newName = modalName.trim() || oldName;
     try {
-      const result = await applicationGroup.updateCategory(oldName, newName, { image: '', video: '' });
+      const result = await programGroup.updateCategory(oldName, newName, { image: '', video: '' });
       if (result.success || result.status === 'ok') {
         setImgVersion(v => v + 1);
         removeModalFocus(newName, true);
         removeModalVideoVolume(newName);
         removeModalClarityPoints(newName);
-        setAllApplications(prev => {
+        setAllPrograms(prev => {
           const catData = prev[oldName];
           if (!catData) return prev;
-          const updated: ApplicationCategoryData = { ...catData, bg_image: '', bg_video: '' };
+          const updated: ProgramCategoryData = { ...catData, bg_image: '', bg_video: '' };
           if (newName !== oldName) {
-            const next: AllApplications = {};
+            const next: AllPrograms = {};
             for (const k of Object.keys(prev)) next[k === oldName ? newName : k] = k === oldName ? updated : prev[k];
             return next;
           }
@@ -1542,19 +1574,19 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, removeModalFocus, removeModalVideoVolume, removeModalClarityPoints, setAllApplications]);
+  }, [closeModal, modalOldName, modalName, removeModalFocus, removeModalVideoVolume, removeModalClarityPoints, setAllPrograms]);
 
-  const updateApplicationDisplayMode = useCallback(async () => {
+  const updateProgramDisplayMode = useCallback(async () => {
     const catName = modalOldName;
     try {
-      await applicationGroup.updateDisplayMode(catName, modalMode, modalSize);
-      setAllApplications(prev => {
+      await programGroup.updateDisplayMode(catName, modalMode, modalSize);
+      setAllPrograms(prev => {
         if (!prev[catName]) return prev;
         return { ...prev, [catName]: { ...prev[catName], display_mode: modalMode, size_mode: modalSize } };
       });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalMode, modalSize, setAllApplications]);
+  }, [closeModal, modalOldName, modalMode, modalSize, setAllPrograms]);
 
   // ========== Prefab Merge/Replace ==========
   const mergePrefab = useCallback((pf: PrefabData) => {
@@ -2038,29 +2070,32 @@ export function AppShell() {
       submitLoras = bg.loras;
       submitPrefabs = bg.prefabs;
     } else {
-      // No region mode — use current selections
-      submitPrompts = selectedTags.map(g => tagsToDisplayString(g));
-      submitCustom = customPrompts;
-      submitLoras = selectedLoras.map(l => {
-        const sel = loraSelections[l.file_path];
-        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
-      });
-      submitPrefabs = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+      // No region mode — use program-filtered selections
+      submitPrompts = programResult.filteredTags.map(g => tagsToDisplayString(g));
+      submitCustom = programResult.filteredCustomPrompts;
+      submitLoras = programResult.filteredLoras;
+      submitPrefabs = programResult.filteredPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
     }
+
+    // Compute prompts that are still "pure parsing" (not converted to user tag)
+    const excludeFromCache = selectedTags
+      .filter(g => g[0]?.is_from_parsing === true)
+      .map(g => tagsToDisplayString(g));
 
     submitSelection(
       submitPrompts,
       submitCustom,
       submitLoras,
       submitPrefabs,
-      selectedApplications.map(a => ({ id: a.id, active: a.active })),
+      selectedPrograms.map(a => ({ id: a.id, active: a.active })),
+      excludeFromCache,
       () => {
         if (window.parent !== window) {
           window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
         }
       }
     );
-  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, selectedApplications, submitSelection, enableRegion]);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, selectedPrograms, programResult, submitSelection, enableRegion]);
 
   // ========== Delete Prompt ==========
   const deletePrompt = useCallback(async (id: string) => {
@@ -3135,7 +3170,7 @@ export function AppShell() {
         const decayX = Math.tanh(tx / (maxX || 1)) * maxX;
         const decayY = Math.tanh(ty / (maxY || 1)) * maxY;
 
-        const catName = cat.id.replace('category-', '').replace('library-', '');
+        const catName = cat.id.replace('category-', '').replace('library-', '').replace('application-', '');
         const base = bgBaseRef.current[catName];
         const fx = base ? decayX + base.x : decayX;
         const fy = base ? decayY + base.y : decayY;
@@ -3172,7 +3207,7 @@ export function AppShell() {
         el.style.setProperty('--bg-height', `${ih * scale}px`);
 
         const catEl = mask.closest('.category') as HTMLElement;
-        const catName = catEl ? catEl.id.replace('category-', '').replace('library-', '') : '';
+        const catName = catEl ? catEl.id.replace('category-', '').replace('library-', '').replace('application-', '') : '';
         if (catName) applyBgFocus(el, key, catName);
       };
       imgEl.src = imgPath;
@@ -3550,16 +3585,12 @@ export function AppShell() {
 
                 const parsedCount = isTemporary ? 0 : cp.filter(p => {
                   const group = getTagGroupForPrompt(p.prompt);
-                  if (!group) return false;
-                  const ds = tagsToDisplayString(group);
-                  return parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds);
+                  return group && group[0]?.is_from_parsing === true;
                 }).length;
                 const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => {
                   if (!isTagSelected(p.prompt)) return false;
                   const group = getTagGroupForPrompt(p.prompt);
-                  if (!group) return true;
-                  const ds = tagsToDisplayString(group);
-                  return !(parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds));
+                  return !group || group[0]?.is_from_parsing !== true;
                 }).length;
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
 
@@ -3608,7 +3639,7 @@ export function AppShell() {
 
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
@@ -3760,7 +3791,7 @@ export function AppShell() {
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
@@ -3810,9 +3841,9 @@ export function AppShell() {
             </div>) : null}
 
             {!tempCtx.mode && !isTemporary ? (
-            <div className="categories-container application-section" id="applications">
-              {Object.entries(allApplications).map(([appCat, catData]) => {
-                const apps = (catData?.applications || []) as ApplicationData[];
+            <div className="categories-container program-section" id="applications">
+              {Object.entries(allPrograms).map(([appCat, catData]) => {
+                const apps = (catData?.programs || []) as ProgramData[];
                 const expanded = expandedCategories.has(appCat);
                 const anim = animating.has(appCat);
                 const displayMode = catData.display_mode || 'horizontal';
@@ -3822,7 +3853,7 @@ export function AppShell() {
                 const bgImage = catData.bg_image || '';
                 const bgVideo = (catData as any).bg_video || '';
                 return (
-                  <div key={appCat} className={`category ${expanded ? 'expanded' : 'collapsed'}`} id={`application-${appCat}`}>
+                  <div key={appCat} className={`category ${expanded ? 'expanded' : 'collapsed'}`} id={`application-${appCat}`} onMouseMove={e => { const r = e.currentTarget.getBoundingClientRect(); const mx = e.clientX - r.left; const my = e.clientY - r.top; const pts = clarityPoints[appCat] || []; const circles = pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join(''); const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${circles}<circle cx="${mx}" cy="${my}" r="70" fill="black"/></svg>`; const blurEl = e.currentTarget.querySelector<HTMLDivElement>('.category-background-blur'); if (blurEl) { const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; blurEl.style.maskImage = url; blurEl.style.webkitMaskImage = url; } }}>
                     {expanded && bgVideo ? (
                       <div className="category-background-mask">
                         <video className="category-background-video" src={imgUrl(bgVideo)} muted={!(videoVolumes[appCat] > 0)} loop autoPlay playsInline ref={el => { if (el) el.volume = videoVolumes[appCat] || 0; }} style={categoryFocusPoints[appCat] ? { objectPosition: `${categoryFocusPoints[appCat].x}% ${categoryFocusPoints[appCat].y}%` } : {}} />
@@ -3832,6 +3863,9 @@ export function AppShell() {
                         <div className="category-background" style={{ backgroundImage: `url(${imgUrl(bgImage)})`, backgroundPosition: categoryFocusPoints[appCat] ? `${categoryFocusPoints[appCat].x}% ${categoryFocusPoints[appCat].y}%` : 'center' }} />
                       </div>
                     ) : null}
+                    {expanded && (bgVideo || bgImage) ? (
+                      <div className="category-background-blur" style={(() => { const pts = clarityPoints[appCat]; if (!pts || pts.length === 0) return undefined; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join('')}</svg>`; const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; return { maskImage: url, WebkitMaskImage: url }; })()} />
+                    ) : null}
                     <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(appCat); }}>
                       {!expanded && bgVideo ? <video className="bg-video" src={imgUrl(bgVideo)} muted loop autoPlay playsInline style={categoryFocusPoints[appCat] ? { objectPosition: `${categoryFocusPoints[appCat].x}% ${categoryFocusPoints[appCat].y}%` } : {}} /> : !expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[appCat] ? { objectPosition: `${categoryFocusPoints[appCat].x}% ${categoryFocusPoints[appCat].y}%` } : {}} /> : null}
                       <div className="header-content">
@@ -3840,9 +3874,9 @@ export function AppShell() {
                           <span style={{ textShadow:'0px 0px 4px black' }}>{appCat}</span>
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
-                          <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(appCat); setModalMode(displayMode); setModalSize(sizeMode); setModalIsCat(true); setModal({type:'applicationDisplayMode',data:{name:appCat}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(appCat); setModalName(appCat); const cd = allApplications[appCat]||{} as any; const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[appCat] ?? 0); setModalClarityPoints(clarityPoints[appCat] ? [...clarityPoints[appCat]] : []); const pt = categoryFocusPoints[appCat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[appCat] ? [...clarityPoints[appCat]] : []); const pt = categoryFocusPoints[appCat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editApplicationCategory',data:{name:appCat}}); }}>{iconGear}</button>
-                          <button className="delete-category-btn" onClick={e => { e.stopPropagation(); if (confirm(`Delete category "${appCat}" and all its programs?`)) { setAllApplications(prev => { const n = {...prev}; delete n[appCat]; return n; }); } }}>{iconTrash}</button>
+                          <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(appCat); setModalMode(displayMode); setModalSize(sizeMode); setModalIsCat(true); setModal({type:'programDisplayMode',data:{name:appCat}}); }}>{iconGrid}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(appCat); setModalName(appCat); const cd = allPrograms[appCat]||{} as any; const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[appCat] ?? 0); setModalClarityPoints(clarityPoints[appCat] ? [...clarityPoints[appCat]] : []); const pt = categoryFocusPoints[appCat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[appCat] ? [...clarityPoints[appCat]] : []); const pt = categoryFocusPoints[appCat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgramCategory',data:{name:appCat}}); }}>{iconGear}</button>
+                          <button className="delete-category-btn" onClick={e => { e.stopPropagation(); if (confirm(`Delete category "${appCat}" and all its programs?`)) { setAllPrograms(prev => { const n = {...prev}; delete n[appCat]; return n; }); } }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
                       </div>
@@ -3850,13 +3884,13 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {apps.map(app => {
-                          const isSelected = selectedApplications.some(sa => sa.id === app.id);
+                          const isSelected = selectedPrograms.some(sa => sa.id === app.id);
                           return (
                             <div key={app.id} className={`prompt-item ${modeClass} ${isSelected ? 'selected' : ''}`} data-application={app.id}>
                               <span className="drag-handle">{iconGrip}</span>
-                              <div className="select-area" onMouseDown={() => toggleApplication(app.id)}>
+                              <div className="select-area" onMouseDown={() => toggleProgram(app.id)}>
                                 <div className="image-layer">
-                                  <div className="no-image" style={{ display:'flex', alignItems:'center', justifyContent:'center' }}>{iconCode}</div>
+                                  {app.preview ? <img src={imgUrl(app.preview)} alt={app.name} loading="lazy" style={focusPoints[app.id] ? { objectPosition: `${focusPoints[app.id].x}% ${focusPoints[app.id].y}%` } : {}} /> : <div className="no-image" style={{ display:'flex', alignItems:'center', justifyContent:'center' }}>{iconCode}</div>}
                                 </div>
                                 <div className="glass-layer" />
                                 <div className="text-layer">
@@ -3865,19 +3899,19 @@ export function AppShell() {
                                 </div>
                               </div>
                               <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModal({type:'editApplication',data:{id:app.id}}); }}>{iconGear}</button>
-                                <button className="action-btn delete" onClick={e => { e.stopPropagation(); deleteApplication(app.id); }}>{iconTrash}</button>
+                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
+                                <button className="action-btn delete" onClick={e => { e.stopPropagation(); deleteProgram(app.id); }}>{iconTrash}</button>
                               </div>
                             </div>
                           );
                         })}
-                        <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={appCat} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModal({type:'editApplication',data:{id:null,category:appCat}}); }}><div>{iconPlus}</div></div>
+                        <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={appCat} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModal({type:'editProgram',data:{id:null,category:appCat}}); }}><div>{iconPlus}</div></div>
                       </div>
                     ) : null}
                   </div>
                 );
               })}
-              <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addApplicationCategory'}); }}>{iconPlus}</div>
+              <div className="add-category-card" onMouseDown={() => { resetModalForm(); setModal({type:'addProgramCategory'}); }}>{iconPlus}</div>
             </div>
             ) : null}
 
@@ -3968,7 +4002,7 @@ export function AppShell() {
                           return undefined;
                         })();
                         return (
-                          <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                          <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'} ${programResult.removedPrefabGuids.has(node.guid) ? 'program-filtered' : ''}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
                             {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                             <div className="prefab-card-header">
                               <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
@@ -4000,6 +4034,7 @@ export function AppShell() {
                             initialSplitMode={sel?.split_mode}
                             isMissing={lora.metadata?.missing === true}
                             isFiltered={isLoraFiltered(lora)}
+                            isProgramFiltered={programResult.removedLoraPaths.has(lora.file_path)}
                             onChange={(data) => {
                               setLoraSelections(prev => {
                                 const existing = prev[lora.file_path];
@@ -4040,7 +4075,8 @@ export function AppShell() {
                       const baseStrength = group[0]?.strength ?? 1.0;
                       const showStrength = baseStrength !== 1.0;
                       const displayStr = tagsToDisplayString(group);
-                      const fromParsing = parsedTagKeys.has(displayStr) && !customAddedTagKeys.has(displayStr);
+                      const fromParsing = group[0]?.is_from_parsing === true;
+                      const programFiltered = programResult.removedTagKeys.has(tagsToDisplayString(group));
                       return (
                         <TagStrengthEditor
                           key={i}
@@ -4048,6 +4084,7 @@ export function AppShell() {
                           strength={baseStrength}
                           showStrength={showStrength}
                           fromParsing={fromParsing}
+                          programFiltered={programFiltered}
                           dragIndex={i}
                           onReorder={(toIdx) => reorderTags(i, toIdx)}
                           onStrengthChange={(v) => {
@@ -4063,26 +4100,26 @@ export function AppShell() {
                 </div>
               </>
             ) : null}
-          </div>
 
           {!tempCtx.mode && !isTemporary ? (
             <>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                <h3 style={{ marginBottom: 0 }}>Selected Programs ({selectedApplications.length})</h3>
-                <button className="clear-btn" onClick={() => setSelectedApplications([])} title="Clear">{iconX}</button>
+                <h3 style={{ marginBottom: 0 }}>Selected Programs ({selectedPrograms.length})</h3>
+                <button className="clear-btn" onClick={() => setSelectedPrograms([])} title="Clear">{iconX}</button>
               </div>
               <div className="prefab-list">
-                {selectedApplications.map((sa, i) => {
-                  let app: ApplicationData | undefined;
-                  for (const catData of Object.values(allApplications)) {
-                    app = (catData.applications || []).find(a => a.id === sa.id);
+                {selectedPrograms.map((sa, i) => {
+                  let app: ProgramData | undefined;
+                  for (const catData of Object.values(allPrograms)) {
+                    app = (catData.programs || []).find(a => a.id === sa.id);
                     if (app) break;
                   }
                   if (!app) return null;
+                  const fp = focusPoints[app.id];
                   return (
                     <div
                       key={sa.id}
-                      className={`application-card ${sa.active ? 'active' : 'inactive'}`}
+                      className={`program-card ${sa.active ? 'active' : 'inactive'}`}
                       draggable
                       onDragStart={e => { e.dataTransfer.setData('text/plain', `selapp:${i}`); }}
                       onDragOver={e => { if (e.dataTransfer.types.includes('text/plain')) e.preventDefault(); }}
@@ -4091,26 +4128,26 @@ export function AppShell() {
                         const data = e.dataTransfer.getData('text/plain');
                         if (data.startsWith('selapp:')) {
                           const fromIdx = parseInt(data.slice(7));
-                          if (fromIdx !== i) reorderApplications(fromIdx, i);
+                          if (fromIdx !== i) reorderPrograms(fromIdx, i);
                         }
                       }}
-                      onMouseDown={e => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.app-card-actions, .action-btn')) return; toggleApplicationActive(sa.id); }}
+                      onMouseDown={e => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.program-card-actions, .action-btn')) return; toggleProgramActive(sa.id); }}
                     >
-                      <div className="app-card-header">
-                        <span className="drag-handle app-drag-handle">{iconGrip}</span>
-                        <span className="app-toggle" style={{ opacity: sa.active ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.name}</span>
-                        <div className="app-card-actions">
-                          <button className="prefab-card-btn edit" onMouseDown={e => { e.stopPropagation(); resetModalForm(); setModalOldName(sa.id); setModalName(app.name); setModalCustomPrompts(app.code); setModal({type:'editApplication',data:{id:sa.id}}); }}>{iconGear}</button>
-                          <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); removeApplication(sa.id); }}>{iconX}</button>
+                      {app.preview && <img className="prefab-card-bg" src={imgUrl(app.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                      <div className="program-card-header">
+                        <span className="drag-handle program-drag-handle">{iconGrip}</span>
+                        <span className="program-toggle" style={{ opacity: sa.active ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.name}</span>
+                        <div className="program-card-actions">
+                          <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); removeProgram(sa.id); }}>{iconX}</button>
                         </div>
                       </div>
-                      {app.code ? <pre className="app-code-preview">{app.code.split('\n').slice(0,3).join('\n')}</pre> : null}
                     </div>
                   );
                 })}
               </div>
             </>
           ) : null}
+          </div>
 
           {!tempCtx.mode && !isTemporary ? (
             <>
@@ -4143,14 +4180,14 @@ export function AppShell() {
             </div>
           </div>
         </div>
-      ) : modal?.type === 'addApplicationCategory' ? (
+      ) : modal?.type === 'addProgramCategory' ? (
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Program Category</h2>
-            <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') { if(!modalName.trim()) return; setAllApplications(prev => ({...prev, [modalName.trim()]: {applications: []}})); closeModal(); } }} />
+            <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} onKeyDown={e => { if(e.key==='Enter') { if(!modalName.trim()) return; setAllPrograms(prev => ({...prev, [modalName.trim()]: {programs: []}})); closeModal(); } }} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => { if(!modalName.trim()) return; setAllApplications(prev => ({...prev, [modalName.trim()]: {applications: []}})); closeModal(); }}>Add</button>
+              <button className="btn btn-primary" onClick={() => { if(!modalName.trim()) return; setAllPrograms(prev => ({...prev, [modalName.trim()]: {programs: []}})); closeModal(); }}>Add</button>
             </div>
           </div>
         </div>
@@ -4218,13 +4255,14 @@ export function AppShell() {
             </div>
           </div>
         </div>
-      ) : modal?.type === 'editApplication' ? (
+      ) : modal?.type === 'editProgram' ? (
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
-            <input type="text" placeholder="Application name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <input type="text" placeholder="Program name" value={modalName} onChange={e => setModalName(e.target.value)} />
+            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <textarea
-              placeholder="# Python code here...&#10;# Available: prompts, cleaned_prompts, custom_prompts, loras, prefabs&#10;# Mutate these lists in place. Execution order = load order."
+              placeholder="// JavaScript code here...&#10;// Available: tags, loras, prefabs, custom_prompts, prompts_data, all_tags, tag_index, decoration_index&#10;// Return { tags, loras, prefabs, custom_prompts } to update context."
               value={modalCustomPrompts}
               onChange={e => setModalCustomPrompts(e.target.value)}
               style={{
@@ -4239,13 +4277,18 @@ export function AppShell() {
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-primary" onClick={async () => {
                 if (!modalName.trim()) { alert('Please enter a name'); return; }
-                await saveApplication(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications');
+                let imageData: string|null = null;
+                if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile!); }); }
+                let videoData: string|null = null;
+                if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
+                const focusData = modalFocusVisible ? { x: modalFocusX, y: modalFocusY } : null;
+                await saveProgram(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications', imageData, videoData, focusData);
                 closeModal();
               }}>Save</button>
             </div>
           </div>
         </div>
-      ) : modal?.type === 'editApplicationCategory' ? (
+      ) : modal?.type === 'editProgramCategory' ? (
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Program Category</h2>
@@ -4253,12 +4296,12 @@ export function AppShell() {
             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
-              <button className="btn btn-danger" onClick={removeApplicationCategoryBg}>Remove BG</button>
-              <button className="btn btn-primary" onClick={updateApplicationCategory}>Update</button>
+              <button className="btn btn-danger" onClick={removeProgramCategoryBg}>Remove BG</button>
+              <button className="btn btn-primary" onClick={updateProgramCategory}>Update</button>
             </div>
           </div>
         </div>
-      ) : modal?.type === 'applicationDisplayMode' ? (
+      ) : modal?.type === 'programDisplayMode' ? (
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Program Display Mode</h2>
@@ -4274,7 +4317,7 @@ export function AppShell() {
             </select>
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
-              <button className="btn btn-primary" onClick={updateApplicationDisplayMode}>Update</button>
+              <button className="btn btn-primary" onClick={updateProgramDisplayMode}>Update</button>
             </div>
           </div>
         </div>
@@ -4845,6 +4888,7 @@ function TagStrengthEditor({
   strength,
   showStrength,
   fromParsing,
+  programFiltered,
   dragIndex,
   onReorder,
   onStrengthChange,
@@ -4854,6 +4898,7 @@ function TagStrengthEditor({
   strength: number;
   showStrength: boolean;
   fromParsing: boolean;
+  programFiltered: boolean;
   dragIndex: number;
   onReorder: (toIdx: number) => void;
   onStrengthChange: (v: number) => void;
@@ -4896,7 +4941,7 @@ function TagStrengthEditor({
   return (
     <span
       ref={spanRef}
-      className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${dragOver ? ' drag-over' : ''}`}
+      className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${programFiltered ? ' program-filtered' : ''}${dragOver ? ' drag-over' : ''}`}
       onClick={editing ? undefined : startEdit}
       draggable={!editing}
       onDragStart={(e) => {

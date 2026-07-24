@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes,
-  LoraFolders, LoraSelectionData, AllApplications,
+  LoraFolders, LoraSelectionData, AllPrograms,
 } from '../types';
 
 const API_BASE = '';
@@ -20,12 +20,12 @@ export function useApi() {
   const [loraRegex, setLoraRegex] = useState('');
   const [loraFolderMeta, setLoraFolderMeta] = useState<Record<string, {bg_image?: string; bg_video?: string}>>({});
   const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
-  const [allApplications, setAllApplications] = useState<AllApplications>({});
-  const [lastSelectedApplications, setLastSelectedApplications] = useState<{ id: string; active?: boolean }[]>([]);
+  const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
+  const [lastSelectedPrograms, setLastSelectedPrograms] = useState<{ id: string; active?: boolean }[]>([]);
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
-    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; applications?: AllApplications; last_selected_applications?: { id: string; active?: boolean }[] } = await res.json();
+    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; programs?: AllPrograms; last_selected_programs?: { id: string; active?: boolean }[] } = await res.json();
     setAllPrompts(data.categories);
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
@@ -36,16 +36,16 @@ export function useApi() {
     setCustomPrompts(data.custom_prompts || '');
     setLoraRegex(data.lora_regex || '');
     setParsedPrompts(data.parsed_prompts || []);
-    setAllApplications(data.applications || {});
-    setLastSelectedApplications(data.last_selected_applications || []);
+    setAllPrograms(data.programs || {});
+    setLastSelectedPrograms(data.last_selected_programs || []);
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], applications?: { id: string; active: boolean }[], onBeforeClose?: () => void) => {
+  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], programs?: { id: string; active: boolean }[], excludeFromCache?: string[], onBeforeClose?: () => void) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, applications }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, exclude_from_cache: excludeFromCache || [] }),
     });
     if (res.ok) {
       onBeforeClose?.();
@@ -75,7 +75,7 @@ export function useApi() {
     customPrompts, setCustomPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
-    allApplications, setAllApplications, lastSelectedApplications,
+    allPrograms, setAllPrograms, lastSelectedPrograms,
     loadData, submitSelection, closeWindow, loadLoraData,
   };
 }

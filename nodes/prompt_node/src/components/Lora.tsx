@@ -16,6 +16,7 @@ interface LoraProps {
   initialSplitMode?: boolean;
   isMissing?: boolean;
   isFiltered?: boolean;
+  isProgramFiltered?: boolean;
   onChange: (data: LoraChangeData) => void;
   onRemove: () => void;
 }
@@ -75,7 +76,7 @@ function buildActiveSetFromInitial(
   return { mergeActive, splitActive };
 }
 
-export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, isFiltered, onChange, onRemove }: LoraProps) {
+export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, isFiltered, isProgramFiltered, onChange, onRemove }: LoraProps) {
   const rawTags = lora.tags || [];
   const splitTags = useMemo(() => {
     const seen = new Set<string>();
@@ -229,7 +230,7 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
     : '';
 
   return (
-    <div className={`lora-card ${cardActive ? 'active' : ''} ${isMissing ? 'missing' : ''} ${isFiltered ? 'filtered' : ''}`} onMouseDown={toggleCard}>
+    <div className={`lora-card ${cardActive ? 'active' : ''} ${isMissing ? 'missing' : ''} ${isFiltered ? 'filtered' : ''} ${isProgramFiltered ? 'program-filtered' : ''}`} onMouseDown={toggleCard}>
       {previewSrc && <img className="lora-card-bg" src={previewSrc} alt="" />}
       <div className="lora-card-header">
         <span className="lora-card-name">{lora.name}</span>
