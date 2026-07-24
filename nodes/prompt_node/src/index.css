@@ -1331,3 +1331,29 @@ body {
 .kolid-dropdown-scroll::-webkit-scrollbar-track { background: transparent; }
 .kolid-dropdown-scroll::-webkit-scrollbar-thumb { background: #48484a; border-radius: 3px; }
 .kolid-dropdown-scroll::-webkit-scrollbar-thumb:hover { background: #5a5a5c; }
+
+/* ═══ Application ═══ */
+.application-section h3 { margin-bottom: 8px; font-size: 14px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+.application-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    user-select: none;
+}
+.application-card:hover { background: var(--bg-card-hover); }
+.application-card.active { border-color: #0a84ff; background: rgba(10, 132, 255, 0.1); }
+.application-card.inactive { opacity: 0.4; }
+.app-card-header { display: flex; align-items: center; gap: 4px; }
+.app-card-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+.app-drag-handle { cursor: grab; color: var(--text-secondary); flex-shrink: 0; }
+.app-toggle { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.application-card.active .app-toggle { color: #0a84ff; }
+.app-code-preview {
+    font-family: Consolas, Monaco, "Courier New", monospace;
+    font-size: 10px; color: var(--text-secondary);
+    margin: 4px 0 0 0; white-space: pre-wrap; overflow: hidden;
+    max-height: 40px; opacity: 0.7;
+}
