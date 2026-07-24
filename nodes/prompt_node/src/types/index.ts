@@ -109,7 +109,7 @@ export interface PointsResponse {
 }
 
 export interface DragState {
-  type: 'category' | 'prompt' | 'library' | 'prefab' | null;
+  type: 'category' | 'prompt' | 'library' | 'prefab' | 'application' | null;
   item: string | null;
   category: string | null;
   element: HTMLElement | null;
@@ -230,4 +230,29 @@ export interface RegionBox {
 /** Singleton background context */
 export interface BackgroundContext extends PromptContextBase {
   isBackground: true;
+}
+
+// ═══ Application ═══
+
+export interface ApplicationData {
+  id: string;
+  name: string;
+  code: string;
+  preview?: string;
+}
+
+export interface ApplicationCategoryData {
+  applications: ApplicationData[];
+  bg_image?: string;
+  bg_video?: string;
+  display_mode?: string;
+  size_mode?: string;
+  [key: string]: unknown;
+}
+
+export type AllApplications = { [category: string]: ApplicationCategoryData };
+
+export interface SelectedApplicationItem {
+  id: string;
+  active: boolean;
 }

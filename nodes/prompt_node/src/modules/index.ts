@@ -121,3 +121,61 @@ export const categoryGroup = new GroupModule('category');
 export const libraryGroup = new GroupModule('library');
 export const categoryDisplay = new DisplayModeModule('category');
 export const libraryDisplay = new DisplayModeModule('library');
+
+export class ApplicationModule {
+  async add(name: string, code: string, category: string) {
+    const resp = await fetch('/add_application', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, code, category }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+
+  async update(id: string, name: string, code: string) {
+    const resp = await fetch('/update_application', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, code }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+
+  async delete(id: string) {
+    const resp = await fetch('/delete_application', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+
+  async reorder(from: number, to: number) {
+    const resp = await fetch('/reorder_applications', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+
+  async updateCategory(oldName: string, newName: string, extra: Record<string, unknown> = {}) {
+    const resp = await fetch('/update_application_category', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_name: oldName, new_name: newName, ...extra }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+
+  async updateDisplayMode(category: string, displayMode: string, sizeMode: string) {
+    const resp = await fetch('/update_application_display_mode', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category, display_mode: displayMode, size_mode: sizeMode }),
+    });
+    if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
+    return resp.json();
+  }
+}
+
+export const applicationGroup = new ApplicationModule();

@@ -76,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None):
+    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_applications=None):
         self.port = port
         self.server = None
         self.started = False
@@ -93,6 +93,8 @@ class SnapshotPromptServer:
         self.last_selected_prefabs = last_selected_prefabs or []
         self.selected_prefabs = []
         self.parsed_prompts = parsed_prompts or []
+        self.last_selected_applications = last_selected_applications or []
+        self.selected_applications = []
         # Region fields
         self.image = None
         self.width = 1024
@@ -109,9 +111,11 @@ class SnapshotPromptServer:
         self.prompt_json = os.path.join(self.data_dir, "prompt.json")
         self.library_json = os.path.join(self.data_dir, "library.json")
         self.lora_folder_meta_json = os.path.join(self.data_dir, "lora_folder_meta.json")
+        self.applications_json = os.path.join(self.data_dir, "applications.json")
 
         self.prompts_data = self._load_prompts()
         self.libraries_data = self._load_libraries()
+        self.applications_data = self._load_applications()
         self.category_display_modes = {}
         self.category_size_modes = {}
         for cat, cat_data in self.prompts_data.items():
@@ -477,6 +481,29 @@ class SnapshotPromptServer:
         except:
             pass
 
+    def _load_applications(self):
+        self._ensure_dirs()
+        if os.path.exists(self.applications_json):
+            try:
+                with open(self.applications_json, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                elif isinstance(data, list):
+                    # Migrate old flat list to categorized format
+                    return {"Applications": data}
+            except:
+                pass
+        return {}
+
+    def _save_applications(self, data):
+        self._ensure_dirs()
+        try:
+            with open(self.applications_json, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
     def _normalize_prefab_tags(self, prefab_tags):
         """Normalize prefab tags so that prompt field stores English prompt instead of Chinese name.
         
@@ -730,12 +757,14 @@ class SnapshotPromptServer:
                 data = {
                     'categories': self.server_instance.prompts_data,
                     'libraries': self.server_instance.libraries_data,
+                    'applications': self.server_instance.applications_data,
                     'last_selected': self.server_instance.last_selected,
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
                     'custom_prompts': self.server_instance.custom_prompts,
                     'last_selected_loras': self.server_instance.last_selected_loras,
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs,
+                    'last_selected_applications': self.server_instance.last_selected_applications,
                     'parsed_prompts': self.server_instance.parsed_prompts,
                     'lora_regex': self.server_instance.lora_regex,
                 }
@@ -863,8 +892,10 @@ class SnapshotPromptServer:
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
                     self.server_instance.selected_loras = data.get('loras', [])
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
+                    self.server_instance.selected_applications = data.get('applications', [])
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
+                    print(f"[PromptNode] stored selected_applications: {self.server_instance.selected_applications}")
                     self.server_instance.prompt_event.set()
 
                     self.send_response(200)
@@ -2157,6 +2188,160 @@ class SnapshotPromptServer:
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode('utf-8'))
 
+            elif self.path == '/add_application':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    app_name = data.get('name', '')
+                    app_code = data.get('code', '')
+                    app_category = data.get('category', 'Applications')
+                    app_id = None
+                    if app_name:
+                        app_id = self.server_instance._generate_id()
+                        if app_category not in self.server_instance.applications_data:
+                            self.server_instance.applications_data[app_category] = {'applications': []}
+                        cat_data = self.server_instance.applications_data[app_category]
+                        if 'applications' not in cat_data:
+                            cat_data['applications'] = []
+                        cat_data['applications'].append({
+                            'id': app_id,
+                            'name': app_name,
+                            'code': app_code,
+                        })
+                        self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok', 'id': app_id}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_application':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    app_id = data.get('id', '')
+                    new_name = data.get('name', '')
+                    new_code = data.get('code', '')
+                    for cat_name, cat_data in self.server_instance.applications_data.items():
+                        apps = cat_data.get('applications', []) if isinstance(cat_data, dict) else cat_data
+                        for app in apps:
+                            if app.get('id') == app_id:
+                                app['name'] = new_name
+                                app['code'] = new_code
+                                break
+                    self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_application_category':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    old_name = data.get('old_name', '').strip()
+                    new_name = data.get('new_name', '').strip()
+                    image_data = data.get('image', None)
+                    video_data = data.get('video', None)
+                    display_mode = data.get('display_mode', None)
+                    size_mode = data.get('size_mode', None)
+                    if old_name and new_name and old_name in self.server_instance.applications_data:
+                        cat_data = self.server_instance.applications_data.pop(old_name)
+                        if not isinstance(cat_data, dict):
+                            cat_data = {'applications': cat_data}
+                        if image_data:
+                            cat_data['bg_image'] = self.server_instance._save_image(image_data)
+                        elif image_data == '':
+                            cat_data['bg_image'] = ''
+                        if video_data is not None:
+                            cat_data['bg_video'] = video_data if video_data else ''
+                        if display_mode is not None:
+                            cat_data['display_mode'] = display_mode
+                        if size_mode is not None:
+                            cat_data['size_mode'] = size_mode
+                        self.server_instance.applications_data[new_name] = cat_data
+                        self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok', 'bg_image': self.server_instance.applications_data.get(new_name, {}).get('bg_image', '')}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_application_display_mode':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    cat_name = data.get('category', '')
+                    display_mode = data.get('display_mode', 'horizontal')
+                    size_mode = data.get('size_mode', 'normal')
+                    if cat_name in self.server_instance.applications_data:
+                        cat_data = self.server_instance.applications_data[cat_name]
+                        if not isinstance(cat_data, dict):
+                            cat_data = {'applications': cat_data}
+                            self.server_instance.applications_data[cat_name] = cat_data
+                        cat_data['display_mode'] = display_mode
+                        cat_data['size_mode'] = size_mode
+                        self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/delete_application':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    app_id = data.get('id', '')
+                    for cat_name, cat_data in self.server_instance.applications_data.items():
+                        if isinstance(cat_data, dict):
+                            cat_data['applications'] = [a for a in cat_data.get('applications', []) if a.get('id') != app_id]
+                    self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/reorder_applications':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    cat_name = data.get('category', '')
+                    from_idx = data.get('from', 0)
+                    to_idx = data.get('to', 0)
+                    if cat_name in self.server_instance.applications_data:
+                        cat_data = self.server_instance.applications_data[cat_name]
+                        apps = cat_data.get('applications', []) if isinstance(cat_data, dict) else cat_data
+                        if 0 <= from_idx < len(apps) and 0 <= to_idx < len(apps):
+                            app = apps.pop(from_idx)
+                            apps.insert(to_idx, app)
+                    self.server_instance._save_applications(self.server_instance.applications_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             else:
                 super().do_POST()
 
@@ -2180,6 +2365,8 @@ class SnapshotPromptNode:
                 "lora": ("STRING", {"default": "", "multiline": True}),
                 "prefab_cache": ("BOOLEAN", {"default": False}),
                 "prefab": ("STRING", {"default": "", "multiline": True}),
+                "application_cache": ("BOOLEAN", {"default": False}),
+                "application": ("STRING", {"default": "", "multiline": True}),
             },
             "optional": {
                 "enable_region": ("BOOLEAN", {"default": False, "tooltip": "Enable bbox region editor + caption JSON output"}),
@@ -2434,7 +2621,7 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
-    def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, unique_id,
+    def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, application_cache, application, unique_id,
                         enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, region="", region_format=""):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
@@ -2515,12 +2702,22 @@ class SnapshotPromptNode:
             except Exception:
                 last_selected_prefabs = []
         
+        last_selected_applications = []
+        if application and application.strip():
+            try:
+                last_selected_applications = json.loads(application.strip())
+                if not isinstance(last_selected_applications, list):
+                    last_selected_applications = []
+            except Exception:
+                last_selected_applications = []
+        
         server = SnapshotPromptServer(
             last_selected=last_selected,
             lora_regex=lora_regex,
             last_selected_loras=last_selected_loras,
             last_selected_prefabs=last_selected_prefabs,
             parsed_prompts=parsed_prompts_list,
+            last_selected_applications=last_selected_applications,
         )
         server.custom_prompts = custom_prompts
         # Region fields
@@ -2719,6 +2916,216 @@ class SnapshotPromptNode:
         lora_trigger_words = ", ".join(all_active_tags)
         print(f"[SnapshotPrompt] Lora trigger words: {lora_trigger_words}")
 
+        # ===== Application post-processing =====
+        # Build structured context: tags as tag groups, loras as dicts
+        
+        # Build prompt lookup: lowercase text -> (original, name, category)
+        prompt_lookup = {}
+        # all_tags_info: lowercase prompt text -> {decorations, tags, mute_decorations, category, name, prompt}
+        all_tags_info = {}
+        for cat, cat_data in server.prompts_data.items():
+            if isinstance(cat_data, dict):
+                cat_decorations = cat_data.get('decorations', [])
+                if isinstance(cat_decorations, str):
+                    cat_decorations = [d.strip() for d in cat_decorations.split(',') if d.strip()]
+                cat_tags = cat_data.get('tags', [])
+                if isinstance(cat_tags, str):
+                    cat_tags = [t.strip() for t in cat_tags.split(',') if t.strip()]
+                for p in cat_data.get('prompts', []):
+                    pt = p.get('prompt', '')
+                    if pt:
+                        prompt_lookup[pt.lower()] = (pt, p.get('name', pt), cat)
+                        p_deco = p.get('decorations', [])
+                        if isinstance(p_deco, str):
+                            p_deco = [d.strip() for d in p_deco.split(',') if d.strip()]
+                        p_tags = p.get('tags', [])
+                        if isinstance(p_tags, str):
+                            p_tags = [t.strip() for t in p_tags.split(',') if t.strip()]
+                        p_mute = p.get('mute_decorations', [])
+                        if isinstance(p_mute, str):
+                            p_mute = [d.strip() for d in p_mute.split(',') if d.strip()]
+                        all_tags_info[pt.lower()] = {
+                            'name': p.get('name', pt),
+                            'prompt': pt,
+                            'category': cat,
+                            'decorations': list(set(cat_decorations + p_deco)),
+                            'tags': list(set(cat_tags + p_tags)),
+                            'mute_decorations': p_mute,
+                        }
+        # Build reverse indices
+        # tag_index: tag name -> list of prompt texts that have this tag
+        # decoration_index: decoration name -> list of prompt texts that can be decorated by it
+        tag_index = {}
+        decoration_index = {}
+        for pt_lower, info in all_tags_info.items():
+            for t in info['tags']:
+                t_lower = t.lower()
+                tag_index.setdefault(t_lower, []).append(info['prompt'])
+            for d in info['decorations']:
+                d_lower = d.lower()
+                decoration_index.setdefault(d_lower, []).append(info['prompt'])
+        server.all_tags_info = all_tags_info
+        server.tag_index = tag_index
+        server.decoration_index = decoration_index
+
+        def _parse_prompt_to_tags(prompt_str):
+            """Parse a bracket-notation prompt string into a list of tag dicts."""
+            if prompt_str.startswith('<') and prompt_str.endswith('>'):
+                return None  # custom prompt, not a tag group
+            
+            # Strip strength wrapper: (content:strength)
+            strength = 1.0
+            body = prompt_str
+            if body.startswith('(') and body.endswith(')'):
+                inner = body[1:-1]
+                colon_idx = inner.rfind(':')
+                if colon_idx > 0:
+                    try:
+                        strength = float(inner[colon_idx+1:])
+                        body = inner[:colon_idx].strip()
+                    except ValueError:
+                        pass
+            
+            import re as _re
+            tags = []
+            pos = 0
+            while pos < len(body):
+                m = _re.match(r'^\[+([^\]]+)\]+', body[pos:])
+                if m:
+                    deco_num = m.group(0).count('[')
+                    content = m.group(1).strip()
+                    info = prompt_lookup.get(content.lower())
+                    if info:
+                        tags.append({'decoration_num': deco_num, 'name': info[1], 'prompt': info[0], 'strength': strength, 'category': info[2]})
+                    else:
+                        tags.append({'decoration_num': deco_num, 'name': content, 'prompt': content, 'strength': strength, 'category': ''})
+                    pos += len(m.group(0))
+                else:
+                    next_bracket = body.find('[', pos)
+                    if next_bracket == -1:
+                        text = body[pos:].strip()
+                        if text:
+                            info = prompt_lookup.get(text.lower())
+                            if info:
+                                tags.append({'decoration_num': 0, 'name': info[1], 'prompt': info[0], 'strength': strength, 'category': info[2]})
+                            else:
+                                tags.append({'decoration_num': 0, 'name': text, 'prompt': text, 'strength': strength, 'category': ''})
+                        break
+                    else:
+                        text = body[pos:next_bracket].strip()
+                        if text:
+                            info = prompt_lookup.get(text.lower())
+                            if info:
+                                tags.append({'decoration_num': 0, 'name': info[1], 'prompt': info[0], 'strength': strength, 'category': info[2]})
+                            else:
+                                tags.append({'decoration_num': 0, 'name': text, 'prompt': text, 'strength': strength, 'category': ''})
+                        pos = next_bracket
+            return tags
+
+        def _serialize_tags_to_prompt(tags):
+            """Serialize a list of tag dicts back to bracket-notation prompt string."""
+            parts = []
+            for tag in tags:
+                d = tag.get('decoration_num', 0)
+                pt = tag.get('prompt', '')
+                if d > 0:
+                    parts.append('[' * d + pt + ']' * d)
+                else:
+                    parts.append(pt)
+            result = ' '.join(parts)
+            strength = tags[0].get('strength', 1.0) if tags else 1.0
+            if strength != 1.0:
+                result = f'({result}:{strength})'
+            return result
+
+        def _run_applications(prompts_raw, custom_prompts_str, loras_list, prefabs_list):
+            """Run application post-processing on a single context (background or region box).
+            
+            Returns (new_prompts_raw, new_cleaned_prompts, new_custom_prompts, new_loras, new_prefabs).
+            """
+            # Parse flat prompt strings into structured tag groups
+            tag_groups = []
+            for p in prompts_raw:
+                if p.startswith('<') and p.endswith('>'):
+                    continue
+                tg = _parse_prompt_to_tags(p)
+                if tg:
+                    tag_groups.append(tg)
+            
+            ctx = {
+                'tags': tag_groups,
+                'custom_prompts': custom_prompts_str,
+                'loras': loras_list,
+                'prefabs': prefabs_list,
+                'prompts_data': server.prompts_data,
+                'all_tags': server.all_tags_info,
+                'tag_index': server.tag_index,
+                'decoration_index': server.decoration_index,
+            }
+            for app in server.selected_applications:
+                code = app.get('code', '')
+                app_name = app.get('name', '?')
+                if not code.strip():
+                    continue
+                local_vars = dict(ctx)
+                local_vars['result'] = None
+                try:
+                    print(f"[Application] Running '{app_name}'...")
+                    exec(code, {'__builtins__': __builtins__}, local_vars)
+                    for k in ('tags', 'custom_prompts', 'loras', 'prefabs'):
+                        if k in local_vars:
+                            ctx[k] = local_vars[k]
+                    print(f"[Application] '{app_name}' completed. tags={len(ctx['tags'])}, loras={len(ctx['loras'])}")
+                except Exception as e:
+                    print(f"[Application] Error in '{app_name}': {e}")
+            
+            # Rebuild flat prompt strings from structured tags
+            new_raw = [_serialize_tags_to_prompt(tg) for tg in ctx['tags']]
+            new_cleaned = [s.replace('[', '').replace(']', '') for s in new_raw]
+            if ctx['custom_prompts']:
+                new_raw.append(f"<{ctx['custom_prompts']}>")
+                new_cleaned.append(ctx['custom_prompts'])
+            return new_raw, new_cleaned, ctx['custom_prompts'], ctx['loras'], ctx['prefabs']
+
+        # Run applications on background context
+        all_prompts_raw, all_prompts_cleaned, server.custom_prompts, all_loras, _ = _run_applications(
+            all_prompts_raw, server.custom_prompts, all_loras, server.selected_prefabs
+        )
+
+        result_prompt = ", ".join(all_prompts_raw)
+        cleaned_result = ", ".join(all_prompts_cleaned)
+
+        # Rebuild active_loras from post-processed lora list
+        active_lora_parts = []
+        for lora_item in all_loras:
+            if not lora_item.get('active', True):
+                continue
+            fp = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            if not fp:
+                continue
+            np_ = fp.replace('\\', '/')
+            if np_ not in server._valid_lora_paths and fp not in server._valid_lora_paths:
+                continue
+            strength = lora_item.get('strength', 1.0)
+            if lora_path_mode:
+                active_lora_parts.append(f"<lora_path:{fp}:{strength}>")
+            else:
+                file_name = lora_item.get('file_name', '') or fp.split('/')[-1].split('\\')[-1]
+                active_lora_parts.append(f"<lora:{file_name}:{strength}>")
+        active_loras = ", ".join(active_lora_parts)
+
+        # Rebuild lora_trigger_words from post-processed lora list
+        all_active_tags = []
+        for lora_item in all_loras:
+            if not lora_item.get('active', True):
+                continue
+            fp = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            np_ = fp.replace('\\', '/')
+            if np_ not in server._valid_lora_paths and fp not in server._valid_lora_paths:
+                continue
+            all_active_tags.extend(lora_item.get('active_tags', []))
+        lora_trigger_words = ", ".join(all_active_tags)
+
         # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
         # Only save user-direct selections, not prefab-expanded content
         user_prompt_only = ", ".join(server.selected_prompts)
@@ -2745,6 +3152,13 @@ class SnapshotPromptNode:
                 "type": "STRING",
                 "value": json.dumps(server.selected_prefabs, ensure_ascii=False)
             })
+        if application_cache:
+            PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                "node_id": unique_id,
+                "widget_name": "application",
+                "type": "STRING",
+                "value": json.dumps(server.selected_applications, ensure_ascii=False)
+            })
 
         merged_prompt = cleaned_result
         if lora_trigger_words:
@@ -2763,8 +3177,95 @@ class SnapshotPromptNode:
 
             rr = server.region_result
             boxes = rr.get('boxes', [])
+            
+            # Run application post-processing on each region box's promptContext
+            for box in boxes:
+                if not isinstance(box, dict):
+                    continue
+                pc = box.get("promptContext")
+                if not pc:
+                    continue
+                box_prompts = pc.get("prompts", [])
+                box_custom = pc.get("custom_prompts", "")
+                box_loras = pc.get("loras", [])
+                box_prefabs = pc.get("prefabs", [])
+                new_raw, new_cleaned, new_custom, new_loras, new_prefabs = _run_applications(
+                    list(box_prompts), box_custom, list(box_loras), list(box_prefabs)
+                )
+                pc["prompts"] = new_raw
+                pc["custom_prompts"] = new_custom
+                pc["loras"] = new_loras
+                pc["prefabs"] = new_prefabs
+                # Rebuild desc from post-processed prompts + custom + lora trigger words
+                desc_parts = []
+                for p in new_cleaned:
+                    if p:
+                        desc_parts.append(p)
+                for l in new_loras:
+                    if l.get("active", True):
+                        desc_parts.extend(l.get("active_tags", []))
+                box["desc"] = ", ".join(desc_parts)
+            
+            # Also run on background_context if present
+            bg_ctx = rr.get('background_context')
+            if bg_ctx:
+                bg_prompts = bg_ctx.get("prompts", [])
+                bg_custom = bg_ctx.get("custom_prompts", "")
+                bg_loras = bg_ctx.get("loras", [])
+                bg_prefabs = bg_ctx.get("prefabs", [])
+                bg_new_raw, bg_new_cleaned, bg_new_custom, bg_new_loras, bg_new_prefabs = _run_applications(
+                    list(bg_prompts), bg_custom, list(bg_loras), list(bg_prefabs)
+                )
+                bg_ctx["prompts"] = bg_new_raw
+                bg_ctx["custom_prompts"] = bg_new_custom
+                bg_ctx["loras"] = bg_new_loras
+                bg_ctx["prefabs"] = bg_new_prefabs
+            
+            # Also process format_slots if present
+            format_slots = rr.get('format_slots', {})
+            if format_slots:
+                for slot_id, slot_ctx in format_slots.items():
+                    if not isinstance(slot_ctx, dict):
+                        continue
+                    sp = slot_ctx.get("prompts", [])
+                    sc = slot_ctx.get("custom_prompts", "")
+                    sl = slot_ctx.get("loras", [])
+                    spf = slot_ctx.get("prefabs", [])
+                    sp_new, sc_new, sl_new, spf_new_raw, spf_new_cleaned = _run_applications(
+                        list(sp), sc, list(sl), list(spf)
+                    )
+                    slot_ctx["prompts"] = sp_new
+                    slot_ctx["custom_prompts"] = sc_new
+                    slot_ctx["loras"] = sl_new
+            
             # Use pre-assembled region_prompt from frontend if available, otherwise build from boxes
+            # After application post-processing, box descs have been updated, so we need to
+            # rebuild region_prompt to reflect the changes
             region_prompt = rr.get('region_prompt', '')
+            if region_prompt:
+                # Parse the assembled region_prompt and update desc fields with post-processed values
+                try:
+                    rp_parsed = json.loads(region_prompt)
+                    # Recursively find and update "desc" fields
+                    def _update_descs(obj, box_desc_map):
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                if k == 'desc' and isinstance(v, str):
+                                    # Find matching box by index or position
+                                    pass
+                                elif isinstance(v, (dict, list)):
+                                    _update_descs(v, box_desc_map)
+                        elif isinstance(obj, list):
+                            for i, item in enumerate(obj):
+                                if isinstance(item, dict):
+                                    if 'desc' in item and i < len(box_desc_map):
+                                        item['desc'] = box_desc_map[i]
+                                    _update_descs(item, box_desc_map)
+                    box_descs = [box.get('desc', '') for box in boxes if isinstance(box, dict)]
+                    _update_descs(rp_parsed, box_descs)
+                    region_prompt = json.dumps(rp_parsed, ensure_ascii=False, separators=(",", ":"))
+                except Exception:
+                    pass
             if not region_prompt:
                 # Fallback: build simple caption from boxes + background
                 caption = {"compositional_deconstruction": {"background": cleaned_result, "elements": []}}
@@ -2854,6 +3355,7 @@ class SnapshotPromptNode:
             "prompt": user_prompt_only,
             "lora": json.dumps(server.selected_loras, ensure_ascii=False),
             "prefab": json.dumps(server.selected_prefabs, ensure_ascii=False),
+            "application": json.dumps(server.selected_applications, ensure_ascii=False),
             "region": "",
         }
         if enable_region and server.region_result:
