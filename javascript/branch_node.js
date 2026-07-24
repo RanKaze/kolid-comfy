@@ -121,9 +121,10 @@ function escapeHTML(str) {
               .replace(/'/g, '&#039;');
 }
 
-function jumpToNode(targetId) {
-    if (!app.graph) return;
-    const target = app.graph.getNodeById(targetId);
+function jumpToNode(targetId, graph) {
+    const searchGraph = graph || app.graph;
+    if (!searchGraph) return;
+    const target = searchGraph.getNodeById(targetId);
     if (!target) return;
     if (app.canvas) {
         app.canvas.centerOnNode(target);
@@ -139,7 +140,7 @@ function jumpToNode(targetId) {
  */
 function parseRelayExpression(text, graph, selfNodeId) {
     if (!text || !text.trim()) return { html: '', jumps: [] };
-    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
+    const allNodesList = getGraphNodes(graph);
     const jumps = [];
     const seenIds = new Set();
     let html = escapeHTML(text);
@@ -205,7 +206,7 @@ function parseRelayExpression(text, graph, selfNodeId) {
  */
 function parseActiveConfig(text, graph, selfNodeId) {
     if (!text || !text.trim()) return { html: '', jumps: [] };
-    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
+    const allNodesList = getGraphNodes(graph);
     const segments = text.split(',').map(s => s.trim()).filter(Boolean);
     const jumps = [];
     const seenIds = new Set();
@@ -261,7 +262,7 @@ function parseActiveConfig(text, graph, selfNodeId) {
  */
 function parseSelectConfig(text, graph, selfNodeId) {
     if (!text || !text.trim()) return { html: '', jumps: [] };
-    const allNodesList = graph ? (graph._nodes || graph.nodes || []) : [];
+    const allNodesList = getGraphNodes(graph);
     const segments = text.split(',').map(s => s.trim()).filter(Boolean);
     const jumps = [];
     const seenIds = new Set();
@@ -318,7 +319,7 @@ function parseSelectConfig(text, graph, selfNodeId) {
  */
 function findReferrers(nodeId, graph) {
     if (!graph) return [];
-    const allNodesList = graph._nodes || graph.nodes || [];
+    const allNodesList = getGraphNodes(graph);
     const referrers = [];
     const seenIds = new Set();
     const node = graph.getNodeById(nodeId);
@@ -405,7 +406,7 @@ function createBranchEditor(widget, node, parserFn, placeholderText) {
             btn.className = "kolid-jump-btn";
             btn.title = `Jump to ${j.title} (id:${j.id})`;
             btn.innerHTML = `<span class="kolid-jump-btn-arrow">→</span>${escapeHTML(j.title)}`;
-            btn.addEventListener("click", () => jumpToNode(j.id));
+            btn.addEventListener("click", () => jumpToNode(j.id, node.graph));
             jumpBar.appendChild(btn);
         }
     }
@@ -460,7 +461,7 @@ function createReferrerBar(node) {
             btn.className = "kolid-jump-btn kolid-jump-btn-ref";
             btn.title = `Referenced by ${r.title} (id:${r.id})`;
             btn.innerHTML = `<span class="kolid-jump-btn-arrow">←</span>${escapeHTML(r.title)}`;
-            btn.addEventListener("click", () => jumpToNode(r.id));
+            btn.addEventListener("click", () => jumpToNode(r.id, node.graph));
             container.appendChild(btn);
         }
     }
@@ -486,6 +487,14 @@ function getLink(graph, linkId) {
     if (graph._links) return graph._links.get(linkId);
     if (graph.links) return graph.links[linkId];
     return null;
+}
+
+/**
+ * 从 graph 中获取节点列表，兼容 _nodes / nodes 两种存储方式
+ */
+function getGraphNodes(graph) {
+    if (!graph) return [];
+    return graph._nodes || graph.nodes || [];
 }
 
 /**
@@ -536,7 +545,7 @@ function getNodeFromExpression(expr, node){
                 let id = Number.parseInt(idMatch[0]);
                 n = targetGraph.getNodeById(id);
             }else{
-                n = targetGraph.nodes.find(n => n.title == match || n.type == match);
+                n = getGraphNodes(targetGraph).find(n => n.title == match || n.type == match);
             }
             if(n && n.subgraph){
                 targetGraph = n.subgraph;
@@ -610,8 +619,9 @@ function resolveSwitchesInExpression(expr, node) {
  */
 function resolveTargetNodes(graph, targetType, targetValue) {
     let targetNodes = [];
+    const allNodesList = getGraphNodes(graph);
     if (targetType === "name") {
-        targetNodes = graph.nodes.filter(n => n.title === targetValue || n.type === targetValue);
+        targetNodes = allNodesList.filter(n => n.title === targetValue || n.type === targetValue);
     } else if (targetType === "id") {
         const n = graph.getNodeById(parseInt(targetValue));
         if (n) targetNodes = [n];
@@ -625,12 +635,12 @@ function resolveTargetNodes(graph, targetType, targetValue) {
             const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes;
             if (groupNodeIds && groupNodeIds.length > 0) {
                 const idSet = new Set(groupNodeIds);
-                targetNodes = graph.nodes.filter(n => idSet.has(n.id));
+                targetNodes = allNodesList.filter(n => idSet.has(n.id));
             }
             // 策略2: 通过 node.group 属性匹配
             if (targetNodes.length === 0) {
                 const groupId = matchedGroup._id != null ? matchedGroup._id : matchedGroup.id;
-                targetNodes = graph.nodes.filter(n => {
+                targetNodes = allNodesList.filter(n => {
                     if (n.group == null) return false;
                     if (typeof n.group === "number") return n.group === groupId;
                     return n.group === matchedGroup || (n.group._id != null && n.group._id === groupId) || (n.group.id != null && n.group.id === groupId);
@@ -641,7 +651,7 @@ function resolveTargetNodes(graph, targetType, targetValue) {
                 const bound = matchedGroup._bounding || matchedGroup.bounding;
                 if (bound && bound.length >= 4) {
                     const [gx, gy, gw, gh] = bound;
-                    targetNodes = graph.nodes.filter(n => {
+                    targetNodes = allNodesList.filter(n => {
                         if (!n.pos || !n.size) return false;
                         const [nx, ny] = n.pos;
                         const [nw, nh] = n.size;
@@ -912,8 +922,9 @@ function layoutValue(node){
 
 
 function* allNodes(graph){
-    for (let index = 0; index < graph.nodes.length; index++) {
-        const node = graph.nodes[index];
+    const nodes = getGraphNodes(graph);
+    for (let index = 0; index < nodes.length; index++) {
+        const node = nodes[index];
         yield node;
         if(node.subgraph){
             yield* allNodes(node.subgraph);
@@ -1391,9 +1402,10 @@ app.registerExtension({
             const _selectConfigGuard = new Set();
 
             function applyNodeOp(graph, targetType, targetValue, op) {
+                const allNodesList = getGraphNodes(graph);
                 let targetNodes = [];
                 if (targetType === "name") {
-                    targetNodes = graph.nodes.filter(n => n.title === targetValue || n.type === targetValue);
+                    targetNodes = allNodesList.filter(n => n.title === targetValue || n.type === targetValue);
                 } else if (targetType === "id") {
                     const n = graph.getNodeById(parseInt(targetValue));
                     if (n) targetNodes = [n];
@@ -1405,21 +1417,21 @@ app.registerExtension({
                     } else {
                         // 调试：打印 group 和第一个节点的结构
                         console.log("[select_config] group keys:", Object.keys(matchedGroup), "has _nodes:", !!matchedGroup._nodes, "has nodes:", !!matchedGroup.nodes);
-                        if (graph.nodes.length > 0) {
-                            console.log("[select_config] first node keys:", Object.keys(graph.nodes[0]), "node.group:", graph.nodes[0].group);
+                        if (allNodesList.length > 0) {
+                            console.log("[select_config] first node keys:", Object.keys(allNodesList[0]), "node.group:", allNodesList[0].group);
                         }
 
                         // 策略1: group 自己的 _nodes / nodes 数组（最可靠）
                         const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes;
                         if (groupNodeIds && groupNodeIds.length > 0) {
                             const idSet = new Set(groupNodeIds);
-                            targetNodes = graph.nodes.filter(n => idSet.has(n.id));
+                            targetNodes = allNodesList.filter(n => idSet.has(n.id));
                         }
 
                         // 策略2: 通过 node.group 属性匹配（如果策略1没找到）
                         if (targetNodes.length === 0) {
                             const groupId = matchedGroup._id != null ? matchedGroup._id : matchedGroup.id;
-                            targetNodes = graph.nodes.filter(n => {
+                            targetNodes = allNodesList.filter(n => {
                                 if (n.group == null) return false;
                                 if (typeof n.group === "number") return n.group === groupId;
                                 return n.group === matchedGroup || (n.group._id != null && n.group._id === groupId) || (n.group.id != null && n.group.id === groupId);
@@ -1431,7 +1443,7 @@ app.registerExtension({
                             const bound = matchedGroup._bounding || matchedGroup.bounding;
                             if (bound && bound.length >= 4) {
                                 const [gx, gy, gw, gh] = bound;
-                                targetNodes = graph.nodes.filter(n => {
+                                targetNodes = allNodesList.filter(n => {
                                     if (!n.pos || !n.size) return false;
                                     const [nx, ny] = n.pos;
                                     const [nw, nh] = n.size;
@@ -1867,7 +1879,7 @@ const NODE_COLORS = {
  */
 function collectBranchGraph(graph) {
     if (!graph) return { nodes: [], edges: [] };
-    const allNodesList = graph._nodes || graph.nodes || [];
+    const allNodesList = getGraphNodes(graph);
     const branchTypes = ['BranchSwitchNode', 'BranchBooleanNode', 'BranchSwitchesNode'];
     const branchNodes = allNodesList.filter(n => branchTypes.includes(n.comfyClass));
     const targetNodes = []; // non-branch nodes targeted by config
@@ -2197,7 +2209,7 @@ function buildBranchManagerGraph(node) {
             group.appendChild(text);
 
             // Click to jump
-            group.addEventListener("click", () => jumpToNode(n.id));
+            group.addEventListener("click", () => jumpToNode(n.id, node.graph));
 
             // Hover for tooltip with full dependency info
             group.addEventListener("mouseenter", (e) => {

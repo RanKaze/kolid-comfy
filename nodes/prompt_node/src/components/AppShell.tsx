@@ -198,6 +198,9 @@ export function AppShell() {
     return set;
   }, [parsedPrompts, allPrompts]);
 
+  // Tags added via CustomPromptsEditor — always blue (original), never purple
+  const [customAddedTagKeys, setCustomAddedTagKeys] = useState<Set<string>>(new Set());
+
   // Listen for auto-tag messages from parent window
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -504,6 +507,7 @@ export function AppShell() {
       setSelectedPrefabs([]);
       setSelectedTags([]);
       setCustomPrompts('');
+      setCustomAddedTagKeys(new Set());
       await Promise.all([loadData(), loadLoraData()]);
       isRegionReloadingRef.current = false;
     }).catch(() => { isRegionReloadingRef.current = false; });
@@ -634,6 +638,7 @@ export function AppShell() {
         setSelectedPrefabs([]);
         setSelectedTags([]);
         setCustomPrompts('');
+        setCustomAddedTagKeys(new Set());
         Promise.all([loadData(), loadLoraData()]).then(() => {
           isReloadingRef.current = false;
         });
@@ -1132,6 +1137,7 @@ export function AppShell() {
 
   const handleCustomPromptsParsed = useCallback((tagGroup: TagGroup, displayString: string) => {
     setSelectedTags(prev => [...prev, tagGroup]);
+    setCustomAddedTagKeys(prev => new Set(prev).add(displayString));
   }, [setSelectedTags]);
 
   // ========== Select Prompt (full toggle logic) ==========
@@ -1273,6 +1279,38 @@ export function AppShell() {
   const removeTemporaryTag = useCallback((tgIdx: number) => {
     tempCtx.removeTagGroup(tgIdx);
   }, [tempCtx]);
+
+  const clearCategoryTags = useCallback((cat: string) => {
+    if (isTemporary && currentCtx) {
+      const cp = ((allPrompts[cat] as any)?.prompts || []) as PromptData[];
+      const promptSet = new Set(cp.map(p => p.prompt));
+      const tagGroups = currentCtx.tagGroups || [];
+      const indicesToRemove: number[] = [];
+      tagGroups.forEach((g, i) => {
+        if (g.some(t => t.decoration_num > 0 && promptSet.has(t.prompt))) {
+          indicesToRemove.push(i);
+        }
+      });
+      indicesToRemove.sort((a, b) => b - a).forEach(idx => tempCtx.removeTagGroup(idx));
+    } else {
+      const cp = ((allPrompts[cat] as any)?.prompts || []) as PromptData[];
+      const promptSet = new Set(cp.map(p => p.prompt));
+      setSelectedTags(prev => prev.filter(group =>
+        !group.some(tag => tag.decoration_num === 0 && promptSet.has(tag.prompt))
+      ));
+    }
+  }, [isTemporary, currentCtx, allPrompts, tempCtx, setSelectedTags]);
+
+  const clearParsedCategoryTags = useCallback((cat: string) => {
+    const cp = ((allPrompts[cat] as any)?.prompts || []) as PromptData[];
+    const promptSet = new Set(cp.map(p => p.prompt));
+    setSelectedTags(prev => prev.filter(group => {
+      const isFromCategory = group.some(tag => tag.decoration_num === 0 && promptSet.has(tag.prompt));
+      if (!isFromCategory) return true;
+      const ds = tagsToDisplayString(group);
+      return !(parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds));
+    }));
+  }, [allPrompts, parsedTagKeys, customAddedTagKeys, setSelectedTags]);
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
@@ -3340,7 +3378,19 @@ export function AppShell() {
                   if (filtered.length === 0) return null;
                 }
 
-                const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => isTagSelected(p.prompt)).length;
+                const parsedCount = isTemporary ? 0 : cp.filter(p => {
+                  const group = getTagGroupForPrompt(p.prompt);
+                  if (!group) return false;
+                  const ds = tagsToDisplayString(group);
+                  return parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds);
+                }).length;
+                const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => {
+                  if (!isTagSelected(p.prompt)) return false;
+                  const group = getTagGroupForPrompt(p.prompt);
+                  if (!group) return true;
+                  const ds = tagsToDisplayString(group);
+                  return !(parsedTagKeys.has(ds) && !customAddedTagKeys.has(ds));
+                }).length;
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
 
                 return (
@@ -3357,7 +3407,7 @@ export function AppShell() {
                     {expanded && (bgVideo || bgImage) ? (
                       <div className="category-background-blur" style={(() => { const pts = clarityPoints[cat]; if (!pts || pts.length === 0) return undefined; const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="100%" height="100%" fill="white"/>${pts.map(p => `<circle cx="${p.x}%" cy="${p.y}%" r="60" fill="black"/>`).join('')}</svg>`; const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`; return { maskImage: url, WebkitMaskImage: url }; })()} />
                     ) : null}
-                    <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn')) toggleCategory(cat); }}>
+                    <div className="category-header" onMouseDown={e => { if (!(e.target as HTMLElement).closest('.drag-handle,.display-mode-btn,.edit-category-btn,.delete-category-btn,.count-badge-clear')) toggleCategory(cat); }}>
                       {!expanded && bgVideo ? <video className="bg-video" src={imgUrl(bgVideo)} muted loop autoPlay playsInline style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : !expanded && bgImage ? <img src={imgUrl(bgImage)} className="bg-image" alt="" style={categoryFocusPoints[cat] ? { objectPosition: `${categoryFocusPoints[cat].x}% ${categoryFocusPoints[cat].y}%` } : {}} /> : null}
                       <div className="header-content">
                         <div style={{ display:'flex', alignItems:'center' }}>
@@ -3366,7 +3416,8 @@ export function AppShell() {
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
                           {(catTags.length > 0 || catDeco.length > 0) && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}{catDeco.map(d => <span className="decoration-tag" key={d}>{d}</span>)}</div>}
-                          {selCount > 0 && <span className="count-badge">{selCount}</span>}
+                          {selCount > 0 && <span className="count-badge">{selCount}<button className="count-badge-clear" onClick={e => { e.stopPropagation(); clearCategoryTags(cat); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></span>}
+                          {parsedCount > 0 && <span className="count-badge parsed-count-badge">{parsedCount}<button className="count-badge-clear" onClick={e => { e.stopPropagation(); clearParsedCategoryTags(cat); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></span>}
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(cat); setModalMode(categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries)); setModalSize(categoryDisplay.getSize(cat, categorySizeModes, allLibraries)); setModalIsCat(true); setModal({type:'displayMode',data:{name:cat,isCat:true}}); }}>{iconGrid}</button>
                           <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[cat] ?? 0); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteCategoryDirect(cat); }}>{iconTrash}</button>
@@ -3747,7 +3798,7 @@ export function AppShell() {
                       const baseStrength = group[0]?.strength ?? 1.0;
                       const showStrength = baseStrength !== 1.0;
                       const displayStr = tagsToDisplayString(group);
-                      const fromParsing = parsedTagKeys.has(displayStr);
+                      const fromParsing = parsedTagKeys.has(displayStr) && !customAddedTagKeys.has(displayStr);
                       return (
                         <TagStrengthEditor
                           key={i}
