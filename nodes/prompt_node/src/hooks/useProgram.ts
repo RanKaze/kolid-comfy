@@ -102,22 +102,60 @@ export function useProgram(
     }
 
     // Collect active programs in order, resolving sub-programs recursively
-    const activePrograms: { code: string; name: string }[] = [];
+    // Each entry carries its own context source (SelectedProgramItem / SelectedProgramRef)
+    interface ActiveProgram {
+      code: string;
+      name: string;
+      ctxSource?: {
+        context_prefab_guids?: string[];
+        context_lora_paths?: string[];
+        context_prompt_texts?: string[];
+        context_prefab_inactive?: string[];
+        context_lora_inactive?: string[];
+        context_prompt_inactive?: string[];
+        enable_prefab_context?: boolean;
+        enable_lora_context?: boolean;
+        enable_prompt_context?: boolean;
+      };
+    }
+    const activePrograms: ActiveProgram[] = [];
     const resolved = new Set<string>();
-    function resolvePrograms(programIds: string[], depth = 0) {
-      for (const pid of programIds) {
+    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_prompt_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_prompt_inactive?: string[] }[], depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
+      for (const item of items) {
+        const pid = item.id;
         if (resolved.has(pid)) continue;
         resolved.add(pid);
         const app = programById.get(pid);
         if (!app) continue;
+        // Build this program's context source: own instance data + program definition toggles
+        const ctxSource: ActiveProgram['ctxSource'] = {
+          context_prefab_guids: item.context_prefab_guids,
+          context_lora_paths: item.context_lora_paths,
+          context_prompt_texts: item.context_prompt_texts,
+          context_prefab_inactive: item.context_prefab_inactive,
+          context_lora_inactive: item.context_lora_inactive,
+          context_prompt_inactive: item.context_prompt_inactive,
+          enable_prefab_context: app.enable_prefab_context,
+          enable_lora_context: app.enable_lora_context,
+          enable_prompt_context: app.enable_prompt_context,
+        };
         // Execute sub-programs first (recursive) — even if parent has no code
         const subPrograms = (app.selected_programs || []).filter(sp => sp.active !== false);
         if (subPrograms.length > 0) {
-          resolvePrograms(subPrograms.map(sp => sp.id), depth + 1);
+          // Sub-programs inherit parent's context (use parent's ctxSource if sub-program has no own context data)
+          resolvePrograms(subPrograms.map(sp => ({
+            id: sp.id,
+            context_prefab_guids: sp.context_prefab_guids ?? ctxSource.context_prefab_guids,
+            context_lora_paths: sp.context_lora_paths ?? ctxSource.context_lora_paths,
+            context_prompt_texts: sp.context_prompt_texts ?? ctxSource.context_prompt_texts,
+            context_prefab_inactive: sp.context_prefab_inactive ?? ctxSource.context_prefab_inactive,
+            context_lora_inactive: sp.context_lora_inactive ?? ctxSource.context_lora_inactive,
+            context_prompt_inactive: sp.context_prompt_inactive ?? ctxSource.context_prompt_inactive,
+          })), depth + 1, ctxSource);
         }
         // Only add to execution list if this program has actual code
         if (app.code && app.code.trim()) {
-          activePrograms.push({ code: app.code, name: app.name });
+          activePrograms.push({ code: app.code, name: app.name, ctxSource });
         }
       }
     }
@@ -128,7 +166,7 @@ export function useProgram(
 
     for (const sa of selectedPrograms) {
       if (!sa.active) continue;
-      resolvePrograms([sa.id]);
+      resolvePrograms([sa], 0);
     }
 
     // Debug: log resolved program chain
@@ -197,40 +235,39 @@ export function useProgram(
     const allGenLoras: any[] = [];
     const allGenPrefabs: any[] = [];
 
-    // Find the root program for context inheritance
-    const rootProgram = selectedPrograms.find(sp => sp.active);
-    const rootProgramData = rootProgram ? programById.get(rootProgram.id) : null;
+    // Build lora lookup (shared across all programs)
+    const loraLookup = new Map<string, LoraItemData>();
+    for (const items of Object.values(allLoraData)) { for (const item of items) loraLookup.set(item.file_path, item); }
 
     // Run each program
     for (const prog of activePrograms) {
-      // Build context variables from root program instance's context selections
+      // Build context variables from THIS program's own context source
+      const cs = prog.ctxSource;
       let prefabContext: any[] = [];
       let loraContext: LoraSelectionData[] = [];
       let promptContext: TagGroup[] = [];
 
-      if (rootProgram && rootProgramData) {
-        if (rootProgramData.enable_prefab_context && rootProgram.context_prefab_guids) {
-          prefabContext = rootProgram.context_prefab_guids.map((guid: string) => {
+      if (cs) {
+        if (cs.enable_prefab_context && cs.context_prefab_guids) {
+          prefabContext = cs.context_prefab_guids.map((guid: string) => {
             const pfData = prefabDataMap.get(guid);
             if (!pfData) return null;
-            const isActive = !(rootProgram.context_prefab_inactive || []).includes(guid);
+            const isActive = !(cs.context_prefab_inactive || []).includes(guid);
             return { guid, name: pfData.name || '', tag_groups: pfData.tag_groups || [], loras: pfData.loras || [], custom_prompts: pfData.custom_prompts || '', preview: pfData.preview || '', active: isActive };
           }).filter(Boolean);
         }
-        if (rootProgramData.enable_lora_context && rootProgram.context_lora_paths) {
-          const loraLookup = new Map<string, LoraItemData>();
-          for (const items of Object.values(allLoraData)) { for (const item of items) loraLookup.set(item.file_path, item); }
-          loraContext = rootProgram.context_lora_paths.map((fp: string) => {
+        if (cs.enable_lora_context && cs.context_lora_paths) {
+          loraContext = cs.context_lora_paths.map((fp: string) => {
             const item = loraLookup.get(fp);
             if (!item) return null;
-            const isActive = !(rootProgram.context_lora_inactive || []).includes(fp);
+            const isActive = !(cs.context_lora_inactive || []).includes(fp);
             const sel = loraSelections[fp];
             return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: isActive, split_mode: sel?.split_mode };
           }).filter(Boolean) as LoraSelectionData[];
         }
-        if (rootProgramData.enable_prompt_context && rootProgram.context_prompt_texts) {
-          promptContext = rootProgram.context_prompt_texts.map((text: string) => {
-            const isActive = !(rootProgram.context_prompt_inactive || []).includes(text);
+        if (cs.enable_prompt_context && cs.context_prompt_texts) {
+          promptContext = cs.context_prompt_texts.map((text: string) => {
+            const isActive = !(cs.context_prompt_inactive || []).includes(text);
             const tg = parseStringToTags(text, allPrompts);
             return { ...tg, active: isActive };
           });
