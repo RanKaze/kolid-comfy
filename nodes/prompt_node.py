@@ -2275,6 +2275,12 @@ class SnapshotPromptServer:
                             'context_prefab_guids': context_prefab_guids,
                             'context_lora_paths': context_lora_paths,
                             'context_prompt_texts': context_prompt_texts,
+                            'prefab_builtin_guids': data.get('prefab_builtin_guids', []),
+                            'lora_builtin_paths': data.get('lora_builtin_paths', []),
+                            'prompt_builtin_texts': data.get('prompt_builtin_texts', []),
+                            'prefab_builtin_inactive': data.get('prefab_builtin_inactive', []),
+                            'lora_builtin_inactive': data.get('lora_builtin_inactive', []),
+                            'prompt_builtin_inactive': data.get('prompt_builtin_inactive', []),
                         })
                         self.server_instance._save_programs(self.server_instance.programs_data)
                     self.send_response(200)
@@ -2326,6 +2332,9 @@ class SnapshotPromptServer:
                                     app['context_lora_paths'] = context_lora_paths
                                 if context_prompt_texts is not None:
                                     app['context_prompt_texts'] = context_prompt_texts
+                                for bf in ['prefab_builtin_guids', 'lora_builtin_paths', 'prompt_builtin_texts', 'prefab_builtin_inactive', 'lora_builtin_inactive', 'prompt_builtin_inactive']:
+                                    if data.get(bf) is not None:
+                                        app[bf] = data.get(bf)
                                 if image_data:
                                     app['preview'] = self.server_instance._save_image(image_data)
                                     new_preview = app['preview']
