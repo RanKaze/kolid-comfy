@@ -76,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_programs=None):
+    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_programs=None, sources=None):
         self.port = port
         self.server = None
         self.started = False
@@ -95,6 +95,7 @@ class SnapshotPromptServer:
         self.parsed_prompts = parsed_prompts or []
         self.last_selected_programs = last_selected_programs or []
         self.selected_programs = []
+        self.sources = sources or {}
         # Region fields
         self.image = None
         self.width = 1024
@@ -804,6 +805,7 @@ class SnapshotPromptServer:
                     'last_selected_programs': self.server_instance.last_selected_programs,
                     'parsed_prompts': self.server_instance.parsed_prompts,
                     'lora_regex': self.server_instance.lora_regex,
+                    'sources': getattr(self.server_instance, 'sources', {}),
                 }
                 print(f"[SnapshotPrompt] /prompts_data: last_selected_programs={self.server_instance.last_selected_programs}")
                 self.send_response(200)
@@ -933,6 +935,7 @@ class SnapshotPromptServer:
                     self.server_instance.selected_programs = data.get('programs', [])
                     self.server_instance.last_selected_programs = data.get('programs', [])
                     self.server_instance.exclude_from_cache = set(data.get('exclude_from_cache', []))
+                    self.server_instance.sources = data.get('sources', {})
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
                     print(f"[PromptNode] stored selected_programs: {self.server_instance.selected_programs}")
@@ -3222,6 +3225,7 @@ class SnapshotPromptNode:
             "program": json.dumps(server.selected_programs, ensure_ascii=False),
             "prompt_parsing": getattr(server, 'parsed_prompts', []) and ", ".join(getattr(server, 'parsed_prompts', [])) or "",
             "custom_prompts": server.custom_prompts or "",
+            "sources": json.dumps(getattr(server, 'sources', {}), ensure_ascii=False),
             "region": "",
         }
         if enable_region and server.region_result:
