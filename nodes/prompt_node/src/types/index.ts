@@ -235,11 +235,17 @@ export interface BackgroundContext extends PromptContextBase {
 
 // ═══ Application ═══
 
+export interface SelectedProgramRef {
+  id: string;
+  active?: boolean;
+}
+
 export interface ProgramData {
   id: string;
   name: string;
   code: string;
   preview?: string;
+  selected_programs?: SelectedProgramRef[];
 }
 
 export interface ProgramCategoryData {

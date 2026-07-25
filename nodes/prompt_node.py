@@ -2212,13 +2212,15 @@ class SnapshotPromptServer:
                         if app_category not in self.server_instance.programs_data:
                             self.server_instance.programs_data[app_category] = {'programs': []}
                         cat_data = self.server_instance.programs_data[app_category]
-                        if 'applications' not in cat_data:
-                            cat_data['applications'] = []
-                        cat_data['applications'].append({
+                        if 'programs' not in cat_data:
+                            cat_data['programs'] = []
+                        selected_programs = data.get('selected_programs', [])
+                        cat_data['programs'].append({
                             'id': app_id,
                             'name': app_name,
                             'code': app_code,
                             'preview': preview,
+                            'selected_programs': selected_programs,
                         })
                         self.server_instance._save_programs(self.server_instance.programs_data)
                     self.send_response(200)
@@ -2239,6 +2241,7 @@ class SnapshotPromptServer:
                     new_code = data.get('code', '')
                     image_data = data.get('image', None)
                     video_data = data.get('video', None)
+                    selected_programs = data.get('selected_programs', None)
                     new_preview = None
                     for cat_name, cat_data in self.server_instance.programs_data.items():
                         apps = cat_data.get('programs', []) if isinstance(cat_data, dict) else cat_data
@@ -2246,6 +2249,8 @@ class SnapshotPromptServer:
                             if app.get('id') == app_id:
                                 app['name'] = new_name
                                 app['code'] = new_code
+                                if selected_programs is not None:
+                                    app['selected_programs'] = selected_programs
                                 if image_data:
                                     app['preview'] = self.server_instance._save_image(image_data)
                                     new_preview = app['preview']
@@ -3083,10 +3088,12 @@ class SnapshotPromptNode:
 
         # Build cache output dict
         cache_data = {
-            "prompt": user_prompt_only,
+            "prompt": ", ".join(server.selected_prompts),
             "lora": json.dumps(server.selected_loras, ensure_ascii=False),
             "prefab": json.dumps(server.selected_prefabs, ensure_ascii=False),
             "program": json.dumps(server.selected_programs, ensure_ascii=False),
+            "prompt_parsing": getattr(server, 'parsed_prompts', []) and ", ".join(getattr(server, 'parsed_prompts', [])) or "",
+            "custom_prompts": server.custom_prompts or "",
             "region": "",
         }
         if enable_region and server.region_result:

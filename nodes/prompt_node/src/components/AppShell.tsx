@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
-  PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem,
+  PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem, SelectedProgramRef,
   LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
   PromptContextBase, RegionContext, RegionBox, BackgroundContext,
 } from '../types';
@@ -867,6 +867,7 @@ export function AppShell() {
   const [modalPrefabTags, setModalPrefabTags] = useState<TagGroup[]>([]);
   const [modalPrefabLoras, setModalPrefabLoras] = useState<LoraSelectionData[]>([]);
   const [modalPrefabSelectedPrefabs, setModalPrefabSelectedPrefabs] = useState<SelectedPrefabRef[]>([]);
+  const [modalProgramSelectedPrograms, setModalProgramSelectedPrograms] = useState<SelectedProgramRef[]>([]);
 
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
@@ -1110,7 +1111,7 @@ export function AppShell() {
     clearZoomView();
     setModalName(''); setModalPrompt(''); setModalTags([]); setModalDecorations([]); setModalMuteDecorations([]);
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
-    setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalMode('horizontal'); setModalSize('normal');
+    setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
     tempCtx.clear();
   }, [clearImageFields]);
@@ -1476,10 +1477,10 @@ export function AppShell() {
     } catch(e) { console.error(e); }
   }, [setAllPrograms]);
 
-  const saveProgram = useCallback(async (id: string | null, name: string, code: string, category: string, image: string | null = null, video: string | null = null, focusData: { x: number; y: number } | null = null) => {
+  const saveProgram = useCallback(async (id: string | null, name: string, code: string, category: string, image: string | null = null, video: string | null = null, focusData: { x: number; y: number } | null = null, selectedPrograms: SelectedProgramRef[] = []) => {
     if (id) {
       try {
-        const result = await programGroup.update(id, name, code, image, video);
+        const result = await programGroup.update(id, name, code, image, video, selectedPrograms);
         setAllPrograms(prev => {
           const next: AllPrograms = {};
           for (const [cat, catData] of Object.entries(prev)) {
@@ -1487,7 +1488,7 @@ export function AppShell() {
               ...catData,
               programs: (catData.programs || []).map(a => {
                 if (a.id !== id) return a;
-                const updated: ProgramData = { ...a, name, code };
+                const updated: ProgramData = { ...a, name, code, selected_programs: selectedPrograms };
                 if (result.preview !== undefined && result.preview !== null) updated.preview = result.preview;
                 else if (image !== null) updated.preview = image;
                 return updated;
@@ -1504,7 +1505,7 @@ export function AppShell() {
     } else {
       try {
         const result = await programGroup.add(name, code, category, image);
-        const newApp: ProgramData = { id: result.id || `${Date.now()}`, name, code, preview: result.preview || image || undefined };
+        const newApp: ProgramData = { id: result.id || `${Date.now()}`, name, code, preview: result.preview || image || undefined, selected_programs: selectedPrograms };
         setAllPrograms(prev => {
           const next = { ...prev };
           if (!next[category]) next[category] = { programs: [] };
@@ -1936,12 +1937,20 @@ export function AppShell() {
       }
     } catch {}
 
+    // --- Parse program data ---
+    let newPrograms: SelectedProgramItem[] = [];
+    try {
+      const programArr = JSON.parse(loaded.program || '[]');
+      newPrograms = programArr.map((p: { id: string; active?: boolean }) => ({ id: p.id, active: p.active !== false }));
+    } catch {}
+
     if (mode === 'replace') {
       setSelectedTags(newTags);
       setCustomPrompts(customSegments.join('\n'));
       setSelectedLoras(newLoras);
       setLoraSelections(newLoraSelections);
       setSelectedPrefabs(newPrefabs);
+      setSelectedPrograms(newPrograms);
     } else {
       // Merge prompts
       setSelectedTags(prev => {
@@ -1972,8 +1981,14 @@ export function AppShell() {
         const toAdd = newPrefabs.filter(p => !existing.has(p.guid));
         return [...prev, ...toAdd];
       });
+      // Merge programs
+      setSelectedPrograms(prev => {
+        const existing = new Set(prev.map(p => p.id));
+        const toAdd = newPrograms.filter(p => !existing.has(p.id));
+        return [...prev, ...toAdd];
+      });
     }
-  }, [loadFromImageData, allPrompts, loraData, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs]);
+  }, [loadFromImageData, allPrompts, loraData, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs, setSelectedPrograms]);
 
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
@@ -3899,7 +3914,7 @@ export function AppShell() {
                                 </div>
                               </div>
                               <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
+                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModalProgramSelectedPrograms([...(app.selected_programs || [])]); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
                                 <button className="action-btn delete" onClick={e => { e.stopPropagation(); deleteProgram(app.id); }}>{iconTrash}</button>
                               </div>
                             </div>
@@ -4261,6 +4276,40 @@ export function AppShell() {
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
             <input type="text" placeholder="Program name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
+            <div className="edit-prefab-section" style={{ marginTop: 12 }}>
+              <label>Sub-programs ({modalProgramSelectedPrograms.length})</label>
+              <div className="prefab-list">
+                {modalProgramSelectedPrograms.map((sp, i) => {
+                  let subApp: ProgramData | undefined;
+                  for (const catData of Object.values(allPrograms)) {
+                    subApp = (catData.programs || []).find(a => a.id === sp.id);
+                    if (subApp) break;
+                  }
+                  const fp = subApp ? focusPoints[subApp.id] : undefined;
+                  return (
+                    <div key={sp.id} className="program-card" style={{ cursor: 'default' }}>
+                      {subApp?.preview && <img className="prefab-card-bg" src={imgUrl(subApp.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                      <div className="program-card-header">
+                        <span className="program-toggle" style={{ opacity: sp.active !== false ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{subApp?.name || sp.id}</span>
+                        <div className="program-card-actions">
+                          <button className="prefab-card-btn remove" onClick={() => setModalProgramSelectedPrograms(prev => prev.filter((_, j) => j !== i))}>{iconX}</button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <select
+                value=""
+                onChange={e => { if (e.target.value) { setModalProgramSelectedPrograms(prev => [...prev, { id: e.target.value, active: true }]); e.target.value = ""; } }}
+                style={{ width: '100%', padding: '8px', marginTop: 8, background: '#1c1c1e', color: '#fff', border: '1px solid #38383a', borderRadius: 8 }}
+              >
+                <option value="">+ Add sub-program...</option>
+                {Object.values(allPrograms).flatMap(cd => cd.programs || []).filter(a => a.id !== modal.data?.id && !modalProgramSelectedPrograms.some(sp => sp.id === a.id)).map(a => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+            </div>
             <textarea
               placeholder="// JavaScript code here...&#10;// Available: tags, loras, prefabs, custom_prompts, prompts_data, all_tags, tag_index, decoration_index&#10;// Return { tags, loras, prefabs, custom_prompts } to update context."
               value={modalCustomPrompts}
@@ -4282,7 +4331,7 @@ export function AppShell() {
                 let videoData: string|null = null;
                 if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
                 const focusData = modalFocusVisible ? { x: modalFocusX, y: modalFocusY } : null;
-                await saveProgram(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications', imageData, videoData, focusData);
+                await saveProgram(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications', imageData, videoData, focusData, modalProgramSelectedPrograms);
                 closeModal();
               }}>Save</button>
             </div>
