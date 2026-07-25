@@ -17,7 +17,7 @@ import {
 } from '../hooks/useSelection';
 import { useApi } from '../hooks/useApi';
 import { useTempContext } from '../hooks/useTempContext';
-import { useProgram } from '../hooks/useProgram';
+import { useProgram, buildAllTagsLookup, enrichTagGroups, buildLoraSelectionData } from '../hooks/useProgram';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
@@ -888,6 +888,8 @@ export function AppShell() {
   const [modalCtxPromptTexts, setModalCtxPromptTexts] = useState<string[]>([]);
   const [modalCtxTab, setModalCtxTab] = useState<'prefab' | 'lora' | 'prompt'>('prefab');
   const [modalMultiProgram, setModalMultiProgram] = useState(false);
+  const [debugOutput, setDebugOutput] = useState<string | null>(null);
+  const [debugErrorLine, setDebugErrorLine] = useState<number | null>(null);
 
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
@@ -1133,8 +1135,66 @@ export function AppShell() {
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
     setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalEnablePrefabCtx(false); setModalEnableLoraCtx(false); setModalEnablePromptCtx(false); setModalMultiProgram(false); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalCtxTab('prefab'); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
+    setDebugOutput(null); setDebugErrorLine(null);
     tempCtx.clear();
   }, [clearImageFields]);
+
+  // Debug: execute program code with current state, capture output + error line
+  const handleDebug = useCallback(() => {
+    setDebugErrorLine(null);
+    const debugConsole: string[] = [];
+    const fakeConsole = {
+      log: (...args: any[]) => { debugConsole.push(args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)).join(' ')); },
+      error: (...args: any[]) => { debugConsole.push('[ERROR] ' + args.map(a => String(a)).join(' ')); },
+      warn: (...args: any[]) => { debugConsole.push('[WARN] ' + args.map(a => String(a)).join(' ')); },
+    };
+
+    // Determine line-number offset caused by the Function() wrapper so we can
+    // map stack-trace line numbers back to the user's code.
+    const fnParams = ['console', 'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'prefab_context', 'lora_context', 'prompt_context'];
+    let lineOffset = 0;
+    try {
+      const probe = new Function(...fnParams, 'throw new Error("__probe__")');
+      probe(fakeConsole, [], [], [], [], [], {}, [], [], []);
+    } catch (pe: any) {
+      const pm = (pe?.stack || '').match(/<anonymous>:(\d+):/);
+      if (pm) lineOffset = parseInt(pm[1], 10) - 1;
+    }
+
+    try {
+      const fn = new Function(...fnParams, modalCustomPrompts);
+      // Build context (matching useProgram.ts enrichment logic via shared helpers)
+      const allTagsLookup = buildAllTagsLookup(allPrompts);
+      const fakeTags = enrichTagGroups(selectedTags, allTagsLookup);
+      const fakeLoras = buildLoraSelectionData(selectedLoras, loraSelections);
+      const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, [], [], []);
+
+      let output = '=== CONSOLE ===\n' + (debugConsole.length > 0 ? debugConsole.join('\n') : '(no output)') + '\n\n';
+      output += '=== RETURN VALUE ===\n' + JSON.stringify(result, null, 2);
+      if (result && typeof result === 'object') {
+        output += '\n\n=== FILTER ===\n';
+        output += 'filter_tag_groups: ' + JSON.stringify(result.filter_tag_groups || [], null, 2) + '\n';
+        output += 'filter_loras: ' + JSON.stringify(result.filter_loras || [], null, 2) + '\n';
+        output += 'filter_prefabs: ' + JSON.stringify(result.filter_prefabs || [], null, 2);
+        output += '\n\n=== GEN ===\n';
+        output += 'gen_tag_groups: ' + JSON.stringify(result.gen_tag_groups || [], null, 2) + '\n';
+        output += 'gen_loras: ' + JSON.stringify(result.gen_loras || [], null, 2) + '\n';
+        output += 'gen_prefabs: ' + JSON.stringify(result.gen_prefabs || [], null, 2);
+      }
+      setDebugOutput(output);
+    } catch (e: any) {
+      const stack = e?.stack || '';
+      const m = stack.match(/<anonymous>:(\d+):/);
+      if (m && lineOffset > 0) {
+        const lineNum = parseInt(m[1], 10) - lineOffset;
+        const codeLines = modalCustomPrompts.split('\n').length;
+        if (lineNum >= 1 && lineNum <= codeLines) {
+          setDebugErrorLine(lineNum);
+        }
+      }
+      setDebugOutput('ERROR: ' + (e.message || String(e)) + '\n' + (e.stack || ''));
+    }
+  }, [modalCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts]);
 
   const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
     if (modalFocusVisible) {
@@ -4742,6 +4802,28 @@ export function AppShell() {
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content wide" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
+            {/* iOS-style toggles */}
+            <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
+              {[
+                { label: 'Prefab Context', checked: modalEnablePrefabCtx, onChange: (v: boolean) => setModalEnablePrefabCtx(v) },
+                { label: 'Lora Context', checked: modalEnableLoraCtx, onChange: (v: boolean) => setModalEnableLoraCtx(v) },
+                { label: 'Prompt Context', checked: modalEnablePromptCtx, onChange: (v: boolean) => setModalEnablePromptCtx(v) },
+                { label: 'Multi Program', checked: modalMultiProgram, onChange: (v: boolean) => setModalMultiProgram(v) },
+              ].map((toggle, idx) => (
+                <label key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+                  <span style={{ fontSize: 13, color: toggle.checked ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>{toggle.label}</span>
+                  <div onClick={() => toggle.onChange(!toggle.checked)} style={{
+                    width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                    background: toggle.checked ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                  }}>
+                    <div style={{
+                      position: 'absolute', top: 2, left: toggle.checked ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                      background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                    }} />
+                  </div>
+                </label>
+              ))}
+            </div>
             <div className="edit-prefab-body row">
               {/* Left: name + preview image */}
               <div className="edit-prefab-left">
@@ -4754,31 +4836,40 @@ export function AppShell() {
                   <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
                 </div>
               </div>
-              {/* Middle: code editor + context toggles */}
-              <div className="edit-prefab-section" style={{ flex: 2, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', gap: 12, marginBottom: 8 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={modalEnablePrefabCtx} onChange={e => setModalEnablePrefabCtx(e.target.checked)} />
-                    Prefab Context
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={modalEnableLoraCtx} onChange={e => setModalEnableLoraCtx(e.target.checked)} />
-                    Lora Context
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={modalEnablePromptCtx} onChange={e => setModalEnablePromptCtx(e.target.checked)} />
-                    Prompt Context
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-                    <input type="checkbox" checked={modalMultiProgram} onChange={e => setModalMultiProgram(e.target.checked)} />
-                    Multi Program
-                  </label>
-                </div>
+              {/* Middle: code editor */}
+              <div className="edit-prefab-section" style={{ flex: 3, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                 <label>Code</label>
                 <ProgramCodeEditor
                   value={modalCustomPrompts}
-                  onChange={setModalCustomPrompts}
+                  onChange={(v) => { setModalCustomPrompts(v); setDebugErrorLine(null); }}
+                  errorLine={debugErrorLine}
                 />
+              </div>
+              {/* Debug terminal */}
+              <div className="edit-prefab-section" style={{ flex: '0 0 340px', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 0 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: debugOutput === null ? '#8e8e93' : debugOutput.startsWith('ERROR') ? '#ff453a' : '#30d158' }} />
+                    Console
+                  </label>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4 }} onClick={handleDebug}>
+                      <span style={{ fontSize: 10 }}>▶</span> Run
+                    </button>
+                    <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 6px' }} onClick={() => { setDebugOutput(null); setDebugErrorLine(null); }}>✕</button>
+                  </div>
+                </div>
+                <div className="debug-terminal-output" style={{
+                  flex: 1, minHeight: 500, maxHeight: 500, overflow: 'auto',
+                  background: '#0d0d0d', color: '#f5f5f5', padding: 10, borderRadius: 8,
+                  fontFamily: 'Consolas, Monaco, monospace', fontSize: 11, lineHeight: 1.5,
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  border: '1px solid #38383a',
+                }}>
+                  {debugOutput !== null ? debugOutput : (
+                    <span style={{ color: '#8e8e93' }}>// Click "Run" to debug. Output will appear here.</span>
+                  )}
+                </div>
               </div>
               {/* Right: sub-programs */}
               <div className="edit-prefab-right" style={{ flex: 1 }}>

@@ -11,6 +11,59 @@ function toList(v: string | string[] | undefined): string[] {
   return [];
 }
 
+/** Build the all_tags lookup table from allPrompts (category + per-prompt decorations/tags/mute_decorations). */
+export function buildAllTagsLookup(allPrompts: AllPrompts): Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> {
+  const allTags: Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> = {};
+  for (const [cat, catData] of Object.entries(allPrompts)) {
+    const cd = catData as any;
+    const catDecos = toList(cd.decorations).map(d => d.toLowerCase());
+    const catTags = toList(cd.tags).map(t => t.toLowerCase());
+    const prompts: any[] = cd.prompts || [];
+    for (const p of prompts) {
+      if (!p.prompt) continue;
+      const key = p.prompt.toLowerCase();
+      const pDecos = toList(p.decorations).map(d => d.toLowerCase());
+      const pTags = toList(p.tags).map(t => t.toLowerCase());
+      const pMute = toList(p.mute_decorations).map(d => d.toLowerCase());
+      allTags[key] = {
+        name: p.name || p.prompt,
+        prompt: p.prompt,
+        category: cat,
+        decorations: [...new Set([...catDecos, ...pDecos])],
+        tags: [...new Set([...catTags, ...pTags])],
+        mute_decorations: pMute,
+      };
+    }
+  }
+  return allTags;
+}
+
+/** Enrich tag_groups with decorations + tags from the all_tags lookup table. */
+export function enrichTagGroups(selectedTags: TagGroup[], allTagsLookup: Record<string, { decorations: string[]; tags: string[] }>): TagGroup[] {
+  return selectedTags.map(g => ({
+    ...g,
+    tags: g.tags.map(t => {
+      const info = allTagsLookup[t.prompt.toLowerCase()];
+      return {
+        ...t,
+        decorations: info?.decorations || [],
+        tags: info?.tags || [],
+      };
+    }),
+  }));
+}
+
+/** Build LoraSelectionData[] from selected loras + their selection state. */
+export function buildLoraSelectionData(
+  selectedLoras: LoraItemData[],
+  loraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }>,
+): LoraSelectionData[] {
+  return selectedLoras.map(l => {
+    const sel = loraSelections[l.file_path];
+    return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+  });
+}
+
 export interface ProgramResult {
   // Final combined output (original minus filtered + generated)
   resultTags: TagGroup[];
@@ -86,10 +139,7 @@ export function useProgram(
 
     const noProgramsResult: ProgramResult = {
       resultTags: selectedTags,
-      resultLoras: selectedLoras.map(l => {
-        const sel = loraSelections[l.file_path];
-        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
-      }),
+      resultLoras: buildLoraSelectionData(selectedLoras, loraSelections),
       resultPrefabs: selectedPrefabs,
       resultCustomPrompts: customPrompts,
       filter_tag_groups: [],
@@ -105,46 +155,11 @@ export function useProgram(
     }
 
     // Build all_tags from allPrompts
-    const allTags: Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> = {};
-
-    for (const [cat, catData] of Object.entries(allPrompts)) {
-      const cd = catData as any;
-      const catDecos = toList(cd.decorations).map(d => d.toLowerCase());
-      const catTags = toList(cd.tags).map(t => t.toLowerCase());
-      const prompts: any[] = cd.prompts || [];
-      for (const p of prompts) {
-        if (!p.prompt) continue;
-        const key = p.prompt.toLowerCase();
-        const pDecos = toList(p.decorations).map(d => d.toLowerCase());
-        const pTags = toList(p.tags).map(t => t.toLowerCase());
-        const pMute = toList(p.mute_decorations).map(d => d.toLowerCase());
-        allTags[key] = {
-          name: p.name || p.prompt,
-          prompt: p.prompt,
-          category: cat,
-          decorations: [...new Set([...catDecos, ...pDecos])],
-          tags: [...new Set([...catTags, ...pTags])],
-          mute_decorations: pMute,
-        };
-      }
-    }
+    const allTags = buildAllTagsLookup(allPrompts);
 
     // Build context — enrich each Tag with decorations and tags from allTags
-    let ctxTags: TagGroup[] = selectedTags.map(g => ({
-      ...g,
-      tags: g.tags.map(t => {
-        const info = allTags[t.prompt.toLowerCase()];
-        return {
-          ...t,
-          decorations: info?.decorations || [],
-          tags: info?.tags || [],
-        };
-      }),
-    }));
-    let ctxLoras: LoraSelectionData[] = selectedLoras.map(l => {
-      const sel = loraSelections[l.file_path];
-      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
-    });
+    let ctxTags: TagGroup[] = enrichTagGroups(selectedTags, allTags);
+    let ctxLoras: LoraSelectionData[] = buildLoraSelectionData(selectedLoras, loraSelections);
     // Build guid → PrefabData lookup
     const prefabDataMap = new Map<string, any>();
     for (const libData of Object.values(allLibraries)) {
@@ -294,10 +309,7 @@ export function useProgram(
 
     const originalLoraPaths = new Set(selectedLoras.map(l => l.file_path));
     const resultLoraPaths = new Set(ctxLoras.map(l => l.file_path));
-    const filter_loras = selectedLoras.filter(l => !resultLoraPaths.has(l.file_path)).map(l => {
-      const sel = loraSelections[l.file_path];
-      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
-    });
+    const filter_loras = buildLoraSelectionData(selectedLoras.filter(l => !resultLoraPaths.has(l.file_path)), loraSelections);
     const gen_loras = ctxLoras.filter(l => !originalLoraPaths.has(l.file_path));
 
     const originalPrefabGuids = new Set(selectedPrefabs.map(p => p.guid));
