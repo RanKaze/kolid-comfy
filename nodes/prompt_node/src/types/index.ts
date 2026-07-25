@@ -186,6 +186,7 @@ export interface LoraItemData {
   preview_url: string;
   tags?: string[];
   metadata: Record<string, unknown>;
+  source?: SourceMode;
 }
 
 export interface LoraSelectionData {

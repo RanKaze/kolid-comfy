@@ -161,6 +161,7 @@ export function AppShell() {
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
     allPrograms, setAllPrograms, lastSelectedPrograms,
+    sources,
   } = api;
 
   const isLoraFiltered = useCallback((item: LoraItemData) => {
@@ -386,13 +387,16 @@ export function AppShell() {
       const tags = parseStringToTags(str, data.categories);
       loadedParsedKeys.add(tagsToDisplayString(tags));
     }
+    const sources = (data as any).sources || {};
 
     const tagGroups = lastSelected
       .filter(str => !str.startsWith('<') || !str.endsWith('>'))
       .map(str => {
         const tg = parseStringToTags(str, data.categories);
-        const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-        return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: isFromParsing ? 'parsing' as const : 'normal' as const };
+        const key = tagsToDisplayString(tg);
+        const isFromParsing = loadedParsedKeys.has(key);
+        const source = (sources[key] as 'parsing' | 'program') || (isFromParsing ? 'parsing' as const : 'normal' as const);
+        return { ...tg, tags: tg.tags.map(t => ({ ...t })), source };
       });
     setSelectedTags(tagGroups);
 
@@ -553,8 +557,9 @@ export function AppShell() {
     for (const saved of lastSelectedLoras) {
       const lookupKey = (saved as any).file_path || (saved as any).file_name;
       const item = available.get(lookupKey);
+      const loraSource = sources[`lora:${lookupKey}`] || 'normal';
       if (item) {
-        restoredLoras.push(item);
+        restoredLoras.push({ ...item, source: loraSource as any });
         restoredSelections[item.file_path] = {
           activeTags: saved.active_tags || [],
           strength: saved.strength ?? 1.0,
@@ -571,6 +576,7 @@ export function AppShell() {
           preview_url: '',
           tags: saved.active_tags || [],
           metadata: { missing: true },
+          source: loraSource as any,
         });
         restoredSelections[lookupKey] = {
           activeTags: saved.active_tags || [],
@@ -583,7 +589,7 @@ export function AppShell() {
     setSelectedLoras(restoredLoras);
     setLoraSelections(restoredSelections);
     loraRestoredRef.current = true;
-  }, [loraData, lastSelectedLoras]);
+  }, [loraData, lastSelectedLoras, sources]);
 
   // Restore selected prefabs from last_selected_prefabs (recursive tree)
   useEffect(() => {
@@ -634,6 +640,7 @@ export function AppShell() {
         tag_groups,
         loras,
         children,
+        source: (sources[`prefab:${node.guid}`] as any) || 'normal',
       };
     }
 
@@ -644,7 +651,7 @@ export function AppShell() {
     }
     setSelectedPrefabs(restored);
     prefabRestoredRef.current = true;
-  }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid]);
+  }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid, sources]);
 
   // Restore selected applications from last_selected_applications
   useEffect(() => {
@@ -2007,10 +2014,15 @@ export function AppShell() {
         loadedParsedKeys.add(tagsToDisplayString(tags));
       }
     }
+    // Parse sources map from loaded data (for restoring parsing/program source)
+    let loadedSources: Record<string, string> = {};
+    try { loadedSources = typeof loaded.sources === 'string' ? JSON.parse(loaded.sources || '{}') : (loaded.sources || {}); } catch {}
     const newTags = regularSegments.map(s => {
       const tg = parseStringToTags(s, allPrompts);
-      const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-      return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: isFromParsing ? 'parsing' as const : 'normal' as const };
+      const key = tagsToDisplayString(tg);
+      const isFromParsing = loadedParsedKeys.has(key);
+      const source = (loadedSources[key] as 'parsing' | 'program') || (isFromParsing ? 'parsing' as const : 'normal' as const);
+      return { ...tg, tags: tg.tags.map(t => ({ ...t })), source };
     });
 
     // --- Parse lora data ---
@@ -2025,8 +2037,9 @@ export function AppShell() {
       for (const saved of loraArr) {
         const lookupKey = saved.file_path || saved.file_name;
         const item = available.get(lookupKey);
+        const loraSource = loadedSources[`lora:${lookupKey}`] || 'normal';
         if (item) {
-          newLoras.push(item);
+          newLoras.push({ ...item, source: loraSource as any });
           newLoraSelections[item.file_path] = {
             activeTags: saved.active_tags || [],
             strength: saved.strength ?? 1.0,
@@ -2042,6 +2055,7 @@ export function AppShell() {
             preview_url: '',
             tags: saved.active_tags || [],
             metadata: { missing: true },
+            source: loraSource as any,
           });
           newLoraSelections[lookupKey] = {
             activeTags: saved.active_tags || [],
@@ -2084,7 +2098,7 @@ export function AppShell() {
             return restoreTree(saved || nested, new Set(visited));
           })
           .filter(Boolean) as SelectedPrefabItem[];
-        return { guid: node.guid, active: node.active !== false, tag_groups, loras, children };
+        return { guid: node.guid, active: node.active !== false, tag_groups, loras, children, source: (loadedSources[`prefab:${node.guid}`] as any) || 'normal' };
       }
       for (const sp of prefabArr) {
         const item = restoreTree(sp, new Set());
@@ -2247,6 +2261,17 @@ export function AppShell() {
       submitPrefabs = programResult.resultPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     }
 
+    // Build sources map for non-normal items (so load_from_image can restore source)
+    const sources: Record<string, string> = {};
+    for (const g of selectedTags) {
+      if (g.source && g.source !== 'normal') sources[tagsToDisplayString(g)] = g.source;
+    }
+    for (const l of selectedLoras) {
+      if ((l as any).source && (l as any).source !== 'normal') sources[`lora:${l.file_path}`] = (l as any).source;
+    }
+    for (const p of selectedPrefabs) {
+      if ((p as any).source && (p as any).source !== 'normal') sources[`prefab:${p.guid}`] = (p as any).source;
+    }
     // Exclude both parsing and program-sourced tags from cache
     const excludeFromCache = selectedTags
       .filter(g => g.source !== 'normal')
@@ -2259,6 +2284,7 @@ export function AppShell() {
       submitPrefabs,
       selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_prompt_texts: a.context_prompt_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_prompt_inactive: a.context_prompt_inactive })),
       excludeFromCache,
+      sources,
       () => {
         if (window.parent !== window) {
           window.parent.postMessage({ type: 'prompt-confirmed' }, '*');

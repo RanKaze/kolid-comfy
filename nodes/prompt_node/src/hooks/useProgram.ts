@@ -176,9 +176,9 @@ export function useProgram(
     }
 
     const noProgramsResult: ProgramResult = {
-      resultTags: selectedTags,
-      resultLoras: buildLoraSelectionData(selectedLoras, loraSelections),
-      resultPrefabs: selectedPrefabs,
+      resultTags: selectedTags.filter(g => g.source !== 'program'),
+      resultLoras: buildLoraSelectionData(selectedLoras.filter(l => (l as any).source !== 'program'), loraSelections),
+      resultPrefabs: selectedPrefabs.filter(p => (p as any).source !== 'program'),
       resultCustomPrompts: customPrompts,
       filter_tag_groups: [],
       filter_loras: [],
@@ -195,9 +195,14 @@ export function useProgram(
     // Build all_tags from allPrompts
     const allTags = buildAllTagsLookup(allPrompts);
 
+    // Strip program-sourced items from the previous run so they don't accumulate
+    const baseTags = selectedTags.filter(g => g.source !== 'program');
+    const baseLoras = selectedLoras.filter(l => (l as any).source !== 'program');
+    const basePrefabs = selectedPrefabs.filter(p => (p as any).source !== 'program');
+
     // Build context — enrich each Tag with decorations and tags from allTags
-    let ctxTags: TagGroup[] = enrichTagGroups(selectedTags, allTags);
-    let ctxLoras: LoraSelectionData[] = buildLoraSelectionData(selectedLoras, loraSelections);
+    let ctxTags: TagGroup[] = enrichTagGroups(baseTags, allTags);
+    let ctxLoras: LoraSelectionData[] = buildLoraSelectionData(baseLoras, loraSelections);
     // Build guid → PrefabData lookup
     const prefabDataMap = new Map<string, any>();
     for (const libData of Object.values(allLibraries)) {
@@ -224,7 +229,7 @@ export function useProgram(
         children: item.children.map(c => buildMergedPrefab(c)),
       };
     };
-    let ctxPrefabs: any[] = selectedPrefabs.map(p => buildMergedPrefab(p));
+    let ctxPrefabs: any[] = basePrefabs.map(p => buildMergedPrefab(p));
     let ctxCustomPrompts = customPrompts;
 
     // Accumulators: collect all filters and gens from all programs, apply at end
@@ -339,19 +344,20 @@ export function useProgram(
     ctxPrefabs = [...ctxPrefabs, ...allGenPrefabs.map(p => ({ ...p, source: 'program' as const }))];
 
     // Compute filtered (removed) and generated (added) sets
-    const originalTagKeys = new Set(selectedTags.map(g => tagsToDisplayString(g)));
+    // Compare against base* (without program-sourced items from previous run)
+    const originalTagKeys = new Set(baseTags.map(g => tagsToDisplayString(g)));
     const resultTagKeys = new Set(ctxTags.map(g => tagsToDisplayString(g)));
-    const filter_tag_groups = selectedTags.filter(g => !resultTagKeys.has(tagsToDisplayString(g)));
+    const filter_tag_groups = baseTags.filter(g => !resultTagKeys.has(tagsToDisplayString(g)));
     const gen_tag_groups = ctxTags.filter(g => !originalTagKeys.has(tagsToDisplayString(g)));
 
-    const originalLoraPaths = new Set(selectedLoras.map(l => l.file_path));
+    const originalLoraPaths = new Set(baseLoras.map(l => l.file_path));
     const resultLoraPaths = new Set(ctxLoras.map(l => l.file_path));
-    const filter_loras = buildLoraSelectionData(selectedLoras.filter(l => !resultLoraPaths.has(l.file_path)), loraSelections);
+    const filter_loras = buildLoraSelectionData(baseLoras.filter(l => !resultLoraPaths.has(l.file_path)), loraSelections);
     const gen_loras = ctxLoras.filter(l => !originalLoraPaths.has(l.file_path));
 
-    const originalPrefabGuids = new Set(selectedPrefabs.map(p => p.guid));
+    const originalPrefabGuids = new Set(basePrefabs.map(p => p.guid));
     const resultPrefabGuids = new Set(ctxPrefabs.map(p => p.guid));
-    const filter_prefabs = selectedPrefabs.filter(p => !resultPrefabGuids.has(p.guid));
+    const filter_prefabs = basePrefabs.filter(p => !resultPrefabGuids.has(p.guid));
     const gen_prefabs = ctxPrefabs.filter(p => !originalPrefabGuids.has(p.guid));
 
     return {
