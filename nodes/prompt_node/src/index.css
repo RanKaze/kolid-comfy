@@ -1309,7 +1309,8 @@ body {
 .prefab-card-btn.remove:hover { color: #ff3b30; }
 .prefab-card-tags { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 .prefab-card-loras { font-size: 10px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
-.prefab-card.active { border-color: rgba(0, 122, 255, 0.5); background: rgba(0, 122, 255, 0.06); }
+.prefab-card.active { border-color: rgba(0, 122, 255, 0.5); background: rgba(0, 122, 255, 0.06); box-shadow: 0 0 0 1px rgba(0, 122, 255, 0.3); }
+.prefab-card.prefab-inactive { opacity: 0.4; }
 .edit-prefab-temp-view { display: flex; flex-direction: column; height: 100%; }
 .lora-folder { position: relative; background: var(--bg-tertiary); border-radius: 12px; flex: 0 0 auto; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; z-index: 1; }
 .lora-folder.expanded { width: 100%; flex: 1 1 100%; }

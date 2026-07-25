@@ -123,19 +123,19 @@ export const categoryDisplay = new DisplayModeModule('category');
 export const libraryDisplay = new DisplayModeModule('library');
 
 export class ProgramModule {
-  async add(name: string, code: string, category: string, image: string | null = null) {
+  async add(name: string, code: string, category: string, image: string | null = null, extra: Record<string, unknown> = {}) {
     const resp = await fetch('/add_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, code, category, image }),
+      body: JSON.stringify({ name, code, category, image, ...extra }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();
   }
 
-  async update(id: string, name: string, code: string, image: string | null = null, video: string | null = null, selectedPrograms?: { id: string; active?: boolean }[]) {
+  async update(id: string, name: string, code: string, image: string | null = null, video: string | null = null, selectedPrograms?: { id: string; active?: boolean }[], extra: Record<string, unknown> = {}) {
     const resp = await fetch('/update_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, code, image, video, selected_programs: selectedPrograms }),
+      body: JSON.stringify({ id, name, code, image, video, selected_programs: selectedPrograms, ...extra }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();

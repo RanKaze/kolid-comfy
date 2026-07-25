@@ -661,7 +661,16 @@ export function AppShell() {
     const appIds = new Set(allAppEntries.map(a => a.id));
     const restored: SelectedProgramItem[] = lastSelectedPrograms
       .filter(sa => appIds.has(sa.id))
-      .map(sa => ({ id: sa.id, active: sa.active !== false }));
+      .map(sa => ({
+        id: sa.id,
+        active: sa.active !== false,
+        context_prefab_guids: sa.context_prefab_guids,
+        context_lora_paths: sa.context_lora_paths,
+        context_prompt_texts: sa.context_prompt_texts,
+        context_prefab_inactive: sa.context_prefab_inactive,
+        context_lora_inactive: sa.context_lora_inactive,
+        context_prompt_inactive: sa.context_prompt_inactive,
+      }));
     setSelectedPrograms(restored);
     programRestoredRef.current = true;
   }, [allPrograms, lastSelectedPrograms]);
@@ -871,6 +880,14 @@ export function AppShell() {
   const [modalPrefabLoras, setModalPrefabLoras] = useState<LoraSelectionData[]>([]);
   const [modalPrefabSelectedPrefabs, setModalPrefabSelectedPrefabs] = useState<SelectedPrefabRef[]>([]);
   const [modalProgramSelectedPrograms, setModalProgramSelectedPrograms] = useState<SelectedProgramRef[]>([]);
+  const [modalEnablePrefabCtx, setModalEnablePrefabCtx] = useState(false);
+  const [modalEnableLoraCtx, setModalEnableLoraCtx] = useState(false);
+  const [modalEnablePromptCtx, setModalEnablePromptCtx] = useState(false);
+  const [modalCtxPrefabGuids, setModalCtxPrefabGuids] = useState<string[]>([]);
+  const [modalCtxLoraPaths, setModalCtxLoraPaths] = useState<string[]>([]);
+  const [modalCtxPromptTexts, setModalCtxPromptTexts] = useState<string[]>([]);
+  const [modalCtxTab, setModalCtxTab] = useState<'prefab' | 'lora' | 'prompt'>('prefab');
+  const [modalMultiProgram, setModalMultiProgram] = useState(false);
 
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
@@ -1114,7 +1131,7 @@ export function AppShell() {
     clearZoomView();
     setModalName(''); setModalPrompt(''); setModalTags([]); setModalDecorations([]); setModalMuteDecorations([]);
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
-    setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalMode('horizontal'); setModalSize('normal');
+    setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalEnablePrefabCtx(false); setModalEnableLoraCtx(false); setModalEnablePromptCtx(false); setModalMultiProgram(false); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalCtxTab('prefab'); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
     tempCtx.clear();
   }, [clearImageFields]);
@@ -1299,7 +1316,7 @@ export function AppShell() {
   const programResult = useProgram(
     selectedPrograms, allPrograms,
     selectedTags, selectedLoras, loraSelections,
-    selectedPrefabs, customPrompts, allPrompts, allLibraries,
+    selectedPrefabs, customPrompts, allPrompts, allLibraries, loraData,
   );
 
   // ========== Tag Selection Helper ==========
@@ -1365,14 +1382,14 @@ export function AppShell() {
 
   // ========== Lora Selection ==========
   const isLoraSelected = useCallback((item: LoraItemData) => {
-    if (tempCtx.mode === 'lora') {
+    if (tempCtx.mode === 'lora' || tempCtx.mode === 'loraCtx') {
       return tempCtx.isIdSelected(item.file_path);
     }
     return selectedLoras.some(l => l.file_path === item.file_path);
   }, [selectedLoras, tempCtx]);
 
   const toggleLora = useCallback((item: LoraItemData) => {
-    if (tempCtx.mode === 'lora') {
+    if (tempCtx.mode === 'lora' || tempCtx.mode === 'loraCtx') {
       tempCtx.toggleId(item.file_path);
       return;
     }
@@ -1440,19 +1457,40 @@ export function AppShell() {
 
   // ========== Application Selection ==========
   const toggleProgram = useCallback((id: string) => {
+    // Check if this program has multi_program enabled
+    let isMulti = false;
+    for (const catData of Object.values(allPrograms)) {
+      const app = (catData.programs || []).find(a => a.id === id);
+      if (app?.multi_program) { isMulti = true; break; }
+    }
     setSelectedPrograms(prev => {
+      if (isMulti) {
+        // Multi program: always add (never remove), dedup by checking if already selected
+        // But allow multiple instances — so just add
+        return [...prev, { id, active: true }];
+      }
       const exists = prev.some(a => a.id === id);
       if (exists) return prev.filter(a => a.id !== id);
       return [...prev, { id, active: true }];
     });
+  }, [allPrograms]);
+
+  const toggleProgramActive = useCallback((id: string, index?: number) => {
+    setSelectedPrograms(prev => {
+      if (index !== undefined) {
+        return prev.map((a, j) => j === index ? { ...a, active: !a.active } : a);
+      }
+      return prev.map(a => a.id === id ? { ...a, active: !a.active } : a);
+    });
   }, []);
 
-  const toggleProgramActive = useCallback((id: string) => {
-    setSelectedPrograms(prev => prev.map(a => a.id === id ? { ...a, active: !a.active } : a));
-  }, []);
-
-  const removeProgram = useCallback((id: string) => {
-    setSelectedPrograms(prev => prev.filter(a => a.id !== id));
+  const removeProgram = useCallback((id: string, index?: number) => {
+    setSelectedPrograms(prev => {
+      if (index !== undefined) {
+        return prev.filter((_, j) => j !== index);
+      }
+      return prev.filter(a => a.id !== id);
+    });
   }, []);
 
   const reorderPrograms = useCallback((fromIdx: number, toIdx: number) => {
@@ -1480,10 +1518,10 @@ export function AppShell() {
     } catch(e) { console.error(e); }
   }, [setAllPrograms]);
 
-  const saveProgram = useCallback(async (id: string | null, name: string, code: string, category: string, image: string | null = null, video: string | null = null, focusData: { x: number; y: number } | null = null, selectedPrograms: SelectedProgramRef[] = []) => {
+  const saveProgram = useCallback(async (id: string | null, name: string, code: string, category: string, image: string | null = null, video: string | null = null, focusData: { x: number; y: number } | null = null, selectedPrograms: SelectedProgramRef[] = [], ctxFields: Record<string, unknown> = {}) => {
     if (id) {
       try {
-        const result = await programGroup.update(id, name, code, image, video, selectedPrograms);
+        const result = await programGroup.update(id, name, code, image, video, selectedPrograms, ctxFields);
         setAllPrograms(prev => {
           const next: AllPrograms = {};
           for (const [cat, catData] of Object.entries(prev)) {
@@ -1491,7 +1529,7 @@ export function AppShell() {
               ...catData,
               programs: (catData.programs || []).map(a => {
                 if (a.id !== id) return a;
-                const updated: ProgramData = { ...a, name, code, selected_programs: selectedPrograms };
+                const updated: ProgramData = { ...a, ...ctxFields, name, code };
                 if (result.preview !== undefined && result.preview !== null) updated.preview = result.preview;
                 else if (image !== null) updated.preview = image;
                 return updated;
@@ -1507,8 +1545,8 @@ export function AppShell() {
       } catch(e) { console.error(e); }
     } else {
       try {
-        const result = await programGroup.add(name, code, category, image);
-        const newApp: ProgramData = { id: result.id || `${Date.now()}`, name, code, preview: result.preview || image || undefined, selected_programs: selectedPrograms };
+        const result = await programGroup.add(name, code, category, image, ctxFields);
+        const newApp: ProgramData = { id: result.id || `${Date.now()}`, name, code, preview: result.preview || image || undefined, selected_programs: selectedPrograms, ...ctxFields } as ProgramData;
         setAllPrograms(prev => {
           const next = { ...prev };
           if (!next[category]) next[category] = { programs: [] };
@@ -1959,7 +1997,7 @@ export function AppShell() {
     let newPrograms: SelectedProgramItem[] = [];
     try {
       const programArr = JSON.parse(loaded.program || '[]');
-      newPrograms = programArr.map((p: { id: string; active?: boolean }) => ({ id: p.id, active: p.active !== false }));
+      newPrograms = programArr.map((p: any) => ({ id: p.id, active: p.active !== false, context_prefab_guids: p.context_prefab_guids, context_lora_paths: p.context_lora_paths, context_prompt_texts: p.context_prompt_texts, context_prefab_inactive: p.context_prefab_inactive, context_lora_inactive: p.context_lora_inactive, context_prompt_inactive: p.context_prompt_inactive }));
     } catch {}
 
     if (mode === 'replace') {
@@ -2120,7 +2158,7 @@ export function AppShell() {
       submitCustom,
       submitLoras,
       submitPrefabs,
-      selectedPrograms.map(a => ({ id: a.id, active: a.active })),
+      selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_prompt_texts: a.context_prompt_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_prompt_inactive: a.context_prompt_inactive })),
       excludeFromCache,
       () => {
         if (window.parent !== window) {
@@ -2575,6 +2613,12 @@ export function AppShell() {
         return { id, active: true };
       }).filter(Boolean) as { id: string; active: boolean }[];
       newPrograms = [...newPrograms, ...added];
+    } else if (tempCtx.mode === 'prefabCtx') {
+      setModalCtxPrefabGuids([...(tempCtx.current.selections || [])]);
+    } else if (tempCtx.mode === 'loraCtx') {
+      setModalCtxLoraPaths([...(tempCtx.current.selections || [])]);
+    } else if (tempCtx.mode === 'promptCtx') {
+      setModalCtxPromptTexts([...(tempCtx.current.selections || [])]);
     }
     setModalPrefabLoras(newLoras);
     setModalPrefabSelectedPrefabs(newPrefabs);
@@ -2584,6 +2628,26 @@ export function AppShell() {
     setModalFocusX(rp.focusX);
     setModalFocusY(rp.focusY);
     setModalFocusVisible(rp.focusVisible);
+    setModalEnablePrefabCtx(!!rp.enablePrefabCtx);
+    setModalEnableLoraCtx(!!rp.enableLoraCtx);
+    setModalEnablePromptCtx(!!rp.enablePromptCtx);
+    if (tempCtx.mode !== 'prefabCtx') setModalCtxPrefabGuids([...(rp.ctxPrefabGuids || [])]);
+    if (tempCtx.mode !== 'loraCtx') setModalCtxLoraPaths([...(rp.ctxLoraPaths || [])]);
+    if (tempCtx.mode !== 'promptCtx') setModalCtxPromptTexts([...(rp.ctxPromptTexts || [])]);
+    // For context modes: save directly to the selected program instance (not the shared ProgramData)
+    if (tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'promptCtx') {
+      const instanceIdx = (rp.modalData as { programId: string; instanceIndex: number }).instanceIndex;
+      const selections = [...(tempCtx.current.selections || [])];
+      setSelectedPrograms(prev => prev.map((p, j) => {
+        if (j !== instanceIdx) return p;
+        if (tempCtx.mode === 'prefabCtx') return { ...p, context_prefab_guids: selections };
+        if (tempCtx.mode === 'loraCtx') return { ...p, context_lora_paths: selections };
+        if (tempCtx.mode === 'promptCtx') return { ...p, context_prompt_texts: selections };
+        return p;
+      }));
+      tempCtx.clear();
+      return;
+    }
     if (rp.modalData && 'programId' in rp.modalData) {
       setModal({ type: 'editProgram', data: { id: rp.modalData.programId } });
     } else {
@@ -2601,6 +2665,12 @@ export function AppShell() {
     setModalPrefabLoras(rp.prefabLoras);
     setModalPrefabSelectedPrefabs(rp.prefabSelectedPrefabs);
     setModalProgramSelectedPrograms(rp.programSelectedPrograms || []);
+    setModalEnablePrefabCtx(!!rp.enablePrefabCtx);
+    setModalEnableLoraCtx(!!rp.enableLoraCtx);
+    setModalEnablePromptCtx(!!rp.enablePromptCtx);
+    setModalCtxPrefabGuids([...(rp.ctxPrefabGuids || [])]);
+    setModalCtxLoraPaths([...(rp.ctxLoraPaths || [])]);
+    setModalCtxPromptTexts([...(rp.ctxPromptTexts || [])]);
     setModalPreviewUrl(rp.previewUrl);
     setModalPreviewVisible(rp.previewVisible);
     setModalFocusX(rp.focusX);
@@ -3626,9 +3696,9 @@ export function AppShell() {
               </div>
             ) : null}
 
-            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' || tempCtx.mode === 'program' ? (
+            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' || tempCtx.mode === 'program' || tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'promptCtx' ? (
               <div className="temporary-banner" style={{ background: 'linear-gradient(135deg, #007aff, #5856d6)', boxShadow: '0 4px 12px rgba(0, 122, 255, 0.3)' }}>
-                <span>{tempCtx.mode === 'lora' ? `Select Loras (${(tempCtx.current?.selections || []).length})` : tempCtx.mode === 'prefab' ? `Select Prefabs (${(tempCtx.current?.selections || []).length})` : `Select Programs (${(tempCtx.current?.selections || []).length})`}</span>
+                <span>{tempCtx.current?.title || tempCtx.mode} ({(tempCtx.current?.selections || []).length})</span>
                 <div>
                   <button className="btn btn-success" onClick={restoreModalWithSelections}>Add Selected</button>
                   <button className="btn btn-secondary" onClick={cancelMainSelection}>Cancel</button>
@@ -3637,7 +3707,7 @@ export function AppShell() {
             ) : null}
 
             {/* ========== Lora Section ========== */}
-            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && tempCtx.mode !== 'program' && Object.keys(loraData).length > 0 ? (() => {
+            {(!tempCtx.mode || tempCtx.mode === 'lora' || tempCtx.mode === 'loraCtx') && Object.keys(loraData).length > 0 ? (() => {
               const regex = loraRegex ? new RegExp(loraRegex) : null;
               const filteredEntries = Object.entries(loraData).map(([folder, items]) => {
                 const filteredItems = regex ? items.filter(it => regex.test(it.file_path)) : items;
@@ -3689,7 +3759,7 @@ export function AppShell() {
               ) : null;
             })() : null}
 
-            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'prefab' && tempCtx.mode !== 'program' ? (
+            {(!tempCtx.mode || tempCtx.mode === 'promptCtx') ? (
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
@@ -3788,7 +3858,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -3835,7 +3905,7 @@ export function AppShell() {
             </div>
             ) : null}
 
-            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'tag' && tempCtx.mode !== 'program' ? (<div className="categories-container prefab-section">
+            {(!tempCtx.mode || tempCtx.mode === 'prefab' || tempCtx.mode === 'prefabCtx') ? (<div className="categories-container prefab-section">
               {libraries.map(([lib, libData]) => {
                 const expanded = expandedLibraries.has(lib);
                 const anim = animating.has(lib);
@@ -3932,7 +4002,7 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {filteredPrompts.map(p => {
-                          const sel = isTagSelected(p.prompt);
+                          const sel = tempCtx.mode === 'promptCtx' ? tempCtx.isIdSelected(p.prompt) : isTagSelected(p.prompt);
                           const group = getTagGroupForPrompt(p.prompt);
                           const fp = focusPoints[p.id];
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
@@ -3941,7 +4011,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => selectPrompt(p.prompt)}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -3970,8 +4040,8 @@ export function AppShell() {
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
                             prefabClass={getPrefabClass((pf.tag_groups||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
-                            isSelected={tempCtx.mode === 'prefab' ? tempCtx.isIdSelected(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
-                            onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
+                            isSelected={tempCtx.mode === 'prefab' || tempCtx.mode === 'prefabCtx' ? tempCtx.isIdSelected(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
+                            onToggle={() => { if (tempCtx.mode === 'prefabCtx') { tempCtx.toggleId(pf.guid || ''); } else { togglePrefab(pf.guid || `${lib}_${i}`); } }}
                             allLibraries={allLibraries}
 
                             onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); setModalPrefabTags((pf?.tag_groups||[]) as TagGroup[]); setModalPrefabLoras((pf?.loras||[]) as LoraSelectionData[]); setModalPrefabSelectedPrefabs((pf?.selected_prefabs||[]) as SelectedPrefabRef[]); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); setModalFileName(pf.preview); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
@@ -4059,7 +4129,7 @@ export function AppShell() {
                                 </div>
                               </div>
                               <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModalProgramSelectedPrograms([...(app.selected_programs || [])]); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
+                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModalProgramSelectedPrograms([...(app.selected_programs || [])]); setModalEnablePrefabCtx(!!app.enable_prefab_context); setModalEnableLoraCtx(!!app.enable_lora_context); setModalEnablePromptCtx(!!app.enable_prompt_context); setModalMultiProgram(!!app.multi_program); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
                                 <button className="action-btn delete" onClick={e => { e.stopPropagation(); deleteProgram(app.id); }}>{iconTrash}</button>
                               </div>
                             </div>
@@ -4107,6 +4177,89 @@ export function AppShell() {
                           </div>
                         </div>
                       </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'prefabCtx' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Prefab Context ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="prefab-list">
+                  {(tempCtx.current?.selections || []).map(guid => {
+                    let pf: PrefabData | undefined;
+                    for (const libData of Object.values(allLibraries)) {
+                      pf = (libData.prefabs || []).find(p => p.guid === guid);
+                      if (pf) break;
+                    }
+                    if (!pf) return null;
+                    return (
+                      <div key={guid} className="prefab-card">
+                        {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" />}
+                        <div className="prefab-card-header">
+                          <span className="prefab-card-name">{pf.name}</span>
+                          <div className="prefab-card-actions">
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); tempCtx.toggleId(guid); }}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'loraCtx' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Lora Context ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="lora-list">
+                  {(tempCtx.current?.selections || []).map(fp => {
+                    let item: LoraItemData | undefined;
+                    for (const items of Object.values(loraData)) {
+                      item = items.find(it => it.file_path === fp);
+                      if (item) break;
+                    }
+                    if (!item) return null;
+                    return (
+                      <div key={fp} className="lora-card active">
+                        <div className="lora-card-header">
+                          <span className="lora-card-name">{item.name}</span>
+                          <div className="lora-card-meta">
+                            <button className="lora-card-remove" onClick={() => tempCtx.toggleId(fp)}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'promptCtx' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Prompt Context ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="selected-tags">
+                  {(tempCtx.current?.selections || []).map(text => {
+                    let name = text;
+                    for (const catData of Object.values(allPrompts)) {
+                      const p = (catData.prompts || []).find(p => p.prompt === text);
+                      if (p) { name = p.name; break; }
+                    }
+                    return (
+                      <span className="tag" key={text}>
+                        {name}
+                        <span className="remove" onClick={() => tempCtx.toggleId(text)}>{iconX}</span>
+                      </span>
                     );
                   })}
                 </div>
@@ -4309,29 +4462,117 @@ export function AppShell() {
                   const fp = focusPoints[app.id];
                   return (
                     <div
-                      key={sa.id}
+                      key={`prog-${i}`}
                       className={`program-card ${sa.active ? 'active' : 'inactive'}`}
-                      draggable
-                      onDragStart={e => { e.dataTransfer.setData('text/plain', `selapp:${i}`); }}
-                      onDragOver={e => { if (e.dataTransfer.types.includes('text/plain')) e.preventDefault(); }}
+                      onDragOver={e => { if (e.dataTransfer.types.includes('text/plain') && e.dataTransfer.types.length === 1) e.preventDefault(); }}
                       onDrop={e => {
                         e.preventDefault();
                         const data = e.dataTransfer.getData('text/plain');
                         if (data.startsWith('selapp:')) {
                           const fromIdx = parseInt(data.slice(7));
-                          if (fromIdx !== i) reorderPrograms(fromIdx, i);
+                          if (fromIdx !== i && !isNaN(fromIdx)) reorderPrograms(fromIdx, i);
                         }
                       }}
-                      onMouseDown={e => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.program-card-actions, .action-btn')) return; toggleProgramActive(sa.id); }}
+                      onMouseDown={e => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.program-card-actions, .action-btn, .drag-handle')) return; toggleProgramActive(sa.id, i); }}
                     >
                       {app.preview && <img className="prefab-card-bg" src={imgUrl(app.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                       <div className="program-card-header">
-                        <span className="drag-handle program-drag-handle">{iconGrip}</span>
+                        <span className="drag-handle program-drag-handle" draggable onDragStart={e => { e.dataTransfer.setData('text/plain', `selapp:${i}`); e.dataTransfer.effectAllowed = 'move'; }}>{iconGrip}</span>
                         <span className="program-toggle" style={{ opacity: sa.active ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.name}</span>
                         <div className="program-card-actions">
-                          <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); removeProgram(sa.id); }}>{iconX}</button>
+                          {app.enable_prefab_context && <button className="prefab-card-btn edit" title="Prefab Context" onMouseDown={e => { e.stopPropagation(); const ctxGuids = sa.context_prefab_guids ?? []; tempCtx.push({ type: 'prefabCtx', title: `Prefab Context for ${app.name}`, selections: [...ctxGuids], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: ctxGuids, ctxLoraPaths: sa.context_lora_paths ?? [], ctxPromptTexts: sa.context_prompt_texts ?? [], previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconLayers}</button>}
+                          {app.enable_lora_context && <button className="prefab-card-btn edit" title="Lora Context" onMouseDown={e => { e.stopPropagation(); const ctxPaths = sa.context_lora_paths ?? []; tempCtx.push({ type: 'loraCtx', title: `Lora Context for ${app.name}`, selections: [...ctxPaths], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: sa.context_prefab_guids ?? [], ctxLoraPaths: ctxPaths, ctxPromptTexts: sa.context_prompt_texts ?? [], previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconGrid}</button>}
+                          {app.enable_prompt_context && <button className="prefab-card-btn edit" title="Prompt Context" onMouseDown={e => { e.stopPropagation(); const ctxTexts = sa.context_prompt_texts ?? []; tempCtx.push({ type: 'promptCtx', title: `Prompt Context for ${app.name}`, selections: [...ctxTexts], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: sa.context_prefab_guids ?? [], ctxLoraPaths: sa.context_lora_paths ?? [], ctxPromptTexts: ctxTexts, previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconCode}</button>}
+                          <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); removeProgram(sa.id, i); }}>{iconX}</button>
                         </div>
                       </div>
+                      {/* Context previews — use instance-level context from sa, not shared app data */}
+                      {(() => {
+                        const ctxPrefabGuids = sa.context_prefab_guids ?? [];
+                        const ctxLoraPaths = sa.context_lora_paths ?? [];
+                        const ctxPromptTexts = sa.context_prompt_texts ?? [];
+                        const ctxPrefabInactive = sa.context_prefab_inactive ?? [];
+                        const ctxLoraInactive = sa.context_lora_inactive ?? [];
+                        const ctxPromptInactive = sa.context_prompt_inactive ?? [];
+
+                        const updateInstance = (updates: Partial<SelectedProgramItem>) => {
+                          setSelectedPrograms(prev => prev.map((p, j) => j === i ? { ...p, ...updates } : p));
+                        };
+
+                        return (
+                          <>
+                      {app.enable_prefab_context && ctxPrefabGuids.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Prefab Context ({ctxPrefabGuids.length})</div>
+                          <div className="prefab-list">
+                            {ctxPrefabGuids.map(guid => {
+                              const pf = findPrefabByGuid(guid);
+                              if (!pf) return null;
+                              const fp = (() => {
+                                for (const [libName, libData] of Object.entries(allLibraries)) {
+                                  const idx = (libData.prefabs || []).findIndex(p => p.guid === guid);
+                                  if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                                }
+                                return undefined;
+                              })();
+                              const isActive = !ctxPrefabInactive.includes(guid);
+                              return (
+                                <div key={guid} className={`prefab-card ${isActive ? '' : 'prefab-inactive'}`} onMouseDown={e => { e.stopPropagation(); if (!(e.target as HTMLElement).closest('.prefab-card-actions')) updateInstance({ context_prefab_inactive: isActive ? [...ctxPrefabInactive, guid] : ctxPrefabInactive.filter(g => g !== guid) }); }}>
+                                  {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                                  <div className="prefab-card-header">
+                                    <span className="prefab-card-name" style={{ opacity: isActive ? 1 : 0.5 }}>{pf.name}</span>
+                                    <div className="prefab-card-actions">
+                                      <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); updateInstance({ context_prefab_guids: ctxPrefabGuids.filter(g => g !== guid), context_prefab_inactive: ctxPrefabInactive.filter(g => g !== guid) }); }}>{iconX}</button>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                      {app.enable_lora_context && ctxLoraPaths.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Lora Context ({ctxLoraPaths.length})</div>
+                          <div className="lora-list">
+                            {ctxLoraPaths.map(fp => {
+                              let item: LoraItemData | undefined;
+                              for (const items of Object.values(loraData)) { item = items.find(it => it.file_path === fp); if (item) break; }
+                              if (!item) return null;
+                              const isActive = !ctxLoraInactive.includes(fp);
+                              return (
+                                <Lora key={fp} lora={item} initialActiveTags={item.tags || []} initialStrength={1.0} initialActive={isActive}
+                                  isMissing={item.metadata?.missing === true} isFiltered={isLoraFiltered(item)}
+                                  onChange={(data) => updateInstance({ context_lora_inactive: data.active ? ctxLoraInactive.filter(p => p !== fp) : [...ctxLoraInactive, fp] })}
+                                  onRemove={() => updateInstance({ context_lora_paths: ctxLoraPaths.filter(p => p !== fp), context_lora_inactive: ctxLoraInactive.filter(p => p !== fp) })}
+                                />
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                      {app.enable_prompt_context && ctxPromptTexts.length > 0 && (
+                        <>
+                          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Prompt Context ({ctxPromptTexts.length})</div>
+                          <div className="selected-tags">
+                            {ctxPromptTexts.map(text => {
+                              let name = text;
+                              for (const catData of Object.values(allPrompts)) { const p = (catData.prompts || []).find(p => p.prompt === text); if (p) { name = p.name; break; } }
+                              const isActive = !ctxPromptInactive.includes(text);
+                              return (
+                                <span className={`tag parsed-tag${isActive ? '' : ' program-filtered'}`} key={text} style={{ cursor: 'pointer' }}
+                                  onMouseDown={() => updateInstance({ context_prompt_inactive: isActive ? [...ctxPromptInactive, text] : ctxPromptInactive.filter(t => t !== text) })}>
+                                  {name}
+                                  <span className="remove" onMouseDown={e => { e.stopPropagation(); updateInstance({ context_prompt_texts: ctxPromptTexts.filter(t => t !== text), context_prompt_inactive: ctxPromptInactive.filter(t => t !== text) }); }}>{iconX}</span>
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                          </>
+                        );
+                      })()}
                     </div>
                   );
                 })}
@@ -4462,8 +4703,26 @@ export function AppShell() {
                   <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
                 </div>
               </div>
-              {/* Middle: code editor */}
+              {/* Middle: code editor + context toggles */}
               <div className="edit-prefab-section" style={{ flex: 2, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', gap: 12, marginBottom: 8 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={modalEnablePrefabCtx} onChange={e => setModalEnablePrefabCtx(e.target.checked)} />
+                    Prefab Context
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={modalEnableLoraCtx} onChange={e => setModalEnableLoraCtx(e.target.checked)} />
+                    Lora Context
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={modalEnablePromptCtx} onChange={e => setModalEnablePromptCtx(e.target.checked)} />
+                    Prompt Context
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={modalMultiProgram} onChange={e => setModalMultiProgram(e.target.checked)} />
+                    Multi Program
+                  </label>
+                </div>
                 <label>Code</label>
                 <ProgramCodeEditor
                   value={modalCustomPrompts}
@@ -4554,7 +4813,15 @@ export function AppShell() {
                 let videoData: string|null = null;
                 if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
                 const focusData = modalFocusVisible ? { x: modalFocusX, y: modalFocusY } : null;
-                await saveProgram(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications', imageData, videoData, focusData, modalProgramSelectedPrograms);
+                await saveProgram(modal.data?.id || null, modalName.trim(), modalCustomPrompts, modal.data?.category || 'Applications', imageData, videoData, focusData, modalProgramSelectedPrograms, {
+                  enable_prefab_context: modalEnablePrefabCtx,
+                  enable_lora_context: modalEnableLoraCtx,
+                  enable_prompt_context: modalEnablePromptCtx,
+                  multi_program: modalMultiProgram,
+                  context_prefab_guids: modalCtxPrefabGuids,
+                  context_lora_paths: modalCtxLoraPaths,
+                  context_prompt_texts: modalCtxPromptTexts,
+                });
                 closeModal();
               }}>Save</button>
             </div>

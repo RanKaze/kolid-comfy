@@ -85,3 +85,6 @@ declare const prefabs: Prefab[];
 declare const custom_prompts: string;
 declare const prompts_data: PromptsData;
 declare const all_tags: { [prompt: string]: AllTagsEntry };
+declare const prefab_context: Prefab[];
+declare const lora_context: Lora[];
+declare const prompt_context: TagGroup[];

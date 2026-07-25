@@ -131,7 +131,7 @@ export interface TemporaryContext {
   level: number;
 }
 
-export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program';
+export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program' | 'prefabCtx' | 'loraCtx' | 'promptCtx';
 
 export interface TempContextRestorePoint {
   name: string;
@@ -140,12 +140,18 @@ export interface TempContextRestorePoint {
   prefabLoras: LoraSelectionData[];
   prefabSelectedPrefabs: SelectedPrefabRef[];
   programSelectedPrograms?: { id: string; active?: boolean }[];
+  enablePrefabCtx?: boolean;
+  enableLoraCtx?: boolean;
+  enablePromptCtx?: boolean;
+  ctxPrefabGuids?: string[];
+  ctxLoraPaths?: string[];
+  ctxPromptTexts?: string[];
   previewUrl: string;
   previewVisible: boolean;
   focusX: number;
   focusY: number;
   focusVisible: boolean;
-  modalData: { lib: string; idx: number } | { programId: string };
+  modalData: { lib: string; idx: number } | { programId: string; instanceIndex?: number };
 }
 
 export interface LoraTempState {
@@ -243,6 +249,12 @@ export interface BackgroundContext extends PromptContextBase {
 export interface SelectedProgramRef {
   id: string;
   active?: boolean;
+  context_prefab_guids?: string[];
+  context_lora_paths?: string[];
+  context_prompt_texts?: string[];
+  context_prefab_inactive?: string[];
+  context_lora_inactive?: string[];
+  context_prompt_inactive?: string[];
 }
 
 export interface ProgramData {
@@ -251,6 +263,10 @@ export interface ProgramData {
   code: string;
   preview?: string;
   selected_programs?: SelectedProgramRef[];
+  enable_prefab_context?: boolean;
+  enable_lora_context?: boolean;
+  enable_prompt_context?: boolean;
+  multi_program?: boolean;
 }
 
 export interface ProgramCategoryData {
@@ -267,4 +283,11 @@ export type AllPrograms = { [category: string]: ProgramCategoryData };
 export interface SelectedProgramItem {
   id: string;
   active: boolean;
+  // Per-instance context overrides (independent copies for multi_program)
+  context_prefab_guids?: string[];
+  context_lora_paths?: string[];
+  context_prompt_texts?: string[];
+  context_prefab_inactive?: string[];
+  context_lora_inactive?: string[];
+  context_prompt_inactive?: string[];
 }

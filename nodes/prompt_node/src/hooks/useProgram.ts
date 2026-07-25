@@ -3,7 +3,7 @@ import type {
   AllPrompts, AllPrograms, SelectedProgramItem, ProgramData,
   TagGroup, LoraItemData, LoraSelectionData, SelectedPrefabItem, AllLibraries,
 } from '../types';
-import { tagsToDisplayString } from './useSelection';
+import { tagsToDisplayString, parseStringToTags } from './useSelection';
 
 function toList(v: string | string[] | undefined): string[] {
   if (Array.isArray(v)) return v;
@@ -34,6 +34,7 @@ export function useProgram(
   customPrompts: string,
   allPrompts: AllPrompts,
   allLibraries: AllLibraries,
+  allLoraData: Record<string, LoraItemData[]>,
 ): ProgramResult {
   return useMemo(() => {
     // Build a lookup of all programs by id
@@ -170,11 +171,50 @@ export function useProgram(
     let ctxPrefabs: any[] = selectedPrefabs.map(p => buildMergedPrefab(p));
     let ctxCustomPrompts = customPrompts;
 
+    // Find the root program for context inheritance
+    const rootProgram = selectedPrograms.find(sp => sp.active);
+    const rootProgramData = rootProgram ? programById.get(rootProgram.id) : null;
+
     // Run each program
     for (const prog of activePrograms) {
+      // Build context variables from root program instance's context selections
+      let prefabContext: any[] = [];
+      let loraContext: LoraSelectionData[] = [];
+      let promptContext: TagGroup[] = [];
+
+      if (rootProgram && rootProgramData) {
+        if (rootProgramData.enable_prefab_context && rootProgram.context_prefab_guids) {
+          prefabContext = rootProgram.context_prefab_guids.map((guid: string) => {
+            const pfData = prefabDataMap.get(guid);
+            if (!pfData) return null;
+            const isActive = !(rootProgram.context_prefab_inactive || []).includes(guid);
+            return { guid, name: pfData.name || '', tag_groups: pfData.tag_groups || [], loras: pfData.loras || [], custom_prompts: pfData.custom_prompts || '', preview: pfData.preview || '', active: isActive };
+          }).filter(Boolean);
+        }
+        if (rootProgramData.enable_lora_context && rootProgram.context_lora_paths) {
+          const loraLookup = new Map<string, LoraItemData>();
+          for (const items of Object.values(allLoraData)) { for (const item of items) loraLookup.set(item.file_path, item); }
+          loraContext = rootProgram.context_lora_paths.map((fp: string) => {
+            const item = loraLookup.get(fp);
+            if (!item) return null;
+            const isActive = !(rootProgram.context_lora_inactive || []).includes(fp);
+            const sel = loraSelections[fp];
+            return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: isActive, split_mode: sel?.split_mode };
+          }).filter(Boolean) as LoraSelectionData[];
+        }
+        if (rootProgramData.enable_prompt_context && rootProgram.context_prompt_texts) {
+          promptContext = rootProgram.context_prompt_texts.map((text: string) => {
+            const isActive = !(rootProgram.context_prompt_inactive || []).includes(text);
+            const tg = parseStringToTags(text, allPrompts);
+            return { ...tg, active: isActive };
+          });
+        }
+      }
+
       try {
         const fn = new Function(
           'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags',
+          'prefab_context', 'lora_context', 'prompt_context',
           prog.code,
         );
         const result = fn(
@@ -191,6 +231,9 @@ export function useProgram(
           ctxCustomPrompts,
           allPrompts,
           allTags,
+          prefabContext,
+          loraContext,
+          promptContext,
         );
         if (result && typeof result === 'object') {
           if (Array.isArray(result.tag_groups)) ctxTags = result.tag_groups;
@@ -249,5 +292,5 @@ export function useProgram(
       addedLoraPaths,
       addedPrefabGuids,
     };
-  }, [selectedPrograms, allPrograms, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries]);
+  }, [selectedPrograms, allPrograms, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries, allLoraData]);
 }

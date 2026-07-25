@@ -1000,7 +1000,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
   
   useEffect(() => {
     if (enableSlot && slotDefs.length > 0) {
-      // Always ensure slots array length matches slotDefs
+      // Ensure slots array matches slotDefs in both length and type per index
       setSlots((prev) => {
         if (prev.length !== slotDefs.length) {
           console.log('[Panel] Syncing slots length, prev:', prev.length, 'new:', slotDefs.length);
@@ -1009,6 +1009,23 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
               return prev[i];  // Preserve existing data for matching type+index
             }
             return { type: d.type, data: null };
+          });
+        }
+        // Lengths match — check if any slot type changed (e.g. snapshot restored with different type)
+        let typeChanged = false;
+        for (let i = 0; i < slotDefs.length; i++) {
+          if (prev[i]?.type !== slotDefs[i].type) {
+            typeChanged = true;
+            break;
+          }
+        }
+        if (typeChanged) {
+          console.log('[Panel] Slot type mismatch detected, resetting to slotDefs types');
+          return slotDefs.map((d, i) => {
+            if (prev[i]?.type === d.type) {
+              return prev[i];  // Preserve existing data for matching type
+            }
+            return { type: d.type, data: null };  // Reset slot with changed type
           });
         }
         return prev;
