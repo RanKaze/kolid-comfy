@@ -10,7 +10,12 @@ interface ProgramCodeEditorProps {
   errorLine?: number | null;
 }
 
-const CTX_VARS = ['tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags'];
+const CTX_VARS = [
+  'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags',
+  'prefab_context', 'lora_context', 'prompt_context',
+  'filter_tag_groups', 'filter_loras', 'filter_prefabs',
+  'gen_tag_groups', 'gen_loras', 'gen_prefabs',
+];
 
 export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEditorProps) {
   const editorRef = useRef<any>(null);
@@ -83,6 +88,13 @@ export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEdi
           (editor as any)._monaco = monaco;
 
           // Inject type definitions from .d.ts file (single source of truth)
+          // Use the editor model's own URI so the language service resolves
+          // the declare-const globals as in-scope for autocomplete.
+          const model = editor.getModel();
+          const modelUri = model?.uri?.toString() || 'inmemory://model/1';
+          monaco.languages.typescript.javascriptDefaults.addExtraLib(ctxTypes, modelUri);
+
+          // Also register as a standalone extra lib so globals are always available
           monaco.languages.typescript.javascriptDefaults.addExtraLib(ctxTypes, 'file:///program-ctx-types.d.ts');
           monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
             target: monaco.languages.typescript.ScriptTarget.ESNext,

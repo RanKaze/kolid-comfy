@@ -1167,9 +1167,48 @@ export function AppShell() {
       const allTagsLookup = buildAllTagsLookup(allPrompts);
       const fakeTags = enrichTagGroups(selectedTags, allTagsLookup);
       const fakeLoras = buildLoraSelectionData(selectedLoras, loraSelections);
-      const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, [], [], []);
 
-      let output = '=== CONSOLE ===\n' + (debugConsole.length > 0 ? debugConsole.join('\n') : '(no output)') + '\n\n';
+      // Randomly select 2-5 prefabs/loras/prompts as context
+      const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
+      const shuffle = <T,>(arr: T[]): T[] => { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+      // Build prefab lookup (matching useProgram.ts)
+      const prefabDataMap = new Map<string, any>();
+      for (const libData of Object.values(allLibraries)) {
+        for (const pf of (libData.prefabs || [])) {
+          if (pf.guid) prefabDataMap.set(pf.guid, pf);
+        }
+      }
+      // Build lora lookup
+      const loraLookup = new Map<string, LoraItemData>();
+      for (const items of Object.values(loraData)) { for (const item of items) loraLookup.set(item.file_path, item); }
+      // Collect all prompt texts
+      const allPromptTexts: { text: string; name: string }[] = [];
+      for (const catData of Object.values(allPrompts)) {
+        for (const p of ((catData as any).prompts || [])) {
+          if (p.prompt) allPromptTexts.push({ text: p.prompt, name: p.name || p.prompt });
+        }
+      }
+
+      const prefabContext = shuffle([...prefabDataMap.entries()]).slice(0, randInt(2, 5)).map(([guid, pfData]) => ({
+        guid, name: pfData.name || '', tag_groups: pfData.tag_groups || [], loras: pfData.loras || [], custom_prompts: pfData.custom_prompts || '', preview: pfData.preview || '', active: true,
+      }));
+      const loraContext = shuffle([...loraLookup.entries()]).slice(0, randInt(2, 5)).map(([fp, item]) => {
+        const sel = loraSelections[fp];
+        return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode };
+      });
+      const promptContext = shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
+        const tg = parseStringToTags(text, allPrompts);
+        return { ...tg, active: true };
+      });
+
+      const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, prefabContext, loraContext, promptContext);
+
+      let output = '=== CONTEXT (random sample) ===\n';
+      output += 'prefab_context: ' + (prefabContext.length > 0 ? prefabContext.map(p => p.name).join(', ') : '(empty)') + '\n';
+      output += 'lora_context: ' + (loraContext.length > 0 ? loraContext.map(l => l.name).join(', ') : '(empty)') + '\n';
+      output += 'prompt_context: ' + (promptContext.length > 0 ? promptContext.map(tg => tg.tags.map((t: any) => t.name).join('|')).join(', ') : '(empty)') + '\n\n';
+      output += '=== CONSOLE ===\n' + (debugConsole.length > 0 ? debugConsole.join('\n') : '(no output)') + '\n\n';
       output += '=== RETURN VALUE ===\n' + JSON.stringify(result, null, 2);
       if (result && typeof result === 'object') {
         output += '\n\n=== FILTER ===\n';
@@ -1194,7 +1233,7 @@ export function AppShell() {
       }
       setDebugOutput('ERROR: ' + (e.message || String(e)) + '\n' + (e.stack || ''));
     }
-  }, [modalCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts]);
+  }, [modalCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries, loraData]);
 
   const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
     if (modalFocusVisible) {
