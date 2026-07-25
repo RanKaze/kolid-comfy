@@ -2257,10 +2257,10 @@ class SnapshotPromptServer:
                         selected_programs = data.get('selected_programs', [])
                         enable_prefab_context = data.get('enable_prefab_context', False)
                         enable_lora_context = data.get('enable_lora_context', False)
-                        enable_prompt_context = data.get('enable_prompt_context', False)
+                        enable_tag_context = data.get('enable_tag_context', False)
                         context_prefab_guids = data.get('context_prefab_guids', [])
                         context_lora_paths = data.get('context_lora_paths', [])
-                        context_prompt_texts = data.get('context_prompt_texts', [])
+                        context_tag_texts = data.get('context_tag_texts', [])
                         multi_program = data.get('multi_program', False)
                         cat_data['programs'].append({
                             'id': app_id,
@@ -2270,17 +2270,20 @@ class SnapshotPromptServer:
                             'selected_programs': selected_programs,
                             'enable_prefab_context': enable_prefab_context,
                             'enable_lora_context': enable_lora_context,
-                            'enable_prompt_context': enable_prompt_context,
+                            'enable_tag_context': enable_tag_context,
                             'multi_program': multi_program,
                             'context_prefab_guids': context_prefab_guids,
                             'context_lora_paths': context_lora_paths,
-                            'context_prompt_texts': context_prompt_texts,
+                            'context_tag_texts': context_tag_texts,
                             'prefab_builtin_guids': data.get('prefab_builtin_guids', []),
                             'lora_builtin_paths': data.get('lora_builtin_paths', []),
                             'tag_group_builtin_texts': data.get('tag_group_builtin_texts', []),
                             'prefab_builtin_inactive': data.get('prefab_builtin_inactive', []),
                             'lora_builtin_inactive': data.get('lora_builtin_inactive', []),
                             'tag_group_builtin_inactive': data.get('tag_group_builtin_inactive', []),
+                            'prefab_builtin_display': data.get('prefab_builtin_display', []),
+                            'lora_builtin_display': data.get('lora_builtin_display', []),
+                            'tag_group_builtin_display': data.get('tag_group_builtin_display', []),
                         })
                         self.server_instance._save_programs(self.server_instance.programs_data)
                     self.send_response(200)
@@ -2304,10 +2307,10 @@ class SnapshotPromptServer:
                     selected_programs = data.get('selected_programs', None)
                     enable_prefab_context = data.get('enable_prefab_context', None)
                     enable_lora_context = data.get('enable_lora_context', None)
-                    enable_prompt_context = data.get('enable_prompt_context', None)
+                    enable_tag_context = data.get('enable_tag_context', None)
                     context_prefab_guids = data.get('context_prefab_guids', None)
                     context_lora_paths = data.get('context_lora_paths', None)
-                    context_prompt_texts = data.get('context_prompt_texts', None)
+                    context_tag_texts = data.get('context_tag_texts', None)
                     multi_program = data.get('multi_program', None)
                     new_preview = None
                     for cat_name, cat_data in self.server_instance.programs_data.items():
@@ -2322,17 +2325,17 @@ class SnapshotPromptServer:
                                     app['enable_prefab_context'] = enable_prefab_context
                                 if enable_lora_context is not None:
                                     app['enable_lora_context'] = enable_lora_context
-                                if enable_prompt_context is not None:
-                                    app['enable_prompt_context'] = enable_prompt_context
+                                if enable_tag_context is not None:
+                                    app['enable_tag_context'] = enable_tag_context
                                 if multi_program is not None:
                                     app['multi_program'] = multi_program
                                 if context_prefab_guids is not None:
                                     app['context_prefab_guids'] = context_prefab_guids
                                 if context_lora_paths is not None:
                                     app['context_lora_paths'] = context_lora_paths
-                                if context_prompt_texts is not None:
-                                    app['context_prompt_texts'] = context_prompt_texts
-                                for bf in ['prefab_builtin_guids', 'lora_builtin_paths', 'tag_group_builtin_texts', 'prefab_builtin_inactive', 'lora_builtin_inactive', 'tag_group_builtin_inactive']:
+                                if context_tag_texts is not None:
+                                    app['context_tag_texts'] = context_tag_texts
+                                for bf in ['prefab_builtin_guids', 'lora_builtin_paths', 'tag_group_builtin_texts', 'prefab_builtin_inactive', 'lora_builtin_inactive', 'tag_group_builtin_inactive', 'prefab_builtin_display', 'lora_builtin_display', 'tag_group_builtin_display']:
                                     if data.get(bf) is not None:
                                         app[bf] = data.get(bf)
                                 if image_data:
