@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type {
   AllPrompts, AllPrograms, SelectedProgramItem, ProgramData,
-  TagGroup, LoraItemData, LoraSelectionData, SelectedPrefabItem,
+  TagGroup, LoraItemData, LoraSelectionData, SelectedPrefabItem, AllLibraries,
 } from '../types';
 import { tagsToDisplayString } from './useSelection';
 
@@ -33,6 +33,7 @@ export function useProgram(
   selectedPrefabs: SelectedPrefabItem[],
   customPrompts: string,
   allPrompts: AllPrompts,
+  allLibraries: AllLibraries,
 ): ProgramResult {
   return useMemo(() => {
     // Build a lookup of all programs by id
@@ -125,7 +126,33 @@ export function useProgram(
       const sel = loraSelections[l.file_path];
       return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
     });
-    let ctxPrefabs: SelectedPrefabItem[] = selectedPrefabs.map(p => ({ ...p }));
+    // Build guid → PrefabData lookup
+    const prefabDataMap = new Map<string, any>();
+    for (const libData of Object.values(allLibraries)) {
+      for (const pf of (libData.prefabs || [])) {
+        if (pf.guid) prefabDataMap.set(pf.guid, pf);
+      }
+    }
+
+    // Build merged prefab data: selection state + actual tags/loras/custom_prompts
+    const buildMergedPrefab = (item: SelectedPrefabItem): any => {
+      const pfData = prefabDataMap.get(item.guid);
+      return {
+        guid: item.guid,
+        active: item.active,
+        // Selection state: which tag groups / loras are active
+        tag_states: item.tags.map(t => ({ ...t })),
+        lora_states: item.loras.map(l => ({ ...l })),
+        // Actual data from prefab definition
+        name: pfData?.name || '',
+        tags: pfData?.tags ? pfData.tags.map((g: any) => g.map((t: any) => ({ ...t }))) : [],
+        loras: pfData?.loras ? pfData.loras.map((l: any) => ({ ...l })) : [],
+        custom_prompts: pfData?.custom_prompts || '',
+        preview: pfData?.preview || '',
+        children: item.children.map(c => buildMergedPrefab(c)),
+      };
+    };
+    let ctxPrefabs: any[] = selectedPrefabs.map(p => buildMergedPrefab(p));
     let ctxCustomPrompts = customPrompts;
 
     // Run each program
@@ -138,7 +165,14 @@ export function useProgram(
         const result = fn(
           ctxTags.map(g => g.map(t => ({ ...t }))),
           ctxLoras.map(l => ({ ...l })),
-          ctxPrefabs.map(p => ({ ...p })),
+          ctxPrefabs.map(p => ({
+            ...p,
+            tags: p.tags ? p.tags.map((g: any) => g.map((t: any) => ({ ...t }))) : [],
+            loras: p.loras ? p.loras.map((l: any) => ({ ...l })) : [],
+            tag_states: p.tag_states ? p.tag_states.map((t: any) => ({ ...t })) : [],
+            lora_states: p.lora_states ? p.lora_states.map((l: any) => ({ ...l })) : [],
+            children: p.children ? p.children.map((c: any) => ({ ...c })) : [],
+          })),
           ctxCustomPrompts,
           allPrompts,
           allTags,
@@ -202,5 +236,5 @@ export function useProgram(
       addedLoraPaths,
       addedPrefabGuids,
     };
-  }, [selectedPrograms, allPrograms, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts]);
+  }, [selectedPrograms, allPrograms, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries]);
 }

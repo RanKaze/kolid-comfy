@@ -127,7 +127,7 @@ export interface TemporaryContext {
   level: number;
 }
 
-export type TempContextMode = 'tag' | 'lora' | 'prefab';
+export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program';
 
 export interface TempContextRestorePoint {
   name: string;
@@ -135,12 +135,13 @@ export interface TempContextRestorePoint {
   prefabTags: TagGroup[];
   prefabLoras: LoraSelectionData[];
   prefabSelectedPrefabs: SelectedPrefabRef[];
+  programSelectedPrograms?: { id: string; active?: boolean }[];
   previewUrl: string;
   previewVisible: boolean;
   focusX: number;
   focusY: number;
   focusVisible: boolean;
-  modalData: { lib: string; idx: number };
+  modalData: { lib: string; idx: number } | { programId: string };
 }
 
 export interface LoraTempState {

@@ -21,6 +21,7 @@ import { useProgram } from '../hooks/useProgram';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
+import { ProgramCodeEditor } from './ProgramCodeEditor';
 import { LoraFolderCard } from './LoraFolderCard';
 import { Lora } from './Lora';
 import { TextToggle } from './TextToggle';
@@ -1296,7 +1297,7 @@ export function AppShell() {
   const programResult = useProgram(
     selectedPrograms, allPrograms,
     selectedTags, selectedLoras, loraSelections,
-    selectedPrefabs, customPrompts, allPrompts,
+    selectedPrefabs, customPrompts, allPrompts, allLibraries,
   );
 
   // ========== Tag Selection Helper ==========
@@ -1856,7 +1857,22 @@ export function AppShell() {
 
     const regularSegments = segments.filter(s => !(s.startsWith('<') && s.endsWith('>')));
     const customSegments = segments.filter(s => s.startsWith('<') && s.endsWith('>')).map(s => s.slice(1, -1));
-    const newTags = regularSegments.map(s => parseStringToTags(s, allPrompts));
+
+    // Build parsed keys from loaded prompt_parsing to mark is_from_parsing
+    const loadedParsedStr: string = loaded.prompt_parsing || '';
+    const loadedParsedKeys = new Set<string>();
+    if (loadedParsedStr) {
+      const parsedSegs = loadedParsedStr.split(',').map(s => s.trim()).filter(Boolean);
+      for (const seg of parsedSegs) {
+        const tags = parseStringToTags(seg, allPrompts);
+        loadedParsedKeys.add(tagsToDisplayString(tags));
+      }
+    }
+    const newTags = regularSegments.map(s => {
+      const tg = parseStringToTags(s, allPrompts);
+      const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
+      return tg.map(t => ({ ...t, is_from_parsing: isFromParsing }));
+    });
 
     // --- Parse lora data ---
     let newLoras: LoraItemData[] = [];
@@ -2529,6 +2545,7 @@ export function AppShell() {
     setModalPrefabTags(rp.prefabTags);
     let newLoras = [...rp.prefabLoras];
     let newPrefabs = [...rp.prefabSelectedPrefabs];
+    let newPrograms = [...(rp.programSelectedPrograms || [])];
     if (tempCtx.mode === 'lora') {
       const added = (tempCtx.current.selections || []).map(path => {
         const item = Object.values(loraData).flat().find(it => it.file_path === path);
@@ -2550,15 +2567,26 @@ export function AppShell() {
         return { guid };
       }).filter(Boolean) as SelectedPrefabRef[];
       newPrefabs = [...newPrefabs, ...added];
+    } else if (tempCtx.mode === 'program') {
+      const added = (tempCtx.current.selections || []).map(id => {
+        if (newPrograms.some(p => p.id === id)) return null;
+        return { id, active: true };
+      }).filter(Boolean) as { id: string; active: boolean }[];
+      newPrograms = [...newPrograms, ...added];
     }
     setModalPrefabLoras(newLoras);
     setModalPrefabSelectedPrefabs(newPrefabs);
+    setModalProgramSelectedPrograms(newPrograms);
     setModalPreviewUrl(rp.previewUrl);
     setModalPreviewVisible(rp.previewVisible);
     setModalFocusX(rp.focusX);
     setModalFocusY(rp.focusY);
     setModalFocusVisible(rp.focusVisible);
-    setModal({ type: 'editPrefab', data: rp.modalData });
+    if (rp.modalData && 'programId' in rp.modalData) {
+      setModal({ type: 'editProgram', data: { id: rp.modalData.programId } });
+    } else {
+      setModal({ type: 'editPrefab', data: rp.modalData as { lib: string; idx: number } });
+    }
     tempCtx.clear();
   }, [tempCtx, loraData]);
 
@@ -2570,12 +2598,17 @@ export function AppShell() {
     setModalPrefabTags(rp.prefabTags);
     setModalPrefabLoras(rp.prefabLoras);
     setModalPrefabSelectedPrefabs(rp.prefabSelectedPrefabs);
+    setModalProgramSelectedPrograms(rp.programSelectedPrograms || []);
     setModalPreviewUrl(rp.previewUrl);
     setModalPreviewVisible(rp.previewVisible);
     setModalFocusX(rp.focusX);
     setModalFocusY(rp.focusY);
     setModalFocusVisible(rp.focusVisible);
-    setModal({ type: 'editPrefab', data: rp.modalData });
+    if (rp.modalData && 'programId' in rp.modalData) {
+      setModal({ type: 'editProgram', data: { id: rp.modalData.programId } });
+    } else {
+      setModal({ type: 'editPrefab', data: rp.modalData as { lib: string; idx: number } });
+    }
     tempCtx.clear();
   }, [tempCtx]);
 
@@ -3495,9 +3528,9 @@ export function AppShell() {
               </div>
             ) : null}
 
-            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' ? (
+            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' || tempCtx.mode === 'program' ? (
               <div className="temporary-banner" style={{ background: 'linear-gradient(135deg, #007aff, #5856d6)', boxShadow: '0 4px 12px rgba(0, 122, 255, 0.3)' }}>
-                <span>{tempCtx.mode === 'lora' ? `Select Loras (${(tempCtx.current?.selections || []).length})` : `Select Prefabs (${(tempCtx.current?.selections || []).length})`}</span>
+                <span>{tempCtx.mode === 'lora' ? `Select Loras (${(tempCtx.current?.selections || []).length})` : tempCtx.mode === 'prefab' ? `Select Prefabs (${(tempCtx.current?.selections || []).length})` : `Select Programs (${(tempCtx.current?.selections || []).length})`}</span>
                 <div>
                   <button className="btn btn-success" onClick={restoreModalWithSelections}>Add Selected</button>
                   <button className="btn btn-secondary" onClick={cancelMainSelection}>Cancel</button>
@@ -3506,7 +3539,7 @@ export function AppShell() {
             ) : null}
 
             {/* ========== Lora Section ========== */}
-            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && Object.keys(loraData).length > 0 ? (() => {
+            {tempCtx.mode !== 'prefab' && tempCtx.mode !== 'tag' && tempCtx.mode !== 'program' && Object.keys(loraData).length > 0 ? (() => {
               const regex = loraRegex ? new RegExp(loraRegex) : null;
               const filteredEntries = Object.entries(loraData).map(([folder, items]) => {
                 const filteredItems = regex ? items.filter(it => regex.test(it.file_path)) : items;
@@ -3558,7 +3591,7 @@ export function AppShell() {
               ) : null;
             })() : null}
 
-            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'prefab' ? (
+            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'prefab' && tempCtx.mode !== 'program' ? (
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
@@ -3575,8 +3608,8 @@ export function AppShell() {
 
                 let filtered = cp;
                 const needsFilter = searchQuery || selectedFilter;
-                if (isTemporary && currentCtx) {
-                  filtered = cp.filter(p => currentCtx!.matchFn!(p, cat));
+                if (isTemporary && currentCtx && currentCtx.matchFn) {
+                  filtered = cp.filter(p => currentCtx.matchFn!(p, cat));
                   if (filtered.length === 0) return null;
                 } else if (needsFilter) {
                   const catDataObj = allPrompts[cat] as any;
@@ -3704,7 +3737,7 @@ export function AppShell() {
             </div>
             ) : null}
 
-            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'tag' ? (<div className="categories-container prefab-section">
+            {tempCtx.mode !== 'lora' && tempCtx.mode !== 'tag' && tempCtx.mode !== 'program' ? (<div className="categories-container prefab-section">
               {libraries.map(([lib, libData]) => {
                 const expanded = expandedLibraries.has(lib);
                 const anim = animating.has(lib);
@@ -3725,7 +3758,8 @@ export function AppShell() {
                 let filteredPrefabs = prefabs;
                 // Filter out prefabs that would cause circular dependency when in prefab selection mode
                 if (tempCtx.mode === 'prefab' && tempCtx.current?.restorePoint) {
-                  const targetGuid = allLibraries[tempCtx.current.restorePoint.modalData.lib]?.prefabs?.[tempCtx.current.restorePoint.modalData.idx]?.guid || null;
+                  const md = tempCtx.current.restorePoint.modalData as { lib: string; idx: number };
+                  const targetGuid = allLibraries[md.lib]?.prefabs?.[md.idx]?.guid || null;
                   filteredPrefabs = prefabs.filter(pf => {
                     if (!pf.guid) return false;
                     if (tempCtx.current!.restorePoint!.prefabSelectedPrefabs.some(sp => sp.guid === pf.guid)) return false;
@@ -3855,7 +3889,7 @@ export function AppShell() {
               <div className="add-library-card" onMouseDown={() => { resetModalForm(); setModal({type:'addLibrary'}); }}>{iconPlus}</div>
             </div>) : null}
 
-            {!tempCtx.mode && !isTemporary ? (
+            {(!tempCtx.mode || tempCtx.mode === 'program') ? (
             <div className="categories-container program-section" id="applications">
               {Object.entries(allPrograms).map(([appCat, catData]) => {
                 const apps = (catData?.programs || []) as ProgramData[];
@@ -3899,11 +3933,24 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {apps.map(app => {
-                          const isSelected = selectedPrograms.some(sa => sa.id === app.id);
+                          const isSelected = tempCtx.mode === 'program'
+                            ? tempCtx.isIdSelected(app.id)
+                            : selectedPrograms.some(sa => sa.id === app.id);
+                          // Filter out self and already-selected in program mode
+                          if (tempCtx.mode === 'program') {
+                            const targetId = (tempCtx.current?.restorePoint?.modalData as any)?.programId;
+                            if (app.id === targetId) return null;
+                          }
                           return (
                             <div key={app.id} className={`prompt-item ${modeClass} ${isSelected ? 'selected' : ''}`} data-application={app.id}>
                               <span className="drag-handle">{iconGrip}</span>
-                              <div className="select-area" onMouseDown={() => toggleProgram(app.id)}>
+                              <div className="select-area" onMouseDown={() => {
+                                if (tempCtx.mode === 'program') {
+                                  tempCtx.toggleId(app.id);
+                                } else {
+                                  toggleProgram(app.id);
+                                }
+                              }}>
                                 <div className="image-layer">
                                   {app.preview ? <img src={imgUrl(app.preview)} alt={app.name} loading="lazy" style={focusPoints[app.id] ? { objectPosition: `${focusPoints[app.id].x}% ${focusPoints[app.id].y}%` } : {}} /> : <div className="no-image" style={{ display:'flex', alignItems:'center', justifyContent:'center' }}>{iconCode}</div>}
                                 </div>
@@ -3959,6 +4006,37 @@ export function AppShell() {
                           <span className="prefab-card-name">{pf.name}</span>
                           <div className="prefab-card-actions">
                             <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); tempCtx.toggleId(guid); }}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'program' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Selected Sub-programs ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="prefab-list">
+                  {(tempCtx.current?.selections || []).map(id => {
+                    let app: ProgramData | undefined;
+                    for (const catData of Object.values(allPrograms)) {
+                      app = (catData.programs || []).find(a => a.id === id);
+                      if (app) break;
+                    }
+                    if (!app) return null;
+                    const fp = focusPoints[app.id];
+                    return (
+                      <div key={id} className="program-card">
+                        {app.preview && <img className="prefab-card-bg" src={imgUrl(app.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                        <div className="program-card-header">
+                          <span className="program-toggle" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.name}</span>
+                          <div className="program-card-actions">
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); tempCtx.toggleId(id); }}>{iconX}</button>
                           </div>
                         </div>
                       </div>
@@ -4272,56 +4350,103 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'editProgram' ? (
         <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-content wide" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
-            <input type="text" placeholder="Program name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
-            <div className="edit-prefab-section" style={{ marginTop: 12 }}>
-              <label>Sub-programs ({modalProgramSelectedPrograms.length})</label>
-              <div className="prefab-list">
-                {modalProgramSelectedPrograms.map((sp, i) => {
-                  let subApp: ProgramData | undefined;
-                  for (const catData of Object.values(allPrograms)) {
-                    subApp = (catData.programs || []).find(a => a.id === sp.id);
-                    if (subApp) break;
-                  }
-                  const fp = subApp ? focusPoints[subApp.id] : undefined;
-                  return (
-                    <div key={sp.id} className="program-card" style={{ cursor: 'default' }}>
-                      {subApp?.preview && <img className="prefab-card-bg" src={imgUrl(subApp.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
-                      <div className="program-card-header">
-                        <span className="program-toggle" style={{ opacity: sp.active !== false ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{subApp?.name || sp.id}</span>
-                        <div className="program-card-actions">
-                          <button className="prefab-card-btn remove" onClick={() => setModalProgramSelectedPrograms(prev => prev.filter((_, j) => j !== i))}>{iconX}</button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+            <div className="edit-prefab-body row">
+              {/* Left: name + preview image */}
+              <div className="edit-prefab-left">
+                <div className="edit-prefab-section">
+                  <label>Program name</label>
+                  <input type="text" placeholder="Program name" value={modalName} onChange={e => setModalName(e.target.value)} />
+                </div>
+                <div className="edit-prefab-section">
+                  <label>Preview Image</label>
+                  <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
+                </div>
               </div>
-              <select
-                value=""
-                onChange={e => { if (e.target.value) { setModalProgramSelectedPrograms(prev => [...prev, { id: e.target.value, active: true }]); e.target.value = ""; } }}
-                style={{ width: '100%', padding: '8px', marginTop: 8, background: '#1c1c1e', color: '#fff', border: '1px solid #38383a', borderRadius: 8 }}
-              >
-                <option value="">+ Add sub-program...</option>
-                {Object.values(allPrograms).flatMap(cd => cd.programs || []).filter(a => a.id !== modal.data?.id && !modalProgramSelectedPrograms.some(sp => sp.id === a.id)).map(a => (
-                  <option key={a.id} value={a.id}>{a.name}</option>
-                ))}
-              </select>
+              {/* Middle: code editor */}
+              <div className="edit-prefab-section" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                <label>Code</label>
+                <ProgramCodeEditor
+                  value={modalCustomPrompts}
+                  onChange={setModalCustomPrompts}
+                />
+              </div>
+              {/* Right: sub-programs */}
+              <div className="edit-prefab-right">
+                <div className="edit-prefab-section">
+                  <label>Programs ({modalProgramSelectedPrograms.length})</label>
+                  <div className="prefab-list">
+                    {modalProgramSelectedPrograms.map((sp, i) => {
+                      let app: ProgramData | undefined;
+                      for (const catData of Object.values(allPrograms)) {
+                        app = (catData.programs || []).find(a => a.id === sp.id);
+                        if (app) break;
+                      }
+                      if (!app) return null;
+                      const fp = focusPoints[app.id];
+                      return (
+                        <div
+                          key={sp.id}
+                          className={`program-card ${sp.active !== false ? 'active' : 'inactive'}`}
+                          draggable
+                          onDragStart={e => { e.dataTransfer.setData('text/plain', `modalprogram:${i}`); }}
+                          onDragOver={e => { if (e.dataTransfer.types.includes('text/plain')) e.preventDefault(); }}
+                          onDrop={e => {
+                            e.preventDefault();
+                            const data = e.dataTransfer.getData('text/plain');
+                            if (data.startsWith('modalprogram:')) {
+                              const fromIdx = parseInt(data.slice(13));
+                              if (fromIdx !== i) {
+                                setModalProgramSelectedPrograms(prev => {
+                                  const next = [...prev];
+                                  const [item] = next.splice(fromIdx, 1);
+                                  next.splice(i, 0, item);
+                                  return next;
+                                });
+                              }
+                            }
+                          }}
+                        >
+                          {app.preview && <img className="prefab-card-bg" src={imgUrl(app.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                          <div className="program-card-header">
+                            <span className="drag-handle program-drag-handle">{iconGrip}</span>
+                            <span className="program-toggle" style={{ opacity: sp.active !== false ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.name}</span>
+                            <div className="program-card-actions">
+                              <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); setModalProgramSelectedPrograms(prev => prev.filter((_, j) => j !== i)); }}>{iconX}</button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
+                    tempCtx.push({
+                      type: 'program',
+                      title: 'Select Programs',
+                      selections: [],
+                      restorePoint: {
+                        name: modalName,
+                        customPrompts: modalCustomPrompts,
+                        prefabTags: modalPrefabTags,
+                        prefabLoras: modalPrefabLoras,
+                        prefabSelectedPrefabs: modalPrefabSelectedPrefabs,
+                        programSelectedPrograms: [...modalProgramSelectedPrograms],
+                        previewUrl: modalPreviewUrl,
+                        previewVisible: modalPreviewVisible,
+                        focusX: modalFocusX,
+                        focusY: modalFocusY,
+                        focusVisible: modalFocusVisible,
+                        modalData: { programId: modal.data?.id || '' },
+                      },
+                    });
+                    closeModal();
+                  }}>
+                    {iconPlus} Add Program
+                  </button>
+                </div>
+              </div>
             </div>
-            <textarea
-              placeholder="// JavaScript code here...&#10;// Available: tags, loras, prefabs, custom_prompts, prompts_data, all_tags, tag_index, decoration_index&#10;// Return { tags, loras, prefabs, custom_prompts } to update context."
-              value={modalCustomPrompts}
-              onChange={e => setModalCustomPrompts(e.target.value)}
-              style={{
-                width: '100%', minHeight: 300, padding: '10px 14px', borderRadius: 10,
-                border: '1px solid #38383a', fontSize: 13,
-                background: '#1c1c1e', color: '#f5f5f5',
-                fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-                resize: 'vertical', boxSizing: 'border-box', marginTop: 8,
-              }}
-            />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-primary" onClick={async () => {
