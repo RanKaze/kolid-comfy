@@ -15,6 +15,7 @@ const CTX_VARS = [
   'prefab_context', 'lora_context', 'prompt_context',
   'filter_tag_groups', 'filter_loras', 'filter_prefabs',
   'gen_tag_groups', 'gen_loras', 'gen_prefabs',
+  'prefab_builtin', 'lora_builtin', 'prompt_builtin',
 ];
 
 export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEditorProps) {
