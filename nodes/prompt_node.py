@@ -934,8 +934,12 @@ class SnapshotPromptServer:
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.selected_programs = data.get('programs', [])
                     self.server_instance.last_selected_programs = data.get('programs', [])
-                    self.server_instance.exclude_from_cache = set(data.get('exclude_from_cache', []))
                     self.server_instance.sources = data.get('sources', {})
+                    # Derive exclude_from_cache from sources keys (non-prefixed = tag keys)
+                    self.server_instance.exclude_from_cache = set(
+                        k for k in self.server_instance.sources
+                        if not k.startswith('lora:') and not k.startswith('prefab:')
+                    )
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
                     print(f"[PromptNode] stored selected_programs: {self.server_instance.selected_programs}")
@@ -3089,20 +3093,25 @@ class SnapshotPromptNode:
                 "value": user_prompt_only
             })
         # 保存选中的值到 lora widget（仅当 lora_cache 为 True）
+        # Filter out program-sourced loras so they don't persist to next session
+        sources_map = getattr(server, 'sources', {})
         if lora_cache:
+            cached_loras = [l for l in server.selected_loras if sources_map.get(f"lora:{l.get('file_path', '')}") != 'program']
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id,
                 "widget_name": "lora",
                 "type": "STRING",
-                "value": json.dumps(server.selected_loras, ensure_ascii=False)
+                "value": json.dumps(cached_loras, ensure_ascii=False)
             })
         # 保存选中的值到 prefab widget（仅当 prefab_cache 为 True）
+        # Filter out program-sourced prefabs so they don't persist to next session
         if prefab_cache:
+            cached_prefabs = [p for p in server.selected_prefabs if sources_map.get(f"prefab:{p.get('guid', '')}") != 'program']
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id,
                 "widget_name": "prefab",
                 "type": "STRING",
-                "value": json.dumps(server.selected_prefabs, ensure_ascii=False)
+                "value": json.dumps(cached_prefabs, ensure_ascii=False)
             })
         if program_cache:
             program_cache_value = json.dumps(server.selected_programs, ensure_ascii=False)

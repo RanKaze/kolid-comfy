@@ -2272,10 +2272,6 @@ export function AppShell() {
     for (const p of selectedPrefabs) {
       if ((p as any).source && (p as any).source !== 'normal') sources[`prefab:${p.guid}`] = (p as any).source;
     }
-    // Exclude both parsing and program-sourced tags from cache
-    const excludeFromCache = selectedTags
-      .filter(g => g.source !== 'normal')
-      .map(g => tagsToDisplayString(g));
 
     submitSelection(
       submitPrompts,
@@ -2283,7 +2279,6 @@ export function AppShell() {
       submitLoras,
       submitPrefabs,
       selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_prompt_texts: a.context_prompt_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_prompt_inactive: a.context_prompt_inactive })),
-      excludeFromCache,
       sources,
       () => {
         if (window.parent !== window) {
