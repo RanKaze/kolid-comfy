@@ -2,16 +2,17 @@
 // This file is the single source of truth — imported as raw text via Vite ?raw
 
 interface Tag {
-  /** 0=base, 1=[deco], 2=[[deco]] */
-  decoration_num: number;
   name: string;
   prompt: string;
-  strength?: number;
   category: string;
-  is_from_parsing?: boolean;
 }
 
-type TagGroup = Tag[];
+interface TagGroup {
+  /** [deco_n, ..., deco_1, base] — last element is base */
+  tags: Tag[];
+  strength: number;
+  is_from_parsing: boolean;
+}
 
 interface Lora {
   file_path: string;
@@ -36,7 +37,7 @@ interface Prefab {
   guid: string;
   active: boolean;
   name: string;
-  tags: TagGroup[];
+  tag_groups: TagGroup[];
   loras: Lora[];
   custom_prompts: string;
   preview: string;
@@ -77,7 +78,7 @@ interface PromptsData {
 type TagIndex = { [tag: string]: string[] };
 type DecorationIndex = { [decoration: string]: string[] };
 
-declare const tags: TagGroup[];
+declare const tag_groups: TagGroup[];
 declare const loras: Lora[];
 declare const prefabs: Prefab[];
 declare const custom_prompts: string;

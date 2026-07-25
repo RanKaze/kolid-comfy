@@ -1,29 +1,28 @@
 import { useState, useCallback } from 'react';
 import type { Tag, TagGroup, PromptData, AllPrompts, TemporaryContext } from '../types';
 
-export function tagsToDisplayName(tags: Tag[]): string {
-  const names = tags.map(t => t.name || t.prompt);
+export function tagsToDisplayName(group: TagGroup): string {
+  const names = group.tags.map(t => t.name || t.prompt);
   const nameStr = names.join(' ');
-  const strength = tags[0]?.strength ?? 1.0;
-  if (strength !== 1.0) {
-    return `${nameStr}:${strength}`;
+  if (group.strength !== 1.0) {
+    return `${nameStr}:${group.strength}`;
   }
   return nameStr;
 }
 
-export function tagsToDisplayString(tags: Tag[]): string {
-  const parts = tags.map(tag => {
-    if (tag.decoration_num > 0) {
-      const brackets = '['.repeat(tag.decoration_num);
-      const closing = ']'.repeat(tag.decoration_num);
+export function tagsToDisplayString(group: TagGroup): string {
+  const parts = group.tags.map((tag, i) => {
+    const decoLevel = group.tags.length - 1 - i; // last = 0 (base), earlier = higher
+    if (decoLevel > 0) {
+      const brackets = '['.repeat(decoLevel);
+      const closing = ']'.repeat(decoLevel);
       return `${brackets}${tag.prompt}${closing}`;
     }
     return tag.prompt;
   });
   const text = parts.join(' ');
-  const strength = tags[0]?.strength ?? 1.0;
-  if (strength !== 1.0) {
-    return `(${text}:${strength})`;
+  if (group.strength !== 1.0) {
+    return `(${text}:${group.strength})`;
   }
   return text;
 }
@@ -38,49 +37,48 @@ function findPromptName(promptText: string, allPrompts: AllPrompts): string {
   return promptText;
 }
 
-function findPromptByName(nameText: string, allPrompts: AllPrompts): { name: string; prompt: string } | null {
-  for (const [, catData] of Object.entries(allPrompts)) {
+function findPromptCategory(promptText: string, allPrompts: AllPrompts): string {
+  for (const [cat, catData] of Object.entries(allPrompts)) {
     const prompts = (catData as { prompts?: PromptData[] }).prompts || [];
     for (const p of prompts) {
-      if (p.name === nameText) return { name: p.name, prompt: p.prompt };
+      if (p.prompt === promptText) return cat;
+    }
+  }
+  return '';
+}
+
+function findPromptByName(nameText: string, allPrompts: AllPrompts): { name: string; prompt: string; category: string } | null {
+  for (const [cat, catData] of Object.entries(allPrompts)) {
+    const prompts = (catData as { prompts?: PromptData[] }).prompts || [];
+    for (const p of prompts) {
+      if (p.name === nameText) return { name: p.name, prompt: p.prompt, category: cat };
     }
   }
   return null;
 }
 
-function createTag(decorationNum: number, promptText: string, allPrompts: AllPrompts, strength?: number): Tag {
-  // First try matching by prompt text
+function createTag(promptText: string, allPrompts: AllPrompts): Tag {
   const name = findPromptName(promptText, allPrompts);
-  // If name === promptText (no match), try matching by name to get the actual prompt
+  const category = findPromptCategory(promptText, allPrompts);
   if (name === promptText) {
     const byName = findPromptByName(promptText, allPrompts);
     if (byName) {
-      return {
-        decoration_num: decorationNum,
-        name: byName.name,
-        prompt: byName.prompt,
-        strength,
-      };
+      return { name: byName.name, prompt: byName.prompt, category: byName.category };
     }
   }
-  return {
-    decoration_num: decorationNum,
-    name,
-    prompt: promptText,
-    strength,
-  };
+  return { name, prompt: promptText, category };
 }
 
-export function parseStringToTags(str: string, allPrompts: AllPrompts): Tag[] {
-  // First, check if the entire string is wrapped in (content:strength)
+export function parseStringToTags(str: string, allPrompts: AllPrompts): TagGroup {
+  let strength = 1.0;
+  let body = str;
   const fullStrengthMatch = str.match(/^\((.*):(\d*\.?\d+)\)$/);
   if (fullStrengthMatch) {
-    const innerContent = fullStrengthMatch[1].trim();
-    const strength = parseFloat(fullStrengthMatch[2]);
-    const innerTags = parseStringToTagsImpl(innerContent, allPrompts);
-    return innerTags.map(t => ({ ...t, strength }));
+    body = fullStrengthMatch[1].trim();
+    strength = parseFloat(fullStrengthMatch[2]);
   }
-  return parseStringToTagsImpl(str, allPrompts);
+  const tags: Tag[] = parseStringToTagsImpl(body, allPrompts);
+  return { tags, strength, is_from_parsing: false };
 }
 
 function parseStringToTagsImpl(str: string, allPrompts: AllPrompts): Tag[] {
@@ -89,20 +87,19 @@ function parseStringToTagsImpl(str: string, allPrompts: AllPrompts): Tag[] {
   while (pos < str.length) {
     const bracketMatch = str.slice(pos).match(/^(\[+)([^\]]+)\]+/);
     if (bracketMatch) {
-      const decoNum = bracketMatch[1].length;
       const content = bracketMatch[2].trim();
-      tags.push(createTag(decoNum, content, allPrompts));
+      tags.push(createTag(content, allPrompts));
       pos += bracketMatch[0].length;
     } else {
       const remaining = str.slice(pos);
       const nextBracket = remaining.indexOf('[');
       if (nextBracket === -1) {
         const text = remaining.trim();
-        if (text) tags.push(createTag(0, text, allPrompts));
+        if (text) tags.push(createTag(text, allPrompts));
         break;
       } else {
         const text = remaining.slice(0, nextBracket).trim();
-        if (text) tags.push(createTag(0, text, allPrompts));
+        if (text) tags.push(createTag(text, allPrompts));
         pos += nextBracket;
       }
     }
@@ -130,21 +127,24 @@ export function getPromptDecorations(promptData: PromptData & { category: string
 }
 
 export function isBasePromptSelectedInTags(prompt: string, selectedTags: TagGroup[]): boolean {
-  return selectedTags.some(group =>
-    group.some(tag => tag.decoration_num === 0 && tag.prompt === prompt),
-  );
+  return selectedTags.some(group => {
+    const base = group.tags[group.tags.length - 1];
+    return base && base.prompt === prompt;
+  });
 }
 
 export function findTagGroupByBasePrompt(basePrompt: string, selectedTags: TagGroup[]): TagGroup | undefined {
-  return selectedTags.find(group =>
-    group.some(tag => tag.decoration_num === 0 && tag.prompt === basePrompt),
-  );
+  return selectedTags.find(group => {
+    const base = group.tags[group.tags.length - 1];
+    return base && base.prompt === basePrompt;
+  });
 }
 
 export function findTagGroupIndex(basePrompt: string, selectedTags: TagGroup[]): number {
-  return selectedTags.findIndex(group =>
-    group.some(tag => tag.decoration_num === 0 && tag.prompt === basePrompt),
-  );
+  return selectedTags.findIndex(group => {
+    const base = group.tags[group.tags.length - 1];
+    return base && base.prompt === basePrompt;
+  });
 }
 
 export function combineTagGroups(
@@ -154,9 +154,11 @@ export function combineTagGroups(
   baseDecoNum: number,
   allPrompts: AllPrompts,
 ): TagGroup {
-  const baseTag = createTag(baseDecoNum, basePrompt, allPrompts);
-  baseTag.name = basePromptName;
-  return [...tagGroups.flat(), baseTag];
+  const baseTag: Tag = { ...createTag(basePrompt, allPrompts), name: basePromptName };
+  // Flatten all tags from child groups + base tag at the end
+  const allTags: Tag[] = [...tagGroups.flatMap(g => g.tags), baseTag];
+  const strength = tagGroups.length > 0 ? tagGroups[0].strength : 1.0;
+  return { tags: allTags, strength, is_from_parsing: false };
 }
 
 function toDecoList(v: string | string[] | undefined): string[] {

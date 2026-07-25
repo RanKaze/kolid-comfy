@@ -121,7 +121,7 @@ export function useProgram(
     }
 
     // Build context — is_from_parsing is already set on each tag
-    let ctxTags: TagGroup[] = selectedTags.map(g => g.map(t => ({ ...t })));
+    let ctxTags: TagGroup[] = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) }));
     let ctxLoras: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
       return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
@@ -141,11 +141,11 @@ export function useProgram(
         guid: item.guid,
         active: item.active,
         // Selection state: which tag groups / loras are active
-        tag_states: item.tags.map(t => ({ ...t })),
+        tag_states: item.tag_groups.map(t => ({ ...t })),
         lora_states: item.loras.map(l => ({ ...l })),
         // Actual data from prefab definition
         name: pfData?.name || '',
-        tags: pfData?.tags ? pfData.tags.map((g: any) => g.map((t: any) => ({ ...t }))) : [],
+        tag_groups: pfData?.tag_groups ? pfData.tag_groups.map((g: any) => ({ ...g, tags: g.tags ? g.tags.map((t: any) => ({ ...t })) : g.map((t: any) => ({ ...t })) })) : [],
         loras: pfData?.loras ? pfData.loras.map((l: any) => ({ ...l })) : [],
         custom_prompts: pfData?.custom_prompts || '',
         preview: pfData?.preview || '',
@@ -159,15 +159,15 @@ export function useProgram(
     for (const prog of activePrograms) {
       try {
         const fn = new Function(
-          'tags', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index',
+          'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index',
           prog.code,
         );
         const result = fn(
-          ctxTags.map(g => g.map(t => ({ ...t }))),
+          ctxTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) })),
           ctxLoras.map(l => ({ ...l })),
           ctxPrefabs.map(p => ({
             ...p,
-            tags: p.tags ? p.tags.map((g: any) => g.map((t: any) => ({ ...t }))) : [],
+            tag_groups: p.tag_groups ? p.tag_groups.map((g: any) => ({ ...g, tags: g.tags ? g.tags.map((t: any) => ({ ...t })) : [] })) : [],
             loras: p.loras ? p.loras.map((l: any) => ({ ...l })) : [],
             tag_states: p.tag_states ? p.tag_states.map((t: any) => ({ ...t })) : [],
             lora_states: p.lora_states ? p.lora_states.map((l: any) => ({ ...l })) : [],
@@ -180,7 +180,7 @@ export function useProgram(
           decorationIndex,
         );
         if (result && typeof result === 'object') {
-          if (Array.isArray(result.tags)) ctxTags = result.tags;
+          if (Array.isArray(result.tag_groups)) ctxTags = result.tag_groups;
           if (Array.isArray(result.loras)) ctxLoras = result.loras;
           if (Array.isArray(result.prefabs)) ctxPrefabs = result.prefabs;
           if (typeof result.custom_prompts === 'string') ctxCustomPrompts = result.custom_prompts;

@@ -37,7 +37,7 @@ export function useTempContext() {
     if (stack.length === 0) return false;
     const last = stack[stack.length - 1];
     if (last.type === 'tag') {
-      return (last.tagGroups || []).some(g => g.some(t => t.decoration_num > 0 && t.prompt === id));
+      return (last.tagGroups || []).some(g => g.tags.slice(0, -1).some(t => t.prompt === id));
     }
     return (last.selections || []).includes(id);
   }, [stack]);

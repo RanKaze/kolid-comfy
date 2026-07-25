@@ -100,20 +100,21 @@ function buildPromptText(ctx: PromptContextBase, findPrefabByGuid: (guid: string
     for (const item of items) {
       if (item.active === false) continue;
       const prefab = findPrefabByGuid(item.guid);
-      if (prefab && prefab.tags) {
-        const savedTags = item.tags || [];
-        for (const group of prefab.tags) {
+      if (prefab && prefab.tag_groups) {
+        const savedTags = item.tag_groups || [];
+        for (const group of prefab.tag_groups) {
           if (!Array.isArray(group)) continue;
           const names = group.map((t: any) => t.name || t.prompt || '');
           let key = names.join(' ');
-          const str = group[0]?.strength ?? 1.0;
+          const str = group.strength ?? 1.0;
           if (str !== 1.0) key = `${key}:${str}`;
           const saved = savedTags.find((st: any) => st.key === key);
           if (saved && saved.active === false) continue;
           const pp: string[] = [];
-          for (const tag of group) {
+          for (let i = 0; i < group.tags.length; i++) {
+            const tag = group.tags[i];
             const pt = tag.prompt || ''; if (!pt) continue;
-            const d = tag.decoration_num || 0; const s = tag.strength ?? 1.0;
+            const d = group.tags.length - 1 - i; const s = group.strength;
             let t: string; if (d > 0) t = '['.repeat(d) + pt + ']'.repeat(d); else t = pt;
             if (s !== 1.0) t = `(${t}:${s})`; pp.push(t);
           }
@@ -232,7 +233,7 @@ export function AppShell() {
             split_mode: sel?.split_mode,
           };
         });
-        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
         window.parent.postMessage({
           type: 'prompt-data',
           data: {
@@ -267,7 +268,7 @@ export function AppShell() {
     return {
       guid,
       active: true,
-      tags: (prefab.tags || []).map(g => ({
+      tag_groups: (prefab.tag_groups || []).map(g => ({
         key: tagsToDisplayName(g as any),
         active: true,
       })),
@@ -285,7 +286,7 @@ export function AppShell() {
   const cascadeActive = useCallback((item: SelectedPrefabItem, active: boolean): SelectedPrefabItem => ({
     ...item,
     active,
-    tags: item.tags.map(t => ({ ...t, active })),
+    tag_groups: item.tag_groups.map(t => ({ ...t, active })),
     loras: item.loras.map(l => ({ ...l, active })),
     children: item.children.map(c => cascadeActive(c, active)),
   }), []);
@@ -386,14 +387,14 @@ export function AppShell() {
       loadedParsedKeys.add(tagsToDisplayString(tags));
     }
 
-    const tags = lastSelected
+    const tagGroups = lastSelected
       .filter(str => !str.startsWith('<') || !str.endsWith('>'))
       .map(str => {
         const tg = parseStringToTags(str, data.categories);
         const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-        return tg.map(t => ({ ...t, is_from_parsing: isFromParsing }));
+        return { ...tg, tags: tg.tags.map(t => ({ ...t })), is_from_parsing: isFromParsing };
       });
-    setSelectedTags(tags);
+    setSelectedTags(tagGroups);
 
     let cp = data.custom_prompts || '';
     for (const str of lastSelected) {
@@ -491,7 +492,7 @@ export function AppShell() {
       const sel = loraSelections[l.file_path];
       return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
     });
-    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     const currentCtx: PromptContextBase = {
       prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
       label: prevIdx >= 0 ? `Region ${String(prevIdx + 1).padStart(2, '0')}` : 'Background',
@@ -594,7 +595,7 @@ export function AppShell() {
     }
 
     function restoreTree(
-      node: { guid: string; active?: boolean; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
+      node: { guid: string; active?: boolean; tag_groups?: SelectedPrefabTagState[]; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
       visited: Set<string>,
     ): SelectedPrefabItem | null {
       if (visited.has(node.guid)) return null;
@@ -603,8 +604,8 @@ export function AppShell() {
       visited.add(node.guid);
 
       // Restore tags: use saved state if available, else default all active
-      const savedTags = (node.tags || []) as SelectedPrefabTagState[];
-      const tags: SelectedPrefabTagState[] = (prefab.tags || []).map(g => {
+      const savedTags = (node.tag_groups || node.tags || []) as SelectedPrefabTagState[];
+      const tag_groups: SelectedPrefabTagState[] = (prefab.tag_groups || []).map(g => {
         const key = tagsToDisplayName(g as any);
         const saved = savedTags.find(st => st.key === key);
         return { key, active: saved ? saved.active !== false : true };
@@ -630,7 +631,7 @@ export function AppShell() {
       return {
         guid: node.guid,
         active: node.active !== false,
-        tags,
+        tag_groups,
         loras,
         children,
       };
@@ -709,7 +710,7 @@ export function AppShell() {
         split_mode: sel?.split_mode,
       };
     });
-    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     window.parent.postMessage({
       type: 'kolid-prompt-live',
       prompts: promptsToSend,
@@ -731,7 +732,7 @@ export function AppShell() {
         const sel = loraSelections[l.file_path];
         return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
       });
-      const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+      const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
       const ctx: PromptContextBase = {
         prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
         label: activeSlotIdRef.current,
@@ -744,7 +745,7 @@ export function AppShell() {
       const sel = loraSelections[l.file_path];
       return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
     });
-    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+    const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     const ctx: PromptContextBase = {
       prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
       label: idx >= 0 ? `Region ${String(idx + 1).padStart(2, '0')}` : 'Background',
@@ -763,22 +764,23 @@ export function AppShell() {
       for (const item of items) {
         if (item.active === false) continue;
         const prefab = findPrefabByGuid(item.guid);
-        if (prefab && prefab.tags) {
-          const savedTags = item.tags || [];
-          for (const group of prefab.tags) {
+        if (prefab && prefab.tag_groups) {
+          const savedTags = item.tag_groups || [];
+          for (const group of prefab.tag_groups) {
             if (!Array.isArray(group)) continue;
             const names = group.map((t: any) => t.name || t.prompt || '');
             let key = names.join(' ');
-            const strength = group[0]?.strength ?? 1.0;
+            const strength = group.strength ?? 1.0;
             if (strength !== 1.0) key = `${key}:${strength}`;
             const saved = savedTags.find((st: any) => st.key === key);
             if (saved && saved.active === false) continue;
             const parts: string[] = [];
-            for (const tag of group) {
+            for (let i = 0; i < group.tags.length; i++) {
+              const tag = group.tags[i];
               const promptText = tag.prompt || '';
               if (!promptText) continue;
-              const deco = tag.decoration_num || 0;
-              const str = tag.strength ?? 1.0;
+              const deco = group.tags.length - 1 - i;
+              const str = group.strength;
               let text: string;
               if (deco > 0) text = '['.repeat(deco) + promptText + ']'.repeat(deco);
               else text = promptText;
@@ -977,7 +979,7 @@ export function AppShell() {
             setModalPrefabTags(prev => [...prev, result.tagGroup]);
           } else {
             // No match: create a plain tag
-            setModalPrefabTags(prev => [...prev, [{ decoration_num: 0, name: seg, prompt: seg }]]);
+            setModalPrefabTags(prev => [...prev, { tags: [{ name: seg, prompt: seg, category: "" }], strength: 1.0, is_from_parsing: false }]);
           }
         }
         input.value = '';
@@ -1179,7 +1181,7 @@ export function AppShell() {
   const handleFilterChange = useCallback((f: string) => setSelectedFilter(f), []);
 
   const handleCustomPromptsParsed = useCallback((tagGroup: TagGroup, displayString: string) => {
-    setSelectedTags(prev => [...prev, tagGroup.map(t => ({ ...t, is_from_parsing: false }))]);
+    setSelectedTags(prev => [...prev, { ...tagGroup, tags: tagGroup.tags.map(t => ({ ...t })), is_from_parsing: false }]);
     setCustomAddedTagKeys(prev => new Set(prev).add(displayString));
   }, [setSelectedTags]);
 
@@ -1193,7 +1195,7 @@ export function AppShell() {
       const promptData = findPromptData(prompt, allPrompts);
       if (!promptData) return;
       const allDecorations = getPromptDecorations(promptData, allPrompts);
-      const tag = { decoration_num: ctx.level || 1, name: promptData.name, prompt };
+      const tag = { name: promptData.name, prompt, category: promptData.category || "" };
 
       if (allDecorations.length > 0) {
         // Push a sub-layer for this prompt's decorations (tag will be combined on completion)
@@ -1222,9 +1224,9 @@ export function AppShell() {
         const stack = [...prev];
         const lastIdx = stack.length - 1;
         const last = stack[lastIdx];
-        const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.some(t => t.decoration_num > 0 && t.prompt === prompt));
+        const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.tags.slice(0, -1).some(t => t.prompt === prompt));
         const newLast = { ...last, tagGroups: existing === -1
-          ? [...(last.tagGroups || []), [tag]]
+          ? [...(last.tagGroups || []), { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, is_from_parsing: false }]
           : (last.tagGroups || []).filter((_g: TagGroup, i: number) => i !== existing)
         };
         stack[lastIdx] = newLast;
@@ -1253,8 +1255,8 @@ export function AppShell() {
     }
 
     setSelectedTags(prev => {
-      const idx = prev.findIndex(g => g.some(t => t.decoration_num === 0 && t.prompt === prompt));
-      if (idx === -1) return [...prev, [{ decoration_num: 0, name: promptData.name, prompt, is_from_parsing: false }]];
+      const idx = prev.findIndex(g => g.tags[g.tags.length - 1]?.prompt === prompt);
+      if (idx === -1) return [...prev, { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, is_from_parsing: false }];
       return prev.filter((_, i) => i !== idx);
     });
   }, [tempCtx, allPrompts, setSelectedTags]);
@@ -1337,7 +1339,7 @@ export function AppShell() {
       const tagGroups = currentCtx.tagGroups || [];
       const indicesToRemove: number[] = [];
       tagGroups.forEach((g, i) => {
-        if (g.some(t => t.decoration_num > 0 && promptSet.has(t.prompt))) {
+        if (g.tags.slice(0, -1).some(t => promptSet.has(t.prompt))) {
           indicesToRemove.push(i);
         }
       });
@@ -1346,7 +1348,7 @@ export function AppShell() {
       const cp = ((allPrompts[cat] as any)?.prompts || []) as PromptData[];
       const promptSet = new Set(cp.map(p => p.prompt));
       setSelectedTags(prev => prev.filter(group =>
-        !group.some(tag => tag.decoration_num === 0 && promptSet.has(tag.prompt))
+        !promptSet.has(group.tags[group.tags.length - 1]?.prompt)
       ));
     }
   }, [isTemporary, currentCtx, allPrompts, tempCtx, setSelectedTags]);
@@ -1355,9 +1357,9 @@ export function AppShell() {
     const cp = ((allPrompts[cat] as any)?.prompts || []) as PromptData[];
     const promptSet = new Set(cp.map(p => p.prompt));
     setSelectedTags(prev => prev.filter(group => {
-      const isFromCategory = group.some(tag => tag.decoration_num === 0 && promptSet.has(tag.prompt));
+      const isFromCategory = promptSet.has(group.tags[group.tags.length - 1]?.prompt);
       if (!isFromCategory) return true;
-      return group[0]?.is_from_parsing !== true;
+      return group.is_from_parsing !== true;
     }));
   }, [allPrompts, setSelectedTags]);
 
@@ -1422,7 +1424,7 @@ export function AppShell() {
   const toggleTreeTag = useCallback((items: SelectedPrefabItem[], guid: string, key: string): SelectedPrefabItem[] =>
     items.map(item => {
       if (item.guid === guid) {
-        return { ...item, tags: item.tags.map(t => t.key === key ? { ...t, active: !t.active } : t) };
+        return { ...item, tag_groups: item.tag_groups.map(t => t.key === key ? { ...t, active: !t.active } : t) };
       }
       return { ...item, children: toggleTreeTag(item.children, guid, key) };
     }),
@@ -1594,7 +1596,7 @@ export function AppShell() {
   const mergePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
     snapshotZoom();
-    const prefabTags = pf.tags || [];
+    const prefabTags = pf.tag_groups || [];
     const prefabCp = pf.custom_prompts || '';
     const prefabLoras = pf.loras || [];
     const prefabSelectedPrefabs = pf.selected_prefabs || [];
@@ -1656,7 +1658,7 @@ export function AppShell() {
     const anyContentMatched = anyPromptsMatched || anyLorasMatched || anyNestedPrefabMatched;
 
     setSelectedTags(prev => {
-      const next = prev.map(g => g.map(t => ({...t})));
+      const next = prev.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) }));
       if (allContentMatched && anyContentMatched) {
         // Fully matched: delete all prefab prompts
         for (const group of prefabTags) {
@@ -1669,7 +1671,7 @@ export function AppShell() {
         for (const group of prefabTags) {
           const groupDisplay = tagsToDisplayName(group);
           if (!next.some(g => tagsToDisplayName(g) === groupDisplay)) {
-            next.push(group.map((t: any) => ({...t})));
+            next.push({ ...group, tags: group.tags.map((t: any) => ({...t})) });
           }
         }
       }
@@ -1768,8 +1770,8 @@ export function AppShell() {
   const replacePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
     snapshotZoom();
-    const tags: TagGroup[] = (pf.tags || []) as TagGroup[];
-    setSelectedTags(tags);
+    const tagGroups: TagGroup[] = (pf.tag_groups || []) as TagGroup[];
+    setSelectedTags(tagGroups);
     setCustomPrompts(pf.custom_prompts || '');
 
     // Restore nested selected_prefabs as recursive tree
@@ -1871,7 +1873,7 @@ export function AppShell() {
     const newTags = regularSegments.map(s => {
       const tg = parseStringToTags(s, allPrompts);
       const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-      return tg.map(t => ({ ...t, is_from_parsing: isFromParsing }));
+      return { ...tg, tags: tg.tags.map(t => ({ ...t })), is_from_parsing: isFromParsing };
     });
 
     // --- Parse lora data ---
@@ -1919,15 +1921,15 @@ export function AppShell() {
     try {
       const prefabArr = JSON.parse(loaded.prefab || '[]');
       function restoreTree(
-        node: { guid: string; active?: boolean; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
+        node: { guid: string; active?: boolean; tag_groups?: SelectedPrefabTagState[]; tags?: SelectedPrefabTagState[]; loras?: SelectedPrefabLoraState[]; children?: any[] },
         visited: Set<string>,
       ): SelectedPrefabItem | null {
         if (visited.has(node.guid)) return null;
         const prefab = findPrefabByGuid(node.guid);
         if (!prefab) return null;
         visited.add(node.guid);
-        const savedTags = (node.tags || []) as SelectedPrefabTagState[];
-        const tags: SelectedPrefabTagState[] = (prefab.tags || []).map(g => {
+        const savedTags = (node.tag_groups || node.tags || []) as SelectedPrefabTagState[];
+        const tag_groups: SelectedPrefabTagState[] = (prefab.tag_groups || []).map(g => {
           const key = tagsToDisplayName(g as any);
           const saved = savedTags.find(st => st.key === key);
           return { key, active: saved ? saved.active !== false : true };
@@ -1945,7 +1947,7 @@ export function AppShell() {
             return restoreTree(saved || nested, new Set(visited));
           })
           .filter(Boolean) as SelectedPrefabItem[];
-        return { guid: node.guid, active: node.active !== false, tags, loras, children };
+        return { guid: node.guid, active: node.active !== false, tag_groups, loras, children };
       }
       for (const sp of prefabArr) {
         const item = restoreTree(sp, new Set());
@@ -2019,7 +2021,7 @@ export function AppShell() {
           const sel = loraSelections[l.file_path];
           return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
         });
-        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+        const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
         const ctx: PromptContextBase = {
           prompts: promptsToSend, custom_prompts: customPrompts, loras: lorasPayload, prefabs: prefabsPayload,
           label: idx >= 0 ? `Region ${String(idx + 1).padStart(2, '0')}` : 'Background',
@@ -2042,7 +2044,7 @@ export function AppShell() {
               const sel = loraSelections[l.file_path];
               return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
             }),
-            prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children })),
+            prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
             label: activeSlotId,
           };
           formatSlotContextsRef.current.set(activeSlotId, currentCtx);
@@ -2091,7 +2093,7 @@ export function AppShell() {
     let submitPrompts: string[];
     let submitCustom: string;
     let submitLoras: LoraSelectionData[];
-    let submitPrefabs: { guid: string; active: boolean; tags: any[]; loras: any[]; children: any[] }[];
+    let submitPrefabs: { guid: string; active: boolean; tag_groups: any[]; loras: any[]; children: any[] }[];
 
     if (enableRegion && backgroundContextRef.current) {
       // Use background context
@@ -2105,12 +2107,12 @@ export function AppShell() {
       submitPrompts = programResult.filteredTags.map(g => tagsToDisplayString(g));
       submitCustom = programResult.filteredCustomPrompts;
       submitLoras = programResult.filteredLoras;
-      submitPrefabs = programResult.filteredPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children }));
+      submitPrefabs = programResult.filteredPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     }
 
     // Compute prompts that are still "pure parsing" (not converted to user tag)
     const excludeFromCache = selectedTags
-      .filter(g => g[0]?.is_from_parsing === true)
+      .filter(g => g.is_from_parsing === true)
       .map(g => tagsToDisplayString(g));
 
     submitSelection(
@@ -2484,7 +2486,7 @@ export function AppShell() {
     const lib = modal?.data?.lib;
     const name = modalName.trim();
     if (!name || !lib) { alert('Please enter prefab name'); return; }
-    const pfTags = selectedTags.map(g => g.map(t => ({...t})));
+    const pfTags = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({...t})) }));
     const pfLoras = buildPrefabLoras();
     const pfSelectedPrefabs = buildSelectedPrefabs();
     const cycle = checkPrefabCycle(null, pfSelectedPrefabs);
@@ -2499,7 +2501,7 @@ export function AppShell() {
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData) return prev;
-        const newPrefab: PrefabData = { name, tags: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
+        const newPrefab: PrefabData = { name, tag_groups: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
         if (result && result.preview) newPrefab.preview = result.preview;
         if (result && result.guid) newPrefab.guid = result.guid;
         const prefabs = [...(libData.prefabs || []), newPrefab];
@@ -2616,7 +2618,7 @@ export function AppShell() {
   const syncPrefab = useCallback(async () => {
     const lib = modal?.data?.lib;
     const idx = modal?.data?.idx;
-    const pfTags = selectedTags.map(g => g.map(t => ({...t})));
+    const pfTags = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({...t})) }));
     const pfLoras = buildPrefabLoras();
     const pfSelectedPrefabs = buildSelectedPrefabs();
     if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0 && pfSelectedPrefabs.length === 0) { alert('No tags, custom_prompts, loras or selected_prefabs to sync'); return; }
@@ -2630,7 +2632,7 @@ export function AppShell() {
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData || !libData.prefabs || idx === undefined || idx < 0 || idx >= libData.prefabs.length) return prev;
-        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tags: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
+        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tag_groups: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
         if (result && result.preview) updatedPrefab.preview = result.preview;
         const prefabs = [...libData.prefabs];
         prefabs[idx] = updatedPrefab;
@@ -2718,6 +2720,13 @@ export function AppShell() {
         dragState.index = parseInt(h.dataset.index!);
         const pi = h.closest('.prompt-item');
         if (pi) { dragState.element = pi as HTMLElement; pi.classList.add('dragging'); }
+      } else if (dtype === 'program') {
+        ev.dataTransfer!.setData('text/plain', h.dataset.category! + '::' + h.dataset.index!);
+        dragState.item = h.dataset.id!;
+        dragState.category = h.dataset.category!;
+        dragState.index = parseInt(h.dataset.index!);
+        const pi = h.closest('.prompt-item');
+        if (pi) { dragState.element = pi as HTMLElement; pi.classList.add('dragging'); }
       }
     }, { capture: true, signal });
 
@@ -2762,8 +2771,8 @@ export function AppShell() {
         if (addCard) { ev.preventDefault(); addCard.classList.add('drag-over'); return; }
       }
 
-      // Prompt/Prefab drop zones
-      if (dt === 'prompt' || dt === 'prefab') {
+      // Prompt/Prefab/Program drop zones
+      if (dt === 'prompt' || dt === 'prefab' || dt === 'program') {
         const pi = target.closest('.prompt-item:not(.add-prompt-btn):not(.dragging)') as HTMLElement;
         if (pi) { ev.preventDefault(); pi.classList.add('drag-over'); return; }
         const addBtn = target.closest('.add-prompt-btn');
@@ -3061,8 +3070,55 @@ export function AppShell() {
           }
         }
       }
+
+      // === Program drop ===
+      if (snapType === 'program') {
+        const pi = target.closest('.prompt-item[data-program]:not(.add-prompt-btn)') as HTMLElement;
+        if (pi && snapCategory != null && snapIndex != null) {
+          const tc = pi.dataset.category;
+          const ti = parseInt(pi.dataset.programIndex!);
+          if (tc && !isNaN(ti) && snapCategory === tc) {
+            // Reorder within same program category
+            setAllPrograms((prev: AllPrograms) => {
+              const catData = prev[tc];
+              if (!catData) return prev;
+              const programs = [...(catData.programs || [])];
+              if (snapIndex < 0 || snapIndex >= programs.length) return prev;
+              const [moved] = programs.splice(snapIndex, 1);
+              const insertAt = ti >= programs.length ? programs.length : ti;
+              programs.splice(insertAt, 0, moved);
+              return { ...prev, [tc]: { ...catData, programs } };
+            });
+            fetch('/reorder_programs', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ category: tc, from: snapIndex, to: ti }),
+            }).catch(console.error);
+          }
+          return;
+        }
+        const addBtn = target.closest('.add-prompt-btn[data-category]') as HTMLElement;
+        if (addBtn && snapCategory != null && snapIndex != null) {
+          const tc = addBtn.dataset.category;
+          if (tc && snapCategory === tc) {
+            // Reorder to end
+            setAllPrograms((prev: AllPrograms) => {
+              const catData = prev[tc];
+              if (!catData) return prev;
+              const programs = [...(catData.programs || [])];
+              if (snapIndex < 0 || snapIndex >= programs.length) return prev;
+              const [moved] = programs.splice(snapIndex, 1);
+              programs.push(moved);
+              return { ...prev, [tc]: { ...catData, programs } };
+            });
+            fetch('/reorder_programs', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ category: tc, from: snapIndex, to: -1 }),
+            }).catch(console.error);
+          }
+        }
+      }
     }, { signal });
-  }, [setAllPrompts, setAllLibraries]);
+  }, [setAllPrompts, setAllLibraries, setAllPrograms]);
 
   // ========== ZOOM VIEW (vanilla JS) ==========
   const initZoomView = useCallback(() => {
@@ -3419,7 +3475,7 @@ export function AppShell() {
                           const sel = loraSelections[l.file_path];
                           return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
                         }),
-                        prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tags: p.tags, loras: p.loras, children: p.children })),
+                        prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
                         label: slot.label,
                       };
                       // Save to current slot/region/background
@@ -3633,12 +3689,12 @@ export function AppShell() {
 
                 const parsedCount = isTemporary ? 0 : cp.filter(p => {
                   const group = getTagGroupForPrompt(p.prompt);
-                  return group && group[0]?.is_from_parsing === true;
+                  return group && group.is_from_parsing === true;
                 }).length;
                 const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => {
                   if (!isTagSelected(p.prompt)) return false;
                   const group = getTagGroupForPrompt(p.prompt);
-                  return !group || group[0]?.is_from_parsing !== true;
+                  return !group || group.is_from_parsing !== true;
                 }).length;
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
 
@@ -3711,7 +3767,7 @@ export function AppShell() {
                                     <div className="selected-card-content">{p.name}</div>
                                     <button className="selected-card-delete" onClick={e => {
                                       e.stopPropagation();
-                                      const tgIdx = currentCtx!.tagGroups!.findIndex(g => g.some(t => t.decoration_num > 0 && t.prompt === p.prompt));
+                                      const tgIdx = currentCtx!.tagGroups!.findIndex(g => g.tags.slice(0, -1).some(t => t.prompt === p.prompt));
                                       if (tgIdx !== -1) removeTemporaryTag(tgIdx);
                                     }}>{iconX}</button>
                                   </div>
@@ -3788,8 +3844,8 @@ export function AppShell() {
                   filteredPrefabs = prefabs.filter(pf => {
                     if (searchQuery) {
                       if (pf.name.toLowerCase().includes(searchQuery)) return true;
-                      for (const group of (pf.tags || [])) {
-                        for (const tag of group) {
+                      for (const group of (pf.tag_groups || [])) {
+                        for (const tag of group.tags) {
                           if (tag.name.toLowerCase().includes(searchQuery) || tag.prompt.toLowerCase().includes(searchQuery)) return true;
                         }
                       }
@@ -3870,13 +3926,13 @@ export function AppShell() {
                         {filteredPrefabs.map((pf, i) => (
                           <PrefabItem key={`prefab_${lib}_${i}`}
                             prefab={pf} libName={lib} idx={i} modeClass={modeClass} isMiniMode={isMiniMode}
-                            prefabClass={getPrefabClass((pf.tags||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
+                            prefabClass={getPrefabClass((pf.tag_groups||[]) as TagGroup[], selectedTags, pf.loras || [], selectedLoras, loraSelections)}
                             focusPoints={focusPoints} imgUrl={imgUrl}
                             isSelected={tempCtx.mode === 'prefab' ? tempCtx.isIdSelected(pf.guid || '') : selectedPrefabs.some(p => p.guid === pf.guid)}
                             onToggle={() => togglePrefab(pf.guid || `${lib}_${i}`)}
                             allLibraries={allLibraries}
 
-                            onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); setModalPrefabTags((pf?.tags||[]) as TagGroup[]); setModalPrefabLoras((pf?.loras||[]) as LoraSelectionData[]); setModalPrefabSelectedPrefabs((pf?.selected_prefabs||[]) as SelectedPrefabRef[]); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); setModalFileName(pf.preview); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
+                            onEdit={() => { resetModalForm(); const pf = allLibraries[lib]?.prefabs?.[i]; setModalOldName(lib); setModalName(pf?.name||''); setModalCustomPrompts(pf?.custom_prompts||''); setModalPrefabTags((pf?.tag_groups||[]) as TagGroup[]); setModalPrefabLoras((pf?.loras||[]) as LoraSelectionData[]); setModalPrefabSelectedPrefabs((pf?.selected_prefabs||[]) as SelectedPrefabRef[]); if(pf?.preview){ setModalPreviewUrl(imgUrl(pf.preview)); setModalPreviewVisible(true); setModalFileName(pf.preview); const key = `prefab_${lib}_${i}`; const pt = focusPoints[key]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrefab',data:{lib,idx:i}}); }}
                             onDelete={() => deletePrefab(lib, i)}
                           />
                         ))}
@@ -3932,7 +3988,7 @@ export function AppShell() {
                     </div>
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
-                        {apps.map(app => {
+                        {apps.map((app, i) => {
                           const isSelected = tempCtx.mode === 'program'
                             ? tempCtx.isIdSelected(app.id)
                             : selectedPrograms.some(sa => sa.id === app.id);
@@ -3942,8 +3998,8 @@ export function AppShell() {
                             if (app.id === targetId) return null;
                           }
                           return (
-                            <div key={app.id} className={`prompt-item ${modeClass} ${isSelected ? 'selected' : ''}`} data-application={app.id}>
-                              <span className="drag-handle">{iconGrip}</span>
+                            <div key={app.id} className={`prompt-item ${modeClass} ${isSelected ? 'selected' : ''}`} data-program={app.id} data-category={appCat} data-program-index={i}>
+                              <span className="drag-handle" draggable data-drag-type="program" data-id={app.id} data-category={appCat} data-index={i}>{iconGrip}</span>
                               <div className="select-area" onMouseDown={() => {
                                 if (tempCtx.mode === 'program') {
                                   tempCtx.toggleId(app.id);
@@ -4165,10 +4221,10 @@ export function AppShell() {
                       </span>
                     ))
                     : selectedTags.map((group, i) => {
-                      const baseStrength = group[0]?.strength ?? 1.0;
+                      const baseStrength = group.strength ?? 1.0;
                       const showStrength = baseStrength !== 1.0;
                       const displayStr = tagsToDisplayString(group);
-                      const fromParsing = group[0]?.is_from_parsing === true;
+                      const fromParsing = group.is_from_parsing === true;
                       const programFiltered = programResult.removedTagKeys.has(tagsToDisplayString(group));
                       return (
                         <TagStrengthEditor
@@ -4183,7 +4239,7 @@ export function AppShell() {
                           onStrengthChange={(v) => {
                             setSelectedTags(prev => prev.map((g, idx) => {
                               if (idx !== i) return g;
-                              return g.map(t => ({ ...t, strength: v }));
+                              return { ...g, strength: v };
                             }));
                           }}
                           onRemove={() => removeTag(i)}
@@ -4709,7 +4765,7 @@ export function AppShell() {
                                     tempCtx.clear();
                                     setModalName(target?.name || '');
                                     setModalCustomPrompts(target?.custom_prompts || '');
-                                    setModalPrefabTags((target?.tags || []) as TagGroup[]);
+                                    setModalPrefabTags((target?.tag_groups || []) as TagGroup[]);
                                     setModalPrefabLoras((target?.loras || []) as LoraSelectionData[]);
                                     setModalPrefabSelectedPrefabs((target?.selected_prefabs || []) as SelectedPrefabRef[]);
                                     setModalPreviewUrl(target?.preview ? imgUrl(target.preview) : '');
@@ -4800,11 +4856,11 @@ export function AppShell() {
                       </div>
                     </div>
 
-                    {node.tags.length > 0 && (
+                    {node.tag_groups.length > 0 && (
                       <div className="edit-prefab-section">
                         <label>Tags</label>
                         <div className="text-toggle-list">
-                          {node.tags.map(t => (
+                          {node.tag_groups.map(t => (
                             <TextToggle key={t.key} text={t.key} active={t.active} onClick={() => togglePrefabTag(node.guid, t.key)} />
                           ))}
                         </div>

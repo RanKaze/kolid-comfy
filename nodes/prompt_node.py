@@ -541,9 +541,8 @@ class SnapshotPromptServer:
         def _try_decompose(prompt_text):
             """Try to decompose a multi-word prompt into a decoration chain.
             
-            Returns a list of tag dicts if all words are known prompts, None otherwise.
-            decoration_num increases from left to right:
-              e.g. "very thin lips" -> [very:2, thin:1, lips:0] -> "[[very]] [thin] lips"
+            Returns a list of tag dicts (name, prompt, category) if all words are known prompts, None otherwise.
+            Order: [deco_n, ..., deco_1, base] — last = base (was decoration_num=0)
             """
             words = prompt_text.split()
             if len(words) < 2:
@@ -568,42 +567,72 @@ class SnapshotPromptServer:
                         result = []
                         for j, (pt, nm) in enumerate(deco_tags):
                             result.append({
-                                'decoration_num': len(deco_tags) - j,
                                 'prompt': pt,
-                                'name': nm
+                                'name': nm,
+                                'category': '',
                             })
                         base_pt, base_nm = prompt_to_name[base_key]
                         result.append({
-                            'decoration_num': 0,
                             'prompt': base_pt,
-                            'name': base_nm
+                            'name': base_nm,
+                            'category': '',
                         })
                         return result
             return None
         
         normalized = []
         for tag_group in prefab_tags:
-            if isinstance(tag_group, list):
+            # Handle new TagGroup format: { tags: [...], strength, is_from_parsing }
+            if isinstance(tag_group, dict) and 'tags' in tag_group:
+                group_tags = tag_group.get('tags', [])
+                new_group_tags = []
+                for tag in group_tags:
+                    if isinstance(tag, dict):
+                        tag_name = tag.get('name', '')
+                        tag_prompt = tag.get('prompt', '')
+                        if (not tag_prompt or tag_prompt == tag_name) and tag_name in name_to_prompt:
+                            tag = dict(tag)
+                            tag['prompt'] = name_to_prompt[tag_name]
+                            tag_prompt = tag['prompt']
+                        new_group_tags.append(tag)
+                    else:
+                        new_group_tags.append(tag)
+                
+                # Heuristic: if the group has exactly one tag with a multi-word prompt,
+                # try to decompose it into a decoration chain
+                if len(new_group_tags) == 1:
+                    single_tag = new_group_tags[0]
+                    if isinstance(single_tag, dict):
+                        pt = single_tag.get('prompt', '')
+                        if ' ' in pt:
+                            decomposed = _try_decompose(pt)
+                            if decomposed:
+                                new_group_tags = decomposed
+                
+                normalized.append({
+                    'tags': new_group_tags,
+                    'strength': tag_group.get('strength', 1.0),
+                    'is_from_parsing': tag_group.get('is_from_parsing', False),
+                })
+            # Handle old format: Tag[] (for backward compat with unmigrated data)
+            elif isinstance(tag_group, list):
                 new_group = []
                 for tag in tag_group:
                     if isinstance(tag, dict):
                         tag_name = tag.get('name', '')
                         tag_prompt = tag.get('prompt', '')
-                        # Fix: if prompt is missing, empty, or identical to name,
-                        # replace with the English prompt from prompt.json
                         if (not tag_prompt or tag_prompt == tag_name) and tag_name in name_to_prompt:
                             tag = dict(tag)
                             tag['prompt'] = name_to_prompt[tag_name]
                             tag_prompt = tag['prompt']
-                        # Preserve strength field if present
-                        if 'strength' in tag and tag['strength'] is not None:
-                            tag = dict(tag)
+                        # Remove old fields
+                        tag.pop('decoration_num', None)
+                        tag.pop('strength', None)
+                        tag.pop('is_from_parsing', None)
                         new_group.append(tag)
                     else:
                         new_group.append(tag)
                 
-                # Heuristic: if the group has exactly one tag with a multi-word prompt,
-                # try to decompose it into a decoration chain
                 if len(new_group) == 1:
                     single_tag = new_group[0]
                     if isinstance(single_tag, dict):
@@ -613,7 +642,11 @@ class SnapshotPromptServer:
                             if decomposed:
                                 new_group = decomposed
                 
-                normalized.append(new_group)
+                normalized.append({
+                    'tags': new_group,
+                    'strength': 1.0,
+                    'is_from_parsing': False,
+                })
             else:
                 normalized.append(tag_group)
         
@@ -2818,17 +2851,44 @@ class SnapshotPromptNode:
             
             # Collect tags as prompts (respect per-tag-group active state)
             tag_states = {t.get('key'): t.get('active', True) for t in node.get('tags', [])}
-            for tag_group in pf.get('tags', []):
-                if isinstance(tag_group, list):
-                    key = ' '.join(tag.get('name') or tag.get('prompt', '') for tag in tag_group)
+            for tag_group in pf.get('tag_groups', pf.get('tags', [])):
+                # Handle new TagGroup format: { tags: [...], strength, is_from_parsing }
+                if isinstance(tag_group, dict) and 'tags' in tag_group:
+                    group_tags = tag_group.get('tags', [])
+                    group_strength = tag_group.get('strength', 1.0)
+                    key = ' '.join(t.get('name') or t.get('prompt', '') for t in group_tags if isinstance(t, dict))
+                    is_active = tag_states.get(key, True)
+                    if not is_active:
+                        continue
+                    parts = []
+                    for i, tag in enumerate(group_tags):
+                        if isinstance(tag, dict):
+                            prompt_text = tag.get('prompt', '')
+                            deco_level = len(group_tags) - 1 - i  # last = 0 (base)
+                            if deco_level > 0:
+                                text = '[' * deco_level + prompt_text + ']' * deco_level
+                            else:
+                                text = prompt_text
+                            parts.append(text)
+                    if parts:
+                        prompt_str = ' '.join(parts)
+                        if group_strength != 1.0:
+                            prompt_str = f"({prompt_str}:{group_strength})"
+                        cleaned_str = prompt_str.replace('[', '').replace(']', '')
+                        if prompt_str not in prompts_raw:
+                            prompts_raw.append(prompt_str)
+                            prompts_cleaned.append(cleaned_str)
+                # Handle old format: Tag[] (backward compat)
+                elif isinstance(tag_group, list):
+                    key = ' '.join(tag.get('name') or tag.get('prompt', '') for tag in tag_group if isinstance(tag, dict))
                     is_active = tag_states.get(key, True)
                     if not is_active:
                         continue
                     parts = []
                     for tag in tag_group:
                         if isinstance(tag, dict):
-                            deco = tag.get('decoration_num') or 0
                             prompt_text = tag.get('prompt', '')
+                            deco = tag.get('decoration_num') or 0
                             strength = tag.get('strength', 1.0)
                             if deco > 0:
                                 text = '[' * deco + prompt_text + ']' * deco

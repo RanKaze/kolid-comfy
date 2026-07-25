@@ -9,7 +9,7 @@ interface ProgramCodeEditorProps {
   onChange: (value: string) => void;
 }
 
-const CTX_VARS = ['tags', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index'];
+const CTX_VARS = ['tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index'];
 
 export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
   const editorRef = useRef<any>(null);
@@ -34,8 +34,13 @@ export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
   };
 
   return (
-    <div style={{ width: '100%', flex: 1, minHeight: 0, border: '1px solid #38383a', borderRadius: 10, overflow: 'hidden', marginTop: 8 }}>
-      <style>{'.ctx-var-highlight { color: #4fc3f7 !important; font-weight: bold; }'}</style>
+    <div style={{ width: '100%', flex: 1, minHeight: 0, border: '1px solid #38383a', borderRadius: 10, overflow: 'visible', marginTop: 8 }}>
+      <style>{`
+        .ctx-var-highlight { color: #4fc3f7 !important; font-weight: bold; }
+        .monaco-editor .mtk7 { color: #dcdcaa !important; }
+        .monaco-editor .scrollbar .slider { border-radius: 4px; }
+      `}</style>
+      <div style={{ height: '100%', overflow: 'hidden', borderRadius: 10 }}>
       <Editor
         height="100%"
         defaultLanguage="javascript"
@@ -70,7 +75,21 @@ export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
           monaco.editor.defineTheme('kolid-dark', {
             base: 'vs-dark',
             inherit: true,
-            rules: [],
+            rules: [
+              { token: 'identifier', foreground: '9cdcfe' },
+              { token: 'delimiter', foreground: 'd4d4d4' },
+              { token: 'delimiter.parenthesis', foreground: 'd4d4d4' },
+              { token: 'delimiter.square', foreground: 'd4d4d4' },
+              { token: 'delimiter.bracket', foreground: 'd4d4d4' },
+              { token: 'keyword', foreground: 'c586c0' },
+              { token: 'string', foreground: 'ce9178' },
+              { token: 'number', foreground: 'b5cea8' },
+              { token: 'comment', foreground: '6a9955', fontStyle: 'italic' },
+              { token: 'regexp', foreground: 'd16969' },
+              { token: 'type', foreground: '4ec9b0' },
+              { token: 'type.identifier', foreground: '4ec9b0' },
+              { token: 'identifier.js', foreground: '9cdcfe' },
+            ],
             colors: { 'editor.background': '#1c1c1e' },
           });
           monaco.editor.setTheme('kolid-dark');
@@ -98,6 +117,7 @@ export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
           </div>
         }
       />
+      </div>
     </div>
   );
 }
