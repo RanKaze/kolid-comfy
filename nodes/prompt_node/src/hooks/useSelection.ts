@@ -78,7 +78,7 @@ export function parseStringToTags(str: string, allPrompts: AllPrompts): TagGroup
     strength = parseFloat(fullStrengthMatch[2]);
   }
   const tags: Tag[] = parseStringToTagsImpl(body, allPrompts);
-  return { tags, strength, is_from_parsing: false };
+  return { tags, strength, source: 'normal' as const };
 }
 
 function parseStringToTagsImpl(str: string, allPrompts: AllPrompts): Tag[] {
@@ -158,7 +158,7 @@ export function combineTagGroups(
   // Flatten all tags from child groups + base tag at the end
   const allTags: Tag[] = [...tagGroups.flatMap(g => g.tags), baseTag];
   const strength = tagGroups.length > 0 ? tagGroups[0].strength : 1.0;
-  return { tags: allTags, strength, is_from_parsing: false };
+  return { tags: allTags, strength, source: 'normal' as const };
 }
 
 function toDecoList(v: string | string[] | undefined): string[] {

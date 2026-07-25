@@ -25,10 +25,12 @@ export interface Tag {
   tags?: string[];
 }
 
+export type SourceMode = 'normal' | 'parsing' | 'program';
+
 export interface TagGroup {
   tags: Tag[];
   strength: number;
-  is_from_parsing: boolean;
+  source: SourceMode;
 }
 
 export interface SelectedPrefabLoraState {
@@ -47,6 +49,7 @@ export interface SelectedPrefabItem {
   tag_groups: SelectedPrefabTagState[];
   loras: SelectedPrefabLoraState[];
   children: SelectedPrefabItem[];
+  source?: SourceMode;
 }
 
 export interface SelectedPrefabRef {
@@ -192,6 +195,7 @@ export interface LoraSelectionData {
   active_tags: string[];
   active: boolean;
   split_mode?: boolean;
+  source?: SourceMode;
 }
 
 export interface LoraFolders {
