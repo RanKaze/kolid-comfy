@@ -76,7 +76,7 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
-    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_programs=None, sources=None):
+    def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_programs=None):
         self.port = port
         self.server = None
         self.started = False
@@ -95,7 +95,9 @@ class SnapshotPromptServer:
         self.parsed_prompts = parsed_prompts or []
         self.last_selected_programs = last_selected_programs or []
         self.selected_programs = []
-        self.sources = sources or {}
+        self.filter_tag_groups = []
+        self.filter_loras = []
+        self.filter_prefabs = []
         # Region fields
         self.image = None
         self.width = 1024
@@ -150,10 +152,11 @@ class SnapshotPromptServer:
 
         prompt_parts = []
         for p in (prompt_data.get('prompts') or []):
-            if p.startswith('<') and p.endswith('>'):
-                prompt_parts.append(p[1:-1])
+            text = p['text'] if isinstance(p, dict) else p
+            if text.startswith('<') and text.endswith('>'):
+                prompt_parts.append(text[1:-1])
             else:
-                prompt_parts.append(p.replace('[', '').replace(']', ''))
+                prompt_parts.append(text.replace('[', '').replace(']', ''))
         custom = prompt_data.get('custom_prompts', '')
         if custom:
             prompt_parts.append(custom)
@@ -805,7 +808,6 @@ class SnapshotPromptServer:
                     'last_selected_programs': self.server_instance.last_selected_programs,
                     'parsed_prompts': self.server_instance.parsed_prompts,
                     'lora_regex': self.server_instance.lora_regex,
-                    'sources': getattr(self.server_instance, 'sources', {}),
                 }
                 print(f"[SnapshotPrompt] /prompts_data: last_selected_programs={self.server_instance.last_selected_programs}")
                 self.send_response(200)
@@ -934,12 +936,9 @@ class SnapshotPromptServer:
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.selected_programs = data.get('programs', [])
                     self.server_instance.last_selected_programs = data.get('programs', [])
-                    self.server_instance.sources = data.get('sources', {})
-                    # Derive exclude_from_cache from sources keys (non-prefixed = tag keys)
-                    self.server_instance.exclude_from_cache = set(
-                        k for k in self.server_instance.sources
-                        if not k.startswith('lora:') and not k.startswith('prefab:')
-                    )
+                    self.server_instance.filter_tag_groups = data.get('filter_tag_groups', [])
+                    self.server_instance.filter_loras = data.get('filter_loras', [])
+                    self.server_instance.filter_prefabs = data.get('filter_prefabs', [])
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
                     print(f"[PromptNode] stored selected_programs: {self.server_instance.selected_programs}")
@@ -3036,21 +3035,23 @@ class SnapshotPromptNode:
         # 去掉所有 '[' 和 ']' 字符，但保留 '<>' 包裹的自定义输入和 '()' 包裹的强度
         cleaned_prompts = []
         for p in server.selected_prompts:
-            # 检查是否是 <> 包裹的自定义输入(兼容旧数据)
-            if p.startswith('<') and p.endswith('>'):
-                cleaned = p[1:-1]
+            text = p['text'] if isinstance(p, dict) else p
+            # 检查是否是<> 包裹的自定义输入(兼容旧数据)
+            if text.startswith('<') and text.endswith('>'):
+                cleaned = text[1:-1]
             else:
                 # 去掉 [ 和 ]，但保留 () 强度包裹
-                cleaned = p.replace('[', '').replace(']', '')
+                cleaned = text.replace('[', '').replace(']', '')
             cleaned_prompts.append(cleaned)
 
         # 追加 custom_prompts 到结果
         if server.custom_prompts:
             cleaned_prompts.append(server.custom_prompts)
-            server.selected_prompts.append(f"<{server.custom_prompts}>")
+            server.selected_prompts.append({"text": f"<{server.custom_prompts}>", "source": "normal"})
 
         # Merge user selections + prefab expansions for final outputs
-        all_prompts_raw = server.selected_prompts + prefab_prompts_raw
+        selected_prompt_texts = [p['text'] if isinstance(p, dict) else p for p in server.selected_prompts]
+        all_prompts_raw = selected_prompt_texts + prefab_prompts_raw
         all_prompts_cleaned = cleaned_prompts + prefab_prompts_cleaned
         
         result_prompt = ", ".join(all_prompts_raw)
@@ -3081,22 +3082,22 @@ class SnapshotPromptNode:
         cleaned_result = ", ".join(all_prompts_cleaned)
 
         # 保存选中的值到 prompt widget（仅当 prompt_cache 为 True）
-        # Only save user-direct selections, not prefab-expanded content
-        # Exclude prompts that the frontend flagged as "still pure parsing" (not modified by user)
-        exclude_set = getattr(server, 'exclude_from_cache', set())
-        user_prompt_only = ", ".join(p for p in server.selected_prompts if p not in exclude_set)
+        # Only save user-direct selections; exclude parsing + program sourced prompts
+        # selected_prompts items are {text, source}; extract text for normal items only
+        cached_prompt_texts = [p['text'] if isinstance(p, dict) else p for p in server.selected_prompts
+                               if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') == 'normal']
+        user_prompt_only = ", ".join(cached_prompt_texts)
         if prompt_cache:
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
-                "node_id": unique_id, 
-                "widget_name": "prompt", 
-                "type": "STRING", 
+                "node_id": unique_id,
+                "widget_name": "prompt",
+                "type": "STRING",
                 "value": user_prompt_only
             })
         # 保存选中的值到 lora widget（仅当 lora_cache 为 True）
         # Filter out program-sourced loras so they don't persist to next session
-        sources_map = getattr(server, 'sources', {})
         if lora_cache:
-            cached_loras = [l for l in server.selected_loras if sources_map.get(f"lora:{l.get('file_path', '')}") != 'program']
+            cached_loras = [l for l in server.selected_loras if l.get('source', 'normal') != 'program']
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id,
                 "widget_name": "lora",
@@ -3106,7 +3107,7 @@ class SnapshotPromptNode:
         # 保存选中的值到 prefab widget（仅当 prefab_cache 为 True）
         # Filter out program-sourced prefabs so they don't persist to next session
         if prefab_cache:
-            cached_prefabs = [p for p in server.selected_prefabs if sources_map.get(f"prefab:{p.get('guid', '')}") != 'program']
+            cached_prefabs = [p for p in server.selected_prefabs if p.get('source', 'normal') != 'program']
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id,
                 "widget_name": "prefab",
@@ -3227,14 +3228,19 @@ class SnapshotPromptNode:
                 pass
 
         # Build cache output dict
+        # selected_prompts items are {text, source}; serialize full array for load_from_image
+        cache_prompt_items = [{"text": p['text'], "source": p.get('source', 'normal')} if isinstance(p, dict) else {"text": p, "source": "normal"} for p in server.selected_prompts]
         cache_data = {
-            "prompt": ", ".join(server.selected_prompts),
+            "prompt": ", ".join(p['text'] if isinstance(p, dict) else p for p in server.selected_prompts),
+            "prompts": json.dumps(cache_prompt_items, ensure_ascii=False),
             "lora": json.dumps(server.selected_loras, ensure_ascii=False),
             "prefab": json.dumps(server.selected_prefabs, ensure_ascii=False),
             "program": json.dumps(server.selected_programs, ensure_ascii=False),
             "prompt_parsing": getattr(server, 'parsed_prompts', []) and ", ".join(getattr(server, 'parsed_prompts', [])) or "",
             "custom_prompts": server.custom_prompts or "",
-            "sources": json.dumps(getattr(server, 'sources', {}), ensure_ascii=False),
+            "filter_tag_groups": json.dumps(getattr(server, 'filter_tag_groups', []), ensure_ascii=False),
+            "filter_loras": json.dumps(getattr(server, 'filter_loras', []), ensure_ascii=False),
+            "filter_prefabs": json.dumps(getattr(server, 'filter_prefabs', []), ensure_ascii=False),
             "region": "",
         }
         if enable_region and server.region_result:
