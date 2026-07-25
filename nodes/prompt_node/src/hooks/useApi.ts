@@ -22,7 +22,6 @@ export function useApi() {
   const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
   const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
   const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[]>([]);
-  const [sources, setSources] = useState<Record<string, string>>({});
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
@@ -39,15 +38,14 @@ export function useApi() {
     setParsedPrompts(data.parsed_prompts || []);
     setAllPrograms(data.programs || {});
     setLastSelectedPrograms(data.last_selected_programs || []);
-    setSources((data as any).sources || {});
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], programs?: any[], sources?: Record<string, string>, onBeforeClose?: () => void) => {
+  const submitSelection = useCallback(async (prompts: { text: string; source: string }[], custom: string, loras: LoraSelectionData[], prefabs?: any[], programs?: any[], filterTags?: any[], filterLoras?: any[], filterPrefabs?: any[], onBeforeClose?: () => void) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, sources: sources || {} }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [] }),
     });
     if (res.ok) {
       onBeforeClose?.();
@@ -78,7 +76,6 @@ export function useApi() {
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
     allPrograms, setAllPrograms, lastSelectedPrograms,
-    sources,
     loadData, submitSelection, closeWindow, loadLoraData,
   };
 }

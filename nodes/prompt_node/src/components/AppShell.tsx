@@ -161,7 +161,6 @@ export function AppShell() {
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
     allPrograms, setAllPrograms, lastSelectedPrograms,
-    sources,
   } = api;
 
   const isLoraFiltered = useCallback((item: LoraItemData) => {
@@ -387,16 +386,13 @@ export function AppShell() {
       const tags = parseStringToTags(str, data.categories);
       loadedParsedKeys.add(tagsToDisplayString(tags));
     }
-    const sources = (data as any).sources || {};
 
     const tagGroups = lastSelected
       .filter(str => !str.startsWith('<') || !str.endsWith('>'))
       .map(str => {
         const tg = parseStringToTags(str, data.categories);
-        const key = tagsToDisplayString(tg);
-        const isFromParsing = loadedParsedKeys.has(key);
-        const source = (sources[key] as 'parsing' | 'program') || (isFromParsing ? 'parsing' as const : 'normal' as const);
-        return { ...tg, tags: tg.tags.map(t => ({ ...t })), source };
+        const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
+        return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: isFromParsing ? 'parsing' as const : 'normal' as const };
       });
     setSelectedTags(tagGroups);
 
@@ -557,7 +553,7 @@ export function AppShell() {
     for (const saved of lastSelectedLoras) {
       const lookupKey = (saved as any).file_path || (saved as any).file_name;
       const item = available.get(lookupKey);
-      const loraSource = sources[`lora:${lookupKey}`] || 'normal';
+      const loraSource = (saved as any).source || 'normal';
       if (item) {
         restoredLoras.push({ ...item, source: loraSource as any });
         restoredSelections[item.file_path] = {
@@ -589,7 +585,7 @@ export function AppShell() {
     setSelectedLoras(restoredLoras);
     setLoraSelections(restoredSelections);
     loraRestoredRef.current = true;
-  }, [loraData, lastSelectedLoras, sources]);
+  }, [loraData, lastSelectedLoras]);
 
   // Restore selected prefabs from last_selected_prefabs (recursive tree)
   useEffect(() => {
@@ -640,7 +636,7 @@ export function AppShell() {
         tag_groups,
         loras,
         children,
-        source: (sources[`prefab:${node.guid}`] as any) || 'normal',
+        source: (node as any).source || 'normal',
       };
     }
 
@@ -651,7 +647,7 @@ export function AppShell() {
     }
     setSelectedPrefabs(restored);
     prefabRestoredRef.current = true;
-  }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid, sources]);
+  }, [allLibraries, lastSelectedPrefabs, findPrefabByGuid]);
 
   // Restore selected applications from last_selected_applications
   useEffect(() => {
@@ -1635,7 +1631,7 @@ export function AppShell() {
               ...catData,
               programs: (catData.programs || []).map(a => {
                 if (a.id !== id) return a;
-                const updated: ProgramData = { ...a, ...ctxFields, name, code };
+                const updated: ProgramData = { ...a, ...ctxFields, name, code, selected_programs: selectedPrograms };
                 if (result.preview !== undefined && result.preview !== null) updated.preview = result.preview;
                 else if (image !== null) updated.preview = image;
                 return updated;
@@ -2014,14 +2010,18 @@ export function AppShell() {
         loadedParsedKeys.add(tagsToDisplayString(tags));
       }
     }
-    // Parse sources map from loaded data (for restoring parsing/program source)
-    let loadedSources: Record<string, string> = {};
-    try { loadedSources = typeof loaded.sources === 'string' ? JSON.parse(loaded.sources || '{}') : (loaded.sources || {}); } catch {}
-    const newTags = regularSegments.map(s => {
+    // Try to load prompt items with inline source (from cache_data.prompts)
+    let loadedPromptItems: { text: string; source: string }[] | null = null;
+    try {
+      if (loaded.prompts) loadedPromptItems = typeof loaded.prompts === 'string' ? JSON.parse(loaded.prompts) : loaded.prompts;
+    } catch {}
+    const newTags = regularSegments.map((s, i) => {
       const tg = parseStringToTags(s, allPrompts);
       const key = tagsToDisplayString(tg);
       const isFromParsing = loadedParsedKeys.has(key);
-      const source = (loadedSources[key] as 'parsing' | 'program') || (isFromParsing ? 'parsing' as const : 'normal' as const);
+      // Use inline source from loadedPromptItems if available, else fallback to parsing detection
+      const inlineSource = loadedPromptItems?.[i]?.source;
+      const source = (inlineSource as 'parsing' | 'program') || (isFromParsing ? 'parsing' as const : 'normal' as const);
       return { ...tg, tags: tg.tags.map(t => ({ ...t })), source };
     });
 
@@ -2037,7 +2037,7 @@ export function AppShell() {
       for (const saved of loraArr) {
         const lookupKey = saved.file_path || saved.file_name;
         const item = available.get(lookupKey);
-        const loraSource = loadedSources[`lora:${lookupKey}`] || 'normal';
+        const loraSource = saved.source || 'normal';
         if (item) {
           newLoras.push({ ...item, source: loraSource as any });
           newLoraSelections[item.file_path] = {
@@ -2098,7 +2098,7 @@ export function AppShell() {
             return restoreTree(saved || nested, new Set(visited));
           })
           .filter(Boolean) as SelectedPrefabItem[];
-        return { guid: node.guid, active: node.active !== false, tag_groups, loras, children, source: (loadedSources[`prefab:${node.guid}`] as any) || 'normal' };
+        return { guid: node.guid, active: node.active !== false, tag_groups, loras, children, source: (node as any).source || 'normal' };
       }
       for (const sp of prefabArr) {
         const item = restoreTree(sp, new Set());
@@ -2241,36 +2241,30 @@ export function AppShell() {
 
     // The prompt/active_loras/lora_trigger_words/merged_prompt outputs must reflect
     // the BACKGROUND context, not the currently selected context.
-    let submitPrompts: string[];
+    let submitPrompts: { text: string; source: string }[];
     let submitCustom: string;
     let submitLoras: LoraSelectionData[];
-    let submitPrefabs: { guid: string; active: boolean; tag_groups: any[]; loras: any[]; children: any[] }[];
+    let submitPrefabs: { guid: string; active: boolean; tag_groups: any[]; loras: any[]; children: any[]; source?: string }[];
+    let submitFilterTags: any[] = [];
+    let submitFilterLoras: any[] = [];
+    let submitFilterPrefabs: any[] = [];
 
     if (enableRegion && backgroundContextRef.current) {
       // Use background context
       const bg = backgroundContextRef.current;
-      submitPrompts = bg.prompts;
+      submitPrompts = bg.prompts.map((p: string) => ({ text: p, source: 'normal' }));
       submitCustom = bg.custom_prompts;
       submitLoras = bg.loras;
       submitPrefabs = bg.prefabs;
     } else {
-      // No region mode — use program-filtered selections
-      submitPrompts = programResult.resultTags.map(g => tagsToDisplayString(g));
+      // No region mode — use program-filtered selections (source inline)
+      submitPrompts = programResult.resultTags.map(g => ({ text: tagsToDisplayString(g), source: g.source || 'normal' }));
       submitCustom = programResult.resultCustomPrompts;
-      submitLoras = programResult.resultLoras;
-      submitPrefabs = programResult.resultPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
-    }
-
-    // Build sources map for non-normal items (so load_from_image can restore source)
-    const sources: Record<string, string> = {};
-    for (const g of selectedTags) {
-      if (g.source && g.source !== 'normal') sources[tagsToDisplayString(g)] = g.source;
-    }
-    for (const l of selectedLoras) {
-      if ((l as any).source && (l as any).source !== 'normal') sources[`lora:${l.file_path}`] = (l as any).source;
-    }
-    for (const p of selectedPrefabs) {
-      if ((p as any).source && (p as any).source !== 'normal') sources[`prefab:${p.guid}`] = (p as any).source;
+      submitLoras = programResult.resultLoras.map(l => ({ ...l, source: (l as any).source || 'normal' }));
+      submitPrefabs = programResult.resultPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children, source: (p as any).source || 'normal' }));
+      submitFilterTags = programResult.filter_tag_groups;
+      submitFilterLoras = programResult.filter_loras;
+      submitFilterPrefabs = programResult.filter_prefabs;
     }
 
     submitSelection(
@@ -2279,7 +2273,9 @@ export function AppShell() {
       submitLoras,
       submitPrefabs,
       selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_prompt_texts: a.context_prompt_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_prompt_inactive: a.context_prompt_inactive })),
-      sources,
+      submitFilterTags,
+      submitFilterLoras,
+      submitFilterPrefabs,
       () => {
         if (window.parent !== window) {
           window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
