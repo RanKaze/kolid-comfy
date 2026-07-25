@@ -47,22 +47,37 @@ export function useProgram(
     // Collect active programs in order, resolving sub-programs recursively
     const activePrograms: { code: string; name: string }[] = [];
     const resolved = new Set<string>();
-    function resolvePrograms(programIds: string[]) {
+    function resolvePrograms(programIds: string[], depth = 0) {
       for (const pid of programIds) {
         if (resolved.has(pid)) continue;
         resolved.add(pid);
         const app = programById.get(pid);
-        if (!app || !app.code || !app.code.trim()) continue;
-        // Execute sub-programs first
-        if (app.selected_programs && app.selected_programs.length > 0) {
-          resolvePrograms(app.selected_programs.filter(sp => sp.active !== false).map(sp => sp.id));
+        if (!app) continue;
+        // Execute sub-programs first (recursive) — even if parent has no code
+        const subPrograms = (app.selected_programs || []).filter(sp => sp.active !== false);
+        if (subPrograms.length > 0) {
+          resolvePrograms(subPrograms.map(sp => sp.id), depth + 1);
         }
-        activePrograms.push({ code: app.code, name: app.name });
+        // Only add to execution list if this program has actual code
+        if (app.code && app.code.trim()) {
+          activePrograms.push({ code: app.code, name: app.name });
+        }
       }
     }
+    // Debug: log selected programs and programById
+    console.log('[useProgram] selectedPrograms:', JSON.stringify(selectedPrograms));
+    console.log('[useProgram] programById keys:', [...programById.keys()]);
+    console.log('[useProgram] allPrograms keys:', Object.keys(allPrograms));
+
     for (const sa of selectedPrograms) {
       if (!sa.active) continue;
       resolvePrograms([sa.id]);
+    }
+
+    // Debug: log resolved program chain
+    console.log('[useProgram] activePrograms count:', activePrograms.length);
+    if (activePrograms.length > 0) {
+      console.log('[useProgram] Resolved program chain:', activePrograms.map((p, i) => `${i}:${p.name}`));
     }
 
     const noProgramsResult: ProgramResult = {
@@ -85,10 +100,8 @@ export function useProgram(
       return noProgramsResult;
     }
 
-    // Build all_tags, tag_index, decoration_index from allPrompts
+    // Build all_tags from allPrompts
     const allTags: Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> = {};
-    const tagIndex: Record<string, string[]> = {};
-    const decorationIndex: Record<string, string[]> = {};
 
     for (const [cat, catData] of Object.entries(allPrompts)) {
       const cd = catData as any;
@@ -109,19 +122,21 @@ export function useProgram(
           tags: [...new Set([...catTags, ...pTags])],
           mute_decorations: pMute,
         };
-        for (const t of allTags[key].tags) {
-          if (!tagIndex[t]) tagIndex[t] = [];
-          tagIndex[t].push(allTags[key].prompt);
-        }
-        for (const d of allTags[key].decorations) {
-          if (!decorationIndex[d]) decorationIndex[d] = [];
-          decorationIndex[d].push(allTags[key].prompt);
-        }
       }
     }
 
-    // Build context — is_from_parsing is already set on each tag
-    let ctxTags: TagGroup[] = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) }));
+    // Build context — enrich each Tag with decorations and tags from allTags
+    let ctxTags: TagGroup[] = selectedTags.map(g => ({
+      ...g,
+      tags: g.tags.map(t => {
+        const info = allTags[t.prompt.toLowerCase()];
+        return {
+          ...t,
+          decorations: info?.decorations || [],
+          tags: info?.tags || [],
+        };
+      }),
+    }));
     let ctxLoras: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
       return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
@@ -159,11 +174,11 @@ export function useProgram(
     for (const prog of activePrograms) {
       try {
         const fn = new Function(
-          'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index',
+          'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags',
           prog.code,
         );
         const result = fn(
-          ctxTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) })),
+          ctxTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t, decorations: t.decorations ? [...t.decorations] : [], tags: t.tags ? [...t.tags] : [] })) })),
           ctxLoras.map(l => ({ ...l })),
           ctxPrefabs.map(p => ({
             ...p,
@@ -176,8 +191,6 @@ export function useProgram(
           ctxCustomPrompts,
           allPrompts,
           allTags,
-          tagIndex,
-          decorationIndex,
         );
         if (result && typeof result === 'object') {
           if (Array.isArray(result.tag_groups)) ctxTags = result.tag_groups;
