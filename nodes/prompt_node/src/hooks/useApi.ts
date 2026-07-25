@@ -21,11 +21,11 @@ export function useApi() {
   const [loraFolderMeta, setLoraFolderMeta] = useState<Record<string, {bg_image?: string; bg_video?: string}>>({});
   const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
   const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
-  const [lastSelectedPrograms, setLastSelectedPrograms] = useState<{ id: string; active?: boolean }[]>([]);
+  const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[]>([]);
 
   const loadData = useCallback(async () => {
     const res = await fetch(`${API_BASE}/prompts_data`);
-    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; programs?: AllPrograms; last_selected_programs?: { id: string; active?: boolean }[] } = await res.json();
+    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; programs?: AllPrograms; last_selected_programs?: any[] } = await res.json();
     setAllPrompts(data.categories);
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
@@ -41,7 +41,7 @@ export function useApi() {
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], programs?: { id: string; active: boolean }[], excludeFromCache?: string[], onBeforeClose?: () => void) => {
+  const submitSelection = useCallback(async (prompts: string[], custom: string, loras: LoraSelectionData[], prefabs?: { guid: string }[], programs?: any[], excludeFromCache?: string[], onBeforeClose?: () => void) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
