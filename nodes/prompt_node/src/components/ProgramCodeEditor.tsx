@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import Editor from '@monaco-editor/react';
 // Import as raw string — Vite inlines the file content at build time
 // This is the single source of truth for program context types
@@ -7,13 +7,15 @@ import ctxTypes from '../program-ctx-types.d.ts?raw';
 interface ProgramCodeEditorProps {
   value: string;
   onChange: (value: string) => void;
+  errorLine?: number | null;
 }
 
 const CTX_VARS = ['tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags'];
 
-export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
+export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEditorProps) {
   const editorRef = useRef<any>(null);
   const decorationsRef = useRef<string[]>([]);
+  const errorDecorationsRef = useRef<string[]>([]);
 
   const applyCtxHighlights = (editor: any, monaco: any) => {
     const model = editor.getModel();
@@ -33,10 +35,34 @@ export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
     decorationsRef.current = editor.deltaDecorations(decorationsRef.current, decorations);
   };
 
+  // Apply / clear error-line highlight
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const monaco = (editor as any)._monaco;
+    const model = editor.getModel();
+    if (!model || !monaco) return;
+    const decorations: any[] = [];
+    if (errorLine != null && errorLine >= 1) {
+      const lineCount = model.getLineCount();
+      const line = Math.min(errorLine, lineCount);
+      decorations.push({
+        range: new monaco.Range(line, 1, line, 1),
+        options: {
+          isWholeLine: true,
+          className: 'error-line-highlight',
+        },
+      });
+      editor.revealLineInCenter(line);
+    }
+    errorDecorationsRef.current = editor.deltaDecorations(errorDecorationsRef.current, decorations);
+  }, [errorLine]);
+
   return (
     <div style={{ width: '100%', flex: 1, minHeight: 0, border: '1px solid #38383a', borderRadius: 10, overflow: 'visible', marginTop: 8 }}>
       <style>{`
         .ctx-var-highlight { color: #4fc3f7 !important; font-weight: bold; }
+        .error-line-highlight { background: rgba(255,69,58,0.25) !important; }
         .monaco-editor .mtk7 { color: #dcdcaa !important; }
         .monaco-editor .scrollbar .slider { border-radius: 4px; }
       `}</style>
