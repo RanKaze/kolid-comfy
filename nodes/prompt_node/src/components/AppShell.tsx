@@ -1025,6 +1025,91 @@ export function AppShell() {
     }
   }, [tagInputSelIdx, tagInputShowDropdown]);
 
+  // Tag autocomplete for Tags Builtin in editProgram modal
+  const [builtinTagInputQuery, setBuiltinTagInputQuery] = useState('');
+  const [builtinTagInputShowDropdown, setBuiltinTagInputShowDropdown] = useState(false);
+  const [builtinTagInputSelIdx, setBuiltinTagInputSelIdx] = useState(-1);
+  const builtinTagInputRef = useRef<HTMLInputElement>(null);
+  const builtinTagDropdownRef = useRef<HTMLDivElement>(null);
+  const builtinSelItemRef = useRef<HTMLDivElement>(null);
+
+  const filteredBuiltinTagSuggestions = useMemo(() => {
+    if (!builtinTagInputQuery) return tagAutocompleteSuggestions.slice(0, 50);
+    const q = builtinTagInputQuery.toLowerCase();
+    return tagAutocompleteSuggestions.filter(([text, name]) =>
+      text.toLowerCase().includes(q) || name.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [tagAutocompleteSuggestions, builtinTagInputQuery]);
+
+  const selectBuiltinTagSuggestion = useCallback((text: string) => {
+    const input = builtinTagInputRef.current;
+    if (!input) return;
+    const pos = input.selectionStart ?? input.value.length;
+    const val = input.value;
+    let s = pos - 1;
+    while (s >= 0 && val[s] !== ',' && val[s] !== ' ') s--;
+    const newVal = val.slice(0, s + 1) + text + (pos >= val.length || val[pos] === ' ' ? '' : ' ') + val.slice(pos);
+    input.value = newVal;
+    const nc = s + 1 + text.length;
+    setTimeout(() => { input.selectionStart = input.selectionEnd = nc; input.focus(); }, 0);
+    setBuiltinTagInputShowDropdown(false);
+    setBuiltinTagInputQuery('');
+    setBuiltinTagInputSelIdx(-1);
+  }, []);
+
+  const handleBuiltinTagInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const pos = input.selectionStart ?? input.value.length;
+    const val = input.value;
+    if (pos === 0) { setBuiltinTagInputShowDropdown(false); return; }
+    let s = pos - 1;
+    while (s >= 0 && val[s] !== ',' && val[s] !== ' ') s--;
+    const word = val.slice(s + 1, pos);
+    if (word.length >= 1) {
+      setBuiltinTagInputQuery(word);
+      setBuiltinTagInputShowDropdown(true);
+      setBuiltinTagInputSelIdx(-1);
+    } else {
+      setBuiltinTagInputShowDropdown(false);
+    }
+  }, []);
+
+  const handleBuiltinTagInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (builtinTagInputShowDropdown && filteredBuiltinTagSuggestions.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setBuiltinTagInputSelIdx(i => Math.min(i + 1, filteredBuiltinTagSuggestions.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setBuiltinTagInputSelIdx(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Tab') { e.preventDefault(); const idx = builtinTagInputSelIdx >= 0 ? builtinTagInputSelIdx : 0; if (idx < filteredBuiltinTagSuggestions.length) selectBuiltinTagSuggestion(filteredBuiltinTagSuggestions[idx][0]); return; }
+      if (e.key === 'Enter' && builtinTagInputSelIdx >= 0) { e.preventDefault(); if (builtinTagInputSelIdx < filteredBuiltinTagSuggestions.length) selectBuiltinTagSuggestion(filteredBuiltinTagSuggestions[builtinTagInputSelIdx][0]); return; }
+      if (e.key === 'Escape') { setBuiltinTagInputShowDropdown(false); return; }
+    }
+    if (e.key === 'Enter') {
+      const input = builtinTagInputRef.current;
+      if (!input) return;
+      const val = input.value.trim();
+      if (val) {
+        const segments = val.split(',').map(s => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+          const result = tryParseLine(seg, allPrompts);
+          if (result && !modalPromptBuiltinTexts.includes(result.tagGroup.tags.map(t => t.prompt).join(','))) {
+            setModalPromptBuiltinTexts(prev => [...prev, result.tagGroup.tags.map(t => t.prompt).join(',')]);
+          } else if (!modalPromptBuiltinTexts.includes(seg)) {
+            setModalPromptBuiltinTexts(prev => [...prev, seg]);
+          }
+        }
+        input.value = '';
+        setBuiltinTagInputShowDropdown(false);
+        setBuiltinTagInputQuery('');
+        setBuiltinTagInputSelIdx(-1);
+      }
+    }
+  }, [builtinTagInputShowDropdown, filteredBuiltinTagSuggestions, builtinTagInputSelIdx, selectBuiltinTagSuggestion, modalPromptBuiltinTexts, allPrompts]);
+
+  useEffect(() => {
+    if (builtinTagInputShowDropdown && builtinTagInputSelIdx >= 0 && builtinSelItemRef.current) {
+      builtinSelItemRef.current.scrollIntoView({ block: 'nearest' });
+    }
+  }, [builtinTagInputSelIdx, builtinTagInputShowDropdown]);
+
   // ========== Image helpers ==========
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1160,7 +1245,7 @@ export function AppShell() {
 
     // Determine line-number offset caused by the Function() wrapper so we can
     // map stack-trace line numbers back to the user's code.
-    const fnParams = ['console', 'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'prefab_context', 'lora_context', 'prompt_context', 'prefab_builtin', 'lora_builtin', 'prompt_builtin'];
+    const fnParams = ['console', 'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'prefab_context', 'lora_context', 'prompt_context', 'prefab_builtin', 'lora_builtin', 'tag_group_builtin'];
     let lineOffset = 0;
     try {
       const probe = new Function(...fnParams, 'throw new Error("__probe__")');
@@ -1219,12 +1304,12 @@ export function AppShell() {
         const sel = loraSelections[fp];
         return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode };
       });
-      const promptBuiltin = shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
+      const tagGroupBuiltin = shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
         const tg = parseStringToTags(text, allPrompts);
         return { ...tg, active: true };
       });
 
-      const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, prefabContext, loraContext, promptContext, prefabBuiltin, loraBuiltin, promptBuiltin);
+      const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, prefabContext, loraContext, promptContext, prefabBuiltin, loraBuiltin, tagGroupBuiltin);
 
       let output = '=== CONTEXT (random sample) ===\n';
       output += 'prefab_context: ' + (prefabContext.length > 0 ? prefabContext.map(p => p.name).join(', ') : '(empty)') + '\n';
@@ -1232,7 +1317,7 @@ export function AppShell() {
       output += 'prompt_context: ' + (promptContext.length > 0 ? promptContext.map(tg => tg.tags.map((t: any) => t.name).join('|')).join(', ') : '(empty)') + '\n';
       output += 'prefab_builtin: ' + (prefabBuiltin.length > 0 ? prefabBuiltin.map(p => p.name).join(', ') : '(empty)') + '\n';
       output += 'lora_builtin: ' + (loraBuiltin.length > 0 ? loraBuiltin.map(l => l.name).join(', ') : '(empty)') + '\n';
-      output += 'prompt_builtin: ' + (promptBuiltin.length > 0 ? promptBuiltin.map(tg => tg.tags.map((t: any) => t.name).join('|')).join(', ') : '(empty)') + '\n\n';
+      output += 'tag_group_builtin: ' + (tagGroupBuiltin.length > 0 ? tagGroupBuiltin.map(tg => tg.tags.map((t: any) => t.name).join('|')).join(', ') : '(empty)') + '\n\n';
       output += '=== CONSOLE ===\n' + (debugConsole.length > 0 ? debugConsole.join('\n') : '(no output)') + '\n\n';
       output += '=== RETURN VALUE ===\n' + JSON.stringify(result, null, 2);
       if (result && typeof result === 'object') {
@@ -2759,7 +2844,7 @@ export function AppShell() {
       setModalPrefabBuiltinGuids([...(tempCtx.current.selections || [])]);
     } else if (tempCtx.mode === 'loraBuiltin') {
       setModalLoraBuiltinPaths([...(tempCtx.current.selections || [])]);
-    } else if (tempCtx.mode === 'promptBuiltin') {
+    } else if (tempCtx.mode === 'tagGroupBuiltin') {
       setModalPromptBuiltinTexts([...(tempCtx.current.selections || [])]);
     }
     setModalPrefabLoras(newLoras);
@@ -2778,10 +2863,10 @@ export function AppShell() {
     if (tempCtx.mode !== 'promptCtx') setModalCtxPromptTexts([...(rp.ctxPromptTexts || [])]);
     if (tempCtx.mode !== 'prefabBuiltin') setModalPrefabBuiltinGuids([...(rp.prefabBuiltinGuids || [])]);
     if (tempCtx.mode !== 'loraBuiltin') setModalLoraBuiltinPaths([...(rp.loraBuiltinPaths || [])]);
-    if (tempCtx.mode !== 'promptBuiltin') setModalPromptBuiltinTexts([...(rp.promptBuiltinTexts || [])]);
+    if (tempCtx.mode !== 'tagGroupBuiltin') setModalPromptBuiltinTexts([...(rp.tagGroupBuiltinTexts || [])]);
     setModalPrefabBuiltinInactive([...(rp.prefabBuiltinInactive || [])]);
     setModalLoraBuiltinInactive([...(rp.loraBuiltinInactive || [])]);
-    setModalPromptBuiltinInactive([...(rp.promptBuiltinInactive || [])]);
+    setModalPromptBuiltinInactive([...(rp.tagGroupBuiltinInactive || [])]);
     // For context modes: save directly to the selected program instance (not the shared ProgramData)
     if (tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'promptCtx') {
       const instanceIdx = (rp.modalData as { programId: string; instanceIndex: number }).instanceIndex;
@@ -2821,10 +2906,10 @@ export function AppShell() {
     setModalCtxPromptTexts([...(rp.ctxPromptTexts || [])]);
     setModalPrefabBuiltinGuids([...(rp.prefabBuiltinGuids || [])]);
     setModalLoraBuiltinPaths([...(rp.loraBuiltinPaths || [])]);
-    setModalPromptBuiltinTexts([...(rp.promptBuiltinTexts || [])]);
+    setModalPromptBuiltinTexts([...(rp.tagGroupBuiltinTexts || [])]);
     setModalPrefabBuiltinInactive([...(rp.prefabBuiltinInactive || [])]);
     setModalLoraBuiltinInactive([...(rp.loraBuiltinInactive || [])]);
-    setModalPromptBuiltinInactive([...(rp.promptBuiltinInactive || [])]);
+    setModalPromptBuiltinInactive([...(rp.tagGroupBuiltinInactive || [])]);
     setModalPreviewUrl(rp.previewUrl);
     setModalPreviewVisible(rp.previewVisible);
     setModalFocusX(rp.focusX);
@@ -3838,7 +3923,7 @@ export function AppShell() {
               </div>
             ) : null}
 
-            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' || tempCtx.mode === 'program' || tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'promptCtx' || tempCtx.mode === 'prefabBuiltin' || tempCtx.mode === 'loraBuiltin' || tempCtx.mode === 'promptBuiltin' ? (
+            {tempCtx.mode === 'lora' || tempCtx.mode === 'prefab' || tempCtx.mode === 'program' || tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'promptCtx' || tempCtx.mode === 'prefabBuiltin' || tempCtx.mode === 'loraBuiltin' || tempCtx.mode === 'tagGroupBuiltin' ? (
               <div className="temporary-banner" style={{ background: 'linear-gradient(135deg, #007aff, #5856d6)', boxShadow: '0 4px 12px rgba(0, 122, 255, 0.3)' }}>
                 <span>{tempCtx.current?.title || tempCtx.mode} ({(tempCtx.current?.selections || []).length})</span>
                 <div>
@@ -3901,7 +3986,7 @@ export function AppShell() {
               ) : null;
             })() : null}
 
-            {(!tempCtx.mode || tempCtx.mode === 'promptCtx' || tempCtx.mode === 'promptBuiltin') ? (
+            {(!tempCtx.mode || tempCtx.mode === 'promptCtx' || tempCtx.mode === 'tagGroupBuiltin') ? (
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
@@ -4000,7 +4085,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx' || tempCtx.mode === 'promptBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -4144,7 +4229,7 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {filteredPrompts.map(p => {
-                          const sel = tempCtx.mode === 'promptCtx' || tempCtx.mode === 'promptBuiltin' ? tempCtx.isIdSelected(p.prompt) : isTagSelected(p.prompt);
+                          const sel = tempCtx.mode === 'promptCtx' || tempCtx.mode === 'tagGroupBuiltin' ? tempCtx.isIdSelected(p.prompt) : isTagSelected(p.prompt);
                           const group = getTagGroupForPrompt(p.prompt);
                           const fp = focusPoints[p.id];
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
@@ -4153,7 +4238,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx' || tempCtx.mode === 'promptBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -4271,7 +4356,7 @@ export function AppShell() {
                                 </div>
                               </div>
                               <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModalProgramSelectedPrograms([...(app.selected_programs || [])]); setModalEnablePrefabCtx(!!app.enable_prefab_context); setModalEnableLoraCtx(!!app.enable_lora_context); setModalEnablePromptCtx(!!app.enable_prompt_context); setModalMultiProgram(!!app.multi_program); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalPrefabBuiltinGuids(app.prefab_builtin_guids || []); setModalLoraBuiltinPaths(app.lora_builtin_paths || []); setModalPromptBuiltinTexts(app.prompt_builtin_texts || []); setModalPrefabBuiltinInactive(app.prefab_builtin_inactive || []); setModalLoraBuiltinInactive(app.lora_builtin_inactive || []); setModalPromptBuiltinInactive(app.prompt_builtin_inactive || []); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
+                                <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(app.id); setModalName(app.name); setModalCustomPrompts(app.code); setModalProgramSelectedPrograms([...(app.selected_programs || [])]); setModalEnablePrefabCtx(!!app.enable_prefab_context); setModalEnableLoraCtx(!!app.enable_lora_context); setModalEnablePromptCtx(!!app.enable_prompt_context); setModalMultiProgram(!!app.multi_program); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalPrefabBuiltinGuids(app.prefab_builtin_guids || []); setModalLoraBuiltinPaths(app.lora_builtin_paths || []); setModalPromptBuiltinTexts(app.tag_group_builtin_texts || []); setModalPrefabBuiltinInactive(app.prefab_builtin_inactive || []); setModalLoraBuiltinInactive(app.lora_builtin_inactive || []); setModalPromptBuiltinInactive(app.tag_group_builtin_inactive || []); if(app.preview){ setModalPreviewUrl(imgUrl(app.preview)); setModalPreviewVisible(true); setModalFileName(app.preview); const pt = focusPoints[app.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editProgram',data:{id:app.id}}); }}>{iconGear}</button>
                                 <button className="action-btn delete" onClick={e => { e.stopPropagation(); deleteProgram(app.id); }}>{iconTrash}</button>
                               </div>
                             </div>
@@ -4411,7 +4496,7 @@ export function AppShell() {
             {tempCtx.mode === 'prefabBuiltin' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Prefab Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Prefabs Builtin ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="prefab-list">
@@ -4441,7 +4526,7 @@ export function AppShell() {
             {tempCtx.mode === 'loraBuiltin' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Lora Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Loras Builtin ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="lora-list">
@@ -4467,10 +4552,10 @@ export function AppShell() {
               </>
             ) : null}
 
-            {tempCtx.mode === 'promptBuiltin' ? (
+            {tempCtx.mode === 'tagGroupBuiltin' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Prompt Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <h3 style={{ marginBottom: 0 }}>Tags Builtin ({(tempCtx.current?.selections || []).length})</h3>
                   <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="selected-tags">
@@ -4967,78 +5052,81 @@ export function AppShell() {
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content extra-wide" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
-            {/* iOS-style toggles */}
-            <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
-              {[
-                { label: 'Prefab Context', checked: modalEnablePrefabCtx, onChange: (v: boolean) => setModalEnablePrefabCtx(v) },
-                { label: 'Lora Context', checked: modalEnableLoraCtx, onChange: (v: boolean) => setModalEnableLoraCtx(v) },
-                { label: 'Prompt Context', checked: modalEnablePromptCtx, onChange: (v: boolean) => setModalEnablePromptCtx(v) },
-                { label: 'Multi Program', checked: modalMultiProgram, onChange: (v: boolean) => setModalMultiProgram(v) },
-              ].map((toggle, idx) => (
-                <label key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
-                  <span style={{ fontSize: 13, color: toggle.checked ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>{toggle.label}</span>
-                  <div onClick={() => toggle.onChange(!toggle.checked)} style={{
-                    width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
-                    background: toggle.checked ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
-                  }}>
-                    <div style={{
-                      position: 'absolute', top: 2, left: toggle.checked ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
-                      background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                    }} />
-                  </div>
-                </label>
-              ))}
-            </div>
-            <div className="edit-prefab-body row">
-              {/* Left: name + preview image */}
-              <div className="edit-prefab-left">
-                <div className="edit-prefab-section">
+            <div className="edit-modal-body row">
+              {/* Left: name + toggles + preview image */}
+              <div className="edit-modal-left">
+                <div className="edit-modal-section">
                   <label>Program name</label>
                   <input type="text" placeholder="Program name" value={modalName} onChange={e => setModalName(e.target.value)} />
                 </div>
-                <div className="edit-prefab-section">
+                {/* iOS-style toggles */}
+                <div className="edit-modal-section">
+                  {[
+                    { label: 'Prefab Context', checked: modalEnablePrefabCtx, onChange: (v: boolean) => setModalEnablePrefabCtx(v) },
+                    { label: 'Lora Context', checked: modalEnableLoraCtx, onChange: (v: boolean) => setModalEnableLoraCtx(v) },
+                    { label: 'Prompt Context', checked: modalEnablePromptCtx, onChange: (v: boolean) => setModalEnablePromptCtx(v) },
+                    { label: 'Multi Program', checked: modalMultiProgram, onChange: (v: boolean) => setModalMultiProgram(v) },
+                  ].map((toggle, idx) => (
+                    <label key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+                      <span style={{ fontSize: 13, color: toggle.checked ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>{toggle.label}</span>
+                      <div onClick={() => toggle.onChange(!toggle.checked)} style={{
+                        width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                        background: toggle.checked ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                      }}>
+                        <div style={{
+                          position: 'absolute', top: 2, left: toggle.checked ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                          background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                        }} />
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="edit-modal-section">
                   <label>Preview Image</label>
                   <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
                 </div>
               </div>
-              {/* Middle: code editor */}
-              <div className="edit-prefab-section" style={{ flex: 3, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                <label>Code</label>
-                <ProgramCodeEditor
-                  value={modalCustomPrompts}
-                  onChange={(v) => { setModalCustomPrompts(v); setDebugErrorLine(null); }}
-                  errorLine={debugErrorLine}
-                />
-              </div>
-              {/* Debug terminal */}
-              <div className="edit-prefab-section" style={{ flex: '0 0 340px', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 0 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: debugOutput === null ? '#8e8e93' : debugOutput.startsWith('ERROR') ? '#ff453a' : '#30d158' }} />
-                    Console
-                  </label>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4 }} onClick={handleDebug}>
-                      <span style={{ fontSize: 10 }}>▶</span> Run
-                    </button>
-                    <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 6px' }} onClick={() => { setDebugOutput(null); setDebugErrorLine(null); }}>✕</button>
+              {/* Code + Debug terminal (vertical) */}
+              <div style={{ flex: 3, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="edit-modal-section" style={{ flex: '0 0 600px', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                  <label>Code</label>
+                  <ProgramCodeEditor
+                    value={modalCustomPrompts}
+                    onChange={(v) => { setModalCustomPrompts(v); setDebugErrorLine(null); }}
+                    errorLine={debugErrorLine}
+                  />
+                </div>
+                {/* Debug terminal */}
+                <div className="edit-modal-section" style={{ flex: '1 1 280px', minHeight: 0, maxHeight: 280, display: 'flex', flexDirection: 'column' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 0 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: debugOutput === null ? '#8e8e93' : debugOutput.startsWith('ERROR') ? '#ff453a' : '#30d158' }} />
+                      Console
+                    </label>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4 }} onClick={handleDebug}>
+                        <span style={{ fontSize: 10 }}>▶</span> Run
+                      </button>
+                      <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 6px' }} onClick={() => { setDebugOutput(null); setDebugErrorLine(null); }}>✕</button>
+                    </div>
+                  </div>
+                  <div className="debug-terminal-output" style={{
+                    flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden',
+                    background: '#0d0d0d', color: '#f5f5f5', padding: 10, borderRadius: 8,
+                    fontFamily: 'Consolas, Monaco, monospace', fontSize: 11, lineHeight: 1.5,
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                    border: '1px solid #38383a',
+                  }}>
+                    {debugOutput !== null ? debugOutput : (
+                      <span style={{ color: '#8e8e93' }}>// Click "Run" to debug. Output will appear here.</span>
+                    )}
                   </div>
                 </div>
-                <div className="debug-terminal-output" style={{
-                  flex: 1, minHeight: 900, maxHeight: 900, overflow: 'auto',
-                  background: '#0d0d0d', color: '#f5f5f5', padding: 10, borderRadius: 8,
-                  fontFamily: 'Consolas, Monaco, monospace', fontSize: 11, lineHeight: 1.5,
-                  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                  border: '1px solid #38383a',
-                }}>
-                  {debugOutput !== null ? debugOutput : (
-                    <span style={{ color: '#8e8e93' }}>// Click "Run" to debug. Output will appear here.</span>
-                  )}
-                </div>
               </div>
-              {/* Right: sub-programs */}
-              <div className="edit-prefab-right" style={{ flex: 1 }}>
-                <div className="edit-prefab-section">
+              {/* Right: sub-programs + builtin */}
+              <div className="edit-program-right">
+                <div className="edit-modal-columns">
+                <div className="edit-modal-section">
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <label style={{ marginBottom: 0 }}>Programs ({modalProgramSelectedPrograms.length})</label>
                     {modalProgramSelectedPrograms.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalProgramSelectedPrograms([])} title="Clear All">{iconX}</button>}
@@ -5112,67 +5200,13 @@ export function AppShell() {
                     {iconPlus} Add Program
                   </button>
                 </div>
-              </div>
               {/* Builtin sections (inline columns) */}
-              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+              <div className="edit-modal-section" style={{ flex: 1, minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <label style={{ marginBottom: 0 }}>Prefab Builtin ({modalPrefabBuiltinGuids.length})</label>
-                  {modalPrefabBuiltinGuids.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPrefabBuiltinGuids([]); setModalPrefabBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
-                </div>
-                <div className="prefab-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
-                  {modalPrefabBuiltinGuids.map((guid, i) => {
-                    const pf = findPrefabByGuid(guid);
-                    if (!pf) return null;
-                    const isActive = !modalPrefabBuiltinInactive.includes(guid);
-                    return (
-                      <div key={guid} className={`prefab-card ${isActive ? 'active' : 'inactive'}`}>
-                        {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" />}
-                        <div className="program-card-header">
-                          <span className="program-toggle" style={{ opacity: isActive ? 1 : 0.5, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pf.name}</span>
-                          <div className="program-card-actions">
-                            <button className="prefab-card-btn" onMouseDown={e => { e.stopPropagation(); setModalPrefabBuiltinInactive(prev => isActive ? [...prev, guid] : prev.filter(g => g !== guid)); }}>{isActive ? '◐' : '○'}</button>
-                            <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); setModalPrefabBuiltinGuids(prev => prev.filter(g => g !== guid)); setModalPrefabBuiltinInactive(prev => prev.filter(g => g !== guid)); }}>{iconX}</button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
-                  tempCtx.push({ type: 'prefabBuiltin', title: 'Select Prefab Builtin', selections: [...modalPrefabBuiltinGuids], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
-                  closeModal();
-                }}>{iconPlus} Add Prefab</button>
-              </div>
-              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <label style={{ marginBottom: 0 }}>Lora Builtin ({modalLoraBuiltinPaths.length})</label>
-                  {modalLoraBuiltinPaths.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalLoraBuiltinPaths([]); setModalLoraBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
-                </div>
-                <div className="lora-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
-                  {modalLoraBuiltinPaths.map((fp, i) => {
-                    const item = Object.values(loraData).flat().find(it => it.file_path === fp);
-                    if (!item) return null;
-                    const isActive = !modalLoraBuiltinInactive.includes(fp);
-                    return (
-                      <div key={fp} className={`lora-item ${isActive ? '' : 'lora-inactive'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', opacity: isActive ? 1 : 0.5 }}>
-                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{item.name}</span>
-                        <button className="prefab-card-btn" onMouseDown={e => { e.stopPropagation(); setModalLoraBuiltinInactive(prev => isActive ? [...prev, fp] : prev.filter(p => p !== fp)); }}>{isActive ? '◐' : '○'}</button>
-                        <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); setModalLoraBuiltinPaths(prev => prev.filter(p => p !== fp)); setModalLoraBuiltinInactive(prev => prev.filter(p => p !== fp)); }}>{iconX}</button>
-                      </div>
-                    );
-                  })}
-                </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
-                  tempCtx.push({ type: 'loraBuiltin', title: 'Select Lora Builtin', selections: [...modalLoraBuiltinPaths], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
-                  closeModal();
-                }}>{iconPlus} Add Lora</button>
-              </div>
-              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <label style={{ marginBottom: 0 }}>Prompt Builtin ({modalPromptBuiltinTexts.length})</label>
+                  <label style={{ marginBottom: 0 }}>Tags Builtin ({modalPromptBuiltinTexts.length})</label>
                   {modalPromptBuiltinTexts.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPromptBuiltinTexts([]); setModalPromptBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
                 </div>
-                <div className="selected-tags" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8, flex: 1, overflow: 'auto', maxHeight: 820 }}>
                   {modalPromptBuiltinTexts.map((text, i) => {
                     const tg = parseStringToTags(text, allPrompts);
                     const name = tg.tags.map(t => t.name).join(' > ');
@@ -5185,10 +5219,91 @@ export function AppShell() {
                     );
                   })}
                 </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
-                  tempCtx.push({ type: 'promptBuiltin', title: 'Select Prompt Builtin', selections: [...modalPromptBuiltinTexts], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
+                <div style={{ position: 'relative' }}>
+                  <input
+                    ref={builtinTagInputRef}
+                    type="text"
+                    placeholder="Add tags, press Enter..."
+                    style={{ fontSize: 12, width: '100%' }}
+                    onChange={handleBuiltinTagInputChange}
+                    onKeyDown={handleBuiltinTagInputKeyDown}
+                    onBlur={() => setTimeout(() => setBuiltinTagInputShowDropdown(false), 200)}
+                  />
+                  {builtinTagInputShowDropdown && filteredBuiltinTagSuggestions.length > 0 ? (
+                    <div ref={builtinTagDropdownRef} className="kolid-dropdown-scroll" style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, maxHeight: 180, overflowY: 'auto', background: '#2c2c2e', borderRadius: 10, marginBottom: 4, zIndex: 100, boxShadow: '0 -4px 16px rgba(0,0,0,0.4)' }}>
+                      {filteredBuiltinTagSuggestions.map(([text, name], i) => (
+                        <div
+                          key={text}
+                          ref={i === builtinTagInputSelIdx ? builtinSelItemRef : null}
+                          onMouseDown={e => { e.preventDefault(); selectBuiltinTagSuggestion(text); }}
+                          style={{
+                            padding: '8px 14px', fontSize: 14, cursor: 'pointer',
+                            color: '#fff', background: i === builtinTagInputSelIdx ? '#3a3a3c' : 'transparent',
+                            fontFamily: '-apple-system, system-ui, Helvetica Neue, sans-serif',
+                            display: 'flex', alignItems: 'center',
+                          }}
+                        >
+                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
+                          {name !== text ? <span style={{ color: '#8e8e93', fontSize: 13, borderLeft: '1px solid #444', paddingLeft: 12, marginLeft: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1 }}>{name}</span> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="edit-modal-section" style={{ flex: 1, minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ marginBottom: 0 }}>Loras Builtin ({modalLoraBuiltinPaths.length})</label>
+                  {modalLoraBuiltinPaths.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalLoraBuiltinPaths([]); setModalLoraBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
+                </div>
+                <div className="lora-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
+                  {modalLoraBuiltinPaths.map((fp, i) => {
+                    const item = Object.values(loraData).flat().find(it => it.file_path === fp);
+                    if (!item) return null;
+                    const isActive = !modalLoraBuiltinInactive.includes(fp);
+                    return (
+                      <Lora key={fp} lora={item} initialActiveTags={item.tags || []} initialStrength={1.0} initialActive={isActive} initialSplitMode={false} isFiltered={isLoraFiltered(item)}
+                        onChange={(data) => setModalLoraBuiltinInactive(prev => data.active ? prev.filter(p => p !== fp) : [...prev, fp])}
+                        onRemove={() => { setModalLoraBuiltinPaths(prev => prev.filter(p => p !== fp)); setModalLoraBuiltinInactive(prev => prev.filter(p => p !== fp)); }}
+                      />
+                    );
+                  })}
+                </div>
+                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
+                  tempCtx.push({ type: 'loraBuiltin', title: 'Select Loras Builtin', selections: [...modalLoraBuiltinPaths], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, tagGroupBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, tagGroupBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
                   closeModal();
-                }}>{iconPlus} Add Prompt</button>
+                }}>{iconPlus} Add Lora</button>
+              </div>
+              <div className="edit-modal-section" style={{ flex: 1, minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ marginBottom: 0 }}>Prefabs Builtin ({modalPrefabBuiltinGuids.length})</label>
+                  {modalPrefabBuiltinGuids.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPrefabBuiltinGuids([]); setModalPrefabBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
+                </div>
+                <div className="prefab-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
+                  {modalPrefabBuiltinGuids.map((guid, i) => {
+                    const pf = findPrefabByGuid(guid);
+                    if (!pf) return null;
+                    const isActive = !modalPrefabBuiltinInactive.includes(guid);
+                    return (
+                      <div key={guid} className={`prefab-card ${isActive ? '' : 'prefab-inactive'}`} style={{ cursor: 'default' }}>
+                        {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" />}
+                        <div className="prefab-card-header">
+                          <span className="prefab-card-name" style={{ opacity: isActive ? 1 : 0.5 }}>{pf.name}</span>
+                          <div className="prefab-card-actions">
+                            <button className="prefab-card-btn" onMouseDown={e => { e.stopPropagation(); setModalPrefabBuiltinInactive(prev => isActive ? [...prev, guid] : prev.filter(g => g !== guid)); }}>{isActive ? '◐' : '○'}</button>
+                            <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); setModalPrefabBuiltinGuids(prev => prev.filter(g => g !== guid)); setModalPrefabBuiltinInactive(prev => prev.filter(g => g !== guid)); }}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
+                  tempCtx.push({ type: 'prefabBuiltin', title: 'Select Prefabs Builtin', selections: [...modalPrefabBuiltinGuids], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, tagGroupBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, tagGroupBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
+                  closeModal();
+                }}>{iconPlus} Add Prefab</button>
+              </div>
+                </div>
               </div>
             </div>
             <div className="modal-buttons">
@@ -5210,10 +5325,10 @@ export function AppShell() {
                   context_prompt_texts: modalCtxPromptTexts,
                   prefab_builtin_guids: modalPrefabBuiltinGuids,
                   lora_builtin_paths: modalLoraBuiltinPaths,
-                  prompt_builtin_texts: modalPromptBuiltinTexts,
+                  tag_group_builtin_texts: modalPromptBuiltinTexts,
                   prefab_builtin_inactive: modalPrefabBuiltinInactive,
                   lora_builtin_inactive: modalLoraBuiltinInactive,
-                  prompt_builtin_inactive: modalPromptBuiltinInactive,
+                  tag_group_builtin_inactive: modalPromptBuiltinInactive,
                 });
                 closeModal();
               }}>Save</button>
@@ -5332,24 +5447,24 @@ export function AppShell() {
         <div className="modal visible" onMouseDown={closeModal}>
           <div className="modal-content wide" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prefab</h2>
-            <div className="edit-prefab-body row">
-              <div className="edit-prefab-left">
-                <div className="edit-prefab-section">
+            <div className="edit-modal-body row">
+              <div className="edit-modal-left">
+                <div className="edit-modal-section">
                   <label>Prefab name</label>
                   <input type="text" placeholder="Prefab name" value={modalName} onChange={e => setModalName(e.target.value)} />
                 </div>
-                <div className="edit-prefab-section">
+                <div className="edit-modal-section">
                   <label>Custom Prompts</label>
                   <textarea placeholder="Custom prompts text..." value={modalCustomPrompts} onChange={e => setModalCustomPrompts(e.target.value)}></textarea>
                 </div>
-                <div className="edit-prefab-section">
+                <div className="edit-modal-section">
                   <label>Preview Image</label>
                   <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
                 </div>
               </div>
               <div className="edit-prefab-right">
-                <div className="edit-prefab-columns">
-                  <div className="edit-prefab-section">
+                <div className="edit-modal-columns">
+                  <div className="edit-modal-section">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                       <label style={{ marginBottom: 0 }}>Tags ({modalPrefabTags.length})</label>
                       {modalPrefabTags.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabTags([])} title="Clear All">{iconX}</button>}
@@ -5394,7 +5509,7 @@ export function AppShell() {
                       ) : null}
                     </div>
                   </div>
-                  <div className="edit-prefab-section">
+                  <div className="edit-modal-section">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                       <label style={{ marginBottom: 0 }}>Loras ({modalPrefabLoras.length})</label>
                       {modalPrefabLoras.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabLoras([])} title="Clear All">{iconX}</button>}
@@ -5442,7 +5557,7 @@ export function AppShell() {
                       {iconPlus} Add Lora
                     </button>
                   </div>
-                  <div className="edit-prefab-section">
+                  <div className="edit-modal-section">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                       <label style={{ marginBottom: 0 }}>Prefabs ({modalPrefabSelectedPrefabs.length})</label>
                       {modalPrefabSelectedPrefabs.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabSelectedPrefabs([])} title="Clear All">{iconX}</button>}
@@ -5560,7 +5675,7 @@ export function AppShell() {
                   <div className="edit-prefab-body">
                     <div className="edit-prefab-title">{pf.name}</div>
 
-                    <div className="edit-prefab-section">
+                    <div className="edit-modal-section">
                       <div className="edit-prefab-row">
                         <span>Active</span>
                         <TextToggle text={node.active ? 'On' : 'Off'} active={node.active} onClick={() => togglePrefabActive(node.guid)} />
@@ -5568,7 +5683,7 @@ export function AppShell() {
                     </div>
 
                     {node.tag_groups.length > 0 && (
-                      <div className="edit-prefab-section">
+                      <div className="edit-modal-section">
                         <label>Tags</label>
                         <div className="text-toggle-list">
                           {node.tag_groups.map(t => (
@@ -5579,7 +5694,7 @@ export function AppShell() {
                     )}
 
                     {node.loras.length > 0 && (
-                      <div className="edit-prefab-section">
+                      <div className="edit-modal-section">
                         <label>Loras</label>
                         <div className="text-toggle-list">
                           {node.loras.map(l => {
@@ -5595,7 +5710,7 @@ export function AppShell() {
                     )}
 
                     {node.children.length > 0 && (
-                      <div className="edit-prefab-section">
+                      <div className="edit-modal-section">
                         <label>Nested Prefabs</label>
                         <div className="modal-nested-list">
                           {node.children.map(c => {
