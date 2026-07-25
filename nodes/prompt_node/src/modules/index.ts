@@ -132,10 +132,10 @@ export class ProgramModule {
     return resp.json();
   }
 
-  async update(id: string, name: string, code: string, image: string | null = null, video: string | null = null) {
+  async update(id: string, name: string, code: string, image: string | null = null, video: string | null = null, selectedPrograms?: { id: string; active?: boolean }[]) {
     const resp = await fetch('/update_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, code, image, video }),
+      body: JSON.stringify({ id, name, code, image, video, selected_programs: selectedPrograms }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();

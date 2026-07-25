@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type {
-  AllPrompts, AllPrograms, SelectedProgramItem,
+  AllPrompts, AllPrograms, SelectedProgramItem, ProgramData,
   TagGroup, LoraItemData, LoraSelectionData, SelectedPrefabItem,
 } from '../types';
 import { tagsToDisplayString } from './useSelection';
@@ -35,16 +35,33 @@ export function useProgram(
   allPrompts: AllPrompts,
 ): ProgramResult {
   return useMemo(() => {
-    // Collect active programs in order
+    // Build a lookup of all programs by id
+    const programById = new Map<string, ProgramData>();
+    for (const catData of Object.values(allPrograms)) {
+      for (const app of (catData.programs || [])) {
+        programById.set(app.id, app);
+      }
+    }
+
+    // Collect active programs in order, resolving sub-programs recursively
     const activePrograms: { code: string; name: string }[] = [];
+    const resolved = new Set<string>();
+    function resolvePrograms(programIds: string[]) {
+      for (const pid of programIds) {
+        if (resolved.has(pid)) continue;
+        resolved.add(pid);
+        const app = programById.get(pid);
+        if (!app || !app.code || !app.code.trim()) continue;
+        // Execute sub-programs first
+        if (app.selected_programs && app.selected_programs.length > 0) {
+          resolvePrograms(app.selected_programs.filter(sp => sp.active !== false).map(sp => sp.id));
+        }
+        activePrograms.push({ code: app.code, name: app.name });
+      }
+    }
     for (const sa of selectedPrograms) {
       if (!sa.active) continue;
-      for (const catData of Object.values(allPrograms)) {
-        const app = (catData.programs || []).find(a => a.id === sa.id);
-        if (app && app.code && app.code.trim()) {
-          activePrograms.push({ code: app.code, name: app.name });
-        }
-      }
+      resolvePrograms([sa.id]);
     }
 
     const noProgramsResult: ProgramResult = {
