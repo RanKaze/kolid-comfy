@@ -2662,29 +2662,27 @@ export function AppShell() {
     const lib = modal?.data?.lib;
     const name = modalName.trim();
     if (!name || !lib) { alert('Please enter prefab name'); return; }
-    const pfTags = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({...t})) }));
-    const pfLoras = buildPrefabLoras();
-    const pfSelectedPrefabs = buildSelectedPrefabs();
-    const cycle = checkPrefabCycle(null, pfSelectedPrefabs);
-    if (cycle) { setErrorModal({ title: 'Circular Dependency', message: cycle }); return; }
+    const pfTags: TagGroup[] = [];
+    const pfLoras: LoraSelectionData[] = [];
+    const pfSelectedPrefabs: SelectedPrefabRef[] = [];
     let imageData = '';
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
     try {
-      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, selected_prefabs:pfSelectedPrefabs, image:imageData}) });
+      const res = await fetch('/add_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_name:name, prefab_tags:pfTags, custom_prompts:'', loras:pfLoras, selected_prefabs:pfSelectedPrefabs, image:imageData}) });
       const result = await res.json();
       closeModal();
       if (imageData) setImgVersion(v => v + 1);
       setAllLibraries((prev: AllLibraries) => {
         const libData = prev[lib];
         if (!libData) return prev;
-        const newPrefab: PrefabData = { name, tag_groups: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
+        const newPrefab: PrefabData = { name, tag_groups: pfTags, custom_prompts: '', loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
         if (result && result.preview) newPrefab.preview = result.preview;
         if (result && result.guid) newPrefab.guid = result.guid;
         const prefabs = [...(libData.prefabs || []), newPrefab];
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
     } catch(e) { console.error(e); }
-  }, [closeModal, modalName, modal?.data?.lib, selectedTags, customPrompts, buildPrefabLoras, buildSelectedPrefabs, checkPrefabCycle, modalImageFile, setAllLibraries]);
+  }, [closeModal, modalName, modal?.data?.lib, modalImageFile, setAllLibraries]);
 
   // ========== Update Prefab ==========
   const updatePrefab = useCallback(async () => {
@@ -2706,7 +2704,7 @@ export function AppShell() {
         const libData = prev[lib];
         if (!libData || !libData.prefabs) return prev;
         const prefabs = libData.prefabs.map((pf: PrefabData, i: number) =>
-          i === idx ? { ...pf, name, custom_prompts: modalCustomPrompts, tags: modalPrefabTags, loras: modalPrefabLoras, selected_prefabs: modalPrefabSelectedPrefabs, preview: result.preview !== undefined ? result.preview : pf.preview } : pf,
+          i === idx ? { ...pf, name, custom_prompts: modalCustomPrompts, tag_groups: modalPrefabTags, loras: modalPrefabLoras, selected_prefabs: modalPrefabSelectedPrefabs, preview: result.preview !== undefined ? result.preview : pf.preview } : pf,
         );
         return { ...prev, [lib]: { ...libData, prefabs } };
       });
@@ -2821,6 +2819,12 @@ export function AppShell() {
     setModalCtxPrefabGuids([...(rp.ctxPrefabGuids || [])]);
     setModalCtxLoraPaths([...(rp.ctxLoraPaths || [])]);
     setModalCtxPromptTexts([...(rp.ctxPromptTexts || [])]);
+    setModalPrefabBuiltinGuids([...(rp.prefabBuiltinGuids || [])]);
+    setModalLoraBuiltinPaths([...(rp.loraBuiltinPaths || [])]);
+    setModalPromptBuiltinTexts([...(rp.promptBuiltinTexts || [])]);
+    setModalPrefabBuiltinInactive([...(rp.prefabBuiltinInactive || [])]);
+    setModalLoraBuiltinInactive([...(rp.loraBuiltinInactive || [])]);
+    setModalPromptBuiltinInactive([...(rp.promptBuiltinInactive || [])]);
     setModalPreviewUrl(rp.previewUrl);
     setModalPreviewVisible(rp.previewVisible);
     setModalFocusX(rp.focusX);
@@ -2834,32 +2838,20 @@ export function AppShell() {
     tempCtx.clear();
   }, [tempCtx]);
 
-  // ========== Sync Prefab ==========
-  const syncPrefab = useCallback(async () => {
-    const lib = modal?.data?.lib;
-    const idx = modal?.data?.idx;
+  // ========== Sync Prefab (copy from selected into modal state, no save) ==========
+  const syncPrefab = useCallback(() => {
     const pfTags = selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({...t})) }));
     const pfLoras = buildPrefabLoras();
     const pfSelectedPrefabs = buildSelectedPrefabs();
-    if (pfTags.length === 0 && !customPrompts && pfLoras.length === 0 && pfSelectedPrefabs.length === 0) { alert('No tags, custom_prompts, loras or selected_prefabs to sync'); return; }
-    const targetGuid = allLibraries[lib]?.prefabs?.[idx ?? -1]?.guid || null;
+    const targetGuid = allLibraries[modal?.data?.lib ?? '']?.prefabs?.[modal?.data?.idx ?? -1]?.guid || null;
     const cycle = checkPrefabCycle(targetGuid, pfSelectedPrefabs);
     if (cycle) { setErrorModal({ title: 'Circular Dependency', message: cycle }); return; }
-    try {
-      const res = await fetch('/update_library_prefab', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library:lib, prefab_index:idx, prefab_name:modalName.trim(), prefab_tags:pfTags, custom_prompts:customPrompts, loras:pfLoras, selected_prefabs:pfSelectedPrefabs}) });
-      const result = await res.json();
-      closeModal();
-      setAllLibraries((prev: AllLibraries) => {
-        const libData = prev[lib];
-        if (!libData || !libData.prefabs || idx === undefined || idx < 0 || idx >= libData.prefabs.length) return prev;
-        const updatedPrefab: PrefabData = { ...libData.prefabs[idx], name: modalName.trim(), tag_groups: pfTags, custom_prompts: customPrompts, loras: pfLoras, selected_prefabs: pfSelectedPrefabs };
-        if (result && result.preview) updatedPrefab.preview = result.preview;
-        const prefabs = [...libData.prefabs];
-        prefabs[idx] = updatedPrefab;
-        return { ...prev, [lib]: { ...libData, prefabs } };
-      });
-    } catch(e) { console.error(e); }
-  }, [closeModal, modalName, selectedTags, customPrompts, buildPrefabLoras, buildSelectedPrefabs, checkPrefabCycle, modal?.data?.lib, modal?.data?.idx, setAllLibraries]);
+    // Copy selected data into modal state — user must click Update to persist
+    setModalPrefabTags(pfTags);
+    setModalPrefabLoras(pfLoras);
+    setModalPrefabSelectedPrefabs(pfSelectedPrefabs);
+    setModalCustomPrompts(customPrompts);
+  }, [selectedTags, customPrompts, buildPrefabLoras, buildSelectedPrefabs, checkPrefabCycle, modal, allLibraries, setModalPrefabTags, setModalPrefabLoras, setModalPrefabSelectedPrefabs, setModalCustomPrompts]);
 
   // ========== Delete Prefab ==========
   const deletePrefab = useCallback(async (lib: string, idx: number) => {
@@ -4416,6 +4408,89 @@ export function AppShell() {
               </>
             ) : null}
 
+            {tempCtx.mode === 'prefabBuiltin' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Prefab Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="prefab-list">
+                  {(tempCtx.current?.selections || []).map(guid => {
+                    let pf: PrefabData | undefined;
+                    for (const libData of Object.values(allLibraries)) {
+                      pf = (libData.prefabs || []).find(p => p.guid === guid);
+                      if (pf) break;
+                    }
+                    if (!pf) return null;
+                    return (
+                      <div key={guid} className="prefab-card">
+                        {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" />}
+                        <div className="prefab-card-header">
+                          <span className="prefab-card-name">{pf.name}</span>
+                          <div className="prefab-card-actions">
+                            <button className="prefab-card-btn remove" onMouseDown={(e) => { e.stopPropagation(); tempCtx.toggleId(guid); }}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'loraBuiltin' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Lora Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="lora-list">
+                  {(tempCtx.current?.selections || []).map(fp => {
+                    let item: LoraItemData | undefined;
+                    for (const items of Object.values(loraData)) {
+                      item = items.find(it => it.file_path === fp);
+                      if (item) break;
+                    }
+                    if (!item) return null;
+                    return (
+                      <div key={fp} className="lora-card active">
+                        <div className="lora-card-header">
+                          <span className="lora-card-name">{item.name}</span>
+                          <div className="lora-card-meta">
+                            <button className="lora-card-remove" onClick={() => tempCtx.toggleId(fp)}>{iconX}</button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
+            {tempCtx.mode === 'promptBuiltin' ? (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <h3 style={{ marginBottom: 0 }}>Prompt Builtin ({(tempCtx.current?.selections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                </div>
+                <div className="selected-tags">
+                  {(tempCtx.current?.selections || []).map(text => {
+                    let name = text;
+                    for (const catData of Object.values(allPrompts)) {
+                      const p = (catData.prompts || []).find(p => p.prompt === text);
+                      if (p) { name = p.name; break; }
+                    }
+                    return (
+                      <span className="tag" key={text}>
+                        {name}
+                        <span className="remove" onClick={() => tempCtx.toggleId(text)}>{iconX}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+
             {tempCtx.mode === 'program' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -4890,7 +4965,7 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'editProgram' ? (
         <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content wide" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-content extra-wide" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.data?.id ? 'Edit Program' : 'New Program'}</h2>
             {/* iOS-style toggles */}
             <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
@@ -4950,7 +5025,7 @@ export function AppShell() {
                   </div>
                 </div>
                 <div className="debug-terminal-output" style={{
-                  flex: 1, minHeight: 500, maxHeight: 500, overflow: 'auto',
+                  flex: 1, minHeight: 900, maxHeight: 900, overflow: 'auto',
                   background: '#0d0d0d', color: '#f5f5f5', padding: 10, borderRadius: 8,
                   fontFamily: 'Consolas, Monaco, monospace', fontSize: 11, lineHeight: 1.5,
                   whiteSpace: 'pre-wrap', wordBreak: 'break-word',
@@ -4964,8 +5039,11 @@ export function AppShell() {
               {/* Right: sub-programs */}
               <div className="edit-prefab-right" style={{ flex: 1 }}>
                 <div className="edit-prefab-section">
-                  <label>Programs ({modalProgramSelectedPrograms.length})</label>
-                  <div className="prefab-list">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ marginBottom: 0 }}>Programs ({modalProgramSelectedPrograms.length})</label>
+                    {modalProgramSelectedPrograms.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalProgramSelectedPrograms([])} title="Clear All">{iconX}</button>}
+                  </div>
+                  <div className="prefab-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
                     {modalProgramSelectedPrograms.map((sp, i) => {
                       let app: ProgramData | undefined;
                       for (const catData of Object.values(allPrograms)) {
@@ -5035,13 +5113,13 @@ export function AppShell() {
                   </button>
                 </div>
               </div>
-            </div>
-            {/* Builtin sections */}
-            <div className="edit-prefab-body row" style={{ marginTop: 8 }}>
-              {/* Prefab Builtin */}
-              <div className="edit-prefab-section" style={{ flex: 1, minWidth: 0 }}>
-                <label>Prefab Builtin ({modalPrefabBuiltinGuids.length})</label>
-                <div className="prefab-list">
+              {/* Builtin sections (inline columns) */}
+              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ marginBottom: 0 }}>Prefab Builtin ({modalPrefabBuiltinGuids.length})</label>
+                  {modalPrefabBuiltinGuids.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPrefabBuiltinGuids([]); setModalPrefabBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
+                </div>
+                <div className="prefab-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
                   {modalPrefabBuiltinGuids.map((guid, i) => {
                     const pf = findPrefabByGuid(guid);
                     if (!pf) return null;
@@ -5060,15 +5138,17 @@ export function AppShell() {
                     );
                   })}
                 </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => {
+                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
                   tempCtx.push({ type: 'prefabBuiltin', title: 'Select Prefab Builtin', selections: [...modalPrefabBuiltinGuids], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
                   closeModal();
                 }}>{iconPlus} Add Prefab</button>
               </div>
-              {/* Lora Builtin */}
-              <div className="edit-prefab-section" style={{ flex: 1, minWidth: 0 }}>
-                <label>Lora Builtin ({modalLoraBuiltinPaths.length})</label>
-                <div className="lora-list">
+              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ marginBottom: 0 }}>Lora Builtin ({modalLoraBuiltinPaths.length})</label>
+                  {modalLoraBuiltinPaths.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalLoraBuiltinPaths([]); setModalLoraBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
+                </div>
+                <div className="lora-list" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
                   {modalLoraBuiltinPaths.map((fp, i) => {
                     const item = Object.values(loraData).flat().find(it => it.file_path === fp);
                     if (!item) return null;
@@ -5082,15 +5162,17 @@ export function AppShell() {
                     );
                   })}
                 </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => {
+                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
                   tempCtx.push({ type: 'loraBuiltin', title: 'Select Lora Builtin', selections: [...modalLoraBuiltinPaths], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
                   closeModal();
                 }}>{iconPlus} Add Lora</button>
               </div>
-              {/* Prompt Builtin */}
-              <div className="edit-prefab-section" style={{ flex: 1, minWidth: 0 }}>
-                <label>Prompt Builtin ({modalPromptBuiltinTexts.length})</label>
-                <div className="selected-tags">
+              <div className="edit-prefab-section" style={{ flex: '0 0 200px', minWidth: 0, maxHeight: 940, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <label style={{ marginBottom: 0 }}>Prompt Builtin ({modalPromptBuiltinTexts.length})</label>
+                  {modalPromptBuiltinTexts.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPromptBuiltinTexts([]); setModalPromptBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
+                </div>
+                <div className="selected-tags" style={{ flex: 1, maxHeight: 900, overflow: 'auto' }}>
                   {modalPromptBuiltinTexts.map((text, i) => {
                     const tg = parseStringToTags(text, allPrompts);
                     const name = tg.tags.map(t => t.name).join(' > ');
@@ -5103,7 +5185,7 @@ export function AppShell() {
                     );
                   })}
                 </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => {
+                <button className="btn btn-secondary" style={{ width: '100%', fontSize: 13, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }} onClick={() => {
                   tempCtx.push({ type: 'promptBuiltin', title: 'Select Prompt Builtin', selections: [...modalPromptBuiltinTexts], restorePoint: { name: modalName, customPrompts: modalCustomPrompts, prefabTags: modalPrefabTags, prefabLoras: modalPrefabLoras, prefabSelectedPrefabs: modalPrefabSelectedPrefabs, programSelectedPrograms: [...modalProgramSelectedPrograms], ctxPrefabGuids: modalCtxPrefabGuids, ctxLoraPaths: modalCtxLoraPaths, ctxPromptTexts: modalCtxPromptTexts, prefabBuiltinGuids: modalPrefabBuiltinGuids, loraBuiltinPaths: modalLoraBuiltinPaths, promptBuiltinTexts: modalPromptBuiltinTexts, prefabBuiltinInactive: modalPrefabBuiltinInactive, loraBuiltinInactive: modalLoraBuiltinInactive, promptBuiltinInactive: modalPromptBuiltinInactive, previewUrl: modalPreviewUrl, previewVisible: modalPreviewVisible, focusX: modalFocusX, focusY: modalFocusY, focusVisible: modalFocusVisible, modalData: { programId: modal.data?.id || '' } } });
                   closeModal();
                 }}>{iconPlus} Add Prompt</button>
@@ -5268,7 +5350,10 @@ export function AppShell() {
               <div className="edit-prefab-right">
                 <div className="edit-prefab-columns">
                   <div className="edit-prefab-section">
-                    <label>Tags ({modalPrefabTags.length})</label>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <label style={{ marginBottom: 0 }}>Tags ({modalPrefabTags.length})</label>
+                      {modalPrefabTags.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabTags([])} title="Clear All">{iconX}</button>}
+                    </div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
                       {modalPrefabTags.map((group, i) => (
                         <span className="tag" key={i}>
@@ -5310,7 +5395,10 @@ export function AppShell() {
                     </div>
                   </div>
                   <div className="edit-prefab-section">
-                    <label>Loras ({modalPrefabLoras.length})</label>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <label style={{ marginBottom: 0 }}>Loras ({modalPrefabLoras.length})</label>
+                      {modalPrefabLoras.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabLoras([])} title="Clear All">{iconX}</button>}
+                    </div>
                     <div className="lora-list">
                       {modalPrefabLoras.map((l, i) => {
                         const item = Object.values(loraData).flat().find(it => it.file_path === l.file_path);
@@ -5355,7 +5443,10 @@ export function AppShell() {
                     </button>
                   </div>
                   <div className="edit-prefab-section">
-                    <label>Prefabs ({modalPrefabSelectedPrefabs.length})</label>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <label style={{ marginBottom: 0 }}>Prefabs ({modalPrefabSelectedPrefabs.length})</label>
+                      {modalPrefabSelectedPrefabs.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => setModalPrefabSelectedPrefabs([])} title="Clear All">{iconX}</button>}
+                    </div>
                     <div className="prefab-list">
                       {modalPrefabSelectedPrefabs.map((sp, i) => {
                         const pf = findPrefabByGuid(sp.guid);

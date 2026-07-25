@@ -72,9 +72,9 @@ export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEdi
         .monaco-editor .mtk7 { color: #dcdcaa !important; }
         .monaco-editor .scrollbar .slider { border-radius: 4px; }
       `}</style>
-      <div style={{ minHeight: 500, overflow: 'visible', borderRadius: 10 }}>
+      <div style={{ minHeight: 900, overflow: 'visible', borderRadius: 10 }}>
       <Editor
-        height={500}
+        height={900}
         defaultLanguage="javascript"
         theme="vs-dark"
         value={value}

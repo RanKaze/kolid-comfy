@@ -995,6 +995,7 @@ body {
     overflow-y: auto;
 }
 .modal-content.wide { max-width: 1400px; overflow: visible; }
+.modal-content.extra-wide { max-width: 2100px; overflow: visible; }
 .modal-content.has-bg-image {
     background: transparent;
     backdrop-filter: none;
