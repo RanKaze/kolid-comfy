@@ -2400,6 +2400,38 @@ class SnapshotPromptServer:
                 else:
                     self.send_error(500, "Server error")
 
+            elif self.path == '/move_program_to_category':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+                if self.server_instance:
+                    from_cat = data.get('from_category', '')
+                    to_cat = data.get('to_category', '')
+                    from_idx = data.get('from_index', 0)
+                    to_idx = data.get('to_index', -1)
+                    if from_cat in self.server_instance.programs_data and to_cat in self.server_instance.programs_data:
+                        from_data = self.server_instance.programs_data[from_cat]
+                        to_data = self.server_instance.programs_data[to_cat]
+                        from_programs = from_data.get('programs', []) if isinstance(from_data, dict) else from_data
+                        to_programs = to_data.get('programs', []) if isinstance(to_data, dict) else to_data
+                        if isinstance(from_data, dict) and isinstance(to_data, dict):
+                            if 0 <= from_idx < len(from_programs):
+                                moved = from_programs.pop(from_idx)
+                                if to_idx == -1 or to_idx >= len(to_programs):
+                                    to_programs.append(moved)
+                                else:
+                                    to_programs.insert(to_idx, moved)
+                                from_data['programs'] = from_programs
+                                to_data['programs'] = to_programs
+                    self.server_instance._save_programs(self.server_instance.programs_data)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
             else:
                 super().do_POST()
 

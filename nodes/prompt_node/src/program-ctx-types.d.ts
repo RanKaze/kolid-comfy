@@ -5,6 +5,10 @@ interface Tag {
   name: string;
   prompt: string;
   category: string;
+  /** Available decorations for this prompt (from category + prompt definitions) */
+  decorations?: string[];
+  /** Classification tags for this prompt (from category + prompt definitions) */
+  tags?: string[];
 }
 
 interface TagGroup {
@@ -75,14 +79,9 @@ interface PromptsData {
   };
 }
 
-type TagIndex = { [tag: string]: string[] };
-type DecorationIndex = { [decoration: string]: string[] };
-
 declare const tag_groups: TagGroup[];
 declare const loras: Lora[];
 declare const prefabs: Prefab[];
 declare const custom_prompts: string;
 declare const prompts_data: PromptsData;
 declare const all_tags: { [prompt: string]: AllTagsEntry };
-declare const tag_index: TagIndex;
-declare const decoration_index: DecorationIndex;
