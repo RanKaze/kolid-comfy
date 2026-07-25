@@ -134,5 +134,5 @@ interface ProgramReturn {
 declare const prefab_builtin: Prefab[];
 /** Lora builtin data (shared program definition, always available). */
 declare const lora_builtin: Lora[];
-/** Prompt builtin data (shared program definition, always available). */
-declare const prompt_builtin: TagGroup[];
+/** Tag group builtin data (shared program definition, always available). */
+declare const tag_group_builtin: TagGroup[];

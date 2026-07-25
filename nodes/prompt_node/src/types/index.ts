@@ -134,7 +134,7 @@ export interface TemporaryContext {
   level: number;
 }
 
-export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program' | 'prefabCtx' | 'loraCtx' | 'promptCtx' | 'prefabBuiltin' | 'loraBuiltin' | 'promptBuiltin';
+export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program' | 'prefabCtx' | 'loraCtx' | 'promptCtx' | 'prefabBuiltin' | 'loraBuiltin' | 'tagGroupBuiltin';
 
 export interface TempContextRestorePoint {
   name: string;
@@ -151,10 +151,10 @@ export interface TempContextRestorePoint {
   ctxPromptTexts?: string[];
   prefabBuiltinGuids?: string[];
   loraBuiltinPaths?: string[];
-  promptBuiltinTexts?: string[];
+  tagGroupBuiltinTexts?: string[];
   prefabBuiltinInactive?: string[];
   loraBuiltinInactive?: string[];
-  promptBuiltinInactive?: string[];
+  tagGroupBuiltinInactive?: string[];
   previewUrl: string;
   previewVisible: boolean;
   focusX: number;
@@ -280,10 +280,10 @@ export interface ProgramData {
   multi_program?: boolean;
   prefab_builtin_guids?: string[];
   lora_builtin_paths?: string[];
-  prompt_builtin_texts?: string[];
+  tag_group_builtin_texts?: string[];
   prefab_builtin_inactive?: string[];
   lora_builtin_inactive?: string[];
-  prompt_builtin_inactive?: string[];
+  tag_group_builtin_inactive?: string[];
 }
 
 export interface ProgramCategoryData {
