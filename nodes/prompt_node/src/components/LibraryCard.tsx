@@ -130,7 +130,7 @@ export function LibraryCard({
           {prefabs.map((pf, i) => (
             <div className="prompt-item-wrapper" key={`prefab_${libName}_${i}`}>
               <div
-                className={`prompt-item ${modeClass} ${getPrefabMatchClass(pf.tags, selectedTags)}`}
+                className={`prompt-item ${modeClass} ${getPrefabMatchClass(pf.tag_groups, selectedTags)}`}
                 data-prefab={`prefab_${libName}_${i}`}
                 data-library={libName}
                 data-prefab-index={i}
@@ -151,7 +151,7 @@ export function LibraryCard({
                   {!isMiniMode && <div className="glass-layer" />}
                   <div className="text-layer">
                     <div className="name" style={{ color: 'var(--accent-color)' }}>{pf.name}</div>
-                    <div className="prompt-text">{pf.tags.map(g => tagsToDisplayName(g)).join(' + ')}</div>
+                    <div className="prompt-text">{pf.tag_groups.map(g => tagsToDisplayName(g)).join(' + ')}</div>
                   </div>
                 </div>
                 <div className="actions" style={{ position: 'absolute', top: 4, right: 4 }}>
