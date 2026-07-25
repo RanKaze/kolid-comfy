@@ -134,7 +134,7 @@ export interface TemporaryContext {
   level: number;
 }
 
-export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program' | 'prefabCtx' | 'loraCtx' | 'promptCtx' | 'prefabBuiltin' | 'loraBuiltin' | 'tagGroupBuiltin';
+export type TempContextMode = 'tag' | 'lora' | 'prefab' | 'program' | 'prefabCtx' | 'loraCtx' | 'tagCtx' | 'prefabBuiltin' | 'loraBuiltin' | 'tagGroupBuiltin';
 
 export interface TempContextRestorePoint {
   name: string;
@@ -145,16 +145,19 @@ export interface TempContextRestorePoint {
   programSelectedPrograms?: { id: string; active?: boolean }[];
   enablePrefabCtx?: boolean;
   enableLoraCtx?: boolean;
-  enablePromptCtx?: boolean;
+  enableTagCtx?: boolean;
   ctxPrefabGuids?: string[];
   ctxLoraPaths?: string[];
-  ctxPromptTexts?: string[];
+  ctxTagTexts?: string[];
   prefabBuiltinGuids?: string[];
   loraBuiltinPaths?: string[];
   tagGroupBuiltinTexts?: string[];
   prefabBuiltinInactive?: string[];
   loraBuiltinInactive?: string[];
   tagGroupBuiltinInactive?: string[];
+  prefabBuiltinDisplay?: string[];
+  loraBuiltinDisplay?: string[];
+  tagGroupBuiltinDisplay?: string[];
   previewUrl: string;
   previewVisible: boolean;
   focusX: number;
@@ -262,10 +265,10 @@ export interface SelectedProgramRef {
   active?: boolean;
   context_prefab_guids?: string[];
   context_lora_paths?: string[];
-  context_prompt_texts?: string[];
+  context_tag_texts?: string[];
   context_prefab_inactive?: string[];
   context_lora_inactive?: string[];
-  context_prompt_inactive?: string[];
+  context_tag_inactive?: string[];
 }
 
 export interface ProgramData {
@@ -276,7 +279,7 @@ export interface ProgramData {
   selected_programs?: SelectedProgramRef[];
   enable_prefab_context?: boolean;
   enable_lora_context?: boolean;
-  enable_prompt_context?: boolean;
+  enable_tag_context?: boolean;
   multi_program?: boolean;
   prefab_builtin_guids?: string[];
   lora_builtin_paths?: string[];
@@ -284,6 +287,9 @@ export interface ProgramData {
   prefab_builtin_inactive?: string[];
   lora_builtin_inactive?: string[];
   tag_group_builtin_inactive?: string[];
+  prefab_builtin_display?: string[];
+  lora_builtin_display?: string[];
+  tag_group_builtin_display?: string[];
 }
 
 export interface ProgramCategoryData {
@@ -303,8 +309,8 @@ export interface SelectedProgramItem {
   // Per-instance context overrides (independent copies for multi_program)
   context_prefab_guids?: string[];
   context_lora_paths?: string[];
-  context_prompt_texts?: string[];
+  context_tag_texts?: string[];
   context_prefab_inactive?: string[];
   context_lora_inactive?: string[];
-  context_prompt_inactive?: string[];
+  context_tag_inactive?: string[];
 }
