@@ -9,7 +9,7 @@ interface ProgramCodeEditorProps {
   onChange: (value: string) => void;
 }
 
-const CTX_VARS = ['tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags', 'tag_index', 'decoration_index'];
+const CTX_VARS = ['tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags'];
 
 export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
   const editorRef = useRef<any>(null);
@@ -40,9 +40,9 @@ export function ProgramCodeEditor({ value, onChange }: ProgramCodeEditorProps) {
         .monaco-editor .mtk7 { color: #dcdcaa !important; }
         .monaco-editor .scrollbar .slider { border-radius: 4px; }
       `}</style>
-      <div style={{ height: '100%', overflow: 'hidden', borderRadius: 10 }}>
+      <div style={{ minHeight: 500, overflow: 'visible', borderRadius: 10 }}>
       <Editor
-        height="100%"
+        height={500}
         defaultLanguage="javascript"
         theme="vs-dark"
         value={value}

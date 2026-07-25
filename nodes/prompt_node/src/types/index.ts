@@ -21,6 +21,8 @@ export interface Tag {
   name: string;
   prompt: string;
   category: string;
+  decorations?: string[];
+  tags?: string[];
 }
 
 export interface TagGroup {

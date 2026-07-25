@@ -3093,6 +3093,28 @@ export function AppShell() {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ category: tc, from: snapIndex, to: ti }),
             }).catch(console.error);
+          } else if (tc && !isNaN(ti) && snapCategory !== tc) {
+            // Move across categories
+            setAllPrograms((prev: AllPrograms) => {
+              const fromCatData = prev[snapCategory];
+              const toCatData = prev[tc];
+              if (!fromCatData || !toCatData) return prev;
+              const fromPrograms = [...(fromCatData.programs || [])];
+              if (snapIndex < 0 || snapIndex >= fromPrograms.length) return prev;
+              const [moved] = fromPrograms.splice(snapIndex, 1);
+              const toPrograms = [...(toCatData.programs || [])];
+              const insertAt = ti >= 0 && ti <= toPrograms.length ? ti : toPrograms.length;
+              toPrograms.splice(insertAt, 0, moved);
+              return {
+                ...prev,
+                [snapCategory]: { ...fromCatData, programs: fromPrograms },
+                [tc]: { ...toCatData, programs: toPrograms },
+              };
+            });
+            fetch('/move_program_to_category', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ from_category: snapCategory, to_category: tc, from_index: snapIndex, to_index: ti }),
+            }).catch(console.error);
           }
           return;
         }
@@ -3100,7 +3122,7 @@ export function AppShell() {
         if (addBtn && snapCategory != null && snapIndex != null) {
           const tc = addBtn.dataset.category;
           if (tc && snapCategory === tc) {
-            // Reorder to end
+            // Reorder to end of same category
             setAllPrograms((prev: AllPrograms) => {
               const catData = prev[tc];
               if (!catData) return prev;
@@ -3113,6 +3135,26 @@ export function AppShell() {
             fetch('/reorder_programs', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ category: tc, from: snapIndex, to: -1 }),
+            }).catch(console.error);
+          } else if (tc && snapCategory !== tc) {
+            // Move to end of other category
+            setAllPrograms((prev: AllPrograms) => {
+              const fromCatData = prev[snapCategory];
+              const toCatData = prev[tc];
+              if (!fromCatData || !toCatData) return prev;
+              const fromPrograms = [...(fromCatData.programs || [])];
+              if (snapIndex < 0 || snapIndex >= fromPrograms.length) return prev;
+              const [moved] = fromPrograms.splice(snapIndex, 1);
+              const toPrograms = [...(toCatData.programs || []), moved];
+              return {
+                ...prev,
+                [snapCategory]: { ...fromCatData, programs: fromPrograms },
+                [tc]: { ...toCatData, programs: toPrograms },
+              };
+            });
+            fetch('/move_program_to_category', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ from_category: snapCategory, to_category: tc, from_index: snapIndex, to_index: -1 }),
             }).catch(console.error);
           }
         }
@@ -4421,7 +4463,7 @@ export function AppShell() {
                 </div>
               </div>
               {/* Middle: code editor */}
-              <div className="edit-prefab-section" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+              <div className="edit-prefab-section" style={{ flex: 2, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                 <label>Code</label>
                 <ProgramCodeEditor
                   value={modalCustomPrompts}
@@ -4429,7 +4471,7 @@ export function AppShell() {
                 />
               </div>
               {/* Right: sub-programs */}
-              <div className="edit-prefab-right">
+              <div className="edit-prefab-right" style={{ flex: 1 }}>
                 <div className="edit-prefab-section">
                   <label>Programs ({modalProgramSelectedPrograms.length})</label>
                   <div className="prefab-list">
