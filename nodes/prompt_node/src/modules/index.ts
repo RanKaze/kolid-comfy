@@ -126,7 +126,7 @@ export class ProgramModule {
   async add(name: string, code: string, category: string, image: string | null = null, extra: Record<string, unknown> = {}) {
     const resp = await fetch('/add_program', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, code, category, image, ...extra }),
+      body: JSON.stringify({ name, code, category, image, selected_programs: extra.selected_programs || [], ...extra }),
     });
     if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
     return resp.json();

@@ -392,7 +392,7 @@ export function AppShell() {
       .map(str => {
         const tg = parseStringToTags(str, data.categories);
         const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-        return { ...tg, tags: tg.tags.map(t => ({ ...t })), is_from_parsing: isFromParsing };
+        return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: isFromParsing ? 'parsing' as const : 'normal' as const };
       });
     setSelectedTags(tagGroups);
 
@@ -996,7 +996,7 @@ export function AppShell() {
             setModalPrefabTags(prev => [...prev, result.tagGroup]);
           } else {
             // No match: create a plain tag
-            setModalPrefabTags(prev => [...prev, { tags: [{ name: seg, prompt: seg, category: "" }], strength: 1.0, is_from_parsing: false }]);
+            setModalPrefabTags(prev => [...prev, { tags: [{ name: seg, prompt: seg, category: "" }], strength: 1.0, source: 'normal' }]);
           }
         }
         input.value = '';
@@ -1198,7 +1198,7 @@ export function AppShell() {
   const handleFilterChange = useCallback((f: string) => setSelectedFilter(f), []);
 
   const handleCustomPromptsParsed = useCallback((tagGroup: TagGroup, displayString: string) => {
-    setSelectedTags(prev => [...prev, { ...tagGroup, tags: tagGroup.tags.map(t => ({ ...t })), is_from_parsing: false }]);
+    setSelectedTags(prev => [...prev, { ...tagGroup, tags: tagGroup.tags.map(t => ({ ...t })), source: 'normal' }]);
     setCustomAddedTagKeys(prev => new Set(prev).add(displayString));
   }, [setSelectedTags]);
 
@@ -1243,7 +1243,7 @@ export function AppShell() {
         const last = stack[lastIdx];
         const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.tags.slice(0, -1).some(t => t.prompt === prompt));
         const newLast = { ...last, tagGroups: existing === -1
-          ? [...(last.tagGroups || []), { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, is_from_parsing: false }]
+          ? [...(last.tagGroups || []), { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, source: 'normal' as const }]
           : (last.tagGroups || []).filter((_g: TagGroup, i: number) => i !== existing)
         };
         stack[lastIdx] = newLast;
@@ -1273,7 +1273,7 @@ export function AppShell() {
 
     setSelectedTags(prev => {
       const idx = prev.findIndex(g => g.tags[g.tags.length - 1]?.prompt === prompt);
-      if (idx === -1) return [...prev, { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, is_from_parsing: false }];
+      if (idx === -1) return [...prev, { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, source: 'normal' }];
       return prev.filter((_, i) => i !== idx);
     });
   }, [tempCtx, allPrompts, setSelectedTags]);
@@ -1376,7 +1376,7 @@ export function AppShell() {
     setSelectedTags(prev => prev.filter(group => {
       const isFromCategory = promptSet.has(group.tags[group.tags.length - 1]?.prompt);
       if (!isFromCategory) return true;
-      return group.is_from_parsing !== true;
+      return group.source !== 'parsing';
     }));
   }, [allPrompts, setSelectedTags]);
 
@@ -1911,7 +1911,7 @@ export function AppShell() {
     const newTags = regularSegments.map(s => {
       const tg = parseStringToTags(s, allPrompts);
       const isFromParsing = loadedParsedKeys.has(tagsToDisplayString(tg));
-      return { ...tg, tags: tg.tags.map(t => ({ ...t })), is_from_parsing: isFromParsing };
+      return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: isFromParsing ? 'parsing' as const : 'normal' as const };
     });
 
     // --- Parse lora data ---
@@ -2142,15 +2142,15 @@ export function AppShell() {
       submitPrefabs = bg.prefabs;
     } else {
       // No region mode — use program-filtered selections
-      submitPrompts = programResult.filteredTags.map(g => tagsToDisplayString(g));
-      submitCustom = programResult.filteredCustomPrompts;
-      submitLoras = programResult.filteredLoras;
-      submitPrefabs = programResult.filteredPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
+      submitPrompts = programResult.resultTags.map(g => tagsToDisplayString(g));
+      submitCustom = programResult.resultCustomPrompts;
+      submitLoras = programResult.resultLoras;
+      submitPrefabs = programResult.resultPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     }
 
-    // Compute prompts that are still "pure parsing" (not converted to user tag)
+    // Exclude both parsing and program-sourced tags from cache
     const excludeFromCache = selectedTags
-      .filter(g => g.is_from_parsing === true)
+      .filter(g => g.source !== 'normal')
       .map(g => tagsToDisplayString(g));
 
     submitSelection(
@@ -3801,12 +3801,12 @@ export function AppShell() {
 
                 const parsedCount = isTemporary ? 0 : cp.filter(p => {
                   const group = getTagGroupForPrompt(p.prompt);
-                  return group && group.is_from_parsing === true;
+                  return group && (group.source === 'parsing' || group.source === 'program');
                 }).length;
                 const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => {
                   if (!isTagSelected(p.prompt)) return false;
                   const group = getTagGroupForPrompt(p.prompt);
-                  return !group || group.is_from_parsing !== true;
+                  return !group || group.source === 'normal';
                 }).length;
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
 
@@ -3855,7 +3855,7 @@ export function AppShell() {
 
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
@@ -4008,7 +4008,7 @@ export function AppShell() {
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.removedTagKeys.has(tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'promptCtx') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
@@ -4331,7 +4331,7 @@ export function AppShell() {
                 {!isTemporary ? (
                   <>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                      <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({selectedPrefabs.length})</h3>
+                      <h3 style={{ marginBottom: 0 }}>Selected Prefabs ({selectedPrefabs.length + programResult.gen_prefabs.length})</h3>
                       <button className="clear-btn" onClick={() => setSelectedPrefabs([])} title="Clear">{iconX}</button>
                     </div>
                     <div className="prefab-list">
@@ -4346,7 +4346,7 @@ export function AppShell() {
                           return undefined;
                         })();
                         return (
-                          <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'} ${programResult.removedPrefabGuids.has(node.guid) ? 'program-filtered' : ''}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
+                          <div key={node.guid} className={`prefab-card ${node.active ? '' : 'prefab-inactive'} ${programResult.filter_prefabs.some(fp => fp.guid === node.guid) ? 'program-filtered' : ''}`} onMouseDown={(e) => { e.stopPropagation(); if ((e.target as HTMLElement).closest('.prefab-card-actions, .action-btn')) return; togglePrefabActive(node.guid); }}>
                             {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
                             <div className="prefab-card-header">
                               <span className="prefab-card-name" style={{ opacity: node.active ? 1 : 0.5 }}>{pf.name}</span>
@@ -4359,10 +4359,30 @@ export function AppShell() {
                           </div>
                         );
                       })}
+                      {/* Program-generated prefabs */}
+                      {programResult.gen_prefabs.map((p, pi) => {
+                        const pf = findPrefabByGuid(p.guid);
+                        if (!pf) return null;
+                        const fp = (() => {
+                          for (const [libName, libData] of Object.entries(allLibraries)) {
+                            const idx = (libData.prefabs || []).findIndex(pp => pp.guid === p.guid);
+                            if (idx !== -1) return focusPoints[`prefab_${libName}_${idx}`];
+                          }
+                          return undefined;
+                        })();
+                        return (
+                          <div key={`prog-pf-${pi}`} className={`prefab-card program-source ${p.active ? '' : 'prefab-inactive'}`}>
+                            {pf.preview && <img className="prefab-card-bg" src={imgUrl(pf.preview)} alt="" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} />}
+                            <div className="prefab-card-header">
+                              <span className="prefab-card-name" style={{ opacity: p.active ? 1 : 0.5 }}>{pf.name}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...(selectedPrefabs.length > 0 ? { marginTop: 12 } : {}) }}>
-                      <h3 style={{ marginBottom: 0 }}>Selected Loras ({selectedLoras.length})</h3>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || programResult.gen_prefabs.length > 0) ? { marginTop: 12 } : {}) }}>
+                      <h3 style={{ marginBottom: 0 }}>Selected Loras ({selectedLoras.length + programResult.gen_loras.length})</h3>
                       <button className="clear-btn" onClick={() => { setSelectedLoras([]); setLoraSelections({}); }} title="Clear">{iconX}</button>
                     </div>
                     <div className="lora-list">
@@ -4378,7 +4398,7 @@ export function AppShell() {
                             initialSplitMode={sel?.split_mode}
                             isMissing={lora.metadata?.missing === true}
                             isFiltered={isLoraFiltered(lora)}
-                            isProgramFiltered={programResult.removedLoraPaths.has(lora.file_path)}
+                            isProgramFiltered={programResult.filter_loras.some(fl => fl.file_path === lora.file_path)}
                             onChange={(data) => {
                               setLoraSelections(prev => {
                                 const existing = prev[lora.file_path];
@@ -4399,12 +4419,35 @@ export function AppShell() {
                           />
                         );
                       })}
+                      {/* Program-generated loras */}
+                      {programResult.gen_loras.map((l, li) => {
+                        let item: LoraItemData | undefined;
+                        for (const items of Object.values(loraData)) {
+                          item = items.find(it => it.file_path === l.file_path);
+                          if (item) break;
+                        }
+                        if (!item) return null;
+                        return (
+                          <Lora
+                            key={`prog-lora-${li}`}
+                            lora={item}
+                            initialActiveTags={l.active_tags || []}
+                            initialStrength={l.strength}
+                            initialActive={l.active}
+                            initialSplitMode={l.split_mode}
+                            isMissing={false}
+                            isFiltered={false}
+                            onChange={() => {}}
+                            onRemove={() => {}}
+                          />
+                        );
+                      })}
                     </div>
                   </>
                 ) : null}
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || selectedLoras.length > 0) && !isTemporary ? { marginTop: 12 } : {}) }}>
-                  <h3 style={{ marginBottom: 0 }}>Selected Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length})</h3>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || selectedLoras.length > 0 || programResult.gen_prefabs.length > 0 || programResult.gen_loras.length > 0) && !isTemporary ? { marginTop: 12 } : {}) }}>
+                  <h3 style={{ marginBottom: 0 }}>Selected Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length + programResult.gen_tag_groups.length})</h3>
                   <button className="clear-btn" onClick={() => setSelectedTags([])} title="Clear">{iconX}</button>
                 </div>
                 <div className="selected-tags">
@@ -4419,8 +4462,9 @@ export function AppShell() {
                       const baseStrength = group.strength ?? 1.0;
                       const showStrength = baseStrength !== 1.0;
                       const displayStr = tagsToDisplayString(group);
-                      const fromParsing = group.is_from_parsing === true;
-                      const programFiltered = programResult.removedTagKeys.has(tagsToDisplayString(group));
+                      const fromParsing = group.source === 'parsing';
+                      const sourceProgram = group.source === 'program';
+                      const programFiltered = programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(group));
                       return (
                         <TagStrengthEditor
                           key={i}
@@ -4428,6 +4472,7 @@ export function AppShell() {
                           strength={baseStrength}
                           showStrength={showStrength}
                           fromParsing={fromParsing}
+                          sourceProgram={sourceProgram}
                           programFiltered={programFiltered}
                           dragIndex={i}
                           onReorder={(toIdx) => reorderTags(i, toIdx)}
@@ -4441,6 +4486,12 @@ export function AppShell() {
                         />
                       );
                     })}
+                    {/* Program-generated tags */}
+                    {programResult.gen_tag_groups.map((group, i) => (
+                      <span className="tag source-program" key={`prog-tag-${i}`}>
+                        {tagsToDisplayName(group)}
+                      </span>
+                    ))}
                 </div>
               </>
             ) : null}
@@ -5428,6 +5479,7 @@ function TagStrengthEditor({
   showStrength,
   fromParsing,
   programFiltered,
+  sourceProgram,
   dragIndex,
   onReorder,
   onStrengthChange,
@@ -5438,6 +5490,7 @@ function TagStrengthEditor({
   showStrength: boolean;
   fromParsing: boolean;
   programFiltered: boolean;
+  sourceProgram: boolean;
   dragIndex: number;
   onReorder: (toIdx: number) => void;
   onStrengthChange: (v: number) => void;
@@ -5480,7 +5533,7 @@ function TagStrengthEditor({
   return (
     <span
       ref={spanRef}
-      className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${programFiltered ? ' program-filtered' : ''}${dragOver ? ' drag-over' : ''}`}
+      className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${programFiltered ? ' program-filtered' : ''}${sourceProgram ? ' source-program' : ''}${dragOver ? ' drag-over' : ''}`}
       onClick={editing ? undefined : startEdit}
       draggable={!editing}
       onDragStart={(e) => {
