@@ -1168,7 +1168,7 @@ export function AppShell() {
       const fakeTags = enrichTagGroups(selectedTags, allTagsLookup);
       const fakeLoras = buildLoraSelectionData(selectedLoras, loraSelections);
 
-      // Randomly select 2-5 prefabs/loras/prompts as context
+      // Randomly select 2-5 prefabs/loras/prompts as context (respecting modal toggles)
       const randInt = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
       const shuffle = <T,>(arr: T[]): T[] => { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
@@ -1190,17 +1190,17 @@ export function AppShell() {
         }
       }
 
-      const prefabContext = shuffle([...prefabDataMap.entries()]).slice(0, randInt(2, 5)).map(([guid, pfData]) => ({
+      const prefabContext = modalEnablePrefabCtx ? shuffle([...prefabDataMap.entries()]).slice(0, randInt(2, 5)).map(([guid, pfData]) => ({
         guid, name: pfData.name || '', tag_groups: pfData.tag_groups || [], loras: pfData.loras || [], custom_prompts: pfData.custom_prompts || '', preview: pfData.preview || '', active: true,
-      }));
-      const loraContext = shuffle([...loraLookup.entries()]).slice(0, randInt(2, 5)).map(([fp, item]) => {
+      })) : [];
+      const loraContext = modalEnableLoraCtx ? shuffle([...loraLookup.entries()]).slice(0, randInt(2, 5)).map(([fp, item]) => {
         const sel = loraSelections[fp];
         return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode };
-      });
-      const promptContext = shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
+      }) : [];
+      const promptContext = modalEnablePromptCtx ? shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
         const tg = parseStringToTags(text, allPrompts);
         return { ...tg, active: true };
-      });
+      }) : [];
 
       const result = fn(fakeConsole, fakeTags, fakeLoras, selectedPrefabs, customPrompts, allPrompts, allTagsLookup, prefabContext, loraContext, promptContext);
 
@@ -1233,7 +1233,7 @@ export function AppShell() {
       }
       setDebugOutput('ERROR: ' + (e.message || String(e)) + '\n' + (e.stack || ''));
     }
-  }, [modalCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries, loraData]);
+  }, [modalCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts, allPrompts, allLibraries, loraData, modalEnablePrefabCtx, modalEnableLoraCtx, modalEnablePromptCtx]);
 
   const saveModalFocus = useCallback((key: string, isCategory: boolean) => {
     if (modalFocusVisible) {
