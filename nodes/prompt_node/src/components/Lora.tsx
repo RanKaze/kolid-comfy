@@ -19,6 +19,7 @@ interface LoraProps {
   isProgramFiltered?: boolean;
   onChange: (data: LoraChangeData) => void;
   onRemove: () => void;
+  hideRemove?: boolean;
 }
 
 const iconX = <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M18 6L6 18M6 6l12 12"/></svg>;
@@ -76,7 +77,7 @@ function buildActiveSetFromInitial(
   return { mergeActive, splitActive };
 }
 
-export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, isFiltered, isProgramFiltered, onChange, onRemove }: LoraProps) {
+export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, isFiltered, isProgramFiltered, onChange, onRemove, hideRemove }: LoraProps) {
   const rawTags = lora.tags || [];
   const splitTags = useMemo(() => {
     const seen = new Set<string>();
@@ -257,9 +258,9 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
           >
             {iconSplit}
           </button>
-          <button className="lora-card-remove" onClick={onRemove} type="button">
+          {hideRemove ? null : <button className="lora-card-remove" onClick={onRemove} type="button">
             {iconX}
-          </button>
+          </button>}
         </div>
       </div>
       {displayTags.length > 0 && (

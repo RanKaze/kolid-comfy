@@ -24,7 +24,7 @@ export function useTempContext() {
     setStack(prev => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
-      if (last.type !== 'lora' && last.type !== 'prefab' && last.type !== 'program' && last.type !== 'prefabCtx' && last.type !== 'loraCtx' && last.type !== 'promptCtx' && last.type !== 'prefabBuiltin' && last.type !== 'loraBuiltin' && last.type !== 'tagGroupBuiltin') return prev;
+      if (last.type !== 'lora' && last.type !== 'prefab' && last.type !== 'program' && last.type !== 'prefabCtx' && last.type !== 'loraCtx' && last.type !== 'tagCtx' && last.type !== 'prefabBuiltin' && last.type !== 'loraBuiltin' && last.type !== 'tagGroupBuiltin') return prev;
       const selections = new Set(last.selections || []);
       if (selections.has(id)) selections.delete(id);
       else selections.add(id);

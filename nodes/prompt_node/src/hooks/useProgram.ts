@@ -109,13 +109,13 @@ export function useProgram(
       ctxSource?: {
         context_prefab_guids?: string[];
         context_lora_paths?: string[];
-        context_prompt_texts?: string[];
+        context_tag_texts?: string[];
         context_prefab_inactive?: string[];
         context_lora_inactive?: string[];
-        context_prompt_inactive?: string[];
+        context_tag_inactive?: string[];
         enable_prefab_context?: boolean;
         enable_lora_context?: boolean;
-        enable_prompt_context?: boolean;
+        enable_tag_context?: boolean;
         prefab_builtin_guids?: string[];
         lora_builtin_paths?: string[];
         tag_group_builtin_texts?: string[];
@@ -126,7 +126,7 @@ export function useProgram(
     }
     const activePrograms: ActiveProgram[] = [];
     const resolved = new Set<string>();
-    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_prompt_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_prompt_inactive?: string[] }[], depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
+    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_tag_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_tag_inactive?: string[] }[], depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
       for (const item of items) {
         const pid = item.id;
         if (resolved.has(pid)) continue;
@@ -137,13 +137,13 @@ export function useProgram(
         const ctxSource: ActiveProgram['ctxSource'] = {
           context_prefab_guids: item.context_prefab_guids,
           context_lora_paths: item.context_lora_paths,
-          context_prompt_texts: item.context_prompt_texts,
+          context_tag_texts: item.context_tag_texts,
           context_prefab_inactive: item.context_prefab_inactive,
           context_lora_inactive: item.context_lora_inactive,
-          context_prompt_inactive: item.context_prompt_inactive,
+          context_tag_inactive: item.context_tag_inactive,
           enable_prefab_context: app.enable_prefab_context,
           enable_lora_context: app.enable_lora_context,
-          enable_prompt_context: app.enable_prompt_context,
+          enable_tag_context: app.enable_tag_context,
           prefab_builtin_guids: app.prefab_builtin_guids,
           lora_builtin_paths: app.lora_builtin_paths,
           tag_group_builtin_texts: app.tag_group_builtin_texts,
@@ -159,10 +159,10 @@ export function useProgram(
             id: sp.id,
             context_prefab_guids: sp.context_prefab_guids ?? ctxSource.context_prefab_guids,
             context_lora_paths: sp.context_lora_paths ?? ctxSource.context_lora_paths,
-            context_prompt_texts: sp.context_prompt_texts ?? ctxSource.context_prompt_texts,
+            context_tag_texts: sp.context_tag_texts ?? ctxSource.context_tag_texts,
             context_prefab_inactive: sp.context_prefab_inactive ?? ctxSource.context_prefab_inactive,
             context_lora_inactive: sp.context_lora_inactive ?? ctxSource.context_lora_inactive,
-            context_prompt_inactive: sp.context_prompt_inactive ?? ctxSource.context_prompt_inactive,
+            context_tag_inactive: sp.context_tag_inactive ?? ctxSource.context_tag_inactive,
           })), depth + 1, ctxSource);
         }
         // Only add to execution list if this program has actual code
@@ -262,7 +262,7 @@ export function useProgram(
       const cs = prog.ctxSource;
       let prefabContext: any[] = [];
       let loraContext: LoraSelectionData[] = [];
-      let promptContext: TagGroup[] = [];
+      let tagContext: TagGroup[] = [];
       let prefabBuiltin: any[] = [];
       let loraBuiltin: LoraSelectionData[] = [];
       let tagGroupBuiltin: TagGroup[] = [];
@@ -285,9 +285,9 @@ export function useProgram(
             return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: isActive, split_mode: sel?.split_mode };
           }).filter(Boolean) as LoraSelectionData[];
         }
-        if (cs.enable_prompt_context && cs.context_prompt_texts) {
-          promptContext = cs.context_prompt_texts.map((text: string) => {
-            const isActive = !(cs.context_prompt_inactive || []).includes(text);
+        if (cs.enable_tag_context && cs.context_tag_texts) {
+          tagContext = cs.context_tag_texts.map((text: string) => {
+            const isActive = !(cs.context_tag_inactive || []).includes(text);
             const tg = parseStringToTags(text, allPrompts);
             return { ...tg, active: isActive };
           });
@@ -322,7 +322,7 @@ export function useProgram(
       try {
         const fn = new Function(
           'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags',
-          'prefab_context', 'lora_context', 'prompt_context',
+          'prefab_context', 'lora_context', 'tag_context',
           'prefab_builtin', 'lora_builtin', 'tag_group_builtin',
           prog.code,
         );
@@ -342,7 +342,7 @@ export function useProgram(
           allTags,
           prefabContext,
           loraContext,
-          promptContext,
+          tagContext,
           prefabBuiltin,
           loraBuiltin,
           tagGroupBuiltin,

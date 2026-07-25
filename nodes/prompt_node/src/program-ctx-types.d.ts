@@ -107,7 +107,7 @@ declare const prefab_context: Prefab[];
 declare const lora_context: Lora[];
 
 /** Prompt context injected from the root program's context selections. */
-declare const prompt_context: TagGroup[];
+declare const tag_context: TagGroup[];
 
 /**
  * The return value of a program. Filters remove matching items; gens add new items.
