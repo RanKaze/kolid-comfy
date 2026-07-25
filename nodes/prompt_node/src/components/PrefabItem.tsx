@@ -36,8 +36,8 @@ export function PrefabItem({
 
 
   const displayStr = useMemo(
-    () => (prefab.tags || []).map(g => tagsToDisplayName(g)).join(' + '),
-    [prefab.tags],
+    () => (prefab.tag_groups || []).map(g => tagsToDisplayName(g)).join(' + '),
+    [prefab.tag_groups],
   );
 
   const loraStr = useMemo(() => {

@@ -18,14 +18,16 @@ export interface CategoryData {
 }
 
 export interface Tag {
-  decoration_num: number;
   name: string;
   prompt: string;
-  strength?: number;
-  is_from_parsing?: boolean;
+  category: string;
 }
 
-export type TagGroup = Tag[];
+export interface TagGroup {
+  tags: Tag[];
+  strength: number;
+  is_from_parsing: boolean;
+}
 
 export interface SelectedPrefabLoraState {
   file_path: string;
@@ -40,7 +42,7 @@ export interface SelectedPrefabTagState {
 export interface SelectedPrefabItem {
   guid: string;
   active: boolean;
-  tags: SelectedPrefabTagState[];
+  tag_groups: SelectedPrefabTagState[];
   loras: SelectedPrefabLoraState[];
   children: SelectedPrefabItem[];
 }
@@ -48,14 +50,14 @@ export interface SelectedPrefabItem {
 export interface SelectedPrefabRef {
   guid: string;
   active?: boolean;
-  tags?: SelectedPrefabTagState[];
+  tag_groups?: SelectedPrefabTagState[];
   loras?: SelectedPrefabLoraState[];
   children?: SelectedPrefabItem[];
 }
 
 export interface PrefabData {
   name: string;
-  tags: TagGroup[];
+  tag_groups: TagGroup[];
   custom_prompts?: string;
   preview?: string;
   loras?: LoraSelectionData[];
@@ -110,7 +112,7 @@ export interface PointsResponse {
 }
 
 export interface DragState {
-  type: 'category' | 'prompt' | 'library' | 'prefab' | 'application' | null;
+  type: 'category' | 'prompt' | 'library' | 'prefab' | 'application' | 'program' | null;
   item: string | null;
   category: string | null;
   element: HTMLElement | null;
