@@ -118,10 +118,10 @@ export function useProgram(
         enable_prompt_context?: boolean;
         prefab_builtin_guids?: string[];
         lora_builtin_paths?: string[];
-        prompt_builtin_texts?: string[];
+        tag_group_builtin_texts?: string[];
         prefab_builtin_inactive?: string[];
         lora_builtin_inactive?: string[];
-        prompt_builtin_inactive?: string[];
+        tag_group_builtin_inactive?: string[];
       };
     }
     const activePrograms: ActiveProgram[] = [];
@@ -146,10 +146,10 @@ export function useProgram(
           enable_prompt_context: app.enable_prompt_context,
           prefab_builtin_guids: app.prefab_builtin_guids,
           lora_builtin_paths: app.lora_builtin_paths,
-          prompt_builtin_texts: app.prompt_builtin_texts,
+          tag_group_builtin_texts: app.tag_group_builtin_texts,
           prefab_builtin_inactive: app.prefab_builtin_inactive,
           lora_builtin_inactive: app.lora_builtin_inactive,
-          prompt_builtin_inactive: app.prompt_builtin_inactive,
+          tag_group_builtin_inactive: app.tag_group_builtin_inactive,
         };
         // Execute sub-programs first (recursive) — even if parent has no code
         const subPrograms = (app.selected_programs || []).filter(sp => sp.active !== false);
@@ -265,7 +265,7 @@ export function useProgram(
       let promptContext: TagGroup[] = [];
       let prefabBuiltin: any[] = [];
       let loraBuiltin: LoraSelectionData[] = [];
-      let promptBuiltin: TagGroup[] = [];
+      let tagGroupBuiltin: TagGroup[] = [];
 
       if (cs) {
         if (cs.enable_prefab_context && cs.context_prefab_guids) {
@@ -310,9 +310,9 @@ export function useProgram(
             return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: isActive, split_mode: sel?.split_mode };
           }).filter(Boolean) as LoraSelectionData[];
         }
-        if (cs.prompt_builtin_texts) {
-          promptBuiltin = cs.prompt_builtin_texts.map((text: string) => {
-            const isActive = !(cs.prompt_builtin_inactive || []).includes(text);
+        if (cs.tag_group_builtin_texts) {
+          tagGroupBuiltin = cs.tag_group_builtin_texts.map((text: string) => {
+            const isActive = !(cs.tag_group_builtin_inactive || []).includes(text);
             const tg = parseStringToTags(text, allPrompts);
             return { ...tg, active: isActive };
           });
@@ -323,7 +323,7 @@ export function useProgram(
         const fn = new Function(
           'tag_groups', 'loras', 'prefabs', 'custom_prompts', 'prompts_data', 'all_tags',
           'prefab_context', 'lora_context', 'prompt_context',
-          'prefab_builtin', 'lora_builtin', 'prompt_builtin',
+          'prefab_builtin', 'lora_builtin', 'tag_group_builtin',
           prog.code,
         );
         const result = fn(
@@ -345,7 +345,7 @@ export function useProgram(
           promptContext,
           prefabBuiltin,
           loraBuiltin,
-          promptBuiltin,
+          tagGroupBuiltin,
         );
         if (result && typeof result === 'object') {
           // Collect filters and gens into accumulators (applied after all programs run)

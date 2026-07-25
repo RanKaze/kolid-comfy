@@ -15,7 +15,7 @@ const CTX_VARS = [
   'prefab_context', 'lora_context', 'prompt_context',
   'filter_tag_groups', 'filter_loras', 'filter_prefabs',
   'gen_tag_groups', 'gen_loras', 'gen_prefabs',
-  'prefab_builtin', 'lora_builtin', 'prompt_builtin',
+  'prefab_builtin', 'lora_builtin', 'tag_group_builtin',
 ];
 
 export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEditorProps) {
@@ -65,16 +65,16 @@ export function ProgramCodeEditor({ value, onChange, errorLine }: ProgramCodeEdi
   }, [errorLine]);
 
   return (
-    <div style={{ width: '100%', flex: 1, minHeight: 0, border: '1px solid #38383a', borderRadius: 10, overflow: 'visible', marginTop: 8 }}>
+    <div style={{ width: '100%', flex: 1, minHeight: 560, border: '1px solid #38383a', borderRadius: 10, overflow: 'visible', marginTop: 8 }}>
       <style>{`
         .ctx-var-highlight { color: #4fc3f7 !important; font-weight: bold; }
         .error-line-highlight { background: rgba(255,69,58,0.25) !important; }
         .monaco-editor .mtk7 { color: #dcdcaa !important; }
         .monaco-editor .scrollbar .slider { border-radius: 4px; }
       `}</style>
-      <div style={{ minHeight: 900, overflow: 'visible', borderRadius: 10 }}>
+      <div style={{ height: 560, overflow: 'visible', borderRadius: 10 }}>
       <Editor
-        height={900}
+        height={560}
         defaultLanguage="javascript"
         theme="vs-dark"
         value={value}

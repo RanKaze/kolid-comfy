@@ -995,7 +995,7 @@ body {
     overflow-y: auto;
 }
 .modal-content.wide { max-width: 1400px; overflow: visible; }
-.modal-content.extra-wide { max-width: 2100px; overflow: visible; }
+.modal-content.extra-wide { max-width: 2500px; overflow: visible; }
 .modal-content.has-bg-image {
     background: transparent;
     backdrop-filter: none;
@@ -1246,11 +1246,12 @@ body {
 .text-toggle.active:hover { transform: translateY(-1px); }
 .prefab-loras { font-size: 10px; color: var(--text-secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Edit Prefab Modal */
-.edit-prefab-body { display: flex; flex-direction: column; gap: 12px; }
-.edit-prefab-body.row { flex-direction: row; gap: 20px; }
-.edit-prefab-left { flex: 0 0 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* Shared modal layout (used by Edit Prefab + Edit Program) */
+.edit-modal-body { display: flex; flex-direction: column; gap: 12px; }
+.edit-modal-body.row { flex-direction: row; gap: 20px; }
+.edit-modal-left { flex: 0 0 260px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .edit-prefab-right { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.edit-program-right { flex: 3; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 /* iOS-style overlay scrollbar for debug terminal */
 .debug-terminal-output {
   -webkit-overflow-scrolling: touch;
@@ -1260,13 +1261,13 @@ body {
 .debug-terminal-output::-webkit-scrollbar-track { background: transparent; }
 .debug-terminal-output::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
 .debug-terminal-output::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.35); }
-.edit-prefab-columns { display: flex; flex-direction: row; gap: 16px; }
-.edit-prefab-columns .edit-prefab-section { flex: 1; min-width: 0; }
-.edit-prefab-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
-.edit-prefab-section { display: flex; flex-direction: column; gap: 6px; }
-.edit-prefab-section label { margin-bottom: 0 !important; }
-.edit-prefab-section input,
-.edit-prefab-section textarea { margin-bottom: 0 !important; }
+.edit-modal-columns { display: flex; flex-direction: row; gap: 16px; align-items: flex-start; }
+.edit-modal-columns .edit-modal-section { flex: 1; min-width: 0; }
+.edit-modal-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.edit-modal-section { display: flex; flex-direction: column; gap: 6px; }
+.edit-modal-section label { margin-bottom: 0 !important; }
+.edit-modal-section input,
+.edit-modal-section textarea { margin-bottom: 0 !important; }
 .edit-prefab-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; background: var(--bg-secondary); border-radius: 6px; font-size: 13px; }
 .modal-tag-list { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .modal-tag { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); display: flex; align-items: center; gap: 4px; }
