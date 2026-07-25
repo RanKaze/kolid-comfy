@@ -931,6 +931,7 @@ class SnapshotPromptServer:
                     self.server_instance.selected_loras = data.get('loras', [])
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.selected_programs = data.get('programs', [])
+                    self.server_instance.last_selected_programs = data.get('programs', [])
                     self.server_instance.exclude_from_cache = set(data.get('exclude_from_cache', []))
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
@@ -2254,6 +2255,7 @@ class SnapshotPromptServer:
                         context_prefab_guids = data.get('context_prefab_guids', [])
                         context_lora_paths = data.get('context_lora_paths', [])
                         context_prompt_texts = data.get('context_prompt_texts', [])
+                        multi_program = data.get('multi_program', False)
                         cat_data['programs'].append({
                             'id': app_id,
                             'name': app_name,
@@ -2263,6 +2265,7 @@ class SnapshotPromptServer:
                             'enable_prefab_context': enable_prefab_context,
                             'enable_lora_context': enable_lora_context,
                             'enable_prompt_context': enable_prompt_context,
+                            'multi_program': multi_program,
                             'context_prefab_guids': context_prefab_guids,
                             'context_lora_paths': context_lora_paths,
                             'context_prompt_texts': context_prompt_texts,
@@ -2293,6 +2296,7 @@ class SnapshotPromptServer:
                     context_prefab_guids = data.get('context_prefab_guids', None)
                     context_lora_paths = data.get('context_lora_paths', None)
                     context_prompt_texts = data.get('context_prompt_texts', None)
+                    multi_program = data.get('multi_program', None)
                     new_preview = None
                     for cat_name, cat_data in self.server_instance.programs_data.items():
                         apps = cat_data.get('programs', []) if isinstance(cat_data, dict) else cat_data
@@ -2308,6 +2312,8 @@ class SnapshotPromptServer:
                                     app['enable_lora_context'] = enable_lora_context
                                 if enable_prompt_context is not None:
                                     app['enable_prompt_context'] = enable_prompt_context
+                                if multi_program is not None:
+                                    app['multi_program'] = multi_program
                                 if context_prefab_guids is not None:
                                     app['context_prefab_guids'] = context_prefab_guids
                                 if context_lora_paths is not None:

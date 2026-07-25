@@ -15,7 +15,7 @@ interface TagGroup {
   /** [deco_n, ..., deco_1, base] — last element is base */
   tags: Tag[];
   strength: number;
-  is_from_parsing: boolean;
+  source: 'normal' | 'parsing' | 'program';
 }
 
 interface Lora {
