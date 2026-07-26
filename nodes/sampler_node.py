@@ -372,6 +372,7 @@ class ContextData:
 
 from ..architecture import Krea2 as arch_krea2
 from ..architecture import Flux2Klein as arch_flux2klein
+from ..architecture import QwenEdit as arch_qwen_edit
 
 
 class ReferenceData:
@@ -680,27 +681,38 @@ class PipelineData:
             prompt = ""
 
         architecture = self.config.get("architecture") if self.config else None
+        condition = None
 
+        # QwenEdit: 独立步骤，可叠加在 architecture 之上
+        if self.config and self.config.get("enable_qwen_edit"):
+            condition = arch_qwen_edit.get_conditioning(
+                self, mode, clip, vae, prompt, reference_latent, reference_image,
+                reference, conditioning_set_values, VAEDecode
+            )
+
+        # Architecture: 基础 conditioning
         if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
-            arch_module = arch_krea2
+            condition = arch_krea2.get_conditioning(
+                self, mode, clip, vae, prompt, reference_latent, reference_image,
+                reference, conditioning_set_values, VAEDecode
+            )
         elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
-            arch_module = arch_flux2klein
+            condition = arch_flux2klein.get_conditioning(
+                self, mode, clip, vae, prompt, reference_latent, reference_image,
+                reference, conditioning_set_values, VAEDecode
+            )
         else:
-            # 默认: 无 reference 处理
-            cache_key = (id(clip), prompt)
-            if cache_key in self._conditioning_cache:
-                print(f"✓ Conditioning cache hit")
-                condition = self._conditioning_cache[cache_key]
-            else:
-                print(f"x Conditioning cache miss")
-                condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
-                self._conditioning_cache[cache_key] = condition
-            return condition
-
-        condition = arch_module.get_conditioning(
-            self, mode, clip, vae, prompt, reference_latent, reference_image,
-            reference, conditioning_set_values, VAEDecode
-        )
+            if condition is None:
+                # 默认: 无 reference 处理
+                cache_key = (id(clip), prompt)
+                if cache_key in self._conditioning_cache:
+                    print(f"✓ Conditioning cache hit")
+                    condition = self._conditioning_cache[cache_key]
+                else:
+                    print(f"x Conditioning cache miss")
+                    condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
+                    self._conditioning_cache[cache_key] = condition
+                return condition
         
         if reference.reference_controls is not None:
             for control in reference.reference_controls:
@@ -2224,8 +2236,34 @@ class PipelineEnableEditNode:
                 print("[EnableEdit] Flux2Klein: no model patch needed")
 
         return (next_pipeline,)
-    
-    
+
+
+# ====================== PipelineEnableQwenEditNode ======================
+class PipelineEnableQwenEditNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "enable": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "enable_qwen_edit"
+    CATEGORY = "sampling/custom"
+
+    def enable_qwen_edit(self, pipeline, enable):
+        next_pipeline = pipeline.copy()
+        next_pipeline.config["enable_qwen_edit"] = enable
+
+        if enable:
+            print("[EnableQwenEdit] QwenImageEditPlus conditioning enabled")
+
+        return (next_pipeline,)
+
+
 # ====================== PipelineDetectNode ======================
 class PipelineDetectNode:
     """
