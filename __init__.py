@@ -180,6 +180,7 @@ NODE_CONFIG = {
     "PipelineAddNoiseNode": {"class": PipelineAddNoiseNode, "name": "PipelineAddNoiseNode"},
     "PipelineToggleMaskInpaintNode": {"class": PipelineToggleMaskInpaintNode, "name": "PipelineToggleMaskInpaintNode"},
     "PipelineEnableEditNode": {"class": PipelineEnableEditNode, "name": "PipelineEnableEditNode"},
+    "PipelineEnableQwenEditNode": {"class": PipelineEnableQwenEditNode, "name": "PipelineEnableQwenEditNode"},
     "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
     "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
     "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},
