@@ -114,6 +114,8 @@ export interface PointsResponse {
   custom_prompts: string;
   parsed_prompts?: string[];
   last_selected_prefabs?: { guid: string; active?: boolean }[];
+  has_tagger?: boolean;
+  has_asset?: boolean;
 }
 
 export interface DragState {
