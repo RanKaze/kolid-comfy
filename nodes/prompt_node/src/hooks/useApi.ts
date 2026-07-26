@@ -20,6 +20,8 @@ export function useApi() {
   const [loraRegex, setLoraRegex] = useState('');
   const [loraFolderMeta, setLoraFolderMeta] = useState<Record<string, {bg_image?: string; bg_video?: string}>>({});
   const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
+  const [hasTagger, setHasTagger] = useState(false);
+  const [hasAsset, setHasAsset] = useState(false);
   const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
   const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[]>([]);
 
@@ -36,6 +38,8 @@ export function useApi() {
     setCustomPrompts(data.custom_prompts || '');
     setLoraRegex(data.lora_regex || '');
     setParsedPrompts(data.parsed_prompts || []);
+    setHasTagger(data.has_tagger || false);
+    setHasAsset(data.has_asset || false);
     setAllPrograms(data.programs || {});
     setLastSelectedPrograms(data.last_selected_programs || []);
     return data;
@@ -75,6 +79,8 @@ export function useApi() {
     customPrompts, setCustomPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
+    hasTagger,
+    hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
     loadData, submitSelection, closeWindow, loadLoraData,
   };
