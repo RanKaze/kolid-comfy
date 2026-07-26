@@ -808,6 +808,8 @@ class SnapshotPromptServer:
                     'last_selected_programs': self.server_instance.last_selected_programs,
                     'parsed_prompts': self.server_instance.parsed_prompts,
                     'lora_regex': self.server_instance.lora_regex,
+                    'has_tagger': getattr(self.server_instance, 'tagger', None) is not None,
+                    'has_asset': bool(getattr(self.server_instance, 'asset', '')),
                 }
                 print(f"[SnapshotPrompt] /prompts_data: last_selected_programs={self.server_instance.last_selected_programs}")
                 self.send_response(200)
@@ -2234,6 +2236,88 @@ class SnapshotPromptServer:
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode('utf-8'))
 
+            elif self.path == '/tag_from_image':
+                content_length = int(self.headers.get('Content-Length', 0))
+                image_bytes = self.rfile.read(content_length) if content_length > 0 else b''
+                result = {'success': False}
+                try:
+                    tagger = getattr(self.server_instance, 'tagger', None)
+                    if tagger is None:
+                        result = {'success': False, 'error': 'Tagger not connected'}
+                    else:
+                        from PIL import Image as PILImage
+                        import io as _io
+                        import numpy as np
+                        import torch
+                        from ..libs.caption_utils import get_tag
+                        img = PILImage.open(_io.BytesIO(image_bytes)).convert('RGB')
+                        img_np = np.array(img).astype(np.float32) / 255.0
+                        img_tensor = torch.from_numpy(img_np)
+                        tag = get_tag(tagger, img_tensor)
+                        print(f"[tag_from_image] tagger result: {tag[:200]}")
+                        parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
+                        result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    result = {'success': False, 'error': str(e)}
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+
+            elif self.path == '/tag_from_capture':
+                result = {'success': False}
+                try:
+                    tagger = getattr(self.server_instance, 'tagger', None)
+                    if tagger is None:
+                        result = {'success': False, 'error': 'Tagger not connected'}
+                    else:
+                        tag = SnapshotPromptNode._capture_and_tag(tagger)
+                        if tag is None:
+                            result = {'success': False, 'error': 'Capture canceled by user'}
+                        else:
+                            print(f"[tag_from_capture] tagger result: {tag[:200]}")
+                            parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
+                            result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    result = {'success': False, 'error': str(e)}
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+
+            elif self.path == '/tag_from_assets':
+                result = {'success': False}
+                try:
+                    tagger = getattr(self.server_instance, 'tagger', None)
+                    asset_name = getattr(self.server_instance, 'asset', '')
+                    if tagger is None:
+                        result = {'success': False, 'error': 'Tagger not connected'}
+                    elif not asset_name or not asset_name.strip():
+                        result = {'success': False, 'error': 'Asset data not provided'}
+                    else:
+                        tag = SnapshotPromptNode._tag_from_assets(tagger, asset_name)
+                        if tag is None:
+                            result = {'success': False, 'error': 'Assets selection canceled or no image in slot'}
+                        else:
+                            print(f"[tag_from_assets] tagger result: {tag[:200]}")
+                            parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
+                            result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    result = {'success': False, 'error': str(e)}
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+
             elif self.path == '/add_program':
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -2520,6 +2604,8 @@ class SnapshotPromptNode:
                 "bg_brightness": ("INT", {"default": 25, "min": 0, "max": 100}),
                 "region": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
                 "region_format": ("STRING", {"default": "", "multiline": True, "tooltip": "JSON template with placeholders"}),
+                "tagger": ("*", {"tooltip": "Optional Florence2 tagger model for Tag From Image button"}),
+                "asset": ("STRING", {"default": "", "multiline": False, "tooltip": "Global-mode assets snapshot name (same as SnapshotAssetsNode data with global_mode=True) for Tag From Assets button"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2765,8 +2851,459 @@ class SnapshotPromptNode:
         custom = ', '.join(custom_parts) if custom_parts else ''
         return last_selected, custom
 
+    # Class-level state for the dedicated Qt capture thread
+    _qt_capture_thread = None
+    _qt_capture_queue = None
+    _qt_capture_result = None
+    _qt_capture_done = None
+
+    @staticmethod
+    def _capture_and_tag(tagger):
+        """Dispatch capture+tag to the dedicated Qt thread (Qt requires same-thread GUI ops)."""
+        import queue as _queue
+
+        # Lazily start the persistent Qt thread
+        if (SnapshotPromptNode._qt_capture_thread is None
+                or not SnapshotPromptNode._qt_capture_thread.is_alive()):
+            SnapshotPromptNode._qt_capture_queue = _queue.Queue()
+            SnapshotPromptNode._qt_capture_done = threading.Event()
+            SnapshotPromptNode._qt_capture_thread = threading.Thread(
+                target=SnapshotPromptNode._qt_capture_thread_main, daemon=True
+            )
+            SnapshotPromptNode._qt_capture_thread.start()
+
+        SnapshotPromptNode._qt_capture_done.clear()
+        SnapshotPromptNode._qt_capture_queue.put(tagger)
+        SnapshotPromptNode._qt_capture_done.wait()
+        return SnapshotPromptNode._qt_capture_result
+
+    @staticmethod
+    def _tag_from_assets(tagger, asset_data):
+        """Start a SnapshotAssetsServer in global mode with a single Image slot,
+        using asset_data as the snapshot name — same as SnapshotAssetsNode with global_mode=True.
+        Wait for user to select an image, then run the tagger. Returns tag string or None."""
+        import webbrowser
+        import time
+        from .assets_node import SnapshotAssetsServer, SnapshotAssetsNode
+
+        # Always global_mode: asset_data is a snapshot name, load from disk
+        snap_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
+        snap_name = asset_data.strip() if asset_data else ""
+        snap_path = os.path.join(snap_dir, f"{snap_name}.json")
+        canvas_snapshot = None
+        if snap_name and os.path.exists(snap_path):
+            with open(snap_path, 'r', encoding='utf-8') as f:
+                canvas_snapshot = f.read()
+            print(f"[tag_from_assets] Loaded snapshot from disk: {snap_path}")
+
+        server = SnapshotAssetsServer(
+            input_data=snap_name,
+            canvas_snapshot=canvas_snapshot,
+            enable_image=False,
+            enable_video=False,
+            enable_audio=False,
+            enable_prompt=False,
+            enable_slot=True,
+            slot_config="Image:tag image",
+            global_mode=True,
+        )
+        server_thread = threading.Thread(target=server.start)
+        server_thread.daemon = True
+        server_thread.start()
+
+        start_time = time.time()
+        while not server.started:
+            try:
+                mm.throw_exception_if_processing_interrupted()
+            except Exception:
+                server.stop()
+                raise
+            if time.time() - start_time > 10:
+                server.stop()
+                raise RuntimeError("[tag_from_assets] Server startup timeout")
+            time.sleep(0.01)
+
+        print(f"[tag_from_assets] Opening browser at: {server.browser_url}")
+        webbrowser.open(server.browser_url)
+
+        if not server.wait_for_confirm():
+            server.stop()
+            return None
+        server.stop()
+
+        selected_slots = getattr(server, 'selected_slots', [])
+        if not selected_slots:
+            return None
+
+        slot = selected_slots[0]
+        slot_data = slot.get('data')
+        if slot_data is None:
+            return None
+
+        image_url = slot_data.get('image', '') if isinstance(slot_data, dict) else ''
+        if not image_url:
+            return None
+
+        tensor = SnapshotAssetsNode._decode_image_data(image_url)
+        from ..libs.caption_utils import get_tag
+        return get_tag(tagger, tensor)
+
+    @staticmethod
+    def _qt_capture_thread_main():
+        """Dedicated thread that owns the QApplication and processes capture requests."""
+        import sys
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        owns_app = app is None
+        if owns_app:
+            app = QApplication(sys.argv)
+
+        while True:
+            tagger = SnapshotPromptNode._qt_capture_queue.get()
+            if tagger is None:
+                break
+            result = None
+            try:
+                result = SnapshotPromptNode._do_capture_and_tag(tagger)
+            except Exception as e:
+                print(f"[tag_from_capture] Error: {e}")
+                import traceback
+                traceback.print_exc()
+                result = None
+            SnapshotPromptNode._qt_capture_result = result
+            SnapshotPromptNode._qt_capture_done.set()
+
+    @staticmethod
+    def _do_capture_and_tag(tagger):
+        """Show floating capture panel → screenshot overlay → run tagger. Called on the Qt thread."""
+        import numpy as np
+        import torch
+        from PIL import Image
+        from ..libs.caption_utils import get_tag
+
+        from PySide6.QtCore import (
+            Qt, QRect, QPoint, QPropertyAnimation,
+            QEasingCurve, QEventLoop, Signal,
+        )
+        from PySide6.QtGui import (
+            QColor, QPainter, QPen, QGuiApplication,
+            QPixmap, QImage, QRegion,
+        )
+        from PySide6.QtWidgets import (
+            QApplication, QWidget, QPushButton,
+            QHBoxLayout, QVBoxLayout, QLabel,
+        )
+        import pyautogui
+
+        class TagCapturePanel(QWidget):
+            closed_with_action = Signal(str)
+
+            def __init__(self):
+                super().__init__()
+                self.action = "cancel"
+                self._drag_pos = None
+                self._final_pos = None
+
+                self.setWindowFlags(
+                    Qt.FramelessWindowHint |
+                    Qt.WindowStaysOnTopHint |
+                    Qt.Tool |
+                    Qt.NoDropShadowWindowHint
+                )
+                self.setAttribute(Qt.WA_TranslucentBackground, True)
+                self.setFixedSize(280, 120)
+
+                self._build_ui()
+                self._update_mask()
+                self._move_to_primary_screen_bottom_right()
+                self._play_spawn_animation()
+                self._remove_windows_shadow()
+
+            def _build_ui(self):
+                root = QVBoxLayout(self)
+                root.setContentsMargins(0, 0, 0, 0)
+                root.setSpacing(0)
+
+                self.card = QWidget(self)
+                self.card.setObjectName("captureCard")
+
+                card_layout = QVBoxLayout(self.card)
+                card_layout.setContentsMargins(16, 16, 16, 16)
+                card_layout.setSpacing(10)
+
+                title = QLabel("Tag From Capture")
+                title.setObjectName("titleLabel")
+
+                tip = QLabel("点击 Shot 框选截图区域\nCancel 取消")
+                tip.setObjectName("tipLabel")
+
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.setSpacing(8)
+
+                self.shot_btn = QPushButton("Shot")
+                self.shot_btn.setObjectName("shotBtn")
+                self.shot_btn.clicked.connect(self.on_capture_click)
+
+                self.cancel_btn = QPushButton("Cancel")
+                self.cancel_btn.setObjectName("cancelBtn")
+                self.cancel_btn.clicked.connect(self.on_exit_click)
+
+                row.addWidget(self.shot_btn, 1)
+                row.addWidget(self.cancel_btn, 1)
+
+                card_layout.addWidget(title)
+                card_layout.addWidget(tip)
+                card_layout.addLayout(row)
+
+                root.addWidget(self.card)
+
+                self.setStyleSheet("""
+                    QWidget#captureCard {
+                        background: rgba(18, 18, 20, 245);
+                        border-radius: 10px;
+                    }
+                    QLabel#titleLabel {
+                        color: white;
+                        font-size: 15px;
+                        font-weight: 700;
+                    }
+                    QLabel#tipLabel {
+                        color: rgba(255, 255, 255, 160);
+                        font-size: 12px;
+                    }
+                    QPushButton {
+                        border: none;
+                        border-radius: 8px;
+                        min-height: 36px;
+                        padding: 0 14px;
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: white;
+                        background: #2C2C2E;
+                    }
+                    QPushButton#shotBtn {
+                        background: #0A84FF;
+                    }
+                    QPushButton#shotBtn:hover { background: #3395FF; }
+                    QPushButton#shotBtn:pressed { background: #006FE8; }
+                    QPushButton#cancelBtn:hover { background: #3A3A3C; }
+                    QPushButton#cancelBtn:pressed { background: #242426; }
+                """)
+
+            def _update_mask(self):
+                self.setMask(QRegion(self.rect()))
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self._update_mask()
+
+            def showEvent(self, event):
+                super().showEvent(event)
+                self._update_mask()
+
+            def paintEvent(self, event):
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                pen = QPen(QColor(10, 132, 255), 2)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                rect = self.rect().adjusted(1, 1, -1, -1)
+                painter.drawRect(rect)
+
+            def _move_to_primary_screen_bottom_right(self):
+                screen = QGuiApplication.primaryScreen()
+                geo = screen.availableGeometry()
+                margin = 24
+                x = geo.x() + geo.width() - self.width() - margin
+                y = geo.y() + geo.height() - self.height() - margin
+                self._final_pos = QPoint(x, y)
+                self.move(x, y)
+
+            def _play_spawn_animation(self):
+                start_pos = QPoint(self._final_pos.x(), self._final_pos.y() + 30)
+                self.move(start_pos)
+                anim = QPropertyAnimation(self, b"pos", self)
+                anim.setDuration(220)
+                anim.setStartValue(start_pos)
+                anim.setEndValue(self._final_pos)
+                anim.setEasingCurve(QEasingCurve.OutCubic)
+                anim.start()
+
+            def _remove_windows_shadow(self):
+                try:
+                    import ctypes
+                    hwnd = int(self.winId())
+                    DWMWA_NCRENDERING_POLICY = 2
+                    DWMNCRP_DISABLED = 1
+                    ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, DWMWA_NCRENDERING_POLICY,
+                        ctypes.byref(ctypes.c_uint(DWMNCRP_DISABLED)),
+                        ctypes.sizeof(ctypes.c_uint)
+                    )
+                except:
+                    pass
+
+            def on_capture_click(self):
+                self.action = "capture"
+                self.close()
+
+            def on_exit_click(self):
+                self.action = "cancel"
+                self.close()
+
+            def closeEvent(self, event):
+                self.closed_with_action.emit(self.action)
+                super().closeEvent(event)
+
+            def mousePressEvent(self, event):
+                if event.button() == Qt.LeftButton:
+                    child = self.childAt(event.position().toPoint())
+                    if isinstance(child, QPushButton):
+                        event.ignore()
+                        return
+                    self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    event.accept()
+
+            def mouseMoveEvent(self, event):
+                if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
+                    self.move(event.globalPosition().toPoint() - self._drag_pos)
+                    self._final_pos = self.pos()
+                    event.accept()
+
+            def mouseReleaseEvent(self, event):
+                self._drag_pos = None
+                event.accept()
+
+        class ScreenshotOverlay(QWidget):
+            closed_with_action = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.start_point = QPoint()
+                self.end_point = QPoint()
+                self.selecting = False
+                self.captured = False
+                self.image = None
+
+                screens = QGuiApplication.screens()
+                left = min(s.geometry().left() for s in screens)
+                top = min(s.geometry().top() for s in screens)
+                right = max(s.geometry().right() for s in screens)
+                bottom = max(s.geometry().bottom() for s in screens)
+                self.virtual_rect = QRect(left, top, right - left + 1, bottom - top + 1)
+
+                self.setGeometry(self.virtual_rect)
+                self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+                self.setAttribute(Qt.WA_TranslucentBackground, True)
+                self.setCursor(Qt.CrossCursor)
+                self.setMouseTracking(True)
+                self.setFocusPolicy(Qt.StrongFocus)
+
+                primary_screen = QGuiApplication.primaryScreen()
+                self.dpr = float(primary_screen.devicePixelRatio()) if primary_screen else 1.0
+
+                full_img = pyautogui.screenshot(
+                    region=(
+                        int(round(self.virtual_rect.x() * self.dpr)),
+                        int(round(self.virtual_rect.y() * self.dpr)),
+                        int(round(self.virtual_rect.width() * self.dpr)),
+                        int(round(self.virtual_rect.height() * self.dpr)),
+                    )
+                )
+                self.full_pil = full_img
+                from PIL.ImageQt import ImageQt
+                qt_image = ImageQt(full_img.convert("RGBA"))
+                if isinstance(qt_image, QImage):
+                    self.background = QPixmap.fromImage(qt_image)
+                else:
+                    self.background = QPixmap.fromImage(QImage(qt_image))
+
+            def paintEvent(self, event):
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                painter.drawPixmap(self.rect(), self.background)
+                painter.fillRect(self.rect(), QColor(8, 8, 10, 110))
+
+                if self.selecting or self.captured:
+                    rect = QRect(self.start_point, self.end_point).normalized()
+                    painter.save()
+                    painter.setClipRect(rect)
+                    painter.drawPixmap(self.rect(), self.background)
+                    painter.restore()
+                    pen = QPen(QColor(10, 132, 255), 2)
+                    painter.setPen(pen)
+                    painter.setBrush(QColor(10, 132, 255, 30))
+                    painter.drawRect(rect)
+
+            def keyPressEvent(self, event):
+                if event.key() == Qt.Key_Escape:
+                    self.close()
+
+            def mousePressEvent(self, event):
+                if event.button() == Qt.LeftButton:
+                    self.start_point = event.position().toPoint()
+                    self.end_point = self.start_point
+                    self.selecting = True
+                    self.update()
+                elif event.button() == Qt.RightButton:
+                    self.close()
+
+            def mouseMoveEvent(self, event):
+                if self.selecting:
+                    self.end_point = event.position().toPoint()
+                    self.update()
+
+            def mouseReleaseEvent(self, event):
+                if event.button() == Qt.LeftButton and self.selecting:
+                    self.end_point = event.position().toPoint()
+                    self.selecting = False
+                    rect = QRect(self.start_point, self.end_point).normalized()
+                    if rect.width() > 10 and rect.height() > 10:
+                        left_px = int(round(rect.x() * self.dpr))
+                        top_px = int(round(rect.y() * self.dpr))
+                        right_px = int(round((rect.x() + rect.width()) * self.dpr))
+                        bottom_px = int(round((rect.y() + rect.height()) * self.dpr))
+                        self.image = self.full_pil.crop((left_px, top_px, right_px, bottom_px))
+                        self.captured = True
+                    self.close()
+
+            def closeEvent(self, event):
+                self.closed_with_action.emit()
+                super().closeEvent(event)
+
+        def wait_for_close(widget, signal_name="closed_with_action"):
+            loop = QEventLoop()
+            getattr(widget, signal_name).connect(loop.quit)
+            loop.exec()
+
+        panel = TagCapturePanel()
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+        wait_for_close(panel, "closed_with_action")
+
+        if panel.action == "cancel":
+            return None
+
+        overlay = ScreenshotOverlay()
+        overlay.show()
+        overlay.raise_()
+        overlay.activateWindow()
+        wait_for_close(overlay)
+
+        if not overlay.captured or overlay.image is None:
+            return None
+
+        pil_img = overlay.image.convert("RGB")
+        img_array = np.array(pil_img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array)
+
+        return get_tag(tagger, img_tensor)
+
     def snapshot_prompt(self, prompt_cache, prompt, prompt_parsing, lora_cache, lora_path_mode, lora_regex, lora, prefab_cache, prefab, program_cache, program, unique_id,
-                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, region="", region_format=""):
+                        enable_region=False, image=None, width=1024, height=1024, bg_brightness=25, region="", region_format="", tagger=None, asset=""):
         # 首先检查是否已中断 - 使用最直接的方式
         try:
             mm.throw_exception_if_processing_interrupted()
@@ -2873,6 +3410,8 @@ class SnapshotPromptNode:
         server.bg_brightness = bg_brightness
         server.initial_boxes = region
         server.region_format = region_format
+        server.tagger = tagger
+        server.asset = asset
         print(f"[SnapshotPrompt] region_format={repr(region_format[:200]) if region_format else 'EMPTY'}")
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True

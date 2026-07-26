@@ -43,6 +43,7 @@ const iconClipboard = <svg width="16" height="16" viewBox="0 0 24 24" fill="none
 const iconLoadFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>;
 const iconPlus = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M5 12h14"/></svg>;
 const iconCode = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>;
+const iconTagFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>;
 
 const ZOOM_DELAY = 2000;
 let zoomTimer: ReturnType<typeof setTimeout> | null = null;
@@ -160,6 +161,8 @@ export function AppShell() {
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
+    hasTagger,
+    hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
   } = api;
 
@@ -193,7 +196,9 @@ export function AppShell() {
   const [selectedPrograms, setSelectedPrograms] = useState<SelectedProgramItem[]>([]);
   const programRestoredRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const tagFileInputRef = useRef<HTMLInputElement>(null);
   const [loadFromImageData, setLoadFromImageData] = useState<any>(null);
+  const [tagging, setTagging] = useState(false);
 
   // Tags that came from prompt_parsing — used to mark is_from_parsing on tag objects during loadData
   const parsedTagKeys = useMemo(() => {
@@ -2320,6 +2325,104 @@ export function AppShell() {
     }
   }, [loadFromImageData, allPrompts, loraData, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs, setSelectedPrograms]);
 
+  // ========== Tag From Image ==========
+  const handleTagFromImageClick = useCallback(() => {
+    tagFileInputRef.current?.click();
+  }, []);
+
+  const handleTagImageSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setTagging(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await fetch('/tag_from_image', { method: 'POST', body: buffer });
+      const result = await res.json();
+      if (result.success && result.tags) {
+        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
+          const tg = parseStringToTags(seg, allPrompts);
+          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
+        });
+        if (newTagGroups.length > 0) {
+          setSelectedTags(prev => {
+            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+            return [...prev, ...toAdd];
+          });
+        }
+      } else {
+        alert(result.error || 'Tagging failed');
+      }
+    } catch (err) {
+      alert('Tag From Image error: ' + (err as Error).message);
+    } finally {
+      setTagging(false);
+    }
+    e.target.value = '';
+  }, [allPrompts, setSelectedTags]);
+
+  // ========== Tag From Capture ==========
+  const [capturing, setCapturing] = useState(false);
+  const handleTagFromCapture = useCallback(async () => {
+    setCapturing(true);
+    try {
+      const res = await fetch('/tag_from_capture', { method: 'POST' });
+      const result = await res.json();
+      if (result.success && result.tags) {
+        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
+          const tg = parseStringToTags(seg, allPrompts);
+          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
+        });
+        if (newTagGroups.length > 0) {
+          setSelectedTags(prev => {
+            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+            return [...prev, ...toAdd];
+          });
+        }
+      } else {
+        if (result.error && result.error !== 'Capture canceled by user') {
+          alert(result.error);
+        }
+      }
+    } catch (err) {
+      alert('Tag From Capture error: ' + (err as Error).message);
+    } finally {
+      setCapturing(false);
+    }
+  }, [allPrompts, setSelectedTags]);
+
+  // ========== Tag From Assets ==========
+  const [assetsLoading, setAssetsLoading] = useState(false);
+  const handleTagFromAssets = useCallback(async () => {
+    setAssetsLoading(true);
+    try {
+      const res = await fetch('/tag_from_assets', { method: 'POST' });
+      const result = await res.json();
+      if (result.success && result.tags) {
+        const newTagGroups: TagGroup[] = (result.tags as string[]).map((seg: string) => {
+          const tg = parseStringToTags(seg, allPrompts);
+          return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
+        });
+        if (newTagGroups.length > 0) {
+          setSelectedTags(prev => {
+            const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+            return [...prev, ...toAdd];
+          });
+        }
+      } else {
+        if (result.error && !result.error.includes('canceled')) {
+          alert(result.error);
+        }
+      }
+    } catch (err) {
+      alert('Tag From Assets error: ' + (err as Error).message);
+    } finally {
+      setAssetsLoading(false);
+    }
+  }, [allPrompts, setSelectedTags]);
+
   // ========== Confirm ==========
   const handleConfirm = useCallback(() => {
     // Flush pending region confirm (don't wait for debounce timer)
@@ -3949,20 +4052,59 @@ export function AppShell() {
         <div className="scroll-container">
           <div className="container">
             <div className="header">
-              <button
-                className="btn btn-primary"
-                onClick={handleLoadFromImageClick}
-                style={{ display: 'flex', alignItems: 'center', fontSize: '16px', fontWeight: 'bold', padding: '8px 16px', border: 'none', borderRadius: '8px', cursor: 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff' }}
-              >
-                {iconLoadFromImage} Load From Image
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg"
-                style={{ display: 'none' }}
-                onChange={handleImageSelected}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={handleLoadFromImageClick}
+                  style={{ display: 'flex', alignItems: 'center', fontSize: '14px', fontWeight: 'bold', padding: '6px 12px', border: 'none', borderRadius: '8px', cursor: 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff' }}
+                >
+                  {iconLoadFromImage} Load From Image
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  style={{ display: 'none' }}
+                  onChange={handleImageSelected}
+                />
+                {hasTagger ? (
+                  <>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleTagFromImageClick}
+                      disabled={tagging || capturing}
+                      style={{ display: 'flex', alignItems: 'center', fontSize: '14px', fontWeight: 'bold', padding: '6px 12px', border: 'none', borderRadius: '8px', cursor: tagging ? 'wait' : 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff', opacity: tagging ? 0.6 : 1 }}
+                    >
+                      {iconTagFromImage} {tagging ? 'Tagging...' : 'Tag From Image'}
+                    </button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={handleTagFromCapture}
+                      disabled={tagging || capturing}
+                      style={{ display: 'flex', alignItems: 'center', fontSize: '14px', fontWeight: 'bold', padding: '6px 12px', border: 'none', borderRadius: '8px', cursor: capturing ? 'wait' : 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff', opacity: capturing ? 0.6 : 1 }}
+                    >
+                      {iconTagFromImage} {capturing ? 'Capturing...' : 'Tag From Capture'}
+                    </button>
+                    {hasAsset ? (
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleTagFromAssets}
+                        disabled={tagging || capturing || assetsLoading}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '14px', fontWeight: 'bold', padding: '6px 12px', border: 'none', borderRadius: '8px', cursor: assetsLoading ? 'wait' : 'pointer', background: 'var(--accent-color, #0a84ff)', color: '#fff', opacity: assetsLoading ? 0.6 : 1 }}
+                      >
+                        {iconTagFromImage} {assetsLoading ? 'Loading...' : 'Tag From Assets'}
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
+                <input
+                  ref={tagFileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  style={{ display: 'none' }}
+                  onChange={handleTagImageSelected}
+                />
+              </div>
               <SearchBar
                 searchQuery={searchQuery}
                 onSearchChange={handleSearch}
