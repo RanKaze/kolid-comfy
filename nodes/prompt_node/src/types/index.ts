@@ -200,6 +200,16 @@ export interface LoraItemData {
   source?: SourceMode;
 }
 
+export interface LoraSliderConfig {
+  enabled: boolean;
+  min: number;
+  max: number;
+  step: number;
+  min_name: string;
+  max_name: string;
+  reverse: boolean;
+}
+
 export interface LoraSelectionData {
   file_path: string;
   name: string;
@@ -207,6 +217,7 @@ export interface LoraSelectionData {
   active_tags: string[];
   active: boolean;
   split_mode?: boolean;
+  slider_config?: LoraSliderConfig;
   source?: SourceMode;
 }
 

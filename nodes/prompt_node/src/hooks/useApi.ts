@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes,
-  LoraFolders, LoraSelectionData, AllPrograms,
+  LoraFolders, LoraSelectionData, LoraSliderConfig, AllPrograms,
 } from '../types';
 
 const API_BASE = '';
@@ -19,6 +19,7 @@ export function useApi() {
   const [loraData, setLoraData] = useState<LoraFolders>({});
   const [loraRegex, setLoraRegex] = useState('');
   const [loraFolderMeta, setLoraFolderMeta] = useState<Record<string, {bg_image?: string; bg_video?: string}>>({});
+  const [loraSliderConfigs, setLoraSliderConfigs] = useState<Record<string, LoraSliderConfig>>({});
   const [parsedPrompts, setParsedPrompts] = useState<string[]>([]);
   const [hasTagger, setHasTagger] = useState(false);
   const [hasAsset, setHasAsset] = useState(false);
@@ -67,6 +68,7 @@ export function useApi() {
     const data = await res.json();
     setLoraData(data.folders || {});
     setLoraFolderMeta(data.folder_meta || {});
+    setLoraSliderConfigs(data.lora_slider_configs || {});
     setLoraRegex(data.lora_regex || '');
     return data.folders || {};
   }, []);
@@ -78,7 +80,7 @@ export function useApi() {
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
-    loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
+    loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
     hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
