@@ -12,41 +12,35 @@ function toList(v: string | string[] | undefined): string[] {
 }
 
 /** Build the all_tags lookup table from allPrompts (category + per-prompt decorations/tags/mute_decorations). */
-export function buildAllTagsLookup(allPrompts: AllPrompts): Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> {
-  const allTags: Record<string, { name: string; prompt: string; category: string; decorations: string[]; tags: string[]; mute_decorations: string[] }> = {};
+export function buildAllTagsLookup(allPrompts: AllPrompts): Record<string, { name: string; prompt: string; category: string; tags: string[] }> {
+  const allTags: Record<string, { name: string; prompt: string; category: string; tags: string[] }> = {};
   for (const [cat, catData] of Object.entries(allPrompts)) {
     const cd = catData as any;
-    const catDecos = toList(cd.decorations).map(d => d.toLowerCase());
     const catTags = toList(cd.tags).map(t => t.toLowerCase());
     const prompts: any[] = cd.prompts || [];
     for (const p of prompts) {
       if (!p.prompt) continue;
       const key = p.prompt.toLowerCase();
-      const pDecos = toList(p.decorations).map(d => d.toLowerCase());
       const pTags = toList(p.tags).map(t => t.toLowerCase());
-      const pMute = toList(p.mute_decorations).map(d => d.toLowerCase());
       allTags[key] = {
         name: p.name || p.prompt,
         prompt: p.prompt,
         category: cat,
-        decorations: [...new Set([...catDecos, ...pDecos])],
         tags: [...new Set([...catTags, ...pTags])],
-        mute_decorations: pMute,
       };
     }
   }
   return allTags;
 }
 
-/** Enrich tag_groups with decorations + tags from the all_tags lookup table. */
-export function enrichTagGroups(selectedTags: TagGroup[], allTagsLookup: Record<string, { decorations: string[]; tags: string[] }>): TagGroup[] {
+/** Enrich tag_groups with tags from the all_tags lookup table. */
+export function enrichTagGroups(selectedTags: TagGroup[], allTagsLookup: Record<string, { tags: string[] }>): TagGroup[] {
   return selectedTags.map(g => ({
     ...g,
     tags: g.tags.map(t => {
       const info = allTagsLookup[t.prompt.toLowerCase()];
       return {
         ...t,
-        decorations: info?.decorations || [],
         tags: info?.tags || [],
       };
     }),
@@ -327,7 +321,7 @@ export function useProgram(
           prog.code,
         );
         const result = fn(
-          ctxTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t, decorations: t.decorations ? [...t.decorations] : [], tags: t.tags ? [...t.tags] : [] })) })),
+          ctxTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t, tags: t.tags ? [...t.tags] : [] })) })),
           ctxLoras.map(l => ({ ...l })),
           ctxPrefabs.map(p => ({
             ...p,

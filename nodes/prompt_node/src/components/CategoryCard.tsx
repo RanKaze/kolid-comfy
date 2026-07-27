@@ -41,7 +41,6 @@ export function CategoryCard({
   const modeClass = isMiniMode ? 'mini-mode' : 'normal-mode';
   const bgImage = catData.bg_image || '';
   const prompts: PromptData[] = (catData.prompts as PromptData[]) || [];
-  const catDecorations: string[] = (catData.decorations as string[]) || [];
   const catTags: string[] = (catData.tags as string[]) || [];
 
   let filteredPrompts = prompts;
@@ -92,11 +91,6 @@ export function CategoryCard({
             <span style={{ textShadow: '0px 0px 4px black' }}>{category}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            {catDecorations.length > 0 && (
-              <div className="decoration-tags">
-                {catDecorations.map(d => <span className="decoration-tag" key={d}>{d}</span>)}
-              </div>
-            )}
             {selectedCount > 0 && <span className="count-badge">{selectedCount}</span>}
             <button className="display-mode-btn" onClick={e => { e.stopPropagation(); }}>{iconGrid}</button>
             <button className="edit-category-btn" onClick={e => { e.stopPropagation(); }}>{iconPencil}</button>
@@ -111,12 +105,6 @@ export function CategoryCard({
           onDragOver={e => { if (document.querySelector('.prompt-item.dragging')) e.preventDefault(); }}
         >
           {filteredPrompts.map(p => {
-            const pDecorations: string[] = Array.isArray(p.decorations) ? p.decorations : [];
-            const uniquePDecorations = pDecorations.filter(d => !catDecorations.includes(d));
-            const decoTagsHtml = uniquePDecorations.length > 0
-              ? `<div class="decoration-tags">${uniquePDecorations.map(d => `<span class="decoration-tag">${d}</span>`).join('')}</div>`
-              : '';
-
             let isSelected = isTemporary ? false : isBasePromptSelectedInTags(p.prompt, selectedTags);
             let selectedCardsHtml = '';
             if (!isTemporary) {
@@ -139,7 +127,7 @@ export function CategoryCard({
                 isMiniMode={isMiniMode}
                 isSelected={isSelected}
                 focusStyle={focusStyle}
-                decoTagsHtml={decoTagsHtml}
+                decoTagsHtml={''}
                 selectedCardsHtml={selectedCardsHtml}
                 onClick={() => onSelectPrompt(p.prompt)}
                 onDragStart={(e) => onDragStartPrompt(e, category, p.id)}

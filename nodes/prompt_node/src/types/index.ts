@@ -4,15 +4,12 @@ export interface PromptData {
   prompt: string;
   preview: string;
   tags?: string | string[];
-  decorations?: string | string[];
-  mute_decorations?: string[];
 }
 
 export interface CategoryData {
   bg_image?: string;
   bg_video?: string;
   tags?: string[];
-  decorations?: string[];
   prompts?: PromptData[];
   [key: string]: unknown;
 }
@@ -21,7 +18,6 @@ export interface Tag {
   name: string;
   prompt: string;
   category: string;
-  decorations?: string[];
   tags?: string[];
 }
 

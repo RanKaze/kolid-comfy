@@ -1,6 +1,12 @@
 import { useState, useCallback } from 'react';
 import type { Tag, TagGroup, PromptData, AllPrompts, TemporaryContext } from '../types';
 
+function toList(v: string | string[] | undefined): string[] {
+  if (Array.isArray(v)) return v.map(s => s.toLowerCase());
+  if (typeof v === 'string') return v.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  return [];
+}
+
 export function tagsToDisplayName(group: TagGroup): string {
   const names = group.tags.map(t => t.name || t.prompt);
   const nameStr = names.join(' ');
@@ -117,15 +123,6 @@ export function findPromptData(prompt: string, allPrompts: AllPrompts): (PromptD
   return null;
 }
 
-export function getPromptDecorations(promptData: PromptData & { category: string }, allPrompts: AllPrompts): string[] {
-  const ownDecorations: string[] = (promptData.decorations as string[]) || [];
-  const catData = allPrompts[promptData.category] || {};
-  const catDecorations: string[] = (catData.decorations as string[]) || [];
-  const muteDecorations: string[] = (promptData.mute_decorations as string[]) || [];
-  const allDecorations = [...new Set([...ownDecorations, ...catDecorations])];
-  return allDecorations.filter(d => !muteDecorations.includes(d));
-}
-
 export function isBasePromptSelectedInTags(prompt: string, selectedTags: TagGroup[]): boolean {
   return selectedTags.some(group => {
     const base = group.tags[group.tags.length - 1];
@@ -161,27 +158,12 @@ export function combineTagGroups(
   return { tags: allTags, strength, source: 'normal' as const };
 }
 
-function toDecoList(v: string | string[] | undefined): string[] {
-  if (Array.isArray(v)) return v;
-  if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
-  return [];
-}
-
-/** Build tag_name -> set of lowercase prompt texts that have that tag */
-function resolveDecoTags(decoTags: Set<string>, tagTextIdx: Map<string, Set<string>>): Set<string> {
-  const resolved = new Set<string>();
-  for (const tag of decoTags) {
-    const texts = tagTextIdx.get(tag);
-    if (texts) texts.forEach(t => resolved.add(t));
-  }
-  return resolved;
-}
-
-type PromptRec = { original: string; name: string; decoTags: Set<string> };
+type PromptRec = { original: string; name: string };
 
 interface ParseCache {
   tagTextIdx: Map<string, Set<string>>;
   promptLowerMap: Map<string, PromptRec>;
+  allPromptKeys: Set<string>;
   allPrompts: AllPrompts;
 }
 
@@ -192,41 +174,34 @@ function ensureCache(allPrompts: AllPrompts): ParseCache {
 
   const tagTextIdx = new Map<string, Set<string>>();
   const promptLowerMap = new Map<string, PromptRec>();
+  const allPromptKeys = new Set<string>();
 
   for (const cd of Object.values(allPrompts)) {
     if (Array.isArray(cd)) {
-      // Legacy array category — each item is a prompt dict
       for (const p of cd) {
         if (!p || typeof p !== 'object') continue;
         const key = (p.prompt || '').toLowerCase();
         if (!key || promptLowerMap.has(key)) continue;
-        promptLowerMap.set(key, { original: p.prompt, name: p.name || p.prompt, decoTags: new Set() });
+        promptLowerMap.set(key, { original: p.prompt, name: p.name || p.prompt });
+        allPromptKeys.add(key);
       }
       continue;
     }
 
-    const catDecoTags = toDecoList((cd as any).decorations).map(d => d.toLowerCase());
-    const catTags = toDecoList((cd as any).tags).map(t => t.toLowerCase());
+    const catTags = toList((cd as any).tags);
     const prompts: PromptData[] = (cd as any).prompts || [];
 
     for (const p of prompts) {
       if (!p || !p.prompt) continue;
       const key = p.prompt.toLowerCase();
-      promptLowerMap.set(key, promptLowerMap.get(key) ?? {
-        original: p.prompt,
-        name: p.name || p.prompt,
-        decoTags: new Set(),
-      });
-      const rec = promptLowerMap.get(key)!;
-      // Merge decoration tags (category + prompt + mutes) — mirrors backend deco_tag_sets
-      for (const d of catDecoTags) rec.decoTags.add(d);
-      for (const d of toDecoList(p.decorations).map(x => x.toLowerCase())) rec.decoTags.add(d);
-      for (const d of toDecoList(p.mute_decorations).map(x => x.toLowerCase())) rec.decoTags.add(d);
+      if (!promptLowerMap.has(key)) {
+        promptLowerMap.set(key, { original: p.prompt, name: p.name || p.prompt });
+      }
+      allPromptKeys.add(key);
 
-      // Register all tags → prompt (mirrors backend tag_to_prompt_texts)
       const allTags = new Set<string>();
       for (const t of catTags) allTags.add(t);
-      for (const t of toDecoList(p.tags).map(x => x.toLowerCase())) allTags.add(t);
+      for (const t of toList(p.tags)) allTags.add(t);
       for (const t of allTags) {
         if (!tagTextIdx.has(t)) tagTextIdx.set(t, new Set());
         tagTextIdx.get(t)!.add(key);
@@ -234,13 +209,13 @@ function ensureCache(allPrompts: AllPrompts): ParseCache {
     }
   }
 
-  parseCache = { tagTextIdx, promptLowerMap, allPrompts };
+  parseCache = { tagTextIdx, promptLowerMap, allPromptKeys, allPrompts };
   return parseCache;
 }
 
 /**
  * Mirror of backend _try_decompose → decompose a list of space‑separated words
- * into decorations + base_prompt following the chain matching rule.
+ * into decorations + base_prompt. All prompts are valid decoration candidates.
  */
 function tryDecompose(words: string[], cache: ParseCache): string | null {
   // _find_all_base_prompts — suffix scan, longest first
@@ -255,24 +230,19 @@ function tryDecompose(words: string[], cache: ParseCache): string | null {
 
   for (const { orig: basePrompt, before } of candidates) {
     let remaining = [...before];
-    let currentDecoTags = cache.promptLowerMap.get(basePrompt.toLowerCase())?.decoTags ?? new Set<string>();
     const decorationLevels: { level: number; text: string }[] = [];
     let ok = true;
     let level = 1;
 
     while (remaining.length > 0) {
-      const decoSet = resolveDecoTags(currentDecoTags, cache.tagTextIdx);
-      // _match_decoration_level — greedy suffix
+      // All prompts are valid decorations — match suffix against all prompt keys
       let matched = false;
       for (let r = 0; r < remaining.length; r++) {
-        const cand = remaining.slice(r).join(' ');
-        if (decoSet.has(cand.toLowerCase())) {
-          decorationLevels.push({ level, text: cand });
+        const cand = remaining.slice(r).join(' ').toLowerCase();
+        if (cache.allPromptKeys.has(cand)) {
+          decorationLevels.push({ level, text: remaining.slice(r).join(' ') });
           remaining = remaining.slice(0, r);
           matched = true;
-          // Next level: use the matched prompt's decoration tags
-          const nxt = cache.promptLowerMap.get(cand.toLowerCase());
-          currentDecoTags = nxt?.decoTags ?? new Set<string>();
           break;
         }
       }
