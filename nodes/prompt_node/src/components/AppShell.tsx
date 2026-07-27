@@ -916,6 +916,8 @@ export function AppShell() {
   const [modalSliderMinName, setModalSliderMinName] = useState('');
   const [modalSliderMaxName, setModalSliderMaxName] = useState('');
   const [modalSliderReverse, setModalSliderReverse] = useState(false);
+  const [modalSliderDefaultValue, setModalSliderDefaultValue] = useState('1');
+  const [modalSliderMarks, setModalSliderMarks] = useState<{value: string; label: string}[]>([]);
   const [debugOutput, setDebugOutput] = useState<string | null>(null);
   const [debugErrorLine, setDebugErrorLine] = useState<number | null>(null);
 
@@ -1637,7 +1639,7 @@ export function AppShell() {
         ...prev,
         [item.file_path]: {
           activeTags: [],
-          strength: 1.0,
+          strength: sc.default_value ?? 1.0,
           active: true,
           slider_config: sc,
         },
@@ -4192,6 +4194,8 @@ export function AppShell() {
                         setModalSliderMinName(sc?.min_name ?? '');
                         setModalSliderMaxName(sc?.max_name ?? '');
                         setModalSliderReverse(sc?.reverse ?? false);
+                        setModalSliderDefaultValue(String(sc?.default_value ?? 1));
+                        setModalSliderMarks((sc?.marks || []).map(m => ({ value: String(m.value), label: m.label })));
                         setModal({ type: 'editLora' });
                       }}
                       bgImage={folderMeta.bg_image}
@@ -6130,6 +6134,10 @@ export function AppShell() {
                 </div>
               </label>
             </div>
+            <div className="edit-modal-section">
+              <label>Default Value</label>
+              <input type="number" step="0.01" value={modalSliderDefaultValue} onChange={e => setModalSliderDefaultValue(e.target.value)} />
+            </div>
             {modalSliderEnabled && (
               <>
                 <div className="edit-modal-section">
@@ -6166,20 +6174,31 @@ export function AppShell() {
                     </div>
                   </label>
                 </div>
+                <div className="edit-modal-section">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <label style={{ marginBottom: 0 }}>Marks</label>
+                    <button className="btn btn-secondary" style={{ fontSize: 11, height: 24, padding: '0 10px' }} onClick={() => setModalSliderMarks(prev => [...prev, { value: '', label: '' }])}>+ Add</button>
+                  </div>
+                  {modalSliderMarks.map((m, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                      <input type="number" step="0.01" placeholder="Value" style={{ width: 80 }} value={m.value} onChange={e => setModalSliderMarks(prev => prev.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
+                      <input type="text" placeholder="Label" style={{ flex: 1 }} value={m.label} onChange={e => setModalSliderMarks(prev => prev.map((x, j) => j === i ? { ...x, label: e.target.value } : x))} />
+                      <button className="clear-btn" style={{ flexShrink: 0 }} onClick={() => setModalSliderMarks(prev => prev.filter((_, j) => j !== i))}>{iconX}</button>
+                    </div>
+                  ))}
+                </div>
               </>
             )}
             <div className="modal-buttons">
               <button className="btn btn-primary" onClick={() => {
                 if (modalEditLoraFilePath) {
+                  const parsedMarks = modalSliderMarks.filter(m => m.value !== '').map(m => ({ value: parseFloat(m.value) || 0, label: m.label }));
+                  const dv = parseFloat(modalSliderDefaultValue) || 1;
                   const newConfig = modalSliderEnabled
-                    ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse }
-                    : undefined;
+                    ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, default_value: dv, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse, marks: parsedMarks }
+                    : { enabled: false, min: 0, max: 2, step: 0.1, default_value: dv, min_name: '', max_name: '', reverse: false, marks: [] };
                   const updatedConfigs = { ...loraSliderConfigs };
-                  if (newConfig) {
-                    updatedConfigs[modalEditLoraFilePath] = newConfig;
-                  } else {
-                    delete updatedConfigs[modalEditLoraFilePath];
-                  }
+                  updatedConfigs[modalEditLoraFilePath] = newConfig;
                   setLoraSliderConfigs(updatedConfigs);
                   fetch('/update_lora_slider_configs', {
                     method: 'POST',
@@ -6190,7 +6209,7 @@ export function AppShell() {
                     const existing = prev[modalEditLoraFilePath];
                     if (!existing) return prev;
                     let newStrength = existing.strength;
-                    if (newConfig) {
+                    if (newConfig.enabled) {
                       newStrength = Math.max(newConfig.min, Math.min(newConfig.max, newStrength));
                     }
                     return {

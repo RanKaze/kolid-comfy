@@ -286,26 +286,33 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
       {sliderEnabled ? (
         <div className="lora-card-slider-row" onMouseDown={e => e.stopPropagation()}>
           {sliderConfig!.min_name && <span className="lora-slider-label">{sliderConfig!.reverse ? sliderConfig!.max_name : sliderConfig!.min_name}</span>}
-          <input
-            className="lora-card-slider"
-            type="range"
-            min={sliderConfig!.min}
-            max={sliderConfig!.max}
-            step={sliderConfig!.step}
-            value={strength}
-            onChange={handleSliderChange}
-            style={{
-              ...(sliderConfig!.reverse ? { direction: 'rtl' } : {}),
-              background: (() => {
-                const pct = ((strength - sliderConfig!.min) / (sliderConfig!.max - sliderConfig!.min)) * 100;
-                const fillPct = sliderConfig!.reverse ? 100 - pct : pct;
-                return `linear-gradient(to right, #0a84ff ${fillPct}%, rgba(255,255,255,0.2) ${fillPct}%)`;
-              })(),
-              borderRadius: '2px',
-              height: '4px',
-            }}
-            title={`Strength: ${strength.toFixed(2)}`}
-          />
+          <div className="lora-card-slider-wrap">
+            <input
+              className="lora-card-slider"
+              type="range"
+              min={sliderConfig!.min}
+              max={sliderConfig!.max}
+              step={sliderConfig!.step}
+              value={strength}
+              onChange={handleSliderChange}
+              style={{
+                ...(sliderConfig!.reverse ? { direction: 'rtl' } : {}),
+                background: (() => {
+                  const pct = ((strength - sliderConfig!.min) / (sliderConfig!.max - sliderConfig!.min)) * 100;
+                  const fillPct = sliderConfig!.reverse ? 100 - pct : pct;
+                  return `linear-gradient(to right, #0a84ff ${fillPct}%, rgba(255,255,255,0.2) ${fillPct}%)`;
+                })(),
+                borderRadius: '2px',
+                height: '4px',
+              }}
+              title={`Strength: ${strength.toFixed(2)}`}
+            />
+            {(sliderConfig!.marks || []).filter(m => m.value >= sliderConfig!.min && m.value <= sliderConfig!.max).map((m, i) => {
+              const pct = ((m.value - sliderConfig!.min) / (sliderConfig!.max - sliderConfig!.min)) * 100;
+              const pos = sliderConfig!.reverse ? 100 - pct : pct;
+              return <div key={i} className="lora-slider-mark" style={{ left: `${pos}%` }} title={m.label} />;
+            })}
+          </div>
           {sliderConfig!.max_name && <span className="lora-slider-label">{sliderConfig!.reverse ? sliderConfig!.min_name : sliderConfig!.max_name}</span>}
           <span className="lora-slider-value">{strength.toFixed(2)}</span>
         </div>
