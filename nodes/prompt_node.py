@@ -2134,14 +2134,13 @@ class SnapshotPromptServer:
                     loras = data.get('loras', [])
                     image_data = data.get('image', '')
 
-                    has_content = prefab_tags or custom_prompts or loras or data.get('selected_prefabs')
-                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_name and has_content:
+                    if lib_name and lib_name in self.server_instance.libraries_data and prefab_name:
                         lib_data = self.server_instance.libraries_data[lib_name]
                         if 'prefabs' not in lib_data:
                             lib_data['prefabs'] = []
                         prefab = {
                             'name': prefab_name,
-                            'tags': prefab_tags,
+                            'tag_groups': prefab_tags,
                             'custom_prompts': custom_prompts,
                             'loras': loras,
                             'selected_prefabs': data.get('selected_prefabs', []),
@@ -2211,7 +2210,7 @@ class SnapshotPromptServer:
                             if 'custom_prompts' in data:
                                 prefabs[prefab_index]['custom_prompts'] = data['custom_prompts']
                             if 'prefab_tags' in data:
-                                prefabs[prefab_index]['tags'] = self.server_instance._normalize_prefab_tags(data['prefab_tags'])
+                                prefabs[prefab_index]['tag_groups'] = self.server_instance._normalize_prefab_tags(data['prefab_tags'])
                             if 'loras' in data:
                                 prefabs[prefab_index]['loras'] = data['loras']
                             if 'selected_prefabs' in data:
@@ -2412,6 +2411,48 @@ class SnapshotPromptServer:
                                     return [_sanitize(v) for v in o]
                                 return o
                             data = _sanitize(data)
+                            # Resolve lora fingerprints in cache data back to file_paths
+                            si = self.server_instance
+                            if si and hasattr(si, 'lora_fingerprints') and si.lora_fingerprints:
+                                fp_to_path = {}
+                                for fp, fingerprint in si.lora_fingerprints.items():
+                                    fp_to_path[fingerprint] = fp
+                                lora_str = data.get('lora', '')
+                                if lora_str:
+                                    try:
+                                        lora_arr = json.loads(lora_str) if isinstance(lora_str, str) else lora_str
+                                        for l in lora_arr:
+                                            old_fp = l.get('file_path', '')
+                                            if old_fp in fp_to_path:
+                                                new_fp = fp_to_path[old_fp]
+                                                # Find updated name/file_name
+                                                for folder_items in (si.lora_data or {}).values():
+                                                    for item in folder_items:
+                                                        if item.get('file_path') == new_fp:
+                                                            l['file_path'] = new_fp
+                                                            l['name'] = item.get('name', l.get('name', ''))
+                                                            l['file_name'] = item.get('file_name', l.get('file_name', ''))
+                                                            break
+                                                    else:
+                                                        continue
+                                                    break
+                                                else:
+                                                    l['file_path'] = new_fp
+                                        data['lora'] = json.dumps(lora_arr, ensure_ascii=False) if isinstance(lora_str, str) else lora_arr
+                                    except Exception:
+                                        pass
+                                # Also resolve filter_loras
+                                fl_str = data.get('filter_loras', '')
+                                if fl_str:
+                                    try:
+                                        fl_arr = json.loads(fl_str) if isinstance(fl_str, str) else fl_str
+                                        for l in fl_arr:
+                                            old_fp = l.get('file_path', '')
+                                            if old_fp in fp_to_path:
+                                                l['file_path'] = fp_to_path[old_fp]
+                                        data['filter_loras'] = json.dumps(fl_arr, ensure_ascii=False) if isinstance(fl_str, str) else fl_arr
+                                    except Exception:
+                                        pass
                             result = {'success': True, 'data': data}
                         except (json.JSONDecodeError, ValueError):
                             result = {'success': False, 'error': 'Image metadata is not in JSON format. Only images saved by SaveDataToNode are supported.'}
@@ -3065,13 +3106,10 @@ class SnapshotPromptNode:
         SnapshotPromptNode._qt_capture_queue.put(tagger)
         SnapshotPromptNode._qt_capture_done.wait()
         return SnapshotPromptNode._qt_capture_result
-
     @staticmethod
     def _tag_from_assets(tagger, asset_data):
-        """Start a SnapshotAssetsServer with a single Image slot, using asset_data
-        the same way SnapshotAssetsNode uses `data`: if it's JSON, parse as canvas
-        snapshot (normal mode); otherwise treat as a global-mode snapshot name.
-        Wait for user to select an image, then run the tagger. Returns tag string or None."""
+        """Start a SnapshotAssetsServer with enable_image=True (no slots),
+        let user select multiple images, tag each one, then merge all tags."""
         import webbrowser
         import time
         from .assets_node import SnapshotAssetsServer, SnapshotAssetsNode
@@ -3100,12 +3138,13 @@ class SnapshotPromptNode:
         server = SnapshotAssetsServer(
             input_data=asset_data,
             canvas_snapshot=canvas_snapshot,
-            enable_image=False,
+            enable_image=True,
+            enable_image_config=False,
+            image_config="",
             enable_video=False,
             enable_audio=False,
             enable_prompt=False,
-            enable_slot=True,
-            slot_config="Image:tag image",
+            enable_slot=False,
             global_mode=global_mode,
         )
         server_thread = threading.Thread(target=server.start)
@@ -3132,22 +3171,29 @@ class SnapshotPromptNode:
             return None
         server.stop()
 
-        selected_slots = getattr(server, 'selected_slots', [])
-        if not selected_slots:
+        selected_images = getattr(server, 'selected_images', [])
+        if not selected_images:
             return None
 
-        slot = selected_slots[0]
-        slot_data = slot.get('data')
-        if slot_data is None:
-            return None
-
-        image_url = slot_data.get('image', '') if isinstance(slot_data, dict) else ''
-        if not image_url:
-            return None
-
-        tensor = SnapshotAssetsNode._decode_image_data(image_url)
+        # Tag each image and merge results
+        all_tags = []
         from ..libs.caption_utils import get_tag
-        return get_tag(tagger, tensor)
+        for img_data in selected_images:
+            if isinstance(img_data, dict):
+                image_url = img_data.get('image', '')
+                if not image_url:
+                    continue
+                tensor = SnapshotAssetsNode._decode_image_data(image_url)
+                tag = get_tag(tagger, tensor)
+                print(f"[tag_from_assets] Individual tag: {tag[:200]}")
+                all_tags.append(tag)
+
+        if not all_tags:
+            return None
+
+        merged = ", ".join(all_tags)
+        print(f"[tag_from_assets] Merged tags ({len(all_tags)} images): {merged[:200]}")
+        return merged
 
     @staticmethod
     def _qt_capture_thread_main():

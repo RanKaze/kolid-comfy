@@ -200,14 +200,21 @@ export interface LoraItemData {
   source?: SourceMode;
 }
 
+export interface LoraSliderMark {
+  value: number;
+  label: string;
+}
+
 export interface LoraSliderConfig {
   enabled: boolean;
   min: number;
   max: number;
   step: number;
+  default_value: number;
   min_name: string;
   max_name: string;
   reverse: boolean;
+  marks: LoraSliderMark[];
 }
 
 export interface LoraSelectionData {
