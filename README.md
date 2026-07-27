@@ -4,6 +4,78 @@
 
 ---
 
+## 📦 安装教程
+
+### 1. 克隆仓库
+
+将本仓库克隆到 ComfyUI 的 `custom_nodes` 目录下：
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/RanKaze/kolid-comfy.git
+cd kolid-comfy
+git submodule update --init --recursive   # 拉取 SuperSplat 前端子模块
+```
+
+> 如果不需要 SnapshotGaussianNode 的 SuperSplat 渲染模式，可以跳过 submodule 步骤。
+
+### 2. 安装 Python 依赖
+
+请使用 ComfyUI 运行时的 Python 环境（虚拟环境或独立 Python）来安装依赖，确保依赖安装在 ComfyUI 实际使用的解释器中：
+
+```bash
+# 方式一：如果使用 ComfyUI 的嵌入式 Python（Windows 便携版）
+# 路径示例: ComfyUI/python_embeded/python.exe
+"<ComfyUI路径>/python_embeded/python.exe" -m pip install -r requirements.txt
+
+# 方式二：如果使用虚拟环境
+# 先激活虚拟环境，再安装
+pip install -r requirements.txt
+```
+
+主要依赖包括：
+
+| 依赖 | 用途 |
+|------|------|
+| `PySide6` | SnapshotCaptureNode 桌面截图浮动面板 |
+| `pyautogui` | 屏幕截图捕获 |
+| `opencv-python` | 视频/图片处理 |
+| `decord` | 高效视频帧读取 |
+| `yt-dlp` | URL 视频下载（YouTube/Bilibili 等） |
+| `selenium` / `seleniumbase` | 网页爬取（EHentai 等） |
+| `psutil` | Wallpaper Engine 进程检测 |
+| `onnxruntime` | 部分检测器模型推理 |
+| `requests` | 网络请求 |
+| `pywebview` | Web UI 辅助 |
+
+> 部分节点（如 SnapshotCaptureNode）仅支持 **Windows**（依赖 PySide6 + win32gui）。
+
+### 3. 构建前端资源（可选）
+
+交互式 Web UI 节点（PromptNode、AssetsNode）的 HTML 文件需要前端构建后才会生成。仓库已附带预构建的 `nodes/web/*.html`，如果需要修改前端代码则需手动构建：
+
+```bash
+# 构建 PromptNode 前端
+cd nodes/prompt_node
+npm install
+npm run build
+# 输出: nodes/web/prompt_node.html
+
+# 构建 AssetsNode 前端
+cd nodes/assets_node
+npm install
+npm run build
+# 输出: nodes/web/assets_node.html
+```
+
+> 构建工具：Vite + TypeScript + React + vite-plugin-singlefile（将所有 JS/CSS 内联到单个 HTML 文件）。
+
+### 4. 重启 ComfyUI
+
+重启 ComfyUI 后，节点会自动加载。在 ComfyUI 的节点搜索中输入节点名称（如 `FitNode`、`PipelineNode`、`SnapshotPromptNode` 等）即可找到。
+
+---
+
 ## ⭐ 核心特色节点
 
 这些节点具有超出常规数据处理的特殊功能（前端交互、工作流控制、架构扩展等），是 Kolid-Comfy 的核心价值所在。
