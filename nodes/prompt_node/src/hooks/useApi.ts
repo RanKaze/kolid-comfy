@@ -45,11 +45,11 @@ export function useApi() {
     return data;
   }, []);
 
-  const submitSelection = useCallback(async (prompts: { text: string; source: string }[], custom: string, loras: LoraSelectionData[], prefabs?: any[], programs?: any[], filterTags?: any[], filterLoras?: any[], filterPrefabs?: any[], onBeforeClose?: () => void) => {
+  const submitSelection = useCallback(async (prompts: { text: string; source: string }[], custom: string, loras: LoraSelectionData[], prefabs?: any[], programs?: any[], filterTags?: any[], filterLoras?: any[], filterPrefabs?: any[], onBeforeClose?: () => void, keepParsing?: boolean) => {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [] }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: keepParsing || false }),
     });
     if (res.ok) {
       onBeforeClose?.();
