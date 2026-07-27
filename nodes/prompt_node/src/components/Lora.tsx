@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
-import type { LoraItemData } from '../types';
+import type { LoraItemData, LoraSliderConfig } from '../types';
 
 interface LoraChangeData {
   activeTags: string[];
   strength: number;
   active: boolean;
   split_mode: boolean;
+  slider_config?: LoraSliderConfig;
 }
 
 interface LoraProps {
@@ -14,6 +15,7 @@ interface LoraProps {
   initialStrength?: number;
   initialActive?: boolean;
   initialSplitMode?: boolean;
+  sliderConfig?: LoraSliderConfig;
   isMissing?: boolean;
   isFiltered?: boolean;
   isProgramFiltered?: boolean;
@@ -77,7 +79,7 @@ function buildActiveSetFromInitial(
   return { mergeActive, splitActive };
 }
 
-export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, isMissing, isFiltered, isProgramFiltered, onChange, onRemove, hideRemove }: LoraProps) {
+export function Lora({ lora, initialActiveTags, initialStrength, initialActive, initialSplitMode, sliderConfig, isMissing, isFiltered, isProgramFiltered, onChange, onRemove, hideRemove }: LoraProps) {
   const rawTags = lora.tags || [];
   const splitTags = useMemo(() => {
     const seen = new Set<string>();
@@ -122,7 +124,7 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
         }
       }
     }
-    return { activeTags: activeList, strength: str, active: cActive, split_mode: sMode };
+    return { activeTags: activeList, strength: str, active: cActive, split_mode: sMode, slider_config: sliderConfig };
   };
 
   // Notify parent of initial state on mount
@@ -149,13 +151,19 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
     });
   };
 
+  const sliderEnabled = sliderConfig?.enabled === true;
+  const strMin = sliderEnabled ? sliderConfig!.min : 0;
+  const strMax = sliderEnabled ? sliderConfig!.max : 2;
+  const strStep = sliderEnabled ? sliderConfig!.step : 0.1;
+  const sliderReverse = sliderEnabled ? sliderConfig!.reverse === true : false;
+
   const handleStrengthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInputDisplay(e.target.value);
   };
 
   const handleStrengthBlur = () => {
     const val = parseFloat(inputDisplay);
-    const clamped = isNaN(val) ? 1.0 : Math.max(0, Math.min(2, val));
+    const clamped = isNaN(val) ? strMin : Math.max(strMin, Math.min(strMax, val));
     const fixed = Math.round(clamped * 100) / 100;
     setStrength(fixed);
     setInputDisplay(fixed.toFixed(2));
@@ -163,10 +171,18 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
   };
 
   const adjustStrength = (delta: number) => {
-    const next = Math.max(0, Math.min(2, Math.round((strength + delta) * 100) / 100));
+    const next = Math.max(strMin, Math.min(strMax, Math.round((strength + delta) * 100) / 100));
     setStrength(next);
     setInputDisplay(next.toFixed(2));
     notifyParent(splitMode, splitActive, mergeActive, next, cardActive);
+  };
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    const fixed = Math.round(val * 100) / 100;
+    setStrength(fixed);
+    setInputDisplay(fixed.toFixed(2));
+    notifyParent(splitMode, splitActive, mergeActive, fixed, cardActive);
   };
 
   const handleToggleSplit = () => {
@@ -236,20 +252,24 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
       <div className="lora-card-header">
         <span className="lora-card-name">{lora.name}</span>
         <div className="lora-card-meta" onMouseDown={e => e.stopPropagation()}>
-          <button className="lora-strength-btn" onClick={() => adjustStrength(-0.1)} type="button" title="Decrease strength">
-            {iconMinus}
-          </button>
-          <input
-            className="lora-strength"
-            type="text"
-            value={inputDisplay}
-            onChange={handleStrengthChange}
-            onBlur={handleStrengthBlur}
-            title="Lora strength"
-          />
-          <button className="lora-strength-btn" onClick={() => adjustStrength(0.1)} type="button" title="Increase strength">
-            {iconPlusSmall}
-          </button>
+          {!sliderEnabled && (
+            <>
+              <button className="lora-strength-btn" onClick={() => adjustStrength(-0.1)} type="button" title="Decrease strength">
+                {iconMinus}
+              </button>
+              <input
+                className="lora-strength"
+                type="text"
+                value={inputDisplay}
+                onChange={handleStrengthChange}
+                onBlur={handleStrengthBlur}
+                title="Lora strength"
+              />
+              <button className="lora-strength-btn" onClick={() => adjustStrength(0.1)} type="button" title="Increase strength">
+                {iconPlusSmall}
+              </button>
+            </>
+          )}
           <button
             className={`lora-card-toggle ${splitMode ? 'active' : ''}`}
             onClick={handleToggleSplit}
@@ -263,6 +283,33 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
           </button>}
         </div>
       </div>
+      {sliderEnabled ? (
+        <div className="lora-card-slider-row" onMouseDown={e => e.stopPropagation()}>
+          {sliderConfig!.min_name && <span className="lora-slider-label">{sliderConfig!.reverse ? sliderConfig!.max_name : sliderConfig!.min_name}</span>}
+          <input
+            className="lora-card-slider"
+            type="range"
+            min={sliderConfig!.min}
+            max={sliderConfig!.max}
+            step={sliderConfig!.step}
+            value={strength}
+            onChange={handleSliderChange}
+            style={{
+              ...(sliderConfig!.reverse ? { direction: 'rtl' } : {}),
+              background: (() => {
+                const pct = ((strength - sliderConfig!.min) / (sliderConfig!.max - sliderConfig!.min)) * 100;
+                const fillPct = sliderConfig!.reverse ? 100 - pct : pct;
+                return `linear-gradient(to right, #0a84ff ${fillPct}%, rgba(255,255,255,0.2) ${fillPct}%)`;
+              })(),
+              borderRadius: '2px',
+              height: '4px',
+            }}
+            title={`Strength: ${strength.toFixed(2)}`}
+          />
+          {sliderConfig!.max_name && <span className="lora-slider-label">{sliderConfig!.reverse ? sliderConfig!.min_name : sliderConfig!.max_name}</span>}
+          <span className="lora-slider-value">{strength.toFixed(2)}</span>
+        </div>
+      ) : null}
       {displayTags.length > 0 && (
         <div className="lora-card-tags" onMouseDown={e => e.stopPropagation()}>
           {displayTags.map((t, i) => (

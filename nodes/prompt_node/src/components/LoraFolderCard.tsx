@@ -12,6 +12,7 @@ interface LoraFolderCardProps {
   selectedLoras: LoraItemData[];
   onToggleLora: (item: LoraItemData) => void;
   isItemSelected?: (item: LoraItemData) => boolean;
+  onEditLora?: (item: LoraItemData) => void;
   bgImage?: string;
   bgVideo?: string;
   videoVolume?: number;
@@ -20,7 +21,7 @@ interface LoraFolderCardProps {
   onEdit?: () => void;
 }
 
-export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, bgImage, bgVideo, videoVolume, clarityPoints, imgUrl, onEdit }: LoraFolderCardProps) {
+export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, onToggleLora, isItemSelected, onEditLora, bgImage, bgVideo, videoVolume, clarityPoints, imgUrl, onEdit }: LoraFolderCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const filtered = searchQuery
@@ -74,6 +75,7 @@ export function LoraFolderCard({ folderName, items, searchQuery, selectedLoras, 
               item={item}
               isSelected={isSelected(item)}
               onToggle={() => onToggleLora(item)}
+              onEdit={onEditLora ? () => onEditLora(item) : undefined}
             />
           ))}
         </div>

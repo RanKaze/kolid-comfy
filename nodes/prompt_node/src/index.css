@@ -1199,6 +1199,9 @@ body {
 .lora-section.collapsed .lora-section-header { width: auto; min-width: 120px; }
 .lora-item.selected { box-shadow: 0 0 0 2px #0a84ff, 0 4px 12px rgba(0,0,0,0.3); }
 .lora-item.selected:hover { box-shadow: 0 0 0 2px #0a84ff, 0 8px 25px rgba(0,0,0,0.4); }
+.lora-item-edit { position: absolute; top: 6px; right: 6px; z-index: 5; width: 26px; height: 26px; background: rgba(0,0,0,0.6); border: none; border-radius: 6px; color: rgba(255,255,255,0.8); cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.2s, background 0.2s; backdrop-filter: blur(4px); }
+.lora-item:hover .lora-item-edit { opacity: 1; }
+.lora-item-edit:hover { background: rgba(0,122,255,0.8); color: #fff; }
 .lora-tag-list { position: absolute; top: 5px; left: 5px; right: 5px; display: flex; flex-wrap: wrap; gap: 4px; z-index: 4; pointer-events: none; }
 .lora-tag-chip { padding: 2px 6px; background: rgba(0, 122, 255, 0.85); border-radius: 4px; font-size: 10px; color: #fff; font-weight: 500; pointer-events: none; }
 .lora-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1234,6 +1237,17 @@ body {
 .lora-card-toggle.active:hover { color: #fff; }
 .lora-card-remove { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s; }
 .lora-card-remove:hover { color: #fff; background: #dc3545; }
+.lora-card-edit { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); cursor: pointer; padding: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; transition: color 0.2s, background 0.2s; }
+.lora-card-edit:hover { color: #fff; background: #0a84ff; }
+.lora-card-slider-row { position: relative; z-index: 1; display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+.lora-slider-label { font-size: 11px; color: #fff; white-space: nowrap; max-width: 50px; overflow: hidden; text-overflow: ellipsis; }
+.lora-card-slider { flex: 1; min-width: 80px; height: 20px; -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; outline: none; }
+.lora-card-slider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; }
+.lora-card-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #0a84ff; margin-top: -5px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+.lora-card-slider::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.2); }
+.lora-card-slider::-moz-range-progress { height: 4px; border-radius: 2px; background: #0a84ff; }
+.lora-card-slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #0a84ff; border: none; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+.lora-slider-value { font-size: 10px; color: var(--text-primary); min-width: 28px; text-align: center; }
 .lora-card-tags { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 4px; }
 .lora-card-tag { padding: 2px 6px; background: rgba(0, 122, 255, 0.1); border: 1px solid rgba(0, 122, 255, 0.25); border-radius: 4px; font-size: 10px; color: var(--text-secondary); cursor: pointer; transition: transform 0.2s; }
 .lora-card-tag:hover { transform: translateY(-1px); }
