@@ -5,8 +5,6 @@ interface Tag {
   name: string;
   prompt: string;
   category: string;
-  /** Available decorations for this prompt (from category + prompt definitions) */
-  decorations?: string[];
   /** Classification tags for this prompt (from category + prompt definitions) */
   tags?: string[];
 }
@@ -54,9 +52,7 @@ interface AllTagsEntry {
   name: string;
   prompt: string;
   category: string;
-  decorations: string[];
   tags: string[];
-  mute_decorations: string[];
 }
 
 interface PromptData {
@@ -65,8 +61,6 @@ interface PromptData {
   prompt: string;
   preview?: string;
   tags?: string[];
-  decorations?: string[];
-  mute_decorations?: string[];
 }
 
 interface PromptsData {
@@ -74,7 +68,6 @@ interface PromptsData {
     bg_image?: string;
     bg_video?: string;
     tags?: string[];
-    decorations?: string[];
     prompts?: PromptData[];
   };
 }
@@ -97,7 +90,7 @@ declare const custom_prompts: string;
 /** Full prompt library data, organized by category. */
 declare const prompts_data: PromptsData;
 
-/** Lookup table: prompt text → metadata (decorations, tags, mute_decorations). */
+/** Lookup table: prompt text → metadata (tags). */
 declare const all_tags: { [prompt: string]: AllTagsEntry };
 
 /** Prefab context injected from the root program's context selections. */
