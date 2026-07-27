@@ -11,7 +11,7 @@ import {
 } from '../modules';
 import {
   parseStringToTags, tagsToDisplayName, tagsToDisplayString,
-  findPromptData, getPromptDecorations, combineTagGroups,
+  findPromptData, combineTagGroups,
   isBasePromptSelectedInTags, findTagGroupByBasePrompt,
   tryParseLine,
 } from '../hooks/useSelection';
@@ -352,11 +352,9 @@ export function AppShell() {
     const set = new Set<string>();
     for (const catData of Object.values(allPrompts)) {
       const cd = catData as any;
-      (Array.isArray(cd.decorations) ? cd.decorations : typeof cd.decorations === 'string' ? cd.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []).forEach((d: string) => set.add(d));
       (Array.isArray(cd.tags) ? cd.tags : typeof cd.tags === 'string' ? cd.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []).forEach((t: string) => set.add(t));
       if (cd.prompts) {
         for (const p of cd.prompts) {
-          toList(p.decorations).forEach((d: string) => set.add(d));
           toList(p.tags).forEach((t: string) => set.add(t));
         }
       }
@@ -881,8 +879,6 @@ export function AppShell() {
   const [modalName, setModalName] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
   const [modalTags, setModalTags] = useState<string[]>([]);
-  const [modalDecorations, setModalDecorations] = useState<string[]>([]);
-  const [modalMuteDecorations, setModalMuteDecorations] = useState<string[]>([]);
   const [modalCategory, setModalCategory] = useState('');
   const [modalOldName, setModalOldName] = useState('');
   const [modalPromptIds, setModalPromptIds] = useState('');
@@ -1246,7 +1242,7 @@ export function AppShell() {
   // ========== Reset all modal form state ==========
   const resetModalForm = useCallback(() => {
     clearZoomView();
-    setModalName(''); setModalPrompt(''); setModalTags([]); setModalDecorations([]); setModalMuteDecorations([]);
+    setModalName(''); setModalPrompt(''); setModalTags([]);
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
     setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalEnablePrefabCtx(false); setModalEnableLoraCtx(false); setModalEnablePromptCtx(false); setModalMultiProgram(false); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalPrefabBuiltinGuids([]); setModalLoraBuiltinPaths([]); setModalPromptBuiltinTexts([]); setModalPrefabBuiltinInactive([]); setModalLoraBuiltinInactive([]); setModalPromptBuiltinInactive([]); setModalPrefabBuiltinDisplay([]); setModalLoraBuiltinDisplay([]); setModalTagGroupBuiltinDisplay([]); setModalCtxTab('prefab'); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
@@ -1441,32 +1437,8 @@ export function AppShell() {
       const ctx = ctxStack[ctxStack.length - 1] as { matchFn?: (p: PromptData, cat: string) => boolean; basePrompt?: string; tagGroups?: TagGroup[]; level?: number };
       const promptData = findPromptData(prompt, allPrompts);
       if (!promptData) return;
-      const allDecorations = getPromptDecorations(promptData, allPrompts);
-      const tag = { name: promptData.name, prompt, category: promptData.category || "" };
 
-      if (allDecorations.length > 0) {
-        // Push a sub-layer for this prompt's decorations (tag will be combined on completion)
-        tempCtx.setStack(prev => {
-          const stack = [...prev];
-          const last = stack[stack.length - 1];
-          stack.push({
-            type: 'tag' as const,
-            matchFn: (p: PromptData, cat: string) => {
-              if (p.prompt === prompt) return false;
-              const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
-              const cd = allPrompts[cat] || {};
-              const ct = (cd.tags as string[]) || [];
-              return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
-            },
-            basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
-            tagGroups: [], level: (last.level || 1) + 1,
-          });
-          return stack;
-        });
-        return;
-      }
-
-      // No decorations: just toggle the decoration tag
+      // Toggle the tag (no decoration sub-context)
       tempCtx.setStack(prev => {
         const stack = [...prev];
         const lastIdx = stack.length - 1;
@@ -1484,22 +1456,6 @@ export function AppShell() {
 
     const promptData = findPromptData(prompt, allPrompts);
     if (!promptData) return;
-    const allDecorations = getPromptDecorations(promptData, allPrompts);
-    if (allDecorations.length > 0) {
-      tempCtx.setStack(prev => [...prev, {
-        type: 'tag' as const,
-        matchFn: (p: PromptData, cat: string) => {
-          if (p.prompt === prompt) return false;
-          const pTags = (Array.isArray(p.tags) ? p.tags : []) as string[];
-          const cd = allPrompts[cat] || {};
-          const ct = (cd.tags as string[]) || [];
-          return pTags.some((t: string) => allDecorations.includes(t)) || ct.some((t: string) => allDecorations.includes(t));
-        },
-        basePrompt: prompt, title: `选择 "${promptData.name}" 的修饰词`,
-        tagGroups: [], level: 1,
-      }]);
-      return;
-    }
 
     setSelectedTags(prev => {
       const idx = prev.findIndex(g => g.tags[g.tags.length - 1]?.prompt === prompt);
@@ -2648,7 +2604,7 @@ export function AppShell() {
     if (modalVideoFile) { const fn = await getUploadedVideoFilename(); videoData = fn || ''; } else if (!modalVideoUrl) { videoData = null; }
     try {
       const result = await categoryGroup.update(oldName, newName, {
-        tags: modalTags, decorations: modalDecorations, image: imageData, video: videoData
+        tags: modalTags, image: imageData, video: videoData
       });
       if (result.success) {
         if (imageData || videoData) setImgVersion(v => v + 1);
@@ -2658,7 +2614,7 @@ export function AppShell() {
         setAllPrompts((prev: AllPrompts) => {
           const catData = prev[oldName];
           if (!catData) return prev;
-          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: result.bg_image !== undefined ? result.bg_image : (catData as CategoryData).bg_image, bg_video: videoData !== null ? videoData : (catData as CategoryData).bg_video };
+          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, bg_image: result.bg_image !== undefined ? result.bg_image : (catData as CategoryData).bg_image, bg_video: videoData !== null ? videoData : (catData as CategoryData).bg_video };
           if (newName !== oldName) {
             const next: AllPrompts = {};
             for (const k of Object.keys(prev)) {
@@ -2684,13 +2640,13 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); alert('Failed to update category'); }
-  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllPrompts, setCategoryDisplayModes, setCategorySizeModes]);
+  }, [closeModal, modalOldName, modalName, modalTags, modalImageFile, modalVideoFile, modalVideoFilename, modalVideoUrl, getUploadedVideoFilename, saveModalFocus, saveModalVideoVolume, saveModalClarityPoints, setAllPrompts, setCategoryDisplayModes, setCategorySizeModes]);
 
   const removeCategoryBg = useCallback(async () => {
     const oldName = modalOldName;
     const newName = modalName.trim() || oldName;
     try {
-      const result = await categoryGroup.update(oldName, newName, { tags: modalTags, decorations: modalDecorations, image: '', video: '' });
+      const result = await categoryGroup.update(oldName, newName, { tags: modalTags, image: '', video: '' });
       if (result.success) {
         setImgVersion(v => v + 1);
         removeModalFocus(newName, true);
@@ -2699,7 +2655,7 @@ export function AppShell() {
         setAllPrompts((prev: AllPrompts) => {
           const catData = prev[oldName];
           if (!catData) return prev;
-          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, decorations: modalDecorations, bg_image: '', bg_video: '' };
+          const updated: CategoryData = { ...(catData as CategoryData), tags: modalTags, bg_image: '', bg_video: '' };
           if (newName !== oldName) {
             const next: AllPrompts = {};
             for (const k of Object.keys(prev)) {
@@ -2713,7 +2669,7 @@ export function AppShell() {
         closeModal();
       }
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, modalTags, modalDecorations, removeModalFocus, removeModalVideoVolume, removeModalClarityPoints, setAllPrompts]);
+  }, [closeModal, modalOldName, modalName, modalTags, removeModalFocus, removeModalVideoVolume, removeModalClarityPoints, setAllPrompts]);
 
   // ========== Update Library ==========
   const updateLibrary = useCallback(async () => {
@@ -2866,7 +2822,7 @@ export function AppShell() {
     let imageData = '';
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
     try {
-      const res = await fetch('/update_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name, prompt:pt, tags:modalTags, decorations:modalDecorations, mute_decorations:modalMuteDecorations, category:modalCategory, image:imageData}) });
+      const res = await fetch('/update_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name, prompt:pt, tags:modalTags, category:modalCategory, image:imageData}) });
       const result = await res.json();
       if (imageData) setImgVersion(v => v + 1);
       saveModalFocus(id, false);
@@ -2874,7 +2830,7 @@ export function AppShell() {
         const next: AllPrompts = {};
         for (const [cat, catData] of Object.entries(prev)) {
           const prompts = ((catData as CategoryData).prompts || []).map((p: PromptData) =>
-            p.id === id ? { ...p, name, prompt: pt, tags: modalTags as any, decorations: modalDecorations as any, mute_decorations: modalMuteDecorations, preview: result.preview || p.preview } : p,
+            p.id === id ? { ...p, name, prompt: pt, tags: modalTags as any, preview: result.preview || p.preview } : p,
           );
           next[cat] = { ...(catData as CategoryData), prompts };
         }
@@ -2882,7 +2838,7 @@ export function AppShell() {
       });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalDecorations, modalMuteDecorations, modalCategory, modalImageFile, saveModalFocus, setAllPrompts]);
+  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalCategory, modalImageFile, saveModalFocus, setAllPrompts]);
 
   // Helper to build current lora payload for prefab storage
   const buildPrefabLoras = useCallback(() => {
@@ -4238,7 +4194,6 @@ export function AppShell() {
             <div className="categories-container prompt-section" id="categories">
               {categories.map(([cat, catData]) => {
                 const cp = catData.prompts as PromptData[] || [];
-                const catDeco = (catData.decorations as string[]) || [];
                 const catTags = (catData.tags as string[]) || [];
                 const expanded = expandedCategories.has(cat);
                 const anim = animating.has(cat);
@@ -4256,7 +4211,6 @@ export function AppShell() {
                   if (filtered.length === 0) return null;
                 } else if (needsFilter) {
                   const catDataObj = allPrompts[cat] as any;
-                  const catDecos: string[] = catDataObj ? (Array.isArray(catDataObj.decorations) ? catDataObj.decorations : typeof catDataObj.decorations === 'string' ? catDataObj.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
                   const catTgs: string[] = catDataObj ? (Array.isArray(catDataObj.tags) ? catDataObj.tags : typeof catDataObj.tags === 'string' ? catDataObj.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
                   filtered = cp.filter(p => {
                     if (searchQuery) {
@@ -4264,9 +4218,8 @@ export function AppShell() {
                       if (!p.name.toLowerCase().includes(searchQuery) && !p.prompt.toLowerCase().includes(searchQuery) && !tm) return false;
                     }
                     if (selectedFilter) {
-                      const pDecos: string[] = Array.isArray(p.decorations) ? p.decorations : typeof p.decorations === 'string' ? p.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
                       const pTgs: string[] = Array.isArray(p.tags) ? p.tags : typeof p.tags === 'string' ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
-                      const allCandidates = pDecos.concat(catDecos, pTgs, catTgs);
+                      const allCandidates = pTgs.concat(catTgs);
                       if (!allCandidates.some(x => x.toLowerCase() === selectedFilter.toLowerCase())) return false;
                     }
                     return true;
@@ -4307,11 +4260,11 @@ export function AppShell() {
                           <span style={{ textShadow:'0px 0px 4px black' }}>{cat}</span>
                         </div>
                         <div style={{ display:'flex', alignItems:'center' }}>
-                          {(catTags.length > 0 || catDeco.length > 0) && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}{catDeco.map(d => <span className="decoration-tag" key={d}>{d}</span>)}</div>}
+                          {catTags.length > 0 && <div className="decoration-tags">{catTags.map(t => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
                           {selCount > 0 && <span className="count-badge">{selCount}<button className="count-badge-clear" onClick={e => { e.stopPropagation(); clearCategoryTags(cat); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></span>}
                           {parsedCount > 0 && <span className="count-badge parsed-count-badge">{parsedCount}<button className="count-badge-clear" onClick={e => { e.stopPropagation(); clearParsedCategoryTags(cat); }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></span>}
                           <button className="display-mode-btn" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(cat); setModalMode(categoryDisplay.getMode(cat, categoryDisplayModes, allLibraries)); setModalSize(categoryDisplay.getSize(cat, categorySizeModes, allLibraries)); setModalIsCat(true); setModal({type:'displayMode',data:{name:cat,isCat:true}}); }}>{iconGrid}</button>
-                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); setModalDecorations(Array.isArray(cd.decorations)?[...cd.decorations]:[]); const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[cat] ?? 0); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
+                          <button className="edit-category-btn" onClick={e => { e.stopPropagation(); resetModalForm(); const cd = allPrompts[cat]||{} as any; setModalOldName(cat); setModalName(cat); setModalTags(Array.isArray(cd.tags)?[...cd.tags]:[]); const bg = cd.bg_image||''; const bgVid = cd.bg_video||''; if(bgVid) { setModalVideoUrl(imgUrl(bgVid)); setModalPreviewVisible(true); setModalFileName(bgVid); setModalVideoVolume(videoVolumes[cat] ?? 0); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } else if(bg) { setModalPreviewUrl(imgUrl(bg)); setModalPreviewVisible(true); setModalFileName(bg); setModalClarityPoints(clarityPoints[cat] ? [...clarityPoints[cat]] : []); const pt = categoryFocusPoints[cat]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editCategory',data:{name:cat}}); }}>{iconGear}</button>
                           <button className="delete-category-btn" onClick={e => { e.stopPropagation(); deleteCategoryDirect(cat); }}>{iconTrash}</button>
                           <span className="toggle">{expanded ? iconChevronUp : iconChevronDown}</span>
                         </div>
@@ -4320,9 +4273,7 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {filtered.map(p => {
-                          const pDeco = Array.isArray(p.decorations) ? p.decorations : [];
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-                          const uDeco = pDeco.filter((d: string) => !catDeco.includes(d));
                           const sel = isTemporary ? isPromptSelectedInTempCtx(p.prompt) : isTagSelected(p.prompt);
                           const group = !isTemporary ? getTagGroupForPrompt(p.prompt) : undefined;
                           const fp = focusPoints[p.id];
@@ -4332,7 +4283,7 @@ export function AppShell() {
                             <div key={p.id} className="prompt-item-wrapper">
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
-                                {(pTags.length > 0 || uDeco.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{uDeco.map((d: string) => <span className="decoration-tag" key={d}>{d}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
+                                {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
@@ -4344,7 +4295,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconGear}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -4419,11 +4370,9 @@ export function AppShell() {
                     }
                     if (selectedFilter) {
                       const catDataObj = allPrompts[p.category] as any;
-                      const catDecos: string[] = catDataObj ? (Array.isArray(catDataObj.decorations) ? catDataObj.decorations : typeof catDataObj.decorations === 'string' ? catDataObj.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
                       const catTgs: string[] = catDataObj ? (Array.isArray(catDataObj.tags) ? catDataObj.tags : typeof catDataObj.tags === 'string' ? catDataObj.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
-                      const pDecos: string[] = Array.isArray(p.decorations) ? p.decorations : typeof p.decorations === 'string' ? p.decorations.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
                       const pTgs: string[] = Array.isArray(p.tags) ? p.tags : typeof p.tags === 'string' ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : [];
-                      const allCandidates = pDecos.concat(catDecos, pTgs, catTgs);
+                      const allCandidates = pTgs.concat(catTgs);
                       if (!allCandidates.some(x => x.toLowerCase() === selectedFilter.toLowerCase())) return false;
                     }
                     return true;
@@ -4485,7 +4434,7 @@ export function AppShell() {
                             <div key={p.id} className="prompt-item-wrapper">
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
-                                {(pTags.length > 0 || (Array.isArray(p.mute_decorations) && p.mute_decorations.length > 0)) && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}{Array.isArray(p.mute_decorations) && p.mute_decorations.map((d: string) => <span className="decoration-tag muted" key={d}>{d}</span>)}</div>}
+                                {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
@@ -4497,7 +4446,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalDecorations(Array.isArray(p.decorations)?[...p.decorations]:[]); setModalMuteDecorations(Array.isArray(p.mute_decorations)?[...p.mute_decorations]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconGear}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -5377,8 +5326,6 @@ export function AppShell() {
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
-            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
-            <TagInput label="Mute Decorations" tags={modalMuteDecorations} setTags={setModalMuteDecorations} />
             <input type="text" placeholder="Category (default: 杂项)" value={modalCategory} onChange={e => setModalCategory(e.target.value)} />
              <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
              <div className="modal-buttons">
@@ -5388,12 +5335,12 @@ export function AppShell() {
                  if(!name||!pt){alert('Please enter name and prompt text');return;}
                  let imageData = '';
                  if(modalImageFile){const r=new FileReader();imageData=await new Promise(resolve=>{r.onload=e=>resolve(e.target?.result as string);r.readAsDataURL(modalImageFile!);});}
-                 const res = await fetch('/add_prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:modalCategory||'杂项',name,prompt:pt,tags:modalTags,decorations:modalDecorations,mute_decorations:modalMuteDecorations,image:imageData})});
+                 const res = await fetch('/add_prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:modalCategory||'杂项',name,prompt:pt,tags:modalTags,image:imageData})});
                  if (!res.ok) return;
                  const result = await res.json();
                  if (imageData) setImgVersion(v => v + 1);
                  const cat = modalCategory || '杂项';
-                 const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: pt, preview: result.preview || '', tags: modalTags as any, decorations: modalDecorations as any, mute_decorations: modalMuteDecorations };
+                 const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: pt, preview: result.preview || '', tags: modalTags as any };
                  setAllPrompts((prev: AllPrompts) => {
                    const catData = prev[cat];
                    return { ...prev, [cat]: { ...(catData as CategoryData || {}), prompts: [...((catData as CategoryData)?.prompts || []), newPrompt] } };
@@ -5410,8 +5357,6 @@ export function AppShell() {
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
-            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
-            <TagInput label="Mute Decorations" tags={modalMuteDecorations} setTags={setModalMuteDecorations} />
             <select value={modalCategory} onChange={e => setModalCategory(e.target.value)}>
               <option value="">Keep current category</option>
               {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
@@ -5760,7 +5705,6 @@ export function AppShell() {
             <h2>Edit Category</h2>
             <input type="text" placeholder="Category name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
-            <TagInput label="Decorations" tags={modalDecorations} setTags={setModalDecorations} />
             <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>

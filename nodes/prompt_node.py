@@ -300,40 +300,27 @@ class SnapshotPromptServer:
                 migrated[category] = {
                     "bg_image": "",
                     "tags": [],
-                    "decorations": [],
                     "prompts": value
                 }
             else:
                 # New format
                 migrated[category] = value
-                # Migrate category without tags/decorations field
+                # Migrate category without tags field
                 if "tags" not in value:
                     value["tags"] = []
                 elif isinstance(value["tags"], str):
                     value["tags"] = [t.strip() for t in value["tags"].split(",") if t.strip()]
-                if "decorations" not in value:
-                    value["decorations"] = []
-                elif isinstance(value["decorations"], str):
-                    value["decorations"] = [t.strip() for t in value["decorations"].split(",") if t.strip()]
                 if "display_mode" not in value:
                     value["display_mode"] = "horizontal"
                 if "size_mode" not in value:
                     value["size_mode"] = "normal"
-                # Migrate prompts without tags/decorations field or with string tags
+                # Migrate prompts without tags field or with string tags
                 if "prompts" in value:
                     for p in value["prompts"]:
                         if "tags" not in p:
                             p["tags"] = []
                         elif isinstance(p["tags"], str):
                             p["tags"] = [t.strip() for t in p["tags"].split(",") if t.strip()]
-                        if "decorations" not in p:
-                            p["decorations"] = []
-                        elif isinstance(p["decorations"], str):
-                            p["decorations"] = [t.strip() for t in p["decorations"].split(",") if t.strip()]
-                        if "mute_decorations" not in p:
-                            p["mute_decorations"] = []
-                        elif isinstance(p["mute_decorations"], str):
-                            p["mute_decorations"] = [t.strip() for t in p["mute_decorations"].split(",") if t.strip()]
         return migrated
 
     def _migrate_display_modes(self):
@@ -1144,19 +1131,12 @@ class SnapshotPromptServer:
                             self.server_instance.prompts_data[category] = {
                                 "bg_image": "",
                                 "tags": [],
-                                "decorations": [],
                                 "prompts": []
                             }
 
                         tags = data.get('tags', [])
                         if isinstance(tags, str):
                             tags = [t.strip() for t in tags.split(",") if t.strip()]
-                        decorations = data.get('decorations', [])
-                        if isinstance(decorations, str):
-                            decorations = [t.strip() for t in decorations.split(",") if t.strip()]
-                        mute_decorations = data.get('mute_decorations', [])
-                        if isinstance(mute_decorations, str):
-                            mute_decorations = [t.strip() for t in mute_decorations.split(",") if t.strip()]
 
                         self.server_instance.prompts_data[category]["prompts"].append({
                             'id': prompt_id,
@@ -1164,8 +1144,6 @@ class SnapshotPromptServer:
                             'prompt': prompt_text,
                             'preview': preview,
                             'tags': tags,
-                            'decorations': decorations,
-                            'mute_decorations': mute_decorations
                         })
                         self.server_instance._save_prompts(self.server_instance.prompts_data)
 
@@ -1204,19 +1182,12 @@ class SnapshotPromptServer:
                                 tags = data.get('tags', p.get('tags', []))
                                 if isinstance(tags, str):
                                     tags = [t.strip() for t in tags.split(",") if t.strip()]
-                                decorations = data.get('decorations', p.get('decorations', []))
-                                if isinstance(decorations, str):
-                                    decorations = [t.strip() for t in decorations.split(",") if t.strip()]
-                                mute_decorations = data.get('mute_decorations', p.get('mute_decorations', []))
-                                if isinstance(mute_decorations, str):
-                                    mute_decorations = [t.strip() for t in mute_decorations.split(",") if t.strip()]
 
                                 if new_category_final != cat_name:
                                     if new_category_final not in self.server_instance.prompts_data:
                                         self.server_instance.prompts_data[new_category_final] = {
                                             "bg_image": "",
                                             "tags": [],
-                                            "decorations": [],
                                             "prompts": []
                                         }
                                     
@@ -1226,8 +1197,6 @@ class SnapshotPromptServer:
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
-                                        'decorations': decorations,
-                                        'mute_decorations': mute_decorations
                                     })
                                     prompts.pop(i)
                                     if not prompts:
@@ -1239,8 +1208,6 @@ class SnapshotPromptServer:
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
-                                        'decorations': decorations,
-                                        'mute_decorations': mute_decorations
                                     }
                                 
                                 found = True
@@ -1725,7 +1692,6 @@ class SnapshotPromptServer:
                             self.server_instance.prompts_data[category_name] = {
                                 "bg_image": "",
                                 "tags": [],
-                                "decorations": [],
                                 "display_mode": "horizontal",
                                 "size_mode": "normal",
                                 "prompts": []
@@ -1751,7 +1717,6 @@ class SnapshotPromptServer:
                     image_data = data.get('image')
                     video_data = data.get('video')
                     tags = data.get('tags')
-                    decorations = data.get('decorations')
                     
                     if old_name and new_name and old_name in self.server_instance.prompts_data:
                         # 获取当前数据
@@ -1776,12 +1741,6 @@ class SnapshotPromptServer:
                             if isinstance(tags, str):
                                 tags = [t.strip() for t in tags.split(",") if t.strip()]
                             cat_data["tags"] = tags
-                        
-                        # 处理 decorations
-                        if decorations is not None:
-                            if isinstance(decorations, str):
-                                decorations = [t.strip() for t in decorations.split(",") if t.strip()]
-                            cat_data["decorations"] = decorations
                         
                         # 如果名称改变，需要迁移数据
                         if old_name != new_name:
@@ -2888,17 +2847,13 @@ class SnapshotPromptNode:
         prompt_index_lower = {}
         # tag_name -> set of lowercase prompt texts that have this tag
         tag_to_prompt_texts = {}
-        # lowercase_prompt_text -> set of lowercase decoration TAG names
-        deco_tag_sets = {}
 
         for cat_name, cat_data in prompts_data.items():
             prompts = []
             if isinstance(cat_data, dict):
-                cat_deco_tags = [d.lower() for d in _ensure_list(cat_data.get('decorations', []))]
                 cat_tags = [t.lower() for t in _ensure_list(cat_data.get('tags', []))]
                 prompts = cat_data.get('prompts', []) or []
             elif isinstance(cat_data, list):
-                cat_deco_tags = []
                 cat_tags = []
                 prompts = cat_data
             else:
@@ -2920,29 +2875,15 @@ class SnapshotPromptNode:
                         tag_to_prompt_texts[t] = set()
                     tag_to_prompt_texts[t].add(key)
 
-                # Collect decoration tag names (lowercase key)
-                if key not in deco_tag_sets:
-                    p_deco_tags = [d.lower() for d in _ensure_list(p.get('decorations', []))] + cat_deco_tags
-                    p_mute_tags = [d.lower() for d in _ensure_list(p.get('mute_decorations', []))]
-                    deco_tag_sets[key] = set(p_deco_tags + p_mute_tags)
-
         if not prompt_index_lower:
             return [], raw_text
 
-        def _resolve_tags(tag_set):
-            """Resolve a set of decoration tags to all lowercase prompt texts that have those tags."""
-            resolved = set()
-            for tag in tag_set:
-                if tag in tag_to_prompt_texts:
-                    resolved |= tag_to_prompt_texts[tag]
-            return resolved
+        # All prompt keys are valid decoration candidates
+        all_prompt_keys = set(prompt_index_lower.keys())
 
         # ------------------------------------------------------------------
         # Parse a comma-segment into decorators + base_prompt.
-        # Matching chain:
-        #   base prompt → its decoration tags → resolve → level1 candidates
-        #   level1 prompt → its decoration tags → resolve → level2 candidates
-        #   etc.
+        # All prompts are valid decoration candidates.
         # ------------------------------------------------------------------
 
         def _find_all_base_prompts(words):
@@ -2957,14 +2898,14 @@ class SnapshotPromptNode:
                     print(f"  [PARSE] candidate base='{prompt_index_lower[key]}' before={words[:start]}")
             return bases
 
-        def _match_decoration_level(remaining_words, deco_set, level):
+        def _match_decoration_level(remaining_words, level):
             """Try to match the LONGEST suffix of remaining_words as a decoration.
-            If not found, drop the leftmost word and retry.
+            All prompts are valid decorations.
             Return (matched_text, remaining_words_before) or None."""
-            print(f"  [DECO] level={level} trying remaining={remaining_words} deco_set_size={len(deco_set)}")
+            print(f"  [DECO] level={level} trying remaining={remaining_words}")
             for start in range(len(remaining_words)):
                 candidate = ' '.join(remaining_words[start:])
-                if candidate.lower() in deco_set:
+                if candidate.lower() in all_prompt_keys:
                     print(f"  [DECO] level={level} matched='{candidate}' remaining_after={remaining_words[:start]}")
                     return candidate, remaining_words[:start]
             print(f"  [DECO] level={level} no match found")
@@ -2972,29 +2913,22 @@ class SnapshotPromptNode:
 
         def _try_decompose(words, strength=None):
             """Given a list of words (segment), try to decompose into
-            decorations + base_prompt following the chain matching rule.
+            decorations + base_prompt. All prompts are valid decorations.
             Return the bracket string or None."""
             base_candidates = _find_all_base_prompts(words)
             for base_prompt, words_before in base_candidates:
                 print(f"  [TRY] base='{base_prompt}' before={words_before}")
-                # Chain-match decorations level by level
                 remaining = list(words_before)
-                base_key = base_prompt.lower()
                 decoration_levels = []
                 level = 1
                 ok = True
-                current_deco_tags = deco_tag_sets.get(base_key, set())
                 while remaining:
-                    deco_set = _resolve_tags(current_deco_tags)
-                    print(f"  [CHAIN] level={level} current_tags={sorted(current_deco_tags)} deco_count={len(deco_set)}")
-                    result = _match_decoration_level(remaining, deco_set, level)
+                    result = _match_decoration_level(remaining, level)
                     if result is None:
                         ok = False
                         break
                     matched_text, remaining = result
                     decoration_levels.append((level, matched_text))
-                    # Next level: use the matched prompt's decoration tags
-                    current_deco_tags = deco_tag_sets.get(matched_text.lower(), set())
                     level += 1
 
                 if ok:
