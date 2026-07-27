@@ -444,7 +444,7 @@ class SnapshotPromptServer:
                 civitai = meta.get('civitai', {}) or {}
                 trained_words = civitai.get('trainedWords', []) if isinstance(civitai, dict) else []
                 item = {
-                    'name': meta.get('name', base_name),
+                    'name': meta.get('model_name') or meta.get('name') or base_name,
                     'file_name': base_name,
                     'file_path': file_path,
                     'preview_url': meta.get('preview_url', ''),

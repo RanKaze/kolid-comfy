@@ -5042,6 +5042,12 @@ export function AppShell() {
                             }));
                           }}
                           onRemove={() => removeTag(i)}
+                          onToggleSource={() => {
+                            setSelectedTags(prev => prev.map((g, idx) => {
+                              if (idx !== i) return g;
+                              return { ...g, source: g.source === 'parsing' ? 'normal' : 'parsing' };
+                            }));
+                          }}
                         />
                       );
                     })}
@@ -6439,6 +6445,7 @@ function TagStrengthEditor({
   onReorder,
   onStrengthChange,
   onRemove,
+  onToggleSource,
 }: {
   displayName: string;
   strength: number;
@@ -6450,6 +6457,7 @@ function TagStrengthEditor({
   onReorder: (toIdx: number) => void;
   onStrengthChange: (v: number) => void;
   onRemove: () => void;
+  onToggleSource: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [tempValue, setTempValue] = useState(String(strength));
@@ -6489,7 +6497,14 @@ function TagStrengthEditor({
     <span
       ref={spanRef}
       className={`tag tag-with-strength${showStrength ? ' has-strength' : ''}${fromParsing ? ' parsed-tag' : ''}${programFiltered ? ' program-filtered' : ''}${sourceProgram ? ' source-program' : ''}${dragOver ? ' drag-over' : ''}`}
-      onClick={editing ? undefined : startEdit}
+      onClick={editing ? undefined : (e) => {
+        if (e.altKey) {
+          e.stopPropagation();
+          onToggleSource();
+        } else {
+          startEdit();
+        }
+      }}
       draggable={!editing}
       onDragStart={(e) => {
         e.dataTransfer.setData('text/plain', String(dragIndex));
