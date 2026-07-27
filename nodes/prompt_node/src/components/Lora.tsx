@@ -133,6 +133,14 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sync strength when initialStrength changes (e.g. slider config default_value updated)
+  useEffect(() => {
+    if (initialStrength !== undefined) {
+      setStrength(initialStrength);
+      setInputDisplay(initialStrength.toFixed(2));
+    }
+  }, [initialStrength]);
+
   const notifyParent = (
     sMode: boolean,
     sActive: Set<number>,
@@ -156,6 +164,41 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
   const strMax = sliderEnabled ? sliderConfig!.max : 2;
   const strStep = sliderEnabled ? sliderConfig!.step : 0.1;
   const sliderReverse = sliderEnabled ? sliderConfig!.reverse === true : false;
+
+  // Compute bubble label from marks: shows single label near a mark, or "low~high" between two marks
+  const sliderBubble = useMemo(() => {
+    if (!sliderConfig?.enabled || !sliderConfig?.marks || sliderConfig.marks.length === 0) return null;
+    const marks = sliderConfig.marks
+      .filter(m => m.value >= sliderConfig.min && m.value <= sliderConfig.max)
+      .sort((a, b) => a.value - b.value);
+    if (marks.length === 0) return null;
+    const range = sliderConfig.max - sliderConfig.min;
+    if (range === 0) return null;
+    const tolerance = range * 0.05;
+
+    let label = '';
+    for (const m of marks) {
+      if (Math.abs(strength - m.value) <= tolerance) { label = m.label; break; }
+    }
+    if (!label) {
+      if (strength < marks[0].value) {
+        label = marks[0].label;
+      } else if (strength > marks[marks.length - 1].value) {
+        label = marks[marks.length - 1].label;
+      } else {
+        for (let i = 0; i < marks.length - 1; i++) {
+          if (strength >= marks[i].value && strength <= marks[i + 1].value) {
+            label = `${marks[i].label}~${marks[i + 1].label}`;
+            break;
+          }
+        }
+      }
+    }
+    if (!label) return null;
+    const pct = ((strength - sliderConfig.min) / range) * 100;
+    const pos = sliderConfig.reverse ? 100 - pct : pct;
+    return { label, pos };
+  }, [strength, sliderConfig]);
 
   const handleStrengthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInputDisplay(e.target.value);
@@ -287,6 +330,11 @@ export function Lora({ lora, initialActiveTags, initialStrength, initialActive, 
         <div className="lora-card-slider-row" onMouseDown={e => e.stopPropagation()}>
           {sliderConfig!.min_name && <span className="lora-slider-label">{sliderConfig!.reverse ? sliderConfig!.max_name : sliderConfig!.min_name}</span>}
           <div className="lora-card-slider-wrap">
+            {sliderBubble && (
+              <div className="lora-slider-bubble" style={{ left: `${sliderBubble.pos}%` }}>
+                {sliderBubble.label}
+              </div>
+            )}
             <input
               className="lora-card-slider"
               type="range"

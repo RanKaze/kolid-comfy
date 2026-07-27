@@ -721,10 +721,11 @@ class SnapshotDetailerSamplerNode:
             custom = prompt_server.custom_prompts
             parts = []
             for p in selected:
-                if p.startswith('<') and p.endswith('>'):
-                    parts.append(p[1:-1])
+                text = p['text'] if isinstance(p, dict) else p
+                if text.startswith('<') and text.endswith('>'):
+                    parts.append(text[1:-1])
                 else:
-                    parts.append(p)
+                    parts.append(text)
             if custom:
                 parts.append(custom)
             user_positive = ','.join(parts)
@@ -1189,9 +1190,22 @@ class SnapshotDetailerSamplerNode:
                 print(f"[PHASE-TRACE] Loop {self._loop_count} START | _current_pipeline.mask id={id(pm)}, shape={pm.shape if pm is not None else None}, sum={pm.sum().item() if pm is not None else 'N/A'}")
 
                 if server.prompt_server:
-                    server.prompt_server.last_selected = server.prompt_server.selected_prompts[:]
-                    server.prompt_server.last_selected_loras = server.prompt_server.selected_loras[:]
-                    server.prompt_server.last_selected_prefabs = server.prompt_server.selected_prefabs[:]
+                    # Keep only normal-sourced prompts for next loop; discard parsing/program.
+                    # last_selected must be plain strings (frontend expects string[], not {text,source}[]).
+                    server.prompt_server.last_selected = [
+                        p['text'] if isinstance(p, dict) else p
+                        for p in server.prompt_server.selected_prompts
+                        if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') == 'normal'
+                    ]
+                    # For loras/prefabs, filter out program-sourced (matching prompt_node.py pattern)
+                    server.prompt_server.last_selected_loras = [
+                        l for l in server.prompt_server.selected_loras
+                        if l.get('source', 'normal') != 'program'
+                    ] if isinstance(server.prompt_server.selected_loras, list) else []
+                    server.prompt_server.last_selected_prefabs = [
+                        p for p in server.prompt_server.selected_prefabs
+                        if p.get('source', 'normal') != 'program'
+                    ] if isinstance(server.prompt_server.selected_prefabs, list) else []
                     server.prompt_server.selected_prompts = []
                     server.prompt_server.selected_loras = []
                     server.prompt_server.selected_prefabs = []

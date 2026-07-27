@@ -2068,7 +2068,7 @@ export function AppShell() {
     // Replace loras
     const prefabLoras = pf.loras || [];
     const newSelectedLoras: LoraItemData[] = [];
-    const newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }> = {};
+    const newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean; slider_config?: LoraSliderConfig }> = {};
     for (const pl of prefabLoras) {
       const path = pl.file_path || (pl as any).file_name;
       let item: LoraItemData | null = null;
@@ -2086,11 +2086,12 @@ export function AppShell() {
         strength: pl.strength ?? 1.0,
         active: pl.active ?? true,
         split_mode: pl.split_mode,
+        slider_config: pl.slider_config ?? loraSliderConfigs[path],
       };
     }
     setSelectedLoras(newSelectedLoras);
     setLoraSelections(newLoraSelections);
-  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, setSelectedLoras, setLoraSelections]);
+  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, loraSliderConfigs, setSelectedLoras, setLoraSelections]);
 
   // ========== Load From Image ==========
   const handleLoadFromImageClick = useCallback(() => {
@@ -2170,7 +2171,7 @@ export function AppShell() {
 
     // --- Parse lora data ---
     let newLoras: LoraItemData[] = [];
-    let newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }> = {};
+    let newLoraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean; slider_config?: LoraSliderConfig }> = {};
     try {
       const loraArr = JSON.parse(loaded.lora || '[]');
       const available = new Map<string, LoraItemData>();
@@ -2189,6 +2190,7 @@ export function AppShell() {
             strength: saved.strength ?? 1.0,
             active: saved.active ?? true,
             split_mode: saved.split_mode,
+            slider_config: saved.slider_config ?? loraSliderConfigs[item.file_path],
           };
         } else {
           const derivedName = lookupKey.includes('/') ? lookupKey.split('/').pop()! : lookupKey;
@@ -2206,6 +2208,7 @@ export function AppShell() {
             strength: saved.strength ?? 1.0,
             active: saved.active ?? true,
             split_mode: saved.split_mode,
+            slider_config: saved.slider_config ?? loraSliderConfigs[lookupKey],
           };
         }
       }
@@ -2292,7 +2295,7 @@ export function AppShell() {
           const derivedName = lookupKey.includes('/') ? lookupKey.split('/').pop()! : lookupKey;
           newLoras.push({ name: saved.name || derivedName, file_name: derivedName, file_path: lookupKey, preview_url: '', tags: saved.active_tags || [], metadata: { missing: true }, source: flSource as any });
         }
-        newLoraSelections[lookupKey] = { activeTags: saved.active_tags || [], strength: saved.strength ?? 1.0, active: saved.active ?? true, split_mode: saved.split_mode };
+        newLoraSelections[lookupKey] = { activeTags: saved.active_tags || [], strength: saved.strength ?? 1.0, active: saved.active ?? true, split_mode: saved.split_mode, slider_config: saved.slider_config ?? loraSliderConfigs[lookupKey] };
       }
     } catch {}
 
@@ -2351,7 +2354,7 @@ export function AppShell() {
         return [...prev, ...toAdd];
       });
     }
-  }, [loadFromImageData, allPrompts, loraData, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs, setSelectedPrograms]);
+  }, [loadFromImageData, allPrompts, loraData, loraSliderConfigs, findPrefabByGuid, setSelectedTags, setCustomPrompts, setSelectedLoras, setLoraSelections, setSelectedPrefabs, setSelectedPrograms]);
 
   // ========== Tag From Image ==========
   const handleTagFromImageClick = useCallback(() => {
@@ -6199,7 +6202,8 @@ export function AppShell() {
               <button className="btn btn-primary" onClick={() => {
                 if (modalEditLoraFilePath) {
                   const parsedMarks = modalSliderMarks.filter(m => m.value !== '').map(m => ({ value: parseFloat(m.value) || 0, label: m.label }));
-                  const dv = parseFloat(modalSliderDefaultValue) || 1;
+                  const dvParsed = parseFloat(modalSliderDefaultValue);
+                  const dv = isNaN(dvParsed) ? 1 : dvParsed;
                   const newConfig = modalSliderEnabled
                     ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, default_value: dv, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse, marks: parsedMarks }
                     : { enabled: false, min: 0, max: 2, step: 0.1, default_value: dv, min_name: '', max_name: '', reverse: false, marks: [] };
@@ -6214,10 +6218,9 @@ export function AppShell() {
                   setLoraSelections(prev => {
                     const existing = prev[modalEditLoraFilePath];
                     if (!existing) return prev;
-                    let newStrength = existing.strength;
-                    if (newConfig.enabled) {
-                      newStrength = Math.max(newConfig.min, Math.min(newConfig.max, newStrength));
-                    }
+                    const newStrength = newConfig.enabled
+                      ? Math.max(newConfig.min, Math.min(newConfig.max, dv))
+                      : existing.strength;
                     return {
                       ...prev,
                       [modalEditLoraFilePath]: {
