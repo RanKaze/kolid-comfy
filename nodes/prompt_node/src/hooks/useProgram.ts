@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type {
   AllPrompts, AllPrograms, SelectedProgramItem, ProgramData,
-  TagGroup, LoraItemData, LoraSelectionData, SelectedPrefabItem, AllLibraries,
+  TagGroup, LoraItemData, LoraSelectionData, LoraSliderConfig, SelectedPrefabItem, AllLibraries,
 } from '../types';
 import { tagsToDisplayString, parseStringToTags } from './useSelection';
 
@@ -56,11 +56,11 @@ export function enrichTagGroups(selectedTags: TagGroup[], allTagsLookup: Record<
 /** Build LoraSelectionData[] from selected loras + their selection state. */
 export function buildLoraSelectionData(
   selectedLoras: LoraItemData[],
-  loraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean }>,
+  loraSelections: Record<string, { activeTags: string[]; strength: number; active: boolean; split_mode?: boolean; slider_config?: LoraSliderConfig }>,
 ): LoraSelectionData[] {
   return selectedLoras.map(l => {
     const sel = loraSelections[l.file_path];
-    return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+    return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
   });
 }
 

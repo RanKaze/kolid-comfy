@@ -3,7 +3,7 @@ import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
   PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem, SelectedProgramRef,
-  LoraItemData, LoraSelectionData, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
+  LoraItemData, LoraSelectionData, LoraSliderConfig, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
   PromptContextBase, RegionContext, RegionBox, BackgroundContext,
 } from '../types';
 import {
@@ -160,7 +160,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
-    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, parsedPrompts,
+    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
     hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
@@ -188,6 +188,7 @@ export function AppShell() {
     strength: number;
     active: boolean;
     split_mode?: boolean;
+    slider_config?: LoraSliderConfig;
   }
   const [selectedLoras, setSelectedLoras] = useState<LoraItemData[]>([]);
   const [loraSelections, setLoraSelections] = useState<Record<string, LoraSelectionState>>({});
@@ -235,7 +236,7 @@ export function AppShell() {
             strength: sel?.strength ?? 1.0,
             active_tags: sel?.activeTags ?? [],
             active: sel?.active ?? true,
-            split_mode: sel?.split_mode,
+            split_mode: sel?.split_mode, slider_config: sel?.slider_config,
           };
         });
         const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
@@ -495,7 +496,7 @@ export function AppShell() {
     const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
     const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
-      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
     });
     const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     const currentCtx: PromptContextBase = {
@@ -566,6 +567,7 @@ export function AppShell() {
           strength: saved.strength ?? 1.0,
           active: saved.active ?? true,
           split_mode: saved.split_mode,
+          slider_config: saved.slider_config ?? loraSliderConfigs[item.file_path],
         };
       } else {
         // Lora was saved but is not in current scan results (filtered by regex or removed)
@@ -584,6 +586,7 @@ export function AppShell() {
           strength: saved.strength ?? 1.0,
           active: saved.active ?? true,
           split_mode: saved.split_mode,
+          slider_config: saved.slider_config ?? loraSliderConfigs[lookupKey],
         };
       }
     }
@@ -724,7 +727,7 @@ export function AppShell() {
         strength: sel?.strength ?? 1.0,
         active_tags: sel?.activeTags ?? [],
         active: sel?.active ?? true,
-        split_mode: sel?.split_mode,
+        split_mode: sel?.split_mode, slider_config: sel?.slider_config,
       };
     });
     const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
@@ -747,7 +750,7 @@ export function AppShell() {
       const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
       const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
         const sel = loraSelections[l.file_path];
-        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+        return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
       });
       const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
       const ctx: PromptContextBase = {
@@ -760,7 +763,7 @@ export function AppShell() {
     const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
     const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
       const sel = loraSelections[l.file_path];
-      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+      return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
     });
     const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
     const ctx: PromptContextBase = {
@@ -905,6 +908,14 @@ export function AppShell() {
   const [modalTagGroupBuiltinDisplay, setModalTagGroupBuiltinDisplay] = useState<string[]>([]);
   const [modalCtxTab, setModalCtxTab] = useState<'prefab' | 'lora' | 'prompt'>('prefab');
   const [modalMultiProgram, setModalMultiProgram] = useState(false);
+  const [modalEditLoraFilePath, setModalEditLoraFilePath] = useState<string | null>(null);
+  const [modalSliderEnabled, setModalSliderEnabled] = useState(false);
+  const [modalSliderMin, setModalSliderMin] = useState('0');
+  const [modalSliderMax, setModalSliderMax] = useState('2');
+  const [modalSliderStep, setModalSliderStep] = useState('0.1');
+  const [modalSliderMinName, setModalSliderMinName] = useState('');
+  const [modalSliderMaxName, setModalSliderMaxName] = useState('');
+  const [modalSliderReverse, setModalSliderReverse] = useState(false);
   const [debugOutput, setDebugOutput] = useState<string | null>(null);
   const [debugErrorLine, setDebugErrorLine] = useState<number | null>(null);
 
@@ -1297,7 +1308,7 @@ export function AppShell() {
       })) : [];
       const loraContext = modalEnableLoraCtx ? shuffle([...loraLookup.entries()]).slice(0, randInt(2, 5)).map(([fp, item]) => {
         const sel = loraSelections[fp];
-        return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode };
+        return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
       }) : [];
       const tagContext = modalEnableTagCtx ? shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
         const tg = parseStringToTags(text, allPrompts);
@@ -1310,7 +1321,7 @@ export function AppShell() {
       }));
       const loraBuiltin = shuffle([...loraLookup.entries()]).slice(0, randInt(2, 5)).map(([fp, item]) => {
         const sel = loraSelections[fp];
-        return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode };
+        return { file_path: fp, name: item.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? item.tags ?? [], active: true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
       });
       const tagGroupBuiltin = shuffle(allPromptTexts).slice(0, randInt(2, 5)).map(({ text }) => {
         const tg = parseStringToTags(text, allPrompts);
@@ -1617,7 +1628,22 @@ export function AppShell() {
       }
       return [...prev, item];
     });
-  }, [tempCtx]);
+    // Initialize slider_config from loraSliderConfigs when adding
+    setLoraSelections(prev => {
+      if (prev[item.file_path]) return prev;
+      const sc = loraSliderConfigs[item.file_path];
+      if (!sc) return prev;
+      return {
+        ...prev,
+        [item.file_path]: {
+          activeTags: [],
+          strength: 1.0,
+          active: true,
+          slider_config: sc,
+        },
+      };
+    });
+  }, [tempCtx, loraSliderConfigs]);
 
   const removeLora = useCallback((filePath: string) => {
     setSelectedLoras(prev => prev.filter(l => l.file_path !== filePath));
@@ -2434,7 +2460,7 @@ export function AppShell() {
         const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));
         const lorasPayload: LoraSelectionData[] = selectedLoras.map(l => {
           const sel = loraSelections[l.file_path];
-          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
         });
         const prefabsPayload = selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
         const ctx: PromptContextBase = {
@@ -2457,7 +2483,7 @@ export function AppShell() {
             custom_prompts: customPrompts,
             loras: selectedLoras.map(l => {
               const sel = loraSelections[l.file_path];
-              return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+              return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
             }),
             prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
             label: activeSlotId,
@@ -2863,7 +2889,7 @@ export function AppShell() {
         strength: sel?.strength ?? 1.0,
         active_tags: sel?.activeTags ?? [],
         active: sel?.active ?? true,
-        split_mode: sel?.split_mode,
+        split_mode: sel?.split_mode, slider_config: sel?.slider_config,
       };
     });
   }, [selectedLoras, loraSelections]);
@@ -3976,7 +4002,7 @@ export function AppShell() {
                         custom_prompts: customPrompts,
                         loras: selectedLoras.map(l => {
                           const sel = loraSelections[l.file_path];
-                          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode };
+                          return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
                         }),
                         prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
                         label: slot.label,
@@ -4156,6 +4182,18 @@ export function AppShell() {
                       selectedLoras={selectedLoras}
                       onToggleLora={toggleLora}
                       isItemSelected={isLoraSelected}
+                      onEditLora={(item) => {
+                        setModalEditLoraFilePath(item.file_path);
+                        const sc = loraSliderConfigs[item.file_path];
+                        setModalSliderEnabled(sc?.enabled ?? false);
+                        setModalSliderMin(String(sc?.min ?? 0));
+                        setModalSliderMax(String(sc?.max ?? 2));
+                        setModalSliderStep(String(sc?.step ?? 0.1));
+                        setModalSliderMinName(sc?.min_name ?? '');
+                        setModalSliderMaxName(sc?.max_name ?? '');
+                        setModalSliderReverse(sc?.reverse ?? false);
+                        setModal({ type: 'editLora' });
+                      }}
                       bgImage={folderMeta.bg_image}
                       bgVideo={folderMeta.bg_video}
                       videoVolume={videoVolumes[folder] || 0}
@@ -4909,6 +4947,7 @@ export function AppShell() {
                             initialStrength={sel?.strength}
                             initialActive={sel?.active}
                             initialSplitMode={sel?.split_mode}
+                            sliderConfig={sel?.slider_config ?? loraSliderConfigs[lora.file_path]}
                             isMissing={lora.metadata?.missing === true}
                             isFiltered={isLoraFiltered(lora)}
                             isProgramFiltered={programResult.filter_loras.some(fl => fl.file_path === lora.file_path)}
@@ -6070,6 +6109,103 @@ export function AppShell() {
             })()}
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>{modalStack.length > 0 ? 'Back' : 'Close'}</button>
+            </div>
+          </div>
+        </div>
+      ) : modal?.type === 'editLora' ? (
+        <div className="modal visible" onMouseDown={closeModal}>
+          <div className="modal-content" style={{ maxWidth: 460 }} onMouseDown={e => e.stopPropagation()}>
+            <h2>Edit Lora</h2>
+            <div className="edit-modal-section">
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+                <span style={{ fontSize: 13, color: modalSliderEnabled ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>Slider</span>
+                <div onClick={() => setModalSliderEnabled(!modalSliderEnabled)} style={{
+                  width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                  background: modalSliderEnabled ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                }}>
+                  <div style={{
+                    position: 'absolute', top: 2, left: modalSliderEnabled ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                  }} />
+                </div>
+              </label>
+            </div>
+            {modalSliderEnabled && (
+              <>
+                <div className="edit-modal-section">
+                  <label>Min</label>
+                  <input type="number" step="0.01" value={modalSliderMin} onChange={e => setModalSliderMin(e.target.value)} />
+                </div>
+                <div className="edit-modal-section">
+                  <label>Max</label>
+                  <input type="number" step="0.01" value={modalSliderMax} onChange={e => setModalSliderMax(e.target.value)} />
+                </div>
+                <div className="edit-modal-section">
+                  <label>Step</label>
+                  <input type="number" step="0.01" value={modalSliderStep} onChange={e => setModalSliderStep(e.target.value)} />
+                </div>
+                <div className="edit-modal-section">
+                  <label>Min Name</label>
+                  <input type="text" placeholder="e.g. Weak" value={modalSliderMinName} onChange={e => setModalSliderMinName(e.target.value)} />
+                </div>
+                <div className="edit-modal-section">
+                  <label>Max Name</label>
+                  <input type="text" placeholder="e.g. Strong" value={modalSliderMaxName} onChange={e => setModalSliderMaxName(e.target.value)} />
+                </div>
+                <div className="edit-modal-section">
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+                    <span style={{ fontSize: 13, color: modalSliderReverse ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>Reverse</span>
+                    <div onClick={() => setModalSliderReverse(!modalSliderReverse)} style={{
+                      width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                      background: modalSliderReverse ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                    }}>
+                      <div style={{
+                        position: 'absolute', top: 2, left: modalSliderReverse ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                        background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                      }} />
+                    </div>
+                  </label>
+                </div>
+              </>
+            )}
+            <div className="modal-buttons">
+              <button className="btn btn-primary" onClick={() => {
+                if (modalEditLoraFilePath) {
+                  const newConfig = modalSliderEnabled
+                    ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse }
+                    : undefined;
+                  const updatedConfigs = { ...loraSliderConfigs };
+                  if (newConfig) {
+                    updatedConfigs[modalEditLoraFilePath] = newConfig;
+                  } else {
+                    delete updatedConfigs[modalEditLoraFilePath];
+                  }
+                  setLoraSliderConfigs(updatedConfigs);
+                  fetch('/update_lora_slider_configs', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ configs: updatedConfigs }),
+                  });
+                  setLoraSelections(prev => {
+                    const existing = prev[modalEditLoraFilePath];
+                    if (!existing) return prev;
+                    let newStrength = existing.strength;
+                    if (newConfig) {
+                      newStrength = Math.max(newConfig.min, Math.min(newConfig.max, newStrength));
+                    }
+                    return {
+                      ...prev,
+                      [modalEditLoraFilePath]: {
+                        ...existing,
+                        strength: newStrength,
+                        slider_config: newConfig,
+                      } as LoraSelectionState,
+                    };
+                  });
+                }
+                closeModal();
+              }}>Save</button>
+              <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
             </div>
           </div>
         </div>

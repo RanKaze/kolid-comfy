@@ -114,6 +114,7 @@ class SnapshotPromptServer:
         self.prompt_json = os.path.join(self.data_dir, "prompt.json")
         self.library_json = os.path.join(self.data_dir, "library.json")
         self.lora_folder_meta_json = os.path.join(self.data_dir, "lora_folder_meta.json")
+        self.lora_slider_configs_json = os.path.join(self.data_dir, "lora_slider_configs.json")
         self.programs_json = os.path.join(self.data_dir, "applications.json")
 
         self.prompts_data = self._load_prompts()
@@ -131,6 +132,7 @@ class SnapshotPromptServer:
         # Scan Lora metadata files (return all for display, but keep regex for output filtering)
         self.lora_data = self._scan_loras()
         self.lora_folder_meta = self._load_lora_folder_meta()
+        self.lora_slider_configs = self._load_lora_slider_configs()
         # Build a set of valid lora paths for output filtering (active_loras / lora_trigger_words)
         import re as _re
         compiled_re = _re.compile(self.lora_regex) if self.lora_regex else None
@@ -187,7 +189,8 @@ class SnapshotPromptServer:
         active_lora_parts = []
         for idx, lora_item in enumerate(all_loras):
             active = lora_item.get('active', True)
-            file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            raw_file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            file_path = self._resolve_lora_file_path(raw_file_path)
             strength = lora_item.get('strength', 1.0)
             print(f"[get_active_loras_string] [{idx}] file_path={file_path}, strength={strength}, active={active}")
             if not active:
@@ -363,11 +366,52 @@ class SnapshotPromptServer:
             except:
                 pass
 
+    def _compute_lora_fingerprint(self, meta, lora_file_path):
+        """Compute a stable fingerprint for a lora.
+        Try civitai.hashes first, fall back to lora file content hash.
+        """
+        import hashlib
+        # 1. Try civitai file hashes (most stable — file content hash, never changes)
+        try:
+            civitai = meta.get('civitai', {}) or {}
+            if isinstance(civitai, dict):
+                files = civitai.get('files', [])
+                if isinstance(files, list) and files:
+                    hashes = files[0].get('hashes', {}) or {}
+                    if isinstance(hashes, dict):
+                        # Prefer SHA256, then AutoV2, then AutoV1, then BLAKE3
+                        for hkey in ('SHA256', 'AutoV2', 'AutoV1', 'BLAKE3'):
+                            if hashes.get(hkey):
+                                return 'hash:' + str(hashes[hkey])
+        except Exception:
+            pass
+        # 2. Fall back to lora file content hash (first 1MB + file size)
+        try:
+            actual_path = lora_file_path
+            if not os.path.exists(actual_path):
+                # Try common extensions
+                for ext in ('.safetensors', '.ckpt', '.pt', '.pth', '.gguf', '.bin'):
+                    candidate = actual_path if actual_path.endswith(ext) else actual_path + ext
+                    if os.path.exists(candidate):
+                        actual_path = candidate
+                        break
+            if not os.path.exists(actual_path):
+                return None
+            file_size = os.path.getsize(actual_path)
+            h = hashlib.sha256()
+            h.update(str(file_size).encode('utf-8'))
+            with open(actual_path, 'rb') as f:
+                h.update(f.read(1024 * 1024))  # first 1MB
+            return 'file:' + h.hexdigest()[:16]
+        except Exception:
+            return None
+
     def _scan_loras(self, regex_pattern=""):
         """Scan F:\\ComfyDB\\models\\loras for *.metadata.json files."""
         import re
         lora_root = r"F:\ComfyDB\models\loras"
         folders = {}
+        self.lora_fingerprints = {}  # file_path -> fingerprint
         if not os.path.exists(lora_root):
             return folders
         compiled_re = re.compile(regex_pattern) if regex_pattern else None
@@ -393,6 +437,10 @@ class SnapshotPromptServer:
                 # apply regex filter on file_path
                 if compiled_re and not compiled_re.search(file_path):
                     continue
+                # Compute fingerprint
+                fingerprint = self._compute_lora_fingerprint(meta, file_path)
+                if fingerprint:
+                    self.lora_fingerprints[file_path] = fingerprint
                 civitai = meta.get('civitai', {}) or {}
                 trained_words = civitai.get('trainedWords', []) if isinstance(civitai, dict) else []
                 item = {
@@ -460,6 +508,122 @@ class SnapshotPromptServer:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except:
             pass
+
+    def _load_lora_slider_configs(self):
+        self._ensure_dirs()
+        if os.path.exists(self.lora_slider_configs_json):
+            try:
+                with open(self.lora_slider_configs_json, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+
+    def _save_lora_slider_configs(self, data):
+        self._ensure_dirs()
+        try:
+            with open(self.lora_slider_configs_json, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
+    def _get_lora_slider_configs_by_filepath(self):
+        """Return slider configs keyed by file_path, resolving via fingerprint."""
+        raw = self.lora_slider_configs  # keyed by fingerprint (or legacy file_path)
+        if not hasattr(self, 'lora_fingerprints'):
+            return raw
+        result = {}
+        # Build reverse map: fingerprint -> file_path
+        fp_to_path = {}
+        for fp, fingerprint in self.lora_fingerprints.items():
+            fp_to_path[fingerprint] = fp
+        for key, config in raw.items():
+            if key in fp_to_path:
+                # Key is a fingerprint, resolve to file_path
+                result[fp_to_path[key]] = config
+            elif key in self.lora_fingerprints:
+                # Key is a file_path that we know about, keep as-is
+                result[key] = config
+            else:
+                # Unknown key (maybe lora no longer exists), keep for potential future match
+                result[key] = config
+        return result
+
+    def _save_lora_slider_config_for_fp(self, file_path, config):
+        """Save a single lora slider config, keyed by fingerprint."""
+        fingerprints = getattr(self, 'lora_fingerprints', {})
+        fp = fingerprints.get(file_path, file_path)
+        if config:
+            self.lora_slider_configs[fp] = config
+        else:
+            self.lora_slider_configs.pop(fp, None)
+        self._save_lora_slider_configs(self.lora_slider_configs)
+
+    def _resolve_lora_file_path(self, fp_or_fingerprint):
+        """Resolve a file_path or fingerprint to current file_path."""
+        if not hasattr(self, 'lora_fingerprints') or not self.lora_fingerprints:
+            return fp_or_fingerprint
+        # If it's a known file_path, return as-is
+        if fp_or_fingerprint in self.lora_fingerprints:
+            return fp_or_fingerprint
+        # Try as fingerprint: build reverse map
+        for file_path, fingerprint in self.lora_fingerprints.items():
+            if fingerprint == fp_or_fingerprint:
+                return file_path
+        return fp_or_fingerprint
+
+    def _resolve_selected_loras_by_fingerprint(self, loras):
+        """Resolve saved lora selections by fingerprint.
+        Saved loras have file_path that may be stale (lora renamed/moved).
+        We keep a persistent fingerprint->file_path map so we can resolve.
+        """
+        if not hasattr(self, 'lora_fingerprints') or not self.lora_fingerprints:
+            return loras
+        # Build fingerprint -> current file_path from current scan
+        current_fp_map = {}
+        for fp, fingerprint in self.lora_fingerprints.items():
+            current_fp_map[fingerprint] = fp
+        result = []
+        for saved in loras:
+            old_fp = saved.get('file_path', '') or saved.get('file_name', '')
+            # If old_fp still exists in current scan, keep as-is
+            if old_fp in self.lora_fingerprints:
+                result.append(saved)
+                continue
+            # Try: old_fp might itself be a fingerprint (from a previous session's save)
+            if old_fp in current_fp_map:
+                new_fp = current_fp_map[old_fp]
+                # Find the lora item to get updated name/file_name
+                matched_item = None
+                for folder_items in (self.lora_data or {}).values():
+                    for item in folder_items:
+                        if item.get('file_path') == new_fp:
+                            matched_item = item
+                            break
+                    if matched_item:
+                        break
+                if matched_item:
+                    result.append({
+                        **saved,
+                        'file_path': matched_item['file_path'],
+                        'name': matched_item['name'],
+                        'file_name': matched_item.get('file_name', ''),
+                    })
+                    continue
+            # Can't resolve, keep as-is (will show as missing)
+            result.append(saved)
+        return result
+
+    def _convert_loras_to_fingerprint_keys(self, loras):
+        """Convert lora list's file_paths to fingerprint keys for storage."""
+        if not hasattr(self, 'lora_fingerprints') or not self.lora_fingerprints:
+            return loras
+        result = []
+        for saved in loras:
+            fp = saved.get('file_path', '') or saved.get('file_name', '')
+            fingerprint = self.lora_fingerprints.get(fp, fp)
+            result.append({**saved, 'file_path': fingerprint})
+        return result
 
     def _load_prompts(self):
         self._ensure_dirs()
@@ -803,7 +967,7 @@ class SnapshotPromptServer:
                     'category_display_modes': self.server_instance.category_display_modes,
                     'category_size_modes': self.server_instance.category_size_modes,
                     'custom_prompts': self.server_instance.custom_prompts,
-                    'last_selected_loras': self.server_instance.last_selected_loras,
+                    'last_selected_loras': self.server_instance._resolve_selected_loras_by_fingerprint(self.server_instance.last_selected_loras),
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs,
                     'last_selected_programs': self.server_instance.last_selected_programs,
                     'parsed_prompts': self.server_instance.parsed_prompts,
@@ -847,7 +1011,8 @@ class SnapshotPromptServer:
                 data = {
                     'folders': self.server_instance.lora_data if self.server_instance else {},
                     'folder_meta': self.server_instance.lora_folder_meta if self.server_instance else {},
-                    'last_selected_loras': self.server_instance.last_selected_loras if self.server_instance else [],
+                    'lora_slider_configs': self.server_instance._get_lora_slider_configs_by_filepath() if self.server_instance else {},
+                    'last_selected_loras': self.server_instance._resolve_selected_loras_by_fingerprint(self.server_instance.last_selected_loras) if self.server_instance else [],
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs if self.server_instance else [],
                     'lora_regex': self.server_instance.lora_regex if self.server_instance else '',
                 }
@@ -934,7 +1099,7 @@ class SnapshotPromptServer:
                 if self.server_instance:
                     self.server_instance.selected_prompts = data.get('prompts', [])
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
-                    self.server_instance.selected_loras = data.get('loras', [])
+                    self.server_instance.selected_loras = self.server_instance._convert_loras_to_fingerprint_keys(data.get('loras', []))
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.selected_programs = data.get('programs', [])
                     self.server_instance.last_selected_programs = data.get('programs', [])
@@ -1521,6 +1686,29 @@ class SnapshotPromptServer:
                         result['bg_image'] = self.server_instance.lora_folder_meta[folder_name].get('bg_image', '')
                         result['bg_video'] = self.server_instance.lora_folder_meta[folder_name].get('bg_video', '')
                     self.wfile.write(json.dumps(result).encode('utf-8'))
+                else:
+                    self.send_error(500, "Server error")
+
+            elif self.path == '/update_lora_slider_configs':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data)
+
+                if self.server_instance:
+                    configs_by_path = data.get('configs', {})
+                    fingerprints = getattr(self.server_instance, 'lora_fingerprints', {})
+                    for file_path, config in configs_by_path.items():
+                        fp = fingerprints.get(file_path, file_path)
+                        if config:
+                            self.server_instance.lora_slider_configs[fp] = config
+                        else:
+                            self.server_instance.lora_slider_configs.pop(fp, None)
+                    self.server_instance._save_lora_slider_configs(self.server_instance.lora_slider_configs)
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
 
@@ -3634,7 +3822,8 @@ class SnapshotPromptNode:
             if not lora_item.get('active', True):
                 continue
             # Filter out loras excluded by lora_regex
-            fp = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            raw_fp = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+            fp = server._resolve_lora_file_path(raw_fp)
             np = fp.replace('\\', '/')
             if np not in server._valid_lora_paths and fp not in server._valid_lora_paths:
                 continue
@@ -3675,11 +3864,13 @@ class SnapshotPromptNode:
         # Filter out program-sourced loras so they don't persist to next session
         if lora_cache:
             cached_loras = [l for l in server.selected_loras if l.get('source', 'normal') != 'program']
+            # Convert to fingerprint keys for widget persistence (survives lora rename/move)
+            fp_cached = server._convert_loras_to_fingerprint_keys(cached_loras)
             PromptServer.instance.send_sync("kolid-comfy-widget-set", {
                 "node_id": unique_id,
                 "widget_name": "lora",
                 "type": "STRING",
-                "value": json.dumps(cached_loras, ensure_ascii=False)
+                "value": json.dumps(fp_cached, ensure_ascii=False)
             })
         # 保存选中的值到 prefab widget（仅当 prefab_cache 为 True）
         # Filter out program-sourced prefabs so they don't persist to next session
@@ -3745,13 +3936,13 @@ class SnapshotPromptNode:
                         if lora.get("active", True) is False:
                             continue
                         # Dedup by file_path
-                        fp = lora.get("file_path", "") or lora.get("file_name", "")
-                        if fp and not any(al.get("file_path") == fp or al.get("file_name") == fp for al in all_region_loras):
+                        fp = server._resolve_lora_file_path(lora.get("file_path", "") or lora.get("file_name", ""))
+                        if fp and not any(server._resolve_lora_file_path(al.get("file_path", "") or al.get("file_name", "")) == fp for al in all_region_loras):
                             all_region_loras.append(lora)
             # Build lora string like active_loras format
             region_lora_parts = []
             for lora_item in all_region_loras:
-                fp = lora_item.get("file_path", "") or lora_item.get("file_name", "")
+                fp = server._resolve_lora_file_path(lora_item.get("file_path", "") or lora_item.get("file_name", ""))
                 if not fp:
                     continue
                 np_ = fp.replace("\\", "/")
@@ -3810,7 +4001,7 @@ class SnapshotPromptNode:
         cache_data = {
             "prompt": ", ".join(p['text'] if isinstance(p, dict) else p for p in server.selected_prompts),
             "prompts": json.dumps(cache_prompt_items, ensure_ascii=False),
-            "lora": json.dumps(server.selected_loras, ensure_ascii=False),
+            "lora": json.dumps(server._convert_loras_to_fingerprint_keys(server.selected_loras), ensure_ascii=False),
             "prefab": json.dumps(server.selected_prefabs, ensure_ascii=False),
             "program": json.dumps(server.selected_programs, ensure_ascii=False),
             "prompt_parsing": getattr(server, 'parsed_prompts', []) and ", ".join(getattr(server, 'parsed_prompts', [])) or "",
