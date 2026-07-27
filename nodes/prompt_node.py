@@ -941,6 +941,7 @@ class SnapshotPromptServer:
                     self.server_instance.filter_tag_groups = data.get('filter_tag_groups', [])
                     self.server_instance.filter_loras = data.get('filter_loras', [])
                     self.server_instance.filter_prefabs = data.get('filter_prefabs', [])
+                    self.server_instance.keep_parsing = data.get('keep_parsing', False)
                     print(f"[PromptNode] stored selected_loras: {self.server_instance.selected_loras}")
                     print(f"[PromptNode] stored selected_prefabs: {self.server_instance.selected_prefabs}")
                     print(f"[PromptNode] stored selected_programs: {self.server_instance.selected_programs}")
@@ -2605,7 +2606,7 @@ class SnapshotPromptNode:
                 "region": ("STRING", {"default": "", "multiline": False, "tooltip": "Cached region data from previous run"}),
                 "region_format": ("STRING", {"default": "", "multiline": True, "tooltip": "JSON template with placeholders"}),
                 "tagger": ("*", {"tooltip": "Optional Florence2 tagger model for Tag From Image button"}),
-                "asset": ("STRING", {"default": "", "multiline": False, "tooltip": "Global-mode assets snapshot name (same as SnapshotAssetsNode data with global_mode=True) for Tag From Assets button"}),
+                "asset": ("STRING", {"default": "", "multiline": True, "tooltip": "Assets snapshot: JSON string (normal mode) or name (global mode) for Tag From Assets button"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -2879,25 +2880,37 @@ class SnapshotPromptNode:
 
     @staticmethod
     def _tag_from_assets(tagger, asset_data):
-        """Start a SnapshotAssetsServer in global mode with a single Image slot,
-        using asset_data as the snapshot name — same as SnapshotAssetsNode with global_mode=True.
+        """Start a SnapshotAssetsServer with a single Image slot, using asset_data
+        the same way SnapshotAssetsNode uses `data`: if it's JSON, parse as canvas
+        snapshot (normal mode); otherwise treat as a global-mode snapshot name.
         Wait for user to select an image, then run the tagger. Returns tag string or None."""
         import webbrowser
         import time
         from .assets_node import SnapshotAssetsServer, SnapshotAssetsNode
 
-        # Always global_mode: asset_data is a snapshot name, load from disk
-        snap_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
-        snap_name = asset_data.strip() if asset_data else ""
-        snap_path = os.path.join(snap_dir, f"{snap_name}.json")
+        # Determine mode: JSON string → normal mode, else → global mode name
+        global_mode = True
         canvas_snapshot = None
-        if snap_name and os.path.exists(snap_path):
-            with open(snap_path, 'r', encoding='utf-8') as f:
-                canvas_snapshot = f.read()
-            print(f"[tag_from_assets] Loaded snapshot from disk: {snap_path}")
+        if asset_data and asset_data.strip():
+            try:
+                parsed = json.loads(asset_data.strip())
+                if isinstance(parsed, dict):
+                    canvas_snapshot = asset_data.strip()
+                    global_mode = False
+                    print(f"[tag_from_assets] Loaded tldraw snapshot from JSON")
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        if global_mode and asset_data and asset_data.strip():
+            snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "snapshots")
+            snap_path = os.path.join(snap_dir, f"{asset_data.strip()}.json")
+            if os.path.exists(snap_path):
+                with open(snap_path, 'r', encoding='utf-8') as f:
+                    canvas_snapshot = f.read()
+                print(f"[tag_from_assets] Loaded snapshot from disk: {snap_path}")
 
         server = SnapshotAssetsServer(
-            input_data=snap_name,
+            input_data=asset_data,
             canvas_snapshot=canvas_snapshot,
             enable_image=False,
             enable_video=False,
@@ -2905,7 +2918,7 @@ class SnapshotPromptNode:
             enable_prompt=False,
             enable_slot=True,
             slot_config="Image:tag image",
-            global_mode=True,
+            global_mode=global_mode,
         )
         server_thread = threading.Thread(target=server.start)
         server_thread.daemon = True
@@ -3645,6 +3658,19 @@ class SnapshotPromptNode:
                 "type": "STRING",
                 "value": user_prompt_only
             })
+        # Keep Confirm: merge parsing-sourced prompts into prompt widget
+        # so they persist as normal selections on next open
+        if getattr(server, 'keep_parsing', False):
+            parsing_texts = [p['text'] if isinstance(p, dict) else p for p in server.selected_prompts
+                             if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') == 'parsing']
+            if parsing_texts:
+                merged_prompt = ", ".join(cached_prompt_texts + parsing_texts)
+                PromptServer.instance.send_sync("kolid-comfy-widget-set", {
+                    "node_id": unique_id,
+                    "widget_name": "prompt",
+                    "type": "STRING",
+                    "value": merged_prompt
+                })
         # 保存选中的值到 lora widget（仅当 lora_cache 为 True）
         # Filter out program-sourced loras so they don't persist to next session
         if lora_cache:

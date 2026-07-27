@@ -2424,7 +2424,7 @@ export function AppShell() {
   }, [allPrompts, setSelectedTags]);
 
   // ========== Confirm ==========
-  const handleConfirm = useCallback(() => {
+  const handleConfirm = useCallback((keepParsing = false) => {
     // Flush pending region confirm (don't wait for debounce timer)
     if (enableRegion) {
       if (regionConfirmTimer.current) clearTimeout(regionConfirmTimer.current);
@@ -2544,7 +2544,8 @@ export function AppShell() {
         if (window.parent !== window) {
           window.parent.postMessage({ type: 'prompt-confirmed' }, '*');
         }
-      }
+      },
+      keepParsing
     );
   }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, selectedPrograms, programResult, submitSelection, enableRegion]);
 
@@ -4960,7 +4961,10 @@ export function AppShell() {
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, ...((selectedPrefabs.length > 0 || selectedLoras.length > 0 || programResult.gen_prefabs.length > 0 || programResult.gen_loras.length > 0) && !isTemporary ? { marginTop: 12 } : {}) }}>
                   <h3 style={{ marginBottom: 0 }}>Selected Prompts ({isTemporary && currentCtx ? currentCtx!.tagGroups!.length : selectedTags.length + programResult.gen_tag_groups.length})</h3>
-                  <button className="clear-btn" onClick={() => setSelectedTags([])} title="Clear">{iconX}</button>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'normal'))} title="Clear normal" style={{ color: '#0a84ff' }}>{iconX}</button>
+                    <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'parsing'))} title="Clear parsing" style={{ color: '#8b5cf6' }}>{iconX}</button>
+                  </div>
                 </div>
                 <div className="selected-tags">
                   {isTemporary && currentCtx
@@ -5271,7 +5275,10 @@ export function AppShell() {
               </div>
 
               <div className="footer">
-                <button className="btn btn-primary" onClick={handleConfirm}>Confirm</button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button className="btn btn-primary" onClick={() => handleConfirm(true)} style={{ background: '#8b5cf6' }}>Keep Confirm</button>
+                  <button className="btn btn-primary" onClick={() => handleConfirm()}>Confirm</button>
+                </div>
               </div>
             </>
           ) : null}
