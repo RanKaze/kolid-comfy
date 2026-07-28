@@ -15,6 +15,12 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
     width: 100%;
     height: 100%;
 }
+.kolid-branch-editor-label {
+    font-size: 10px;
+    color: #8e8e93;
+    padding: 0 1px 2px 1px;
+    user-select: none;
+}
 .kolid-branch-editor-wrap {
     position: relative;
     width: 100%;
@@ -374,6 +380,12 @@ function findReferrers(nodeId, graph) {
 function createBranchEditor(widget, node, parserFn, placeholderText) {
     const container = document.createElement("div");
     container.className = "kolid-branch-editor";
+
+    // Widget name label (like ComfyUI's original widget title)
+    const label = document.createElement("div");
+    label.className = "kolid-branch-editor-label";
+    label.textContent = widget.name || "";
+    container.appendChild(label);
 
     const editorWrap = document.createElement("div");
     editorWrap.className = "kolid-branch-editor-wrap";
@@ -1155,34 +1167,58 @@ function nodeInit(node, is_create){
             const relayWidget = node.widgets.find(w => w.name === 'relay_expression');
             if (relayWidget) {
                 const savedValue = relayWidget.value || "";
-                relayWidget.hidden = true;
+
+                // Remove the original widget entirely (DOM widgets ignore hidden flag)
+                const idx = node.widgets.indexOf(relayWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+                if (relayWidget.inputEl && relayWidget.inputEl.parentElement) {
+                    relayWidget.inputEl.parentElement.removeChild(relayWidget.inputEl);
+                }
+                if (relayWidget.element && relayWidget.element.parentElement) {
+                    relayWidget.element.parentElement.removeChild(relayWidget.element);
+                }
 
                 const editor = createBranchEditor(relayWidget, node, parseRelayExpression,
                     "Boolean expression: (!NodeA&&NodeB)||NodeC\nAlso: {id}==[N] or ..Parent:NodeA");
                 relayWidget.value = savedValue;
                 editor.textarea.value = savedValue;
                 editor.update();
-                node.addDOMWidget("relay_expression_editor", "kolid_branch_editor", editor.container, {
+                const domWidget = node.addDOMWidget("relay_expression", "kolid_branch_editor", editor.container, {
                     getValue: () => relayWidget.value,
                     setValue: (v) => { relayWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
+                    hideOnZoom: false,
                 });
+                domWidget.value = savedValue;
+                editor.textarea.addEventListener("input", () => { domWidget.value = editor.textarea.value; });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
             }
             const configWidget = node.widgets.find(w => w.name === 'active_config');
             if (configWidget) {
                 const savedValue = configWidget.value || "";
-                configWidget.hidden = true;
+
+                // Remove the original widget entirely (DOM widgets ignore hidden flag)
+                const idx = node.widgets.indexOf(configWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+                if (configWidget.inputEl && configWidget.inputEl.parentElement) {
+                    configWidget.inputEl.parentElement.removeChild(configWidget.inputEl);
+                }
+                if (configWidget.element && configWidget.element.parentElement) {
+                    configWidget.element.parentElement.removeChild(configWidget.element);
+                }
 
                 const editor = createBranchEditor(configWidget, node, parseActiveConfig,
                     "op:target_type:target_value, e.g: mute:name:NodeA, foldout:id:123");
                 configWidget.value = savedValue;
                 editor.textarea.value = savedValue;
                 editor.update();
-                node.addDOMWidget("active_config_editor", "kolid_branch_editor", editor.container, {
+                const domWidget = node.addDOMWidget("active_config", "kolid_branch_editor", editor.container, {
                     getValue: () => configWidget.value,
                     setValue: (v) => { configWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
+                    hideOnZoom: false,
                 });
+                domWidget.value = savedValue;
+                editor.textarea.addEventListener("input", () => { domWidget.value = editor.textarea.value; });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
             }
@@ -1216,17 +1252,29 @@ function nodeInit(node, is_create){
             const configWidget = node.widgets.find(w => w.name === 'select_config');
             if (configWidget) {
                 const savedValue = configWidget.value || "";
-                configWidget.hidden = true;
+
+                // Remove the original widget entirely (DOM widgets ignore hidden flag)
+                const idx = node.widgets.indexOf(configWidget);
+                if (idx !== -1) node.widgets.splice(idx, 1);
+                if (configWidget.inputEl && configWidget.inputEl.parentElement) {
+                    configWidget.inputEl.parentElement.removeChild(configWidget.inputEl);
+                }
+                if (configWidget.element && configWidget.element.parentElement) {
+                    configWidget.element.parentElement.removeChild(configWidget.element);
+                }
 
                 const editor = createBranchEditor(configWidget, node, parseSelectConfig,
                     "select_index:op:target_type:target_value, e.g: 1:mute:name:NodeA, 2:set:id:123");
                 configWidget.value = savedValue;
                 editor.textarea.value = savedValue;
                 editor.update();
-                node.addDOMWidget("select_config_editor", "kolid_branch_editor", editor.container, {
+                const domWidget = node.addDOMWidget("select_config", "kolid_branch_editor", editor.container, {
                     getValue: () => configWidget.value,
                     setValue: (v) => { configWidget.value = v || ''; editor.textarea.value = v || ''; editor.update(); },
+                    hideOnZoom: false,
                 });
+                domWidget.value = savedValue;
+                editor.textarea.addEventListener("input", () => { domWidget.value = editor.textarea.value; });
                 if (!node._kolidBranchEditors) node._kolidBranchEditors = [];
                 node._kolidBranchEditors.push(editor);
             }

@@ -1,8 +1,7 @@
 export interface ServerConfig {
   mask_url: string;
   prompt_url: string;
-  switch_url: string;
-  loop_count: number;
+  detail_status: 'idle' | 'running' | 'done' | 'error';
   add_noise: string;
   start_step_rate: number;
   end_step_rate: number;
@@ -20,19 +19,12 @@ export interface DetailerParams {
 }
 
 export interface StatusResponse {
-  detail_status: 'idle' | 'running' | 'selecting' | 'done' | 'error';
-  phase: string;
-  loop_count: number;
-  switch_url?: string;
+  detail_status: 'idle' | 'running' | 'done' | 'error';
   error?: string;
+  progress?: number;
+  current_step?: number;
+  total_steps?: number;
 }
-
-export interface ResultResponse {
-  original_image: string;
-  detailed_image: string;
-}
-
-export type Phase = 'mask' | 'tag' | 'prompt' | 'waiting' | 'switch';
 
 export interface TagPreviews {
   full?: string;
@@ -51,3 +43,11 @@ export interface DebugRecoverData {
   original_width: number;
   original_height: number;
 }
+
+export interface HistoryItem {
+  key: string;
+  name: string;
+  src: string;
+}
+
+export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'context';
