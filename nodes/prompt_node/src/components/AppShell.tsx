@@ -217,14 +217,41 @@ export function AppShell() {
   // Listen for auto-tag messages from parent window
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'auto-tag' && typeof event.data.tag === 'string') {
-        const tag = event.data.tag.trim();
-        setCustomPrompts(prev => {
-          if (!prev) return tag;
-          const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
-          if (existing.includes(tag)) return prev;
-          return prev + '\n' + tag;
-        });
+      if (event.data?.type === 'auto-tag') {
+        // If tags array is provided (parsed mode), add as parsing-sourced tag groups
+        if (Array.isArray(event.data.tags) && event.data.tags.length > 0) {
+          const newTagGroups: TagGroup[] = (event.data.tags as string[]).map((seg: string) => {
+            const tg = parseStringToTags(seg, allPrompts);
+            return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
+          });
+          if (newTagGroups.length > 0) {
+            setSelectedTags(prev => {
+              const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+              const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+              return [...prev, ...toAdd];
+            });
+          }
+        }
+        // If custom text is provided, add to custom prompts
+        if (event.data.custom && typeof event.data.custom === 'string' && event.data.custom.trim()) {
+          const custom = event.data.custom.trim();
+          setCustomPrompts(prev => {
+            if (!prev) return custom;
+            const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
+            if (existing.includes(custom)) return prev;
+            return prev + '\n' + custom;
+          });
+        }
+        // Fallback: if no tags/custom but raw tag string, add to custom prompts
+        if (!event.data.tags && !event.data.custom && typeof event.data.tag === 'string') {
+          const tag = event.data.tag.trim();
+          setCustomPrompts(prev => {
+            if (!prev) return tag;
+            const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
+            if (existing.includes(tag)) return prev;
+            return prev + '\n' + tag;
+          });
+        }
       } else if (event.data?.type === 'get-prompt') {
         // Atomic collection: return current prompt/lora/prefab data to parent
         const promptsToSend = selectedTags.map(g => tagsToDisplayString(g));

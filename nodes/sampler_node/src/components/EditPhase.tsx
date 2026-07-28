@@ -1,660 +1,405 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
-import AdvancedSettings from './AdvancedSettings';
-import type { DetailerParams, Phase, TagPreviews, DebugRecoverData } from '../types';
+import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem } from '../types';
 
 interface EditPhaseProps {
-  phase: Phase;
+  tab: Tab;
+  onTabChange: (tab: Tab) => void;
   maskUrl: string;
   promptUrl: string;
-  switchUrl: string;
-  loopCount: number;
   maskConfirmed: boolean;
   promptReady: boolean;
   autoTagging: boolean;
-  autoTagResult: string | null;
   tagPreviews: TagPreviews | null;
   tagResult: string | null;
   debugData: DebugRecoverData | null;
+  detailStatus: 'idle' | 'running' | 'done' | 'error';
+  detailProgress: { progress: number; current: number; total: number };
+  resultImages: { original: string; detailed: string } | null;
+  history: HistoryItem[];
+  onRefreshHistory: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
+  maskIframeRef: React.RefObject<HTMLIFrameElement>;
   params: DetailerParams;
   onParamChange: (params: DetailerParams) => void;
   onRunTag: (mode: 'mask' | 'covered' | 'full') => void;
-  onFinish: () => void;
+  onRunDetailer: () => void;
+  onSelectImage: (key: string) => void;
+  onFinishClick: () => void;
+  showFinishDialog: boolean;
+  onFinish: (selectedKey?: string) => void;
+  onCloseFinishDialog: () => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
-  phase,
-  maskUrl,
-  promptUrl,
-  switchUrl,
-  loopCount,
-  maskConfirmed,
-  promptReady,
-  autoTagging,
-  autoTagResult,
-  tagPreviews,
-  tagResult,
-  debugData,
-  promptIframeRef,
-  params,
-  onParamChange,
-  onRunTag,
-  onFinish,
+  tab, onTabChange, maskUrl, promptUrl,
+  maskConfirmed, promptReady, autoTagging, tagPreviews, tagResult,
+  debugData, detailStatus, detailProgress, resultImages,
+  history, onRefreshHistory, promptIframeRef, maskIframeRef,
+  params, onParamChange, onRunTag, onRunDetailer, onSelectImage,
+  onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
 }) => {
-  const maskIframeRef = React.useRef<HTMLIFrameElement>(null);
-  const isMaskPhase = phase === 'mask';
-  const isTagPhase = phase === 'tag';
-  const isPromptPhase = phase === 'prompt';
-  const isWaiting = phase === 'waiting';
-  const isSwitchPhase = phase === 'switch';
+  const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
+  const tabs: { id: Tab; label: string; color: string }[] = [
+    { id: 'mask', label: 'Mask', color: '#ff9f0a' },
+    { id: 'tag', label: 'Tag', color: '#af52de' },
+    { id: 'prompt', label: 'Prompt', color: '#0a84ff' },
+    { id: 'draw', label: 'Draw', color: '#30d158' },
+    { id: 'context', label: 'Context', color: '#64d2ff' },
+  ];
+  const hasTagger = !!tagPreviews || !!tagResult;
 
-  // Notify mask iframe when loop changes (no key remount, use single iframe)
-  React.useEffect(() => {
-    const iframe = maskIframeRef.current;
-    if (iframe?.contentWindow) {
-      iframe.contentWindow.postMessage({ type: 'new-loop', loop: loopCount }, '*');
-    }
-  }, [loopCount]);
-
-  const hasTagPanel = !!tagPreviews;
-
-  const getPanelFlex = (type: 'mask' | 'prompt' | 'tag' | 'switch') => {
-    if (isMaskPhase) {
-      // Mask 阶段：mask 为主，prompt 为辅
-      if (type === 'mask') return hasTagPanel ? 2.0 : 2.5;
-      if (type === 'prompt') return hasTagPanel ? 0.6 : 0.8;
-      if (type === 'tag') return hasTagPanel ? 0.4 : 0;
-      return 0;
-    }
-    if (isTagPhase) {
-      // Tag 阶段：三者均衡
-      if (type === 'mask') return 0.8;
-      if (type === 'tag') return 1.0;
-      if (type === 'prompt') return 0.8;
-      return 0;
-    }
-    if (isPromptPhase) {
-      // Prompt 阶段：prompt 为主
-      if (type === 'mask') return 0.4;
-      if (type === 'prompt') return hasTagPanel ? 2.2 : 2.5;
-      if (type === 'tag') return hasTagPanel ? 0.15 : 0;
-      return 0;
-    }
-    if (isWaiting) {
-      // Waiting 阶段：如果有 switch，switch 为主；否则和 prompt 阶段类似
-      if (showSwitch) {
-        if (type === 'switch') return 3.0;
-        if (type === 'mask') return 0.3;
-        if (type === 'prompt') return 0.4;
-        if (type === 'tag') return hasTagPanel ? 0.1 : 0;
-        return 0;
-      }
-      if (type === 'mask') return 0.4;
-      if (type === 'prompt') return hasTagPanel ? 2.2 : 2.5;
-      if (type === 'tag') return hasTagPanel ? 0.15 : 0;
-      return 0;
-    }
-    if (isSwitchPhase) {
-      // Switch 阶段：switch 为主，其余为辅
-      if (type === 'switch') return 3.0;
-      if (type === 'mask') return 0.2;
-      if (type === 'prompt') return 0.2;
-      if (type === 'tag') return hasTagPanel ? 0.08 : 0;
-      return 0;
-    }
-    return 1;
+  const updateParam = (key: keyof DetailerParams, value: string | number) => {
+    onParamChange({ ...params, [key]: value });
   };
-
-  const showSwitch = !!switchUrl && (isSwitchPhase || isWaiting);
-  const showTag = hasTagPanel && !isMaskPhase;
 
   return (
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          <span style={styles.title}>Detailer Sampler</span>
-          <span style={styles.badge}>Loop #{loopCount + 1}</span>
+        <div style={styles.tabBar}>
+          {tabs.filter(t => t.id !== 'tag' || hasTagger).map(t => (
+            <button
+              key={t.id}
+              style={{
+                ...styles.tabBtn,
+                color: tab === t.id ? t.color : 'rgba(255,255,255,0.35)',
+              }}
+              onClick={() => {
+                if (t.id === 'context') onRefreshHistory();
+                onTabChange(t.id);
+              }}
+            >
+              {t.label}
+              {t.id === 'mask' && maskConfirmed && <span style={styles.dot}>●</span>}
+              {t.id === 'prompt' && promptReady && <span style={styles.dot}>●</span>}
+              {t.id === 'draw' && detailStatus === 'done' && <span style={styles.dot}>●</span>}
+            </button>
+          ))}
         </div>
-        <div style={styles.phaseSteps}>
-          <PhaseStep label="Mask" active={isMaskPhase} done={maskConfirmed} />
-          <PhaseConnector done={maskConfirmed} />
-          <PhaseStep label="Tag" active={isTagPhase} done={!!tagResult} />
-          <PhaseConnector done={!!tagResult} />
-          <PhaseStep label="Prompt" active={isPromptPhase} done={promptReady} />
-          <PhaseConnector done={promptReady} />
-          <PhaseStep label="Waiting" active={isWaiting} done={false} />
-          <PhaseConnector done={false} />
-          <PhaseStep label="Switch" active={isSwitchPhase} done={false} />
-        </div>
+        <button style={styles.finishBtn} onClick={onFinishClick}>Finish</button>
       </div>
 
-      {/* Panel layout */}
-      <div style={{ ...styles.splitPanel, position: 'relative' }}>
-        {/* Mask panel */}
-        <div style={{ ...getPanelStyle(maskConfirmed), flex: getPanelFlex('mask') }}>
-          <div style={styles.panelLabel}>
-            <StatusDot active={maskConfirmed} />
-            Mask Editor
-          </div>
-          <iframe
-            ref={maskIframeRef}
-            src={maskUrl}
-            style={styles.iframe}
-            title="Mask Editor"
-            allow="clipboard-write"
-          />
+      {/* Tab content — iframes always mounted, hidden via display:none */}
+      <div style={styles.content}>
+        {/* Mask — always mounted */}
+        <div style={{ ...styles.iframeWrap, display: tab === 'mask' ? 'flex' : 'none' }}>
+          <iframe ref={maskIframeRef} src={maskUrl} style={styles.iframe} title="Mask" allow="clipboard-write" />
         </div>
 
-        {/* Tag panel */}
-        {showTag && (
-          <div style={{ ...getPanelStyle(true), flex: getPanelFlex('tag'), borderColor: '#af52de' }}>
-            <div style={styles.panelLabel}>
-              <StatusDot active={!!tagResult} />
-              Tag Mode
-            </div>
-            <div style={styles.tagPanelInner}>
-              <TagCard
-                label="Mask Tag"
-                description="Cropped to mask"
-                image={tagPreviews.mask}
-                onClick={() => onRunTag('mask')}
-                disabled={autoTagging}
-              />
-              <TagCard
-                label="Covered Tag"
-                description="Mask kept, outside white"
-                image={tagPreviews.covered}
-                onClick={() => onRunTag('covered')}
-                disabled={autoTagging}
-              />
-              <TagCard
-                label="Full Tag"
-                description="Full image"
-                image={tagPreviews.full}
-                onClick={() => onRunTag('full')}
-                disabled={autoTagging}
-              />
+        {/* Tag */}
+        {tab === 'tag' && (
+          <div style={styles.scrollContent}>
+            <div style={styles.tagGrid}>
+              <TagCard label="Mask Tag" description="Cropped to mask" image={tagPreviews?.mask} onClick={() => onRunTag('mask')} disabled={autoTagging} />
+              <TagCard label="Covered Tag" description="Mask kept, outside white" image={tagPreviews?.covered} onClick={() => onRunTag('covered')} disabled={autoTagging} />
+              <TagCard label="Full Tag" description="Full image" image={tagPreviews?.full} onClick={() => onRunTag('full')} disabled={autoTagging} />
             </div>
             {autoTagging && (
-              <div style={styles.tagLoading}>
-                <div style={styles.spinner} />
-                <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600 }}>Running tagger…</span>
-              </div>
+              <div style={styles.centerRow}><div style={styles.spinner} /><span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600 }}>Running tagger…</span></div>
             )}
             {tagResult && (
               <div style={styles.tagResultBar}>
-                <span style={{ color: '#64d2ff', fontSize: 11, fontWeight: 600 }}>Tag:</span>
-                <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: 11, marginLeft: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tagResult}</span>
+                <span style={{ color: '#64d2ff', fontSize: 12, fontWeight: 600 }}>Tag:</span>
+                <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: 12, marginLeft: 6 }}>{tagResult}</span>
               </div>
             )}
           </div>
         )}
 
-        {/* Prompt panel */}
-        <div style={{ ...getPanelStyle(promptReady), flex: getPanelFlex('prompt') }}>
-          <div style={styles.panelLabel}>
-            <StatusDot active={promptReady} />
-            Prompt Selector
-          </div>
-          <iframe
-            key={`prompt-${loopCount}`}
-            ref={promptIframeRef}
-            src={promptUrl}
-            style={styles.iframe}
-            title="Prompt Selector"
-            allow="clipboard-write"
-          />
+        {/* Prompt — always mounted */}
+        <div style={{ ...styles.iframeWrap, display: tab === 'prompt' ? 'flex' : 'none' }}>
+          <iframe ref={promptIframeRef} src={promptUrl} style={styles.iframe} title="Prompt" allow="clipboard-write" />
         </div>
 
-        {/* Switch panel */}
-        {showSwitch && (
-          <div style={{ ...getPanelStyle(true), flex: getPanelFlex('switch'), borderColor: '#30d158' }}>
-            <div style={styles.panelLabel}>
-              <StatusDot active={true} />
-              Result Switch
+        {/* Draw */}
+        {tab === 'draw' && (
+          <div style={styles.drawLayout}>
+            {/* Left: settings */}
+            <div style={styles.drawSettingsPanel}>
+              <div style={styles.sectionTitle}>Sampling Parameters</div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Add Noise</label>
+                <select style={styles.paramSelect} value={params.add_noise} onChange={e => updateParam('add_noise', e.target.value)}>
+                  <option value="enable">enable</option>
+                  <option value="disable">disable</option>
+                </select>
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Start Step</label>
+                <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={params.start_step_rate} onChange={e => updateParam('start_step_rate', parseFloat(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>End Step</label>
+                <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={params.end_step_rate} onChange={e => updateParam('end_step_rate', parseFloat(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Pixels</label>
+                <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={params.pixels} onChange={e => updateParam('pixels', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Crop Reserve</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.crop_reserve} onChange={e => updateParam('crop_reserve', parseInt(e.target.value))} />
+              </div>
             </div>
-            <iframe
-              key={`switch-${loopCount}`}
-              src={switchUrl}
-              style={styles.iframe}
-              title="Result Switch"
-              allow="clipboard-write"
-            />
-          </div>
-        )}
 
-        {/* Debug panel */}
-        {isSwitchPhase && debugData && (
-          <div style={{ ...getPanelStyle(true), flex: 1, borderColor: '#ff453a', maxWidth: 360, overflowY: 'auto' }}>
-            <div style={styles.panelLabel}>
-              <StatusDot active={true} />
-              Debug: recover_crop
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '44px 10px 10px' }}>
-              <DebugImage src={debugData.background} label="Background" />
-              <DebugImage src={debugData.image} label="Image (to paste)" />
-              <DebugMask src={debugData.mask} label="Mask" />
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-                <DebugString label="crop_x" value={debugData.crop_x} />
-                <DebugString label="crop_y" value={debugData.crop_y} />
-                <DebugString label="crop_w" value={debugData.crop_width} />
-                <DebugString label="crop_h" value={debugData.crop_height} />
-                <DebugString label="orig_w" value={debugData.original_width} />
-                <DebugString label="orig_h" value={debugData.original_height} />
+            {/* Right: status / results / run button */}
+            <div style={styles.drawMainArea}>
+              {detailStatus === 'running' && (
+                <div style={styles.drawStatusCenter}>
+                  <div style={styles.spinner} />
+                  <div style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>Running Detailer</div>
+                  {detailProgress.total > 0 && (
+                    <>
+                      <div style={styles.progressBarTrack}>
+                        <div style={{ ...styles.progressBarFill, width: `${detailProgress.progress * 100}%` }} />
+                      </div>
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                        Step {detailProgress.current} / {detailProgress.total}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {detailStatus === 'error' && (
+                <div style={styles.drawStatusCenter}>
+                  <div style={{ fontSize: 17, fontWeight: 700, color: '#ff453a' }}>Error</div>
+                </div>
+              )}
+
+              {detailStatus === 'done' && resultImages && (
+                <div style={styles.resultGrid}>
+                  <div style={styles.resultCard}>
+                    <div style={styles.resultLabel}>Original</div>
+                    <img src={resultImages.original} alt="Original" style={styles.resultImg} />
+                  </div>
+                  <div style={styles.resultCard}>
+                    <div style={styles.resultLabel}>Detailed</div>
+                    <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
+                  </div>
+                </div>
+              )}
+
+              {detailStatus === 'done' && debugData && (
+                <div style={styles.debugPanel}>
+                  <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Debug: recover_crop</div>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <DebugImage src={debugData.background} label="Background" />
+                    <DebugImage src={debugData.image} label="Image" />
+                    <DebugMask src={debugData.mask} label="Mask" />
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                    <DebugString label="crop_x" value={debugData.crop_x} />
+                    <DebugString label="crop_y" value={debugData.crop_y} />
+                    <DebugString label="crop_w" value={debugData.crop_width} />
+                    <DebugString label="crop_h" value={debugData.crop_height} />
+                  </div>
+                </div>
+              )}
+
+              {/* Run button bottom-right */}
+              <div style={styles.runBtnWrap}>
+                <button
+                  style={{ ...styles.runBtn, opacity: detailStatus === 'running' ? 0.4 : 1, cursor: detailStatus === 'running' ? 'not-allowed' : 'pointer' }}
+                  onClick={onRunDetailer}
+                  disabled={detailStatus === 'running'}
+                >
+                  {detailStatus === 'running' ? 'Running…' : 'Run Detailer'}
+                </button>
               </div>
             </div>
           </div>
         )}
 
-        {/* Waiting overlay */}
-        {isWaiting && !switchUrl && (
-          <div style={styles.waitingOverlay}>
-            <div style={styles.spinner} />
-            <div style={styles.waitingTitle}>Running Detailer</div>
-            <div style={styles.waitingSubtitle}>Please wait while the detailer processes your image…</div>
-          </div>
-        )}
-      </div>
-
-      {/* Bottom bar */}
-      <div style={styles.bottomBar}>
-        <div style={styles.statusRow}>
-          {isMaskPhase && (
-            <span style={styles.phaseHint}>
-              Draw mask area and click <b style={{ color: '#30d158' }}>Confirm</b> in the mask editor
-            </span>
-          )}
-          {isTagPhase && (
-            <span style={styles.phaseHint}>
-              Select how the tagger should see the image
-            </span>
-          )}
-          {isPromptPhase && (
-            <span style={styles.phaseHint}>
-              Select prompt, then click <b style={{ color: '#0a84ff' }}>Confirm</b> in the prompt selector
-            </span>
-          )}
-          {isWaiting && (
-            <span style={styles.phaseHint}>
-              Detailer is running… <b style={{ color: '#ff9f0a' }}>Do not close</b> this window
-            </span>
-          )}
-          {isSwitchPhase && (
-            <span style={styles.phaseHint}>
-              Choose <b style={{ color: '#30d158' }}>Original</b> or <b style={{ color: '#0a84ff' }}>Detailed</b> for the next loop
-            </span>
-          )}
-          {autoTagResult && !isSwitchPhase && (
-            <div style={styles.tagResult} title={autoTagResult}>
-              <span style={{ color: '#64d2ff', fontSize: 12, fontWeight: 600 }}>Tag:</span>
-              <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginLeft: 6, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {autoTagResult}
-              </span>
+        {/* Context — left: large preview, right: thumbnail list */}
+        {tab === 'context' && (
+          <div style={styles.contextLayout}>
+            {/* Left: large preview */}
+            <div style={styles.contextPreview}>
+              {hoveredHistory ? (
+                <>
+                  <img src={hoveredHistory.src} alt={hoveredHistory.name} style={styles.contextPreviewImg} />
+                  <div style={styles.contextPreviewLabel}>{hoveredHistory.name}</div>
+                  <button style={styles.contextSelectBtn} onClick={() => onSelectImage(hoveredHistory.key)}>
+                    Select This Image
+                  </button>
+                </>
+              ) : (
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>Hover over a thumbnail to preview</div>
+              )}
             </div>
-          )}
-        </div>
-
-        {(isMaskPhase || isPromptPhase) && (
-          <div style={styles.settingsRow}>
-            <AdvancedSettings params={params} onChange={onParamChange} />
+            {/* Right: thumbnail list */}
+            <div style={styles.contextThumbList}>
+              {history.map(h => (
+                <button
+                  key={h.key}
+                  style={{
+                    ...styles.contextThumb,
+                    borderColor: hoveredHistory?.key === h.key ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                  }}
+                  onMouseEnter={() => setHoveredHistory(h)}
+                  onClick={() => onSelectImage(h.key)}
+                >
+                  <img src={h.src} alt={h.name} style={styles.contextThumbImg} />
+                  <div style={styles.contextThumbName}>{h.name}</div>
+                </button>
+              ))}
+              {history.length === 0 && (
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No history yet.</div>
+              )}
+            </div>
           </div>
         )}
-
-        <div style={styles.actionRow}>
-          <button style={styles.secondaryBtn} onClick={onFinish}>
-            {isSwitchPhase ? 'Finish & Close' : 'Finish'}
-          </button>
-        </div>
       </div>
+
+      {/* Finish dialog */}
+      {showFinishDialog && (
+        <div style={styles.overlay}>
+          <div style={styles.dialog}>
+            <div style={styles.dialogTitle}>Select Final Image</div>
+            <div style={styles.dialogSubtitle}>Choose which image to return as the pipeline output</div>
+            <div style={styles.dialogHistoryGrid}>
+              {history.map(h => (
+                <button key={h.key} style={styles.historyCard} onClick={() => onFinish(h.key)}>
+                  <img src={h.src} alt={h.name} style={styles.historyImg} />
+                  <div style={styles.historyName}>{h.name}</div>
+                </button>
+              ))}
+            </div>
+            <div style={styles.dialogActions}>
+              <button style={styles.secondaryBtn} onClick={() => onFinish()}>Use Current</button>
+              <button style={styles.cancelBtn} onClick={onCloseFinishDialog}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
-const TagCard: React.FC<{
-  label: string;
-  description: string;
-  image?: string;
-  onClick: () => void;
-  disabled: boolean;
-}> = ({ label, description, image, onClick, disabled }) => (
-  <button
-    style={{
-      ...styles.tagCard,
-      opacity: disabled ? 0.5 : 1,
-      cursor: disabled ? 'not-allowed' : 'pointer',
-    }}
-    onClick={onClick}
-    disabled={disabled}
-  >
+const TagCard: React.FC<{ label: string; description: string; image?: string; onClick: () => void; disabled: boolean }> = ({ label, description, image, onClick, disabled }) => (
+  <button style={{ ...styles.tagCard, opacity: disabled ? 0.5 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }} onClick={onClick} disabled={disabled}>
     <div style={styles.tagCardImageWrap}>
-      {image ? (
-        <img src={image} alt={label} style={styles.tagCardImage} />
-      ) : (
-        <div style={styles.tagCardPlaceholder}>No preview</div>
-      )}
+      {image ? <img src={image} alt={label} style={styles.tagCardImage} /> : <div style={styles.tagCardPlaceholder}>No preview</div>}
     </div>
     <div style={styles.tagCardLabel}>{label}</div>
     <div style={styles.tagCardDesc}>{description}</div>
   </button>
 );
 
-const PhaseStep: React.FC<{ label: string; active: boolean; done: boolean }> = ({ label, active, done }) => (
-  <div style={{
-    display: 'flex',
-    alignItems: 'center',
-    gap: 5,
-    padding: '4px 12px',
-    borderRadius: 8,
-    background: active ? 'rgba(10, 132, 255, 0.12)' : done ? 'rgba(48, 209, 88, 0.08)' : 'transparent',
-    border: active ? '1px solid rgba(10, 132, 255, 0.25)' : done ? '1px solid rgba(48, 209, 88, 0.2)' : '1px solid transparent',
-    transition: 'all 0.3s ease',
-  }}>
-    <StatusDot active={done || active} />
-    <span style={{
-      fontSize: 12,
-      fontWeight: active ? 700 : 600,
-      color: active ? '#0a84ff' : done ? '#30d158' : 'rgba(255,255,255,0.35)',
-      transition: 'color 0.3s ease',
-    }}>
-      {label}
-    </span>
-  </div>
-);
-
-const PhaseConnector: React.FC<{ done: boolean }> = ({ done }) => (
-  <div style={{
-    width: 18,
-    height: 1,
-    background: done ? '#30d158' : 'rgba(255,255,255,0.1)',
-    transition: 'background 0.3s ease',
-  }} />
-);
-
-const StatusDot: React.FC<{ active: boolean }> = ({ active }) => (
-  <span
-    style={{
-      width: 7,
-      height: 7,
-      borderRadius: '50%',
-      display: 'inline-block',
-      marginRight: 5,
-      background: active ? '#30d158' : '#ff9f0a',
-      boxShadow: active
-        ? '0 0 5px rgba(48, 209, 88, 0.45)'
-        : '0 0 5px rgba(255, 159, 10, 0.4)',
-      transition: 'all 0.3s ease',
-      flexShrink: 0,
-    }}
-  />
-);
-
-function getPanelStyle(active: boolean): React.CSSProperties {
-  const color = active ? '#007aff' : '#ff9f0a';
-  return {
-    minWidth: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    background: '#0d0d0d',
-    position: 'relative',
-    borderRadius: 14,
-    overflow: 'hidden',
-    border: `2px solid ${color}`,
-    boxShadow: `0 0 0 1px ${color}33, 0 0 20px ${color}22`,
-    transition: 'border-color 0.4s ease, box-shadow 0.4s ease, flex 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94)',
-    margin: '0 4px',
-  };
-}
-
 const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    background: '#0d0d0d',
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif",
-  },
+  container: { display: 'flex', flexDirection: 'column', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },
+
+  // Header — iOS style segmented control feel
   header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '10px 24px',
-    background: 'rgba(28, 28, 30, 0.6)',
-    backdropFilter: 'blur(20px) saturate(180%)',
-    WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-    borderBottom: '1px solid rgba(255,255,255,0.06)',
-    flexShrink: 0,
-    zIndex: 10,
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '0 16px', height: 48, flexShrink: 0,
+    background: 'rgba(28,28,30,0.72)', backdropFilter: 'blur(20px) saturate(180%)', WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+    borderBottom: '0.5px solid rgba(255,255,255,0.08)',
   },
-  headerLeft: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
+  tabBar: { display: 'flex', alignItems: 'center', gap: 0, height: '100%' },
+  tabBtn: {
+    padding: '0 16px', fontSize: 14, fontWeight: 600, background: 'transparent', border: 'none',
+    cursor: 'pointer', transition: 'color 0.2s ease', display: 'flex', alignItems: 'center', gap: 5,
+    height: '100%', letterSpacing: '0.2px',
   },
-  title: {
-    fontSize: 15,
-    fontWeight: 700,
-    color: '#fff',
-    letterSpacing: '0.2px',
+  dot: { color: '#30d158', fontSize: 7 },
+  finishBtn: {
+    padding: '6px 18px', fontSize: 13, fontWeight: 600, color: '#fff',
+    background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer',
+    transition: 'all 0.2s ease', letterSpacing: '0.3px',
   },
-  badge: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: 'rgba(255,255,255,0.6)',
-    background: 'rgba(255,255,255,0.08)',
-    padding: '3px 10px',
-    borderRadius: 10,
-    letterSpacing: '0.3px',
-  },
-  phaseSteps: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 2,
-  },
-  splitPanel: {
-    display: 'flex',
-    flex: 1,
-    minHeight: 0,
-    gap: 4,
-    padding: '0 4px',
-  },
-  panelLabel: {
-    position: 'absolute',
-    top: 12,
-    left: 12,
-    zIndex: 5,
-    display: 'flex',
-    alignItems: 'center',
-    fontSize: 12,
-    fontWeight: 600,
-    color: 'rgba(255,255,255,0.7)',
-    background: 'rgba(28, 28, 30, 0.55)',
-    backdropFilter: 'blur(16px)',
-    WebkitBackdropFilter: 'blur(16px)',
-    padding: '6px 14px',
-    borderRadius: 12,
-    border: '1px solid rgba(255,255,255,0.06)',
-    letterSpacing: '0.2px',
-  },
-  iframe: {
-    width: '100%',
-    height: '100%',
-    border: 'none',
-    background: '#0d0d0d',
-  },
-  tagPanelInner: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-    padding: '44px 6px 6px',
-    overflowY: 'auto',
-    flex: 1,
-    alignItems: 'stretch',
-  },
+
+  // Content area
+  content: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
+
+  // iframe wrapper — no border, clean
+  iframeWrap: { flex: 1, minHeight: 0, background: '#0d0d0d' },
+  iframe: { width: '100%', height: '100%', border: 'none', background: '#0d0d0d' },
+
+  // Scrollable content
+  scrollContent: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 },
+
+  // Tag cards — flex:1 equal width
+  tagGrid: { display: 'flex', gap: 12 },
   tagCard: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 4,
-    padding: 6,
-    background: 'rgba(28, 28, 30, 0.6)',
-    border: '1px solid rgba(255,255,255,0.08)',
-    borderRadius: 10,
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-    textAlign: 'center',
-    minHeight: 0,
+    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 8,
+    background: 'rgba(28,28,30,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12,
+    cursor: 'pointer', transition: 'all 0.2s ease', textAlign: 'center',
   },
-  tagCardImageWrap: {
-    width: '100%',
-    aspectRatio: '1',
-    borderRadius: 6,
-    overflow: 'hidden',
-    background: '#1a1a1a',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+  tagCardImageWrap: { width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  tagCardImage: { width: '100%', height: '100%', objectFit: 'cover' },
+  tagCardPlaceholder: { fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 500 },
+  tagCardLabel: { fontSize: 12, fontWeight: 700, color: '#fff' },
+  tagCardDesc: { fontSize: 10, fontWeight: 500, color: 'rgba(255,255,255,0.4)' },
+
+  centerRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  tagResultBar: { display: 'flex', alignItems: 'center', background: 'rgba(100,210,255,0.08)', padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(100,210,255,0.15)' },
+
+  // Draw tab layout: left settings + right main area
+  drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
+  drawSettingsPanel: {
+    width: 260, flexShrink: 0, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
+    background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
-  tagCardImage: {
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover',
+  sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
+  paramRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
+  paramSelect: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none' },
+  paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
+
+  drawMainArea: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 16, position: 'relative', overflowY: 'auto' },
+
+  drawStatusCenter: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14 },
+
+  // Progress bar — iOS style
+  progressBarTrack: { width: 280, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
+  progressBarFill: { height: '100%', borderRadius: 3, background: '#0a84ff', transition: 'width 0.3s ease' },
+
+  resultGrid: { display: 'flex', gap: 12, flex: 1, minHeight: 0, flexWrap: 'nowrap' },
+  resultCard: { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 8, border: '0.5px solid rgba(255,255,255,0.08)' },
+  resultLabel: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' },
+  resultImg: { width: '100%', flex: 1, minHeight: 0, objectFit: 'contain', borderRadius: 8 },
+
+  debugPanel: { background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 12, border: '0.5px solid rgba(255,69,58,0.15)', marginTop: 12 },
+
+  // Run button — bottom right
+  runBtnWrap: { position: 'absolute', bottom: 16, right: 16, },
+  runBtn: {
+    padding: '10px 28px', fontSize: 14, fontWeight: 700, color: '#fff',
+    background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 10, cursor: 'pointer',
+    transition: 'all 0.2s ease', letterSpacing: '0.3px',
+    boxShadow: '0 2px 12px rgba(48,209,88,0.2)',
   },
-  tagCardPlaceholder: {
-    fontSize: 9,
-    color: 'rgba(255,255,255,0.3)',
-    fontWeight: 500,
-  },
-  tagCardLabel: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: '#fff',
-    letterSpacing: '0.1px',
-    lineHeight: 1.2,
-  },
-  tagCardDesc: {
-    fontSize: 9,
-    fontWeight: 500,
-    color: 'rgba(255,255,255,0.4)',
-    lineHeight: 1.2,
-  },
-  tagLoading: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    padding: '0 12px 10px',
-  },
-  tagResultBar: {
-    display: 'flex',
-    alignItems: 'center',
-    background: 'rgba(100, 210, 255, 0.08)',
-    padding: '5px 12px',
-    borderRadius: 8,
-    border: '1px solid rgba(100, 210, 255, 0.15)',
-    margin: '0 12px 10px',
-  },
-  waitingOverlay: {
-    position: 'absolute',
-    inset: 0,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'rgba(13, 13, 13, 0.82)',
-    backdropFilter: 'blur(8px)',
-    WebkitBackdropFilter: 'blur(8px)',
-    zIndex: 20,
-    borderRadius: 14,
-    gap: 16,
-  },
-  spinner: {
-    width: 24,
-    height: 24,
-    borderRadius: '50%',
-    border: '2px solid rgba(255,255,255,0.08)',
-    borderTopColor: '#0a84ff',
-    animation: 'spin 1s linear infinite',
-    flexShrink: 0,
-  },
-  waitingTitle: {
-    fontSize: 18,
-    fontWeight: 700,
-    color: '#fff',
-    letterSpacing: '0.3px',
-  },
-  waitingSubtitle: {
-    fontSize: 13,
-    fontWeight: 500,
-    color: 'rgba(255,255,255,0.45)',
-    letterSpacing: '0.2px',
-  },
-  bottomBar: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '10px 24px',
-    background: 'rgba(28, 28, 30, 0.6)',
-    backdropFilter: 'blur(20px) saturate(180%)',
-    WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-    borderTop: '1px solid rgba(255,255,255,0.06)',
-    flexShrink: 0,
-    zIndex: 10,
-  },
-  statusRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-  },
-  phaseHint: {
-    fontSize: 13,
-    fontWeight: 500,
-    color: 'rgba(255,255,255,0.5)',
-    lineHeight: 1.5,
-  },
-  tagResult: {
-    display: 'flex',
-    alignItems: 'center',
-    background: 'rgba(100, 210, 255, 0.08)',
-    padding: '4px 12px',
-    borderRadius: 10,
-    border: '1px solid rgba(100, 210, 255, 0.15)',
-  },
-  settingsRow: {
-    display: 'flex',
-    alignItems: 'center',
-    marginRight: 20,
-  },
-  actionRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-  },
-  autoTagBtn: {
-    padding: '9px 24px',
-    fontSize: 14,
-    fontWeight: 700,
-    color: '#fff',
-    background: 'rgba(175, 82, 222, 0.85)',
-    border: 'none',
-    borderRadius: 10,
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-    letterSpacing: '0.3px',
-    boxShadow: '0 2px 8px rgba(175, 82, 222, 0.25)',
-  },
-  secondaryBtn: {
-    padding: '9px 24px',
-    fontSize: 14,
-    fontWeight: 700,
-    color: '#fff',
-    background: 'rgba(255,255,255,0.1)',
-    border: 'none',
-    borderRadius: 10,
-    cursor: 'pointer',
-    transition: 'all 0.2s ease',
-    letterSpacing: '0.3px',
-  },
+
+  // Context — left/right split layout
+  contextLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
+  contextPreview: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8, background: '#0d0d0d' },
+  contextPreviewImg: { maxWidth: '100%', maxHeight: 'calc(100% - 80px)', objectFit: 'contain', borderRadius: 12 },
+  contextPreviewLabel: { fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.7)' },
+  contextSelectBtn: { padding: '8px 24px', fontSize: 13, fontWeight: 600, color: '#fff', background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer' },
+  contextThumbList: { width: 240, flexShrink: 0, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, background: 'rgba(28,28,30,0.4)', borderLeft: '0.5px solid rgba(255,255,255,0.06)' },
+  contextThumb: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, padding: 6, background: 'rgba(28,28,30,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, cursor: 'pointer', transition: 'border-color 0.2s ease' },
+  contextThumbImg: { width: 56, height: 56, objectFit: 'cover', borderRadius: 6, flexShrink: 0 },
+  contextThumbName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+
+  // History (used in finish dialog)
+  dialogHistoryGrid: { display: 'flex', flexWrap: 'wrap', gap: 12, alignContent: 'flex-start' },
+  historyCard: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 6, background: 'rgba(28,28,30,0.6)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 12, cursor: 'pointer', transition: 'all 0.2s ease' },
+  historyImg: { width: 200, height: 200, objectFit: 'cover', borderRadius: 8 },
+  historyName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)' },
+
+  spinner: { width: 24, height: 24, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.08)', borderTopColor: '#0a84ff', animation: 'spin 1s linear infinite', flexShrink: 0 },
+
+  // Dialog
+  overlay: { position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', zIndex: 100 },
+  dialog: { background: '#1c1c1e', borderRadius: 16, padding: 24, maxWidth: '80vw', maxHeight: '80vh', overflowY: 'auto', border: '0.5px solid rgba(255,255,255,0.1)' },
+  dialogTitle: { fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 4 },
+  dialogSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.45)', marginBottom: 16 },
+  dialogActions: { display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 },
+  secondaryBtn: { padding: '8px 20px', fontSize: 14, fontWeight: 600, color: '#fff', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, cursor: 'pointer' },
+  cancelBtn: { padding: '8px 20px', fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.5)', background: 'transparent', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 8, cursor: 'pointer' },
 };
 
 export default EditPhase;
