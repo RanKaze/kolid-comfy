@@ -93,15 +93,37 @@
             font-weight: 600;
         }
 
-        /* Confirm bar at bottom center */
-        .confirm-bar {
-            position: absolute;
-            bottom: 16px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 50;
+        /* Bottom bar (outside image container) */
+        .bottom-bar {
+            flex-shrink: 0;
             display: flex;
-            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 10px 20px;
+            background: rgba(28, 28, 30, 0.6);
+            backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border-top: 1px solid rgba(255,255,255,0.06);
+            z-index: 50;
+        }
+        .bottom-bar .instructions {
+            position: static;
+            transform: none;
+            background: transparent;
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+            padding: 0;
+            border: none;
+            box-shadow: none;
+            color: rgba(255,255,255,0.5);
+            font-size: 12px;
+            font-weight: 500;
+            pointer-events: none;
+        }
+        .bottom-bar .instructions strong {
+            color: rgba(255,255,255,0.8);
+            font-weight: 600;
         }
         .confirm-btn {
             padding: 10px 32px;
@@ -327,12 +349,6 @@
         <canvas id="drawCanvas"></canvas>
         <div id="brushCursor"></div>
         <div id="status">Loading...</div>
-        <div class="instructions">
-            <strong>LMB</strong> Draw · <strong>RMB</strong> Erase · <strong>Wheel</strong> Size · <strong>Alt+Drag</strong> Resize
-        </div>
-        <div class="confirm-bar">
-            <button class="confirm-btn" id="confirmButton">Confirm Mask</button>
-        </div>
         <div class="controls">
             <div class="control-row" style="justify-content: space-between;">
                 <span>Mode</span>
@@ -390,6 +406,13 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <div class="bottom-bar">
+        <div class="instructions">
+            <strong>LMB</strong> Draw · <strong>RMB</strong> Erase · <strong>Wheel</strong> Size · <strong>Alt+Drag</strong> Resize · <strong>Enter</strong> Confirm
+        </div>
+        <button class="confirm-btn" id="confirmButton">Confirm Mask</button>
     </div>
 
     <script>
@@ -746,6 +769,10 @@
                     if (window.parent !== window) {
                         window.parent.postMessage({ type: 'mask-confirmed' }, '*');
                     }
+                    // Auto-close the page (works in standalone tab; iframe is unmounted by parent)
+                    setTimeout(() => {
+                        window.close();
+                    }, 300);
                 } else {
                     status.textContent = 'Error sending mask';
                     status.classList.remove('success');
@@ -772,9 +799,8 @@
                 if (window.parent !== window) {
                     window.parent.postMessage({ type: 'mask-data', mask: base64 }, '*');
                 }
-            } else if (event.data?.type === 'new-loop') {
-                // Parent signals a new loop: update loop token, clear canvas and reload image/mask
-                currentLoop = String(event.data.loop ?? '0');
+            } else if (event.data?.type === 'new-loop' || event.data?.type === 'reload-image') {
+                // Parent signals to reload: clear canvas and reload image
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 maskConfirmed = false;
                 confirmButton.textContent = 'Confirm Mask';

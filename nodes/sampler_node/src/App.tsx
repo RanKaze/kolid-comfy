@@ -1,29 +1,30 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Phase, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData } from './types';
+import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
 
 const App: React.FC = () => {
-  const [phase, setPhase] = useState<Phase>('mask');
-  const phaseRef = useRef<Phase>('mask');
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  const [tab, setTab] = useState<Tab>('mask');
+  const tabRef = useRef<Tab>('mask');
+  useEffect(() => { tabRef.current = tab; }, [tab]);
 
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [maskConfirmed, setMaskConfirmed] = useState<boolean>(false);
-  const maskConfirmedRef = useRef(false);
-  useEffect(() => { maskConfirmedRef.current = maskConfirmed; }, [maskConfirmed]);
 
-  const [promptReady, setPromptReady] = useState<boolean>(false);
+  const [maskConfirmed, setMaskConfirmed] = useState(false);
+  const [promptReady, setPromptReady] = useState(false);
   const [autoTagging, setAutoTagging] = useState(false);
-  const [autoTagResult, setAutoTagResult] = useState<string | null>(null);
   const [tagPreviews, setTagPreviews] = useState<TagPreviews | null>(null);
   const [tagResult, setTagResult] = useState<string | null>(null);
   const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
-  const [switchUrl, setSwitchUrl] = useState<string>('');
+  const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [showFinishDialog, setShowFinishDialog] = useState(false);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
+  const maskIframeRef = useRef<HTMLIFrameElement>(null);
 
   const [params, setParams] = useState<DetailerParams>({
     add_noise: 'enable',
@@ -46,13 +47,26 @@ const App: React.FC = () => {
           pixels: data.pixels,
           crop_reserve: data.crop_reserve,
         });
+        setDetailStatus(data.detail_status);
       })
       .catch(e => setError('Failed to load config: ' + e.message));
   }, []);
 
-  // Load tag previews when entering tag phase
+  // Fetch history on mount and when entering context tab
+  const refreshHistory = useCallback(() => {
+    fetch('/api/history')
+      .then(r => r.json())
+      .then(data => {
+        if (data.history) setHistory(data.history);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshHistory(); }, [refreshHistory]);
+
+  // Load tag previews when entering tag tab
   useEffect(() => {
-    if (phase !== 'tag') return;
+    if (tab !== 'tag') return;
     fetch('/api/tag_previews')
       .then(r => r.json())
       .then((data: TagPreviews) => {
@@ -61,7 +75,7 @@ const App: React.FC = () => {
         }
       })
       .catch(e => setError('Failed to load tag previews: ' + e.message));
-  }, [phase]);
+  }, [tab]);
 
   // Listen for postMessage from mask/prompt iframes
   useEffect(() => {
@@ -69,30 +83,22 @@ const App: React.FC = () => {
       if (event.data?.type === 'mask-confirmed') {
         setMaskConfirmed(true);
         setError(null);
+        // Auto-advance: mask → tag (if tagger) or prompt
+        if (tabRef.current === 'mask') {
+          setTab(config?.has_tagger ? 'tag' : 'prompt');
+        }
       } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
         setError(null);
-        if (phaseRef.current === 'prompt' && maskConfirmedRef.current) {
-          setPhase('waiting');
-        }
+        // Auto-advance to Draw tab when prompt is confirmed
+        setTab('draw');
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, []);
+  }, [config]);
 
-  // Auto-advance from mask → tag/prompt when mask is confirmed
-  useEffect(() => {
-    if (phase === 'mask' && maskConfirmed && config) {
-      if (config.has_tagger) {
-        setPhase('tag');
-      } else {
-        setPhase('prompt');
-      }
-    }
-  }, [phase, maskConfirmed, config]);
-
-  // Poll mask status periodically (fallback for postMessage)
+  // Poll mask status (fallback)
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -101,77 +107,86 @@ const App: React.FC = () => {
         const data = await res.json();
         if (!cancelled && data.has_mask) {
           setMaskConfirmed(true);
-          setError(null);
         }
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     };
     poll();
     const interval = setInterval(poll, POLL_INTERVAL);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // Poll prompt status periodically (fallback)
+  // Poll prompt status (fallback)
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
         const res = await fetch('/api/has_prompt');
         const data = await res.json();
-        if (!cancelled) {
-          setPromptReady(!!data.has_prompt);
-        }
-      } catch {
-        // ignore
-      }
+        if (!cancelled) setPromptReady(!!data.has_prompt);
+      } catch { /* ignore */ }
     };
     poll();
     const interval = setInterval(poll, PROMPT_POLL_INTERVAL);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // Poll status when in waiting phase
+  // Poll status when in draw tab (running)
   useEffect(() => {
-    if (phase !== 'waiting') return;
-
+    if (tab !== 'draw' || detailStatus !== 'running') return;
     let cancelled = false;
     const poll = async () => {
       try {
         const res = await fetch('/api/status');
         const data: StatusResponse = await res.json();
         if (cancelled) return;
-
-        if (data.switch_url) {
-          setSwitchUrl(data.switch_url);
-        }
-
+        setDetailStatus(data.detail_status);
+        setDetailProgress({
+          progress: data.progress || 0,
+          current: data.current_step || 0,
+          total: data.total_steps || 0,
+        });
         if (data.detail_status === 'done') {
-          setPhase('switch');
+          refreshHistory();
         } else if (data.detail_status === 'error') {
           setError(data.error || 'Detailer failed');
-          setPhase('prompt');
         }
-      } catch (e: any) {
-        if (!cancelled) {
-          setError('Polling error: ' + e.message);
-          setPhase('prompt');
-        }
-      }
+      } catch { /* ignore */ }
     };
-
     const interval = setInterval(poll, POLL_INTERVAL);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [phase]);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [tab, detailStatus, refreshHistory]);
+
+  // Fetch debug data when detail is done
+  useEffect(() => {
+    if (detailStatus !== 'done') return;
+    fetch('/api/debug_recover_data')
+      .then(r => r.json())
+      .then(data => {
+        if (!data.error) setDebugData(data);
+      })
+      .catch(() => {});
+  }, [detailStatus]);
+
+  // Fetch result images when detail is done
+  const [resultImages, setResultImages] = useState<{original: string; detailed: string} | null>(null);
+  useEffect(() => {
+    if (detailStatus !== 'done') return;
+    fetch('/api/result')
+      .then(r => r.json())
+      .then(data => {
+        if (data.original_image && data.detailed_image) {
+          setResultImages({ original: data.original_image, detailed: data.detailed_image });
+        }
+      })
+      .catch(() => {});
+    // Tell mask iframe to reload the new image
+    setTimeout(() => {
+      const iframe = maskIframeRef.current;
+      if (iframe?.contentWindow) {
+        iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
+      }
+    }, 200);
+  }, [detailStatus]);
 
   const handleRunTag = useCallback(async (mode: 'mask' | 'covered' | 'full') => {
     setError(null);
@@ -189,17 +204,65 @@ const App: React.FC = () => {
         return;
       }
       setTagResult(data.tag);
-      setAutoTagResult(data.tag);
-      // Send tag to prompt iframe
-      const iframe = promptIframeRef.current;
-      if (iframe?.contentWindow) {
-        iframe.contentWindow.postMessage({ type: 'auto-tag', tag: data.tag }, '*');
-      }
-      setPhase('prompt');
+      // Switch to prompt tab first so iframe is visible, then send tags
+      setTab('prompt');
+      // Small delay to ensure tab switch + iframe render before postMessage
+      setTimeout(() => {
+        const iframe = promptIframeRef.current;
+        if (iframe?.contentWindow) {
+          iframe.contentWindow.postMessage({
+            type: 'auto-tag',
+            tag: data.tag,
+            tags: data.tags || [],
+            custom: data.custom || '',
+          }, '*');
+        }
+      }, 100);
     } catch (e: any) {
       setError('Tag error: ' + e.message);
     } finally {
       setAutoTagging(false);
+    }
+  }, []);
+
+  const handleRunDetailer = useCallback(async () => {
+    setError(null);
+    setDetailStatus('running');
+    setDetailProgress({ progress: 0, current: 0, total: 0 });
+    setDebugData(null);
+    setResultImages(null);
+    try {
+      await fetch('/api/run_detailer', { method: 'POST' });
+    } catch (e: any) {
+      setError('Failed to start detailer: ' + e.message);
+      setDetailStatus('idle');
+    }
+  }, []);
+
+  const handleSelectImage = useCallback(async (key: string) => {
+    try {
+      await fetch('/api/select_image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      // Reset state for next iteration
+      setMaskConfirmed(false);
+      setPromptReady(false);
+      setTagResult(null);
+      setDetailStatus('idle');
+      setResultImages(null);
+      setDebugData(null);
+      setTab('mask');
+      // Tell mask iframe to reload its image
+      setTimeout(() => {
+        const iframe = maskIframeRef.current;
+        if (iframe?.contentWindow) {
+          iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
+        }
+      }, 100);
+    } catch (e: any) {
+      setError('Failed to select image: ' + e.message);
     }
   }, []);
 
@@ -212,88 +275,17 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  // Poll status in switch phase: detect loopCount change to auto-advance
-  useEffect(() => {
-    if (phase !== 'switch') return;
+  const handleFinishClick = useCallback(() => {
+    setShowFinishDialog(true);
+  }, []);
 
-    let cancelled = false;
-    let currentLoop = -1; // initialized on first poll, not from stale config
-    const poll = async () => {
-      try {
-        const res = await fetch('/api/status');
-        const data = await res.json();
-        if (cancelled) return;
-
-        if (data.switch_url) {
-          setSwitchUrl(data.switch_url);
-        }
-
-        if (currentLoop < 0) {
-          currentLoop = data.loop_count;
-          return;
-        }
-
-        if (data.loop_count > currentLoop) {
-          // Backend has advanced to next loop
-          currentLoop = data.loop_count;
-          // Refresh full config so all URLs and loop_count stay in sync
-          try {
-            const cfgRes = await fetch('/api/config');
-            const cfgData = await cfgRes.json();
-            if (!cancelled) setConfig(cfgData);
-          } catch {
-            setConfig(prev => prev ? { ...prev, loop_count: data.loop_count } : null);
-          }
-          setMaskConfirmed(false);
-          setPromptReady(false);
-          setTagResult(null);
-          setAutoTagResult(null);
-          setSwitchUrl('');
-          setPhase('mask');
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setError('Status poll error: ' + e.message);
-        }
-      }
-    };
-
-    const interval = setInterval(poll, POLL_INTERVAL);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [phase]);
-
-  // Fetch debug recover data when in switch phase
-  useEffect(() => {
-    if (phase !== 'switch') return;
-
-    let cancelled = false;
-    const fetchDebug = async () => {
-      try {
-        const res = await fetch('/api/debug_recover_data');
-        const data = await res.json();
-        if (cancelled) return;
-        if (!data.error) {
-          setDebugData(data);
-        }
-      } catch {
-        // ignore
-      }
-    };
-
-    fetchDebug();
-    const interval = setInterval(fetchDebug, POLL_INTERVAL * 2);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [phase]);
-
-  const handleFinish = useCallback(async () => {
+  const handleFinish = useCallback(async (selectedKey?: string) => {
     try {
-      await fetch('/api/finish', { method: 'POST' });
+      await fetch('/api/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected_key: selectedKey }),
+      });
       window.close();
     } catch {
       window.close();
@@ -311,23 +303,32 @@ const App: React.FC = () => {
   return (
     <div>
       <EditPhase
-        phase={phase}
+        tab={tab}
+        onTabChange={setTab}
         maskUrl={config.mask_url}
         promptUrl={config.prompt_url}
-        switchUrl={switchUrl}
-        loopCount={config.loop_count}
         maskConfirmed={maskConfirmed}
         promptReady={promptReady}
         autoTagging={autoTagging}
-        autoTagResult={autoTagResult}
         tagPreviews={tagPreviews}
         tagResult={tagResult}
         debugData={debugData}
+        detailStatus={detailStatus}
+        detailProgress={detailProgress}
+        resultImages={resultImages}
+        history={history}
+        onRefreshHistory={refreshHistory}
         promptIframeRef={promptIframeRef}
+        maskIframeRef={maskIframeRef}
         params={params}
         onParamChange={handleParamChange}
         onRunTag={handleRunTag}
+        onRunDetailer={handleRunDetailer}
+        onSelectImage={handleSelectImage}
+        onFinishClick={handleFinishClick}
+        showFinishDialog={showFinishDialog}
         onFinish={handleFinish}
+        onCloseFinishDialog={() => setShowFinishDialog(false)}
       />
 
       {error && (
