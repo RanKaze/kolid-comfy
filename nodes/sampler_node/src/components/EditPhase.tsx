@@ -15,7 +15,7 @@ interface EditPhaseProps {
   debugData: DebugRecoverData | null;
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   detailProgress: { progress: number; current: number; total: number };
-  resultImages: { original: string; detailed: string } | null;
+  resultImages: { original: string; detailed: string; originalKey: string | null; detailedKey: string | null } | null;
   history: HistoryItem[];
   onRefreshHistory: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
@@ -27,8 +27,13 @@ interface EditPhaseProps {
   onSelectImage: (key: string) => void;
   onFinishClick: () => void;
   showFinishDialog: boolean;
-  onFinish: (selectedKey?: string) => void;
+  onFinish: (selectedKeys?: string[]) => void;
   onCloseFinishDialog: () => void;
+  onAddContextImage: (base64: string) => void;
+  onLoadFromAssets: () => void;
+  loadingAssets: boolean;
+  currentContextKey: string | null;
+  onSetContext: (key: string) => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -38,8 +43,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   history, onRefreshHistory, promptIframeRef, maskIframeRef,
   params, onParamChange, onRunTag, onRunDetailer, onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
+  onAddContextImage, onLoadFromAssets, loadingAssets,
+  currentContextKey, onSetContext,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const tabs: { id: Tab; label: string; color: string }[] = [
     { id: 'mask', label: 'Mask', color: '#ff9f0a' },
     { id: 'tag', label: 'Tag', color: '#af52de' },
@@ -51,6 +59,38 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const updateParam = (key: keyof DetailerParams, value: string | number) => {
     onParamChange({ ...params, [key]: value });
+  };
+
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      onAddContextImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  const toggleFinishSelection = (key: string) => {
+    setSelectedKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleConfirmFinish = () => {
+    const keys = Array.from(selectedKeys);
+    onFinish(keys.length > 0 ? keys : undefined);
+  };
+
+  const handleCloseFinishDialog = () => {
+    setSelectedKeys(new Set());
+    onCloseFinishDialog();
   };
 
   return (
@@ -170,14 +210,42 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
               {detailStatus === 'done' && resultImages && (
                 <div style={styles.resultGrid}>
-                  <div style={styles.resultCard}>
-                    <div style={styles.resultLabel}>Original</div>
-                    <img src={resultImages.original} alt="Original" style={styles.resultImg} />
-                  </div>
-                  <div style={styles.resultCard}>
-                    <div style={styles.resultLabel}>Detailed</div>
-                    <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
-                  </div>
+                  {(() => {
+                    const origKey = resultImages.originalKey;
+                    const origActive = origKey === currentContextKey;
+                    return (
+                      <div
+                        style={{
+                          ...styles.resultCard,
+                          borderColor: origActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                          boxShadow: origActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                          cursor: origKey && !origActive ? 'pointer' : 'default',
+                        }}
+                        onClick={() => origKey && !origActive && onSetContext(origKey)}
+                      >
+                        <div style={styles.resultLabel}>Original</div>
+                        <img src={resultImages.original} alt="Original" style={styles.resultImg} />
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const detKey = resultImages.detailedKey;
+                    const detActive = detKey === currentContextKey;
+                    return (
+                      <div
+                        style={{
+                          ...styles.resultCard,
+                          borderColor: detActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                          boxShadow: detActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                          cursor: detKey && !detActive ? 'pointer' : 'default',
+                        }}
+                        onClick={() => detKey && !detActive && onSetContext(detKey)}
+                      >
+                        <div style={styles.resultLabel}>Detailed</div>
+                        <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -212,7 +280,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           </div>
         )}
 
-        {/* Context — left: large preview, right: thumbnail list */}
+        {/* Context — left/right split layout */}
         {tab === 'context' && (
           <div style={styles.contextLayout}>
             {/* Left: large preview */}
@@ -229,20 +297,36 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>Hover over a thumbnail to preview</div>
               )}
             </div>
-            {/* Right: thumbnail list */}
+            {/* Right: thumbnail list + load buttons */}
             <div style={styles.contextThumbList}>
+              <div style={styles.contextLoadBtns}>
+                <button style={styles.contextLoadBtn} onClick={() => fileInputRef.current?.click()}>
+                  Load From Image
+                </button>
+                <button
+                  style={{ ...styles.contextLoadBtn, opacity: loadingAssets ? 0.5 : 1, cursor: loadingAssets ? 'wait' : 'pointer' }}
+                  onClick={onLoadFromAssets}
+                  disabled={loadingAssets}
+                >
+                  {loadingAssets ? 'Loading…' : 'Load From Assets'}
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileSelect} />
+              </div>
               {history.map(h => (
                 <button
                   key={h.key}
                   style={{
                     ...styles.contextThumb,
-                    borderColor: hoveredHistory?.key === h.key ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                    borderColor: currentContextKey === h.key ? '#0a84ff'
+                      : (hoveredHistory?.key === h.key ? '#0a84ff' : 'rgba(255,255,255,0.08)'),
+                    boxShadow: currentContextKey === h.key ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
                   }}
                   onMouseEnter={() => setHoveredHistory(h)}
                   onClick={() => onSelectImage(h.key)}
                 >
                   <img src={h.src} alt={h.name} style={styles.contextThumbImg} />
                   <div style={styles.contextThumbName}>{h.name}</div>
+                  {currentContextKey === h.key && <div style={styles.contextActiveDot} />}
                 </button>
               ))}
               {history.length === 0 && (
@@ -253,23 +337,34 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         )}
       </div>
 
-      {/* Finish dialog */}
+      {/* Finish dialog — multi-select */}
       {showFinishDialog && (
         <div style={styles.overlay}>
           <div style={styles.dialog}>
-            <div style={styles.dialogTitle}>Select Final Image</div>
-            <div style={styles.dialogSubtitle}>Choose which image to return as the pipeline output</div>
+            <div style={styles.dialogTitle}>Select Final Images</div>
+            <div style={styles.dialogSubtitle}>Choose which images to return as the pipeline output ({selectedKeys.size} selected)</div>
             <div style={styles.dialogHistoryGrid}>
               {history.map(h => (
-                <button key={h.key} style={styles.historyCard} onClick={() => onFinish(h.key)}>
-                  <img src={h.src} alt={h.name} style={styles.historyImg} />
+                <button
+                  key={h.key}
+                  style={{
+                    ...styles.historyCard,
+                    borderColor: selectedKeys.has(h.key) ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                    boxShadow: selectedKeys.has(h.key) ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                  }}
+                  onClick={() => toggleFinishSelection(h.key)}
+                >
+                  <div style={styles.historyImgWrap}>
+                    <img src={h.src} alt={h.name} style={styles.historyImg} />
+                    {selectedKeys.has(h.key) && <div style={styles.historyCheck}>✓</div>}
+                  </div>
                   <div style={styles.historyName}>{h.name}</div>
                 </button>
               ))}
             </div>
             <div style={styles.dialogActions}>
-              <button style={styles.secondaryBtn} onClick={() => onFinish()}>Use Current</button>
-              <button style={styles.cancelBtn} onClick={onCloseFinishDialog}>Cancel</button>
+              <button style={styles.cancelBtn} onClick={handleCloseFinishDialog}>Cancel</button>
+              <button style={styles.confirmBtn} onClick={handleConfirmFinish}>Confirm</button>
             </div>
           </div>
         </div>
@@ -383,11 +478,16 @@ const styles: Record<string, React.CSSProperties> = {
   contextThumb: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, padding: 6, background: 'rgba(28,28,30,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, cursor: 'pointer', transition: 'border-color 0.2s ease' },
   contextThumbImg: { width: 56, height: 56, objectFit: 'cover', borderRadius: 6, flexShrink: 0 },
   contextThumbName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  contextActiveDot: { width: 8, height: 8, borderRadius: '50%', background: '#0a84ff', boxShadow: '0 0 6px rgba(10,132,255,0.5)', flexShrink: 0, marginLeft: 'auto' },
+  contextLoadBtns: { display: 'flex', gap: 6, marginBottom: 4 },
+  contextLoadBtn: { flex: 1, padding: '6px 8px', fontSize: 11, fontWeight: 600, color: '#fff', background: 'rgba(255,255,255,0.1)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease' },
 
   // History (used in finish dialog)
   dialogHistoryGrid: { display: 'flex', flexWrap: 'wrap', gap: 12, alignContent: 'flex-start' },
   historyCard: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 6, background: 'rgba(28,28,30,0.6)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 12, cursor: 'pointer', transition: 'all 0.2s ease' },
+  historyImgWrap: { position: 'relative', width: 200, height: 200 },
   historyImg: { width: 200, height: 200, objectFit: 'cover', borderRadius: 8 },
+  historyCheck: { position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: '50%', background: '#0a84ff', color: '#fff', fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.3)' },
   historyName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)' },
 
   spinner: { width: 24, height: 24, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.08)', borderTopColor: '#0a84ff', animation: 'spin 1s linear infinite', flexShrink: 0 },
@@ -398,7 +498,7 @@ const styles: Record<string, React.CSSProperties> = {
   dialogTitle: { fontSize: 18, fontWeight: 700, color: '#fff', marginBottom: 4 },
   dialogSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.45)', marginBottom: 16 },
   dialogActions: { display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 16 },
-  secondaryBtn: { padding: '8px 20px', fontSize: 14, fontWeight: 600, color: '#fff', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, cursor: 'pointer' },
+  confirmBtn: { padding: '8px 24px', fontSize: 14, fontWeight: 600, color: '#fff', background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer' },
   cancelBtn: { padding: '8px 20px', fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.5)', background: 'transparent', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 8, cursor: 'pointer' },
 };
 

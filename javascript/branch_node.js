@@ -44,7 +44,7 @@ if (!document.getElementById(BRANCH_STYLE_ID)) {
     white-space: pre-wrap;
     word-wrap: break-word;
     overflow-wrap: break-word;
-    overflow: auto;
+    overflow: hidden;
 }
 .kolid-branch-editor-input {
     position: absolute;
@@ -213,52 +213,63 @@ function parseRelayExpression(text, graph, selfNodeId) {
 function parseActiveConfig(text, graph, selfNodeId) {
     if (!text || !text.trim()) return { html: '', jumps: [] };
     const allNodesList = getGraphNodes(graph);
-    const segments = text.split(',').map(s => s.trim()).filter(Boolean);
     const jumps = [];
     const seenIds = new Set();
-    let htmlParts = [];
+    let html = '';
+    let segStart = 0;
 
-    for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
-        const parts = seg.split(':');
-        // Format: op:target_type:target_value
-        if (parts.length < 3) {
-            htmlParts.push(`<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`);
-            if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
-            continue;
-        }
-        const op = parts[0].trim();
-        const targetType = parts[1].trim();
-        const targetValue = parts.slice(2).join(':').trim();
+    for (let i = 0; i <= text.length; i++) {
+        if (i === text.length || text[i] === ',') {
+            if (i > segStart) {
+                const seg = text.substring(segStart, i);
+                const c1 = seg.indexOf(':');
+                const c2 = c1 >= 0 ? seg.indexOf(':', c1 + 1) : -1;
 
-        let targetNodes = [];
-        if (graph) {
-            if (targetType === 'name') {
-                targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
-            } else if (targetType === 'id') {
-                const n = graph.getNodeById(parseInt(targetValue));
-                if (n && n.id !== selfNodeId) targetNodes = [n];
-            } else if (targetType === 'group') {
-                const groups = graph._groups || graph.groups || [];
-                const matchedGroup = groups.find(g => g.title === targetValue);
-                if (matchedGroup) {
-                    const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
-                    targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
+                if (c1 < 0 || c2 < 0) {
+                    html += `<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`;
+                } else {
+                    const op = seg.substring(0, c1);
+                    const targetType = seg.substring(c1 + 1, c2);
+                    const targetValue = seg.substring(c2 + 1);
+                    const opTrimmed = op.trim();
+                    const targetTypeTrimmed = targetType.trim();
+                    const targetValueTrimmed = targetValue.trim();
+
+                    const opClass = /^(mute|!mute|bypass|!bypass|foldout|!foldout|expand|!expand|set|!set)$/.test(opTrimmed) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
+
+                    let targetNodes = [];
+                    if (graph) {
+                        if (targetTypeTrimmed === 'name') {
+                            targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValueTrimmed || n.type === targetValueTrimmed));
+                        } else if (targetTypeTrimmed === 'id') {
+                            const n = graph.getNodeById(parseInt(targetValueTrimmed));
+                            if (n && n.id !== selfNodeId) targetNodes = [n];
+                        } else if (targetTypeTrimmed === 'group') {
+                            const groups = graph._groups || graph.groups || [];
+                            const matchedGroup = groups.find(g => g.title === targetValueTrimmed);
+                            if (matchedGroup) {
+                                const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
+                                targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
+                            }
+                        }
+                    }
+
+                    const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
+
+                    for (const n of targetNodes) {
+                        if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
+                    }
+
+                    html += `<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`;
                 }
             }
+            if (i < text.length && text[i] === ',') {
+                html += '<span class="kolid-branch-seg-sep">,</span>';
+                segStart = i + 1;
+            }
         }
-
-        const opClass = /^(mute|!mute|bypass|!bypass|foldout|!foldout|expand|!expand|set|!set)$/.test(op) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
-        const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
-
-        htmlParts.push(`<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`);
-
-        for (const n of targetNodes) {
-            if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
-        }
-        if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
     }
-    return { html: htmlParts.join(''), jumps };
+    return { html, jumps };
 }
 
 /**
@@ -269,54 +280,65 @@ function parseActiveConfig(text, graph, selfNodeId) {
 function parseSelectConfig(text, graph, selfNodeId) {
     if (!text || !text.trim()) return { html: '', jumps: [] };
     const allNodesList = getGraphNodes(graph);
-    const segments = text.split(',').map(s => s.trim()).filter(Boolean);
     const jumps = [];
     const seenIds = new Set();
-    let htmlParts = [];
+    let html = '';
+    let segStart = 0;
 
-    for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
-        const parts = seg.split(':');
-        // Format: select_index:op:target_type:target_value (4+ parts)
-        if (parts.length < 4 || !/^\d+$/.test(parts[0].trim())) {
-            htmlParts.push(`<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`);
-            if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
-            continue;
-        }
-        const selectIndex = parts[0].trim();
-        const op = parts[1].trim();
-        const targetType = parts[2].trim();
-        const targetValue = parts.slice(3).join(':').trim();
+    for (let i = 0; i <= text.length; i++) {
+        if (i === text.length || text[i] === ',') {
+            if (i > segStart) {
+                const seg = text.substring(segStart, i);
+                const c1 = seg.indexOf(':');
+                const c2 = c1 >= 0 ? seg.indexOf(':', c1 + 1) : -1;
+                const c3 = c2 >= 0 ? seg.indexOf(':', c2 + 1) : -1;
 
-        let targetNodes = [];
-        if (graph) {
-            if (targetType === 'name') {
-                targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValue || n.type === targetValue));
-            } else if (targetType === 'id') {
-                const n = graph.getNodeById(parseInt(targetValue));
-                if (n && n.id !== selfNodeId) targetNodes = [n];
-            } else if (targetType === 'group') {
-                const groups = graph._groups || graph.groups || [];
-                const matchedGroup = groups.find(g => g.title === targetValue);
-                if (matchedGroup) {
-                    const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
-                    targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
+                if (c1 < 0 || c2 < 0 || c3 < 0 || !/^\s*\d+\s*$/.test(seg.substring(0, c1))) {
+                    html += `<span class="kolid-branch-seg-error">${escapeHTML(seg)}</span>`;
+                } else {
+                    const selectIndex = seg.substring(0, c1);
+                    const op = seg.substring(c1 + 1, c2);
+                    const targetType = seg.substring(c2 + 1, c3);
+                    const targetValue = seg.substring(c3 + 1);
+                    const opTrimmed = op.trim();
+                    const targetTypeTrimmed = targetType.trim();
+                    const targetValueTrimmed = targetValue.trim();
+
+                    const opClass = /^(mute|!mute|bypass|!bypass|set|!set)$/.test(opTrimmed) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
+
+                    let targetNodes = [];
+                    if (graph) {
+                        if (targetTypeTrimmed === 'name') {
+                            targetNodes = allNodesList.filter(n => n.id !== selfNodeId && (n.title === targetValueTrimmed || n.type === targetValueTrimmed));
+                        } else if (targetTypeTrimmed === 'id') {
+                            const n = graph.getNodeById(parseInt(targetValueTrimmed));
+                            if (n && n.id !== selfNodeId) targetNodes = [n];
+                        } else if (targetTypeTrimmed === 'group') {
+                            const groups = graph._groups || graph.groups || [];
+                            const matchedGroup = groups.find(g => g.title === targetValueTrimmed);
+                            if (matchedGroup) {
+                                const groupNodeIds = matchedGroup._nodes || matchedGroup.nodes || [];
+                                targetNodes = allNodesList.filter(n => groupNodeIds.includes(n.id));
+                            }
+                        }
+                    }
+
+                    const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
+
+                    for (const n of targetNodes) {
+                        if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
+                    }
+
+                    html += `<span class="kolid-branch-seg-sep">${escapeHTML(selectIndex)}</span>:<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`;
                 }
             }
+            if (i < text.length && text[i] === ',') {
+                html += '<span class="kolid-branch-seg-sep">,</span>';
+                segStart = i + 1;
+            }
         }
-
-        const idxClass = 'kolid-branch-seg-sep';
-        const opClass = /^(mute|!mute|bypass|!bypass|set|!set)$/.test(op) ? 'kolid-branch-seg-op' : 'kolid-branch-seg-error';
-        const targetClass = targetNodes.length > 0 ? 'kolid-branch-seg-ok' : 'kolid-branch-seg-warn';
-
-        htmlParts.push(`<span class="${idxClass}">${escapeHTML(selectIndex)}</span>:<span class="${opClass}">${escapeHTML(op)}</span>:<span class="kolid-branch-seg-sep">${escapeHTML(targetType)}</span>:<span class="${targetClass}">${escapeHTML(targetValue)}</span>`);
-
-        for (const n of targetNodes) {
-            if (!seenIds.has(n.id)) { seenIds.add(n.id); jumps.push({ id: n.id, title: n.title || n.type || `Node ${n.id}` }); }
-        }
-        if (i < segments.length - 1) htmlParts.push('<span class="kolid-branch-seg-sep">,</span> ');
     }
-    return { html: htmlParts.join(''), jumps };
+    return { html, jumps };
 }
 
 /**
@@ -407,9 +429,17 @@ function createBranchEditor(widget, node, parserFn, placeholderText) {
 
     function update() {
         const result = parserFn(textarea.value, node.graph, node.id);
-        // Show syntax-highlighted content, or placeholder text to set base height
         const displayText = textarea.value || textarea.placeholder || '';
-        highlight.innerHTML = result.html || escapeHTML(displayText);
+        let html = result.html || escapeHTML(displayText);
+        // Trailing newline: <textarea> renders an extra empty line at the end,
+        // but <pre> collapses it. Add a \n to match.
+        if (textarea.value && textarea.value.endsWith('\n')) {
+            html += '\n';
+        }
+        highlight.innerHTML = html;
+        // Sync scroll position from textarea to highlight
+        highlight.scrollTop = textarea.scrollTop;
+        highlight.scrollLeft = textarea.scrollLeft;
 
         // Build jump buttons
         jumpBar.innerHTML = "";
@@ -432,6 +462,12 @@ function createBranchEditor(widget, node, parserFn, placeholderText) {
         syncTimer = setTimeout(() => {
             if (widget.callback) widget.callback(widget.value);
         }, 300);
+    });
+
+    // Sync scroll: textarea → highlight
+    textarea.addEventListener("scroll", () => {
+        highlight.scrollTop = textarea.scrollTop;
+        highlight.scrollLeft = textarea.scrollLeft;
     });
 
     // Sync widget -> textarea (when widget changes externally)
