@@ -44,6 +44,8 @@ const iconLoadFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="
 const iconPlus = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M5 12h14"/></svg>;
 const iconCode = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>;
 const iconTagFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>;
+const iconSwapDown = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M19 12l-7 7-7-7"/></svg>;
+const iconSwapUp = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 19V5M5 12l7-7 7 7"/></svg>;
 
 const ZOOM_DELAY = 2000;
 let zoomTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,9 +228,11 @@ export function AppShell() {
           });
           if (newTagGroups.length > 0) {
             setSelectedTags(prev => {
-              const existing = new Set(prev.map(g => tagsToDisplayString(g)));
+              // 移除旧的 parsing tag，保留 normal/program tag，然后添加新的 parsing tag
+              const filtered = prev.filter(g => g.source !== 'parsing');
+              const existing = new Set(filtered.map(g => tagsToDisplayString(g)));
               const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
-              return [...prev, ...toAdd];
+              return [...filtered, ...toAdd];
             });
           }
         }
@@ -4986,6 +4990,8 @@ export function AppShell() {
                   <div style={{ display: 'flex', gap: '6px' }}>
                     <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'normal'))} title="Clear normal" style={{ color: '#0a84ff' }}>{iconX}</button>
                     <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.filter(g => g.source !== 'parsing'))} title="Clear parsing" style={{ color: '#8b5cf6' }}>{iconX}</button>
+                    <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.map(g => g.source === 'parsing' ? { ...g, source: 'normal' as const } : g))} title="Convert parsing → normal" style={{ color: '#0a84ff' }}>{iconSwapUp}</button>
+                    <button className="clear-btn" onClick={() => setSelectedTags(prev => prev.map(g => g.source === 'normal' ? { ...g, source: 'parsing' as const } : g))} title="Convert normal → parsing" style={{ color: '#8b5cf6' }}>{iconSwapDown}</button>
                   </div>
                 </div>
                 <div className="selected-tags">

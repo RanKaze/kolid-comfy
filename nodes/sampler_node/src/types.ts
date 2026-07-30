@@ -8,6 +8,7 @@ export interface ServerConfig {
   pixels: number;
   crop_reserve: number;
   has_tagger: boolean;
+  current_context_key: string | null;
 }
 
 export interface DetailerParams {

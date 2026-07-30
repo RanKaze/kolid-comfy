@@ -10,6 +10,7 @@ import time
 import base64
 import io
 import numpy as np
+import cv2
 from PIL import Image
 import torch
 import comfy.model_management as mm
@@ -73,15 +74,19 @@ class SnapshotDetailerSamplerServer:
         self.detail_current_step = 0
         self.finished = False
         self.finish_selected_key = None
+        self.finish_selected_keys = None  # 多选 keys 列表
         self.window_closed = False
 
         # 历史图片画廊
         self.selected_history = []
         self._history_counter = 0
+        self.current_context_key = None  # 当前作为 context 的 history key
 
         # 最新结果
         self.original_image = None
         self.detailed_image = None
+        self.original_key = None   # history key of the original image
+        self.detailed_key = None   # history key of the detailed image
         self.debug_recover_data = None
 
         # 子服务器
@@ -376,6 +381,7 @@ class SnapshotDetailerSamplerServer:
                     'pixels': inst.pixels if inst else 1048576,
                     'crop_reserve': inst.crop_reserve if inst else 32,
                     'has_tagger': inst.tagger is not None if inst else False,
+                    'current_context_key': getattr(inst, 'current_context_key', None),
                 })
                 return
 
@@ -408,6 +414,9 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({
                             'original_image': tensor_to_base64(inst.original_image),
                             'detailed_image': tensor_to_base64(inst.detailed_image),
+                            'original_key': getattr(inst, 'original_key', None),
+                            'detailed_key': getattr(inst, 'detailed_key', None),
+                            'current_context_key': getattr(inst, 'current_context_key', None),
                         })
                     except Exception as e:
                         self._send_json({'error': str(e)}, 500)
@@ -424,7 +433,8 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'error': 'not ready'})
                     return
                 pipeline = inst.node_instance.get_current_pipeline()
-                mask = inst.mask_server.peek_latest_mask() if inst.mask_server else None
+                # 使用 pipeline 中已应用的 mask（由 /api/submit_mask 在进入 Tag 前设置）
+                mask = pipeline.mask if pipeline else None
                 previews = inst.node_instance._generate_tag_previews(pipeline, mask)
                 self._send_json(previews)
                 return
@@ -457,6 +467,49 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True})
                 return
 
+            if self.path == '/api/submit_mask':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    mask_b64 = body.get('mask', '')
+                    if not mask_b64:
+                        self._send_json({'success': False, 'error': 'No mask data'}, 400)
+                        return
+                    if inst.node_instance is None or inst.node_instance._current_pipeline is None:
+                        self._send_json({'success': False, 'error': 'Pipeline not ready'}, 400)
+                        return
+                    pipeline = inst.node_instance._current_pipeline
+                    img = pipeline.image
+                    if img is None:
+                        img = pipeline.get_image()
+                    if img is None:
+                        self._send_json({'success': False, 'error': 'No image'}, 400)
+                        return
+                    orig_h, orig_w = (img.shape[1], img.shape[2]) if img.dim() == 4 else (img.shape[0], img.shape[1])
+                    # Decode base64 mask
+                    raw = mask_b64.split(',')[1] if ',' in mask_b64 else mask_b64
+                    mask_bytes = base64.b64decode(raw)
+                    mask_img = Image.open(io.BytesIO(mask_bytes))
+                    if mask_img.mode != 'RGBA':
+                        mask_img = mask_img.convert('RGBA')
+                    # Use alpha channel as mask
+                    mask_gray = np.array(mask_img)[:, :, 3].astype(np.float32) / 255.0
+                    # Resize to match pipeline image dimensions
+                    if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
+                        mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                    mask_gray = (mask_gray > 0).astype(np.float32)
+                    mask_tensor = torch.from_numpy(mask_gray).unsqueeze(0)  # [1, H, W]
+                    inst.node_instance._on_mask_set(mask_tensor)
+                    # Also update mask server's stored mask so peek_latest_mask works
+                    if inst.mask_server:
+                        inst.mask_server.set_mask(mask_tensor)
+                    self._send_json({'success': True})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
             if self.path == '/api/select_image':
                 length = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
@@ -468,8 +521,15 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/finish':
                 length = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
-                selected_key = body.get('selected_key')
-                inst.finish_selected_key = selected_key
+                selected_keys = body.get('selected_keys')
+                if selected_keys is not None and isinstance(selected_keys, list):
+                    inst.finish_selected_keys = selected_keys
+                    inst.finish_selected_key = selected_keys[0] if len(selected_keys) == 1 else None
+                else:
+                    # 兼容旧格式 single key
+                    selected_key = body.get('selected_key')
+                    inst.finish_selected_key = selected_key
+                    inst.finish_selected_keys = [selected_key] if selected_key else None
                 inst.finished = True
                 inst.put_action('finish')
                 # 唤醒 mask/prompt 以防阻塞
@@ -478,6 +538,50 @@ class SnapshotDetailerSamplerServer:
                 if inst.prompt_server:
                     inst.prompt_server.prompt_event.set()
                 self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/add_context_image':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    image_b64 = body.get('image', '')
+                    if not image_b64:
+                        self._send_json({'success': False, 'error': 'No image data'}, 400)
+                        return
+                    # 解码 base64 → tensor
+                    if ',' in image_b64:
+                        b64_data = image_b64.split(',', 1)[1]
+                    else:
+                        b64_data = image_b64
+                    img_bytes = base64.b64decode(b64_data)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    arr = np.array(img).astype(np.float32) / 255.0
+                    tensor = torch.from_numpy(arr).unsqueeze(0)
+                    inst.add_history(tensor, name=f'Loaded #{len(inst.selected_history) + 1}')
+                    self._send_json({'success': True})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/load_from_assets':
+                try:
+                    if inst.node_instance is None:
+                        self._send_json({'success': False, 'error': 'Node instance not available'})
+                        return
+                    asset_data = inst.asset or ''
+                    if not asset_data or not asset_data.strip():
+                        self._send_json({'success': False, 'error': 'No asset data configured'})
+                        return
+                    count = inst.node_instance._load_from_assets(inst, asset_data)
+                    self._send_json({'success': True, 'count': count})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/run_tag':
@@ -498,7 +602,13 @@ class SnapshotDetailerSamplerServer:
                         parsed_selected, parsed_custom = [], tag
                         if SnapshotPromptNode is not None:
                             parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
-                        inst.prompt_server.selected_prompts = [{'text': p, 'source': 'parsing'} for p in parsed_selected]
+                        # 移除旧的 parsing tag，保留 normal/program tag，然后添加新的 parsing tag
+                        new_prompts = [
+                            p for p in (inst.prompt_server.selected_prompts or [])
+                            if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
+                        ]
+                        new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
+                        inst.prompt_server.selected_prompts = new_prompts
                         inst.prompt_server.custom_prompts = parsed_custom
                     self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': parsed_custom})
                 except Exception as e:
@@ -615,6 +725,86 @@ class SnapshotDetailerSamplerNode:
             except Exception as mask_err:
                 print(f"[RunTag] crop_mask failed, falling back to full: {mask_err}")
         return get_tag(tagger, tag_image)
+
+    # -------------------------------------------------------------------------
+    # Load From Assets
+    # -------------------------------------------------------------------------
+    def _load_from_assets(self, server, asset_data):
+        """Open SnapshotAssetsServer for image selection, add selected images to history."""
+        import webbrowser
+        from .assets_node import SnapshotAssetsServer, SnapshotAssetsNode
+
+        # Determine mode: JSON string → normal mode, else → global mode name
+        global_mode = True
+        canvas_snapshot = None
+        if asset_data and asset_data.strip():
+            try:
+                parsed = json.loads(asset_data.strip())
+                if isinstance(parsed, dict):
+                    canvas_snapshot = asset_data.strip()
+                    global_mode = False
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        if global_mode and asset_data and asset_data.strip():
+            snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "snapshots")
+            snap_path = os.path.join(snap_dir, f"{asset_data.strip()}.json")
+            if os.path.exists(snap_path):
+                with open(snap_path, 'r', encoding='utf-8') as f:
+                    canvas_snapshot = f.read()
+
+        assets_server = SnapshotAssetsServer(
+            input_data=asset_data,
+            canvas_snapshot=canvas_snapshot,
+            enable_image=True,
+            enable_image_config=False,
+            image_config="",
+            enable_video=False,
+            enable_audio=False,
+            enable_prompt=False,
+            enable_slot=False,
+            global_mode=global_mode,
+        )
+        server_thread = threading.Thread(target=assets_server.start)
+        server_thread.daemon = True
+        server_thread.start()
+
+        start_time = time.time()
+        while not assets_server.started:
+            try:
+                mm.throw_exception_if_processing_interrupted()
+            except Exception:
+                assets_server.stop()
+                raise
+            if time.time() - start_time > 10:
+                assets_server.stop()
+                raise RuntimeError("[load_from_assets] Server startup timeout")
+            time.sleep(0.01)
+
+        print(f"[load_from_assets] Opening browser at: {assets_server.browser_url}")
+        webbrowser.open(assets_server.browser_url)
+
+        if not assets_server.wait_for_confirm():
+            assets_server.stop()
+            return 0
+        assets_server.stop()
+
+        selected_images = getattr(assets_server, 'selected_images', [])
+        if not selected_images:
+            return 0
+
+        count = 0
+        for img_data in selected_images:
+            if isinstance(img_data, dict):
+                image_url = img_data.get('image', '')
+                if not image_url:
+                    continue
+                tensor = SnapshotAssetsNode._decode_image_data(image_url)
+                server.add_history(tensor, name=f'Asset #{len(server.selected_history) + 1}')
+                count += 1
+
+        print(f"[load_from_assets] Added {count} images to history")
+        return count
 
     # -------------------------------------------------------------------------
     # Prompt 解析
@@ -806,6 +996,28 @@ class SnapshotDetailerSamplerNode:
         return next_pipeline, original_image, detailed_image, debug_recover_data
 
     # -------------------------------------------------------------------------
+    # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
+    # -------------------------------------------------------------------------
+    def _switch_image(self, server, new_image, context_key=None):
+        """切换 pipeline 的图片并更新 mask server。尺寸相同则保留 mask。"""
+        old_image = self._current_pipeline.image
+        old_h, old_w = (old_image.shape[1], old_image.shape[2]) if old_image is not None and hasattr(old_image, 'shape') and old_image.dim() >= 3 else (0, 0)
+        new_h, new_w = (new_image.shape[1], new_image.shape[2]) if new_image is not None and hasattr(new_image, 'shape') and new_image.dim() >= 3 else (0, 0)
+
+        self._current_pipeline.image = new_image
+        server.current_context_key = context_key
+
+        if server.mask_server:
+            server.mask_server.set_image(new_image)
+            if old_h != new_h or old_w != new_w:
+                # 尺寸不同，mask 不通用，清除
+                server.mask_server.clear()
+                self._current_pipeline.mask = None
+                print(f"[SnapshotDetailerSampler] Image size changed ({old_w}x{old_h} → {new_w}x{new_h}), mask cleared")
+            else:
+                print(f"[SnapshotDetailerSampler] Image size unchanged ({new_w}x{new_h}), mask preserved")
+
+    # -------------------------------------------------------------------------
     # 主入口
     # -------------------------------------------------------------------------
     def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
@@ -845,6 +1057,7 @@ class SnapshotDetailerSamplerNode:
         # 添加初始图片到历史画廊
         if self._current_pipeline and self._current_pipeline.image is not None:
             server.add_history(self._current_pipeline.image, name='Original')
+            server.current_context_key = server.selected_history[-1]['key']
 
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
@@ -905,44 +1118,54 @@ class SnapshotDetailerSamplerNode:
                         if current_mask is not None:
                             current_mask = current_mask.clone()
 
+                        # 遮罩必须存在，否则 detailer 无意义
+                        if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
+                            server.detail_status = 'error'
+                            server.detail_error = 'Mask is required — draw a mask before running the detailer'
+                            continue
+
                         next_pipeline, original_image, detailed_image, debug_data = self._run_detailer(
                             self._current_pipeline, current_mask, user_positive, user_loras, params
                         )
 
                         server.original_image = original_image
                         server.detailed_image = detailed_image
+                        server.original_key = server.current_context_key  # 记录 detailer 运行前的 context key
                         server.debug_recover_data = debug_data
                         server.detail_status = 'done'
 
                         # 添加到历史画廊
                         server.add_history(detailed_image, name=f'Detail #{len(server.selected_history)}')
+                        new_key = server.selected_history[-1]['key']
+                        server.detailed_key = new_key
 
                         # 更新 pipeline
                         self._current_pipeline = next_pipeline
 
-                        # 更新 mask server 的图片
-                        if server.mask_server:
-                            server.mask_server.set_image(next_pipeline.image)
-                            server.mask_server.clear()
+                        # 更新 mask server 的图片（与 select_image 相同逻辑：尺寸相同则保留 mask）
+                        self._switch_image(server, next_pipeline.image, context_key=new_key)
 
-                        # 保留 prompt 中的 normal-sourced 项
+                        # 清理 prompt 中的 program-sourced 项（parsing tag 保留，在 tag 阶段转换）
                         if server.prompt_server:
+                            server.prompt_server.selected_prompts = [
+                                p for p in (server.prompt_server.selected_prompts or [])
+                                if not (isinstance(p, dict) and p.get('source', 'normal') == 'program')
+                            ]
+                            server.prompt_server.selected_loras = [
+                                l for l in (server.prompt_server.selected_loras or [])
+                                if l.get('source', 'normal') != 'program'
+                            ] if isinstance(server.prompt_server.selected_loras, list) else []
+                            server.prompt_server.selected_prefabs = [
+                                p for p in (server.prompt_server.selected_prefabs or [])
+                                if p.get('source', 'normal') != 'program'
+                            ] if isinstance(server.prompt_server.selected_prefabs, list) else []
                             server.prompt_server.last_selected = [
                                 p['text'] if isinstance(p, dict) else p
                                 for p in server.prompt_server.selected_prompts
-                                if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') == 'normal'
+                                if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') != 'program'
                             ]
-                            server.prompt_server.last_selected_loras = [
-                                l for l in server.prompt_server.selected_loras
-                                if l.get('source', 'normal') != 'program'
-                            ] if isinstance(server.prompt_server.selected_loras, list) else []
-                            server.prompt_server.last_selected_prefabs = [
-                                p for p in server.prompt_server.selected_prefabs
-                                if p.get('source', 'normal') != 'program'
-                            ] if isinstance(server.prompt_server.selected_prefabs, list) else []
-                            server.prompt_server.selected_prompts = []
-                            server.prompt_server.selected_loras = []
-                            server.prompt_server.selected_prefabs = []
+                            server.prompt_server.last_selected_loras = list(server.prompt_server.selected_loras)
+                            server.prompt_server.last_selected_prefabs = list(server.prompt_server.selected_prefabs)
                             server.prompt_server.custom_prompts = ''
 
                     except Exception as e:
@@ -965,10 +1188,7 @@ class SnapshotDetailerSamplerNode:
                     key = action.get('key', '')
                     img = server.get_history_image(key)
                     if img is not None:
-                        self._current_pipeline.image = img
-                        if server.mask_server:
-                            server.mask_server.set_image(img)
-                            server.mask_server.clear()
+                        self._switch_image(server, img, context_key=key)
                         print(f"[SnapshotDetailerSampler] Selected history image: {key}")
 
         finally:
@@ -978,7 +1198,16 @@ class SnapshotDetailerSamplerNode:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
 
         # 如果用户在 finish 时选了历史图片，用它作为最终输出
-        if server.finish_selected_key:
+        if server.finish_selected_keys and len(server.finish_selected_keys) > 1:
+            # 多选：收集所有选中的图片，直接存为列表到 pipeline.image
+            selected_images = []
+            for key in server.finish_selected_keys:
+                img = server.get_history_image(key)
+                if img is not None:
+                    selected_images.append(img)
+            if selected_images:
+                self._current_pipeline.image = selected_images
+        elif server.finish_selected_key:
             img = server.get_history_image(server.finish_selected_key)
             if img is not None:
                 self._current_pipeline.image = img

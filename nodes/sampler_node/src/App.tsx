@@ -23,6 +23,8 @@ const App: React.FC = () => {
   const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
+  const [loadingAssets, setLoadingAssets] = useState(false);
+  const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
 
@@ -48,6 +50,7 @@ const App: React.FC = () => {
           crop_reserve: data.crop_reserve,
         });
         setDetailStatus(data.detail_status);
+        setCurrentContextKey(data.current_context_key ?? null);
       })
       .catch(e => setError('Failed to load config: ' + e.message));
   }, []);
@@ -67,30 +70,72 @@ const App: React.FC = () => {
   // Load tag previews when entering tag tab
   useEffect(() => {
     if (tab !== 'tag') return;
-    fetch('/api/tag_previews')
-      .then(r => r.json())
-      .then((data: TagPreviews) => {
-        if (data.full || data.mask || data.covered) {
-          setTagPreviews(data);
+    // First: get current mask from mask iframe, submit it to main server, then load tag previews
+    const iframe = maskIframeRef.current;
+    if (iframe?.contentWindow) {
+      let resolved = false;
+      const maskHandler = (event: MessageEvent) => {
+        if (event.data?.type === 'mask-data' && !resolved) {
+          resolved = true;
+          window.removeEventListener('message', maskHandler);
+          const maskData = event.data.mask;
+          if (maskData) {
+            // Submit mask to main server (resizes to pipeline.image dimensions)
+            fetch('/api/submit_mask', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mask: maskData }),
+            }).finally(() => {
+              fetch('/api/tag_previews')
+                .then(r => r.json())
+                .then((data: TagPreviews) => {
+                  if (data.full || data.mask || data.covered) setTagPreviews(data);
+                })
+                .catch(e => setError('Failed to load tag previews: ' + e.message));
+            });
+          } else {
+            fetch('/api/tag_previews')
+              .then(r => r.json())
+              .then((data: TagPreviews) => {
+                if (data.full || data.mask || data.covered) setTagPreviews(data);
+              })
+              .catch(e => setError('Failed to load tag previews: ' + e.message));
+          }
         }
-      })
-      .catch(e => setError('Failed to load tag previews: ' + e.message));
+      };
+      window.addEventListener('message', maskHandler);
+      iframe.contentWindow.postMessage({ type: 'get-mask' }, '*');
+      // Timeout fallback: if iframe doesn't respond, just load previews with existing mask
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          window.removeEventListener('message', maskHandler);
+          fetch('/api/tag_previews')
+            .then(r => r.json())
+            .then((data: TagPreviews) => {
+              if (data.full || data.mask || data.covered) setTagPreviews(data);
+            })
+            .catch(e => setError('Failed to load tag previews: ' + e.message));
+        }
+      }, 500);
+    } else {
+      fetch('/api/tag_previews')
+        .then(r => r.json())
+        .then((data: TagPreviews) => {
+          if (data.full || data.mask || data.covered) setTagPreviews(data);
+        })
+        .catch(e => setError('Failed to load tag previews: ' + e.message));
+    }
   }, [tab]);
 
   // Listen for postMessage from mask/prompt iframes
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'mask-confirmed') {
-        setMaskConfirmed(true);
-        setError(null);
-        // Auto-advance: mask → tag (if tagger) or prompt
-        if (tabRef.current === 'mask') {
-          setTab(config?.has_tagger ? 'tag' : 'prompt');
-        }
+        // Mask 不再需要 confirm，直接忽略
       } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
         setError(null);
-        // Auto-advance to Draw tab when prompt is confirmed
         setTab('draw');
       }
     };
@@ -98,22 +143,26 @@ const App: React.FC = () => {
     return () => window.removeEventListener('message', handler);
   }, [config]);
 
-  // Poll mask status (fallback)
+  // Poll mask status — auto-advance to tag/prompt when mask is drawn
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
         const res = await fetch('/api/has_mask');
         const data = await res.json();
-        if (!cancelled && data.has_mask) {
+        if (!cancelled && data.has_mask && !maskConfirmed) {
           setMaskConfirmed(true);
+          // Auto-advance: mask → tag (if tagger) or prompt
+          if (tabRef.current === 'mask') {
+            setTab(config?.has_tagger ? 'tag' : 'prompt');
+          }
         }
       } catch { /* ignore */ }
     };
     poll();
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [config, maskConfirmed]);
 
   // Poll prompt status (fallback)
   useEffect(() => {
@@ -147,6 +196,10 @@ const App: React.FC = () => {
         });
         if (data.detail_status === 'done') {
           refreshHistory();
+          // Refresh config to get updated current_context_key
+          fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
+            if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
+          }).catch(() => {});
         } else if (data.detail_status === 'error') {
           setError(data.error || 'Detailer failed');
         }
@@ -168,14 +221,21 @@ const App: React.FC = () => {
   }, [detailStatus]);
 
   // Fetch result images when detail is done
-  const [resultImages, setResultImages] = useState<{original: string; detailed: string} | null>(null);
+  const [resultImages, setResultImages] = useState<{original: string; detailed: string; originalKey: string | null; detailedKey: string | null} | null>(null);
   useEffect(() => {
     if (detailStatus !== 'done') return;
     fetch('/api/result')
       .then(r => r.json())
       .then(data => {
         if (data.original_image && data.detailed_image) {
-          setResultImages({ original: data.original_image, detailed: data.detailed_image });
+          setResultImages({
+            original: data.original_image,
+            detailed: data.detailed_image,
+            originalKey: data.original_key ?? null,
+            detailedKey: data.detailed_key ?? null,
+          });
+          // Auto-set context to detailed image after Run Detailer
+          setCurrentContextKey(data.current_context_key ?? data.detailed_key ?? null);
         }
       })
       .catch(() => {});
@@ -253,6 +313,7 @@ const App: React.FC = () => {
       setDetailStatus('idle');
       setResultImages(null);
       setDebugData(null);
+      setCurrentContextKey(key);
       setTab('mask');
       // Tell mask iframe to reload its image
       setTimeout(() => {
@@ -263,6 +324,27 @@ const App: React.FC = () => {
       }, 100);
     } catch (e: any) {
       setError('Failed to select image: ' + e.message);
+    }
+  }, []);
+
+  // Set context without leaving the current tab or resetting Draw results
+  const handleSetContext = useCallback(async (key: string) => {
+    setCurrentContextKey(key);  // Immediate UI feedback
+    try {
+      await fetch('/api/select_image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key }),
+      });
+      // Tell mask iframe to reload its image (so mask tab is ready when user switches)
+      setTimeout(() => {
+        const iframe = maskIframeRef.current;
+        if (iframe?.contentWindow) {
+          iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
+        }
+      }, 100);
+    } catch (e: any) {
+      setError('Failed to set context: ' + e.message);
     }
   }, []);
 
@@ -279,18 +361,48 @@ const App: React.FC = () => {
     setShowFinishDialog(true);
   }, []);
 
-  const handleFinish = useCallback(async (selectedKey?: string) => {
+  const handleFinish = useCallback(async (selectedKeys?: string[]) => {
     try {
       await fetch('/api/finish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_key: selectedKey }),
+        body: JSON.stringify({ selected_keys: selectedKeys }),
       });
       window.close();
     } catch {
       window.close();
     }
   }, []);
+
+  const handleAddContextImage = useCallback(async (base64: string) => {
+    try {
+      await fetch('/api/add_context_image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: base64 }),
+      });
+      refreshHistory();
+    } catch (e: any) {
+      setError('Failed to add image: ' + e.message);
+    }
+  }, [refreshHistory]);
+
+  const handleLoadFromAssets = useCallback(async () => {
+    setLoadingAssets(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/load_from_assets', { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || 'Failed to load from assets');
+      }
+      refreshHistory();
+    } catch (e: any) {
+      setError('Failed to load from assets: ' + e.message);
+    } finally {
+      setLoadingAssets(false);
+    }
+  }, [refreshHistory]);
 
   if (!config) {
     return (
@@ -329,6 +441,11 @@ const App: React.FC = () => {
         showFinishDialog={showFinishDialog}
         onFinish={handleFinish}
         onCloseFinishDialog={() => setShowFinishDialog(false)}
+        onAddContextImage={handleAddContextImage}
+        onLoadFromAssets={handleLoadFromAssets}
+        loadingAssets={loadingAssets}
+        currentContextKey={currentContextKey}
+        onSetContext={handleSetContext}
       />
 
       {error && (

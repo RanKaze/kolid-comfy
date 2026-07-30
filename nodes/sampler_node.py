@@ -2020,6 +2020,48 @@ class PipelineDecodeNode:
 
     def decode(self, pipeline: PipelineData):
         next_pipeline = pipeline.copy()
+
+        # latent 是列表 → 逐个解码后 cat 成 batch
+        if isinstance(next_pipeline.latent, list):
+            decoded_list = []
+            for lat in next_pipeline.latent:
+                dec = VAEDecode().decode(vae=next_pipeline.vae, samples=lat)[0]
+                if dec.dim() == 3:
+                    dec = dec.unsqueeze(0)
+                decoded_list.append(dec)
+            if not decoded_list:
+                return (next_pipeline, next_pipeline.get_image())
+            h, w = decoded_list[0].shape[1], decoded_list[0].shape[2]
+            resized = []
+            for img in decoded_list:
+                if img.shape[1] != h or img.shape[2] != w:
+                    img = torch.nn.functional.interpolate(
+                        img.permute(0, 3, 1, 2), size=(h, w), mode='bilinear'
+                    ).permute(0, 2, 3, 1)
+                resized.append(img)
+            batch = torch.cat(resized, dim=0)
+            return (next_pipeline, batch)
+
+        # image 是列表 → cat 成 batch
+        if isinstance(next_pipeline.image, list):
+            imgs = []
+            for img in next_pipeline.image:
+                if img.dim() == 3:
+                    img = img.unsqueeze(0)
+                imgs.append(img)
+            if not imgs:
+                return (next_pipeline, next_pipeline.get_image())
+            h, w = imgs[0].shape[1], imgs[0].shape[2]
+            resized = []
+            for img in imgs:
+                if img.shape[1] != h or img.shape[2] != w:
+                    img = torch.nn.functional.interpolate(
+                        img.permute(0, 3, 1, 2), size=(h, w), mode='bilinear'
+                    ).permute(0, 2, 3, 1)
+                resized.append(img)
+            batch = torch.cat(resized, dim=0)
+            return (next_pipeline, batch)
+
         return (next_pipeline, next_pipeline.get_image())
     
 
