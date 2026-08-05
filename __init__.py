@@ -32,6 +32,7 @@ from .nodes.snapshot_sampler_node import *
 from .nodes.application_node import *
 from .nodes.assets_node import *
 from .nodes.assets_info_collect_node import *
+from .nodes.interface_node import *
     
 
 NODE_CONFIG = {
@@ -136,6 +137,9 @@ NODE_CONFIG = {
     "SnapshotDetailerSamplerNode": {"class": SnapshotDetailerSamplerNode, "name": "SnapshotDetailerSamplerNode"},
     "SnapshotAssetsNode": {"class": SnapshotAssetsNode, "name": "SnapshotAssetsNode"},
     "AssetsInfoCollectNode": {"class": AssetsInfoCollectNode, "name": "AssetsInfoCollectNode"},
+
+    "InterfaceStartNode": {"class": InterfaceStartNode, "name": "InterfaceStartNode"},
+    "InterfaceEndNode": {"class": InterfaceEndNode, "name": "InterfaceEndNode"},
 
     "ApplicationNode": {"class": ApplicationNode, "name": "ApplicationNode"},
 
