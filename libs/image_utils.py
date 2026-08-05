@@ -105,6 +105,8 @@ def crop_mask(image, mask, reserve):
                 x1, y1 = int(min_x[i]), int(min_y[i])
                 x2, y2 = int(max_x[i]) + 1, int(max_y[i]) + 1
 
+                print(f"[DIAG] crop_mask bbox: x1={x1} y1={y1} x2={x2} y2={y2} crop_w={x2-x1} crop_h={y2-y1} image={W}x{H} mask_sum={mask[i].sum().item():.1f}")
+
                 cropped_img = image[i, y1:y2, x1:x2, :]
                 cropped_msk = mask[i, y1:y2, x1:x2]
 

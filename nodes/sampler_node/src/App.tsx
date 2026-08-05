@@ -25,8 +25,10 @@ const App: React.FC = () => {
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
+  const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
+  const blendIframeRef = useRef<HTMLIFrameElement>(null);
 
   const [params, setParams] = useState<DetailerParams>({
     add_noise: 'enable',
@@ -80,11 +82,15 @@ const App: React.FC = () => {
           window.removeEventListener('message', maskHandler);
           const maskData = event.data.mask;
           if (maskData) {
-            // Submit mask to main server (resizes to pipeline.image dimensions)
+            const brushMode = event.data.brush_mode || 'binary';
+            const strength = event.data.strength ?? 1.0;
+            const center = event.data.center ?? 1.0;
+            const edge = event.data.edge ?? 0.0;
+            const gamma = event.data.gamma ?? 2.0;
             fetch('/api/submit_mask', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ mask: maskData }),
+              body: JSON.stringify({ mask: maskData, brush_mode: brushMode, strength, center, edge, gamma }),
             }).finally(() => {
               fetch('/api/tag_previews')
                 .then(r => r.json())
@@ -137,6 +143,15 @@ const App: React.FC = () => {
         setPromptReady(true);
         setError(null);
         setTab('draw');
+      } else if (event.data?.type === 'blend-select') {
+        // Blend iframe requests image selection
+        setBlendSelect({ role: event.data.role });
+      } else if (event.data?.type === 'blend-data') {
+        // Blend iframe returns blend data (bg/fg keys + mask)
+        const { bgKey, fgKey, mask } = event.data;
+        if (bgKey && fgKey && mask) {
+          handleBlend(bgKey, fgKey, mask);
+        }
       }
     };
     window.addEventListener('message', handler);
@@ -404,6 +419,24 @@ const App: React.FC = () => {
     }
   }, [refreshHistory]);
 
+  const handleBlend = useCallback(async (bgKey: string, fgKey: string, maskBase64: string) => {
+    setError(null);
+    try {
+      const res = await fetch('/api/blend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ background_key: bgKey, foreground_key: fgKey, mask: maskBase64 }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || 'Blend failed');
+      }
+      refreshHistory();
+    } catch (e: any) {
+      setError('Blend error: ' + e.message);
+    }
+  }, [refreshHistory]);
+
   if (!config) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#888' }}>
@@ -446,6 +479,20 @@ const App: React.FC = () => {
         loadingAssets={loadingAssets}
         currentContextKey={currentContextKey}
         onSetContext={handleSetContext}
+        blendIframeRef={blendIframeRef}
+        showBlendSelect={blendSelect}
+        onBlendSelectImage={(key, name, src) => {
+          if (blendSelect) {
+            const iframe = blendIframeRef.current;
+            iframe?.contentWindow?.postMessage({
+              type: 'blend-image-selected',
+              role: blendSelect.role,
+              key, name, src,
+            }, '*');
+          }
+          setBlendSelect(null);
+        }}
+        onCloseBlendSelect={() => setBlendSelect(null)}
       />
 
       {error && (

@@ -370,6 +370,18 @@ class SnapshotDetailerSamplerServer:
                     self.send_error(404, "sampler_node.html not found")
                 return
 
+            if self.path == '/blend_node.html':
+                file_path = os.path.join(os.path.dirname(__file__), 'web', 'blend_node.html')
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "blend_node.html not found")
+                return
+
             if self.path == '/api/config':
                 self._send_json({
                     'mask_url': inst.mask_url if inst else '',
@@ -472,6 +484,11 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     mask_b64 = body.get('mask', '')
+                    brush_mode = body.get('brush_mode', 'binary')
+                    strength = float(body.get('strength', 1.0))
+                    center = float(body.get('center', 1.0))
+                    edge = float(body.get('edge', 0.0))
+                    gamma = float(body.get('gamma', 2.0))
                     if not mask_b64:
                         self._send_json({'success': False, 'error': 'No mask data'}, 400)
                         return
@@ -497,8 +514,16 @@ class SnapshotDetailerSamplerServer:
                     # Resize to match pipeline image dimensions
                     if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
                         mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                    mask_gray = (mask_gray > 0).astype(np.float32)
+                    # Apply brush mode transform
+                    # Brush softness is already baked into the alpha channel (radial gradient in canvas)
+                    # Binary: threshold any non-zero alpha to full strength
+                    if brush_mode == 'binary':
+                        mask_gray = (mask_gray > 0).astype(np.float32) * strength
+                    else:
+                        # Linear / Exponential: alpha already encodes the gradient, just clip
+                        mask_gray = np.clip(mask_gray, 0, 1)
                     mask_tensor = torch.from_numpy(mask_gray).unsqueeze(0)  # [1, H, W]
+                    print(f"[DIAG] submit_mask: received mask_img={mask_img.size} mode={mask_img.mode} → gray_shape={mask_gray.shape} sum={mask_gray.sum():.1f} max={mask_gray.max():.3f} → tensor_shape={mask_tensor.shape} brush_mode={brush_mode}")
                     inst.node_instance._on_mask_set(mask_tensor)
                     # Also update mask server's stored mask so peek_latest_mask works
                     if inst.mask_server:
@@ -578,6 +603,51 @@ class SnapshotDetailerSamplerServer:
                         return
                     count = inst.node_instance._load_from_assets(inst, asset_data)
                     self._send_json({'success': True, 'count': count})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/blend':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    bg_key = body.get('background_key', '')
+                    fg_key = body.get('foreground_key', '')
+                    mask_b64 = body.get('mask', '')
+                    if not bg_key or not fg_key or not mask_b64:
+                        self._send_json({'success': False, 'error': 'Missing bg_key, fg_key, or mask'}, 400)
+                        return
+                    bg_img = inst.get_history_image(bg_key)
+                    fg_img = inst.get_history_image(fg_key)
+                    if bg_img is None or fg_img is None:
+                        self._send_json({'success': False, 'error': 'Image not found'}, 400)
+                        return
+                    # Ensure same dimensions — resize fg to match bg
+                    bg_h, bg_w = bg_img.shape[1], bg_img.shape[2]
+                    if fg_img.shape[1] != bg_h or fg_img.shape[2] != bg_w:
+                        fg_img = torch.nn.functional.interpolate(
+                            fg_img.permute(0, 3, 1, 2), size=(bg_h, bg_w), mode='bilinear'
+                        ).permute(0, 2, 3, 1)
+                    # Decode mask
+                    raw = mask_b64.split(',')[1] if ',' in mask_b64 else mask_b64
+                    mask_bytes = base64.b64decode(raw)
+                    mask_img = Image.open(io.BytesIO(mask_bytes))
+                    if mask_img.mode != 'RGBA':
+                        mask_img = mask_img.convert('RGBA')
+                    mask_gray = np.array(mask_img)[:, :, 3].astype(np.float32) / 255.0
+                    # Resize mask to match image
+                    if mask_gray.shape[0] != bg_h or mask_gray.shape[1] != bg_w:
+                        mask_gray = cv2.resize(mask_gray, (bg_w, bg_h), interpolation=cv2.INTER_LINEAR)
+                    mask_gray = np.clip(mask_gray, 0, 1)
+                    # Alpha blend: result = bg * (1 - alpha) + fg * alpha
+                    alpha = torch.from_numpy(mask_gray).unsqueeze(0).unsqueeze(-1)  # [1, H, W, 1]
+                    blended = bg_img * (1 - alpha) + fg_img * alpha
+                    blended = torch.clamp(blended, 0, 1)
+                    inst.add_history(blended, name=f'Blend #{len(inst.selected_history)}')
+                    new_key = inst.selected_history[-1]['key']
+                    self._send_json({'success': True, 'key': new_key})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -1123,6 +1193,22 @@ class SnapshotDetailerSamplerNode:
                             server.detail_status = 'error'
                             server.detail_error = 'Mask is required — draw a mask before running the detailer'
                             continue
+
+                        # 诊断：打印 mask 和 image 的尺寸信息
+                        diag_img = self._current_pipeline.image
+                        if diag_img is not None:
+                            diag_img_h, diag_img_w = (diag_img.shape[1], diag_img.shape[2]) if diag_img.dim() == 4 else (diag_img.shape[0], diag_img.shape[1])
+                        else:
+                            diag_img_h, diag_img_w = 0, 0
+                        if current_mask is not None:
+                            diag_mask_shape = str(current_mask.shape)
+                            diag_mask_sum = current_mask.sum().item()
+                            diag_mask_max = current_mask.max().item()
+                        else:
+                            diag_mask_shape = 'None'
+                            diag_mask_sum = 0
+                            diag_mask_max = 0
+                        print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
 
                         next_pipeline, original_image, detailed_image, debug_data = self._run_detailer(
                             self._current_pipeline, current_mask, user_positive, user_loras, params
