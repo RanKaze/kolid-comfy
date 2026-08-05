@@ -34,6 +34,10 @@ interface EditPhaseProps {
   loadingAssets: boolean;
   currentContextKey: string | null;
   onSetContext: (key: string) => void;
+  blendIframeRef: React.RefObject<HTMLIFrameElement>;
+  showBlendSelect: { role: 'background' | 'foreground' } | null;
+  onBlendSelectImage: (key: string, name: string, src: string) => void;
+  onCloseBlendSelect: () => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -45,6 +49,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
+  blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -53,6 +58,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     { id: 'tag', label: 'Tag', color: '#af52de' },
     { id: 'prompt', label: 'Prompt', color: '#0a84ff' },
     { id: 'draw', label: 'Draw', color: '#30d158' },
+    { id: 'blend', label: 'Blend', color: '#ff9f0a' },
     { id: 'context', label: 'Context', color: '#64d2ff' },
   ];
   const hasTagger = !!tagPreviews || !!tagResult;
@@ -280,6 +286,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           </div>
         )}
 
+        {/* Blend — iframe-based blend page with live preview */}
+        {tab === 'blend' && (
+          <BlendTab history={history} blendIframeRef={blendIframeRef} showBlendSelect={showBlendSelect} onBlendSelectImage={onBlendSelectImage} onCloseBlendSelect={onCloseBlendSelect} />
+        )}
+
         {/* Context — left/right split layout */}
         {tab === 'context' && (
           <div style={styles.contextLayout}>
@@ -370,6 +381,44 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         </div>
       )}
     </div>
+  );
+};
+
+// ── BlendTab ──
+const BlendTab: React.FC<{
+  history: HistoryItem[];
+  blendIframeRef: React.RefObject<HTMLIFrameElement>;
+  showBlendSelect: { role: 'background' | 'foreground' } | null;
+  onBlendSelectImage: (key: string, name: string, src: string) => void;
+  onCloseBlendSelect: () => void;
+}> = ({ history, blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect }) => {
+  return (
+    <>
+      <iframe ref={blendIframeRef} src="/blend_node.html" style={{ width: '100%', height: '100%', border: 'none', background: '#0d0d0d' }} title="Blend" allow="clipboard-write" />
+      {/* Image selection modal */}
+      {showBlendSelect && (
+        <div style={styles.overlay}>
+          <div style={styles.dialog}>
+            <div style={styles.dialogTitle}>Select {showBlendSelect.role === 'background' ? 'Background' : 'Foreground'}</div>
+            <div style={styles.dialogHistoryGrid}>
+              {history.map(h => (
+                <button key={h.key} style={styles.historyCard} onClick={() => {
+                  onBlendSelectImage(h.key, h.name, h.src);
+                }}>
+                  <div style={styles.historyImgWrap}>
+                    <img src={h.src} alt={h.name} style={styles.historyImg} />
+                  </div>
+                  <div style={styles.historyName}>{h.name}</div>
+                </button>
+              ))}
+            </div>
+            <div style={styles.dialogActions}>
+              <button style={styles.cancelBtn} onClick={onCloseBlendSelect}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 

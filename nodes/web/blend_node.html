@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blend</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+#mainArea { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+#canvasArea { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; position: relative; margin: 16px; }
+#blendCanvas { position: absolute; cursor: crosshair; touch-action: none; }
+#status { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); pointer-events: none; background: rgba(28,28,30,0.55); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); padding: 8px 20px; border-radius: 20px; color: #fff; font-size: 13px; font-weight: 500; z-index: 50; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
+#status.success { background: rgba(48,209,88,0.2); border-color: rgba(48,209,88,0.3); color: #30d158; }
+
+#sidePanel { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; padding: 12px; gap: 8px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow-y: auto; }
+.panel-section { display: flex; flex-direction: column; gap: 4px; }
+.panel-label { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.5px; }
+.panel-thumb { width: 100%; aspect-ratio: 16/9; background: #1a1a1a; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); overflow: hidden; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: border-color 0.2s; }
+.panel-thumb:hover { border-color: rgba(0,122,255,0.5); }
+.panel-thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 7px; }
+.panel-thumb-empty { color: rgba(255,255,255,0.2); font-size: 11px; }
+
+#maskPreview { width: 100%; aspect-ratio: 16/9; background: #1a1a1a; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); }
+
+.bottom-bar { flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px 20px; background: rgba(28,28,30,0.6); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border-top: 1px solid rgba(255,255,255,0.06); z-index: 50; }
+.control-group { display: flex; align-items: center; gap: 8px; }
+label { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); white-space: nowrap; }
+input[type="range"] { cursor: pointer; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.15); outline: none; width: 100px; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); cursor: pointer; margin-top: -6px; }
+.range-value { min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: rgba(255,255,255,0.7); }
+.bottom-divider { width: 1px; height: 28px; background: rgba(255,255,255,0.1); flex-shrink: 0; }
+.control-button { background: rgba(255,255,255,0.1); border: none; border-radius: 10px; padding: 7px 14px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; }
+.control-button:hover { background: rgba(255,255,255,0.18); }
+.confirm-btn { padding: 10px 32px; font-size: 14px; font-weight: 700; color: #fff; border: none; border-radius: 12px; cursor: pointer; transition: all 0.2s ease; background: rgba(48,209,88,0.9); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
+.confirm-btn:hover { background: rgba(48,209,88,1.0); transform: translateY(-1px); }
+
+.controls { position: absolute; top: 16px; right: 16px; background: rgba(28,28,30,0.6); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); padding: 14px; border-radius: 20px; z-index: 50; display: flex; flex-direction: column; gap: 8px; min-width: 180px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.35); }
+.detector-title { font-size: 11px; font-weight: 700; color: #64d2ff; text-transform: uppercase; letter-spacing: 0.8px; }
+.brush-mode-btn.active { background: rgba(0,122,255,0.85); box-shadow: 0 2px 8px rgba(0,122,255,0.25); }
+.control-row { display: flex; align-items: center; gap: 10px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
+.control-row label { min-width: 50px; }
+.control-row input[type="range"] { flex: 1; }
+.control-row span { min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: rgba(255,255,255,0.7); }
+
+#brushCursor { position: fixed; pointer-events: none; border-radius: 50%; z-index: 100; display: none; transform: translate(-50%,-50%); box-sizing: border-box; border: 1.5px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3); }
+#brushCursor.erase { border: 1.5px dashed rgba(255,255,255,0.9); }
+#brushCursor::before, #brushCursor::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); background: rgba(255,255,255,0.7); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.5); }
+#brushCursor::before { width: 1px; height: 16px; }
+#brushCursor::after { width: 16px; height: 1px; }
+</style>
+</head>
+<body>
+<div id="mainArea">
+    <div id="canvasArea">
+        <div id="status">Select background and foreground</div>
+        <canvas id="blendCanvas"></canvas>
+        <div id="brushCursor"></div>
+        <div class="controls" id="brushPanel">
+            <div class="detector-title">Brush</div>
+            <div class="control-row" style="gap:4px; justify-content:center;">
+                <button class="control-button brush-mode-btn active" id="brushBinary" style="flex:1; padding:5px 8px; font-size:11px;">Binary</button>
+                <button class="control-button brush-mode-btn" id="brushLinear" style="flex:1; padding:5px 8px; font-size:11px;">Linear</button>
+                <button class="control-button brush-mode-btn" id="brushExpo" style="flex:1; padding:5px 8px; font-size:11px;">Exponential</button>
+            </div>
+            <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0"><span id="brushStrengthValue">1.00</span></div>
+            <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0"><span id="brushCenterValue">1.00</span></div>
+            <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0"><span id="brushEdgeValue">0.00</span></div>
+            <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="brushGammaValue">2.0</span></div>
+            <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40"><span id="brushSizeValue">40</span></div>
+
+            <div style="height:1px; background:rgba(255,255,255,0.08); margin: 4px 0;"></div>
+
+            <div class="detector-title" style="color:#ff6b6b;">Eraser</div>
+            <div class="control-row" style="gap: 4px; justify-content: center;">
+                <button class="control-button eraser-mode-btn active" id="eraserBinary" style="flex:1; padding: 5px 8px; font-size: 11px;">Binary</button>
+                <button class="control-button eraser-mode-btn" id="eraserLinear" style="flex:1; padding: 5px 8px; font-size: 11px;">Linear</button>
+                <button class="control-button eraser-mode-btn" id="eraserExpo" style="flex:1; padding: 5px 8px; font-size: 11px;">Exponential</button>
+            </div>
+            <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0"><span id="eraserStrengthValue">1.00</span></div>
+            <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0"><span id="eraserCenterValue">1.00</span></div>
+            <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0"><span id="eraserEdgeValue">0.00</span></div>
+            <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="eraserGammaValue">2.0</span></div>
+        </div>
+    </div>
+    <div id="sidePanel">
+        <div class="panel-section">
+            <div class="panel-label">Background</div>
+            <div class="panel-thumb" id="bgThumb"><span class="panel-thumb-empty">Click to select</span></div>
+        </div>
+        <div class="panel-section">
+            <div class="panel-label">Foreground</div>
+            <div class="panel-thumb" id="fgThumb"><span class="panel-thumb-empty">Click to select</span></div>
+        </div>
+        <div class="panel-section">
+            <div class="panel-label">Mask Preview</div>
+            <canvas id="maskPreview"></canvas>
+        </div>
+    </div>
+</div>
+<div class="bottom-bar">
+    <button class="control-button" id="clearBtn">Clear</button>
+    <div class="bottom-divider"></div>
+    <button class="confirm-btn" id="blendBtn">Blend</button>
+</div>
+<script>
+const canvasArea = document.getElementById('canvasArea');
+const blendCanvas = document.getElementById('blendCanvas');
+const maskPreview = document.getElementById('maskPreview');
+const status = document.getElementById('status');
+const brushCursor = document.getElementById('brushCursor');
+const blendCtx = blendCanvas.getContext('2d');
+const maskPrevCtx = maskPreview.getContext('2d');
+const bgThumb = document.getElementById('bgThumb');
+const fgThumb = document.getElementById('fgThumb');
+
+let bgSrc = '', fgSrc = '', bgKey = '', fgKey = '';
+let bgImgEl = null, fgImgEl = null;
+let isDrawing = false;
+let isErasing = false;
+let isAltResizing = false;
+let altResizeAnchorX = 0;
+let altResizeBaseSize = 40;
+let altResizeBrushCenterX = 0;
+let altResizeBrushCenterY = 0;
+const ALT_RESIZE_SENSITIVITY = 0.5;
+let brushSize = 40;
+let lastX = 0, lastY = 0;
+let brushMode = 'binary';
+let brushStrength = 1.0;
+let brushCenter = 1.0;
+let brushEdge = 0.0;
+let brushGamma = 2.0;
+
+// Eraser state (independent from brush)
+let eraserMode = 'binary';
+let eraserStrength = 1.0;
+let eraserCenter = 1.0;
+let eraserEdge = 0.0;
+let eraserGamma = 2.0;
+
+// Offscreen canvases
+const maskCanvas = document.createElement('canvas');
+const maskCtx = maskCanvas.getContext('2d');
+const strokeCanvas = document.createElement('canvas');
+const strokeCtx = strokeCanvas.getContext('2d');
+const snapshotCanvas = document.createElement('canvas');
+const snapshotCtx = snapshotCanvas.getContext('2d');
+// Cached fg canvas (pre-rendered fg image at canvas size for fast blending)
+let fgRenderCanvas = null;
+
+function syncCanvases(w, h) {
+    for (const c of [maskCanvas, strokeCanvas, snapshotCanvas]) {
+        if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    }
+}
+
+function makeBrushGradient(ctx, cx, cy, r) {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    const mode = isErasing ? eraserMode : brushMode;
+    const strength = isErasing ? eraserStrength : brushStrength;
+    const center = isErasing ? eraserCenter : brushCenter;
+    const edge = isErasing ? eraserEdge : brushEdge;
+    const gamma = isErasing ? eraserGamma : brushGamma;
+    if (mode === 'binary') {
+        grad.addColorStop(0, `rgba(255, 255, 255, ${strength})`);
+        grad.addColorStop(1, `rgba(255, 255, 255, ${strength})`);
+    } else if (mode === 'linear') {
+        grad.addColorStop(0, `rgba(255, 255, 255, ${center * strength})`);
+        grad.addColorStop(1, `rgba(255, 255, 255, ${edge * strength})`);
+    } else {
+        const stops = 20;
+        for (let i = 0; i <= stops; i++) {
+            const t = i / stops;
+            const a = strength * Math.pow(1 - t, gamma);
+            grad.addColorStop(t, `rgba(255, 255, 255, ${a})`);
+        }
+    }
+    return grad;
+}
+
+function drawDot(x, y) {
+    const r = brushSize / 2;
+    strokeCtx.globalCompositeOperation = 'source-over';
+    strokeCtx.fillStyle = makeBrushGradient(strokeCtx, x, y, r);
+    strokeCtx.beginPath();
+    strokeCtx.arc(x, y, r, 0, Math.PI * 2);
+    strokeCtx.fill();
+}
+
+function drawStroke(x, y) {
+    const r = brushSize / 2;
+    strokeCtx.globalCompositeOperation = 'source-over';
+    strokeCtx.strokeStyle = makeBrushGradient(strokeCtx, x, y, r);
+    strokeCtx.fillStyle = makeBrushGradient(strokeCtx, x, y, r);
+    strokeCtx.lineCap = 'round';
+    strokeCtx.lineJoin = 'round';
+    strokeCtx.lineWidth = brushSize;
+    strokeCtx.beginPath();
+    strokeCtx.moveTo(lastX, lastY);
+    strokeCtx.lineTo(x, y);
+    strokeCtx.stroke();
+    drawDot(x, y);
+}
+
+// Render the blend preview using canvas compositing (no per-pixel ImageData — fast)
+function renderBlend() {
+    const w = blendCanvas.width, h = blendCanvas.height;
+    if (w <= 0 || h <= 0) return;
+    blendCtx.globalCompositeOperation = 'source-over';
+    blendCtx.globalAlpha = 1;
+    blendCtx.clearRect(0, 0, w, h);
+    // Draw background
+    if (bgImgEl) blendCtx.drawImage(bgImgEl, 0, 0, w, h);
+    // Draw foreground using mask as alpha via canvas compositing
+    if (fgImgEl) {
+        // Use maskCanvas as alpha: draw fg, then use destination-in with mask
+        // Step 1: draw fg onto a temp canvas
+        const tmp = document.createElement('canvas');
+        tmp.width = w; tmp.height = h;
+        const tmpCtx = tmp.getContext('2d');
+        tmpCtx.drawImage(fgImgEl, 0, 0, w, h);
+        // Step 2: use mask as alpha — destination-in keeps only where mask has alpha
+        tmpCtx.globalCompositeOperation = 'destination-in';
+        tmpCtx.drawImage(maskCanvas, 0, 0);
+        // Step 3: draw the masked fg on top of bg
+        blendCtx.drawImage(tmp, 0, 0);
+    }
+    // Update mask preview
+    maskPrevCtx.clearRect(0, 0, maskPreview.width, maskPreview.height);
+    maskPrevCtx.fillStyle = '#000';
+    maskPrevCtx.fillRect(0, 0, maskPreview.width, maskPreview.height);
+    if (maskCanvas.width > 0) maskPrevCtx.drawImage(maskCanvas, 0, 0, maskPreview.width, maskPreview.height);
+}
+
+// Live preview during stroke — fast, no ImageData
+function livePreviewStroke() {
+    // Restore mask from snapshot
+    maskCtx.globalCompositeOperation = 'source-over';
+    maskCtx.globalAlpha = 1;
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskCtx.drawImage(snapshotCanvas, 0, 0);
+    // Composite current stroke
+    if (isErasing) {
+        maskCtx.globalCompositeOperation = 'destination-out';
+        maskCtx.globalAlpha = 1;
+    } else {
+        maskCtx.globalCompositeOperation = 'source-over';
+        maskCtx.globalAlpha = 1;
+    }
+    maskCtx.drawImage(strokeCanvas, 0, 0);
+    maskCtx.globalAlpha = 1;
+    maskCtx.globalCompositeOperation = 'source-over';
+    renderBlend();
+}
+
+function commitStroke() {
+    livePreviewStroke();
+    strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
+}
+
+// Brush mode buttons
+const modeConfigs = [
+    { id: 'brushBinary', mode: 'binary', rows: { brushStrengthRow: true, brushCenterRow: false, brushEdgeRow: false, brushGammaRow: false } },
+    { id: 'brushLinear', mode: 'linear', rows: { brushStrengthRow: true, brushCenterRow: true, brushEdgeRow: true, brushGammaRow: false } },
+    { id: 'brushExpo', mode: 'exponential', rows: { brushStrengthRow: true, brushCenterRow: false, brushEdgeRow: false, brushGammaRow: true } },
+];
+modeConfigs.forEach(m => {
+    const btn = document.getElementById(m.id);
+    btn.addEventListener('click', () => {
+        brushMode = m.mode;
+        modeConfigs.forEach(mm => document.getElementById(mm.id).classList.remove('active'));
+        btn.classList.add('active');
+        for (const [rowId, show] of Object.entries(m.rows))
+            document.getElementById(rowId).style.display = show ? 'flex' : 'none';
+    });
+});
+const bindRange = (inputId, valId, setter) => {
+    const el = document.getElementById(inputId);
+    const valEl = document.getElementById(valId);
+    el.addEventListener('input', () => { setter(parseFloat(el.value)); valEl.textContent = parseFloat(el.value).toFixed(2); });
+};
+bindRange('brushStrength', 'brushStrengthValue', v => brushStrength = v);
+bindRange('brushCenter', 'brushCenterValue', v => brushCenter = v);
+bindRange('brushEdge', 'brushEdgeValue', v => brushEdge = v);
+bindRange('brushGamma', 'brushGammaValue', v => brushGamma = v);
+document.getElementById('brushSize').addEventListener('input', e => {
+    brushSize = parseInt(e.target.value);
+    document.getElementById('brushSizeValue').textContent = brushSize;
+    brushCursor.style.width = brushSize + 'px';
+    brushCursor.style.height = brushSize + 'px';
+});
+
+// Eraser mode buttons setup (independent from brush)
+function setupEraserModeButtons() {
+    const modes = [
+        { id: 'eraserBinary', mode: 'binary', rows: { eraserStrengthRow: true, eraserCenterRow: false, eraserEdgeRow: false, eraserGammaRow: false } },
+        { id: 'eraserLinear', mode: 'linear', rows: { eraserStrengthRow: true, eraserCenterRow: true, eraserEdgeRow: true, eraserGammaRow: false } },
+        { id: 'eraserExpo', mode: 'exponential', rows: { eraserStrengthRow: true, eraserCenterRow: false, eraserEdgeRow: false, eraserGammaRow: true } },
+    ];
+    modes.forEach(m => {
+        const btn = document.getElementById(m.id);
+        btn.addEventListener('click', () => {
+            eraserMode = m.mode;
+            modes.forEach(mm => document.getElementById(mm.id).classList.remove('active'));
+            btn.classList.add('active');
+            for (const [rowId, show] of Object.entries(m.rows))
+                document.getElementById(rowId).style.display = show ? 'flex' : 'none';
+        });
+    });
+    bindRange('eraserStrength', 'eraserStrengthValue', v => eraserStrength = v);
+    bindRange('eraserCenter', 'eraserCenterValue', v => eraserCenter = v);
+    bindRange('eraserEdge', 'eraserEdgeValue', v => eraserEdge = v);
+    bindRange('eraserGamma', 'eraserGammaValue', v => eraserGamma = v);
+}
+setupEraserModeButtons();
+
+function updateCursorMode() {
+    if (isErasing) brushCursor.classList.add('erase');
+    else brushCursor.classList.remove('erase');
+}
+
+function moveCursor(e) { brushCursor.style.left = e.clientX + 'px'; brushCursor.style.top = e.clientY + 'px'; }
+
+function loadImage(src, callback) { const img = new Image(); img.onload = () => callback(img); img.src = src; }
+
+function setupCanvas() {
+    if (!fgSrc) return;
+    loadImage(fgSrc, (img) => {
+        fgImgEl = img;
+        const areaRect = canvasArea.getBoundingClientRect();
+        const maxW = areaRect.width - 32;
+        const maxH = areaRect.height - 32;
+        let w = img.width, h = img.height;
+        const scale = Math.min(maxW / w, maxH / h, 1);
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        blendCanvas.width = w; blendCanvas.height = h;
+        maskCanvas.width = w; maskCanvas.height = h;
+        strokeCanvas.width = w; strokeCanvas.height = h;
+        snapshotCanvas.width = w; snapshotCanvas.height = h;
+        maskPreview.width = w; maskPreview.height = h;
+        blendCanvas.style.position = 'absolute';
+        blendCanvas.style.left = ((areaRect.width - w) / 2) + 'px';
+        blendCanvas.style.top = ((areaRect.height - h) / 2) + 'px';
+        maskCtx.clearRect(0, 0, w, h);
+        if (bgSrc) { loadImage(bgSrc, (bgImg) => { bgImgEl = bgImg; renderBlend(); }); }
+        else renderBlend();
+    });
+}
+
+// Mouse events
+blendCanvas.addEventListener('mouseenter', () => { brushCursor.style.display = 'block'; });
+blendCanvas.addEventListener('mouseleave', () => { brushCursor.style.display = 'none'; isDrawing = false; });
+
+window.addEventListener('mousemove', e => {
+    if (isAltResizing) {
+        const dx = e.clientX - altResizeAnchorX;
+        const newSize = altResizeBaseSize + dx * ALT_RESIZE_SENSITIVITY;
+        brushSize = Math.max(2, Math.round(newSize));
+        document.getElementById('brushSize').value = brushSize;
+        document.getElementById('brushSizeValue').textContent = brushSize;
+        brushCursor.style.width = brushSize + 'px';
+        brushCursor.style.height = brushSize + 'px';
+        brushCursor.style.left = altResizeBrushCenterX + 'px';
+        brushCursor.style.top = altResizeBrushCenterY + 'px';
+        return;
+    }
+    moveCursor(e);
+    if (!isDrawing) return;
+    const rect = blendCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    drawStroke(x, y);
+    livePreviewStroke();
+    lastX = x; lastY = y;
+});
+
+blendCanvas.addEventListener('mousedown', e => {
+    if (e.altKey) {
+        isAltResizing = true;
+        altResizeAnchorX = e.clientX;
+        altResizeBaseSize = brushSize;
+        altResizeBrushCenterX = e.clientX;
+        altResizeBrushCenterY = e.clientY;
+        e.preventDefault();
+        return;
+    }
+    if (e.button === 0) isErasing = false;
+    else if (e.button === 2) isErasing = true;
+    else return;
+    updateCursorMode();
+    isDrawing = true;
+    snapshotCtx.clearRect(0, 0, snapshotCanvas.width, snapshotCanvas.height);
+    snapshotCtx.drawImage(maskCanvas, 0, 0);
+    strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
+    const rect = blendCanvas.getBoundingClientRect();
+    lastX = e.clientX - rect.left;
+    lastY = e.clientY - rect.top;
+    drawDot(lastX, lastY);
+    livePreviewStroke();
+    e.preventDefault();
+});
+blendCanvas.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('mouseup', e => {
+    if (isDrawing) commitStroke();
+    isDrawing = false;
+    if (isAltResizing) {
+        isAltResizing = false;
+        moveCursor(e);
+    }
+});
+
+// Wheel to adjust brush size
+blendCanvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 2 : -2;
+    let newSize = Math.max(2, brushSize + delta);
+    brushSize = newSize;
+    document.getElementById('brushSize').value = brushSize;
+    document.getElementById('brushSizeValue').textContent = brushSize;
+    brushCursor.style.width = brushSize + 'px';
+    brushCursor.style.height = brushSize + 'px';
+}, { passive: false });
+
+// Touch support
+blendCanvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length !== 1) return;
+    isErasing = false;
+    isDrawing = true;
+    syncCanvases(blendCanvas.width, blendCanvas.height);
+    snapshotCtx.clearRect(0, 0, snapshotCanvas.width, snapshotCanvas.height);
+    snapshotCtx.drawImage(maskCanvas, 0, 0);
+    strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
+    const touch = e.touches[0];
+    const rect = blendCanvas.getBoundingClientRect();
+    lastX = touch.clientX - rect.left;
+    lastY = touch.clientY - rect.top;
+    drawDot(lastX, lastY);
+    livePreviewStroke();
+}, { passive: false });
+blendCanvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!isDrawing || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    const rect = blendCanvas.getBoundingClientRect();
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
+    drawStroke(x, y);
+    livePreviewStroke();
+    lastX = x; lastY = y;
+}, { passive: false });
+blendCanvas.addEventListener('touchend', () => { if (isDrawing) commitStroke(); isDrawing = false; });
+
+window.addEventListener('resize', () => { if (fgSrc) setupCanvas(); });
+
+// Clear
+document.getElementById('clearBtn').addEventListener('click', () => { maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height); renderBlend(); });
+
+// BG/FG selection via thumbnail click → postMessage to parent
+bgThumb.addEventListener('click', () => { if (window.parent !== window) window.parent.postMessage({ type: 'blend-select', role: 'background' }, '*'); });
+fgThumb.addEventListener('click', () => { if (window.parent !== window) window.parent.postMessage({ type: 'blend-select', role: 'foreground' }, '*'); });
+
+// Update thumbnail display
+function updateThumb(el, src, name) {
+    if (src) {
+        el.innerHTML = `<img src="${src}" alt="${name}">`;
+    } else {
+        el.innerHTML = '<span class="panel-thumb-empty">Click to select</span>';
+    }
+}
+
+// Listen for image selection from parent
+window.addEventListener('message', event => {
+    if (event.data?.type === 'blend-image-selected') {
+        const { role, key, src, name } = event.data;
+        if (role === 'background') {
+            bgSrc = src; bgKey = key;
+            updateThumb(bgThumb, src, name);
+            loadImage(bgSrc, (img) => { bgImgEl = img; renderBlend(); });
+        } else if (role === 'foreground') {
+            fgSrc = src; fgKey = key;
+            updateThumb(fgThumb, src, name);
+            setupCanvas();
+        }
+        if (bgSrc && fgSrc) status.textContent = 'Draw mask to blend';
+    } else if (event.data?.type === 'blend-get-data') {
+        const maskBase64 = maskCanvas.toDataURL('image/png');
+        if (window.parent !== window) {
+            window.parent.postMessage({ type: 'blend-data', bgKey, fgKey, mask: maskBase64,
+                brush_mode: brushMode, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma }, '*');
+        }
+    }
+});
+
+// Blend button
+document.getElementById('blendBtn').addEventListener('click', () => {
+    if (!bgKey || !fgKey) { status.textContent = 'Select background and foreground first'; return; }
+    // Send blend data directly to parent
+    const maskBase64 = maskCanvas.toDataURL('image/png');
+    if (window.parent !== window) {
+        window.parent.postMessage({ type: 'blend-data', bgKey, fgKey, mask: maskBase64,
+            brush_mode: brushMode, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma }, '*');
+    }
+    status.textContent = 'Blending...';
+});
+
+brushCursor.style.width = brushSize + 'px';
+brushCursor.style.height = brushSize + 'px';
+</script>
+</body>
+</html>

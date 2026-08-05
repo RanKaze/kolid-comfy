@@ -119,8 +119,7 @@ export function useProgram(
       };
     }
     const activePrograms: ActiveProgram[] = [];
-    const resolved = new Set<string>();
-    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_tag_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_tag_inactive?: string[] }[], depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
+    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_tag_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_tag_inactive?: string[] }[], resolved: Set<string>, depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
       for (const item of items) {
         const pid = item.id;
         if (resolved.has(pid)) continue;
@@ -157,7 +156,7 @@ export function useProgram(
             context_prefab_inactive: sp.context_prefab_inactive ?? ctxSource.context_prefab_inactive,
             context_lora_inactive: sp.context_lora_inactive ?? ctxSource.context_lora_inactive,
             context_tag_inactive: sp.context_tag_inactive ?? ctxSource.context_tag_inactive,
-          })), depth + 1, ctxSource);
+          })), resolved, depth + 1, ctxSource);
         }
         // Only add to execution list if this program has actual code
         if (app.code && app.code.trim()) {
@@ -172,7 +171,7 @@ export function useProgram(
 
     for (const sa of selectedPrograms) {
       if (!sa.active) continue;
-      resolvePrograms([sa], 0);
+      resolvePrograms([sa], new Set<string>(), 0);
     }
 
     // Debug: log resolved program chain
