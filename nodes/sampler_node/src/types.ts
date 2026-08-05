@@ -51,4 +51,4 @@ export interface HistoryItem {
   src: string;
 }
 
-export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'context';
+export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context';
