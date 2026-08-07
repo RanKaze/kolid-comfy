@@ -39,7 +39,7 @@ interface EditPhaseProps {
   onBlendSelectImage: (key: string, name: string, src: string) => void;
   onCloseBlendSelect: () => void;
   interfaces: InterfaceInfo[];
-  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
+  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: HistoryItem[];
 }
 
@@ -300,7 +300,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} />
+          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
         )}
 
         {/* Context — left/right split layout */}
@@ -472,19 +472,33 @@ const InterfaceTab: React.FC<{
   interfaces: InterfaceInfo[];
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   detailProgress: { progress: number; current: number; total: number };
-  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
+  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: HistoryItem[];
   currentContextKey: string | null;
   onSetContext: (key: string) => void;
-}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface, interfaceResults, currentContextKey, onSetContext }) => {
+  history: HistoryItem[];
+}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface, interfaceResults, currentContextKey, onSetContext, history }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
+  // 每个 interface 的执行选项
+  const [execOptions, setExecOptions] = useState<Record<number, { image_source: 'default' | 'select'; image_source_key: string | null; operation: 'default' | 'crop'; crop_reserve: number }>>({});
+  const [showImageSelect, setShowImageSelect] = useState<number | null>(null);
 
   if (interfaces.length === 0) {
     return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
   }
 
+  const updateOpts = (idx: number, patch: Partial<typeof execOptions[number]>) => {
+    setExecOptions(prev => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
+  };
+
   const handleExecute = (idx: number) => {
-    onExecuteInterface(idx, manualValues[idx] || {});
+    const opts = execOptions[idx] || { image_source: 'default', image_source_key: null, operation: 'default', crop_reserve: 32 };
+    const payload = {
+      operation: opts.operation,
+      crop_reserve: opts.crop_reserve,
+      image_source_key: opts.image_source === 'select' ? opts.image_source_key : null,
+    };
+    onExecuteInterface(idx, manualValues[idx] || {}, payload);
   };
 
   const showProgress = detailStatus === 'running' && detailProgress.total > 0;
@@ -563,6 +577,46 @@ const InterfaceTab: React.FC<{
             </div>
           )}
 
+          {/* 注入选项：图片来源 + 执行方式 + crop_reserve */}
+          {iface.start_ports && iface.start_ports.some(p => p.type === 'IMAGE' || p.type === 'MASK') && (
+            <div style={{ marginBottom: 12, padding: 10, background: 'rgba(10,132,255,0.06)', borderRadius: 8, border: '0.5px solid rgba(10,132,255,0.15)' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(100,210,255,0.6)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Injection Options</div>
+
+              {/* 图片来源 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Image</label>
+                <select
+                  style={styles.paramSelect}
+                  value={execOptions[idx]?.image_source ?? 'default'}
+                  onChange={e => updateOpts(idx, { image_source: e.target.value as 'default' | 'select', ...(e.target.value === 'default' ? { image_source_key: null } : {}) })}
+                >
+                  <option value="default">默认 (Context)</option>
+                  <option value="select">从 Context 选择</option>
+                </select>
+                {execOptions[idx]?.image_source === 'select' && (
+                  <button style={styles.contextLoadBtn} onClick={() => setShowImageSelect(idx)}>
+                    {execOptions[idx]?.image_source_key ? '更换图片' : '选择图片'}
+                  </button>
+                )}
+              </div>
+
+              {/* 操作 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Operation</label>
+                <select style={styles.paramSelect} value={execOptions[idx]?.operation ?? 'default'} onChange={e => updateOpts(idx, { operation: e.target.value as 'default' | 'crop' })}>
+                  <option value="default">默认 (整图)</option>
+                  <option value="crop">Crop Mask 区域</option>
+                </select>
+                {execOptions[idx]?.operation === 'crop' && (
+                  <>
+                    <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 50 }}>Reserve</label>
+                    <input type="number" min={0} max={256} style={{ ...styles.paramInput, width: 70, flex: 'none' }} value={execOptions[idx]?.crop_reserve ?? 32} onChange={e => updateOpts(idx, { crop_reserve: parseInt(e.target.value) || 0 })} />
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* End ports (outputs) */}
           {iface.end_ports && iface.end_ports.length > 0 && (
             <div style={{ marginBottom: 12 }}>
@@ -624,6 +678,44 @@ const InterfaceTab: React.FC<{
           </div>
         </div>
       ))}
+
+      {/* 从 Context 选择图片 modal — 只显示与当前 context 图同尺寸的图 */}
+      {showImageSelect !== null && (() => {
+        const cur = history.find(h => h.key === currentContextKey);
+        const cw = cur?.width, ch = cur?.height;
+        const eligible = history.filter(h => h.key !== currentContextKey && h.key !== (execOptions[showImageSelect]?.image_source_key ?? null) &&
+          cw && ch && h.width === cw && h.height === ch);
+        return (
+          <div style={styles.overlay}>
+            <div style={styles.dialog}>
+              <div style={styles.dialogTitle}>Select Image (same size as context: {cw}×{ch})</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 12 }}>
+                Only images matching current context dimensions ({cw}×{ch}) can be validly masked.
+              </div>
+              {eligible.length === 0 ? (
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No same-size images available. Load images of matching dimensions in Context tab first.</div>
+              ) : (
+                <div style={styles.dialogHistoryGrid}>
+                  {eligible.map(h => (
+                    <button key={h.key} style={styles.historyCard} onClick={() => {
+                      updateOpts(showImageSelect, { image_source_key: h.key });
+                      setShowImageSelect(null);
+                    }}>
+                      <div style={styles.historyImgWrap}>
+                        <img src={h.src} alt={h.name} style={styles.historyImg} />
+                      </div>
+                      <div style={styles.historyName}>{h.name}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div style={styles.dialogActions}>
+                <button style={styles.cancelBtn} onClick={() => setShowImageSelect(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };
