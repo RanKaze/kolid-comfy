@@ -2,8 +2,11 @@ import inspect
 import json
 from ..libs.utils import AlwaysEqualProxy, ByPassTypeTuple
 
+from comfy_execution.graph_utils import is_link
+
 MAX_INTERFACE_NUM = 20
 any_type = AlwaysEqualProxy("*")
+_UNRESOLVED = object()  # sentinel for unresolved link values
 
 # Global injection dict: {start_node_id: {port_num: value}}
 _interface_injections = {}
@@ -753,15 +756,14 @@ class InterfaceExecutor:
             # 3. Widget 映射
             self._map_all_widgets(sub_prompt)
 
-            # 4. 拓扑排序并执行
+            # 4. 懒求值：从 End 节点开始递归求值
             output_values = {}
-            execution_order = self._topo_sort(sub_prompt, start_id, end_id)
-            print(f"[InterfaceExecutor] Order: {execution_order}")
+            self._eval_cache = output_values
+            self._eval_stack = set()  # 循环检测
+            self._eval_count = 0
+            self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
 
-            for i, nid in enumerate(execution_order):
-                if nid.startswith("_"):
-                    continue
-                self._execute_node(nid, sub_prompt, execution_order, start_id, end_id, pkg, output_values, i)
+            self._evaluate_node(end_id, sub_prompt, start_id, end_id, pkg, output_values)
 
             # 5. 提取结果
             results = self._extract_results(pkg, end_id, output_values, interface_name)
@@ -904,180 +906,247 @@ class InterfaceExecutor:
                     result[name] = bool(val)
         return result
 
-    @staticmethod
-    def _topo_sort(sub_prompt, start_id, end_id):
-        """拓扑排序"""
-        deps = {}
-        for nid, node in sub_prompt.items():
-            if nid.startswith("_"):
-                continue
-            deps[nid] = set()
-            for val in node.get("inputs", {}).values():
-                if isinstance(val, list) and len(val) == 2:
-                    origin = str(val[0])
-                    if origin in sub_prompt:
-                        deps[nid].add(origin)
-        order = []
-        visited = set()
-        temp = set()
-        def visit(nid):
-            if nid in visited:
-                return
-            if nid in temp:
-                return
-            temp.add(nid)
-            for d in deps.get(nid, set()):
-                visit(d)
-            temp.discard(nid)
-            visited.add(nid)
-            order.append(nid)
-        visit(str(start_id))
-        for nid in sub_prompt:
-            if not nid.startswith("_"):
-                visit(nid)
-        return order
-
-    def _execute_node(self, nid, sub_prompt, execution_order, start_id, end_id, pkg, output_values, step_idx):
-        """执行单个节点"""
+    def _evaluate_node(self, nid, sub_prompt, start_id, end_id, pkg, output_values):
+        """从 End 节点开始递归求值（懒求值）。
+        
+        只有被下游节点实际需要的节点才会被执行。
+        支持 ComfyUI 的 check_lazy_status 机制：
+        - 先用已有输入调用 check_lazy_status，获取需要的 input 名称列表
+        - 只递归求值那些需要的上游节点
+        - 对没有 check_lazy_status 的节点，求值所有 link 输入
+        """
         import nodes as comfy_nodes
-        node = sub_prompt[nid]
-        class_type = node.get("class_type", "")
-        class_def = comfy_nodes.NODE_CLASS_MAPPINGS.get(class_type)
-        if not class_def:
-            print(f"[InterfaceExecutor] SKIP {nid}: '{class_type}' not found")
-            return
 
-        if self.on_progress:
-            self.on_progress(step_idx, len(execution_order))
-        print(f"[InterfaceExecutor] ({step_idx+1}/{len(execution_order)}) {nid} ({class_type})")
+        # 0. 缓存检查
+        if nid in output_values:
+            return output_values[nid]
 
-        inputs = {}
-        node_inputs = node.get("inputs", {})
+        # 循环检测
+        if nid in self._eval_stack:
+            raise RuntimeError(f"Circular dependency detected at node {nid}")
+        self._eval_stack.add(nid)
 
-        # 注入 port_types / unique_id
-        import json as _json
-        if nid == end_id:
-            inputs["port_types"] = _json.dumps({str(k): v for k, v in pkg.get('types', {}).items()})
-        if nid == start_id:
-            inputs["port_types"] = _json.dumps({str(k): v for k, v in pkg.get('start_types', {}).items()})
-            inputs["unique_id"] = start_id
+        try:
+            node = sub_prompt[nid]
+            class_type = node.get("class_type", "")
+            class_def = comfy_nodes.NODE_CLASS_MAPPINGS.get(class_type)
+            if not class_def:
+                print(f"[InterfaceExecutor] SKIP {nid}: '{class_type}' not found")
+                output_values[nid] = ()
+                return output_values[nid]
 
-        for name, val in node_inputs.items():
-            if isinstance(val, list) and len(val) == 2:
-                origin_id = str(val[0])
-                output_slot = int(val[1])
-                aliases = sub_prompt.get("_subgraph_output_aliases", {})
-                alias_key = f"{origin_id}:{output_slot}"
-                if alias_key in aliases:
-                    origin_id = aliases[alias_key]
-                    output_slot = 0
-                if origin_id in output_values:
-                    ot = output_values[origin_id]
-                    if output_slot < len(ot):
-                        inputs[name] = ot[output_slot]
-                elif nid == end_id and name.startswith("value"):
-                    import re as _re
-                    m = _re.match(r"value(\d+)", name)
-                    if m:
-                        pn = int(m.group(1))
-                        so = output_values.get(start_id, ())
-                        if pn < len(so):
-                            inputs[name] = so[pn]
+            self._eval_count += 1
+            if self.on_progress:
+                self.on_progress(self._eval_count, self._eval_total)
+            print(f"[InterfaceExecutor] ({self._eval_count}/{self._eval_total}) {nid} ({class_type})")
+
+            node_inputs = node.get("inputs", {})
+
+            # 1. 第一遍：解析非 link 输入 + 注入 hidden 输入
+            inputs = {}
+            pending_links = {}  # name -> (origin_id, output_slot)
+
+            import json as _json
+            if nid == end_id:
+                inputs["port_types"] = _json.dumps({str(k): v for k, v in pkg.get('types', {}).items()})
+            if nid == start_id:
+                inputs["port_types"] = _json.dumps({str(k): v for k, v in pkg.get('start_types', {}).items()})
+                inputs["unique_id"] = start_id
+
+            for name, val in node_inputs.items():
+                if is_link(val):
+                    origin_id = str(val[0])
+                    output_slot = int(val[1])
+                    aliases = sub_prompt.get("_subgraph_output_aliases", {})
+                    alias_key = f"{origin_id}:{output_slot}"
+                    if alias_key in aliases:
+                        origin_id = aliases[alias_key]
+                        output_slot = 0
+                    # 检查是否已缓存
+                    resolved = self._resolve_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid, name)
+                    if resolved is not _UNRESOLVED:
+                        inputs[name] = resolved
+                    else:
+                        pending_links[name] = (origin_id, output_slot)
+                elif isinstance(val, dict) and val.get("_virtual_input"):
+                    inputs[name] = self._resolve_virtual(val, output_values, start_id)
+                elif isinstance(val, dict) and "_sg_input_slot" in val:
+                    pass  # Unresolved, skip
                 else:
-                    # Try matching with prefix — origin_id might be without prefix
-                    # while output_values key has prefix (e.g. "6463" vs "6972.6463")
-                    matched = False
-                    for ov_key in output_values:
-                        if ov_key.endswith("." + origin_id):
-                            ot = output_values[ov_key]
-                            if output_slot < len(ot):
-                                inputs[name] = ot[output_slot]
-                                matched = True
-                                break
-                    if not matched:
-                        if nid == end_id and name.startswith("value"):
-                            pass  # Already tried above
-                        elif origin_id in sub_prompt:
-                            print(f"[InterfaceExecutor]   WARNING: {name} ← {origin_id} not in output_values (pending in sub_prompt)")
-                        else:
-                            # 外部节点：不在 sub_prompt 中，按需执行
-                            ext_result = self._try_execute_external(origin_id, output_values)
-                            if ext_result is not None and output_slot < len(ext_result):
-                                inputs[name] = ext_result[output_slot]
-                            else:
-                                print(f"[InterfaceExecutor]   WARNING: {name} ← {origin_id} external resolve failed")
-            elif isinstance(val, dict) and val.get("_virtual_input"):
-                inputs[name] = self._resolve_virtual(val, output_values, start_id)
-            elif isinstance(val, dict) and "_sg_input_slot" in val:
-                pass  # Unresolved, skip
-            else:
-                inputs[name] = val
+                    inputs[name] = val
 
-        # 填充默认值
-        try:
-            it = class_def.INPUT_TYPES()
-            for rn, rd in it.get("required", {}).items():
-                if rn not in inputs and isinstance(rd, tuple) and len(rd) >= 2:
-                    opts = rd[1] if isinstance(rd[1], dict) else {}
-                    if opts.get("default") is not None:
-                        inputs[rn] = opts["default"]
-                    elif isinstance(rd[0], list) and rd[0]:
-                        inputs[rn] = rd[0][0]
-        except Exception:
-            pass
+            # 2. 填充默认值（在 lazy check 之前，让 check_lazy_status 能看到 widget 值）
+            try:
+                it = class_def.INPUT_TYPES()
+                for rn, rd in it.get("required", {}).items():
+                    if rn not in inputs and isinstance(rd, tuple) and len(rd) >= 2:
+                        opts = rd[1] if isinstance(rd[1], dict) else {}
+                        if opts.get("default") is not None:
+                            inputs[rn] = opts["default"]
+                        elif isinstance(rd[0], list) and rd[0]:
+                            inputs[rn] = rd[0][0]
+            except Exception:
+                pass
 
-        # Debug: log tensor shapes for troubleshooting
-        _dbg = []
-        for _k, _v in inputs.items():
-            if hasattr(_v, 'shape'):
-                _dbg.append(f"{_k}={tuple(_v.shape)}")
-            elif hasattr(_v, 'model'):
-                _dbg.append(f"{_k}=PipelineData")
-            elif _v is None:
-                _dbg.append(f"{_k}=None")
-            else:
-                _dbg.append(f"{_k}={type(_v).__name__}")
-        print(f"[InterfaceExecutor]   inputs: {_dbg}")
-        try:
-            obj = class_def()
-            func = getattr(obj, getattr(class_def, "FUNCTION", "execute"))
-            if getattr(class_def, "INPUT_IS_LIST", False):
-                inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
+            # 3. 懒求值：check_lazy_status
+            has_lazy = callable(getattr(class_def, "check_lazy_status", None))
 
-            # Hook ComfyUI progress bar for sampler-like nodes
-            orig_hook = None
-            if self.on_sampler_progress:
+            if has_lazy and pending_links:
+                # 用已有输入（pending links 设为 None）调用 check_lazy_status
+                lazy_inputs = dict(inputs)
+                for name in pending_links:
+                    lazy_inputs[name] = None
+                obj_tmp = class_def()
                 try:
-                    import comfy.utils
-                    orig_hook = comfy.utils.PROGRESS_BAR_HOOK
-                    def _sampler_hook(current, total, preview=None, **kwargs):
-                        if self.on_sampler_progress:
-                            self.on_sampler_progress(current, total, nid)
-                    comfy.utils.set_progress_bar_global_hook(_sampler_hook)
+                    required = obj_tmp.check_lazy_status(**lazy_inputs)
                 except Exception:
-                    pass
+                    required = None
+
+                if required:
+                    # 只求值 check_lazy_status 声明需要的 link 输入
+                    for name in required:
+                        if name in pending_links:
+                            origin_id, output_slot = pending_links[name]
+                            self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values)
+                            val = self._get_output(origin_id, output_slot, output_values)
+                            if val is not _UNRESOLVED:
+                                inputs[name] = val
+                                del pending_links[name]
+                # 未被 check_lazy_status 要求的 pending links 跳过（懒求值）
+
+            else:
+                # 没有 check_lazy_status：求值所有 pending links
+                for name, (origin_id, output_slot) in list(pending_links.items()):
+                    self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values)
+                    val = self._get_output(origin_id, output_slot, output_values)
+                    if val is not _UNRESOLVED:
+                        inputs[name] = val
+                        del pending_links[name]
+
+            # 4. 执行节点
+            _dbg = []
+            for _k, _v in inputs.items():
+                if hasattr(_v, 'shape'):
+                    _dbg.append(f"{_k}={tuple(_v.shape)}")
+                elif hasattr(_v, 'model'):
+                    _dbg.append(f"{_k}=PipelineData")
+                elif _v is None:
+                    _dbg.append(f"{_k}=None")
+                else:
+                    _dbg.append(f"{_k}={type(_v).__name__}")
+            print(f"[InterfaceExecutor]   inputs: {_dbg}")
 
             try:
-                result = func(**inputs)
-            finally:
-                # Restore original hook
-                if orig_hook is not None:
+                obj = class_def()
+                func = getattr(obj, getattr(class_def, "FUNCTION", "execute"))
+                if getattr(class_def, "INPUT_IS_LIST", False):
+                    inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
+
+                # Hook ComfyUI progress bar for sampler-like nodes
+                orig_hook = None
+                if self.on_sampler_progress:
                     try:
                         import comfy.utils
-                        comfy.utils.set_progress_bar_global_hook(orig_hook)
+                        orig_hook = comfy.utils.PROGRESS_BAR_HOOK
+                        def _sampler_hook(current, total, preview=None, **kwargs):
+                            if self.on_sampler_progress:
+                                self.on_sampler_progress(current, total, nid)
+                        comfy.utils.set_progress_bar_global_hook(_sampler_hook)
                     except Exception:
                         pass
 
-            if result is None:
-                result = ()
-            elif not isinstance(result, tuple):
-                result = (result,)
-            output_values[nid] = result
-            print(f"[InterfaceExecutor]   → {len(result)} outputs")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise RuntimeError(f"Node {nid} ({class_type}) failed: {e}")
+                try:
+                    result = func(**inputs)
+                finally:
+                    if orig_hook is not None:
+                        try:
+                            import comfy.utils
+                            comfy.utils.set_progress_bar_global_hook(orig_hook)
+                        except Exception:
+                            pass
+
+                if result is None:
+                    result = ()
+                elif not isinstance(result, tuple):
+                    result = (result,)
+                output_values[nid] = result
+                print(f"[InterfaceExecutor]   → {len(result)} outputs")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"Node {nid} ({class_type}) failed: {e}")
+        finally:
+            self._eval_stack.discard(nid)
+
+        return output_values[nid]
+
+    # ---- link 解析辅助 ----
+
+    def _resolve_link(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid, name):
+        """尝试从缓存解析 link 输出，返回值或 _UNRESOLVED"""
+        # 直接缓存
+        if origin_id in output_values:
+            ot = output_values[origin_id]
+            if output_slot < len(ot):
+                return ot[output_slot]
+            return _UNRESOLVED
+
+        # End 节点的 value 输入 → 从 Start 输出回溯
+        if nid == end_id and name.startswith("value"):
+            import re as _re
+            m = _re.match(r"value(\d+)", name)
+            if m:
+                pn = int(m.group(1))
+                so = output_values.get(start_id, ())
+                if pn < len(so):
+                    return so[pn]
+
+        # prefix 匹配
+        for ov_key in output_values:
+            if ov_key.endswith("." + origin_id):
+                ot = output_values[ov_key]
+                if output_slot < len(ot):
+                    return ot[output_slot]
+                return _UNRESOLVED
+
+        return _UNRESOLVED
+
+    def _eval_link(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values):
+        """递归求值一个 link 引用的上游节点"""
+        # 已缓存
+        if origin_id in output_values:
+            return
+
+        # End 节点的 value 输入 → 从 Start 输出回溯
+        # (这里不需要，_resolve_link 已处理)
+
+        # prefix 匹配
+        for ov_key in output_values:
+            if ov_key.endswith("." + origin_id):
+                return
+
+        # 在 sub_prompt 中 → 递归求值
+        if origin_id in sub_prompt:
+            self._evaluate_node(origin_id, sub_prompt, start_id, end_id, pkg, output_values)
+            return
+
+        # 外部节点 → 按需执行
+        ext_result = self._try_execute_external(origin_id, output_values)
+        if ext_result is None:
+            print(f"[InterfaceExecutor]   WARNING: external node {origin_id} resolve failed")
+
+    def _get_output(self, origin_id, output_slot, output_values):
+        """从 output_values 取值，支持 prefix 匹配"""
+        if origin_id in output_values:
+            ot = output_values[origin_id]
+            if output_slot < len(ot):
+                return ot[output_slot]
+        for ov_key in output_values:
+            if ov_key.endswith("." + origin_id):
+                ot = output_values[ov_key]
+                if output_slot < len(ot):
+                    return ot[output_slot]
+        return _UNRESOLVED
 
     def _resolve_virtual(self, val, output_values, start_id):
         """解析子图虚拟输入（子图边界端口在父图未连线时产生）。
