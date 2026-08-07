@@ -167,6 +167,8 @@ class ConfigKrea2EditNode:
                 "ref_boost_mask": ("MASK", {"tooltip": "可选区域 mask, 限制最后一个参考的 boost 范围(如人脸)。空=整个参考。"}),
                 "grounding_px": ("INT", {"default": 768, "min": 0, "max": 4096, "step": 64,
                                          "tooltip": "VLM 输入图像最长边上限。0=原始分辨率。"}),
+                "fit_mode": (["fit", "crop"], {"default": "fit",
+                                "tooltip": "源图适配方式: fit=像素空间缩放后居中放置(匹配训练几何, 默认); crop=center-crop到目标宽高比后resize(旧版兼容)"}),
             }
         }
 
@@ -175,7 +177,7 @@ class ConfigKrea2EditNode:
     FUNCTION = "process"
     CATEGORY = "sampling/custom"
 
-    def process(self, config=None, ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None, grounding_px=768):
+    def process(self, config=None, ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None, grounding_px=768, fit_mode="fit"):
         from .sampler_node import ConfigData
         if config is None:
             config = ConfigData()
@@ -184,6 +186,7 @@ class ConfigKrea2EditNode:
         config["ref_boost"] = ref_boost
         config["ref_boost_a"] = ref_boost_a
         config["grounding_px"] = grounding_px
+        config["fit_mode"] = fit_mode
         if ref_boost_mask is not None:
             config["ref_boost_mask"] = ref_boost_mask
         return (config,)

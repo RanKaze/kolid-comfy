@@ -1012,10 +1012,10 @@ class SnapshotDetailerSamplerNode:
         seed = params['seed']
         add_noise = params['add_noise']
         start_step_rate = params['start_step_rate']
-        end_step_rate = params['end_step_rate']
-        pixels = params['pixels']
-        align = params['align']
-        crop_reserve = params['crop_reserve']
+        end_step_rate = float(params['end_step_rate'])
+        pixels = int(params['pixels'])
+        align = int(params['align'])
+        crop_reserve = int(params['crop_reserve'])
         context_regex = params['context_regex']
 
         next_pipeline = pipeline.copy()
