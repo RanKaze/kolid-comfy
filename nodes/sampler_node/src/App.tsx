@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem } from './types';
+import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const [loadingAssets, setLoadingAssets] = useState(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
+  const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
@@ -53,6 +54,14 @@ const App: React.FC = () => {
         });
         setDetailStatus(data.detail_status);
         setCurrentContextKey(data.current_context_key ?? null);
+        if (data.has_package) {
+          fetch('/api/package')
+            .then(r => r.json())
+            .then(pkgData => {
+              if (pkgData.interfaces) setInterfaces(pkgData.interfaces);
+            })
+            .catch(() => {});
+        }
       })
       .catch(e => setError('Failed to load config: ' + e.message));
   }, []);
@@ -196,7 +205,7 @@ const App: React.FC = () => {
 
   // Poll status when in draw tab (running)
   useEffect(() => {
-    if (tab !== 'draw' || detailStatus !== 'running') return;
+    if ((tab !== 'draw' && tab !== 'interface') || detailStatus !== 'running') return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -310,6 +319,22 @@ const App: React.FC = () => {
       await fetch('/api/run_detailer', { method: 'POST' });
     } catch (e: any) {
       setError('Failed to start detailer: ' + e.message);
+      setDetailStatus('idle');
+    }
+  }, []);
+
+  const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>) => {
+    setError(null);
+    setDetailStatus('running');
+    setDetailProgress({ progress: 0, current: 0, total: 0 });
+    try {
+      await fetch('/api/execute_interface', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ interface_index: interfaceIndex, manual_values: manualValues }),
+      });
+    } catch (e: any) {
+      setError('Failed to start interface execution: ' + e.message);
       setDetailStatus('idle');
     }
   }, []);
@@ -493,6 +518,8 @@ const App: React.FC = () => {
           setBlendSelect(null);
         }}
         onCloseBlendSelect={() => setBlendSelect(null)}
+        interfaces={interfaces}
+        onExecuteInterface={handleExecuteInterface}
       />
 
       {error && (

@@ -18,6 +18,8 @@ import comfy.model_management as mm
 # =============================================================================
 # 导入现有模块
 # =============================================================================
+from ..libs.utils import AlwaysEqualProxy
+
 try:
     from .image_node import SnapshotMaskNodeServer, waitSnapShot
 except ImportError as e:
@@ -49,14 +51,21 @@ class SnapshotDetailerSamplerServer:
     后端通过 action queue 接收前端指令（run_detailer / select_image / finish）。
     """
 
-    def __init__(self, detector, tagger, lora_regex, asset=None,
-                 node_instance=None, unique_id=None, config=None):
+    def __init__(self, detector, tagger, lora_regex, asset=None, package=None,
+                 node_instance=None, unique_id=None, config=None, extra_pnginfo=None, prompt=None):
         self.detector = detector
         self.tagger = tagger
+        self.extra_pnginfo = extra_pnginfo
         self.asset = asset
         self.lora_regex = lora_regex
         self.node_instance = node_instance
         self.unique_id = unique_id
+        self.packages = []
+        if package:
+            if isinstance(package, list):
+                self.packages = [p for p in package if isinstance(p, dict)]
+            elif isinstance(package, dict):
+                self.packages = [package]
 
         cfg = config or {}
         self.add_noise = cfg.get('add_noise', 'enable')
@@ -394,6 +403,8 @@ class SnapshotDetailerSamplerServer:
                     'crop_reserve': inst.crop_reserve if inst else 32,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'current_context_key': getattr(inst, 'current_context_key', None),
+                    'has_package': bool(inst and inst.packages),
+                    'package_count': len(inst.packages) if inst else 0,
                 })
                 return
 
@@ -405,6 +416,62 @@ class SnapshotDetailerSamplerServer:
                     'current_step': inst.detail_current_step if inst else 0,
                     'total_steps': inst.detail_total_steps if inst else 0,
                 })
+                return
+
+            if self.path == '/api/package':
+                if not inst or not inst.packages:
+                    self._send_json({'interfaces': []})
+                    return
+
+                from .interface_node import InterfacePackageNode
+                epi = getattr(inst, 'extra_pnginfo', None)
+                if isinstance(epi, list):
+                    epi = epi[0] if epi else {}
+
+                interfaces = []
+                for pkg in inst.packages:
+                    end_id = pkg.get('end_node_id', '')
+
+                    # Get fresh package from extra_pnginfo for full port info
+                    fresh_pkg = pkg
+                    if epi and isinstance(epi, dict) and end_id:
+                        pkg_node = InterfacePackageNode()
+                        fresh = pkg_node.get_package(end_id, epi, None)
+                        if fresh and fresh[0]:
+                            fresh_pkg = fresh[0]
+
+                    start_types = fresh_pkg.get('start_types', {})
+                    end_types = fresh_pkg.get('types', {})
+
+                    def make_port(num, name, ptype):
+                        is_inject = ptype in ('PIPELINE_DATA', 'IMAGE', 'MASK')
+                        is_manual = ptype in ('STRING', 'INT', 'FLOAT', 'BOOLEAN', 'COMBO')
+                        return {
+                            'num': num,
+                            'name': name,
+                            'type': ptype,
+                            'value': None,
+                            'category': 'inject' if is_inject else ('manual' if is_manual else 'port'),
+                        }
+
+                    # Start ports: ONLY from start_types (Start node's connected value ports)
+                    start_ports = []
+                    for port_num_str, ptype in sorted(start_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                        port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
+                        start_ports.append(make_port(port_num, 'value' + str(port_num), ptype))
+
+                    # End ports: ONLY from end_types (End node's connected value ports)
+                    end_ports = []
+                    for port_num_str, ptype in sorted(end_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                        port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
+                        end_ports.append(make_port(port_num, 'value' + str(port_num), ptype))
+
+                    interfaces.append({
+                        'name': fresh_pkg.get('name', pkg.get('name', '')),
+                        'start_ports': start_ports,
+                        'end_ports': end_ports,
+                    })
+                self._send_json({'interfaces': interfaces})
                 return
 
             if self.path == '/api/has_mask':
@@ -476,6 +543,15 @@ class SnapshotDetailerSamplerServer:
 
             if self.path == '/api/run_detailer':
                 inst.put_action('run_detailer')
+                self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/execute_interface':
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                interface_index = body.get('interface_index', 0)
+                manual_values = body.get('manual_values', {})
+                inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values)
                 self._send_json({'ok': True})
                 return
 
@@ -724,6 +800,11 @@ class SnapshotDetailerSamplerNode:
                 "detector": ("*",),
                 "tagger": ("*",),
                 "asset": ("STRING", {"default": "", "multiline": True, "tooltip": "Assets snapshot: JSON string (normal mode) or name (global mode) for Tag From Assets button"}),
+                "package": ("*",),
+            },
+            "hidden": {
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
             }
         }
 
@@ -1088,11 +1169,44 @@ class SnapshotDetailerSamplerNode:
                 print(f"[SnapshotDetailerSampler] Image size unchanged ({new_w}x{new_h}), mask preserved")
 
     # -------------------------------------------------------------------------
+    # Interface Package 执行
+    # -------------------------------------------------------------------------
+    def _execute_interface(self, server, interface_idx, manual_values):
+        """Execute a sub-graph via InterfaceExecutor."""
+        if interface_idx >= len(server.packages):
+            raise ValueError(f"Interface index {interface_idx} out of range ({len(server.packages)} packages)")
+
+        pkg = server.packages[interface_idx]
+        from .interface_node import InterfaceExecutor
+
+        executor = InterfaceExecutor(
+            extra_pnginfo=getattr(server, 'extra_pnginfo', None),
+            on_progress=lambda cur, total: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
+            get_pipeline=lambda: self._current_pipeline,
+            get_image=lambda: self._current_pipeline.get_image() if self._current_pipeline else None,
+            get_mask=lambda: self._current_pipeline.mask if self._current_pipeline else None,
+            on_result_image=lambda img, name: server.add_history(img, name=name),
+            on_result_pipeline=None,
+            on_sampler_progress=lambda cur, total, node_id: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
+        )
+
+        results = executor.execute(pkg, manual_values)
+
+        # Auto-select last added image as context
+        if results:
+            new_key = server.selected_history[-1]['key']
+            last_image = server.get_history_image(new_key)
+            if last_image is not None:
+                self._switch_image(server, last_image, context_key=new_key)
+                print(f"[InterfaceExec] Auto-set context to {new_key}")
+
+    # -------------------------------------------------------------------------
     # 主入口
     # -------------------------------------------------------------------------
     def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
                start_step_rate=0.8, end_step_rate=1.0, pixels=1048576,
-               align=8, crop_reserve=32, detector=None, tagger=None, asset="", unique_id=None):
+               align=8, crop_reserve=32, detector=None, tagger=None, asset="", package=None,
+               extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
 
         self._current_pipeline = pipeline.copy() if pipeline else None
@@ -1102,8 +1216,10 @@ class SnapshotDetailerSamplerNode:
             tagger=tagger,
             lora_regex=lora_regex,
             asset=asset,
+            package=package,
             node_instance=self,
             unique_id=unique_id,
+            extra_pnginfo=extra_pnginfo,
             config={
                 'add_noise': add_noise,
                 'start_step_rate': start_step_rate,
@@ -1276,6 +1392,28 @@ class SnapshotDetailerSamplerNode:
                     if img is not None:
                         self._switch_image(server, img, context_key=key)
                         print(f"[SnapshotDetailerSampler] Selected history image: {key}")
+
+                if act == 'execute_interface':
+                    interface_idx = action.get('interface_index', 0)
+                    manual_values = action.get('manual_values', {})
+                    server.detail_status = 'running'
+                    server.detail_error = None
+                    server.detail_progress = 0
+                    try:
+                        self._execute_interface(server, interface_idx, manual_values)
+                        server.detail_status = 'done'
+                        server.detail_progress = 1.0
+                    except Exception as e:
+                        if mm.processing_interrupted() or 'Interrupt' in type(e).__name__:
+                            print("[SnapshotDetailerSampler] Interrupted during interface execution")
+                            break
+                        import traceback
+                        traceback.print_exc()
+                        server.detail_status = 'error'
+                        server.detail_error = str(e)
+                    finally:
+                        gc.collect()
+                        mm.soft_empty_cache()
 
         finally:
             server.stop()
