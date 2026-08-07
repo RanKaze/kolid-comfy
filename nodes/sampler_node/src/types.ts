@@ -54,6 +54,20 @@ export interface HistoryItem {
   src: string;
 }
 
+export interface HistoryItem {
+  key: string;
+  name: string;
+  src: string;
+  width?: number;
+  height?: number;
+}
+
+export interface InterfaceExecOptions {
+  image_source_key?: string | null;
+  operation: 'default' | 'crop';
+  crop_reserve: number;
+}
+
 export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context' | 'interface';
 
 export interface InterfacePort {

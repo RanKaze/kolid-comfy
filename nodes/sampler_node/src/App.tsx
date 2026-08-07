@@ -338,7 +338,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>) => {
+  const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
     setDetailStatus('running');
     setDetailProgress({ progress: 0, current: 0, total: 0 });
@@ -346,7 +346,7 @@ const App: React.FC = () => {
       await fetch('/api/execute_interface', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ interface_index: interfaceIndex, manual_values: manualValues }),
+        body: JSON.stringify({ interface_index: interfaceIndex, manual_values: manualValues, exec_options: execOptions || {} }),
       });
     } catch (e: any) {
       setError('Failed to start interface execution: ' + e.message);
