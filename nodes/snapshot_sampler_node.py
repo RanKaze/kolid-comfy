@@ -98,6 +98,9 @@ class SnapshotDetailerSamplerServer:
         self.detailed_key = None   # history key of the detailed image
         self.debug_recover_data = None
 
+        # Interface 执行结果 keys（最近一次）
+        self.interface_result_keys = []
+
         # 子服务器
         self.mask_server = None
         self.prompt_server = None
@@ -415,6 +418,7 @@ class SnapshotDetailerSamplerServer:
                     'progress': inst.detail_progress if inst else 0,
                     'current_step': inst.detail_current_step if inst else 0,
                     'total_steps': inst.detail_total_steps if inst else 0,
+                    'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
                 })
                 return
 
@@ -1190,13 +1194,22 @@ class SnapshotDetailerSamplerNode:
             entry.loras = get_loras_from_string(user_loras) if user_loras else []
             injected_pipeline.context.contexts['__prompt_tab__'] = entry
 
+        # 记录 interface 结果 keys
+        server.interface_result_keys = []
+
+        def _on_result_image(img, name):
+            server.add_history(img, name=name)
+            # add_history appends to selected_history; get the key
+            if server.selected_history:
+                server.interface_result_keys.append(server.selected_history[-1]['key'])
+
         executor = InterfaceExecutor(
             extra_pnginfo=getattr(server, 'extra_pnginfo', None),
             on_progress=lambda cur, total: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
             get_pipeline=lambda: injected_pipeline,
             get_image=lambda: injected_pipeline.get_image() if injected_pipeline else None,
             get_mask=lambda: injected_pipeline.mask if injected_pipeline else None,
-            on_result_image=lambda img, name: server.add_history(img, name=name),
+            on_result_image=_on_result_image,
             on_result_pipeline=None,
             on_sampler_progress=lambda cur, total, node_id: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
         )

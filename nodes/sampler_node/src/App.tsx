@@ -27,6 +27,7 @@ const App: React.FC = () => {
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
+  const [interfaceResults, setInterfaceResults] = useState<HistoryItem[]>([]);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
@@ -67,8 +68,8 @@ const App: React.FC = () => {
   }, []);
 
   // Fetch history on mount and when entering context tab
-  const refreshHistory = useCallback(() => {
-    fetch('/api/history')
+  const refreshHistory = useCallback((): Promise<void> => {
+    return fetch('/api/history')
       .then(r => r.json())
       .then(data => {
         if (data.history) setHistory(data.history);
@@ -219,7 +220,21 @@ const App: React.FC = () => {
           total: data.total_steps || 0,
         });
         if (data.detail_status === 'done') {
-          refreshHistory();
+          const resultKeys = data.interface_result_keys || [];
+          refreshHistory().then(() => {
+            // Build interface results from keys — read from DOM after history update
+            if (resultKeys.length > 0) {
+              setHistory(prev => {
+                const results = resultKeys
+                  .map(k => prev.find(h => h.key === k))
+                  .filter((h): h is HistoryItem => !!h);
+                setInterfaceResults(results);
+                return prev;
+              });
+            } else {
+              setInterfaceResults([]);
+            }
+          });
           // Refresh config to get updated current_context_key
           fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
             if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
@@ -520,6 +535,7 @@ const App: React.FC = () => {
         onCloseBlendSelect={() => setBlendSelect(null)}
         interfaces={interfaces}
         onExecuteInterface={handleExecuteInterface}
+        interfaceResults={interfaceResults}
       />
 
       {error && (
