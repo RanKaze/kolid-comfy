@@ -1179,12 +1179,23 @@ class SnapshotDetailerSamplerNode:
         pkg = server.packages[interface_idx]
         from .interface_node import InterfaceExecutor
 
+        # 将 prompt tab 的 lora/prompt 注入到 pipeline 副本中
+        user_positive, user_loras = self._parse_prompt(server.prompt_server)
+        injected_pipeline = self._current_pipeline.copy() if self._current_pipeline else None
+        if injected_pipeline and (user_positive or user_loras):
+            from .sampler_node import SamplerContext
+            entry = SamplerContext()
+            entry.positive = user_positive
+            entry.negative = ''
+            entry.loras = get_loras_from_string(user_loras) if user_loras else []
+            injected_pipeline.context.contexts['__prompt_tab__'] = entry
+
         executor = InterfaceExecutor(
             extra_pnginfo=getattr(server, 'extra_pnginfo', None),
             on_progress=lambda cur, total: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
-            get_pipeline=lambda: self._current_pipeline,
-            get_image=lambda: self._current_pipeline.get_image() if self._current_pipeline else None,
-            get_mask=lambda: self._current_pipeline.mask if self._current_pipeline else None,
+            get_pipeline=lambda: injected_pipeline,
+            get_image=lambda: injected_pipeline.get_image() if injected_pipeline else None,
+            get_mask=lambda: injected_pipeline.mask if injected_pipeline else None,
             on_result_image=lambda img, name: server.add_history(img, name=name),
             on_result_pipeline=None,
             on_sampler_progress=lambda cur, total, node_id: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
