@@ -40,6 +40,7 @@ interface EditPhaseProps {
   onCloseBlendSelect: () => void;
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
+  interfaceResults: HistoryItem[];
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -52,9 +53,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
   blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
-  interfaces, onExecuteInterface,
+  interfaces, onExecuteInterface, interfaceResults,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
+  const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const tabs: { id: Tab; label: string; color: string }[] = [
     { id: 'mask', label: 'Mask', color: '#ff9f0a' },
@@ -100,6 +102,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const handleCloseFinishDialog = () => {
     setSelectedKeys(new Set());
+    setHoveredFinish(null);
     onCloseFinishDialog();
   };
 
@@ -297,7 +300,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} />
+          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} />
         )}
 
         {/* Context — left/right split layout */}
@@ -357,32 +360,55 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         )}
       </div>
 
-      {/* Finish dialog — multi-select */}
+      {/* Finish dialog — left preview + right card grid with hover */}
       {showFinishDialog && (
         <div style={styles.overlay}>
-          <div style={styles.dialog}>
-            <div style={styles.dialogTitle}>Select Final Images</div>
-            <div style={styles.dialogSubtitle}>Choose which images to return as the pipeline output ({selectedKeys.size} selected)</div>
-            <div style={styles.dialogHistoryGrid}>
-              {history.map(h => (
-                <button
-                  key={h.key}
-                  style={{
-                    ...styles.historyCard,
-                    borderColor: selectedKeys.has(h.key) ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                    boxShadow: selectedKeys.has(h.key) ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                  }}
-                  onClick={() => toggleFinishSelection(h.key)}
-                >
-                  <div style={styles.historyImgWrap}>
-                    <img src={h.src} alt={h.name} style={styles.historyImg} />
-                    {selectedKeys.has(h.key) && <div style={styles.historyCheck}>✓</div>}
-                  </div>
-                  <div style={styles.historyName}>{h.name}</div>
-                </button>
-              ))}
+          <div style={{ ...styles.dialog, width: '80vw', maxWidth: 1000, padding: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ padding: '20px 24px 12px', flexShrink: 0 }}>
+              <div style={styles.dialogTitle}>Select Final Images</div>
+              <div style={styles.dialogSubtitle}>Hover to preview, click to select ({selectedKeys.size} selected)</div>
             </div>
-            <div style={styles.dialogActions}>
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 0 }}>
+              {/* Left: large preview */}
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8, background: '#0d0d0d', borderRadius: '12px 0 0 0' }}>
+                {(hoveredFinish || history.find(h => selectedKeys.has(h.key))) ? (
+                  <>
+                    <img src={(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.src} alt={(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.name} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 40px)', objectFit: 'contain', borderRadius: 12 }} />
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.name}</div>
+                  </>
+                ) : (
+                  <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>Hover over a card to preview</div>
+                )}
+              </div>
+              {/* Right: card grid */}
+              <div style={{ width: 420, flexShrink: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignContent: 'flex-start' }}>
+                  {history.map(h => (
+                    <button
+                      key={h.key}
+                      style={{
+                        ...styles.historyCard,
+                        borderColor: selectedKeys.has(h.key) ? '#0a84ff'
+                          : (hoveredFinish?.key === h.key ? 'rgba(10,132,255,0.4)' : 'rgba(255,255,255,0.08)'),
+                        boxShadow: selectedKeys.has(h.key) ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                      }}
+                      onMouseEnter={() => setHoveredFinish(h)}
+                      onClick={() => toggleFinishSelection(h.key)}
+                    >
+                      <div style={styles.historyImgWrap}>
+                        <img src={h.src} alt={h.name} style={styles.historyImg} />
+                        {selectedKeys.has(h.key) && <div style={styles.historyCheck}>✓</div>}
+                      </div>
+                      <div style={styles.historyName}>{h.name}</div>
+                    </button>
+                  ))}
+                </div>
+                {history.length === 0 && (
+                  <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No history yet.</div>
+                )}
+              </div>
+            </div>
+            <div style={{ ...styles.dialogActions, padding: '12px 24px 20px', flexShrink: 0 }}>
               <button style={styles.cancelBtn} onClick={handleCloseFinishDialog}>Cancel</button>
               <button style={styles.confirmBtn} onClick={handleConfirmFinish}>Confirm</button>
             </div>
@@ -447,7 +473,10 @@ const InterfaceTab: React.FC<{
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   detailProgress: { progress: number; current: number; total: number };
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
-}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface }) => {
+  interfaceResults: HistoryItem[];
+  currentContextKey: string | null;
+  onSetContext: (key: string) => void;
+}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface, interfaceResults, currentContextKey, onSetContext }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
 
   if (interfaces.length === 0) {
@@ -551,8 +580,35 @@ const InterfaceTab: React.FC<{
               {showProgress && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgress.current} / {detailProgress.total}</span>}
             </div>
           )}
-          {detailStatus === 'done' && (
-            <div style={{ marginTop: 8, fontSize: 12, color: '#30d158', fontWeight: 600 }}>✓ Done — images added to context</div>
+          {detailStatus === 'done' && interfaceResults.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Results</div>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {interfaceResults.map(r => {
+                  const active = r.key === currentContextKey;
+                  return (
+                    <div
+                      key={r.key}
+                      style={{
+                        ...styles.resultCard,
+                        width: 160, flex: 'none',
+                        borderColor: active ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                        boxShadow: active ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                        cursor: active ? 'default' : 'pointer',
+                      }}
+                      onClick={() => !active && onSetContext(r.key)}
+                    >
+                      <div style={styles.resultLabel}>{r.name}</div>
+                      <img src={r.src} alt={r.name} style={{ width: '100%', height: 120, objectFit: 'cover', borderRadius: 8 }} />
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Click a card to set as context</div>
+            </div>
+          )}
+          {detailStatus === 'done' && interfaceResults.length === 0 && (
+            <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>✓ Done — no images generated</div>
           )}
           {detailStatus === 'error' && (
             <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
