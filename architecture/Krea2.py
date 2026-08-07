@@ -36,6 +36,16 @@ def _imgids(bs, frame, h_, w_, device):
     return ids.reshape(1, h_ * w_, 3).repeat(bs, 1, 1)
 
 
+def _imgids_offset(bs, frame, gh, gw, th, tw, device):
+    """stride-1 整数位置 ID，居中偏移。用于 fit 模式下已对齐目标网格密度的参考。"""
+    off_h, off_w = max(0, (th - gh) // 2), max(0, (tw - gw) // 2)
+    ids = torch.zeros(gh, gw, 3, device=device, dtype=torch.float32)
+    ids[..., 0] = frame
+    ids[..., 1] = (torch.arange(gh, device=device, dtype=torch.float32) + off_h)[:, None]
+    ids[..., 2] = (torch.arange(gw, device=device, dtype=torch.float32) + off_w)[None, :]
+    return ids.reshape(1, gh * gw, 3).repeat(bs, 1, 1)
+
+
 def _to_4d(v):
     """(B,C,T,H,W) -> (B*T,C,H,W); 4D 直接返回。"""
     if v.ndim == 5:
@@ -65,6 +75,47 @@ def _fit_area(samples, max_pixels, snap=1):
     if (nh, nw) == (h, w):
         return samples
     return comfy.utils.common_upscale(samples, nw, nh, "area", "disabled")
+
+
+def _fit_encode_image(image, vae, H, W, cache, key, fit_mode="crop"):
+    """像素空间源图适配: 在 VAE 编码前完成 crop/resize，避免 latent 空间插值模糊。
+
+    H, W 为目标 latent 尺寸; px_h=H*8, px_w=W*8 为目标像素尺寸。
+    fit_mode='fit': 按比例缩放后居中放置（stride-1 位置 ID 匹配训练几何）。
+    fit_mode='crop': center-crop 到目标宽高比后 resize 到精确目标像素尺寸。
+    """
+    key = key + (fit_mode,)
+    if key in cache:
+        return cache[key]
+    print(f"[Krea2] _fit_encode_image: mode={fit_mode} in={tuple(image.shape)} target_latent={H}x{W}", flush=True)
+    px_h, px_w = H * 8, W * 8
+    img = image.movedim(-1, 1)  # B,H,W,C -> B,C,H,W
+    ih, iw = img.shape[-2:]
+    if fit_mode == "fit":
+        sc = min(px_h / ih, px_w / iw)
+        CROP_TOL = 0.08
+        if ih * sc >= px_h * (1 - CROP_TOL) and iw * sc >= px_w * (1 - CROP_TOL):
+            s = max(px_h / ih, px_w / iw)
+            ch, cw = min(ih, int(round(px_h / s))), min(iw, int(round(px_w / s)))
+            y0, x0 = (ih - ch) // 2, (iw - cw) // 2
+            img = img[..., y0:y0 + ch, x0:x0 + cw]
+            nh, nw = px_h, px_w
+        else:
+            nh = min(max(16, int(ih * sc) // 16 * 16), max(16, px_h // 16 * 16))
+            nw = min(max(16, int(iw * sc) // 16 * 16), max(16, px_w // 16 * 16))
+        img = F.interpolate(img.float(), size=(nh, nw), mode="bicubic", antialias=True)
+        lat = vae.encode(img.movedim(1, -1)[..., :3].clamp(0, 1))
+        cache[key] = lat
+        return lat
+    # crop (default): center-crop to target AR, then resize
+    s = max(px_h / ih, px_w / iw)
+    ch, cw = min(ih, int(round(px_h / s))), min(iw, int(round(px_w / s)))
+    y0, x0 = (ih - ch) // 2, (iw - cw) // 2
+    img = img[..., y0:y0 + ch, x0:x0 + cw]
+    img = F.interpolate(img.float(), size=(px_h, px_w), mode="bicubic", antialias=True)
+    lat = vae.encode(img.movedim(1, -1)[..., :3].clamp(0, 1))
+    cache[key] = lat
+    return lat
 
 
 def _ref_attn_bias(boosts, boost_mask, txtlen, slens, tgtlen, mask_hw, device, dtype):
@@ -99,7 +150,8 @@ def _ref_attn_bias(boosts, boost_mask, txtlen, slens, tgtlen, mask_hw, device, d
 # ====================== 核心 forward ======================
 
 def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_options,
-                       ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None):
+                       ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None,
+                       ref_native=False, pos_mode="anchor"):
     """Krea2 SingleStreamDiT forward，带源参考块。
 
     单流架构: [text | source(frame=1..N) | target(frame=0)]
@@ -109,6 +161,8 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
     x           : (B,C,H,W) 或 (B,C,T,H,W) 噪声目标潜空间
     ref_latents : 源潜空间列表 (来自 extra_conds/conditioning)
     context     : (B, seq, txtlayers*txtdim) — Qwen3-VL 编码
+    ref_native  : True = 源已在目标分辨率（像素路径），跳过 _fit_src
+    pos_mode    : 'stride1' = 居中偏移位置 ID（fit 模式），'anchor' = 锚点位置
     """
     from einops import rearrange
     from comfy.ldm.flux.layers import timestep_embedding
@@ -132,7 +186,7 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
         src = _to_4d(sl).to(x.device, x.dtype)
         if src.shape[0] != bs:
             src = src[:1].expand(bs, *src.shape[1:])
-        if src.shape[-2:] != (H, W):
+        if not ref_native and src.shape[-2:] != (H, W):
             src = _fit_src(src, H, W).to(x.dtype)
         srcs.append(comfy.ldm.common_dit.pad_to_patch_size(src, (patch, patch), padding_mode="replicate"))
     src_grids = [(s_.shape[-2] // patch, s_.shape[-1] // patch) for s_ in srcs]
@@ -154,7 +208,11 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
     combined = torch.cat([context] + src_imgs + [tgt_img], dim=1)  # [text | refs... | target]
 
     device = combined.device
-    ref_ids = [_imgids(bs, i + 1, gh, gw, device) for i, (gh, gw) in enumerate(src_grids)]
+    if pos_mode == "stride1" and ref_native:
+        ref_ids = [_imgids_offset(bs, i + 1, gh, gw, h_, w_, device)
+                   for i, (gh, gw) in enumerate(src_grids)]
+    else:
+        ref_ids = [_imgids(bs, i + 1, gh, gw, device) for i, (gh, gw) in enumerate(src_grids)]
     pos = torch.cat([
         torch.zeros(bs, txtlen, 3, device=device, dtype=torch.float32)]   # text @ frame=0
         + ref_ids                                                          # refs @ frame=1,2,...
@@ -184,11 +242,14 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
 
 # ====================== 模型 patch ======================
 
-def apply_model_patch(model_patcher, ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None):
+def apply_model_patch(model_patcher, ref_boost=1.0, ref_boost_a=1.0, ref_boost_mask=None,
+                      fit_mode="fit", vae=None, pixel_state=None):
     """对 Krea2 模型做 edit forward patch（单流 + RoPE frame 区分）。
 
     使用 extra_conds 机制传递 reference_latents，
     forward 使用 krea2_edit_forward（单流架构）。
+    fit_mode + vae: 启用像素空间源图适配路径（防模糊）。
+    pixel_state: 可选共享状态 dict，用于多个 model patcher（如 model_negative）共享同一组源图。
     """
     m = model_patcher.clone()
     base_model = m.model
@@ -197,6 +258,10 @@ def apply_model_patch(model_patcher, ref_boost=1.0, ref_boost_a=1.0, ref_boost_m
     orig_extra_conds = base_model.extra_conds
     orig_extra_conds_shapes = base_model.extra_conds_shapes
     orig_forward = dit.forward
+
+    if pixel_state is None:
+        pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "px_cache": {}}
+    m.model_options["_krea2_pixel_state"] = pixel_state
 
     def extra_conds(**kwargs):
         out = orig_extra_conds(**kwargs)
@@ -219,8 +284,29 @@ def apply_model_patch(model_patcher, ref_boost=1.0, ref_boost_a=1.0, ref_boost_m
     def forward(x, timesteps, context, attention_mask=None, transformer_options={}, ref_latents=None, **kwargs):
         if ref_latents is None or len(ref_latents) == 0:
             return orig_forward(x, timesteps, context, attention_mask=attention_mask, transformer_options=transformer_options, **kwargs)
+
+        # 像素路径: 在 forward 时按目标分辨率编码源图（防模糊）
+        src_images = pixel_state.get("source_images")
+        pxe = pixel_state.get("vae")
+        fmode = pixel_state.get("fit_mode", "crop")
+
+        if src_images is not None and pxe is not None and len(src_images) > 0:
+            xx = _to_4d(x)
+            Hh, Ww = xx.shape[-2], xx.shape[-1]
+            src = []
+            for i, img in enumerate(src_images):
+                lat = _fit_encode_image(img, pxe, Hh, Ww, pixel_state["px_cache"], (str(i), Hh, Ww), fmode)
+                src.append(base_model.process_latent_in(lat))
+            ref_latents = src
+            ref_native = (fmode == "fit")
+            pos_mode = ("stride1" if fmode == "fit" else "anchor")
+        else:
+            ref_native = False
+            pos_mode = "anchor"
+
         return krea2_edit_forward(dit, x, timesteps, context, ref_latents, transformer_options,
-                                  ref_boost=ref_boost, ref_boost_a=ref_boost_a, ref_boost_mask=ref_boost_mask)
+                                  ref_boost=ref_boost, ref_boost_a=ref_boost_a, ref_boost_mask=ref_boost_mask,
+                                  ref_native=ref_native, pos_mode=pos_mode)
 
     m.add_object_patch("extra_conds", extra_conds)
     m.add_object_patch("extra_conds_shapes", extra_conds_shapes)
@@ -242,6 +328,7 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
 
     images_vl = []
     ref_latents = []
+    source_images_pixel = []  # 像素空间源图（用于 forward 时 _fit_encode_image）
 
     # 处理当前 pipeline 图像 (reference_image) — 编辑场景的源图
     if reference_image is not None:
@@ -255,6 +342,9 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
         else:
             samples_vl = samples
         images_vl.append(samples_vl.movedim(1, -1)[:, :, :, :3])
+
+        # 像素路径源图（原始分辨率，forward 时按目标分辨率裁剪+编码）
+        source_images_pixel.append(reference_image[:, :, :, :3])
 
         # VAE 潜空间: 缩小到 REF_LATENT_MAX_PIXELS 以内
         s_fit = _fit_area(samples, REF_LATENT_MAX_PIXELS, snap=REF_SNAP)
@@ -275,12 +365,22 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
             s_vl = s
         images_vl.append(s_vl.movedim(1, -1)[:, :, :, :3])
 
+        # 像素路径源图
+        source_images_pixel.append(decoded[:, :, :, :3])
+
         # VAE 潜空间
         s_fit = _fit_area(s, REF_LATENT_MAX_PIXELS, snap=REF_SNAP)
         ref_latents.append(vae.encode(s_fit.movedim(1, -1)[:, :, :, :3]))
 
     if len(images_vl) > 0:
         print(f"[Reference] Krea2: {len(images_vl)} reference image(s) -> grounded encode + VAE re-encode")
+
+    # 存储像素路径源图供 forward 使用
+    pixel_state = self.model.model_options.get("_krea2_pixel_state", None) if self.model is not None else None
+    if pixel_state is not None and pixel_state.get("vae") is not None and len(source_images_pixel) > 0:
+        pixel_state["source_images"] = source_images_pixel
+        pixel_state["px_cache"].clear()
+        print(f"[Krea2] pixel path: {len(source_images_pixel)} source image(s) stored for forward-time encoding")
 
     # 构建 grounded encode 模板 (带 system prompt)
     nimg = len(images_vl)
