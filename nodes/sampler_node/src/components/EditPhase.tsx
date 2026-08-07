@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
-import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem } from '../types';
+import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort } from '../types';
 
 interface EditPhaseProps {
   tab: Tab;
@@ -38,6 +38,8 @@ interface EditPhaseProps {
   showBlendSelect: { role: 'background' | 'foreground' } | null;
   onBlendSelectImage: (key: string, name: string, src: string) => void;
   onCloseBlendSelect: () => void;
+  interfaces: InterfaceInfo[];
+  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -50,6 +52,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
   blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
+  interfaces, onExecuteInterface,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -60,6 +63,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     { id: 'draw', label: 'Draw', color: '#30d158' },
     { id: 'blend', label: 'Blend', color: '#ff9f0a' },
     { id: 'context', label: 'Context', color: '#64d2ff' },
+    ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, label: 'Interface', color: '#bf5af2' }] : []),
   ];
   const hasTagger = !!tagPreviews || !!tagResult;
 
@@ -291,6 +295,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <BlendTab history={history} blendIframeRef={blendIframeRef} showBlendSelect={showBlendSelect} onBlendSelectImage={onBlendSelectImage} onCloseBlendSelect={onCloseBlendSelect} />
         )}
 
+        {/* Interface — package-driven sub-graph execution */}
+        {tab === 'interface' && (
+          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} />
+        )}
+
         {/* Context — left/right split layout */}
         {tab === 'context' && (
           <div style={styles.contextLayout}>
@@ -431,6 +440,137 @@ const TagCard: React.FC<{ label: string; description: string; image?: string; on
     <div style={styles.tagCardDesc}>{description}</div>
   </button>
 );
+
+// ── InterfaceTab ──
+const InterfaceTab: React.FC<{
+  interfaces: InterfaceInfo[];
+  detailStatus: 'idle' | 'running' | 'done' | 'error';
+  detailProgress: { progress: number; current: number; total: number };
+  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>) => void;
+}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface }) => {
+  const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
+
+  if (interfaces.length === 0) {
+    return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
+  }
+
+  const handleExecute = (idx: number) => {
+    onExecuteInterface(idx, manualValues[idx] || {});
+  };
+
+  const showProgress = detailStatus === 'running' && detailProgress.total > 0;
+
+  const renderPort = (port: InterfacePort, idx: number, isStart: boolean) => {
+    const mv = manualValues[idx]?.[String(port.num)] ?? port.value ?? '';
+    const cat = port.category;
+    const badgeColor = cat === 'inject' ? 'rgba(48,209,88,0.15)' : cat === 'manual' ? 'rgba(10,132,255,0.15)' : 'rgba(255,255,255,0.08)';
+    const badgeText = cat === 'inject' ? '#30d158' : cat === 'manual' ? '#0a84ff' : 'rgba(255,255,255,0.3)';
+    const label = cat === 'inject' ? '(inject)' : cat === 'manual' ? '(widget)' : '(port)';
+
+    return (
+      <div key={port.num} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+        {/* Port name */}
+        <div style={{ minWidth: 80, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{port.name}</div>
+        {/* Type badge */}
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: badgeColor, color: badgeText, minWidth: 70, textAlign: 'center' }}>
+          {port.type}
+        </span>
+        {/* Category label */}
+        <span style={{ fontSize: 10, color: badgeText, fontWeight: 500, minWidth: 50 }}>{label}</span>
+
+        {/* Input controls for manual types */}
+        {isStart && port.type === 'STRING' && (
+          <input style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))} />
+        )}
+        {isStart && port.type === 'INT' && (
+          <input type="number" style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: parseInt(e.target.value) || 0 } }))} />
+        )}
+        {isStart && port.type === 'FLOAT' && (
+          <input type="number" step="0.01" style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: parseFloat(e.target.value) || 0 } }))} />
+        )}
+        {isStart && port.type === 'BOOLEAN' && (
+          <input type="checkbox" checked={!!mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.checked } }))} />
+        )}
+
+        {/* Inject label for auto types */}
+        {isStart && cat === 'inject' && (
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+            {port.type === 'MASK' ? '← Mask' : port.type === 'IMAGE' ? '← Context Image' : '← Pipeline'}
+          </span>
+        )}
+
+        {/* Value preview for IMAGE/MASK */}
+        {port.value && (port.type === 'IMAGE' || port.type === 'MASK') && typeof port.value === 'string' && (
+          <img src={port.value} alt={port.name} style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 4 }} />
+        )}
+
+        {/* Pipeline indicator */}
+        {port.type === 'PIPELINE_DATA' && port.value && typeof port.value === 'object' && port.value.has_pipeline && (
+          <span style={{ fontSize: 10, color: '#30d158' }}>✓ has data</span>
+        )}
+
+        {/* Not connected */}
+        {port.type === 'NONE' && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)' }}>Not connected</span>}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {interfaces.map((iface, idx) => (
+        <div key={idx} style={{ background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)' }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{iface.name || `Interface ${idx + 1}`}</div>
+
+          {/* Start ports (inputs) */}
+          {iface.start_ports && iface.start_ports.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Start (Inputs)</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {iface.start_ports.map(port => renderPort(port, idx, true))}
+              </div>
+            </div>
+          )}
+
+          {/* End ports (outputs) */}
+          {iface.end_ports && iface.end_ports.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>End (Outputs)</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {iface.end_ports.map(port => renderPort(port, idx, false))}
+              </div>
+            </div>
+          )}
+
+          {detailStatus === 'running' && (
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={styles.spinner} />
+              <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600 }}>Running…</span>
+              {showProgress && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgress.current} / {detailProgress.total}</span>}
+            </div>
+          )}
+          {detailStatus === 'done' && (
+            <div style={{ marginTop: 8, fontSize: 12, color: '#30d158', fontWeight: 600 }}>✓ Done — images added to context</div>
+          )}
+          {detailStatus === 'error' && (
+            <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+            <button
+              style={{ ...styles.runBtn, opacity: detailStatus === 'running' ? 0.4 : 1, cursor: detailStatus === 'running' ? 'not-allowed' : 'pointer' }}
+              onClick={() => handleExecute(idx)}
+              disabled={detailStatus === 'running'}
+            >
+              {detailStatus === 'running' ? 'Running…' : 'Execute'}
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const styles: Record<string, React.CSSProperties> = {
   container: { display: 'flex', flexDirection: 'column', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },
