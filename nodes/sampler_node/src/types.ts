@@ -9,6 +9,8 @@ export interface ServerConfig {
   crop_reserve: number;
   has_tagger: boolean;
   current_context_key: string | null;
+  has_package: boolean;
+  package_count: number;
 }
 
 export interface DetailerParams {
@@ -51,4 +53,18 @@ export interface HistoryItem {
   src: string;
 }
 
-export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context';
+export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context' | 'interface';
+
+export interface InterfacePort {
+  num: number;
+  name: string;
+  type: string;
+  value: any;
+  category: 'inject' | 'manual' | 'port';
+}
+
+export interface InterfaceInfo {
+  name: string;
+  start_ports: InterfacePort[];
+  end_ports: InterfacePort[];
+}
