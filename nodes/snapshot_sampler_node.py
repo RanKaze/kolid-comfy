@@ -254,17 +254,29 @@ class SnapshotDetailerSamplerServer:
         """添加一张图片到历史画廊。"""
         self._history_counter += 1
         key = f'history_{self._history_counter}'
+        # 记录尺寸供前端过滤同尺寸图片
+        h, w = 0, 0
+        if image is not None and hasattr(image, 'shape'):
+            shp = image.shape
+            if len(shp) == 4:
+                h, w = shp[1], shp[2]
+            elif len(shp) == 3:
+                h, w = shp[0], shp[1]
         self.selected_history.append({
             'key': key,
             'src': tensor_to_base64(image),
             'name': name or f'#{self._history_counter}',
+            'width': w,
+            'height': h,
         })
         if len(self.selected_history) > 20:
             self.selected_history = self.selected_history[-20:]
 
     def get_history_list(self):
         """返回历史画廊列表（base64 缩略图）。"""
-        return [{'key': h['key'], 'name': h['name'], 'src': h['src']} for h in self.selected_history]
+        return [{'key': h['key'], 'name': h['name'], 'src': h['src'],
+                 'width': h.get('width', 0), 'height': h.get('height', 0)}
+                for h in self.selected_history]
 
     def get_history_image(self, key):
         """根据 key 获取历史图片 tensor。"""
@@ -555,7 +567,8 @@ class SnapshotDetailerSamplerServer:
                 body = json.loads(self.rfile.read(length)) if length else {}
                 interface_index = body.get('interface_index', 0)
                 manual_values = body.get('manual_values', {})
-                inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values)
+                exec_options = body.get('exec_options', {})
+                inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values, exec_options=exec_options)
                 self._send_json({'ok': True})
                 return
 
@@ -1175,10 +1188,15 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Interface Package 执行
     # -------------------------------------------------------------------------
-    def _execute_interface(self, server, interface_idx, manual_values):
+    def _execute_interface(self, server, interface_idx, manual_values, exec_options=None):
         """Execute a sub-graph via InterfaceExecutor."""
         if interface_idx >= len(server.packages):
             raise ValueError(f"Interface index {interface_idx} out of range ({len(server.packages)} packages)")
+
+        exec_options = exec_options or {}
+        operation = exec_options.get('operation', 'default')
+        src_key = exec_options.get('image_source_key') or None
+        crop_reserve = int(exec_options.get('crop_reserve', 32))
 
         pkg = server.packages[interface_idx]
         from .interface_node import InterfaceExecutor
@@ -1194,27 +1212,87 @@ class SnapshotDetailerSamplerNode:
             entry.loras = get_loras_from_string(user_loras) if user_loras else []
             injected_pipeline.context.contexts['__prompt_tab__'] = entry
 
+        # 确定注入的图 + mask
+        if src_key:
+            base_img = server.get_history_image(src_key)
+            if base_img is None:
+                raise ValueError(f"Selected context image not found: {src_key}")
+            base_mask = self._current_pipeline.mask if self._current_pipeline else None
+            # 尺寸校验：所选图必须与当前 context 图同尺寸，遮罩才合法
+            cur_img = self._current_pipeline.image if self._current_pipeline else None
+            if cur_img is not None and base_img.shape != cur_img.shape:
+                raise ValueError(
+                    f"Selected image {base_img.shape} does not match current context {cur_img.shape}. "
+                    f"Only same-size images can be validly masked."
+                )
+        else:
+            base_img = injected_pipeline.get_image() if injected_pipeline else None
+            base_mask = injected_pipeline.mask if injected_pipeline else None
+
+        injected_img = base_img
+        injected_mask = base_mask
+        pending_crop = None
+
+        # Crop mask 区域
+        if operation == 'crop':
+            if base_img is None or base_mask is None:
+                raise ValueError("Crop operation requires both image and mask")
+            exp_mask = expand_mask(base_mask, grow=32, blur=32)
+            cropped_img, cropped_mask, crop_info = crop_mask(
+                image=base_img, mask=exp_mask, reserve=crop_reserve)
+            injected_img, injected_mask = cropped_img, cropped_mask
+            pending_crop = {
+                'crop_info': crop_info,
+                'original': base_img,
+                'mask': cropped_mask,
+            }
+            print(f"[InterfaceExec] cropped {base_img.shape} → {cropped_img.shape} crop_info={crop_info}")
+
         # 记录 interface 结果 keys
         server.interface_result_keys = []
 
+        # 不在执行期直接加 history——等 uncrop 之后再以最终图加入
         def _on_result_image(img, name):
-            server.add_history(img, name=name)
-            # add_history appends to selected_history; get the key
-            if server.selected_history:
-                server.interface_result_keys.append(server.selected_history[-1]['key'])
+            pass
 
         executor = InterfaceExecutor(
             extra_pnginfo=getattr(server, 'extra_pnginfo', None),
             on_progress=lambda cur, total: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
             get_pipeline=lambda: injected_pipeline,
-            get_image=lambda: injected_pipeline.get_image() if injected_pipeline else None,
-            get_mask=lambda: injected_pipeline.mask if injected_pipeline else None,
+            get_image=lambda: injected_img,
+            get_mask=lambda: injected_mask,
             on_result_image=_on_result_image,
             on_result_pipeline=None,
             on_sampler_progress=lambda cur, total, node_id: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
         )
 
         results = executor.execute(pkg, manual_values)
+
+        # Uncrop：将裁剪结果复原回完整图
+        if pending_crop is not None:
+            uncropped_results = []
+            for item in results:
+                ptype, img, name = item
+                if ptype == 'IMAGE':
+                    uncropped, _ = recover_crop(
+                        background=pending_crop['original'],
+                        image=img,
+                        crop_info=pending_crop['crop_info'],
+                        recover_method='mask_blend',
+                        mask=pending_crop['mask'],
+                    )
+                    uncropped_results.append(('IMAGE', uncropped, name))
+                else:
+                    uncropped_results.append(item)
+            results = uncropped_results
+            print(f"[InterfaceExec] uncropped {len(results)} results back to full size")
+
+        # 以最终（可能已 uncrop）图加入 history，并记录 keys
+        for ptype, img, name in results:
+            if ptype == 'IMAGE':
+                server.add_history(img, name=name)
+                if server.selected_history:
+                    server.interface_result_keys.append(server.selected_history[-1]['key'])
 
         # Auto-select last added image as context
         if results:
@@ -1420,11 +1498,12 @@ class SnapshotDetailerSamplerNode:
                 if act == 'execute_interface':
                     interface_idx = action.get('interface_index', 0)
                     manual_values = action.get('manual_values', {})
+                    exec_options = action.get('exec_options', {})
                     server.detail_status = 'running'
                     server.detail_error = None
                     server.detail_progress = 0
                     try:
-                        self._execute_interface(server, interface_idx, manual_values)
+                        self._execute_interface(server, interface_idx, manual_values, exec_options)
                         server.detail_status = 'done'
                         server.detail_progress = 1.0
                     except Exception as e:
