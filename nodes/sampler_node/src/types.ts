@@ -27,6 +27,7 @@ export interface StatusResponse {
   progress?: number;
   current_step?: number;
   total_steps?: number;
+  interface_result_keys?: string[];
 }
 
 export interface TagPreviews {
