@@ -422,6 +422,7 @@ const App: React.FC = () => {
       });
     } catch { /* ignore */ }
     setFinished(true);
+    window.close();
   }, []);
 
   const handleAddContextImage = useCallback(async (base64: string) => {
