@@ -23,7 +23,9 @@ const App: React.FC = () => {
   const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
+  const [finished, setFinished] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(false);
+  const [syncingTab, setSyncingTab] = useState(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
@@ -37,7 +39,11 @@ const App: React.FC = () => {
     start_step_rate: 0.8,
     end_step_rate: 1.0,
     pixels: 1048576,
+    align: 8,
     crop_reserve: 32,
+    enable_edit: false,
+    context_reference: false,
+    context_reference_key: null,
   });
 
   // Fetch config on mount
@@ -51,7 +57,11 @@ const App: React.FC = () => {
           start_step_rate: data.start_step_rate,
           end_step_rate: data.end_step_rate,
           pixels: data.pixels,
+          align: data.align,
           crop_reserve: data.crop_reserve,
+          enable_edit: data.enable_edit,
+          context_reference: data.context_reference,
+          context_reference_key: data.context_reference_key,
         });
         setDetailStatus(data.detail_status);
         setCurrentContextKey(data.current_context_key ?? null);
@@ -82,77 +92,57 @@ const App: React.FC = () => {
   // Load tag previews when entering tag tab
   useEffect(() => {
     if (tab !== 'tag') return;
-    // First: get current mask from mask iframe, submit it to main server, then load tag previews
-    const iframe = maskIframeRef.current;
-    if (iframe?.contentWindow) {
-      let resolved = false;
-      const maskHandler = (event: MessageEvent) => {
-        if (event.data?.type === 'mask-data' && !resolved) {
-          resolved = true;
-          window.removeEventListener('message', maskHandler);
-          const maskData = event.data.mask;
-          if (maskData) {
-            const brushMode = event.data.brush_mode || 'binary';
-            const strength = event.data.strength ?? 1.0;
-            const center = event.data.center ?? 1.0;
-            const edge = event.data.edge ?? 0.0;
-            const gamma = event.data.gamma ?? 2.0;
-            fetch('/api/submit_mask', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ mask: maskData, brush_mode: brushMode, strength, center, edge, gamma }),
-            }).finally(() => {
-              fetch('/api/tag_previews')
-                .then(r => r.json())
-                .then((data: TagPreviews) => {
-                  if (data.full || data.mask || data.covered) setTagPreviews(data);
-                })
-                .catch(e => setError('Failed to load tag previews: ' + e.message));
-            });
-          } else {
-            fetch('/api/tag_previews')
-              .then(r => r.json())
-              .then((data: TagPreviews) => {
-                if (data.full || data.mask || data.covered) setTagPreviews(data);
-              })
-              .catch(e => setError('Failed to load tag previews: ' + e.message));
-          }
-        }
-      };
-      window.addEventListener('message', maskHandler);
-      iframe.contentWindow.postMessage({ type: 'get-mask' }, '*');
-      // Timeout fallback: if iframe doesn't respond, just load previews with existing mask
-      setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          window.removeEventListener('message', maskHandler);
-          fetch('/api/tag_previews')
-            .then(r => r.json())
-            .then((data: TagPreviews) => {
-              if (data.full || data.mask || data.covered) setTagPreviews(data);
-            })
-            .catch(e => setError('Failed to load tag previews: ' + e.message));
-        }
-      }, 500);
-    } else {
-      fetch('/api/tag_previews')
-        .then(r => r.json())
-        .then((data: TagPreviews) => {
-          if (data.full || data.mask || data.covered) setTagPreviews(data);
-        })
-        .catch(e => setError('Failed to load tag previews: ' + e.message));
+    // Mask is already synced via handleTabChange → sync-mask → handleMask
+    // Just load tag previews using the synced mask
+    fetch('/api/tag_previews')
+      .then(r => r.json())
+      .then((data: TagPreviews) => {
+        if (data.full || data.mask || data.covered) setTagPreviews(data);
+      })
+      .catch(e => setError('Failed to load tag previews: ' + e.message));
+  }, [tab]);
+
+  const handleTabChange = useCallback((newTab: Tab) => {
+    const needMaskSync = tab === 'mask' && newTab !== 'mask';
+    const needPromptSync = tab === 'prompt' && newTab !== 'prompt';
+    if (!needMaskSync && !needPromptSync) {
+      setTab(newTab);
+      return;
     }
+    setSyncingTab(true);
+    const targetTab = newTab;
+    const checkSyncDone = (event: MessageEvent) => {
+      const done = (needMaskSync && event.data?.type === 'mask-confirmed') ||
+                   (needPromptSync && event.data?.type === 'prompt-synced');
+      if (!done) return;
+      window.removeEventListener('message', checkSyncDone);
+      setSyncingTab(false);
+      setTab(targetTab);
+    };
+    window.addEventListener('message', checkSyncDone);
+    if (needMaskSync) {
+      const iframe = maskIframeRef.current;
+      if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-mask' }, '*');
+    }
+    if (needPromptSync) {
+      const iframe = promptIframeRef.current;
+      if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-prompt' }, '*');
+    }
+    // Timeout fallback
+    setTimeout(() => {
+      window.removeEventListener('message', checkSyncDone);
+      setSyncingTab(false);
+      setTab(targetTab);
+    }, 3000);
   }, [tab]);
 
   // Listen for postMessage from mask/prompt iframes
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'mask-confirmed') {
-        // Mask 不再需要 confirm，直接忽略
+        setMaskConfirmed(true);
       } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
-        setError(null);
-        setTab('draw');
       } else if (event.data?.type === 'blend-select') {
         // Blend iframe requests image selection
         setBlendSelect({ role: event.data.role });
@@ -330,13 +320,20 @@ const App: React.FC = () => {
     setDetailProgress({ progress: 0, current: 0, total: 0 });
     setDebugData(null);
     setResultImages(null);
+
     try {
-      await fetch('/api/run_detailer', { method: 'POST' });
+      await fetch('/api/run_detailer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          context_reference_key: params.enable_edit && params.context_reference ? params.context_reference_key : null,
+        }),
+      });
     } catch (e: any) {
       setError('Failed to start detailer: ' + e.message);
       setDetailStatus('idle');
     }
-  }, []);
+  }, [params.enable_edit, params.context_reference, params.context_reference_key]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
@@ -423,10 +420,8 @@ const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ selected_keys: selectedKeys }),
       });
-      window.close();
-    } catch {
-      window.close();
-    }
+    } catch { /* ignore */ }
+    setFinished(true);
   }, []);
 
   const handleAddContextImage = useCallback(async (base64: string) => {
@@ -485,16 +480,37 @@ const App: React.FC = () => {
     );
   }
 
+  if (finished) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 16, background: '#0d0d0d', color: '#fff' }}>
+        <div style={{ width: 48, height: 48, borderRadius: '50%', background: 'rgba(48,209,88,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <span style={{ fontSize: 28, color: '#30d158' }}>✓</span>
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>Finished</div>
+        <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)' }}>You can close this tab.</div>
+      </div>
+    );
+  }
+
   return (
     <div>
+      {syncingTab && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 32, height: 32, borderRadius: '50%', border: '3px solid rgba(255,255,255,0.1)', borderTopColor: '#0a84ff', animation: 'spin 0.8s linear infinite' }} />
+            <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: 600 }}>Syncing...</span>
+          </div>
+        </div>
+      )}
       <EditPhase
         tab={tab}
-        onTabChange={setTab}
+        onTabChange={handleTabChange}
         maskUrl={config.mask_url}
         promptUrl={config.prompt_url}
         maskConfirmed={maskConfirmed}
         promptReady={promptReady}
         autoTagging={autoTagging}
+        hasTagger={!!config?.has_tagger}
         tagPreviews={tagPreviews}
         tagResult={tagResult}
         debugData={debugData}

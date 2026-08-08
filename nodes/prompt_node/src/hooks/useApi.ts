@@ -58,6 +58,14 @@ export function useApi() {
     }
   }, []);
 
+  const syncSelection = useCallback(async (prompts: { text: string; source: string }[], custom: string, loras: LoraSelectionData[], prefabs?: any[], programs?: any[], filterTags?: any[], filterLoras?: any[], filterPrefabs?: any[]) => {
+    await fetch(`${API_BASE}/select_prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: false }),
+    });
+  }, []);
+
   const closeWindow = useCallback(() => {
     fetch(`${API_BASE}/window_closed`, { method: 'POST' });
     window.close();
@@ -84,6 +92,6 @@ export function useApi() {
     hasTagger,
     hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
-    loadData, submitSelection, closeWindow, loadLoraData,
+    loadData, submitSelection, syncSelection, closeWindow, loadLoraData,
   };
 }

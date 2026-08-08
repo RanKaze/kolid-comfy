@@ -247,7 +247,7 @@
             text-transform: uppercase;
             letter-spacing: 0.8px;
         }
-        .brush-mode-btn.active {
+        .brush-mode-btn.active, .eraser-mode-btn.active {
             background: rgba(0, 122, 255, 0.85);
             box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
         }
@@ -437,6 +437,11 @@
                 <label>Thresh</label>
                 <input type="range" id="detThreshold" min="0" max="1" step="0.01" value="0.5">
                 <span id="detThresholdValue">0.50</span>
+            </div>
+            <div class="control-row">
+                <label>Strength</label>
+                <input type="range" id="detStrength" min="0" max="1" step="0.01" value="1.0">
+                <span id="detStrengthValue">1.00</span>
             </div>
             <div class="control-row">
                 <label>Dilate</label>
@@ -647,6 +652,8 @@
 
                 const handleImageLoaded = () => {
                     setTimeout(() => {
+                        const prevW = maskDataCanvas.width;
+                        const prevH = maskDataCanvas.height;
                         fitCanvas();
                         syncMaskDataCanvas();
                         if (data.initial_mask) {
@@ -654,10 +661,15 @@
                             maskImg.onload = () => {
                                 maskDataCtx.globalCompositeOperation = 'source-over';
                                 maskDataCtx.globalAlpha = 1;
+                                maskDataCtx.clearRect(0, 0, maskDataCanvas.width, maskDataCanvas.height);
                                 maskDataCtx.drawImage(maskImg, 0, 0, maskDataCanvas.width, maskDataCanvas.height);
                                 redrawDisplay();
                             };
                             maskImg.src = data.initial_mask;
+                        } else {
+                            // No valid initial_mask for this image — clear
+                            maskDataCtx.clearRect(0, 0, maskDataCanvas.width, maskDataCanvas.height);
+                            redrawDisplay();
                         }
                         if (data.has_detector) {
                             hasDetector = true;
@@ -853,6 +865,11 @@
             strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
         }
 
+        // Sync mask to backend. Called on tab switch and confirm.
+        async function syncMask() {
+            await sendMask();
+        }
+
         // --- Mouse events on imageContainer (not just canvas) ---
         // This ensures Alt+Drag resize continues even if the mouse leaves the canvas
         // but stays within the container.
@@ -1030,10 +1047,14 @@
                 if (response.ok && result.mask) {
                     const maskImg = new Image();
                     maskImg.onload = () => {
-                        ctx.clearRect(0, 0, canvas.width, canvas.height);
-                        ctx.globalCompositeOperation = 'source-over';
-                        ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
+                        syncMaskDataCanvas();
+                        maskDataCtx.globalCompositeOperation = 'source-over';
+                        maskDataCtx.globalAlpha = 1;
+                        maskDataCtx.clearRect(0, 0, maskDataCanvas.width, maskDataCanvas.height);
+                        maskDataCtx.drawImage(maskImg, 0, 0, maskDataCanvas.width, maskDataCanvas.height);
+                        redrawDisplay();
                         status.textContent = 'Mask grown';
+                        status.classList.add('success');
                     };
                     maskImg.src = result.mask;
                 } else {
@@ -1053,6 +1074,7 @@
             el.addEventListener('input', () => { valEl.textContent = el.value; });
         }
         bindRange('detThreshold', 'detThresholdValue');
+        bindRange('detStrength', 'detStrengthValue');
         bindRange('detDilation', 'detDilationValue');
         bindRange('detCropFactor', 'detCropFactorValue');
         bindRange('detDropSize', 'detDropSizeValue');
@@ -1065,6 +1087,7 @@
             try {
                 const params = {
                     threshold: parseFloat(document.getElementById('detThreshold').value),
+                    strength: parseFloat(document.getElementById('detStrength').value),
                     dilation: parseInt(document.getElementById('detDilation').value),
                     crop_factor: parseFloat(document.getElementById('detCropFactor').value),
                     drop_size: parseInt(document.getElementById('detDropSize').value),
@@ -1080,9 +1103,14 @@
                 if (response.ok && result.mask) {
                     const maskImg = new Image();
                     maskImg.onload = () => {
-                        ctx.globalCompositeOperation = 'source-over';
-                        ctx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
+                        syncMaskDataCanvas();
+                        maskDataCtx.globalCompositeOperation = 'source-over';
+                        maskDataCtx.globalAlpha = 1;
+                        maskDataCtx.clearRect(0, 0, maskDataCanvas.width, maskDataCanvas.height);
+                        maskDataCtx.drawImage(maskImg, 0, 0, maskDataCanvas.width, maskDataCanvas.height);
+                        redrawDisplay();
                         status.textContent = 'Detection applied';
+                        status.classList.add('success');
                     };
                     maskImg.src = result.mask;
                 } else if (response.ok) {
@@ -1096,7 +1124,7 @@
             }
         });
 
-        // Send mask (Confirm / Update)
+        // Send mask (Confirm / Update) — 只同步到后端并通知父级，不关闭窗口
         async function sendMask() {
             try {
                 const base64 = maskDataCanvas.toDataURL('image/png');
@@ -1106,18 +1134,12 @@
                     body: JSON.stringify({ mask: base64, loop: currentLoop })
                 });
                 if (response.ok) {
-                    const wasConfirmed = maskConfirmed;
                     maskConfirmed = true;
-                    status.textContent = wasConfirmed ? 'Mask updated' : 'Mask confirmed';
+                    status.textContent = 'Mask confirmed';
                     status.classList.add('success');
-                    confirmButton.textContent = 'Update Mask';
-                    confirmButton.classList.add('update');
                     if (window.parent !== window) {
                         window.parent.postMessage({ type: 'mask-confirmed' }, '*');
                     }
-                    setTimeout(() => {
-                        window.close();
-                    }, 300);
                 } else {
                     status.textContent = 'Error sending mask';
                     status.classList.remove('success');
@@ -1150,13 +1172,11 @@
                         gamma: brushGamma,
                     }, '*');
                 }
+            } else if (event.data?.type === 'sync-mask') {
+                sendMask();
             } else if (event.data?.type === 'new-loop' || event.data?.type === 'reload-image') {
-                syncMaskDataCanvas();
-                maskDataCtx.clearRect(0, 0, maskDataCanvas.width, maskDataCanvas.height);
-                redrawDisplay();
+                // Don't clear mask — loadImage will restore via initial_mask if dimensions match
                 maskConfirmed = false;
-                confirmButton.textContent = 'Confirm Mask';
-                confirmButton.classList.remove('update');
                 status.textContent = 'Loading...';
                 status.classList.remove('success');
                 loadImage();

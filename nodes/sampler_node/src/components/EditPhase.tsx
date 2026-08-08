@@ -2,6 +2,23 @@ import React, { useState } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
 import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort } from '../types';
 
+const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> = ({ checked, onChange }) => (
+  <div
+    onClick={() => onChange(!checked)}
+    style={{
+      width: 36, height: 22, borderRadius: 22,
+      background: checked ? '#30d158' : '#39393d',
+      position: 'relative', transition: 'background 0.2s ease', flexShrink: 0, cursor: 'pointer',
+    }}
+  >
+    <div style={{
+      position: 'absolute', top: 2, left: checked ? 16 : 2,
+      width: 18, height: 18, borderRadius: '50%', background: '#fff',
+      transition: 'left 0.2s ease', boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+    }} />
+  </div>
+);
+
 interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
@@ -10,6 +27,7 @@ interface EditPhaseProps {
   maskConfirmed: boolean;
   promptReady: boolean;
   autoTagging: boolean;
+  hasTagger: boolean;
   tagPreviews: TagPreviews | null;
   tagResult: string | null;
   debugData: DebugRecoverData | null;
@@ -45,7 +63,7 @@ interface EditPhaseProps {
 
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, maskUrl, promptUrl,
-  maskConfirmed, promptReady, autoTagging, tagPreviews, tagResult,
+  maskConfirmed, promptReady, autoTagging, hasTagger, tagPreviews, tagResult,
   debugData, detailStatus, detailProgress, resultImages,
   history, onRefreshHistory, promptIframeRef, maskIframeRef,
   params, onParamChange, onRunTag, onRunDetailer, onSelectImage,
@@ -58,6 +76,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
   const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [showRefSelect, setShowRefSelect] = useState(false);
+  const [contextPreview, setContextPreview] = useState<{ image: string; mask: string | null } | null>(null);
+
+  // Fetch context preview when entering draw tab
+  React.useEffect(() => {
+    if (tab === 'draw') {
+      fetch('/api/context_preview')
+        .then(r => r.json())
+        .then(data => {
+          if (data.image) setContextPreview({ image: data.image, mask: data.mask ?? null });
+        })
+        .catch(() => {});
+    }
+  }, [tab, currentContextKey, detailStatus]);
   const tabs: { id: Tab; label: string; color: string }[] = [
     { id: 'mask', label: 'Mask', color: '#ff9f0a' },
     { id: 'tag', label: 'Tag', color: '#af52de' },
@@ -67,9 +99,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     { id: 'context', label: 'Context', color: '#64d2ff' },
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, label: 'Interface', color: '#bf5af2' }] : []),
   ];
-  const hasTagger = !!tagPreviews || !!tagResult;
 
-  const updateParam = (key: keyof DetailerParams, value: string | number) => {
+  const updateParam = (key: keyof DetailerParams, value: string | number | boolean) => {
     onParamChange({ ...params, [key]: value });
   };
 
@@ -170,6 +201,23 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <div style={styles.drawLayout}>
             {/* Left: settings */}
             <div style={styles.drawSettingsPanel}>
+              {contextPreview && contextPreview.image && (
+                <div style={styles.contextPreviewBox}>
+                  <div style={styles.sectionTitle}>Context</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
+                      <img src={contextPreview.image} alt="Context" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    </div>
+                    <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
+                      {contextPreview.mask ? (
+                        <img src={contextPreview.mask} alt="Mask" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>No mask</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div style={styles.sectionTitle}>Sampling Parameters</div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Add Noise</label>
@@ -191,9 +239,35 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={params.pixels} onChange={e => updateParam('pixels', parseInt(e.target.value))} />
               </div>
               <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Align</label>
+                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={params.align} onChange={e => updateParam('align', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Crop Reserve</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.crop_reserve} onChange={e => updateParam('crop_reserve', parseInt(e.target.value))} />
               </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Enable Edit</label>
+                <IOSToggle checked={params.enable_edit} onChange={v => updateParam('enable_edit', v)} />
+              </div>
+              {params.enable_edit && (
+                <div style={styles.editSubSection}>
+                  <div style={styles.paramRow}>
+                    <label style={styles.paramLabel}>Context Reference</label>
+                    <IOSToggle checked={params.context_reference} onChange={v => updateParam('context_reference', v)} />
+                  </div>
+                  {params.context_reference && (
+                    <div style={styles.paramRow}>
+                      <label style={styles.paramLabel}>Reference Image</label>
+                      <button style={styles.contextLoadBtn} onClick={() => setShowRefSelect(true)}>
+                        {params.context_reference_key
+                          ? (history.find(h => h.key === params.context_reference_key)?.name ?? 'Selected')
+                          : 'Select'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Right: status / results / run button */}
@@ -264,11 +338,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
               {detailStatus === 'done' && debugData && (
                 <div style={styles.debugPanel}>
-                  <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Debug: recover_crop</div>
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Debug</div>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                     <DebugImage src={debugData.background} label="Background" />
                     <DebugImage src={debugData.image} label="Image" />
                     <DebugMask src={debugData.mask} label="Mask" />
+                    {debugData.reference_images && debugData.reference_images.map((ref, i) => (
+                      <DebugImage key={i} src={ref.src} label={ref.name} />
+                    ))}
                   </div>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
                     <DebugString label="crop_x" value={debugData.crop_x} />
@@ -359,6 +436,41 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           </div>
         )}
       </div>
+
+      {/* Reference image select modal */}
+      {showRefSelect && (() => {
+        const cur = history.find(h => h.key === currentContextKey);
+        const cw = cur?.width, ch = cur?.height;
+        const eligible = history.filter(h => h.key !== currentContextKey &&
+          (!cw || !ch || (h.width === cw && h.height === ch)));
+        return (
+          <div style={styles.overlay}>
+            <div style={styles.dialog}>
+              <div style={styles.dialogTitle}>Select Reference Image{cw && ch ? ` (${cw}×${ch})` : ''}</div>
+              {eligible.length === 0 ? (
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No eligible images available.</div>
+              ) : (
+                <div style={styles.dialogHistoryGrid}>
+                  {eligible.map(h => (
+                    <button key={h.key} style={styles.historyCard} onClick={() => {
+                      updateParam('context_reference_key', h.key);
+                      setShowRefSelect(false);
+                    }}>
+                      <div style={styles.historyImgWrap}>
+                        <img src={h.src} alt={h.name} style={styles.historyImg} />
+                      </div>
+                      <div style={styles.historyName}>{h.name}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div style={styles.dialogActions}>
+                <button style={styles.cancelBtn} onClick={() => setShowRefSelect(false)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Finish dialog — left preview + right card grid with hover */}
       {showFinishDialog && (
@@ -776,11 +888,16 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
+  contextPreviewBox: { marginBottom: 12 },
+  contextPreviewWrap: { position: 'relative', width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' },
+  ctxPreviewImg: { width: '100%', height: '100%', objectFit: 'cover' },
+  ctxPreviewMask: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
   paramSelect: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none' },
   paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
 
+  editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
   drawMainArea: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 16, position: 'relative', overflowY: 'auto' },
 
   drawStatusCenter: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14 },

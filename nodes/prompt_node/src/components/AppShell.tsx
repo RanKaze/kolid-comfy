@@ -160,7 +160,7 @@ function buildPromptText(ctx: PromptContextBase, findPrefabByGuid: (guid: string
 export function AppShell() {
   const api = useApi();
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
-    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, closeWindow, loraRegex,
+    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, syncSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
@@ -198,6 +198,13 @@ export function AppShell() {
   const prefabRestoredRef = useRef(false);
   const [selectedPrograms, setSelectedPrograms] = useState<SelectedProgramItem[]>([]);
   const programRestoredRef = useRef(false);
+
+  // Refs for sync-prompt handler (access latest state without re-registering listener)
+  const selectedTagsRef = useRef(selectedTags); selectedTagsRef.current = selectedTags;
+  const selectedLorasRef = useRef(selectedLoras); selectedLorasRef.current = selectedLoras;
+  const loraSelectionsRef = useRef(loraSelections); loraSelectionsRef.current = loraSelections;
+  const selectedPrefabsRef = useRef(selectedPrefabs); selectedPrefabsRef.current = selectedPrefabs;
+  const customPromptsRef = useRef(customPrompts); customPromptsRef.current = customPrompts;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const tagFileInputRef = useRef<HTMLInputElement>(null);
   const [loadFromImageData, setLoadFromImageData] = useState<any>(null);
@@ -737,8 +744,28 @@ export function AppShell() {
       }
     };
     window.addEventListener('message', reloadHandler);
+
+    // Sync prompt selection without closing window (called on tab switch to draw)
+    const syncHandler = (e: MessageEvent) => {
+      if (e.data?.type === 'sync-prompt' && window.parent !== window) {
+        const promptsToSend = selectedTagsRef.current.map(g => tagsToDisplayString(g)).map((text: string) => ({ text, source: 'normal' }));
+        const lorasPayload: any[] = [];
+        for (const l of selectedLorasRef.current) {
+          const sel = loraSelectionsRef.current[l.file_path];
+          lorasPayload.push({ file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config });
+        }
+        const prefabsPayload = selectedPrefabsRef.current.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
+        syncSelection(promptsToSend, customPromptsRef.current, lorasPayload, prefabsPayload, [], [], [], []).then(() => {
+          window.parent.postMessage({ type: 'prompt-synced' }, '*');
+        }).catch(() => {
+          window.parent.postMessage({ type: 'prompt-synced' }, '*');
+        });
+      }
+    };
+    window.addEventListener('message', syncHandler);
+
     try { window.parent?.postMessage({ type: 'kolid-prompt-ready' }, '*'); } catch {}
-    return () => window.removeEventListener('message', reloadHandler);
+    return () => { window.removeEventListener('message', reloadHandler); window.removeEventListener('message', syncHandler); };
   }, [loadData, loadLoraData]);
 
   // Live context push: whenever selections change, notify parent immediately
