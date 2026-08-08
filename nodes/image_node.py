@@ -1877,10 +1877,12 @@ def handleMask(serverHandler, set_event):
         
         # Resize mask to match original image dimensions
         if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
+            print(f"[handleMask] resize mask: canvas={mask_gray.shape[1]}x{mask_gray.shape[0]} → image={orig_w}x{orig_h} | min={mask_gray.min():.3f} max={mask_gray.max():.3f} sum={mask_gray.sum():.1f} nonzero={np.count_nonzero(mask_gray)}")
             mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+            print(f"[handleMask] after resize: min={mask_gray.min():.3f} max={mask_gray.max():.3f} sum={mask_gray.sum():.1f} nonzero={np.count_nonzero(mask_gray)}")
         
-        # Binarize: any painted area becomes 1.0
-        mask_gray = (mask_gray > 0).astype(np.float32)
+        # Preserve alpha values for soft brushes (don't binarize)
+        mask_gray = np.clip(mask_gray, 0.0, 1.0)
         
         # Add batch dimension -> [1, H, W]
         mask_array = np.expand_dims(mask_gray, axis=0)
@@ -1932,6 +1934,7 @@ def handleDetect(serverHandler):
         # Use frontend params directly (all parameters are controlled from the web UI)
         params = {
             'threshold': data.get('threshold', 0.5),
+            'strength': data.get('strength', 1.0),
             'dilation': data.get('dilation', 4),
             'crop_factor': data.get('crop_factor', 1.5),
             'drop_size': data.get('drop_size', 0),
@@ -1972,9 +1975,13 @@ def handleDetect(serverHandler):
         # Ensure shape is [1, H, W]
         if combined.dim() == 2:
             combined = combined.unsqueeze(0)
+        # Apply strength
+        strength = params.get('strength', 1.0)
+        if strength < 1.0:
+            combined = combined * strength
         
-        # Convert to base64 overlay image
-        mask_base64 = detector_mask_to_base64(combined)
+        # Convert to base64 overlay image (alpha=1.0 for full-opacity mask data)
+        mask_base64 = detector_mask_to_base64(combined, alpha=1.0)
         
         serverHandler.send_response(200)
         serverHandler.send_header('Content-type', 'application/json')
@@ -2023,23 +2030,34 @@ def handleGrow(serverHandler):
             serverHandler.send_error(500, "Failed to decode mask image")
             return
         
-        # Extract alpha channel as binary mask
+        # Extract alpha channel — preserve original strength values
         if mask_bgra.ndim == 3 and mask_bgra.shape[2] == 4:
-            mask_gray = (mask_bgra[:, :, 3] > 0).astype(np.uint8) * 255
+            mask_gray = mask_bgra[:, :, 3].astype(np.float32) / 255.0
         else:
-            mask_gray = cv2.cvtColor(mask_bgra, cv2.COLOR_BGR2GRAY)
-            mask_gray = (mask_gray > 0).astype(np.uint8) * 255
+            mask_gray = cv2.cvtColor(mask_bgra, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         
-        # Dilate
+        # Build binary mask for dilation from non-zero alpha
+        binary = (mask_gray > 0).astype(np.uint8)
+        
+        # Dilate the binary mask
         k = grow * 2 + 1
         kernel = np.ones((k, k), np.uint8)
-        dilated = cv2.dilate(mask_gray, kernel, iterations=1)
+        dilated_binary = cv2.dilate(binary, kernel, iterations=1)
         
-        # Convert to red overlay base64
-        h, w = dilated.shape
+        # Preserve original alpha in dilated regions: new pixels get max of nearby original alpha
+        # Use the dilated binary as the new mask shape, keep original alpha where it existed
+        result_mask = mask_gray.copy()
+        # For newly added pixels (dilated but not original), use a fill value from neighbors
+        new_pixels = dilated_binary & (~binary)
+        if new_pixels.any():
+            # Dilate the alpha values themselves to fill new pixels with nearby strength
+            result_mask = cv2.dilate(mask_gray, kernel, iterations=1)
+        
+        # Convert to red overlay base64 — preserve original alpha
+        h, w = result_mask.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
         rgba[:, :, 0] = 255
-        rgba[:, :, 3] = (dilated > 0).astype(np.uint8) * 153  # alpha 0.6 = 153
+        rgba[:, :, 3] = (np.clip(result_mask, 0, 1) * 255).astype(np.uint8)
         
         _, buffer = cv2.imencode('.png', cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
         base64_str = base64.b64encode(buffer).decode('utf-8')
@@ -2144,6 +2162,7 @@ class SnapshotMaskNodeServer:
             else:
                 print(f"[MASK-TRACE] SnapshotMaskNodeServer.set_mask | NO loop_index | mask id={id(mask)}, sum={mask.sum().item() if hasattr(mask, 'sum') else 'N/A'}")
             self._current_mask = mask
+            self._initial_mask = mask  # 实时同步时更新 initial_mask，使 reload-image 可恢复
         if getattr(self, '_on_mask_set', None) is not None:
             try:
                 self._on_mask_set(mask, loop_index)
@@ -2230,7 +2249,13 @@ class SnapshotMaskNodeServer:
                             'image': image_base64
                         }
                         if self.server_instance.get_initial_mask() is not None:
-                            response['initial_mask'] = mask_to_base64(self.server_instance.get_initial_mask())
+                            # Only return initial_mask if it matches current image dimensions
+                            img = self.server_instance.get_image()
+                            mask = self.server_instance.get_initial_mask()
+                            img_h, img_w = (img.shape[1], img.shape[2]) if hasattr(img, 'shape') and img.ndim == 4 else (img.shape[0], img.shape[1]) if hasattr(img, 'shape') else (0, 0)
+                            mask_h, mask_w = (mask.shape[1], mask.shape[2]) if hasattr(mask, 'shape') and mask.ndim == 3 else (mask.shape[0], mask.shape[1]) if hasattr(mask, 'shape') else (0, 0)
+                            if img_h == mask_h and img_w == mask_w:
+                                response['initial_mask'] = mask_to_base64(mask)
                         # Detector info
                         response['has_detector'] = self.server_instance.detector is not None
                         response_data = json.dumps(response).encode('utf-8')

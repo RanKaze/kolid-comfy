@@ -867,22 +867,38 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
         const shapeId = `shape:${Date.now()}_${Math.random().toString(36).substr(2, 9)}` as any;
         console.log('[DEBUG:handleCaptureDone] Generated IDs — assetId:', assetId, 'shapeId:', shapeId);
 
-        // Use actual captured frame dimensions, fallback to 300
-        const imgW = imgInfo.width || 300;
-        const imgH = imgInfo.height || 300;
-
         // Position the new card next to the source video shape, with offset
+        // Use the video shape's display size (not raw pixel dimensions) for the image card
         const sourceVid = captureTarget?.vid;
         let x = 0;
         let y = 0;
+        let vidW = 0;
+        let vidH = 0;
         console.log('[DEBUG:handleCaptureDone] sourceVid shapeId:', sourceVid?.shapeId);
         if (sourceVid?.shapeId) {
           const vidShape = editor.getShape(sourceVid.shapeId as any);
-          console.log('[DEBUG:handleCaptureDone] vidShape found:', !!vidShape, vidShape ? { x: vidShape.x, y: vidShape.y, w: (vidShape.props as any).w } : null);
+          console.log('[DEBUG:handleCaptureDone] vidShape found:', !!vidShape, vidShape ? { x: vidShape.x, y: vidShape.y, w: (vidShape.props as any).w, h: (vidShape.props as any).h } : null);
           if (vidShape) {
-            x = vidShape.x + ((vidShape.props as any).w || 300) + 40;
+            vidW = (vidShape.props as any).w || 0;
+            vidH = (vidShape.props as any).h || 0;
+            x = vidShape.x + (vidW || 300) + 40;
             y = vidShape.y;
           }
+        }
+        // Image shape size matches the video shape; asset keeps raw pixel dimensions
+        const imgW = vidW || imgInfo.width || 300;
+        const imgH = vidH || imgInfo.height || 300;
+
+        // Avoid overlap: keep moving right until the new card doesn't intersect any existing shape
+        const GAP = 40;
+        const pageShapes = editor.getCurrentPageShapes();
+        const rectsOverlap = (ax: number, ay: number, aw: number, ah: number, bx: number, by: number, bw: number, bh: number) =>
+          ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+        while (pageShapes.some((s) => {
+          const sp = s.props as any;
+          return rectsOverlap(x, y, imgW, imgH, s.x, s.y, sp.w || 0, sp.h || 0);
+        })) {
+          x += imgW + GAP;
         }
         console.log('[DEBUG:handleCaptureDone] Position:', { x, y });
 
@@ -899,8 +915,8 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
           props: {
             name: imgInfo.name,
             src: imgInfo.dataUrl,
-            w: imgW,
-            h: imgH,
+            w: imgInfo.width || imgW,
+            h: imgInfo.height || imgH,
             mimeType: 'image/png',
             isAnimated: false,
           },

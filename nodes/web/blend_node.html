@@ -37,7 +37,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 
 .controls { position: absolute; top: 16px; right: 16px; background: rgba(28,28,30,0.6); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); padding: 14px; border-radius: 20px; z-index: 50; display: flex; flex-direction: column; gap: 8px; min-width: 180px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.35); }
 .detector-title { font-size: 11px; font-weight: 700; color: #64d2ff; text-transform: uppercase; letter-spacing: 0.8px; }
-.brush-mode-btn.active { background: rgba(0,122,255,0.85); box-shadow: 0 2px 8px rgba(0,122,255,0.25); }
+.brush-mode-btn.active, .eraser-mode-btn.active { background: rgba(0,122,255,0.85); box-shadow: 0 2px 8px rgba(0,122,255,0.25); }
 .control-row { display: flex; align-items: center; gap: 10px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
 .control-row label { min-width: 50px; }
 .control-row input[type="range"] { flex: 1; }
@@ -59,9 +59,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div class="controls" id="brushPanel">
             <div class="detector-title">Brush</div>
             <div class="control-row" style="gap:4px; justify-content:center;">
-                <button class="control-button brush-mode-btn active" id="brushBinary" style="flex:1; padding:5px 8px; font-size:11px;">Binary</button>
+                <button class="control-button brush-mode-btn" id="brushBinary" style="flex:1; padding:5px 8px; font-size:11px;">Binary</button>
                 <button class="control-button brush-mode-btn" id="brushLinear" style="flex:1; padding:5px 8px; font-size:11px;">Linear</button>
-                <button class="control-button brush-mode-btn" id="brushExpo" style="flex:1; padding:5px 8px; font-size:11px;">Exponential</button>
+                <button class="control-button brush-mode-btn active" id="brushExpo" style="flex:1; padding:5px 8px; font-size:11px;">Exponential</button>
             </div>
             <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0"><span id="brushStrengthValue">1.00</span></div>
             <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0"><span id="brushCenterValue">1.00</span></div>
@@ -73,9 +73,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 
             <div class="detector-title" style="color:#ff6b6b;">Eraser</div>
             <div class="control-row" style="gap: 4px; justify-content: center;">
-                <button class="control-button eraser-mode-btn active" id="eraserBinary" style="flex:1; padding: 5px 8px; font-size: 11px;">Binary</button>
+                <button class="control-button eraser-mode-btn" id="eraserBinary" style="flex:1; padding: 5px 8px; font-size: 11px;">Binary</button>
                 <button class="control-button eraser-mode-btn" id="eraserLinear" style="flex:1; padding: 5px 8px; font-size: 11px;">Linear</button>
-                <button class="control-button eraser-mode-btn" id="eraserExpo" style="flex:1; padding: 5px 8px; font-size: 11px;">Exponential</button>
+                <button class="control-button eraser-mode-btn active" id="eraserExpo" style="flex:1; padding: 5px 8px; font-size: 11px;">Exponential</button>
             </div>
             <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0"><span id="eraserStrengthValue">1.00</span></div>
             <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0"><span id="eraserCenterValue">1.00</span></div>
@@ -126,14 +126,14 @@ let altResizeBrushCenterY = 0;
 const ALT_RESIZE_SENSITIVITY = 0.5;
 let brushSize = 40;
 let lastX = 0, lastY = 0;
-let brushMode = 'binary';
+let brushMode = 'exponential';
 let brushStrength = 1.0;
 let brushCenter = 1.0;
 let brushEdge = 0.0;
 let brushGamma = 2.0;
 
 // Eraser state (independent from brush)
-let eraserMode = 'binary';
+let eraserMode = 'exponential';
 let eraserStrength = 1.0;
 let eraserCenter = 1.0;
 let eraserEdge = 0.0;
@@ -275,6 +275,12 @@ modeConfigs.forEach(m => {
             document.getElementById(rowId).style.display = show ? 'flex' : 'none';
     });
 });
+
+// Initialize rows for default exponential mode
+document.getElementById('brushCenterRow').style.display = 'none';
+document.getElementById('brushEdgeRow').style.display = 'none';
+document.getElementById('brushGammaRow').style.display = 'flex';
+
 const bindRange = (inputId, valId, setter) => {
     const el = document.getElementById(inputId);
     const valEl = document.getElementById(valId);
@@ -314,6 +320,11 @@ function setupEraserModeButtons() {
     bindRange('eraserGamma', 'eraserGammaValue', v => eraserGamma = v);
 }
 setupEraserModeButtons();
+
+// Initialize rows for default exponential eraser mode
+document.getElementById('eraserCenterRow').style.display = 'none';
+document.getElementById('eraserEdgeRow').style.display = 'none';
+document.getElementById('eraserGammaRow').style.display = 'flex';
 
 function updateCursorMode() {
     if (isErasing) brushCursor.classList.add('erase');
