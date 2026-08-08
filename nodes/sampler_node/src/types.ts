@@ -6,7 +6,11 @@ export interface ServerConfig {
   start_step_rate: number;
   end_step_rate: number;
   pixels: number;
+  align: number;
   crop_reserve: number;
+  enable_edit: boolean;
+  context_reference: boolean;
+  context_reference_key: string | null;
   has_tagger: boolean;
   current_context_key: string | null;
   has_package: boolean;
@@ -18,7 +22,11 @@ export interface DetailerParams {
   start_step_rate: number;
   end_step_rate: number;
   pixels: number;
+  align: number;
   crop_reserve: number;
+  enable_edit: boolean;
+  context_reference: boolean;
+  context_reference_key: string | null;
 }
 
 export interface StatusResponse {
@@ -36,6 +44,11 @@ export interface TagPreviews {
   covered?: string;
 }
 
+export interface DebugReferenceImage {
+  name: string;
+  src: string;
+}
+
 export interface DebugRecoverData {
   background: string;
   image: string;
@@ -46,6 +59,7 @@ export interface DebugRecoverData {
   crop_height: number;
   original_width: number;
   original_height: number;
+  reference_images: DebugReferenceImage[];
 }
 
 export interface HistoryItem {

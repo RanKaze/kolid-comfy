@@ -8,6 +8,7 @@ def apply_model_patch(model_patcher):
 
 def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_image, reference, conditioning_set_values, VAEDecode):
     """Flux2Klein: 原有逻辑，reference_latents 直接附加到 conditioning。"""
+    has_ref = (reference_latent is not None) or (reference.reference_latents and len(reference.reference_latents) > 0)
     cache_key = (id(clip), prompt)
 
     if cache_key in self._conditioning_cache:
@@ -17,6 +18,11 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
         print(f"x Conditioning cache miss")
         condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
         self._conditioning_cache[cache_key] = condition
+
+    # 有 reference 时深拷贝，避免追加 reference_latents 污染缓存
+    if has_ref:
+        import copy
+        condition = copy.deepcopy(condition)
 
     if reference_latent is not None:
         condition = conditioning_set_values(condition, {"reference_latents": [reference_latent["samples"]]}, append=True)

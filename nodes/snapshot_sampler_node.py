@@ -34,11 +34,13 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, mask_to_base64, set_inpaint_mask
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask
 from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
+from .image_node import mask_to_base64 as mask_to_red_base64
+from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein
 import gc
 
 
@@ -74,6 +76,9 @@ class SnapshotDetailerSamplerServer:
         self.pixels = cfg.get('pixels', 1048576)
         self.align = cfg.get('align', 8)
         self.crop_reserve = cfg.get('crop_reserve', 32)
+        self.enable_edit = cfg.get('enable_edit', False)
+        self.context_reference = cfg.get('context_reference', False)
+        self.context_reference_key = cfg.get('context_reference_key', None)
 
         self.tag_result = None
         self.detail_status = 'idle'
@@ -199,28 +204,34 @@ class SnapshotDetailerSamplerServer:
         t_main.start()
 
     def stop(self):
+        print("[SnapshotDetailerSampler] stop() called")
         if self.mask_server:
             self.mask_server._on_mask_set = None
-        def _stop(server):
+        def _stop(server, name):
             if server:
                 try:
+                    print(f"[SnapshotDetailerSampler] Stopping {name}...")
                     server.stop()
-                except Exception:
-                    pass
+                    print(f"[SnapshotDetailerSampler] {name} stopped.")
+                except Exception as e:
+                    print(f"[SnapshotDetailerSampler] Error stopping {name}: {e}")
         threads = []
-        for s in (self.mask_server, self.prompt_server):
-            t = threading.Thread(target=_stop, args=(s,))
+        for s, name in [(self.mask_server, 'mask_server'), (self.prompt_server, 'prompt_server')]:
+            t = threading.Thread(target=_stop, args=(s, name))
             t.daemon = True
             t.start()
             threads.append(t)
+        print("[SnapshotDetailerSampler] Stopping main_server...")
         if self.main_server:
             try:
                 self.main_server.shutdown()
                 self.main_server.server_close()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[SnapshotDetailerSampler] Error stopping main_server: {e}")
+        print("[SnapshotDetailerSampler] main_server stopped.")
         for t in threads:
             t.join(timeout=2.0)
+        print("[SnapshotDetailerSampler] All servers stopped.")
 
     # -------------------------------------------------------------------------
     # 事件驱动
@@ -328,7 +339,15 @@ class SnapshotDetailerSamplerServer:
             })
             ps.send_sync("kolid-comfy-widget-set", {
                 "node_id": self.unique_id,
+                "widget_name": "align", "type": "INT", "value": str(self.align),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
                 "widget_name": "crop_reserve", "type": "INT", "value": str(self.crop_reserve),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "enable_edit", "type": "STRING", "value": "enable" if self.enable_edit else "disable",
             })
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Widget sync failed: {e}")
@@ -347,9 +366,20 @@ class SnapshotDetailerSamplerServer:
         if 'pixels' in data:
             self.pixels = int(data['pixels'])
             dirty = True
+        if 'align' in data:
+            self.align = int(data['align'])
+            dirty = True
         if 'crop_reserve' in data:
             self.crop_reserve = int(data['crop_reserve'])
             dirty = True
+        if 'enable_edit' in data:
+            self.enable_edit = bool(data['enable_edit'])
+            dirty = True
+        if 'context_reference' in data:
+            self.context_reference = bool(data['context_reference'])
+            dirty = True
+        if 'context_reference_key' in data:
+            self.context_reference_key = data['context_reference_key']
         if dirty:
             self._sync_widgets()
 
@@ -415,7 +445,11 @@ class SnapshotDetailerSamplerServer:
                     'start_step_rate': inst.start_step_rate if inst else 0.8,
                     'end_step_rate': inst.end_step_rate if inst else 1.0,
                     'pixels': inst.pixels if inst else 1048576,
+                    'align': inst.align if inst else 8,
                     'crop_reserve': inst.crop_reserve if inst else 32,
+                    'enable_edit': inst.enable_edit if inst else False,
+                    'context_reference': inst.context_reference if inst else False,
+                    'context_reference_key': inst.context_reference_key if inst else None,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'current_context_key': getattr(inst, 'current_context_key', None),
                     'has_package': bool(inst and inst.packages),
@@ -495,6 +529,20 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'has_mask': has})
                 return
 
+            if self.path == '/api/context_preview':
+                try:
+                    pipeline = inst.node_instance.get_current_pipeline() if inst and inst.node_instance else None
+                    if pipeline is not None and pipeline.image is not None:
+                        resp = {'image': tensor_to_base64(pipeline.image)}
+                        if pipeline.mask is not None:
+                            resp['mask'] = mask_to_red_base64(pipeline.mask)
+                        self._send_json(resp)
+                    else:
+                        self._send_json({'image': None, 'mask': None})
+                except Exception as e:
+                    self._send_json({'image': None, 'mask': None, 'error': str(e)})
+                return
+
             if self.path == '/api/has_prompt':
                 has = (inst.prompt_server is not None and
                        (getattr(inst.prompt_server, 'selected_prompts', None) or
@@ -558,7 +606,9 @@ class SnapshotDetailerSamplerServer:
                 return
 
             if self.path == '/api/run_detailer':
-                inst.put_action('run_detailer')
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                inst.put_action('run_detailer', **body)
                 self._send_json({'ok': True})
                 return
 
@@ -650,6 +700,7 @@ class SnapshotDetailerSamplerServer:
                     inst.finish_selected_keys = [selected_key] if selected_key else None
                 inst.finished = True
                 inst.put_action('finish')
+                print("[SnapshotDetailerSampler] Finish action received, selected_keys:", inst.finish_selected_keys)
                 # 唤醒 mask/prompt 以防阻塞
                 if inst.mask_server:
                     inst.mask_server.screenshot_event.set()
@@ -798,6 +849,10 @@ class SnapshotDetailerSamplerNode:
     前端通过 tab 自由切换 Mask/Tag/Prompt/Draw/Context，后端通过 action queue 响应。
     """
 
+    # 完成护栏：防止 IS_CHANGED=nan 导致 ComfyUI 在节点返回后立即重算重开浏览器
+    _last_finish_time = 0.0
+    FINISH_COOLDOWN = 3.0  # 秒：完成后此时间内的重入直接透传，不重开
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -812,6 +867,7 @@ class SnapshotDetailerSamplerNode:
                 "pixels": ("INT", {"default": 1048576, "min": 65536, "max": 16777216, "step": 65536}),
                 "align": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1}),
                 "crop_reserve": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
+                "enable_edit": (["disable", "enable"], {"default": "disable"}),
             },
             "optional": {
                 "detector": ("*",),
@@ -993,29 +1049,38 @@ class SnapshotDetailerSamplerNode:
             if custom:
                 parts.append(custom)
             user_positive = ','.join(parts)
+
             loras = prompt_server.selected_loras or []
             lora_str_parts = []
+            trigger_words = []
             for lora_item in loras:
                 if isinstance(lora_item, dict):
+                    if not lora_item.get('active', True):
+                        continue
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                     strength = lora_item.get('strength', 1.0)
                     lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
+                    trigger_words.extend(lora_item.get('active_tags', []))
                 else:
                     lora_str_parts.append(str(lora_item))
             user_loras = ','.join(lora_str_parts)
+            if trigger_words:
+                trigger_str = ', '.join(trigger_words)
+                user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
         return user_positive, user_loras
 
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_detailer(self, pipeline, user_mask, user_positive, user_loras, params):
+    def _run_detailer(self, pipeline, user_mask, user_positive, user_loras, params, server=None):
         seed = params['seed']
         add_noise = params['add_noise']
-        start_step_rate = params['start_step_rate']
+        start_step_rate = float(params['start_step_rate'])
         end_step_rate = float(params['end_step_rate'])
         pixels = int(params['pixels'])
         align = int(params['align'])
         crop_reserve = int(params['crop_reserve'])
+        enable_edit = params.get('enable_edit', False)
         context_regex = params['context_regex']
 
         next_pipeline = pipeline.copy()
@@ -1032,6 +1097,9 @@ class SnapshotDetailerSamplerNode:
 
         if user_mask is not None:
             user_mask = user_mask.clone()
+        # Binarize mask for expand_mask (soft alpha values below 0.5 get thresholded away)
+        if user_mask is not None:
+            user_mask = (user_mask > 0).float()
         expanded_mask = expand_mask(user_mask, grow=32, blur=32)
 
         cropped_image, cropped_mask, crop_info = crop_mask(
@@ -1081,13 +1149,65 @@ class SnapshotDetailerSamplerNode:
             model_negative=model_negative
         )
 
+        # Enable Edit: 应用模型 patch 并使用原始上下文图作为 reference
+        if enable_edit:
+            architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+            if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
+                ref_boost = next_pipeline.config.get("ref_boost", 1.0)
+                ref_boost_a = next_pipeline.config.get("ref_boost_a", 1.0)
+                ref_boost_mask = next_pipeline.config.get("ref_boost_mask", None)
+                fit_mode = next_pipeline.config.get("fit_mode", "fit")
+                vae = next_pipeline.vae
+                pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "px_cache": {}}
+                model_to_use = arch_krea2.apply_model_patch(
+                    model_to_use, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
+                if model_negative_to_use is not None:
+                    model_negative_to_use = arch_krea2.apply_model_patch(
+                        model_negative_to_use, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
+                next_pipeline.config["enable_edit"] = True
+                next_pipeline.model = model_to_use
+                print(f"[Detailer] Krea2 edit patch applied (ref_boost={ref_boost}, ref_boost_a={ref_boost_a}, fit_mode={fit_mode})")
+            elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
+                model_to_use = arch_flux2klein.apply_model_patch(model_to_use)
+                if model_negative_to_use is not None:
+                    model_negative_to_use = arch_flux2klein.apply_model_patch(model_negative_to_use)
+                next_pipeline.config["enable_edit"] = True
+                next_pipeline.model = model_to_use
+                print("[Detailer] Flux2Klein edit patch applied")
+
+        # Context Reference: 从 history 加载图片作为额外参考
+        context_reference = params.get('context_reference', False)
+        context_reference_key = params.get('context_reference_key')
+        if enable_edit and context_reference and context_reference_key and server is not None:
+            ref_img = server.get_history_image(context_reference_key)
+            if ref_img is not None:
+                ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
+                next_pipeline.reference.reference_latents.append(ref_latent)
+                print(f"[Detailer] Context reference injected: key={context_reference_key}, latent_shape={ref_latent['samples'].shape}")
+            else:
+                print(f"[Detailer] WARNING: context reference key '{context_reference_key}' not found in history")
+        else:
+            print(f"[Detailer] Context reference: enable_edit={enable_edit}, context_reference={context_reference}, key={context_reference_key}, has_server={server is not None}")
+
+        print(f"[Detailer] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
+
+        # 按架构区分 reference 传递方式
+        architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+        is_krea2 = architecture and re.search(r"Krea2", architecture, re.IGNORECASE)
+        is_flux2klein = architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE)
+
+        # Flux2Klein: reference_latent=tmp_latent (目标 latent), reference_image 不使用
+        # Krea2: reference_latent=None (忽略), reference_image=resized_image (源图)
+        ref_latent_arg = tmp_latent if is_flux2klein else None
+        ref_image_arg = resized_image if (is_krea2 or not is_flux2klein) else None
+
         positive_condition = next_pipeline.get_conditioning(
             mode='positive',
             clip=clip_to_use,
             vae=next_pipeline.vae,
             prompt=current_positive,
-            reference_latent=None,
-            reference_image=resized_image,
+            reference_latent=ref_latent_arg,
+            reference_image=ref_image_arg,
             reference=next_pipeline.reference
         )
 
@@ -1096,8 +1216,8 @@ class SnapshotDetailerSamplerNode:
             clip=clip_to_use,
             vae=next_pipeline.vae,
             prompt=current_negative,
-            reference_latent=None,
-            reference_image=resized_image,
+            reference_latent=ref_latent_arg,
+            reference_image=ref_image_arg,
             reference=next_pipeline.reference
         )
 
@@ -1139,24 +1259,64 @@ class SnapshotDetailerSamplerNode:
         detailed_image = final_image
 
         try:
+            # Debug mask: use original user_mask cropped to same region (not expanded)
+            debug_mask = user_mask
+            if debug_mask is not None and crop_info is not None:
+                cx = crop_info.get('crop_x', 0)
+                cy = crop_info.get('crop_y', 0)
+                cw = crop_info.get('crop_width', debug_mask.shape[-1])
+                ch = crop_info.get('crop_height', debug_mask.shape[-2])
+                debug_mask = debug_mask[:, cy:cy+ch, cx:cx+cw]
+                # Resize to match recovered_image for display
+                if debug_mask.shape[-2:] != recovered_image.shape[1:3]:
+                    import torch.nn.functional as F
+                    debug_mask = F.interpolate(debug_mask.unsqueeze(1), size=(recovered_image.shape[1], recovered_image.shape[2]), mode='bilinear', align_corners=False).squeeze(1)
+
             debug_recover_data = {
                 'background': tensor_to_base64(original_image),
                 'image': tensor_to_base64(recovered_image),
-                'mask': mask_to_base64(recovered_mask),
+                'mask': mask_to_red_base64(debug_mask if debug_mask is not None else recovered_mask),
                 'crop_x': crop_info.get('crop_x', 0),
                 'crop_y': crop_info.get('crop_y', 0),
                 'crop_width': crop_info.get('crop_width', 0),
                 'crop_height': crop_info.get('crop_height', 0),
                 'original_width': crop_info.get('original_width', 0),
                 'original_height': crop_info.get('original_height', 0),
+                'reference_images': [],
             }
+
+            # 收集所有 reference 图片用于 debug 显示
+            ref_imgs = []
+            # reference_image (resized_image, 即 crop+resize 后的输入图)
+            ref_imgs.append(('source (resized)', resized_image))
+            # context reference (如果注入了)
+            if enable_edit and context_reference and context_reference_key and server is not None:
+                ctx_img = server.get_history_image(context_reference_key)
+                if ctx_img is not None:
+                    ref_imgs.append((f'context ref ({context_reference_key})', ctx_img))
+            # reference_latents (来自 ReferenceImageNode/ReferenceLatentNode, 解码后显示)
+            for i, lat in enumerate(next_pipeline.reference.reference_latents):
+                try:
+                    decoded_ref = VAEDecode().decode(vae=next_pipeline.vae, samples=lat)[0]
+                    ref_imgs.append((f'reference_latent[{i}]', decoded_ref))
+                except Exception:
+                    pass
+
+            for name, img in ref_imgs:
+                try:
+                    debug_recover_data['reference_images'].append({
+                        'name': name,
+                        'src': tensor_to_base64(img),
+                    })
+                except Exception:
+                    pass
         except Exception as dbg_e:
-            print(f'[Debug] failed to save recover debug data: {dbg_e}')
+            print(f'[Debug] failed to save debug data: {dbg_e}')
             debug_recover_data = None
 
         next_pipeline.image = final_image
         next_pipeline.latent = None
-        next_pipeline.mask = final_mask
+        next_pipeline.mask = user_mask  # 保留原始用户 mask，不用 expand+recover 后的 mask
 
         gc.collect()
         mm.soft_empty_cache()
@@ -1307,9 +1467,17 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
                start_step_rate=0.8, end_step_rate=1.0, pixels=1048576,
-               align=8, crop_reserve=32, detector=None, tagger=None, asset="", package=None,
+               align=8, crop_reserve=32, enable_edit="disable", detector=None, tagger=None, asset="", package=None,
                extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
+
+        # 完成护栏：IS_CHANGED=nan 会让 ComfyUI 在该节点返回后认为它变化了，
+        # 如果该节点位于连向 OUTPUT_NODE 的路径上，ComfyUI 会立即再排队执行一次，
+        # 导致浏览器被意外重开。这里在 finish 后短时间内拦截这种自动重入。
+        now = time.time()
+        if now - SnapshotDetailerSamplerNode._last_finish_time < SnapshotDetailerSamplerNode.FINISH_COOLDOWN:
+            print("[SnapshotDetailerSampler] Auto re-entry within cooldown after finish — skipping (passthrough)")
+            return (pipeline,)
 
         self._current_pipeline = pipeline.copy() if pipeline else None
 
@@ -1329,6 +1497,7 @@ class SnapshotDetailerSamplerNode:
                 'pixels': pixels,
                 'align': align,
                 'crop_reserve': crop_reserve,
+                'enable_edit': enable_edit == "enable",
                 'context_regex': context_regex,
             }
         )
@@ -1358,6 +1527,7 @@ class SnapshotDetailerSamplerNode:
             'pixels': pixels,
             'align': align,
             'crop_reserve': crop_reserve,
+            'enable_edit': enable_edit == "enable",
             'context_regex': context_regex,
         }
 
@@ -1428,8 +1598,20 @@ class SnapshotDetailerSamplerNode:
                             diag_mask_max = 0
                         print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
 
+                        # 从 action 中获取 context reference key
+                        # 从 server 同步前端修改过的参数
+                        params['add_noise'] = server.add_noise
+                        params['start_step_rate'] = server.start_step_rate
+                        params['end_step_rate'] = server.end_step_rate
+                        params['pixels'] = server.pixels
+                        params['align'] = server.align
+                        params['crop_reserve'] = server.crop_reserve
+                        params['enable_edit'] = server.enable_edit
+                        params['context_reference'] = server.context_reference
+                        params['context_reference_key'] = action.get('context_reference_key')
+
                         next_pipeline, original_image, detailed_image, debug_data = self._run_detailer(
-                            self._current_pipeline, current_mask, user_positive, user_loras, params
+                            self._current_pipeline, current_mask, user_positive, user_loras, params, server=server
                         )
 
                         server.original_image = original_image
@@ -1519,29 +1701,30 @@ class SnapshotDetailerSamplerNode:
                         mm.soft_empty_cache()
 
         finally:
+            print("[SnapshotDetailerSampler] Stopping servers...")
             server.stop()
+            print("[SnapshotDetailerSampler] Servers stopped.")
 
         if server.window_closed and not server.finished:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
 
         # 如果用户在 finish 时选了历史图片，用它作为最终输出
-        if server.finish_selected_keys and len(server.finish_selected_keys) > 1:
-            # 多选：收集所有选中的图片，直接存为列表到 pipeline.image
+        # 先清空已有的 image 和 latent，再追加选中的图片
+        if server.finish_selected_keys and len(server.finish_selected_keys) > 0:
             selected_images = []
             for key in server.finish_selected_keys:
                 img = server.get_history_image(key)
                 if img is not None:
                     selected_images.append(img)
             if selected_images:
-                self._current_pipeline.image = selected_images
-        elif server.finish_selected_key:
-            img = server.get_history_image(server.finish_selected_key)
-            if img is not None:
-                self._current_pipeline.image = img
+                self._current_pipeline.image = selected_images if len(selected_images) > 1 else selected_images[0]
+            self._current_pipeline.latent = None
 
         result = self._current_pipeline
         self._current_pipeline = None
 
         if result is None:
             raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
+        # 记录完成时间，cooldown 内的重入直接透传
+        SnapshotDetailerSamplerNode._last_finish_time = time.time()
         return (result,)
