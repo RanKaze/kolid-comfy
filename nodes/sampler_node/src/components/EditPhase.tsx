@@ -1,6 +1,40 @@
 import React, { useState } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
-import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort } from '../types';
+import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
+
+const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
+  // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
+  const s = 22;
+  const sw = 1.6;
+  const props = { width: s, height: s, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: sw, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  switch (icon) {
+    case 'mask': return (
+      <svg {...props}><rect x="3" y="3" width="7" height="7" fill="currentColor" opacity="0.15" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" fill="currentColor" opacity="0.15" /></svg>
+    );
+    case 'tag': return (
+      <svg {...props}><path d="M3 7l5-4 13 4-4 13-13-4z" /><circle cx="14" cy="10" r="1.5" /></svg>
+    );
+    case 'prompt': return (
+      <svg {...props}><path d="M4 4h16v16H4z" /><path d="M8 9h8M8 13h6M8 17h4" /></svg>
+    );
+    case 'draw': return (
+      <svg {...props}><path d="M3 21l4-1 11-11-3-3L4 17z" /><path d="M14 6l4 4" /><path d="M18 2l4 4-2 2-4-4z" /></svg>
+    );
+    case 'blend': return (
+      <svg {...props}><rect x="3" y="3" width="18" height="7" rx="1" /><path d="M3 13.5c3 0 3 2 6 2s3-2 6-2 3 2 6 2" /><rect x="3" y="16" width="18" height="5" rx="1" /></svg>
+    );
+    case 'context': return (
+      <svg {...props}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9.5" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg>
+    );
+    case 'interface': return (
+      <svg {...props}><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" fill="currentColor" opacity="0.4" /><rect x="3" y="3" width="7" height="7" fill="currentColor" opacity="0.4" /></svg>
+    );
+    case 'pipeline': return (
+      <svg {...props}><path d="M4 14l4 0 0-4 8 0 0 4 4 0" /><circle cx="4" cy="14" r="1.5" /><circle cx="20" cy="14" r="1.5" /></svg>
+    );
+    default: return <svg {...props}><circle cx="12" cy="12" r="9" /></svg>;
+  }
+};
 
 const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> = ({ checked, onChange }) => (
   <div
@@ -58,7 +92,12 @@ interface EditPhaseProps {
   onCloseBlendSelect: () => void;
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: HistoryItem[];
+  interfaceResults: Record<number, HistoryItem[]>;
+  interfaceStatus: 'idle' | 'running' | 'done' | 'error';
+  interfaceProgress: { progress: number; current: number; total: number };
+  pipelinePackages: PipelinePackageInfo[];
+  onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
+  currentPipelineKey: string | null;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -71,7 +110,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
   blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
-  interfaces, onExecuteInterface, interfaceResults,
+  interfaces, onExecuteInterface, interfaceResults, interfaceStatus, interfaceProgress,
+  pipelinePackages, onSwitchPipeline, currentPipelineKey,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
   const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
@@ -90,14 +130,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .catch(() => {});
     }
   }, [tab, currentContextKey, detailStatus]);
-  const tabs: { id: Tab; label: string; color: string }[] = [
-    { id: 'mask', label: 'Mask', color: '#ff9f0a' },
-    { id: 'tag', label: 'Tag', color: '#af52de' },
-    { id: 'prompt', label: 'Prompt', color: '#0a84ff' },
-    { id: 'draw', label: 'Draw', color: '#30d158' },
-    { id: 'blend', label: 'Blend', color: '#ff9f0a' },
-    { id: 'context', label: 'Context', color: '#64d2ff' },
-    ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, label: 'Interface', color: '#bf5af2' }] : []),
+  const tabs: { id: Tab; icon: string; color: string }[] = [
+    { id: 'mask', icon: 'mask', color: '#ff9f0a' },
+    { id: 'tag', icon: 'tag', color: '#af52de' },
+    { id: 'prompt', icon: 'prompt', color: '#0a84ff' },
+    { id: 'draw', icon: 'draw', color: '#30d158' },
+    { id: 'blend', icon: 'blend', color: '#ff9f0a' },
+    { id: 'context', icon: 'context', color: '#64d2ff' },
+    ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
+    ...(pipelinePackages.length > 0 ? [{ id: 'pipeline' as Tab, icon: 'pipeline', color: '#30d158' }] : []),
   ];
 
   const updateParam = (key: keyof DetailerParams, value: string | number | boolean) => {
@@ -139,29 +180,32 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   return (
     <div style={styles.container}>
-      {/* Header */}
-      <div style={styles.header}>
-        <div style={styles.tabBar}>
+      {/* Sidebar — vertical icon tabs */}
+      <div style={styles.sidebar}>
+        <div style={styles.sidebarTabs}>
           {tabs.filter(t => t.id !== 'tag' || hasTagger).map(t => (
             <button
               key={t.id}
+              title={t.id}
               style={{
-                ...styles.tabBtn,
+                ...styles.sidebarBtn,
                 color: tab === t.id ? t.color : 'rgba(255,255,255,0.35)',
+                background: tab === t.id ? t.color + '15' : 'transparent',
+                borderLeft: tab === t.id ? `2px solid ${t.color}` : '2px solid transparent',
               }}
               onClick={() => {
                 if (t.id === 'context') onRefreshHistory();
                 onTabChange(t.id);
               }}
             >
-              {t.label}
-              {t.id === 'mask' && maskConfirmed && <span style={styles.dot}>●</span>}
-              {t.id === 'prompt' && promptReady && <span style={styles.dot}>●</span>}
-              {t.id === 'draw' && detailStatus === 'done' && <span style={styles.dot}>●</span>}
+              <TabIcon icon={t.icon} />
+              {t.id === 'mask' && maskConfirmed && <span style={styles.sidebarDot} />}
+              {t.id === 'prompt' && promptReady && <span style={styles.sidebarDot} />}
+              {t.id === 'draw' && detailStatus === 'done' && <span style={styles.sidebarDot} />}
             </button>
           ))}
         </div>
-        <button style={styles.finishBtn} onClick={onFinishClick}>Finish</button>
+        <button style={styles.finishBtn} onClick={onFinishClick}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="8" /></svg></button>
       </div>
 
       {/* Tab content — iframes always mounted, hidden via display:none */}
@@ -206,11 +250,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   <div style={styles.sectionTitle}>Context</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
-                      <img src={contextPreview.image} alt="Context" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img src={contextPreview.image} alt="Context" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
                     </div>
                     <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
                       {contextPreview.mask ? (
-                        <img src={contextPreview.mask} alt="Mask" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        <img src={contextPreview.mask} alt="Mask" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
                       ) : (
                         <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>No mask</div>
                       )}
@@ -245,6 +289,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Crop Reserve</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.crop_reserve} onChange={e => updateParam('crop_reserve', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Mask Grow</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.mask_grow} onChange={e => updateParam('mask_grow', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Mask Blur</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.mask_blur} onChange={e => updateParam('mask_blur', parseInt(e.target.value))} />
               </div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Enable Edit</label>
@@ -377,7 +429,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatus={detailStatus} detailProgress={detailProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
+          <InterfaceTab interfaces={interfaces} detailStatus={interfaceStatus} detailProgress={interfaceProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
+        )}
+
+        {/* Pipeline — dynamic pipeline switching */}
+        {tab === 'pipeline' && (
+          <PipelineTab pipelinePackages={pipelinePackages} onSwitchPipeline={onSwitchPipeline} currentPipelineKey={currentPipelineKey} />
         )}
 
         {/* Context — left/right split layout */}
@@ -585,15 +642,15 @@ const InterfaceTab: React.FC<{
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   detailProgress: { progress: number; current: number; total: number };
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: HistoryItem[];
+  interfaceResults: Record<number, HistoryItem[]>;
   currentContextKey: string | null;
   onSetContext: (key: string) => void;
   history: HistoryItem[];
 }> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface, interfaceResults, currentContextKey, onSetContext, history }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
-  // 每个 interface 的执行选项
-  const [execOptions, setExecOptions] = useState<Record<number, { image_source: 'default' | 'select'; image_source_key: string | null; operation: 'default' | 'crop'; crop_reserve: number }>>({});
-  const [showImageSelect, setShowImageSelect] = useState<number | null>(null);
+  // 每个 interface 的执行选项: operation 和 crop_reserve 是卡片级, image_keys 是端口级
+  const [execOptions, setExecOptions] = useState<Record<number, { operation: 'default' | 'crop'; crop_reserve: number; image_keys: Record<number, string | null> }>>({});
+  const [showImageSelect, setShowImageSelect] = useState<{ ifaceIdx: number; portNum: number } | null>(null);
 
   if (interfaces.length === 0) {
     return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
@@ -603,12 +660,19 @@ const InterfaceTab: React.FC<{
     setExecOptions(prev => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
   };
 
+  const setImageKey = (idx: number, portNum: number, key: string | null) => {
+    setExecOptions(prev => {
+      const cur = prev[idx] || { operation: 'default' as const, crop_reserve: 32, image_keys: {} };
+      return { ...prev, [idx]: { ...cur, image_keys: { ...cur.image_keys, [portNum]: key } } };
+    });
+  };
+
   const handleExecute = (idx: number) => {
-    const opts = execOptions[idx] || { image_source: 'default', image_source_key: null, operation: 'default', crop_reserve: 32 };
+    const opts = execOptions[idx] || { operation: 'default', crop_reserve: 32, image_keys: {} };
     const payload = {
       operation: opts.operation,
       crop_reserve: opts.crop_reserve,
-      image_source_key: opts.image_source === 'select' ? opts.image_source_key : null,
+      image_keys: opts.image_keys || {},
     };
     onExecuteInterface(idx, manualValues[idx] || {}, payload);
   };
@@ -650,21 +714,45 @@ const InterfaceTab: React.FC<{
           <input type="checkbox" checked={!!mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.checked } }))} />
         )}
 
-        {/* Inject label for auto types */}
-        {isStart && cat === 'inject' && (
+        {/* IMAGE port: per-port image selector with preview */}
+        {isStart && cat === 'inject' && port.type === 'IMAGE' && (() => {
+          const selectedKey = execOptions[idx]?.image_keys?.[port.num] ?? null;
+          const ctxItem = history.find(h => h.key === currentContextKey);
+          const selItem = selectedKey ? history.find(h => h.key === selectedKey) : null;
+          const previewSrc = selItem?.src ?? ctxItem?.src ?? null;
+          const previewLabel = selItem ? selItem.name : 'Context Image';
+          return (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div
+                style={{ position: 'relative', width: 40, height: 40, borderRadius: 6, overflow: 'hidden', cursor: 'pointer', background: '#1a1a1a', border: selectedKey ? '1.5px solid #0a84ff' : '0.5px solid rgba(255,255,255,0.1)', flexShrink: 0 }}
+                onClick={() => setShowImageSelect({ ifaceIdx: idx, portNum: port.num })}
+                title={previewLabel}
+              >
+                {previewSrc ? (
+                  <img src={previewSrc} alt={previewLabel} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                ) : (
+                  <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>No img</div>
+                )}
+              </div>
+              <span style={{ fontSize: 10, color: selectedKey ? '#0a84ff' : 'rgba(255,255,255,0.4)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{previewLabel}</span>
+              {selectedKey && (
+                <button
+                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 14, padding: '2px 4px', flexShrink: 0 }}
+                  onClick={() => setImageKey(idx, port.num, null)}
+                  title="Reset to context image"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* Inject label for non-IMAGE auto types */}
+        {isStart && cat === 'inject' && port.type !== 'IMAGE' && (
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-            {port.type === 'MASK' ? '← Mask' : port.type === 'IMAGE' ? '← Context Image' : '← Pipeline'}
+            {port.type === 'MASK' ? '← Mask' : '← Pipeline'}
           </span>
-        )}
-
-        {/* Value preview for IMAGE/MASK */}
-        {port.value && (port.type === 'IMAGE' || port.type === 'MASK') && typeof port.value === 'string' && (
-          <img src={port.value} alt={port.name} style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 4 }} />
-        )}
-
-        {/* Pipeline indicator */}
-        {port.type === 'PIPELINE_DATA' && port.value && typeof port.value === 'object' && port.value.has_pipeline && (
-          <span style={{ fontSize: 10, color: '#30d158' }}>✓ has data</span>
         )}
 
         {/* Not connected */}
@@ -674,9 +762,9 @@ const InterfaceTab: React.FC<{
   };
 
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={{ flex: 1, minHeight: 0, overflowX: 'auto', overflowY: 'hidden', padding: 16, display: 'flex', flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
       {interfaces.map((iface, idx) => (
-        <div key={idx} style={{ background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)' }}>
+        <div key={idx} style={{ width: 360, flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{iface.name || `Interface ${idx + 1}`}</div>
 
           {/* Start ports (inputs) */}
@@ -689,30 +777,9 @@ const InterfaceTab: React.FC<{
             </div>
           )}
 
-          {/* 注入选项：图片来源 + 执行方式 + crop_reserve */}
+          {/* Operation options (card-level) */}
           {iface.start_ports && iface.start_ports.some(p => p.type === 'IMAGE' || p.type === 'MASK') && (
             <div style={{ marginBottom: 12, padding: 10, background: 'rgba(10,132,255,0.06)', borderRadius: 8, border: '0.5px solid rgba(10,132,255,0.15)' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(100,210,255,0.6)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Injection Options</div>
-
-              {/* 图片来源 */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Image</label>
-                <select
-                  style={styles.paramSelect}
-                  value={execOptions[idx]?.image_source ?? 'default'}
-                  onChange={e => updateOpts(idx, { image_source: e.target.value as 'default' | 'select', ...(e.target.value === 'default' ? { image_source_key: null } : {}) })}
-                >
-                  <option value="default">默认 (Context)</option>
-                  <option value="select">从 Context 选择</option>
-                </select>
-                {execOptions[idx]?.image_source === 'select' && (
-                  <button style={styles.contextLoadBtn} onClick={() => setShowImageSelect(idx)}>
-                    {execOptions[idx]?.image_source_key ? '更换图片' : '选择图片'}
-                  </button>
-                )}
-              </div>
-
-              {/* 操作 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Operation</label>
                 <select style={styles.paramSelect} value={execOptions[idx]?.operation ?? 'default'} onChange={e => updateOpts(idx, { operation: e.target.value as 'default' | 'crop' })}>
@@ -746,36 +813,43 @@ const InterfaceTab: React.FC<{
               {showProgress && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgress.current} / {detailProgress.total}</span>}
             </div>
           )}
-          {detailStatus === 'done' && interfaceResults.length > 0 && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Results</div>
-              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                {interfaceResults.map(r => {
-                  const active = r.key === currentContextKey;
-                  return (
-                    <div
-                      key={r.key}
-                      style={{
-                        ...styles.resultCard,
-                        width: 160, flex: 'none',
-                        borderColor: active ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                        boxShadow: active ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                        cursor: active ? 'default' : 'pointer',
-                      }}
-                      onClick={() => !active && onSetContext(r.key)}
-                    >
-                      <div style={styles.resultLabel}>{r.name}</div>
-                      <img src={r.src} alt={r.name} style={{ width: '100%', height: 120, objectFit: 'cover', borderRadius: 8 }} />
-                    </div>
-                  );
-                })}
+          {(() => {
+            const ifaceResults = interfaceResults[idx] || [];
+            const showIfaceResults = detailStatus === 'done' || ifaceResults.length > 0;
+            if (!showIfaceResults) return null;
+            if (ifaceResults.length === 0) {
+              return detailStatus === 'done' ? (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>✓ Done — no images generated</div>
+              ) : null;
+            }
+            return (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Results</div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  {ifaceResults.map(r => {
+                    const active = r.key === currentContextKey;
+                    return (
+                      <div
+                        key={r.key}
+                        style={{
+                          ...styles.resultCard,
+                          width: '100%', flex: '1 1 100%',
+                          borderColor: active ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                          boxShadow: active ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                          cursor: active ? 'default' : 'pointer',
+                        }}
+                        onClick={() => !active && onSetContext(r.key)}
+                      >
+                        <div style={styles.resultLabel}>{r.name}</div>
+                        <img src={r.src} alt={r.name} style={{ width: '100%', height: 'auto', maxHeight: 200, objectFit: 'contain', borderRadius: 8 }} />
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Click a card to set as context</div>
               </div>
-              <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Click a card to set as context</div>
-            </div>
-          )}
-          {detailStatus === 'done' && interfaceResults.length === 0 && (
-            <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>✓ Done — no images generated</div>
-          )}
+            );
+          })()}
           {detailStatus === 'error' && (
             <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
           )}
@@ -791,26 +865,28 @@ const InterfaceTab: React.FC<{
         </div>
       ))}
 
-      {/* 从 Context 选择图片 modal — 只显示与当前 context 图同尺寸的图 */}
+      {/* 从 Context 选择图片 modal — per-port image selection */}
       {showImageSelect !== null && (() => {
+        const { ifaceIdx, portNum } = showImageSelect;
         const cur = history.find(h => h.key === currentContextKey);
         const cw = cur?.width, ch = cur?.height;
-        const eligible = history.filter(h => h.key !== currentContextKey && h.key !== (execOptions[showImageSelect]?.image_source_key ?? null) &&
-          cw && ch && h.width === cw && h.height === ch);
+        const currentSel = execOptions[ifaceIdx]?.image_keys?.[portNum] ?? null;
+        const eligible = history.filter(h => h.key !== currentContextKey && h.key !== currentSel &&
+          (!cw || !ch || (h.width === cw && h.height === ch)));
         return (
           <div style={styles.overlay}>
             <div style={styles.dialog}>
-              <div style={styles.dialogTitle}>Select Image (same size as context: {cw}×{ch})</div>
+              <div style={styles.dialogTitle}>Select Image for Port {portNum}{cw && ch ? ' (' + cw + 'x' + ch + ')' : ''}</div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 12 }}>
-                Only images matching current context dimensions ({cw}×{ch}) can be validly masked.
+                Select an image to inject into this IMAGE port. Close to use context image.
               </div>
               {eligible.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No same-size images available. Load images of matching dimensions in Context tab first.</div>
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No same-size images available.</div>
               ) : (
                 <div style={styles.dialogHistoryGrid}>
                   {eligible.map(h => (
                     <button key={h.key} style={styles.historyCard} onClick={() => {
-                      updateOpts(showImageSelect, { image_source_key: h.key });
+                      setImageKey(ifaceIdx, portNum, h.key);
                       setShowImageSelect(null);
                     }}>
                       <div style={styles.historyImgWrap}>
@@ -832,27 +908,81 @@ const InterfaceTab: React.FC<{
   );
 };
 
-const styles: Record<string, React.CSSProperties> = {
-  container: { display: 'flex', flexDirection: 'column', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },
+// ── PipelineTab ──
+const PipelineTab: React.FC<{
+  pipelinePackages: PipelinePackageInfo[];
+  onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
+  currentPipelineKey: string | null;
+}> = ({ pipelinePackages, onSwitchPipeline, currentPipelineKey }) => {
+  if (pipelinePackages.length === 0) {
+    return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No pipeline packages connected.</div>;
+  }
 
-  // Header — iOS style segmented control feel
-  header: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '0 16px', height: 48, flexShrink: 0,
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflowX: 'auto', overflowY: 'hidden', padding: 16, display: 'flex', flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
+      {pipelinePackages.map((pkg, pkgIdx) => (
+        <div key={pkgIdx} style={{ width: 360, flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{pkg.name || 'Pipeline Group ' + (pkgIdx + 1)}</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {pkg.pipelines.map((pl, plIdx) => {
+              const key = pkgIdx + '_' + plIdx;
+              const active = key === currentPipelineKey;
+              return (
+                <div
+                  key={plIdx}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                    borderRadius: 8,
+                    background: active ? 'rgba(48,209,88,0.1)' : 'rgba(255,255,255,0.04)',
+                    border: '0.5px solid ' + (active ? '#30d158' : 'rgba(255,255,255,0.08)'),
+                    boxShadow: active ? '0 0 0 2px rgba(48,209,88,0.2)' : 'none',
+                  }}
+                >
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: active ? '#30d158' : 'rgba(255,255,255,0.8)' }}>{pl.name}</div>
+                  {active ? (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#30d158' }}>● Active</span>
+                  ) : (
+                    <button
+                      style={{ ...styles.runBtn, padding: '4px 14px', fontSize: 12 }}
+                      onClick={() => onSwitchPipeline(pkgIdx, plIdx)}
+                    >
+                      Switch
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {pkg.pipelines.length === 0 && (
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', padding: 8 }}>No pipelines found.</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const styles: Record<string, React.CSSProperties> = {
+  container: { display: 'flex', flexDirection: 'row', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },
+
+  // Sidebar — vertical icon tabs
+  sidebar: {
+    width: 52, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'space-between', padding: '8px 0',
     background: 'rgba(28,28,30,0.72)', backdropFilter: 'blur(20px) saturate(180%)', WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-    borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+    borderRight: '0.5px solid rgba(255,255,255,0.08)',
   },
-  tabBar: { display: 'flex', alignItems: 'center', gap: 0, height: '100%' },
-  tabBtn: {
-    padding: '0 16px', fontSize: 14, fontWeight: 600, background: 'transparent', border: 'none',
-    cursor: 'pointer', transition: 'color 0.2s ease', display: 'flex', alignItems: 'center', gap: 5,
-    height: '100%', letterSpacing: '0.2px',
+  sidebarTabs: { display: 'flex', flexDirection: 'column', gap: 2, width: '100%', alignItems: 'center', justifyContent: 'center', flex: 1 },
+  sidebarBtn: {
+    width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', border: 'none', borderLeft: '2px solid transparent',
+    cursor: 'pointer', transition: 'all 0.2s ease', position: 'relative', borderRadius: 0,
   },
-  dot: { color: '#30d158', fontSize: 7 },
+  sidebarDot: { position: 'absolute', top: 6, right: 6, width: 6, height: 6, borderRadius: '50%', background: '#30d158' },
   finishBtn: {
-    padding: '6px 18px', fontSize: 13, fontWeight: 600, color: '#fff',
+    width: 36, height: 36, fontSize: 16, fontWeight: 700, color: '#fff',
     background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer',
-    transition: 'all 0.2s ease', letterSpacing: '0.3px',
+    transition: 'all 0.2s ease', flexShrink: 0,
   },
 
   // Content area
@@ -873,7 +1003,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer', transition: 'all 0.2s ease', textAlign: 'center',
   },
   tagCardImageWrap: { width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  tagCardImage: { width: '100%', height: '100%', objectFit: 'cover' },
+  tagCardImage: { width: '100%', height: '100%', objectFit: 'contain' },
   tagCardPlaceholder: { fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 500 },
   tagCardLabel: { fontSize: 12, fontWeight: 700, color: '#fff' },
   tagCardDesc: { fontSize: 10, fontWeight: 500, color: 'rgba(255,255,255,0.4)' },

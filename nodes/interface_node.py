@@ -679,12 +679,119 @@ class PackageMergeNode:
         packages = []
         for i in range(1, 5):
             pkg = kwargs.get("package%d" % i)
-            if pkg is not None:
-                if isinstance(pkg, list):
-                    packages.extend(pkg)
-                else:
-                    packages.append(pkg)
+            if pkg is None:
+                continue
+            if isinstance(pkg, list):
+                for item in pkg:
+                    if isinstance(item, dict):
+                        packages.append(item)
+                    elif isinstance(item, list):
+                        packages.extend([x for x in item if isinstance(x, dict)])
+            elif isinstance(pkg, dict):
+                packages.append(pkg)
+        print(f"[PackageMergeNode] Merged {len(packages)} packages")
         return (packages,)
+
+
+class PipelinePackageNode:
+    """Takes a node_id (pivot node), analyzes all PIPELINE_DATA inputs
+    connected to that node from the graph, outputs a PACKAGE with pipeline refs.
+
+    The pivot node is any node in the workflow that has PIPELINE_DATA input connections.
+    PipelinePackageNode does NOT execute upstream nodes — it only collects graph structure.
+    Actual pipeline data is obtained at interaction time via InterfaceExecutor._try_execute_external.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "node_id": ("STRING", {"default": "", "multiline": False, "tooltip": "Node ID of the pivot node whose PIPELINE_DATA inputs will be collected"}),
+            },
+            "hidden": {
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("PACKAGE",)
+    RETURN_NAMES = ("package",)
+    FUNCTION = "get_package"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        return True
+
+    @staticmethod
+    def _infer_node_title(node_obj, subgraph_by_type=None):
+        """Infer a display title for a node from its properties."""
+        title = node_obj.get("title", "")
+        if title:
+            return title
+        node_type = node_obj.get("type", "Unknown")
+        # If type is a subgraph UUID, look up the subgraph's name
+        if subgraph_by_type and node_type in subgraph_by_type:
+            sg = subgraph_by_type[node_type]
+            sg_name = sg.get("name", "")
+            if sg_name:
+                return sg_name
+        return node_type
+
+    def get_package(self, node_id, extra_pnginfo=None, unique_id=None):
+        if isinstance(extra_pnginfo, list):
+            extra_pnginfo = extra_pnginfo[0] if extra_pnginfo else {}
+        if isinstance(node_id, list):
+            node_id = node_id[0] if node_id else ""
+        if not node_id:
+            return (None,)
+
+        node_id_str = str(node_id).strip()
+
+        workflow = None
+        if isinstance(extra_pnginfo, dict):
+            workflow = extra_pnginfo.get("workflow") or extra_pnginfo.get("prompt")
+        if not workflow or "nodes" not in workflow:
+            return (None,)
+
+        node_by_id, links, subgraph_by_type = InterfacePackageNode._build_node_lookup(workflow)
+
+        pivot_node = node_by_id.get(node_id_str)
+        if not pivot_node:
+            return (None,)
+
+        # Find all PIPELINE_DATA inputs on the pivot node
+        pipelines = []
+        for inp in pivot_node.get("inputs", []):
+            if not isinstance(inp, dict):
+                continue
+            link_id = inp.get("link")
+            if link_id is None:
+                continue
+            # Find the link to get origin node + type
+            for link in links:
+                if isinstance(link, list) and len(link) >= 6 and link[0] == link_id:
+                    origin_id = str(link[1])
+                    origin_slot = link[2]
+                    link_type = link[5]
+                    if link_type == "PIPELINE_DATA":
+                        origin_node = node_by_id.get(origin_id)
+                        name = self._infer_node_title(origin_node, subgraph_by_type) if origin_node else f"Pipeline {len(pipelines) + 1}"
+                        pipelines.append({
+                            "name": name,
+                            "node_id": origin_id,
+                            "origin_slot": origin_slot,
+                        })
+                    break
+
+        pkg = {
+            "type": "pipeline",
+            "name": self._infer_node_title(pivot_node, subgraph_by_type),
+            "pipelines": pipelines,
+            "node_id": node_id_str,
+        }
+        print(f"[PipelinePackageNode] Collected {len(pipelines)} pipelines from pivot node {node_id_str}")
+        return (pkg,)
 
 
 # =============================================================================
@@ -720,11 +827,12 @@ class InterfaceExecutor:
         self._sg_widget_values = {}  # Set during execute from pkg
         self._sg_input_defs = []
 
-    def execute(self, pkg, manual_values=None):
+    def execute(self, pkg, manual_values=None, port_overrides=None):
         """执行一个 interface package。
         Args:
             pkg: InterfacePackageNode 输出的 PACKAGE dict
             manual_values: {port_num: value} 手动输入值（STRING/INT/FLOAT/BOOLEAN）
+            port_overrides: {port_num: value} 端口级覆盖值（优先于回调注入）
         Returns:
             list of extracted values (images, pipelines, etc.)
         """
@@ -749,6 +857,11 @@ class InterfaceExecutor:
 
         # 2. 注入值
         injections = self._build_injections(pkg, manual_values)
+        if port_overrides:
+            for port_num, val in port_overrides.items():
+                if val is not None:
+                    pn = int(port_num) if isinstance(port_num, str) else port_num
+                    injections[pn] = val
         _interface_injections[start_id] = injections
         print(f"[InterfaceExecutor] Injected {len(injections)} values")
 
@@ -846,8 +959,21 @@ class InterfaceExecutor:
         func = getattr(class_def, func_name, None)
         if func is None:
             return {}
-        sig = _inspect.signature(func)
-        param_names = [p for p in sig.parameters if p != 'self' and p != 'kwargs']
+        # If FUNCTION is EXECUTE_NORMALIZED (new ComfyNode API), use the real execute method for signature
+        if func_name == "EXECUTE_NORMALIZED":
+            real_func = getattr(class_def, "execute", None)
+            if real_func is not None:
+                func = real_func
+        try:
+            sig = _inspect.signature(func)
+        except Exception:
+            return {}
+        # Only keep named parameters (POSITIONAL_OR_KEYWORD, KEYWORD_ONLY), skip *args/**kwargs/self
+        param_names = [
+            p for p, v in sig.parameters.items()
+            if v.kind in (_inspect.Parameter.POSITIONAL_OR_KEYWORD, _inspect.Parameter.KEYWORD_ONLY, _inspect.Parameter.POSITIONAL_ONLY)
+            and p != 'self'
+        ]
         try:
             input_types = class_def.INPUT_TYPES()
         except Exception:
@@ -863,6 +989,10 @@ class InterfaceExecutor:
                         opts = val[1] if len(val) >= 2 and isinstance(val[1], dict) else {}
                         if opts.get("forceInput", False):
                             link_names.add(name)
+                        # All hidden inputs are system-provided, never mapped from widgets_values
+                        if cat == "hidden":
+                            link_names.add(name)
+                            continue
                         if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN"):
                             widget_types[name] = t
                         elif isinstance(t, list):
@@ -1067,8 +1197,16 @@ class InterfaceExecutor:
 
                 if result is None:
                     result = ()
-                elif not isinstance(result, tuple):
-                    result = (result,)
+                else:
+                    # Unwrap ComfyNode API NodeOutput objects
+                    try:
+                        from comfy_api.latest._io import NodeOutput
+                        if isinstance(result, NodeOutput):
+                            result = tuple(result.args) if result.args else ()
+                    except ImportError:
+                        pass
+                    if not isinstance(result, tuple):
+                        result = (result,)
                 output_values[nid] = result
                 print(f"[InterfaceExecutor]   → {len(result)} outputs")
             except Exception as e:
@@ -1167,6 +1305,323 @@ class InterfaceExecutor:
             f"provides a matching port type."
         )
 
+    def _expand_nested_subgraph(self, sn_id, sn, subgraph_by_type, parent_links, sub_prompt, parent_prefix, parent_sg_node_id, parent_sg_data, output_values):
+        """递归展开嵌套 subgraph 节点的内部节点到 sub_prompt 中。"""
+        sg_type = sn.get("type", "")
+        sg_data = subgraph_by_type.get(sg_type)
+        if not sg_data:
+            print(f"[InterfaceExecutor] Nested subgraph {sn_id}: type '{sg_type}' not found in subgraph definitions")
+            return
+
+        nested_sg_nodes = sg_data.get("nodes", [])
+        nested_sg_links_raw = sg_data.get("links", [])
+        if isinstance(nested_sg_links_raw, dict):
+            nested_sg_links = list(nested_sg_links_raw.values())
+        elif isinstance(nested_sg_links_raw, list):
+            nested_sg_links = nested_sg_links_raw
+        else:
+            nested_sg_links = []
+
+        nested_link_by_id = {}
+        for sl in nested_sg_links:
+            if isinstance(sl, list) and len(sl) >= 5:
+                nested_link_by_id[sl[0]] = sl
+            elif isinstance(sl, dict):
+                lid = sl.get("id")
+                if lid is not None:
+                    nested_link_by_id[lid] = sl
+
+        def get_origin(ld):
+            if isinstance(ld, list): return str(ld[1]), ld[2]
+            if isinstance(ld, dict): return str(ld.get("origin_id")), ld.get("origin_slot")
+            return None, None
+
+        def get_target(ld):
+            if isinstance(ld, list): return str(ld[3]), ld[4]
+            if isinstance(ld, dict): return str(ld.get("target_id")), ld.get("target_slot")
+            return None, None
+
+        nested_prefix = parent_prefix + sn_id + "."
+        nested_sg_id_set = {str(n.get("id")) for n in nested_sg_nodes}
+
+        # Find nested output proxy for alias mapping
+        nested_out_node = None
+        for n in nested_sg_nodes:
+            if n.get("type") in ("graph/output", "SubgraphNodeOutput"):
+                nested_out_node = n
+                break
+
+        for n in nested_sg_nodes:
+            n_id = str(n.get("id"))
+            n_type = n.get("type", "")
+            if n_type in ("graph/input", "graph/output", "SubgraphNodeInput", "SubgraphNodeOutput"):
+                continue
+            # Double-nested subgraph
+            if n_type in subgraph_by_type:
+                self._expand_nested_subgraph(nested_prefix + n_id, n, subgraph_by_type, nested_sg_links, sub_prompt, nested_prefix, sn_id, sg_data, output_values)
+                continue
+
+            n_inputs = {}
+            for inp in n.get("inputs", []):
+                if not isinstance(inp, dict):
+                    continue
+                lid = inp.get("link")
+                nm = inp.get("name", "")
+                if lid is not None and lid in nested_link_by_id:
+                    ld = nested_link_by_id[lid]
+                    origin, origin_slot = get_origin(ld)
+                    origin_node_obj = next((x for x in nested_sg_nodes if str(x.get("id")) == origin), None)
+                    is_virtual = origin and origin.startswith("-") and origin not in nested_sg_id_set
+                    if (origin_node_obj and origin_node_obj.get("type") in ("graph/input", "SubgraphNodeInput")) or is_virtual:
+                        # Boundary input — resolve from parent subgraph's links or parent graph
+                        resolved = False
+                        # Check parent subgraph links (the subgraph containing sn)
+                        for pl in parent_links:
+                            if isinstance(pl, list) and len(pl) >= 5 and str(pl[3]) == sn_id and pl[4] == origin_slot:
+                                p_origin = str(pl[1])
+                                p_slot = pl[2]
+                                # Resolve from parent sub_prompt or parent graph
+                                p_prefixed = parent_prefix + p_origin
+                                if p_prefixed in sub_prompt:
+                                    n_inputs[nm] = [p_prefixed, p_slot]
+                                elif p_origin in output_values and p_slot < len(output_values[p_origin]):
+                                    n_inputs[nm] = output_values[p_origin][p_slot]
+                                else:
+                                    n_inputs[nm] = [p_origin, p_slot]
+                                resolved = True
+                                break
+                        if not resolved:
+                            # Check if PIPELINE_DATA can be injected
+                            sg_inputs_defs = sg_data.get("inputs", [])
+                            if origin_slot < len(sg_inputs_defs):
+                                inp_def = sg_inputs_defs[origin_slot]
+                                if inp_def.get("type") == "PIPELINE_DATA" and self.get_pipeline is not None:
+                                    n_inputs[nm] = self.get_pipeline()
+                                    resolved = True
+                            if not resolved:
+                                print(f"[InterfaceExecutor]   Nested subgraph input slot {origin_slot} unresolved for {nested_prefix + n_id}.{nm}")
+                    else:
+                        n_inputs[nm] = [nested_prefix + origin, origin_slot]
+                elif lid is not None:
+                    # Try parent links
+                    for pl in parent_links:
+                        if isinstance(pl, list) and len(pl) >= 5 and pl[0] == lid:
+                            n_inputs[nm] = [str(pl[1]), pl[2]]
+                            break
+            sub_prompt[nested_prefix + n_id] = {
+                "class_type": n_type,
+                "inputs": n_inputs,
+                "_widgets_values": n.get("widgets_values", []),
+            }
+
+        # Map nested subgraph outputs to its internal output proxy's inputs
+        if nested_out_node:
+            nested_out_id = str(nested_out_node.get("id"))
+            for sl in nested_sg_links:
+                target, target_slot = get_target(sl)
+                if target == nested_out_id:
+                    origin, origin_slot = get_origin(sl)
+                    internal_origin = nested_prefix + origin
+                    aliases = sub_prompt.setdefault("_subgraph_output_aliases", {})
+                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = internal_origin
+        else:
+            # No explicit output proxy — check virtual negative IDs
+            for sl in nested_sg_links:
+                target, target_slot = get_target(sl)
+                if target and target.startswith("-") and target not in nested_sg_id_set:
+                    origin, origin_slot = get_origin(sl)
+                    internal_origin = nested_prefix + origin
+                    aliases = sub_prompt.setdefault("_subgraph_output_aliases", {})
+                    aliases[parent_prefix + sn_id + ":" + str(target_slot)] = internal_origin
+
+    def _try_execute_subgraph(self, sg_node_id, sg_node, subgraph_by_type, links, output_values):
+        """展开并执行一个 ComfyUI subgraph 节点，返回其输出 tuple。"""
+        sg_type = sg_node.get("type", "")
+        sg_data = subgraph_by_type.get(sg_type)
+        if not sg_data:
+            raise RuntimeError(f"Subgraph {sg_node_id}: type '{sg_type}' not found in subgraph definitions")
+
+        sg_nodes = sg_data.get("nodes", [])
+        sg_links_raw = sg_data.get("links", [])
+        # Normalize links
+        if isinstance(sg_links_raw, dict):
+            sg_links = list(sg_links_raw.values())
+        elif isinstance(sg_links_raw, list):
+            sg_links = sg_links_raw
+        else:
+            sg_links = []
+
+        # Build link lookup
+        link_by_id = {}
+        for sl in sg_links:
+            if isinstance(sl, list) and len(sl) >= 5:
+                link_by_id[sl[0]] = sl
+            elif isinstance(sl, dict):
+                lid = sl.get("id")
+                if lid is not None:
+                    link_by_id[lid] = sl
+
+        def get_link_origin(link_data):
+            if isinstance(link_data, list):
+                return str(link_data[1]), link_data[2]
+            elif isinstance(link_data, dict):
+                return str(link_data.get("origin_id")), link_data.get("origin_slot")
+            return None, None
+
+        def get_link_target(link_data):
+            if isinstance(link_data, list):
+                return str(link_data[3]), link_data[4]
+            elif isinstance(link_data, dict):
+                return str(link_data.get("target_id")), link_data.get("target_slot")
+            return None, None
+
+        # Find output proxy node (graph/output or SubgraphNodeOutput)
+        sg_out_node = None
+        for sn in sg_nodes:
+            if sn.get("type") in ("graph/output", "SubgraphNodeOutput"):
+                sg_out_node = sn
+                break
+
+        prefix = f"{sg_node_id}."
+        sg_node_id_set = {str(sn.get("id")) for sn in sg_nodes}
+
+        # Expand internal nodes into sub_prompt (skip proxy nodes)
+        sub_prompt = {}
+        for sn in sg_nodes:
+            sn_id = str(sn.get("id"))
+            sn_type = sn.get("type", "")
+            if sn_type in ("graph/input", "graph/output", "SubgraphNodeInput", "SubgraphNodeOutput"):
+                continue
+            # Check if this is a nested subgraph node — recursively expand
+            if sn_type in subgraph_by_type:
+                self._expand_nested_subgraph(sn_id, sn, subgraph_by_type, links, sub_prompt, prefix, sg_node_id, sg_data, output_values)
+                continue
+            sn_inputs = {}
+            for inp in sn.get("inputs", []):
+                if isinstance(inp, dict):
+                    link_id = inp.get("link")
+                    name = inp.get("name", "")
+                    if link_id is not None and link_id in link_by_id:
+                        sl = link_by_id[link_id]
+                        origin, origin_slot = get_link_origin(sl)
+                        is_proxy_input = (origin and origin.startswith("-") and origin not in sg_node_id_set) or \
+                                         (sg_out_node and origin == str(sg_out_node.get("id")))
+                        # Actually we need to check if origin is graph/input proxy
+                        origin_node_obj = next((n for n in sg_nodes if str(n.get("id")) == origin), None)
+                        is_virtual_input = origin and origin.startswith("-") and origin not in sg_node_id_set
+                        if (origin_node_obj and origin_node_obj.get("type") in ("graph/input", "SubgraphNodeInput")) or is_virtual_input:
+                            # This input comes from subgraph boundary (proxy node or virtual negative ID)
+                            # origin_slot = subgraph input slot = parent node input slot
+                            resolved = False
+                            for pl in links:
+                                if isinstance(pl, list) and len(pl) >= 5:
+                                    if str(pl[3]) == sg_node_id and pl[4] == origin_slot:
+                                        parent_origin = str(pl[1])
+                                        parent_origin_slot = pl[2]
+                                        if parent_origin in output_values and parent_origin_slot < len(output_values[parent_origin]):
+                                            sn_inputs[name] = output_values[parent_origin][parent_origin_slot]
+                                        else:
+                                            ext = self._try_execute_external(parent_origin, output_values)
+                                            if ext is not None and parent_origin_slot < len(ext):
+                                                sn_inputs[name] = ext[parent_origin_slot]
+                                        resolved = True
+                                        break
+                            if not resolved:
+                                # Check if it's a PIPELINE_DATA input that can be injected
+                                sg_inputs_defs = sg_data.get("inputs", [])
+                                if origin_slot < len(sg_inputs_defs):
+                                    inp_def = sg_inputs_defs[origin_slot]
+                                    if inp_def.get("type") == "PIPELINE_DATA" and self.get_pipeline is not None:
+                                        sn_inputs[name] = self.get_pipeline()
+                                        resolved = True
+                                if not resolved:
+                                    print(f"[InterfaceExecutor]   Subgraph input slot {origin_slot} unresolved for {sn_id}.{name}")
+                        else:
+                            sn_inputs[name] = [prefix + origin, origin_slot]
+                    elif link_id is not None:
+                        # Try parent graph links
+                        for pl in links:
+                            if isinstance(pl, list) and len(pl) >= 5 and pl[0] == link_id:
+                                sn_inputs[name] = [str(pl[1]), pl[2]]
+                                break
+            sub_prompt[prefix + sn_id] = {
+                "class_type": sn_type,
+                "inputs": sn_inputs,
+                "_widgets_values": sn.get("widgets_values", []),
+            }
+
+        # Find the output proxy node to determine which internal node produces each output
+        if not sg_out_node:
+            # No explicit output proxy — check virtual negative IDs
+            # Find links targeting negative IDs
+            output_aliases = {}
+            for sl in sg_links:
+                target, target_slot = get_link_target(sl)
+                if target and target.startswith("-") and target not in sg_node_id_set:
+                    origin, origin_slot = get_link_origin(sl)
+                    output_aliases[f"{sg_node_id}:{target_slot}"] = prefix + origin
+            # Execute all internal nodes, then find outputs via aliases
+            self._map_all_widgets(sub_prompt)
+            self._eval_cache = output_values
+            self._eval_stack = set()
+            self._eval_count = 0
+            self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
+            for alias_key, internal_origin in output_aliases.items():
+                if internal_origin in sub_prompt and internal_origin not in output_values:
+                    self._evaluate_node(internal_origin, sub_prompt, "", "", {"start_types": {}, "types": {}}, output_values)
+            # Map subgraph output slots to internal node outputs
+            sg_outputs = sg_data.get("outputs", [])
+            result = []
+            for i, out_def in enumerate(sg_outputs):
+                alias_key = f"{sg_node_id}:{i}"
+                internal_origin = output_aliases.get(alias_key)
+                if internal_origin and internal_origin in output_values:
+                    result.append(output_values[internal_origin][0] if output_values[internal_origin] else None)
+                else:
+                    result.append(None)
+            result = tuple(result)
+            output_values[sg_node_id] = result
+            return result
+
+        # Has explicit graph/output proxy — find which internal nodes feed into it
+        sg_out_id = str(sg_out_node.get("id"))
+        output_targets = {}  # slot → internal_node_id
+        for sl in sg_links:
+            origin, origin_slot = get_link_origin(sl)
+            target, target_slot = get_link_target(sl)
+            if target == sg_out_id:
+                output_targets[target_slot] = prefix + origin
+
+        # Widget mapping
+        self._map_all_widgets(sub_prompt)
+        print(f"[InterfaceExecutor] Subgraph {sg_node_id}: {len(sub_prompt)} internal nodes: {list(sub_prompt.keys())}")
+        for nid, node in sub_prompt.items():
+            print(f"[InterfaceExecutor]   {nid} ({node.get('class_type', '?')}) inputs={node.get('inputs', {})}")
+
+        # Execute internal nodes that feed into the output proxy
+        self._eval_cache = output_values
+        self._eval_stack = set()
+        self._eval_count = 0
+        self._eval_total = len([n for n in sub_prompt if not n.startswith("_")])
+        for slot, internal_origin in output_targets.items():
+            if internal_origin in sub_prompt and internal_origin not in output_values:
+                self._evaluate_node(internal_origin, sub_prompt, "", "", {"start_types": {}, "types": {}}, output_values)
+
+        # Build result tuple: slot N → output_values[internal_origin][0]
+        max_slot = max(output_targets.keys()) if output_targets else -1
+        result = []
+        for i in range(max_slot + 1):
+            internal_origin = output_targets.get(i)
+            if internal_origin and internal_origin in output_values:
+                ot = output_values[internal_origin]
+                result.append(ot[0] if ot else None)
+            else:
+                result.append(None)
+        result = tuple(result)
+        output_values[sg_node_id] = result
+        print(f"[InterfaceExecutor] Subgraph {sg_node_id} executed: {len(result)} outputs")
+        return result
+
     def _try_execute_external(self, node_id, output_values):
         """从 extra_pnginfo 查找并执行外部节点（递归解析依赖）"""
         if node_id in output_values:
@@ -1175,7 +1630,7 @@ class InterfaceExecutor:
         if isinstance(epi, list):
             epi = epi[0] if epi else {}
         if not epi or not isinstance(epi, dict):
-            return None
+            raise RuntimeError(f"External node {node_id}: no extra_pnginfo available")
         workflow = epi.get("workflow") or epi.get("prompt") or {}
         nodes_list = workflow.get("nodes", [])
         links = workflow.get("links", [])
@@ -1185,16 +1640,22 @@ class InterfaceExecutor:
                 target = n
                 break
         if not target:
-            return None
+            raise RuntimeError(f"External node {node_id}: node not found in workflow")
         import nodes as comfy_nodes
-        class_def = comfy_nodes.NODE_CLASS_MAPPINGS.get(target.get("type", ""))
+        node_type = target.get("type", "")
+        class_def = comfy_nodes.NODE_CLASS_MAPPINGS.get(node_type)
         if not class_def:
-            return None
+            # Check if this is a subgraph node (type is a UUID in subgraph_by_type)
+            node_by_id, links, subgraph_by_type = InterfacePackageNode._build_node_lookup(workflow)
+            if node_type in subgraph_by_type:
+                return self._try_execute_subgraph(node_id, target, subgraph_by_type, links, output_values)
+            raise RuntimeError(f"External node {node_id}: type '{node_type}' not in NODE_CLASS_MAPPINGS and not a known subgraph")
         inputs = {}
         for inp in target.get("inputs", []):
             if isinstance(inp, dict):
                 lid = inp.get("link")
                 nm = inp.get("name", "")
+                inp_type = inp.get("type", "")
                 if lid is not None:
                     for link in links:
                         if len(link) >= 5 and link[0] == lid:
@@ -1210,6 +1671,10 @@ class InterfaceExecutor:
                                 else:
                                     print(f"[InterfaceExecutor]   External dep {oid} unresolved for {node_id}.{nm}")
                             break
+                elif inp_type == "PIPELINE_DATA" and self.get_pipeline is not None:
+                    # Unconnected PIPELINE_DATA input — inject current pipeline
+                    inputs[nm] = self.get_pipeline()
+                    print(f"[InterfaceExecutor]   Injected pipeline for {node_id}.{nm} (unconnected)")
         wv = target.get("widgets_values", [])
         wd = self._build_widget_dict(class_def, wv)
         for nm, v in wd.items():
@@ -1226,7 +1691,7 @@ class InterfaceExecutor:
                         inputs[rn] = rd[0][0]
         except Exception:
             pass
-        print(f"[InterfaceExecutor] External: {node_id} ({target.get('type')})")
+        print(f"[InterfaceExecutor] External: {node_id} ({target.get('type')}) inputs={{{', '.join(f'{k}={type(v).__name__}' for k, v in inputs.items())}}}")
         try:
             obj = class_def()
             func = getattr(obj, getattr(class_def, "FUNCTION", "execute"))
@@ -1235,30 +1700,33 @@ class InterfaceExecutor:
             result = func(**inputs)
             if result is None:
                 result = ()
-            elif not isinstance(result, tuple):
-                result = (result,)
+            else:
+                # Unwrap ComfyNode API NodeOutput objects
+                try:
+                    from comfy_api.latest._io import NodeOutput
+                    if isinstance(result, NodeOutput):
+                        result = tuple(result.args) if result.args else ()
+                except ImportError:
+                    pass
+                if not isinstance(result, tuple):
+                    result = (result,)
             output_values[node_id] = result
             return result
         except Exception as e:
-            print(f"[InterfaceExecutor] External {node_id} failed: {e}")
-            return None
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"External node {node_id} ({target.get('type', '?')}) failed: {e}")
 
     def _extract_results(self, pkg, end_id, output_values, interface_name):
-        """从 End 节点输出提取结果"""
+        """从 End 节点输出提取结果。支持 list 输出：list 中每个元素作为独立结果。"""
         end_outputs = output_values.get(end_id, ())
         end_types = pkg.get('types', {})
         results = []
         added_count = 0
-        for port_num_str, port_type in end_types.items():
-            port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
-            idx = port_num - 1
-            if idx < 0 or idx >= len(end_outputs):
-                continue
-            val = end_outputs[idx]
-            if val is None:
-                continue
-            name = f'{interface_name} #{added_count + 1}'
-            if port_type == 'PIPELINE_DATA':
+
+        def _add_one(ptype, val, name):
+            nonlocal added_count
+            if ptype == 'PIPELINE_DATA':
                 if hasattr(val, 'get_image'):
                     try:
                         img = val.get_image()
@@ -1276,11 +1744,28 @@ class InterfaceExecutor:
                     added_count += 1
                 if self.on_result_pipeline:
                     self.on_result_pipeline(val, name)
-            elif port_type == 'IMAGE':
+            elif ptype == 'IMAGE':
                 results.append(('IMAGE', val, name))
                 if self.on_result_image:
                     self.on_result_image(val, name)
                 added_count += 1
             else:
-                results.append((port_type, val, name))
+                results.append((ptype, val, name))
+                added_count += 1
+
+        for port_num_str, port_type in end_types.items():
+            port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
+            idx = port_num - 1
+            if idx < 0 or idx >= len(end_outputs):
+                continue
+            val = end_outputs[idx]
+            if val is None:
+                continue
+            if isinstance(val, list):
+                for item in val:
+                    if item is None:
+                        continue
+                    _add_one(port_type, item, f'{interface_name} #{added_count + 1}')
+            else:
+                _add_one(port_type, val, f'{interface_name} #{added_count + 1}')
         return results
