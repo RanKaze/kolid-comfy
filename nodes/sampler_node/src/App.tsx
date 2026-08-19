@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo } from './types';
+import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -21,15 +21,25 @@ const App: React.FC = () => {
   const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
+  const [interfaceStatus, setInterfaceStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [interfaceProgress, setInterfaceProgress] = useState({ progress: 0, current: 0, total: 0 });
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(false);
   const [syncingTab, setSyncingTab] = useState(false);
+  const syncingTabRef = useRef(false);
+  useEffect(() => { syncingTabRef.current = syncingTab; }, [syncingTab]);
+  // Track whether the latest mask-confirmed/prompt-confirmed was consumed by handleTabChange sync
+  const consumedMaskConfirmedRef = useRef(false);
+  const consumedPromptConfirmedRef = useRef(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
-  const [interfaceResults, setInterfaceResults] = useState<HistoryItem[]>([]);
+  const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
+  const [currentPipelineKey, setCurrentPipelineKey] = useState<string | null>(null);
+  const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
+  const [interfaceResults, setInterfaceResults] = useState<Record<number, HistoryItem[]>>({});
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
@@ -41,6 +51,8 @@ const App: React.FC = () => {
     pixels: 1048576,
     align: 8,
     crop_reserve: 32,
+    mask_grow: 32,
+    mask_blur: 32,
     enable_edit: false,
     context_reference: false,
     context_reference_key: null,
@@ -59,6 +71,8 @@ const App: React.FC = () => {
           pixels: data.pixels,
           align: data.align,
           crop_reserve: data.crop_reserve,
+          mask_grow: data.mask_grow,
+          mask_blur: data.mask_blur,
           enable_edit: data.enable_edit,
           context_reference: data.context_reference,
           context_reference_key: data.context_reference_key,
@@ -70,6 +84,14 @@ const App: React.FC = () => {
             .then(r => r.json())
             .then(pkgData => {
               if (pkgData.interfaces) setInterfaces(pkgData.interfaces);
+            })
+            .catch(() => {});
+        }
+        if (data.has_pipeline_package) {
+          fetch('/api/pipeline_package')
+            .then(r => r.json())
+            .then(pkgData => {
+              if (pkgData.pipeline_packages) setPipelinePackages(pkgData.pipeline_packages);
             })
             .catch(() => {});
         }
@@ -111,12 +133,17 @@ const App: React.FC = () => {
     }
     setSyncingTab(true);
     const targetTab = newTab;
+    let syncDone = false;
     const checkSyncDone = (event: MessageEvent) => {
       const done = (needMaskSync && event.data?.type === 'mask-confirmed') ||
                    (needPromptSync && event.data?.type === 'prompt-synced');
       if (!done) return;
+      syncDone = true;
       window.removeEventListener('message', checkSyncDone);
       setSyncingTab(false);
+      // Mark that this mask-confirmed/prompt-confirmed was consumed by sync
+      if (needMaskSync) consumedMaskConfirmedRef.current = true;
+      if (needPromptSync) consumedPromptConfirmedRef.current = true;
       setTab(targetTab);
     };
     window.addEventListener('message', checkSyncDone);
@@ -130,6 +157,7 @@ const App: React.FC = () => {
     }
     // Timeout fallback
     setTimeout(() => {
+      if (syncDone) return;
       window.removeEventListener('message', checkSyncDone);
       setSyncingTab(false);
       setTab(targetTab);
@@ -141,8 +169,26 @@ const App: React.FC = () => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'mask-confirmed') {
         setMaskConfirmed(true);
+        // Skip auto-advance if this was consumed by handleTabChange sync
+        if (consumedMaskConfirmedRef.current) {
+          consumedMaskConfirmedRef.current = false;
+          return;
+        }
+        // Auto-advance only on user-initiated confirm (not during tab switch sync)
+        if (tabRef.current === 'mask' && !syncingTabRef.current) {
+          setTab(config?.has_tagger ? 'tag' : 'prompt');
+        }
       } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
+        // Skip auto-advance if this was consumed by handleTabChange sync
+        if (consumedPromptConfirmedRef.current) {
+          consumedPromptConfirmedRef.current = false;
+          return;
+        }
+        // Auto-advance: prompt → draw
+        if (tabRef.current === 'prompt' && !syncingTabRef.current) {
+          setTab('draw');
+        }
       } else if (event.data?.type === 'blend-select') {
         // Blend iframe requests image selection
         setBlendSelect({ role: event.data.role });
@@ -167,10 +213,6 @@ const App: React.FC = () => {
         const data = await res.json();
         if (!cancelled && data.has_mask && !maskConfirmed) {
           setMaskConfirmed(true);
-          // Auto-advance: mask → tag (if tagger) or prompt
-          if (tabRef.current === 'mask') {
-            setTab(config?.has_tagger ? 'tag' : 'prompt');
-          }
         }
       } catch { /* ignore */ }
     };
@@ -194,9 +236,9 @@ const App: React.FC = () => {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // Poll status when in draw tab (running)
+  // Poll status when draw is running
   useEffect(() => {
-    if ((tab !== 'draw' && tab !== 'interface') || detailStatus !== 'running') return;
+    if (tab !== 'draw' || detailStatus !== 'running') return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -210,21 +252,6 @@ const App: React.FC = () => {
           total: data.total_steps || 0,
         });
         if (data.detail_status === 'done') {
-          const resultKeys = data.interface_result_keys || [];
-          refreshHistory().then(() => {
-            // Build interface results from keys — read from DOM after history update
-            if (resultKeys.length > 0) {
-              setHistory(prev => {
-                const results = resultKeys
-                  .map(k => prev.find(h => h.key === k))
-                  .filter((h): h is HistoryItem => !!h);
-                setInterfaceResults(results);
-                return prev;
-              });
-            } else {
-              setInterfaceResults([]);
-            }
-          });
           // Refresh config to get updated current_context_key
           fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
             if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
@@ -237,6 +264,49 @@ const App: React.FC = () => {
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
   }, [tab, detailStatus, refreshHistory]);
+
+  // Poll status when interface is running
+  useEffect(() => {
+    if (tab !== 'interface' || interfaceStatus !== 'running') return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/status');
+        const data: StatusResponse = await res.json();
+        if (cancelled) return;
+        setInterfaceStatus(data.interface_status || 'idle');
+        setInterfaceProgress({
+          progress: data.interface_progress || 0,
+          current: data.interface_current_step || 0,
+          total: data.interface_total_steps || 0,
+        });
+        if (data.interface_status === 'done') {
+          const resultKeys = data.interface_result_keys || [];
+          const execIdx = executedInterfaceIdx;
+          refreshHistory().then(() => {
+            if (resultKeys.length > 0 && execIdx !== null) {
+              setHistory(prev => {
+                const results = resultKeys
+                  .map(k => prev.find(h => h.key === k))
+                  .filter((h): h is HistoryItem => !!h);
+                setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: results }));
+                return prev;
+              });
+            } else if (execIdx !== null) {
+              setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
+            }
+          });
+          fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
+            if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
+          }).catch(() => {});
+        } else if (data.interface_status === 'error') {
+          setError(data.interface_error || 'Interface execution failed');
+        }
+      } catch { /* ignore */ }
+    };
+    const interval = setInterval(poll, POLL_INTERVAL);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [tab, interfaceStatus, refreshHistory, executedInterfaceIdx]);
 
   // Fetch debug data when detail is done
   useEffect(() => {
@@ -314,12 +384,38 @@ const App: React.FC = () => {
     }
   }, []);
 
+  const syncPrompt = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      const iframe = promptIframeRef.current;
+      if (!iframe?.contentWindow) { resolve(); return; }
+      let done = false;
+      const handler = (event: MessageEvent) => {
+        if (event.data?.type === 'prompt-synced') {
+          done = true;
+          window.removeEventListener('message', handler);
+          resolve();
+        }
+      };
+      window.addEventListener('message', handler);
+      iframe.contentWindow.postMessage({ type: 'sync-prompt' }, '*');
+      setTimeout(() => {
+        if (!done) {
+          window.removeEventListener('message', handler);
+          resolve();
+        }
+      }, 3000);
+    });
+  }, []);
+
   const handleRunDetailer = useCallback(async () => {
     setError(null);
     setDetailStatus('running');
     setDetailProgress({ progress: 0, current: 0, total: 0 });
     setDebugData(null);
     setResultImages(null);
+
+    // Ensure prompt is synced before running detailer
+    await syncPrompt();
 
     try {
       await fetch('/api/run_detailer', {
@@ -333,12 +429,13 @@ const App: React.FC = () => {
       setError('Failed to start detailer: ' + e.message);
       setDetailStatus('idle');
     }
-  }, [params.enable_edit, params.context_reference, params.context_reference_key]);
+  }, [params.enable_edit, params.context_reference, params.context_reference_key, syncPrompt]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
-    setDetailStatus('running');
-    setDetailProgress({ progress: 0, current: 0, total: 0 });
+    setInterfaceStatus('running');
+    setInterfaceProgress({ progress: 0, current: 0, total: 0 });
+    setExecutedInterfaceIdx(interfaceIndex);
     try {
       await fetch('/api/execute_interface', {
         method: 'POST',
@@ -347,7 +444,39 @@ const App: React.FC = () => {
       });
     } catch (e: any) {
       setError('Failed to start interface execution: ' + e.message);
-      setDetailStatus('idle');
+      setInterfaceStatus('idle');
+    }
+  }, []);
+
+  const handleSwitchPipeline = useCallback(async (packageIdx: number, pipelineIdx: number) => {
+    setError(null);
+    try {
+      const res = await fetch('/api/switch_pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package_idx: packageIdx, pipeline_idx: pipelineIdx }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCurrentPipelineKey(`${packageIdx}_${pipelineIdx}`);
+        // Refresh context preview + mask iframe
+        fetch('/api/context_preview').then(r => r.json()).then(() => {}).catch(() => {});
+        setTimeout(() => {
+          const iframe = maskIframeRef.current;
+          if (iframe?.contentWindow) {
+            iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
+          }
+          // Notify prompt iframe to reload lora data (lora_regex may have changed)
+          const promptIframe = promptIframeRef.current;
+          if (promptIframe?.contentWindow) {
+            promptIframe.contentWindow.postMessage({ type: 'reload-lora-data' }, '*');
+          }
+        }, 100);
+      } else {
+        setError(data.error || 'Failed to switch pipeline');
+      }
+    } catch (e: any) {
+      setError('Failed to switch pipeline: ' + e.message);
     }
   }, []);
 
@@ -366,7 +495,6 @@ const App: React.FC = () => {
       setResultImages(null);
       setDebugData(null);
       setCurrentContextKey(key);
-      setTab('mask');
       // Tell mask iframe to reload its image
       setTimeout(() => {
         const iframe = maskIframeRef.current;
@@ -553,6 +681,11 @@ const App: React.FC = () => {
         interfaces={interfaces}
         onExecuteInterface={handleExecuteInterface}
         interfaceResults={interfaceResults}
+        interfaceStatus={interfaceStatus}
+        interfaceProgress={interfaceProgress}
+        pipelinePackages={pipelinePackages}
+        onSwitchPipeline={handleSwitchPipeline}
+        currentPipelineKey={currentPipelineKey}
       />
 
       {error && (

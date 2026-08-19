@@ -63,11 +63,28 @@ class SnapshotDetailerSamplerServer:
         self.node_instance = node_instance
         self.unique_id = unique_id
         self.packages = []
-        if package:
-            if isinstance(package, list):
-                self.packages = [p for p in package if isinstance(p, dict)]
-            elif isinstance(package, dict):
-                self.packages = [package]
+        self.interface_packages = []
+        self.pipeline_packages = []
+        if package is not None:
+            # Robust flattening: package may be a dict, a list of dicts, or a nested list
+            flat = []
+            if isinstance(package, dict):
+                flat = [package]
+            elif isinstance(package, list):
+                for p in package:
+                    if isinstance(p, dict):
+                        flat.append(p)
+                    elif isinstance(p, list):
+                        flat.extend([x for x in p if isinstance(x, dict)])
+            self.packages = flat
+            for p in self.packages:
+                if p.get("type") == "pipeline":
+                    self.pipeline_packages.append(p)
+                else:
+                    self.interface_packages.append(p)
+            print(f"[SnapshotDetailerSampler] package input: type={type(package).__name__}, "
+                  f"len={len(package) if isinstance(package, (list, dict)) else 1}, "
+                  f"total={len(self.packages)}, interface={len(self.interface_packages)}, pipeline={len(self.pipeline_packages)}")
 
         cfg = config or {}
         self.add_noise = cfg.get('add_noise', 'enable')
@@ -76,6 +93,8 @@ class SnapshotDetailerSamplerServer:
         self.pixels = cfg.get('pixels', 1048576)
         self.align = cfg.get('align', 8)
         self.crop_reserve = cfg.get('crop_reserve', 32)
+        self.mask_grow = cfg.get('mask_grow', 32)
+        self.mask_blur = cfg.get('mask_blur', 32)
         self.enable_edit = cfg.get('enable_edit', False)
         self.context_reference = cfg.get('context_reference', False)
         self.context_reference_key = cfg.get('context_reference_key', None)
@@ -86,6 +105,11 @@ class SnapshotDetailerSamplerServer:
         self.detail_progress = 0       # 0..1
         self.detail_total_steps = 0
         self.detail_current_step = 0
+        self.interface_status = 'idle'
+        self.interface_error = None
+        self.interface_progress = 0
+        self.interface_total_steps = 0
+        self.interface_current_step = 0
         self.finished = False
         self.finish_selected_key = None
         self.finish_selected_keys = None  # 多选 keys 列表
@@ -93,6 +117,7 @@ class SnapshotDetailerSamplerServer:
 
         # 历史图片画廊
         self.selected_history = []
+        self._history_tensors = {}  # key → tensor (原始引用，避免 base64 往返)
         self._history_counter = 0
         self.current_context_key = None  # 当前作为 context 的 history key
 
@@ -262,7 +287,7 @@ class SnapshotDetailerSamplerServer:
     # 历史画廊
     # -------------------------------------------------------------------------
     def add_history(self, image, name=None):
-        """添加一张图片到历史画廊。"""
+        """添加一张图片到历史画廊。保留 tensor 引用以避免 base64 往返。"""
         self._history_counter += 1
         key = f'history_{self._history_counter}'
         # 记录尺寸供前端过滤同尺寸图片
@@ -273,6 +298,8 @@ class SnapshotDetailerSamplerServer:
                 h, w = shp[1], shp[2]
             elif len(shp) == 3:
                 h, w = shp[0], shp[1]
+        # 保留 tensor 引用
+        self._history_tensors[key] = image
         self.selected_history.append({
             'key': key,
             'src': tensor_to_base64(image),
@@ -281,7 +308,8 @@ class SnapshotDetailerSamplerServer:
             'height': h,
         })
         if len(self.selected_history) > 20:
-            self.selected_history = self.selected_history[-20:]
+            old = self.selected_history.pop(0)
+            self._history_tensors.pop(old['key'], None)
 
     def get_history_list(self):
         """返回历史画廊列表（base64 缩略图）。"""
@@ -290,7 +318,11 @@ class SnapshotDetailerSamplerServer:
                 for h in self.selected_history]
 
     def get_history_image(self, key):
-        """根据 key 获取历史图片 tensor。"""
+        """根据 key 获取历史图片 tensor。优先返回 tensor 引用，避免 base64 decode。"""
+        tensor = self._history_tensors.get(key)
+        if tensor is not None:
+            return tensor
+        # Fallback: 从 base64 decode（兼容旧数据）
         for h in self.selected_history:
             if h['key'] == key:
                 try:
@@ -347,6 +379,14 @@ class SnapshotDetailerSamplerServer:
             })
             ps.send_sync("kolid-comfy-widget-set", {
                 "node_id": self.unique_id,
+                "widget_name": "mask_grow", "type": "INT", "value": str(self.mask_grow),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
+                "widget_name": "mask_blur", "type": "INT", "value": str(self.mask_blur),
+            })
+            ps.send_sync("kolid-comfy-widget-set", {
+                "node_id": self.unique_id,
                 "widget_name": "enable_edit", "type": "STRING", "value": "enable" if self.enable_edit else "disable",
             })
         except Exception as e:
@@ -371,6 +411,12 @@ class SnapshotDetailerSamplerServer:
             dirty = True
         if 'crop_reserve' in data:
             self.crop_reserve = int(data['crop_reserve'])
+            dirty = True
+        if 'mask_grow' in data:
+            self.mask_grow = int(data['mask_grow'])
+            dirty = True
+        if 'mask_blur' in data:
+            self.mask_blur = int(data['mask_blur'])
             dirty = True
         if 'enable_edit' in data:
             self.enable_edit = bool(data['enable_edit'])
@@ -447,13 +493,17 @@ class SnapshotDetailerSamplerServer:
                     'pixels': inst.pixels if inst else 1048576,
                     'align': inst.align if inst else 8,
                     'crop_reserve': inst.crop_reserve if inst else 32,
+                    'mask_grow': inst.mask_grow if inst else 32,
+                    'mask_blur': inst.mask_blur if inst else 32,
                     'enable_edit': inst.enable_edit if inst else False,
                     'context_reference': inst.context_reference if inst else False,
                     'context_reference_key': inst.context_reference_key if inst else None,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'current_context_key': getattr(inst, 'current_context_key', None),
-                    'has_package': bool(inst and inst.packages),
-                    'package_count': len(inst.packages) if inst else 0,
+                    'has_package': bool(inst and inst.interface_packages),
+                    'package_count': len(inst.interface_packages) if inst else 0,
+                    'has_pipeline_package': bool(inst and inst.pipeline_packages),
+                    'pipeline_package_count': len(inst.pipeline_packages) if inst else 0,
                 })
                 return
 
@@ -464,12 +514,17 @@ class SnapshotDetailerSamplerServer:
                     'progress': inst.detail_progress if inst else 0,
                     'current_step': inst.detail_current_step if inst else 0,
                     'total_steps': inst.detail_total_steps if inst else 0,
+                    'interface_status': getattr(inst, 'interface_status', 'idle') if inst else 'idle',
+                    'interface_error': getattr(inst, 'interface_error', None) if inst else None,
+                    'interface_progress': getattr(inst, 'interface_progress', 0) if inst else 0,
+                    'interface_current_step': getattr(inst, 'interface_current_step', 0) if inst else 0,
+                    'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
                 })
                 return
 
             if self.path == '/api/package':
-                if not inst or not inst.packages:
+                if not inst or not inst.interface_packages:
                     self._send_json({'interfaces': []})
                     return
 
@@ -479,7 +534,7 @@ class SnapshotDetailerSamplerServer:
                     epi = epi[0] if epi else {}
 
                 interfaces = []
-                for pkg in inst.packages:
+                for pkg in inst.interface_packages:
                     end_id = pkg.get('end_node_id', '')
 
                     # Get fresh package from extra_pnginfo for full port info
@@ -522,6 +577,22 @@ class SnapshotDetailerSamplerServer:
                         'end_ports': end_ports,
                     })
                 self._send_json({'interfaces': interfaces})
+                return
+
+            if self.path == '/api/pipeline_package':
+                if not inst or not inst.pipeline_packages:
+                    self._send_json({'pipeline_packages': []})
+                    return
+                pipeline_packages = []
+                for pkg in inst.pipeline_packages:
+                    pipelines = []
+                    for i, p in enumerate(pkg.get('pipelines', [])):
+                        pipelines.append({"name": p.get("name", f"Pipeline {i+1}"), "node_id": p.get("node_id", "")})
+                    pipeline_packages.append({
+                        "name": pkg.get("name", "PipelineGroup"),
+                        "pipelines": pipelines,
+                    })
+                self._send_json({"pipeline_packages": pipeline_packages})
                 return
 
             if self.path == '/api/has_mask':
@@ -620,6 +691,79 @@ class SnapshotDetailerSamplerServer:
                 exec_options = body.get('exec_options', {})
                 inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values, exec_options=exec_options)
                 self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/switch_pipeline':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    package_idx = int(body.get('package_idx', 0))
+                    pipeline_idx = int(body.get('pipeline_idx', 0))
+                    if not inst or package_idx >= len(inst.pipeline_packages):
+                        self._send_json({'success': False, 'error': 'Invalid package index'}, 400)
+                        return
+                    pkg = inst.pipeline_packages[package_idx]
+                    pipelines = pkg.get('pipelines', [])
+                    if pipeline_idx >= len(pipelines):
+                        self._send_json({'success': False, 'error': 'Invalid pipeline index'}, 400)
+                        return
+                    pipeline_info = pipelines[pipeline_idx]
+                    upstream_node_id = pipeline_info.get("node_id", "")
+
+                    # Execute the upstream node via InterfaceExecutor to get PIPELINE_DATA
+                    from .interface_node import InterfaceExecutor
+                    epi = getattr(inst, 'extra_pnginfo', None)
+                    if isinstance(epi, list):
+                        epi = epi[0] if epi else {}
+                    # Provide current pipeline as fallback for unresolved PIPELINE_DATA inputs
+                    current_pipeline = inst.node_instance._current_pipeline
+                    executor = InterfaceExecutor(
+                        extra_pnginfo=epi,
+                        get_pipeline=lambda: current_pipeline,
+                    )
+                    output_values = {}
+                    try:
+                        executor._try_execute_external(upstream_node_id, output_values)
+                    except Exception as ex:
+                        self._send_json({'success': False, 'error': f'Failed to execute upstream node {upstream_node_id}: {ex}'}, 500)
+                        return
+                    if upstream_node_id not in output_values or not output_values[upstream_node_id]:
+                        self._send_json({'success': False, 'error': f'Failed to execute upstream node {upstream_node_id}: execution returned no output'}, 500)
+                        return
+                    new_pipeline = output_values[upstream_node_id][0]
+                    if new_pipeline is None:
+                        self._send_json({'success': False, 'error': 'Upstream node returned None pipeline'}, 500)
+                        return
+
+                    # Switch pipeline (preserve history)
+                    # Inherit image/latent from current pipeline if new pipeline lacks them
+                    if new_pipeline.image is None and current_pipeline is not None and current_pipeline.image is not None:
+                        new_pipeline.image = current_pipeline.image
+                    if new_pipeline.latent is None and current_pipeline is not None and current_pipeline.latent is not None:
+                        new_pipeline.latent = current_pipeline.latent
+                    if new_pipeline.mask is None and current_pipeline is not None and current_pipeline.mask is not None:
+                        new_pipeline.mask = current_pipeline.mask
+                    inst.node_instance._current_pipeline = new_pipeline.copy()
+                    new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
+                    inst.node_instance._switch_image(inst, new_image, context_key=inst.current_context_key)
+                    # Update lora_regex from new pipeline's architecture
+                    new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
+                    old_arch = current_pipeline.config.get("architecture") if current_pipeline and current_pipeline.config else None
+                    print(f"[PipelineSwitch] old_arch={old_arch}, new_arch={new_arch}, config_keys={list(new_pipeline.config.keys()) if new_pipeline.config else 'None'}")
+                    if new_arch:
+                        new_arch = str(new_arch)
+                        inst.lora_regex = new_arch
+                        if inst.prompt_server:
+                            inst.prompt_server.update_lora_regex(new_arch)
+                    elif old_arch:
+                        # If new pipeline didn't set architecture, keep old regex
+                        print(f"[PipelineSwitch] WARNING: new pipeline has no architecture in config, keeping old lora_regex={inst.lora_regex}")
+                    print(f"[PipelineSwitch] Switched to pipeline '{pipeline_info.get('name', '')}' (node {upstream_node_id}), lora_regex='{new_arch or inst.lora_regex}'")
+                    self._send_json({'success': True})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/submit_mask':
@@ -849,10 +993,6 @@ class SnapshotDetailerSamplerNode:
     前端通过 tab 自由切换 Mask/Tag/Prompt/Draw/Context，后端通过 action queue 响应。
     """
 
-    # 完成护栏：防止 IS_CHANGED=nan 导致 ComfyUI 在节点返回后立即重算重开浏览器
-    _last_finish_time = 0.0
-    FINISH_COOLDOWN = 3.0  # 秒：完成后此时间内的重入直接透传，不重开
-
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -867,6 +1007,8 @@ class SnapshotDetailerSamplerNode:
                 "pixels": ("INT", {"default": 1048576, "min": 65536, "max": 16777216, "step": 65536}),
                 "align": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1}),
                 "crop_reserve": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
+                "mask_grow": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
+                "mask_blur": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
                 "enable_edit": (["disable", "enable"], {"default": "disable"}),
             },
             "optional": {
@@ -1058,6 +1200,8 @@ class SnapshotDetailerSamplerNode:
                     if not lora_item.get('active', True):
                         continue
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                    if hasattr(prompt_server, '_resolve_lora_file_path'):
+                        file_path = prompt_server._resolve_lora_file_path(file_path)
                     strength = lora_item.get('strength', 1.0)
                     lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
                     trigger_words.extend(lora_item.get('active_tags', []))
@@ -1080,6 +1224,8 @@ class SnapshotDetailerSamplerNode:
         pixels = int(params['pixels'])
         align = int(params['align'])
         crop_reserve = int(params['crop_reserve'])
+        mask_grow = int(params.get('mask_grow', 32))
+        mask_blur = int(params.get('mask_blur', 32))
         enable_edit = params.get('enable_edit', False)
         context_regex = params['context_regex']
 
@@ -1100,7 +1246,7 @@ class SnapshotDetailerSamplerNode:
         # Binarize mask for expand_mask (soft alpha values below 0.5 get thresholded away)
         if user_mask is not None:
             user_mask = (user_mask > 0).float()
-        expanded_mask = expand_mask(user_mask, grow=32, blur=32)
+        expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
 
         cropped_image, cropped_mask, crop_info = crop_mask(
             image=original_image,
@@ -1165,14 +1311,12 @@ class SnapshotDetailerSamplerNode:
                     model_negative_to_use = arch_krea2.apply_model_patch(
                         model_negative_to_use, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
                 next_pipeline.config["enable_edit"] = True
-                next_pipeline.model = model_to_use
                 print(f"[Detailer] Krea2 edit patch applied (ref_boost={ref_boost}, ref_boost_a={ref_boost_a}, fit_mode={fit_mode})")
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
                 model_to_use = arch_flux2klein.apply_model_patch(model_to_use)
                 if model_negative_to_use is not None:
                     model_negative_to_use = arch_flux2klein.apply_model_patch(model_negative_to_use)
                 next_pipeline.config["enable_edit"] = True
-                next_pipeline.model = model_to_use
                 print("[Detailer] Flux2Klein edit patch applied")
 
         # Context Reference: 从 history 加载图片作为额外参考
@@ -1350,15 +1494,15 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     def _execute_interface(self, server, interface_idx, manual_values, exec_options=None):
         """Execute a sub-graph via InterfaceExecutor."""
-        if interface_idx >= len(server.packages):
-            raise ValueError(f"Interface index {interface_idx} out of range ({len(server.packages)} packages)")
+        if interface_idx >= len(server.interface_packages):
+            raise ValueError(f"Interface index {interface_idx} out of range ({len(server.interface_packages)} interface packages)")
 
         exec_options = exec_options or {}
         operation = exec_options.get('operation', 'default')
-        src_key = exec_options.get('image_source_key') or None
+        image_keys = exec_options.get('image_keys', {})  # {port_num_str: history_key}
         crop_reserve = int(exec_options.get('crop_reserve', 32))
 
-        pkg = server.packages[interface_idx]
+        pkg = server.interface_packages[interface_idx]
         from .interface_node import InterfaceExecutor
 
         # 将 prompt tab 的 lora/prompt 注入到 pipeline 副本中
@@ -1372,28 +1516,24 @@ class SnapshotDetailerSamplerNode:
             entry.loras = get_loras_from_string(user_loras) if user_loras else []
             injected_pipeline.context.contexts['__prompt_tab__'] = entry
 
-        # 确定注入的图 + mask
-        if src_key:
-            base_img = server.get_history_image(src_key)
-            if base_img is None:
-                raise ValueError(f"Selected context image not found: {src_key}")
-            base_mask = self._current_pipeline.mask if self._current_pipeline else None
-            # 尺寸校验：所选图必须与当前 context 图同尺寸，遮罩才合法
-            cur_img = self._current_pipeline.image if self._current_pipeline else None
-            if cur_img is not None and base_img.shape != cur_img.shape:
-                raise ValueError(
-                    f"Selected image {base_img.shape} does not match current context {cur_img.shape}. "
-                    f"Only same-size images can be validly masked."
-                )
-        else:
-            base_img = injected_pipeline.get_image() if injected_pipeline else None
-            base_mask = injected_pipeline.mask if injected_pipeline else None
+        # 默认注入的图 + mask (context image)
+        base_img = injected_pipeline.get_image() if injected_pipeline else None
+        base_mask = injected_pipeline.mask if injected_pipeline else None
+
+        # 构建端口级图片覆盖
+        port_overrides = {}
+        for port_num_str, key in image_keys.items():
+            if key:
+                img = server.get_history_image(key)
+                if img is not None:
+                    port_overrides[int(port_num_str)] = img
+                    print(f"[InterfaceExec] Port {port_num_str} image override: key={key}")
 
         injected_img = base_img
         injected_mask = base_mask
         pending_crop = None
 
-        # Crop mask 区域
+        # Crop mask 区域 (基于 context image + mask)
         if operation == 'crop':
             if base_img is None or base_mask is None:
                 raise ValueError("Crop operation requires both image and mask")
@@ -1417,16 +1557,16 @@ class SnapshotDetailerSamplerNode:
 
         executor = InterfaceExecutor(
             extra_pnginfo=getattr(server, 'extra_pnginfo', None),
-            on_progress=lambda cur, total: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
+            on_progress=lambda cur, total: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
             get_pipeline=lambda: injected_pipeline,
             get_image=lambda: injected_img,
             get_mask=lambda: injected_mask,
             on_result_image=_on_result_image,
             on_result_pipeline=None,
-            on_sampler_progress=lambda cur, total, node_id: setattr(server, 'detail_current_step', cur) or setattr(server, 'detail_total_steps', total) or setattr(server, 'detail_progress', cur / max(total, 1)),
+            on_sampler_progress=lambda cur, total, node_id: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
         )
 
-        results = executor.execute(pkg, manual_values)
+        results = executor.execute(pkg, manual_values, port_overrides=port_overrides)
 
         # Uncrop：将裁剪结果复原回完整图
         if pending_crop is not None:
@@ -1467,19 +1607,17 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
                start_step_rate=0.8, end_step_rate=1.0, pixels=1048576,
-               align=8, crop_reserve=32, enable_edit="disable", detector=None, tagger=None, asset="", package=None,
+               align=8, crop_reserve=32, mask_grow=32, mask_blur=32, enable_edit="disable", detector=None, tagger=None, asset="", package=None,
                extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
 
-        # 完成护栏：IS_CHANGED=nan 会让 ComfyUI 在该节点返回后认为它变化了，
-        # 如果该节点位于连向 OUTPUT_NODE 的路径上，ComfyUI 会立即再排队执行一次，
-        # 导致浏览器被意外重开。这里在 finish 后短时间内拦截这种自动重入。
-        now = time.time()
-        if now - SnapshotDetailerSamplerNode._last_finish_time < SnapshotDetailerSamplerNode.FINISH_COOLDOWN:
-            print("[SnapshotDetailerSampler] Auto re-entry within cooldown after finish — skipping (passthrough)")
-            return (pipeline,)
-
         self._current_pipeline = pipeline.copy() if pipeline else None
+
+        # Derive lora_regex from pipeline's architecture config if not explicitly provided
+        if not lora_regex and pipeline and pipeline.config:
+            arch = pipeline.config.get("architecture")
+            if arch:
+                lora_regex = str(arch)
 
         server = SnapshotDetailerSamplerServer(
             detector=detector,
@@ -1497,6 +1635,8 @@ class SnapshotDetailerSamplerNode:
                 'pixels': pixels,
                 'align': align,
                 'crop_reserve': crop_reserve,
+                'mask_grow': mask_grow,
+                'mask_blur': mask_blur,
                 'enable_edit': enable_edit == "enable",
                 'context_regex': context_regex,
             }
@@ -1527,6 +1667,8 @@ class SnapshotDetailerSamplerNode:
             'pixels': pixels,
             'align': align,
             'crop_reserve': crop_reserve,
+            'mask_grow': mask_grow,
+            'mask_blur': mask_blur,
             'enable_edit': enable_edit == "enable",
             'context_regex': context_regex,
         }
@@ -1606,6 +1748,8 @@ class SnapshotDetailerSamplerNode:
                         params['pixels'] = server.pixels
                         params['align'] = server.align
                         params['crop_reserve'] = server.crop_reserve
+                        params['mask_grow'] = server.mask_grow
+                        params['mask_blur'] = server.mask_blur
                         params['enable_edit'] = server.enable_edit
                         params['context_reference'] = server.context_reference
                         params['context_reference_key'] = action.get('context_reference_key')
@@ -1681,21 +1825,23 @@ class SnapshotDetailerSamplerNode:
                     interface_idx = action.get('interface_index', 0)
                     manual_values = action.get('manual_values', {})
                     exec_options = action.get('exec_options', {})
-                    server.detail_status = 'running'
-                    server.detail_error = None
-                    server.detail_progress = 0
+                    server.interface_status = 'running'
+                    server.interface_error = None
+                    server.interface_progress = 0
+                    server.interface_current_step = 0
+                    server.interface_total_steps = 0
                     try:
                         self._execute_interface(server, interface_idx, manual_values, exec_options)
-                        server.detail_status = 'done'
-                        server.detail_progress = 1.0
+                        server.interface_status = 'done'
+                        server.interface_progress = 1.0
                     except Exception as e:
                         if mm.processing_interrupted() or 'Interrupt' in type(e).__name__:
                             print("[SnapshotDetailerSampler] Interrupted during interface execution")
                             break
                         import traceback
                         traceback.print_exc()
-                        server.detail_status = 'error'
-                        server.detail_error = str(e)
+                        server.interface_status = 'error'
+                        server.interface_error = str(e)
                     finally:
                         gc.collect()
                         mm.soft_empty_cache()
@@ -1725,6 +1871,4 @@ class SnapshotDetailerSamplerNode:
 
         if result is None:
             raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
-        # 记录完成时间，cooldown 内的重入直接透传
-        SnapshotDetailerSamplerNode._last_finish_time = time.time()
         return (result,)
