@@ -198,6 +198,9 @@ def _build_lora_cache():
     if len(_lora_path_cache) == 0:
         print("警告：未找到任何 LoRA 文件，请检查 ComfyUI/models/loras 目录下是否有 .safetensors 文件")
 
+# Build cache once at module load time
+_build_lora_cache()
+
 
 def set_inpaint_mask(resized_image: torch.Tensor, resized_mask: torch.Tensor, vae, grow_mask_by: int = 0):
     """
@@ -773,7 +776,6 @@ class PipelineData:
 class ContextNode:
     @classmethod
     def INPUT_TYPES(s):
-        _build_lora_cache()
         return{
             "required": {
                 "name": ("STRING", {"default": ""}),    
@@ -878,7 +880,6 @@ class ReferenceLatentNode:
 
     @classmethod
     def INPUT_TYPES(s):
-        _build_lora_cache()
         return{
             "required": {
             },
@@ -911,7 +912,6 @@ class ReferenceImageNode:
 
     @classmethod
     def INPUT_TYPES(s):
-        _build_lora_cache()
         return{
             "required": {
             },
@@ -946,7 +946,6 @@ class ReferenceImageNode:
 class ReferenceContolNetNode:
     @classmethod
     def INPUT_TYPES(s):
-        _build_lora_cache()
         return{
             "required": {
             },

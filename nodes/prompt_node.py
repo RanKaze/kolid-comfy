@@ -144,6 +144,21 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
+    def update_lora_regex(self, new_regex):
+        """Update lora_regex, rescan loras, and rebuild valid paths."""
+        self.lora_regex = str(new_regex) if new_regex else ""
+        self.lora_data = self._scan_loras(self.lora_regex)
+        import re as _re
+        compiled_re = _re.compile(self.lora_regex) if self.lora_regex else None
+        self._valid_lora_paths = set()
+        for folder_items in self.lora_data.values():
+            for item in folder_items:
+                fp = item.get('file_path', '').replace('\\', '/')
+                if not compiled_re or compiled_re.search(fp):
+                    self._valid_lora_paths.add(fp)
+                    self._valid_lora_paths.add(item.get('file_name', ''))
+        print(f"[PromptServer] lora_regex updated to '{self.lora_regex}', {len(self._valid_lora_paths)} valid loras")
+
     @staticmethod
     def parse_prompt_data(prompt_data):
         """Parse prompt payload into user_positive and user_loras strings."""
@@ -401,6 +416,7 @@ class SnapshotPromptServer:
         self.lora_fingerprints = {}  # file_path -> fingerprint
         if not os.path.exists(lora_root):
             return folders
+        regex_pattern = str(regex_pattern) if regex_pattern else ""
         compiled_re = re.compile(regex_pattern) if regex_pattern else None
         for dirpath, dirnames, filenames in os.walk(lora_root):
             for filename in filenames:

@@ -143,6 +143,7 @@ NODE_CONFIG = {
     "InterfacePackageNode": {"class": InterfacePackageNode, "name": "InterfacePackageNode"},
     "InterfaceCaptureNode": {"class": InterfaceCaptureNode, "name": "InterfaceCaptureNode"},
     "PackageMergeNode": {"class": PackageMergeNode, "name": "PackageMergeNode"},
+    "PipelinePackageNode": {"class": PipelinePackageNode, "name": "PipelinePackageNode"},
 
     "ApplicationNode": {"class": ApplicationNode, "name": "ApplicationNode"},
 

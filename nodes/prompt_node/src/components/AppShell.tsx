@@ -741,6 +741,9 @@ export function AppShell() {
         Promise.all([loadData(), loadLoraData()]).then(() => {
           isReloadingRef.current = false;
         });
+      } else if (e.data?.type === 'reload-lora-data') {
+        // Only reload lora data (lora_regex changed due to pipeline switch), keep selections
+        loadLoraData();
       }
     };
     window.addEventListener('message', reloadHandler);

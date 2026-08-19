@@ -8,6 +8,8 @@ export interface ServerConfig {
   pixels: number;
   align: number;
   crop_reserve: number;
+  mask_grow: number;
+  mask_blur: number;
   enable_edit: boolean;
   context_reference: boolean;
   context_reference_key: string | null;
@@ -15,6 +17,8 @@ export interface ServerConfig {
   current_context_key: string | null;
   has_package: boolean;
   package_count: number;
+  has_pipeline_package: boolean;
+  pipeline_package_count: number;
 }
 
 export interface DetailerParams {
@@ -24,6 +28,8 @@ export interface DetailerParams {
   pixels: number;
   align: number;
   crop_reserve: number;
+  mask_grow: number;
+  mask_blur: number;
   enable_edit: boolean;
   context_reference: boolean;
   context_reference_key: string | null;
@@ -35,6 +41,11 @@ export interface StatusResponse {
   progress?: number;
   current_step?: number;
   total_steps?: number;
+  interface_status?: 'idle' | 'running' | 'done' | 'error';
+  interface_error?: string;
+  interface_progress?: number;
+  interface_current_step?: number;
+  interface_total_steps?: number;
   interface_result_keys?: string[];
 }
 
@@ -82,7 +93,7 @@ export interface InterfaceExecOptions {
   crop_reserve: number;
 }
 
-export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context' | 'interface';
+export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context' | 'interface' | 'pipeline';
 
 export interface InterfacePort {
   num: number;
@@ -96,4 +107,14 @@ export interface InterfaceInfo {
   name: string;
   start_ports: InterfacePort[];
   end_ports: InterfacePort[];
+}
+
+export interface PipelineInfo {
+  name: string;
+  node_id: string;
+}
+
+export interface PipelinePackageInfo {
+  name: string;
+  pipelines: PipelineInfo[];
 }
