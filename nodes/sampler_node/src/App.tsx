@@ -21,8 +21,8 @@ const App: React.FC = () => {
   const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
-  const [interfaceStatus, setInterfaceStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [interfaceProgress, setInterfaceProgress] = useState({ progress: 0, current: 0, total: 0 });
+  const [interfaceStatusByIdx, setInterfaceStatusByIdx] = useState<Record<number, 'idle' | 'running' | 'done' | 'error'>>({});
+  const [interfaceProgressByIdx, setInterfaceProgressByIdx] = useState<Record<number, { progress: number; current: number; total: number }>>({});
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
@@ -268,26 +268,30 @@ const App: React.FC = () => {
     return () => { cancelled = true; clearInterval(interval); };
   }, [tab, detailStatus, refreshHistory]);
 
-  // Poll status when interface is running
+  // Poll status when interface is running (mutual exclusion: only one runs at a time)
   useEffect(() => {
-    if (tab !== 'interface' || interfaceStatus !== 'running') return;
+    if (tab !== 'interface' || executedInterfaceIdx === null || interfaceStatusByIdx[executedInterfaceIdx] !== 'running') return;
+    const execIdx = executedInterfaceIdx;
     let cancelled = false;
     const poll = async () => {
       try {
         const res = await fetch('/api/status');
         const data: StatusResponse = await res.json();
         if (cancelled) return;
-        setInterfaceStatus(data.interface_status || 'idle');
-        setInterfaceProgress({
-          progress: data.interface_progress || 0,
-          current: data.interface_current_step || 0,
-          total: data.interface_total_steps || 0,
-        });
-        if (data.interface_status === 'done') {
+        const st = data.interface_status || 'idle';
+        setInterfaceStatusByIdx(prev => ({ ...prev, [execIdx]: st }));
+        setInterfaceProgressByIdx(prev => ({
+          ...prev,
+          [execIdx]: {
+            progress: data.interface_progress || 0,
+            current: data.interface_current_step || 0,
+            total: data.interface_total_steps || 0,
+          },
+        }));
+        if (st === 'done') {
           const resultKeys = data.interface_result_keys || [];
-          const execIdx = executedInterfaceIdx;
           refreshHistory().then(() => {
-            if (resultKeys.length > 0 && execIdx !== null) {
+            if (resultKeys.length > 0) {
               setHistory(prev => {
                 const results = resultKeys
                   .map(k => prev.find(h => h.key === k))
@@ -295,21 +299,21 @@ const App: React.FC = () => {
                 setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: results }));
                 return prev;
               });
-            } else if (execIdx !== null) {
+            } else {
               setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
             }
           });
           fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
             if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
           }).catch(() => {});
-        } else if (data.interface_status === 'error') {
+        } else if (st === 'error') {
           setError(data.interface_error || 'Interface execution failed');
         }
       } catch { /* ignore */ }
     };
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [tab, interfaceStatus, refreshHistory, executedInterfaceIdx]);
+  }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshHistory]);
 
   // Fetch debug data when detail is done
   useEffect(() => {
@@ -437,9 +441,13 @@ const App: React.FC = () => {
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
-    setInterfaceStatus('running');
-    setInterfaceProgress({ progress: 0, current: 0, total: 0 });
+    // Mutual exclusion: if another interface is currently running, ignore this request.
+    if (executedInterfaceIdx !== null && interfaceStatusByIdx[executedInterfaceIdx] === 'running') {
+      return;
+    }
     setExecutedInterfaceIdx(interfaceIndex);
+    setInterfaceStatusByIdx(prev => ({ ...prev, [interfaceIndex]: 'running' }));
+    setInterfaceProgressByIdx(prev => ({ ...prev, [interfaceIndex]: { progress: 0, current: 0, total: 0 } }));
     try {
       await fetch('/api/execute_interface', {
         method: 'POST',
@@ -448,9 +456,10 @@ const App: React.FC = () => {
       });
     } catch (e: any) {
       setError('Failed to start interface execution: ' + e.message);
-      setInterfaceStatus('idle');
+      setInterfaceStatusByIdx(prev => ({ ...prev, [interfaceIndex]: 'idle' }));
+      setExecutedInterfaceIdx(null);
     }
-  }, []);
+  }, [executedInterfaceIdx, interfaceStatusByIdx]);
 
   const handleSwitchPipeline = useCallback(async (packageIdx: number, pipelineIdx: number) => {
     setError(null);
@@ -749,8 +758,8 @@ const App: React.FC = () => {
         interfaces={interfaces}
         onExecuteInterface={handleExecuteInterface}
         interfaceResults={interfaceResults}
-        interfaceStatus={interfaceStatus}
-        interfaceProgress={interfaceProgress}
+        interfaceStatusByIdx={interfaceStatusByIdx}
+        interfaceProgressByIdx={interfaceProgressByIdx}
         pipelinePackages={pipelinePackages}
         onSwitchPipeline={handleSwitchPipeline}
         currentPipelineKey={currentPipelineKey}

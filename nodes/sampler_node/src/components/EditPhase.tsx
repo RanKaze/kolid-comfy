@@ -132,8 +132,8 @@ interface EditPhaseProps {
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: Record<number, HistoryItem[]>;
-  interfaceStatus: 'idle' | 'running' | 'done' | 'error';
-  interfaceProgress: { progress: number; current: number; total: number };
+  interfaceStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
+  interfaceProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   pipelinePackages: PipelinePackageInfo[];
   onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
   currentPipelineKey: string | null;
@@ -150,7 +150,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
   blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
-  interfaces, onExecuteInterface, interfaceResults, interfaceStatus, interfaceProgress,
+  interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
   pipelinePackages, onSwitchPipeline, currentPipelineKey,
 }) => {
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
@@ -594,7 +594,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatus={interfaceStatus} detailProgress={interfaceProgress} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
+          <InterfaceTab interfaces={interfaces} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
         )}
 
         {/* Pipeline — dynamic pipeline switching */}
@@ -810,14 +810,14 @@ const TagCard: React.FC<{ label: string; description: string; image?: string; on
 // ── InterfaceTab ──
 const InterfaceTab: React.FC<{
   interfaces: InterfaceInfo[];
-  detailStatus: 'idle' | 'running' | 'done' | 'error';
-  detailProgress: { progress: number; current: number; total: number };
+  detailStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
+  detailProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: Record<number, HistoryItem[]>;
   currentContextKey: string | null;
   onSetContext: (key: string) => void;
   history: HistoryItem[];
-}> = ({ interfaces, detailStatus, detailProgress, onExecuteInterface, interfaceResults, currentContextKey, onSetContext, history }) => {
+}> = ({ interfaces, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, currentContextKey, onSetContext, history }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
   // 每个 interface 的执行选项: operation 和 crop_reserve 是卡片级, image_keys 是端口级
   const [execOptions, setExecOptions] = useState<Record<number, { operation: 'default' | 'crop'; crop_reserve: number; image_keys: Record<number, string | null> }>>({});
@@ -848,7 +848,7 @@ const InterfaceTab: React.FC<{
     onExecuteInterface(idx, manualValues[idx] || {}, payload);
   };
 
-  const showProgress = detailStatus === 'running' && detailProgress.total > 0;
+  const showProgress = (idx: number) => detailStatusByIdx[idx] === 'running' && (detailProgressByIdx[idx]?.total ?? 0) > 0;
 
   const renderPort = (port: InterfacePort, idx: number, isStart: boolean) => {
     const mv = manualValues[idx]?.[String(port.num)] ?? port.value ?? '';
@@ -977,19 +977,19 @@ const InterfaceTab: React.FC<{
             </div>
           )}
 
-          {detailStatus === 'running' && (
+          {detailStatusByIdx[idx] === 'running' && (
             <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={styles.spinner} />
               <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600 }}>Running…</span>
-              {showProgress && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgress.current} / {detailProgress.total}</span>}
+              {showProgress(idx) && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgressByIdx[idx]?.current} / {detailProgressByIdx[idx]?.total}</span>}
             </div>
           )}
           {(() => {
             const ifaceResults = interfaceResults[idx] || [];
-            const showIfaceResults = detailStatus === 'done' || ifaceResults.length > 0;
+            const showIfaceResults = detailStatusByIdx[idx] === 'done' || ifaceResults.length > 0;
             if (!showIfaceResults) return null;
             if (ifaceResults.length === 0) {
-              return detailStatus === 'done' ? (
+              return detailStatusByIdx[idx] === 'done' ? (
                 <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>✓ Done — no images generated</div>
               ) : null;
             }
@@ -1021,16 +1021,16 @@ const InterfaceTab: React.FC<{
               </div>
             );
           })()}
-          {detailStatus === 'error' && (
+          {detailStatusByIdx[idx] === 'error' && (
             <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
           )}
           <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
             <button
-              style={{ ...styles.runBtn, opacity: detailStatus === 'running' ? 0.4 : 1, cursor: detailStatus === 'running' ? 'not-allowed' : 'pointer' }}
+              style={{ ...styles.runBtn, opacity: detailStatusByIdx[idx] === 'running' ? 0.4 : 1, cursor: detailStatusByIdx[idx] === 'running' ? 'not-allowed' : 'pointer' }}
               onClick={() => handleExecute(idx)}
-              disabled={detailStatus === 'running'}
+              disabled={detailStatusByIdx[idx] === 'running'}
             >
-              {detailStatus === 'running' ? 'Running…' : 'Execute'}
+              {detailStatusByIdx[idx] === 'running' ? 'Running…' : 'Execute'}
             </button>
           </div>
         </div>

@@ -483,36 +483,35 @@ class InterfacePackageNode:
                 if sw:
                     interface_name = str(sw[0]) if sw[0] else ""
 
-        # Collect nodes on paths from Start to End
-        # Algorithm: forward reachability from Start ∩ backward reachability from End
-        
-        # 1. Forward reachability: all nodes reachable downstream from Start
-        forward_reachable = set()
-        queue = [start_node_id]
-        while queue:
-            nid = queue.pop(0)
-            if nid in forward_reachable:
-                continue
-            forward_reachable.add(nid)
-            for tid in self._get_node_downstream(nid, links):
-                if tid not in forward_reachable:
-                    queue.append(tid)
-        
-        # 2. Backward reachability: all nodes that can reach End (upstream of End)
-        # Also include nodes upstream of End's value inputs
-        backward_reachable = set()
+        # Collect nodes belonging to the interface subgraph.
+        #
+        # Definition: the interface subgraph is the upstream-closure of End
+        # (all nodes that can reach End), EXCEPT we do NOT follow past the
+        # InterfaceStartNode. The Start node's own inputs are provided by
+        # boundary injection (_build_injections), so its upstream (nodes before
+        # Start, e.g. 7416) must NOT be executed. Any other node's upstream
+        # (e.g. a model loader 7442 feeding an internal node 7443) IS part of
+        # the interface and must be executed.
+        #
+        # This fixes the previous bug where "Start downstream ∩ End upstream"
+        # wrongly excluded root nodes (no-input source nodes like loaders)
+        # whose output ultimately reaches End.
+
+        # Backward reachability from End; stop ascending once we hit Start.
+        sub_graph_ids = set()
         queue = [node_id_str]
         while queue:
             nid = queue.pop(0)
-            if nid in backward_reachable:
+            if nid in sub_graph_ids:
                 continue
-            backward_reachable.add(nid)
+            sub_graph_ids.add(nid)
+            # Do not follow Start's inputs further upstream — they are injected.
+            if nid == start_node_id:
+                continue
             for (up_origin, _, _) in self._get_node_upstream(nid, links):
-                if up_origin not in backward_reachable:
+                if up_origin not in sub_graph_ids:
                     queue.append(up_origin)
-        
-        # 3. Intersection: nodes on a path from Start to End
-        sub_graph_ids = forward_reachable & backward_reachable
+
         # Always include Start and End
         sub_graph_ids.add(start_node_id)
         sub_graph_ids.add(node_id_str)
@@ -535,10 +534,25 @@ class InterfacePackageNode:
             inputs = self._get_node_inputs(n, links)
             # Keep ALL links — internal links will be resolved from output_values,
             # external links will be resolved at execution time from extra_pnginfo
+            #
+            # InterfaceStartNode's inputs that point outside the subgraph (its
+            # upstream, e.g. 7416) are boundary-injected values, NOT nodes to
+            # execute. Drop those links so Start takes the injected valueN kwargs
+            # instead of trying to evaluate a node before Start.
+            if nid == start_node_id:
+                filtered = {}
+                for name, link in inputs.items():
+                    origin_id = str(link[0]) if isinstance(link, (list, tuple)) else str(link)
+                    if origin_id not in sub_graph_ids:
+                        # External source → provided by injection, not executed.
+                        continue
+                    filtered[name] = link
+                inputs = filtered
+            wv = n.get("widgets_values", [])
             sub_prompt[nid] = {
                 "class_type": node_type,
                 "inputs": inputs,
-                "_widgets_values": n.get("widgets_values", []),
+                "_widgets_values": wv,
             }
 
         # Infer types from End's value inputs
@@ -993,7 +1007,9 @@ class InterfaceExecutor:
                         if cat == "hidden":
                             link_names.add(name)
                             continue
-                        if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN"):
+                        if isinstance(t, str) and t in ("STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"):
+                            # New ComfyUI API nodes use string type tags like "COMBO";
+                            # old API nodes use a raw list for combo boxes.
                             widget_types[name] = t
                         elif isinstance(t, list):
                             widget_types[name] = "COMBO"
@@ -1034,7 +1050,7 @@ class InterfaceExecutor:
                     result[name] = val.lower() in ("true", "1", "yes")
                 else:
                     result[name] = bool(val)
-        return result
+            return result
 
     def _evaluate_node(self, nid, sub_prompt, start_id, end_id, pkg, output_values):
         """从 End 节点开始递归求值（懒求值）。
@@ -1137,7 +1153,7 @@ class InterfaceExecutor:
                     for name in required:
                         if name in pending_links:
                             origin_id, output_slot = pending_links[name]
-                            self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values)
+                            self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid)
                             val = self._get_output(origin_id, output_slot, output_values)
                             if val is not _UNRESOLVED:
                                 inputs[name] = val
@@ -1147,7 +1163,7 @@ class InterfaceExecutor:
             else:
                 # 没有 check_lazy_status：求值所有 pending links
                 for name, (origin_id, output_slot) in list(pending_links.items()):
-                    self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values)
+                    self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid)
                     val = self._get_output(origin_id, output_slot, output_values)
                     if val is not _UNRESOLVED:
                         inputs[name] = val
@@ -1249,7 +1265,7 @@ class InterfaceExecutor:
 
         return _UNRESOLVED
 
-    def _eval_link(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values):
+    def _eval_link(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid=None):
         """递归求值一个 link 引用的上游节点"""
         # 已缓存
         if origin_id in output_values:
@@ -1268,10 +1284,18 @@ class InterfaceExecutor:
             self._evaluate_node(origin_id, sub_prompt, start_id, end_id, pkg, output_values)
             return
 
-        # 外部节点 → 按需执行
-        ext_result = self._try_execute_external(origin_id, output_values)
-        if ext_result is None:
-            print(f"[InterfaceExecutor]   WARNING: external node {origin_id} resolve failed")
+        # 边界外节点（InterfaceStartNode 之前 / 不在 interface 子图内）
+        # interface 子图是封闭的，只允许通过 Start 边界注入与外界交互。
+        # 不再递归执行外部节点（那会把 Start 之前的节点一并拉进来执行），
+        # 而是尝试从 Start 节点的注入输出解析该边界输入；解析不到则明确报错。
+        resolved = self._resolve_external_boundary(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values)
+        if not resolved:
+            raise RuntimeError(
+                f"[InterfaceExecutor] Node {nid}: input links to node '{origin_id}' "
+                f"which is outside the interface subgraph (before InterfaceStartNode). "
+                f"Interface nodes may only reference nodes within the interface or values "
+                f"injected through the InterfaceStartNode boundary."
+            )
 
     def _get_output(self, origin_id, output_slot, output_values):
         """从 output_values 取值，支持 prefix 匹配"""
@@ -1285,6 +1309,39 @@ class InterfaceExecutor:
                 if output_slot < len(ot):
                     return ot[output_slot]
         return _UNRESOLVED
+
+    def _resolve_external_boundary(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values):
+        """尝试将 interface 边界外的 link 解析为 Start 节点注入的边界输入。
+
+        interface 子图是封闭的：子图内节点引用的外部值，只能通过 InterfaceStartNode
+        的注入输出（由 _build_injections 注入的 PIPELINE_DATA / IMAGE / MASK 等）提供。
+        这里先在已缓存的 Start 输出里按 alias 匹配，匹配不到则返回 False，由调用方报错。
+        """
+        # Start 节点已被执行，其注入输出就在 output_values[start_id]
+        start_outputs = output_values.get(start_id, ())
+        if not start_outputs:
+            return False
+
+        # 1) 通过 subgraph_output_aliases 把外部节点映射到 Start 的某个输出端口
+        aliases = sub_prompt.get("_subgraph_output_aliases", {})
+        alias_key = f"{origin_id}:{output_slot}"
+        if alias_key in aliases:
+            mapped = aliases[alias_key]
+            # mapped 是一个 boundary 节点 id，其输出被 alias 到 Start 的某个端口
+            mapped_outputs = output_values.get(mapped, ())
+            if mapped_outputs and len(mapped_outputs) > 0:
+                return True
+
+        # 2) 直接按 (origin_id, output_slot) 在 Start 注入输出里查找
+        #    interface 内部节点若经 Start 边界连接，其 link 的 origin 应为 start_id，
+        #    因此走到这里的 origin 是越界节点；这里仅做前缀兜底匹配，避免误判。
+        for ov_key in output_values:
+            if ov_key.endswith("." + origin_id):
+                ot = output_values[ov_key]
+                if output_slot < len(ot):
+                    return True
+
+        return False
 
     def _resolve_virtual(self, val, output_values, start_id):
         """解析子图虚拟输入（子图边界端口在父图未连线时产生）。
