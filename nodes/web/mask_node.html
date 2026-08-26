@@ -152,22 +152,29 @@
             box-shadow: 0 4px 12px rgba(0, 122, 255, 0.35);
         }
 
-        /* Detector panel (top-right) */
-        .controls {
+        /* Right-side panel stack — panels stack vertically, never overlap */
+        #rightPanels {
             position: absolute;
             top: 16px;
             right: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: calc(100% - 32px);
+            z-index: 50;
+        }
+        /* Detector panel */
+        .controls {
             background: rgba(28, 28, 30, 0.6);
             backdrop-filter: blur(24px) saturate(180%);
             -webkit-backdrop-filter: blur(24px) saturate(180%);
             padding: 14px;
             border-radius: 20px;
-            z-index: 50;
             display: none;
             flex-direction: column;
             gap: 8px;
             min-width: 180px;
-            max-height: 90vh;
+            min-height: 0;
             overflow-y: auto;
             border: 1px solid rgba(255, 255, 255, 0.08);
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
@@ -251,33 +258,21 @@
             background: rgba(0, 122, 255, 0.85);
             box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
         }
-        /* Brush panel (always visible, above detector) */
+        /* Brush panel (always visible) */
         .brush-panel {
-            position: absolute;
-            top: 16px;
-            right: 16px;
             background: rgba(28, 28, 30, 0.6);
             backdrop-filter: blur(24px) saturate(180%);
             -webkit-backdrop-filter: blur(24px) saturate(180%);
             padding: 14px;
             border-radius: 20px;
-            z-index: 51;
             display: flex;
             flex-direction: column;
             gap: 8px;
             min-width: 180px;
+            min-height: 0;
+            overflow-y: auto;
             border: 1px solid rgba(255, 255, 255, 0.08);
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
-        }
-        /* When detector is visible, offset brush panel above it */
-        .brush-panel + .controls.visible,
-        .controls.visible ~ .brush-panel {
-            /* handled by JS: brush panel moves up when detector visible */
-        }
-        .brush-panel.detector-below {
-            top: auto;
-            bottom: 16px;
-            right: 16px;
         }
 
         /* Modern buttons */
@@ -371,7 +366,50 @@
         <div id="brushCursor"></div>
         <div id="status">Loading...</div>
 
-        <!-- Brush panel (top-right, always visible) -->
+        <!-- Right-side panel stack (detector + brush, never overlap) -->
+        <div id="rightPanels">
+        <!-- Detector panel (top of stack, only shown if detector exists) -->
+        <div class="controls" id="detectorPanel">
+            <div class="detector-title">Detector</div>
+            <div class="control-row">
+                <label>Thresh</label>
+                <input type="range" id="detThreshold" min="0" max="1" step="0.01" value="0.5">
+                <span id="detThresholdValue">0.50</span>
+            </div>
+            <div class="control-row">
+                <label>Strength</label>
+                <input type="range" id="detStrength" min="0" max="1" step="0.01" value="1.0">
+                <span id="detStrengthValue">1.00</span>
+            </div>
+            <div class="control-row">
+                <label>Dilate</label>
+                <input type="range" id="detDilation" min="0" max="64" step="1" value="4">
+                <span id="detDilationValue">4</span>
+            </div>
+            <div class="control-row">
+                <label>Crop</label>
+                <input type="range" id="detCropFactor" min="1" max="4" step="0.1" value="1.5">
+                <span id="detCropFactorValue">1.5</span>
+            </div>
+            <div class="control-row">
+                <label>Drop</label>
+                <input type="range" id="detDropSize" min="0" max="512" step="1" value="0">
+                <span id="detDropSizeValue">0</span>
+            </div>
+            <div class="control-row">
+                <label>Prompt</label>
+                <input type="text" id="detPrompt" placeholder="empty">
+            </div>
+            <div class="control-row">
+                <label>Fill</label>
+                <input type="checkbox" id="detFillMask" checked>
+            </div>
+            <div class="control-row" style="justify-content: center;">
+                <button class="control-button primary" id="detectButton">Detect</button>
+            </div>
+        </div>
+
+        <!-- Brush panel (below detector, always visible) -->
         <div class="brush-panel" id="brushPanel">
             <div class="detector-title">Brush</div>
             <div class="control-row" style="gap: 4px; justify-content: center;">
@@ -429,46 +467,6 @@
                 <span id="eraserGammaValue">2.0</span>
             </div>
         </div>
-
-        <!-- Detector panel (top-right, only shown if detector exists) -->
-        <div class="controls" id="detectorPanel">
-            <div class="detector-title">Detector</div>
-            <div class="control-row">
-                <label>Thresh</label>
-                <input type="range" id="detThreshold" min="0" max="1" step="0.01" value="0.5">
-                <span id="detThresholdValue">0.50</span>
-            </div>
-            <div class="control-row">
-                <label>Strength</label>
-                <input type="range" id="detStrength" min="0" max="1" step="0.01" value="1.0">
-                <span id="detStrengthValue">1.00</span>
-            </div>
-            <div class="control-row">
-                <label>Dilate</label>
-                <input type="range" id="detDilation" min="0" max="64" step="1" value="4">
-                <span id="detDilationValue">4</span>
-            </div>
-            <div class="control-row">
-                <label>Crop</label>
-                <input type="range" id="detCropFactor" min="1" max="4" step="0.1" value="1.5">
-                <span id="detCropFactorValue">1.5</span>
-            </div>
-            <div class="control-row">
-                <label>Drop</label>
-                <input type="range" id="detDropSize" min="0" max="512" step="1" value="0">
-                <span id="detDropSizeValue">0</span>
-            </div>
-            <div class="control-row">
-                <label>Prompt</label>
-                <input type="text" id="detPrompt" placeholder="empty">
-            </div>
-            <div class="control-row">
-                <label>Fill</label>
-                <input type="checkbox" id="detFillMask" checked>
-            </div>
-            <div class="control-row" style="justify-content: center;">
-                <button class="control-button primary" id="detectButton">Detect</button>
-            </div>
         </div>
     </div>
 
@@ -673,10 +671,9 @@
                         }
                         if (data.has_detector) {
                             hasDetector = true;
+                            // CSS flex stack (#rightPanels) handles layout —
+                            // no JS offset needed (safe even while iframe is display:none)
                             detectorPanel.classList.add('visible');
-                            // Move brush panel above detector panel
-                            document.getElementById('brushPanel').style.bottom = '';
-                            document.getElementById('brushPanel').style.top = (16 + detectorPanel.offsetHeight + 8) + 'px';
                         }
                         status.textContent = 'Ready';
                     }, 0);
