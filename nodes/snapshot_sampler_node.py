@@ -96,8 +96,38 @@ class SnapshotDetailerSamplerServer:
         self.mask_grow = cfg.get('mask_grow', 32)
         self.mask_blur = cfg.get('mask_blur', 32)
         self.enable_edit = cfg.get('enable_edit', False)
+        self.edit_mode = cfg.get('edit_mode', 'fit')
+        self.ref_boost = cfg.get('ref_boost', 4.0)
+        self.ref_boost_a = cfg.get('ref_boost_a', 1.0)
+        self.enable_ref_boost_mask = cfg.get('enable_ref_boost_mask', False)
+        self.grounding_px = cfg.get('grounding_px', 768)
         self.context_reference = cfg.get('context_reference', False)
         self.context_reference_key = cfg.get('context_reference_key', None)
+
+        # Pipeline Block chain (default: single Detailer block from INPUT_TYPES defaults)
+        self.blocks = cfg.get('blocks')
+        if not self.blocks:
+            self.blocks = [{
+                'id': 'block-1',
+                'type': 'detailer',
+                'name': 'Detailer',
+                'params': {
+                    'add_noise': self.add_noise,
+                    'start_step_rate': self.start_step_rate,
+                    'end_step_rate': self.end_step_rate,
+                    'pixels': self.pixels,
+                    'align': self.align,
+                    'crop_reserve': self.crop_reserve,
+                    'enable_edit': self.enable_edit,
+                    'edit_mode': self.edit_mode,
+                    'ref_boost': self.ref_boost,
+                    'ref_boost_a': self.ref_boost_a,
+                    'enable_ref_boost_mask': self.enable_ref_boost_mask,
+                    'grounding_px': self.grounding_px,
+                    'context_reference': self.context_reference,
+                    'context_reference_key': self.context_reference_key,
+                },
+            }]
 
         self.tag_result = None
         self.detail_status = 'idle'
@@ -426,6 +456,27 @@ class SnapshotDetailerSamplerServer:
             dirty = True
         if 'context_reference_key' in data:
             self.context_reference_key = data['context_reference_key']
+        if 'blocks' in data:
+            self.blocks = data['blocks']
+            # Sync individual params from first detailer block for ComfyUI widget display
+            first_detailer = next((b for b in self.blocks if b.get('type') == 'detailer'), None)
+            if first_detailer:
+                bp = first_detailer.get('params', first_detailer)
+                self.add_noise = bp.get('add_noise', self.add_noise)
+                self.start_step_rate = float(bp.get('start_step_rate', self.start_step_rate))
+                self.end_step_rate = float(bp.get('end_step_rate', self.end_step_rate))
+                self.pixels = int(bp.get('pixels', self.pixels))
+                self.align = int(bp.get('align', self.align))
+                self.crop_reserve = int(bp.get('crop_reserve', self.crop_reserve))
+                self.enable_edit = bool(bp.get('enable_edit', self.enable_edit))
+                self.edit_mode = bp.get('edit_mode', self.edit_mode)
+                self.ref_boost = float(bp.get('ref_boost', self.ref_boost))
+                self.ref_boost_a = float(bp.get('ref_boost_a', self.ref_boost_a))
+                self.enable_ref_boost_mask = bool(bp.get('enable_ref_boost_mask', self.enable_ref_boost_mask))
+                self.grounding_px = int(bp.get('grounding_px', self.grounding_px))
+                self.context_reference = bool(bp.get('context_reference', self.context_reference))
+                self.context_reference_key = bp.get('context_reference_key', self.context_reference_key)
+            dirty = True
         if dirty:
             self._sync_widgets()
 
@@ -437,6 +488,17 @@ class SnapshotDetailerSamplerServer:
 
         def log_message(self, format, *args):
             pass
+
+        @staticmethod
+        def _get_current_architecture(inst):
+            """当前 pipeline 的模型架构名（用于前端按架构渲染 DetailerBlock 设置）。"""
+            try:
+                node = getattr(inst, 'node_instance', None)
+                pipeline = getattr(node, '_current_pipeline', None)
+                cfg = getattr(pipeline, 'config', None)
+                return cfg.get('architecture') if isinstance(cfg, dict) else None
+            except Exception:
+                return None
 
         def _send_json(self, data, status=200):
             self.send_response(status)
@@ -500,10 +562,12 @@ class SnapshotDetailerSamplerServer:
                     'context_reference_key': inst.context_reference_key if inst else None,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'current_context_key': getattr(inst, 'current_context_key', None),
+                    'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
                     'package_count': len(inst.interface_packages) if inst else 0,
                     'has_pipeline_package': bool(inst and inst.pipeline_packages),
                     'pipeline_package_count': len(inst.pipeline_packages) if inst else 0,
+                    'blocks': inst.blocks if inst else [],
                 })
                 return
 
@@ -1216,18 +1280,11 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_detailer(self, pipeline, user_mask, user_positive, user_loras, params, server=None):
-        seed = params['seed']
-        add_noise = params['add_noise']
-        start_step_rate = float(params['start_step_rate'])
-        end_step_rate = float(params['end_step_rate'])
-        pixels = int(params['pixels'])
-        align = int(params['align'])
-        crop_reserve = int(params['crop_reserve'])
-        mask_grow = int(params.get('mask_grow', 32))
-        mask_blur = int(params.get('mask_blur', 32))
-        enable_edit = params.get('enable_edit', False)
-        context_regex = params['context_regex']
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None):
+        seed = global_params['seed']
+        mask_grow = int(global_params.get('mask_grow', 32))
+        mask_blur = int(global_params.get('mask_blur', 32))
+        context_regex = global_params['context_regex']
 
         next_pipeline = pipeline.copy()
         if next_pipeline.cache is None:
@@ -1243,153 +1300,296 @@ class SnapshotDetailerSamplerNode:
 
         if user_mask is not None:
             user_mask = user_mask.clone()
-        # Binarize mask for expand_mask (soft alpha values below 0.5 get thresholded away)
-        if user_mask is not None:
             user_mask = (user_mask > 0).float()
         expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
 
+        # First detailer block: crop_mask (using its crop_reserve)
+        first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
+        first_bp = first_detailer.get('params', first_detailer)
+        first_crop_reserve = int(first_bp.get('crop_reserve', 32))
         cropped_image, cropped_mask, crop_info = crop_mask(
             image=original_image,
             mask=expanded_mask,
-            reserve=crop_reserve
+            reserve=first_crop_reserve
         )
 
-        resized_image, resized_mask, resize_info = limit_pixels(
-            image=cropped_image,
-            pixels=pixels,
-            mask=cropped_mask,
-            align=align,
+        current_image = cropped_image
+        current_mask = cropped_mask
+        last_resize_info = None
+        last_resized_mask = None
+        last_resized_image = None
+        last_block_debug = {}
+
+        # Save original pipeline state for restoration after each block
+        _orig_enable_edit = next_pipeline.config.get("enable_edit") if next_pipeline.config else None
+        _orig_grounding_px = next_pipeline.config.get("grounding_px") if next_pipeline.config else None
+        _orig_ref_latents = list(next_pipeline.reference.reference_latents) if next_pipeline.reference and next_pipeline.reference.reference_latents else []
+        _orig_model = next_pipeline.model
+        _orig_model_negative = next_pipeline.config.get("model_negative") if next_pipeline.config else None
+
+        # Enable Edit: 在 block 循环之前对 pipeline model 统一打一次补丁（与
+        # PipelineEnableEditNode / 主 SamplerNode 路径相同的机制）。ref_boost 等
+        # 为 pipeline 级 config，对所有 block 相同；fit_mode 由 block 级
+        # edit_mode 逐 block 写入 pixel_state（forward 动态读取）。之后循环内
+        # get_model_clip() 的 clone 共享补丁闭包（含 pixel_state），节点级
+        # source 注入（source_images / source_latents）直接写入 pixel_state ——
+        # conditioning 只承载 grounded encode 语义输出（数据流分离，对齐
+        # krea2edit source patch 参考）。Krea2: source patch（fit/crop 双模式）；
+        # Flux2Klein: 原生 ref 路径。
+        _edit_patched = False
+        _edit_pixel_state = None
+        _any_edit = any(
+            (b.get('params', b) or {}).get('enable_edit', False)
+            for b in blocks if b.get('type') != 'interface'
         )
-
-        tmp_latent = VAEEncode().encode(
-            vae=next_pipeline.vae,
-            pixels=resized_image
-        )[0]
-
-        sampler_name = next_pipeline.sampler_name or 'euler'
-        scheduler = next_pipeline.scheduler or 'normal'
-        steps = next_pipeline.steps or 20
-        cfg = next_pipeline.cfg or 8.0
-
-        start_at_step = int(start_step_rate * steps)
-        end_at_step = int(end_step_rate * steps)
-
-        current_positive = ','.join([p for p in [context_positive, user_positive] if p])
-        current_negative = context_negative
-        current_loras = context_loras.copy()
-        current_loras.extend(get_loras_from_string(user_loras))
-
-        tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_image)
-        if tmp_positive:
-            current_positive += ',' + tmp_positive
-        if tmp_negative:
-            current_negative += ',' + tmp_negative
-        if tmp_loras:
-            current_loras.extend(tmp_loras)
-
-        model_negative = next_pipeline.config.get("model_negative")
-        model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
-            model=next_pipeline.model,
-            clip=next_pipeline.clip,
-            loras=current_loras,
-            model_negative=model_negative
-        )
-
-        # Enable Edit: 应用模型 patch 并使用原始上下文图作为 reference
-        if enable_edit:
+        if _any_edit:
             architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
             if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
                 ref_boost = next_pipeline.config.get("ref_boost", 1.0)
                 ref_boost_a = next_pipeline.config.get("ref_boost_a", 1.0)
                 ref_boost_mask = next_pipeline.config.get("ref_boost_mask", None)
-                fit_mode = next_pipeline.config.get("fit_mode", "fit")
                 vae = next_pipeline.vae
-                pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "px_cache": {}}
-                model_to_use = arch_krea2.apply_model_patch(
-                    model_to_use, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
-                if model_negative_to_use is not None:
-                    model_negative_to_use = arch_krea2.apply_model_patch(
-                        model_negative_to_use, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
-                next_pipeline.config["enable_edit"] = True
-                print(f"[Detailer] Krea2 edit patch applied (ref_boost={ref_boost}, ref_boost_a={ref_boost_a}, fit_mode={fit_mode})")
+                pixel_state = {"fit_mode": "fit", "vae": vae, "source_images": None, "source_latents": None, "px_cache": {}}
+                next_pipeline.model = arch_krea2.apply_model_patch(
+                    next_pipeline.model, ref_boost, ref_boost_a, ref_boost_mask, "fit", vae, pixel_state)
+                if _orig_model_negative is not None:
+                    next_pipeline.config["model_negative"] = arch_krea2.apply_model_patch(
+                        _orig_model_negative, ref_boost, ref_boost_a, ref_boost_mask, "fit", vae, pixel_state)
+                _edit_patched = True
+                _edit_pixel_state = pixel_state
+                print(f"[Detailer] Krea2 edit patch applied to pipeline model (ref_boost={ref_boost}, ref_boost_a={ref_boost_a})")
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
-                model_to_use = arch_flux2klein.apply_model_patch(model_to_use)
-                if model_negative_to_use is not None:
-                    model_negative_to_use = arch_flux2klein.apply_model_patch(model_negative_to_use)
-                next_pipeline.config["enable_edit"] = True
-                print("[Detailer] Flux2Klein edit patch applied")
+                next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
+                if _orig_model_negative is not None:
+                    next_pipeline.config["model_negative"] = arch_flux2klein.apply_model_patch(_orig_model_negative)
+                _edit_patched = True
+                print("[Detailer] Flux2Klein edit patch applied to pipeline model")
 
-        # Context Reference: 从 history 加载图片作为额外参考
-        context_reference = params.get('context_reference', False)
-        context_reference_key = params.get('context_reference_key')
-        if enable_edit and context_reference and context_reference_key and server is not None:
-            ref_img = server.get_history_image(context_reference_key)
-            if ref_img is not None:
-                ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
-                next_pipeline.reference.reference_latents.append(ref_latent)
-                print(f"[Detailer] Context reference injected: key={context_reference_key}, latent_shape={ref_latent['samples'].shape}")
-            else:
-                print(f"[Detailer] WARNING: context reference key '{context_reference_key}' not found in history")
-        else:
-            print(f"[Detailer] Context reference: enable_edit={enable_edit}, context_reference={context_reference}, key={context_reference_key}, has_server={server is not None}")
+        try:
+            for i, block in enumerate(blocks):
+                is_last = (i == len(blocks) - 1)
 
-        print(f"[Detailer] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
+                if block.get('type') == 'interface':
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — skipping (not yet supported in chain)")
+                    continue
 
-        # 按架构区分 reference 传递方式
-        architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
-        is_krea2 = architecture and re.search(r"Krea2", architecture, re.IGNORECASE)
-        is_flux2klein = architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE)
+                # Detailer block params (support both nested 'params' dict and flat)
+                bp = block.get('params', block)
+                add_noise = bp.get('add_noise', 'enable')
+                start_step_rate = float(bp.get('start_step_rate', 0.8))
+                end_step_rate = float(bp.get('end_step_rate', 1.0))
+                pixels = int(bp.get('pixels', 1048576))
+                align = int(bp.get('align', 8))
+                enable_edit = bp.get('enable_edit', False)
+                edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
+                ref_boost = float(bp.get('ref_boost', 4.0))
+                ref_boost_a = float(bp.get('ref_boost_a', 1.0))
+                enable_ref_boost_mask = bp.get('enable_ref_boost_mask', False)
+                grounding_px = int(bp.get('grounding_px', 768))
+                context_reference = bp.get('context_reference', False)
+                context_reference_key = bp.get('context_reference_key')
 
-        # Flux2Klein: reference_latent=tmp_latent (目标 latent), reference_image 不使用
-        # Krea2: reference_latent=None (忽略), reference_image=resized_image (源图)
-        ref_latent_arg = tmp_latent if is_flux2klein else None
-        ref_image_arg = resized_image if (is_krea2 or not is_flux2klein) else None
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, pixels={pixels}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
 
-        positive_condition = next_pipeline.get_conditioning(
-            mode='positive',
-            clip=clip_to_use,
-            vae=next_pipeline.vae,
-            prompt=current_positive,
-            reference_latent=ref_latent_arg,
-            reference_image=ref_image_arg,
-            reference=next_pipeline.reference
-        )
+                # limit_pixels (per-block resolution)
+                resized_image, resized_mask, resize_info = limit_pixels(
+                    image=current_image,
+                    pixels=pixels,
+                    mask=current_mask,
+                    align=align,
+                )
 
-        negative_condition = next_pipeline.get_conditioning(
-            mode='negative',
-            clip=clip_to_use,
-            vae=next_pipeline.vae,
-            prompt=current_negative,
-            reference_latent=ref_latent_arg,
-            reference_image=ref_image_arg,
-            reference=next_pipeline.reference
-        )
+                # VAEEncode
+                tmp_latent = VAEEncode().encode(
+                    vae=next_pipeline.vae,
+                    pixels=resized_image
+                )[0]
 
-        from .sampler_node import _ksampler
-        sampled_latent = _ksampler(
-            model=model_to_use,
-            seed=seed,
-            steps=steps,
-            cfg=cfg,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            positive=positive_condition,
-            negative=negative_condition,
-            latent=tmp_latent,
-            disable_noise=(add_noise == "disable"),
-            start_step=start_at_step,
-            last_step=end_at_step,
-            force_full_denoise=True,
-            sigmas=next_pipeline.config.get("sigmas"),
-            model_negative=model_negative_to_use,
-        )[0]
+                sampler_name = next_pipeline.sampler_name or 'euler'
+                scheduler = next_pipeline.scheduler or 'normal'
+                steps = next_pipeline.steps or 20
+                cfg = next_pipeline.cfg or 8.0
 
-        decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+                start_at_step = int(start_step_rate * steps)
+                end_at_step = int(end_step_rate * steps)
 
+                # Condition
+                current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+                current_negative = context_negative
+                current_loras = context_loras.copy()
+                current_loras.extend(get_loras_from_string(user_loras))
+
+                tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_image)
+                if tmp_positive:
+                    current_positive += ',' + tmp_positive
+                if tmp_negative:
+                    current_negative += ',' + tmp_negative
+                if tmp_loras:
+                    current_loras.extend(tmp_loras)
+
+                model_negative = next_pipeline.config.get("model_negative")
+                model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
+                    model=next_pipeline.model,
+                    clip=next_pipeline.clip,
+                    loras=current_loras,
+                    model_negative=model_negative
+                )
+
+                # Restore reference_latents to original before per-block injection
+                next_pipeline.reference.reference_latents = list(_orig_ref_latents)
+
+                # Enable Edit 补丁已在循环前统一应用到 pipeline model（含
+                # model_negative），get_model_clip 返回的 clone 自动携带补丁闭包；
+                # 此处仅记录本 block 的开关状态供 debug / UI 使用。
+                next_pipeline.config["enable_edit"] = enable_edit
+                # block 级 grounding_px: Krea2 grounded encode 的 VLM 看图分辨率
+                # 上限（正/负条件共用 — 同一 get_conditioning 路径）
+                next_pipeline.config["grounding_px"] = grounding_px
+                # block 级 edit 参数: forward 从 pixel_state 动态读取，支持逐
+                # block 切换 —— edit_mode（fit/crop 几何）与 ref_boost 三参数
+                # （注意力增强; enable_ref_boost_mask 启用时以 context mask
+                # [当前块裁剪区 mask, 与源图同网格] 限定增强区域）
+                if _edit_pixel_state is not None:
+                    _edit_pixel_state["fit_mode"] = edit_mode
+                    _edit_pixel_state["ref_boost"] = ref_boost
+                    _edit_pixel_state["ref_boost_a"] = ref_boost_a
+                    _edit_pixel_state["ref_boost_mask"] = (
+                        resized_mask if (enable_edit and enable_ref_boost_mask) else None
+                    )
+
+                # Context Reference injection (per-block)
+                if enable_edit and context_reference and context_reference_key and server is not None:
+                    ref_img = server.get_history_image(context_reference_key)
+                    if ref_img is not None:
+                        ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
+                        next_pipeline.reference.reference_latents.append(ref_latent)
+                        print(f"[Block {i+1}] Context reference injected: key={context_reference_key}")
+                    else:
+                        print(f"[Block {i+1}] WARNING: context reference key '{context_reference_key}' not found")
+
+                print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
+
+                # Reference args by architecture — Enable Edit 统一控制 edit 路径
+                # Krea2: source patch + grounded encode (语义+像素双路径)
+                # Flux2Klein: 原生 ref_latents — 当前块 latent 作为 reference
+                architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+                is_krea2 = bool(architecture and re.search(r"Krea2", architecture, re.IGNORECASE))
+                is_flux2klein = bool(architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE))
+
+                ref_latent_arg = tmp_latent if (is_flux2klein and enable_edit) else None
+                ref_image_arg = resized_image if ((is_krea2 and enable_edit) or not is_flux2klein) else None
+
+                positive_condition = next_pipeline.get_conditioning(
+                    mode='positive',
+                    clip=clip_to_use,
+                    vae=next_pipeline.vae,
+                    prompt=current_positive,
+                    reference_latent=ref_latent_arg,
+                    reference_image=ref_image_arg,
+                    reference=next_pipeline.reference
+                )
+
+                negative_condition = next_pipeline.get_conditioning(
+                    mode='negative',
+                    clip=clip_to_use,
+                    vae=next_pipeline.vae,
+                    prompt=current_negative,
+                    reference_latent=ref_latent_arg,
+                    reference_image=ref_image_arg,
+                    reference=next_pipeline.reference
+                )
+
+                # 节点级 pixel_state 注入（对齐 krea2edit source patch 数据流）：
+                # source 由 snapshot 节点直接写入 patch 闭包，不经 conditioning 管道。
+                # - edit on: source_latents = 当前块 latent（identity edit: source==target
+                #   初始网格）；并在采样外预编码像素源（对齐参考 target_latent 用途，
+                #   避免 mid-sampling VAE 加载驱逐扩散模型）
+                # - edit off: 清空残留（覆盖 get_conditioning side-channel 写入），走原生 forward
+                if _edit_pixel_state is not None:
+                    if enable_edit and is_krea2:
+                        _edit_pixel_state["source_latents"] = [tmp_latent["samples"]]
+                        _edit_pixel_state["px_cache"] = {}
+                        if _edit_pixel_state.get("source_images"):
+                            Hh, Ww = tmp_latent["samples"].shape[-2], tmp_latent["samples"].shape[-1]
+                            arch_krea2.pre_encode_sources(_edit_pixel_state, Hh, Ww)
+                    else:
+                        _edit_pixel_state["source_images"] = None
+                        _edit_pixel_state["source_latents"] = None
+                        _edit_pixel_state["px_cache"] = {}
+
+                from .sampler_node import _ksampler
+                sampled_latent = _ksampler(
+                    model=model_to_use,
+                    seed=seed,
+                    steps=steps,
+                    cfg=cfg,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
+                    positive=positive_condition,
+                    negative=negative_condition,
+                    latent=tmp_latent,
+                    disable_noise=(add_noise == "disable"),
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=True,
+                    sigmas=next_pipeline.config.get("sigmas"),
+                    model_negative=model_negative_to_use,
+                )[0]
+
+                decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+
+                # Recover to pre-resize (cropped) resolution so next block starts at cropped size
+                if not is_last:
+                    recovered_decoded, _ = recover_size(
+                        image=decoded_image,
+                        resize_info=resize_info,
+                        mask=resized_mask
+                    )
+                    current_image = recovered_decoded
+                    current_mask = cropped_mask
+                else:
+                    current_image = decoded_image
+                    current_mask = resized_mask
+
+                last_resize_info = resize_info
+                last_resized_mask = resized_mask
+                last_resized_image = resized_image
+
+                last_block_debug = {
+                    'enable_edit': enable_edit,
+                    'edit_mode': edit_mode,
+                    'ref_boost': ref_boost,
+                    'ref_boost_a': ref_boost_a,
+                    'enable_ref_boost_mask': enable_ref_boost_mask,
+                    'grounding_px': grounding_px,
+                    'context_reference': context_reference,
+                    'context_reference_key': context_reference_key,
+                }
+
+                print(f"[Block {i+1}] Done: decoded shape={decoded_image.shape}")
+        finally:
+            # Restore pipeline state
+            if next_pipeline.config is not None:
+                next_pipeline.config["enable_edit"] = _orig_enable_edit
+                if _orig_grounding_px is not None:
+                    next_pipeline.config["grounding_px"] = _orig_grounding_px
+                else:
+                    # 原值缺失时删除 key，避免 None 覆盖 get_conditioning 的默认值回退
+                    next_pipeline.config.pop("grounding_px", None)
+                if _edit_patched:
+                    next_pipeline.config["model_negative"] = _orig_model_negative
+            if next_pipeline.reference is not None:
+                next_pipeline.reference.reference_latents = _orig_ref_latents
+            if _edit_patched:
+                # 返回的 pipeline 会成为 _current_pipeline，必须还原为未打补丁的
+                # model，避免补丁闭包（含 source_images/px_cache）跨运行滞留
+                next_pipeline.model = _orig_model
+
+        # Last block: recover_size + recover_crop
         recovered_image, recovered_mask = recover_size(
-            image=decoded_image,
-            resize_info=resize_info,
-            mask=resized_mask
+            image=current_image,
+            resize_info=last_resize_info,
+            mask=last_resized_mask
         )
 
         final_image, final_mask = recover_crop(
@@ -1402,8 +1602,8 @@ class SnapshotDetailerSamplerNode:
 
         detailed_image = final_image
 
+        # Debug data
         try:
-            # Debug mask: use original user_mask cropped to same region (not expanded)
             debug_mask = user_mask
             if debug_mask is not None and crop_info is not None:
                 cx = crop_info.get('crop_x', 0)
@@ -1411,7 +1611,6 @@ class SnapshotDetailerSamplerNode:
                 cw = crop_info.get('crop_width', debug_mask.shape[-1])
                 ch = crop_info.get('crop_height', debug_mask.shape[-2])
                 debug_mask = debug_mask[:, cy:cy+ch, cx:cx+cw]
-                # Resize to match recovered_image for display
                 if debug_mask.shape[-2:] != recovered_image.shape[1:3]:
                     import torch.nn.functional as F
                     debug_mask = F.interpolate(debug_mask.unsqueeze(1), size=(recovered_image.shape[1], recovered_image.shape[2]), mode='bilinear', align_corners=False).squeeze(1)
@@ -1429,17 +1628,14 @@ class SnapshotDetailerSamplerNode:
                 'reference_images': [],
             }
 
-            # 收集所有 reference 图片用于 debug 显示
             ref_imgs = []
-            # reference_image (resized_image, 即 crop+resize 后的输入图)
-            ref_imgs.append(('source (resized)', resized_image))
-            # context reference (如果注入了)
-            if enable_edit and context_reference and context_reference_key and server is not None:
-                ctx_img = server.get_history_image(context_reference_key)
+            if last_resized_image is not None:
+                ref_imgs.append(('source (resized)', last_resized_image))
+            if last_block_debug.get('enable_edit') and last_block_debug.get('context_reference') and last_block_debug.get('context_reference_key') and server is not None:
+                ctx_img = server.get_history_image(last_block_debug['context_reference_key'])
                 if ctx_img is not None:
-                    ref_imgs.append((f'context ref ({context_reference_key})', ctx_img))
-            # reference_latents (来自 ReferenceImageNode/ReferenceLatentNode, 解码后显示)
-            for i, lat in enumerate(next_pipeline.reference.reference_latents):
+                    ref_imgs.append((f'context ref ({last_block_debug["context_reference_key"]})', ctx_img))
+            for i, lat in enumerate(_orig_ref_latents):
                 try:
                     decoded_ref = VAEDecode().decode(vae=next_pipeline.vae, samples=lat)[0]
                     ref_imgs.append((f'reference_latent[{i}]', decoded_ref))
@@ -1460,7 +1656,7 @@ class SnapshotDetailerSamplerNode:
 
         next_pipeline.image = final_image
         next_pipeline.latent = None
-        next_pipeline.mask = user_mask  # 保留原始用户 mask，不用 expand+recover 后的 mask
+        next_pipeline.mask = user_mask
 
         gc.collect()
         mm.soft_empty_cache()
@@ -1659,20 +1855,6 @@ class SnapshotDetailerSamplerNode:
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
 
-        params = {
-            'seed': seed,
-            'add_noise': add_noise,
-            'start_step_rate': start_step_rate,
-            'end_step_rate': end_step_rate,
-            'pixels': pixels,
-            'align': align,
-            'crop_reserve': crop_reserve,
-            'mask_grow': mask_grow,
-            'mask_blur': mask_blur,
-            'enable_edit': enable_edit == "enable",
-            'context_regex': context_regex,
-        }
-
         try:
             while not server.finished:
                 try:
@@ -1740,22 +1922,17 @@ class SnapshotDetailerSamplerNode:
                             diag_mask_max = 0
                         print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
 
-                        # 从 action 中获取 context reference key
-                        # 从 server 同步前端修改过的参数
-                        params['add_noise'] = server.add_noise
-                        params['start_step_rate'] = server.start_step_rate
-                        params['end_step_rate'] = server.end_step_rate
-                        params['pixels'] = server.pixels
-                        params['align'] = server.align
-                        params['crop_reserve'] = server.crop_reserve
-                        params['mask_grow'] = server.mask_grow
-                        params['mask_blur'] = server.mask_blur
-                        params['enable_edit'] = server.enable_edit
-                        params['context_reference'] = server.context_reference
-                        params['context_reference_key'] = action.get('context_reference_key')
+                        # Build global_params and blocks for pipeline execution
+                        global_params = {
+                            'seed': seed,
+                            'mask_grow': server.mask_grow,
+                            'mask_blur': server.mask_blur,
+                            'context_regex': context_regex,
+                        }
+                        blocks = server.blocks
 
-                        next_pipeline, original_image, detailed_image, debug_data = self._run_detailer(
-                            self._current_pipeline, current_mask, user_positive, user_loras, params, server=server
+                        next_pipeline, original_image, detailed_image, debug_data = self._run_pipeline_blocks(
+                            self._current_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
                         )
 
                         server.original_image = original_image

@@ -9,14 +9,11 @@ import math
 import torch
 import torch.nn.functional as F
 import comfy
-import comfy.conds
 import comfy.ldm.common_dit
 import comfy.utils
 
 
 VLM_MAX_PIXELS = 384 * 384
-REF_LATENT_MAX_PIXELS = 1024 * 1024
-REF_SNAP = 16
 GROUNDING_PX_DEFAULT = 768
 
 SYSTEM_PROMPT_DEFAULT = (
@@ -64,17 +61,6 @@ def _fit_src(src, H, W):
     y0, x0 = (sh - ch) // 2, (sw - cw) // 2
     src = src[..., y0:y0 + ch, x0:x0 + cw]
     return F.interpolate(src.float(), size=(H, W), mode="bilinear")
-
-
-def _fit_area(samples, max_pixels, snap=1):
-    """将 (B, C, H, W) 图像缩小（不放大）到 max_pixels 以内，保持宽高比，对齐到 snap。"""
-    h, w = samples.shape[2], samples.shape[3]
-    scale = min(1.0, math.sqrt(max_pixels / (w * h)))
-    nw = max(round(w * scale / snap) * snap, snap)
-    nh = max(round(h * scale / snap) * snap, snap)
-    if (nh, nw) == (h, w):
-        return samples
-    return comfy.utils.common_upscale(samples, nw, nh, "area", "disabled")
 
 
 def _fit_encode_image(image, vae, H, W, cache, key, fit_mode="crop"):
@@ -180,7 +166,8 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
     h_, w_ = H // patch, W // patch
 
     # 处理源潜空间: 适配目标网格、pad、batch
-    src_list = list(ref_latents) if not isinstance(ref_latents, (list, tuple)) else ref_latents
+    # 裸 tensor 时按整体包裹（list(tensor) 会沿 dim0 错误迭代）
+    src_list = ref_latents if isinstance(ref_latents, (list, tuple)) else [ref_latents]
     srcs = []
     for sl in src_list:
         src = _to_4d(sl).to(x.device, x.dtype)
@@ -209,6 +196,10 @@ def krea2_edit_forward(m, x, timesteps, context, ref_latents, transformer_option
 
     device = combined.device
     if pos_mode == "stride1" and ref_native:
+        if any(h_ - gh > 2 or w_ - gw > 2 for gh, gw in src_grids):
+            print("[Krea2] NOTE: fit margins >2 tokens (source/output aspect-ratio gap is large). "
+                  "fit is trained for matched/near-matched AR; for a big AR change prefer 'crop', "
+                  "or set the output AR closer to the source.", flush=True)
         ref_ids = [_imgids_offset(bs, i + 1, gh, gw, h_, w_, device)
                    for i, (gh, gw) in enumerate(src_grids)]
     else:
@@ -246,89 +237,102 @@ def apply_model_patch(model_patcher, ref_boost=1.0, ref_boost_a=1.0, ref_boost_m
                       fit_mode="fit", vae=None, pixel_state=None):
     """对 Krea2 模型做 edit forward patch（单流 + RoPE frame 区分）。
 
-    使用 extra_conds 机制传递 reference_latents，
-    forward 使用 krea2_edit_forward（单流架构）。
-    fit_mode + vae: 启用像素空间源图适配路径（防模糊）。
+    对齐 comfyui-krea2edit (source patch) 的数据流：source 由节点级
+    pixel_state 闭包持有（不经 conditioning 管道）——
+      - source_images + vae: 像素路径（fit/crop，按目标分辨率编码，防模糊）
+      - source_latents: latent fallback（无 vae/像素时）
+    conditioning 只承载 grounded encode 的语义输出（纯文本+vision tokens）。
     pixel_state: 可选共享状态 dict，用于多个 model patcher（如 model_negative）共享同一组源图。
     """
     m = model_patcher.clone()
     base_model = m.model
     dit = m.get_model_object("diffusion_model")
 
-    orig_extra_conds = base_model.extra_conds
-    orig_extra_conds_shapes = base_model.extra_conds_shapes
     orig_forward = dit.forward
 
     if pixel_state is None:
-        pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "px_cache": {}}
+        pixel_state = {"fit_mode": fit_mode, "vae": vae,
+                       "source_images": None, "source_latents": None, "px_cache": {}}
+    # ref_boost 三参数动态化: pixel_state 优先（block 级逐块切换），
+    # patch 参数作为初始默认（主 SamplerNode / PipelineEnableEditNode 路径）
+    pixel_state.setdefault("ref_boost", ref_boost)
+    pixel_state.setdefault("ref_boost_a", ref_boost_a)
+    pixel_state.setdefault("ref_boost_mask", ref_boost_mask)
     m.model_options["_krea2_pixel_state"] = pixel_state
 
-    def extra_conds(**kwargs):
-        out = orig_extra_conds(**kwargs)
-        ref_latents = kwargs.get("reference_latents", None)
-        if ref_latents is not None:
-            out["ref_latents"] = comfy.conds.CONDList(
-                [base_model.process_latent_in(lat) for lat in ref_latents]
-            )
-        return out
-
-    def extra_conds_shapes(**kwargs):
-        out = orig_extra_conds_shapes(**kwargs)
-        ref_latents = kwargs.get("reference_latents", None)
-        if ref_latents is not None:
-            out["ref_latents"] = list(
-                [1, 16, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 16]
-            )
-        return out
-
     def forward(x, timesteps, context, attention_mask=None, transformer_options={}, ref_latents=None, **kwargs):
-        if ref_latents is None or len(ref_latents) == 0:
-            return orig_forward(x, timesteps, context, attention_mask=attention_mask, transformer_options=transformer_options, **kwargs)
-
-        # 像素路径: 在 forward 时按目标分辨率编码源图（防模糊）
+        # ref_latents 参数仅作签名兼容（原生 execute 签名含此位）；
+        # source 一律来自 pixel_state（节点级注入，对齐参考闭包持有模式）
         src_images = pixel_state.get("source_images")
+        src_latents = pixel_state.get("source_latents")
         pxe = pixel_state.get("vae")
         fmode = pixel_state.get("fit_mode", "crop")
+        rb = pixel_state.get("ref_boost", ref_boost)
+        rba = pixel_state.get("ref_boost_a", ref_boost_a)
+        rbm = pixel_state.get("ref_boost_mask", ref_boost_mask)
 
         if src_images is not None and pxe is not None and len(src_images) > 0:
+            # 像素路径: 按目标分辨率编码源图（防模糊）
             xx = _to_4d(x)
             Hh, Ww = xx.shape[-2], xx.shape[-1]
             src = []
             for i, img in enumerate(src_images):
                 lat = _fit_encode_image(img, pxe, Hh, Ww, pixel_state["px_cache"], (str(i), Hh, Ww), fmode)
                 src.append(base_model.process_latent_in(lat))
-            ref_latents = src
             ref_native = (fmode == "fit")
             pos_mode = ("stride1" if fmode == "fit" else "anchor")
-        else:
+        elif src_latents is not None and len(src_latents) > 0:
+            # latent fallback: 与目标同网格（detailer 场景 source==target 初始 latent）
+            src = [base_model.process_latent_in(_to_4d(sl)) for sl in src_latents]
             ref_native = False
             pos_mode = "anchor"
+        else:
+            return orig_forward(x, timesteps, context, attention_mask=attention_mask,
+                                transformer_options=transformer_options, **kwargs)
 
-        return krea2_edit_forward(dit, x, timesteps, context, ref_latents, transformer_options,
-                                  ref_boost=ref_boost, ref_boost_a=ref_boost_a, ref_boost_mask=ref_boost_mask,
+        return krea2_edit_forward(dit, x, timesteps, context, src, transformer_options,
+                                  ref_boost=rb, ref_boost_a=rba, ref_boost_mask=rbm,
                                   ref_native=ref_native, pos_mode=pos_mode)
 
-    m.add_object_patch("extra_conds", extra_conds)
-    m.add_object_patch("extra_conds_shapes", extra_conds_shapes)
     m.add_object_patch("diffusion_model.forward", forward)
     return m
+
+
+def pre_encode_sources(pixel_state, Hh, Ww):
+    """采样前预热像素路径 px_cache（对齐参考 target_latent 的预编码用途）。
+
+    在采样循环外 VAE 编码源图，避免 mid-sampling VAE 加载驱逐扩散模型
+    （参考警告: 'the VAE is pulled onto the GPU mid-sampling and can evict
+    part of the diffusion model, slowing every remaining step'）。
+    Hh/Ww 为目标 latent 网格尺寸（samples.shape[-2:]）。
+    """
+    src_images = pixel_state.get("source_images") if pixel_state else None
+    pxe = pixel_state.get("vae") if pixel_state else None
+    if not src_images or pxe is None:
+        return
+    fmode = pixel_state.get("fit_mode", "crop")
+    for i, img in enumerate(src_images):
+        _fit_encode_image(img, pxe, Hh, Ww, pixel_state["px_cache"], (str(i), Hh, Ww), fmode)
+    print(f"[Krea2] pre-encoded {len(src_images)} source(s) at target {Hh * 8}x{Ww * 8}px "
+          f"(before sampling, fit_mode={fmode})", flush=True)
 
 
 # ====================== 条件编码 (grounded encode) ======================
 
 def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_image, reference, conditioning_set_values, VAEDecode):
-    """Krea2: grounded encode + 参考潜空间。
+    """Krea2: grounded encode（纯语义路径，对齐 Krea2EditGroundedEncode）。
 
-    使用 system prompt 模板让 VLM "看到"源图（语义路径），
-    同时 VAE 编码源图为潜空间并附加到 conditioning（外观路径）。
+    prompt + 源图经 Qwen3-VL（vision tokens + system prompt 模板）；
+    negative = 空 prompt + 同图（训练 unconditional）。
+    外观路径（source patch）由 model patch 的 pixel_state 承担，
+    conditioning 不携带任何 latent —— 对齐参考节点数据流分离设计。
     """
     grounding_px = self.config.get("grounding_px", GROUNDING_PX_DEFAULT) if self.config else GROUNDING_PX_DEFAULT
     system_prompt = self.config.get("krea2_system_prompt", "") if self.config else ""
     sp = system_prompt.strip() if system_prompt else SYSTEM_PROMPT_DEFAULT
 
     images_vl = []
-    ref_latents = []
-    source_images_pixel = []  # 像素空间源图（用于 forward 时 _fit_encode_image）
+    source_images_pixel = []  # 像素空间源图（side-channel 写入 pixel_state）
 
     # 处理当前 pipeline 图像 (reference_image) — 编辑场景的源图
     if reference_image is not None:
@@ -346,11 +350,7 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
         # 像素路径源图（原始分辨率，forward 时按目标分辨率裁剪+编码）
         source_images_pixel.append(reference_image[:, :, :, :3])
 
-        # VAE 潜空间: 缩小到 REF_LATENT_MAX_PIXELS 以内
-        s_fit = _fit_area(samples, REF_LATENT_MAX_PIXELS, snap=REF_SNAP)
-        ref_latents.append(vae.encode(s_fit.movedim(1, -1)[:, :, :, :3]))
-
-    # 处理额外参考潜空间 (来自 ReferenceImageNode / ReferenceLatentNode)
+    # 处理额外参考潜空间 (来自 ReferenceImageNode / ReferenceLatentNode / context_reference)
     for lat in reference.reference_latents:
         samples = lat["samples"]
         decoded = VAEDecode().decode(vae=vae, samples={"samples": samples})[0]
@@ -368,14 +368,11 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
         # 像素路径源图
         source_images_pixel.append(decoded[:, :, :, :3])
 
-        # VAE 潜空间
-        s_fit = _fit_area(s, REF_LATENT_MAX_PIXELS, snap=REF_SNAP)
-        ref_latents.append(vae.encode(s_fit.movedim(1, -1)[:, :, :, :3]))
-
     if len(images_vl) > 0:
-        print(f"[Reference] Krea2: {len(images_vl)} reference image(s) -> grounded encode + VAE re-encode")
+        print(f"[Reference] Krea2: {len(images_vl)} reference image(s) -> grounded encode")
 
-    # 存储像素路径源图供 forward 使用
+    # side-channel: 像素源图写入 pixel_state（主 SamplerNode 的 edit 入口；
+    # snapshot 节点随后做节点级覆盖写 + 预编码）
     pixel_state = self.model.model_options.get("_krea2_pixel_state", None) if self.model is not None else None
     if pixel_state is not None and pixel_state.get("vae") is not None and len(source_images_pixel) > 0:
         pixel_state["source_images"] = source_images_pixel
@@ -388,12 +385,12 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     template = ("<|im_start|>system\n" + sp + "<|im_end|>\n<|im_start|>user\n"
                 + vis + "{}<|im_end|>\n<|im_start|>assistant\n")
 
-    tokens = clip.tokenize(prompt, images=images_vl, llama_template=template)
+    # CFG negative grounding: 训练的 unconditional = 空 prompt + 同图。
+    # 对齐 Krea2EditGroundedEncode 的用法: "ground the NEGATIVE too:
+    # empty prompt, same image (matches training's unconditional)"。
+    # negative prompt 文本仅在无图可 ground 时保留 (text-only fallback)。
+    encode_prompt = "" if (mode == 'negative' and nimg > 0) else prompt
+    tokens = clip.tokenize(encode_prompt, images=images_vl, llama_template=template)
     condition = clip.encode_from_tokens_scheduled(tokens)
-
-    if len(ref_latents) > 0:
-        condition = conditioning_set_values(
-            condition, {"reference_latents": ref_latents}, append=True
-        )
 
     return condition

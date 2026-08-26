@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, DetailerParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -44,19 +44,29 @@ const App: React.FC = () => {
   const maskIframeRef = useRef<HTMLIFrameElement>(null);
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
 
-  const [params, setParams] = useState<DetailerParams>({
+  const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
     start_step_rate: 0.8,
     end_step_rate: 1.0,
     pixels: 1048576,
     align: 8,
     crop_reserve: 32,
-    mask_grow: 32,
-    mask_blur: 32,
     enable_edit: false,
+    edit_mode: 'fit' as const,
+    ref_boost: 4.0,
+    ref_boost_a: 1.0,
+    enable_ref_boost_mask: false,
+    grounding_px: 768,
     context_reference: false,
     context_reference_key: null,
-  });
+  };
+  const [blocks, setBlocks] = useState<PipelineBlock[]>([
+    { id: 'block-1', type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } },
+  ]);
+  const [architecture, setArchitecture] = useState<string | null>(null);
+  const [maskGrow, setMaskGrow] = useState(32);
+  const [maskBlur, setMaskBlur] = useState(32);
+  const blockIdCounter = useRef(2);
 
   // Fetch config on mount
   useEffect(() => {
@@ -64,21 +74,14 @@ const App: React.FC = () => {
       .then(r => r.json())
       .then((data: ServerConfig) => {
         setConfig(data);
-        setParams({
-          add_noise: data.add_noise,
-          start_step_rate: data.start_step_rate,
-          end_step_rate: data.end_step_rate,
-          pixels: data.pixels,
-          align: data.align,
-          crop_reserve: data.crop_reserve,
-          mask_grow: data.mask_grow,
-          mask_blur: data.mask_blur,
-          enable_edit: data.enable_edit,
-          context_reference: data.context_reference,
-          context_reference_key: data.context_reference_key,
-        });
+        setMaskGrow(data.mask_grow);
+        setMaskBlur(data.mask_blur);
+        if (data.blocks && data.blocks.length > 0) {
+          setBlocks(data.blocks);
+        }
         setDetailStatus(data.detail_status);
         setCurrentContextKey(data.current_context_key ?? null);
+        setArchitecture(data.architecture ?? null);
         if (data.has_package) {
           fetch('/api/package')
             .then(r => r.json())
@@ -323,6 +326,9 @@ const App: React.FC = () => {
   const [resultImages, setResultImages] = useState<{original: string; detailed: string; originalKey: string | null; detailedKey: string | null} | null>(null);
   useEffect(() => {
     if (detailStatus !== 'done') return;
+    // Refresh history so new detailed image is available in blend/select dialogs
+    // without requiring a visit to the context tab
+    refreshHistory();
     fetch('/api/result')
       .then(r => r.json())
       .then(data => {
@@ -345,7 +351,7 @@ const App: React.FC = () => {
         iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
       }
     }, 200);
-  }, [detailStatus]);
+  }, [detailStatus, refreshHistory]);
 
   const handleRunTag = useCallback(async (mode: 'mask' | 'covered' | 'full') => {
     setError(null);
@@ -421,15 +427,13 @@ const App: React.FC = () => {
       await fetch('/api/run_detailer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          context_reference_key: params.enable_edit && params.context_reference ? params.context_reference_key : null,
-        }),
+        body: JSON.stringify({}),
       });
     } catch (e: any) {
       setError('Failed to start detailer: ' + e.message);
       setDetailStatus('idle');
     }
-  }, [params.enable_edit, params.context_reference, params.context_reference_key, syncPrompt]);
+  }, [syncPrompt]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
@@ -459,6 +463,10 @@ const App: React.FC = () => {
       const data = await res.json();
       if (data.success) {
         setCurrentPipelineKey(`${packageIdx}_${pipelineIdx}`);
+        // Refresh architecture (edit settings are rendered per-architecture)
+        fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
+          setArchitecture(cfg.architecture ?? null);
+        }).catch(() => {});
         // Refresh context preview + mask iframe
         fetch('/api/context_preview').then(r => r.json()).then(() => {}).catch(() => {});
         setTimeout(() => {
@@ -528,13 +536,66 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleParamChange = useCallback((next: DetailerParams) => {
-    setParams(next);
+  const handleBlocksChange = useCallback((next: PipelineBlock[]) => {
+    setBlocks(next);
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(next),
+      body: JSON.stringify({ blocks: next }),
     }).catch(() => {});
+  }, []);
+
+  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur', value: number) => {
+    if (key === 'mask_grow') setMaskGrow(value);
+    if (key === 'mask_blur') setMaskBlur(value);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: value }),
+    }).catch(() => {});
+  }, []);
+
+  const handleAddBlock = useCallback((type: 'detailer' | 'interface') => {
+    const id = 'block-' + blockIdCounter.current++;
+    const newBlock: PipelineBlock = type === 'detailer'
+      ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
+      : { id, type: 'interface', name: 'Interface', params: { ...defaultBlockParams }, interface_index: 0 };
+    setBlocks(prev => {
+      const next = [...prev, newBlock];
+      fetch('/api/update_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks: next }),
+      }).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const handleRemoveBlock = useCallback((blockId: string) => {
+    setBlocks(prev => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter(b => b.id !== blockId);
+      fetch('/api/update_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks: next }),
+      }).catch(() => {});
+      return next;
+    });
+  }, []);
+
+  const handleReorderBlocks = useCallback((fromIdx: number, toIdx: number) => {
+    setBlocks(prev => {
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      fetch('/api/update_config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ blocks: next }),
+      }).catch(() => {});
+      return next;
+    });
   }, []);
 
   const handleFinishClick = useCallback(() => {
@@ -650,8 +711,15 @@ const App: React.FC = () => {
         onRefreshHistory={refreshHistory}
         promptIframeRef={promptIframeRef}
         maskIframeRef={maskIframeRef}
-        params={params}
-        onParamChange={handleParamChange}
+        blocks={blocks}
+        architecture={architecture}
+        maskGrow={maskGrow}
+        maskBlur={maskBlur}
+        onBlocksChange={handleBlocksChange}
+        onGlobalParamChange={handleGlobalParamChange}
+        onAddBlock={handleAddBlock}
+        onRemoveBlock={handleRemoveBlock}
+        onReorderBlocks={handleReorderBlocks}
         onRunTag={handleRunTag}
         onRunDetailer={handleRunDetailer}
         onSelectImage={handleSelectImage}

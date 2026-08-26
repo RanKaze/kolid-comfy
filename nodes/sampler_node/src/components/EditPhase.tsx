@@ -1,36 +1,67 @@
 import React, { useState } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
-import type { DetailerParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
+import type { PipelineBlock, DetailerBlockParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
   const s = 22;
-  const sw = 1.6;
+  const sw = 1.7;
   const props = { width: s, height: s, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: sw, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
   switch (icon) {
     case 'mask': return (
-      <svg {...props}><rect x="3" y="3" width="7" height="7" fill="currentColor" opacity="0.15" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" fill="currentColor" opacity="0.15" /></svg>
+      <svg {...props}>
+        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" opacity="0.15" fill="currentColor" stroke="none" />
+        <path d="M8 12h8M12 8v8" />
+        <circle cx="12" cy="12" r="3.5" />
+      </svg>
     );
     case 'tag': return (
-      <svg {...props}><path d="M3 7l5-4 13 4-4 13-13-4z" /><circle cx="14" cy="10" r="1.5" /></svg>
+      <svg {...props}>
+        <path d="M12.72 2.23l7.05 7.05a2.5 2.5 0 010 3.54l-6.36 6.36a2.5 2.5 0 01-3.54 0l-6.36-6.36a2.5 2.5 0 010-3.54l7.05-7.05a1.5 1.5 0 012.16 0z" />
+        <circle cx="9.5" cy="9.5" r="1.2" fill="currentColor" stroke="none" />
+      </svg>
     );
     case 'prompt': return (
-      <svg {...props}><path d="M4 4h16v16H4z" /><path d="M8 9h8M8 13h6M8 17h4" /></svg>
+      <svg {...props}>
+        <path d="M4 6h16M4 10h12M4 14h14M4 18h10" strokeWidth={1.5} />
+        <path d="M20 16l3 3-3 3" />
+      </svg>
     );
     case 'draw': return (
-      <svg {...props}><path d="M3 21l4-1 11-11-3-3L4 17z" /><path d="M14 6l4 4" /><path d="M18 2l4 4-2 2-4-4z" /></svg>
+      <svg {...props}>
+        <path d="M12 20h9" strokeWidth={1.5} />
+        <path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />
+      </svg>
     );
     case 'blend': return (
-      <svg {...props}><rect x="3" y="3" width="18" height="7" rx="1" /><path d="M3 13.5c3 0 3 2 6 2s3-2 6-2 3 2 6 2" /><rect x="3" y="16" width="18" height="5" rx="1" /></svg>
+      <svg {...props}>
+        <circle cx="9" cy="12" r="5" opacity="0.3" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="12" r="5" />
+        <path d="M12 7.5v9" opacity="0.4" />
+      </svg>
     );
     case 'context': return (
-      <svg {...props}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9.5" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg>
+      <svg {...props}>
+        <rect x="3" y="4" width="18" height="16" rx="2.5" />
+        <circle cx="8.5" cy="9.5" r="1.5" fill="currentColor" stroke="none" />
+        <path d="M3 15l5-5 4 4 5-5 4 4" strokeWidth={1.5} />
+      </svg>
     );
     case 'interface': return (
-      <svg {...props}><rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" /><rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" fill="currentColor" opacity="0.4" /><rect x="3" y="3" width="7" height="7" fill="currentColor" opacity="0.4" /></svg>
+      <svg {...props}>
+        <rect x="4" y="5" width="16" height="3" rx="1.5" />
+        <rect x="4" y="11" width="12" height="3" rx="1.5" />
+        <rect x="4" y="17" width="8" height="3" rx="1.5" />
+      </svg>
     );
     case 'pipeline': return (
-      <svg {...props}><path d="M4 14l4 0 0-4 8 0 0 4 4 0" /><circle cx="4" cy="14" r="1.5" /><circle cx="20" cy="14" r="1.5" /></svg>
+      <svg {...props}>
+        <circle cx="6" cy="7" r="2.5" />
+        <circle cx="18" cy="7" r="2.5" />
+        <circle cx="6" cy="17" r="2.5" />
+        <circle cx="18" cy="17" r="2.5" />
+        <path d="M8.5 7h7M8.5 17h7M6 9.5v5M18 9.5v5" strokeWidth={1.5} />
+      </svg>
     );
     default: return <svg {...props}><circle cx="12" cy="12" r="9" /></svg>;
   }
@@ -72,8 +103,16 @@ interface EditPhaseProps {
   onRefreshHistory: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   maskIframeRef: React.RefObject<HTMLIFrameElement>;
-  params: DetailerParams;
-  onParamChange: (params: DetailerParams) => void;
+  blocks: PipelineBlock[];
+  /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
+  architecture: string | null;
+  maskGrow: number;
+  maskBlur: number;
+  onBlocksChange: (blocks: PipelineBlock[]) => void;
+  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur', value: number) => void;
+  onAddBlock: (type: 'detailer' | 'interface') => void;
+  onRemoveBlock: (blockId: string) => void;
+  onReorderBlocks: (fromIdx: number, toIdx: number) => void;
   onRunTag: (mode: 'mask' | 'covered' | 'full') => void;
   onRunDetailer: () => void;
   onSelectImage: (key: string) => void;
@@ -105,7 +144,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   maskConfirmed, promptReady, autoTagging, hasTagger, tagPreviews, tagResult,
   debugData, detailStatus, detailProgress, resultImages,
   history, onRefreshHistory, promptIframeRef, maskIframeRef,
-  params, onParamChange, onRunTag, onRunDetailer, onSelectImage,
+  blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  onRunTag, onRunDetailer, onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
@@ -116,7 +156,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
   const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [showRefSelect, setShowRefSelect] = useState(false);
+  const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
   const [contextPreview, setContextPreview] = useState<{ image: string; mask: string | null } | null>(null);
 
   // Fetch context preview when entering draw tab
@@ -141,9 +181,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     ...(pipelinePackages.length > 0 ? [{ id: 'pipeline' as Tab, icon: 'pipeline', color: '#30d158' }] : []),
   ];
 
-  const updateParam = (key: keyof DetailerParams, value: string | number | boolean) => {
-    onParamChange({ ...params, [key]: value });
+  const updateBlockParam = (blockId: string, key: keyof DetailerBlockParams, value: string | number | boolean) => {
+    onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } } : b));
   };
+
+  // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
+  const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -205,7 +248,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             </button>
           ))}
         </div>
-        <button style={styles.finishBtn} onClick={onFinishClick}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="8" /></svg></button>
+        <button style={styles.finishBtn} onClick={onFinishClick} title="Finish">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" />
+            <path d="M2 17l10 5 10-5" />
+            <path d="M2 12l10 5 10-5" />
+          </svg>
+        </button>
       </div>
 
       {/* Tab content — iframes always mounted, hidden via display:none */}
@@ -262,64 +311,180 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                 </div>
               )}
-              <div style={styles.sectionTitle}>Sampling Parameters</div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Add Noise</label>
-                <select style={styles.paramSelect} value={params.add_noise} onChange={e => updateParam('add_noise', e.target.value)}>
-                  <option value="enable">enable</option>
-                  <option value="disable">disable</option>
-                </select>
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Start Step</label>
-                <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={params.start_step_rate} onChange={e => updateParam('start_step_rate', parseFloat(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>End Step</label>
-                <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={params.end_step_rate} onChange={e => updateParam('end_step_rate', parseFloat(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Pixels</label>
-                <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={params.pixels} onChange={e => updateParam('pixels', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Align</label>
-                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={params.align} onChange={e => updateParam('align', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Crop Reserve</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.crop_reserve} onChange={e => updateParam('crop_reserve', parseInt(e.target.value))} />
-              </div>
+              {/* Global params */}
+              <div style={styles.sectionTitle}>Mask Settings</div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Grow</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.mask_grow} onChange={e => updateParam('mask_grow', parseInt(e.target.value))} />
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
               </div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Blur</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={params.mask_blur} onChange={e => updateParam('mask_blur', parseInt(e.target.value))} />
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskBlur} onChange={e => onGlobalParamChange('mask_blur', parseInt(e.target.value))} />
               </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Enable Edit</label>
-                <IOSToggle checked={params.enable_edit} onChange={v => updateParam('enable_edit', v)} />
-              </div>
-              {params.enable_edit && (
-                <div style={styles.editSubSection}>
-                  <div style={styles.paramRow}>
-                    <label style={styles.paramLabel}>Context Reference</label>
-                    <IOSToggle checked={params.context_reference} onChange={v => updateParam('context_reference', v)} />
-                  </div>
-                  {params.context_reference && (
-                    <div style={styles.paramRow}>
-                      <label style={styles.paramLabel}>Reference Image</label>
-                      <button style={styles.contextLoadBtn} onClick={() => setShowRefSelect(true)}>
-                        {params.context_reference_key
-                          ? (history.find(h => h.key === params.context_reference_key)?.name ?? 'Selected')
-                          : 'Select'}
-                      </button>
+
+              {/* Pipeline Blocks */}
+              <div style={styles.sectionTitle}>Pipeline Blocks</div>
+              {blocks.map((block, blockIdx) => (
+                <div key={block.id} style={{
+                  background: 'rgba(255,255,255,0.03)',
+                  borderRadius: 10,
+                  marginBottom: 8,
+                  border: '0.5px solid rgba(255,255,255,0.08)',
+                  overflow: 'hidden',
+                }}>
+                  {/* Block header: drag handle + centered title + actions */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', height: 32,
+                    borderBottom: '0.5px solid rgba(255,255,255,0.06)',
+                  }}>
+                    {/* Drag handle */}
+                    <div
+                      draggable
+                      onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(blockIdx)); e.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                      onDrop={(e) => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (!isNaN(from)) onReorderBlocks(from, blockIdx); }}
+                      title="Drag to reorder"
+                      style={{
+                        width: 28, height: '100%', flexShrink: 0,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        cursor: 'grab', color: 'rgba(255,255,255,0.2)',
+                      }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/><circle cx="3" cy="6" r="1.3"/><circle cx="9" cy="6" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/></svg>
                     </div>
-                  )}
+                    {/* Centered title */}
+                    <span style={{
+                      flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
+                      color: block.type === 'detailer' ? '#30d158' : '#bf5af2',
+                    }}>{block.name}</span>
+                    {/* Action buttons */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: 28, flexShrink: 0, justifyContent: 'center' }}>
+                      {blocks.length > 1 && (
+                        <button title="Remove" style={{ background: 'none', border: 'none', color: 'rgba(255,90,90,0.5)', cursor: 'pointer', fontSize: 13, padding: '2px 4px', lineHeight: 1 }}
+                          onClick={() => onRemoveBlock(block.id)}>✕</button>
+                      )}
+                    </div>
+                  </div>
+                  {/* Block params */}
+                  <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {block.type === 'detailer' && (
+                      <>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Add Noise</label>
+                          <select style={styles.paramSelect} value={block.params.add_noise} onChange={e => updateBlockParam(block.id, 'add_noise', e.target.value)}>
+                            <option value="enable" style={{ background: '#1c1c1e', color: '#fff' }}>enable</option>
+                            <option value="disable" style={{ background: '#1c1c1e', color: '#fff' }}>disable</option>
+                          </select>
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Start Step</label>
+                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={block.params.start_step_rate} onChange={e => updateBlockParam(block.id, 'start_step_rate', parseFloat(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>End Step</label>
+                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={block.params.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Pixels</label>
+                          <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={block.params.pixels} onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Align</label>
+                          <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={block.params.align} onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Crop Reserve</label>
+                          <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={block.params.crop_reserve} onChange={e => updateBlockParam(block.id, 'crop_reserve', parseInt(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Enable Edit</label>
+                          <IOSToggle checked={block.params.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
+                        </div>
+                        {block.params.enable_edit && (
+                          <div style={styles.editSubSection}>
+                            {isKrea2 && (
+                              <div style={styles.paramRow}>
+                                <label style={styles.paramLabel}>Edit Mode</label>
+                                <select
+                                  style={styles.paramSelect}
+                                  value={block.params.edit_mode ?? 'fit'}
+                                  title="fit: 整图适配目标网格 + stride-1 位置 ID（训练匹配几何，防模糊）。crop: center-crop 到目标宽高比（适合源/目标 AR 差距大的场景）。"
+                                  onChange={e => updateBlockParam(block.id, 'edit_mode', e.target.value)}
+                                >
+                                  <option value="fit" style={{ background: '#1c1c1e', color: '#fff' }}>fit</option>
+                                  <option value="crop" style={{ background: '#1c1c1e', color: '#fff' }}>crop</option>
+                                </select>
+                              </div>
+                            )}
+                            {isKrea2 && (
+                              <>
+                                <div style={styles.paramRow}>
+                                  <label style={styles.paramLabel}>Grounding Px</label>
+                                  <input style={styles.paramInput} type="number" min={0} max={2048} step={64}
+                                    title="Grounded encode 的 VLM 看图分辨率上限（正/负提示词共用同一源图缩放）。更高 = 更清晰的语义理解但更多 vision tokens / 显存; 0 = 不限制。"
+                                    value={block.params.grounding_px ?? 768}
+                                    onChange={e => updateBlockParam(block.id, 'grounding_px', parseInt(e.target.value) || 0)} />
+                                </div>
+                                <div style={styles.paramRow}>
+                                  <label style={styles.paramLabel}>Ref Boost</label>
+                                  <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
+                                    title="参考保真度: 最后一个参考（源图）的 target->ref 注意力乘数。>1 拉向参考外观, <1 放松。最优值因模型而异。"
+                                    value={block.params.ref_boost ?? 4.0}
+                                    onChange={e => updateBlockParam(block.id, 'ref_boost', parseFloat(e.target.value) || 0)} />
+                                </div>
+                                <div style={styles.paramRow}>
+                                  <label style={styles.paramLabel}>Ref Boost A</label>
+                                  <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
+                                    title="第一个参考（场景, 仅多参考如 Context Ref 时生效）的注意力乘数。单参考工作流无效果。"
+                                    value={block.params.ref_boost_a ?? 1.0}
+                                    onChange={e => updateBlockParam(block.id, 'ref_boost_a', parseFloat(e.target.value) || 0)} />
+                                </div>
+                                <div style={styles.paramRow} title="启用后以 context mask（当前块裁剪区 mask）限定 ref_boost 增强区域 — 仅 mask 内的参考 token 被增强, 保护 mask 外区域。">
+                                  <label style={styles.paramLabel}>Ref Boost Mask</label>
+                                  <IOSToggle checked={block.params.enable_ref_boost_mask ?? false}
+                                    onChange={v => updateBlockParam(block.id, 'enable_ref_boost_mask', v)} />
+                                </div>
+                              </>
+                            )}
+                            <div style={styles.paramRow}>
+                              <label style={styles.paramLabel}>Context Ref</label>
+                              <IOSToggle checked={block.params.context_reference} onChange={v => updateBlockParam(block.id, 'context_reference', v)} />
+                            </div>
+                            {block.params.context_reference && (
+                              <div style={styles.paramRow}>
+                                <label style={styles.paramLabel}>Ref Image</label>
+                                <button style={styles.contextLoadBtn} onClick={() => setShowRefSelect(block.id)}>
+                                  {block.params.context_reference_key
+                                    ? (history.find(h => h.key === block.params.context_reference_key)?.name ?? 'Selected')
+                                    : 'Select'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {block.type === 'interface' && (
+                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', padding: '4px 0' }}>
+                        Interface block — executes sub-graph (coming soon)
+                      </div>
+                    )}
+                  </div>
                 </div>
-              )}
+              ))}
+              {/* Add block buttons — bottom */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                <button style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8,
+                  background: 'rgba(48,209,88,0.1)', border: '0.5px solid rgba(48,209,88,0.2)',
+                  color: '#30d158', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }} onClick={() => onAddBlock('detailer')}>+ Detailer</button>
+                <button style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8,
+                  background: 'rgba(191,90,242,0.1)', border: '0.5px solid rgba(191,90,242,0.2)',
+                  color: '#bf5af2', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }} onClick={() => onAddBlock('interface')}>+ Interface</button>
+              </div>
             </div>
 
             {/* Right: status / results / run button */}
@@ -503,15 +668,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         return (
           <div style={styles.overlay}>
             <div style={styles.dialog}>
-              <div style={styles.dialogTitle}>Select Reference Image{cw && ch ? ` (${cw}×${ch})` : ''}</div>
+              <div style={styles.dialogTitle}>Select Reference Image{cw && ch ? ' (' + cw + 'x' + ch + ')' : ''}</div>
               {eligible.length === 0 ? (
                 <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No eligible images available.</div>
               ) : (
                 <div style={styles.dialogHistoryGrid}>
                   {eligible.map(h => (
                     <button key={h.key} style={styles.historyCard} onClick={() => {
-                      updateParam('context_reference_key', h.key);
-                      setShowRefSelect(false);
+                      updateBlockParam(showRefSelect, 'context_reference_key', h.key);
+                      setShowRefSelect(null);
                     }}>
                       <div style={styles.historyImgWrap}>
                         <img src={h.src} alt={h.name} style={styles.historyImg} />
@@ -522,7 +687,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               )}
               <div style={styles.dialogActions}>
-                <button style={styles.cancelBtn} onClick={() => setShowRefSelect(false)}>Cancel</button>
+                <button style={styles.cancelBtn} onClick={() => setShowRefSelect(null)}>Cancel</button>
               </div>
             </div>
           </div>
@@ -566,7 +731,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     >
                       <div style={styles.historyImgWrap}>
                         <img src={h.src} alt={h.name} style={styles.historyImg} />
-                        {selectedKeys.has(h.key) && <div style={styles.historyCheck}>✓</div>}
+                        {selectedKeys.has(h.key) && (
+                          <div style={styles.historyCheck}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M5 13l4 4L19 7" />
+                            </svg>
+                          </div>
+                        )}
                       </div>
                       <div style={styles.historyName}>{h.name}</div>
                     </button>
@@ -783,8 +954,8 @@ const InterfaceTab: React.FC<{
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Operation</label>
                 <select style={styles.paramSelect} value={execOptions[idx]?.operation ?? 'default'} onChange={e => updateOpts(idx, { operation: e.target.value as 'default' | 'crop' })}>
-                  <option value="default">默认 (整图)</option>
-                  <option value="crop">Crop Mask 区域</option>
+                  <option value="default" style={{ background: '#1c1c1e', color: '#fff' }}>默认 (整图)</option>
+                  <option value="crop" style={{ background: '#1c1c1e', color: '#fff' }}>Crop Mask 区域</option>
                 </select>
                 {execOptions[idx]?.operation === 'crop' && (
                   <>
@@ -980,9 +1151,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   sidebarDot: { position: 'absolute', top: 6, right: 6, width: 6, height: 6, borderRadius: '50%', background: '#30d158' },
   finishBtn: {
-    width: 36, height: 36, fontSize: 16, fontWeight: 700, color: '#fff',
-    background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer',
+    width: 40, height: 40, fontSize: 16, fontWeight: 700, color: '#30d158',
+    background: 'rgba(48,209,88,0.12)', border: 'none', borderRadius: 10, cursor: 'pointer',
     transition: 'all 0.2s ease', flexShrink: 0,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
   },
 
   // Content area
@@ -1024,7 +1196,7 @@ const styles: Record<string, React.CSSProperties> = {
   ctxPreviewMask: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
-  paramSelect: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none' },
+  paramSelect: { flex: 1, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
