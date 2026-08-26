@@ -2266,7 +2266,7 @@ class PipelineEnableEditNode:
                 ref_boost_mask = next_pipeline.config.get("ref_boost_mask", None)
                 fit_mode = next_pipeline.config.get("fit_mode", "fit")
                 vae = next_pipeline.vae
-                pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "px_cache": {}}
+                pixel_state = {"fit_mode": fit_mode, "vae": vae, "source_images": None, "source_latents": None, "px_cache": {}}
                 next_pipeline.model = arch_krea2.apply_model_patch(
                     next_pipeline.model, ref_boost, ref_boost_a, ref_boost_mask, fit_mode, vae, pixel_state)
                 print(f"[EnableEdit] Krea2 edit source patch applied (ref_boost={ref_boost}, ref_boost_a={ref_boost_a}, fit_mode={fit_mode})")

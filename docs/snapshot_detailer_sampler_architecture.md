@@ -119,20 +119,42 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 │  limit_pixels(cropped_image, cropped_mask, pixels, align)                  │
 │  │  → resized_image, resized_mask, resize_info                             │
 │  ▼                                                                          │
+│  [block 循环前] [任一 block enable_edit] 按架构 patch:                     │
+│  ├─ Krea2: apply_model_patch → next_pipeline.model +                      │
+│  │  config["model_negative"] (共享 pixel_state; get_model_clip 的 clone    │
+│  │  自动携带补丁闭包, get_conditioning 写入的 source_images 经             │
+│  │  pixel_state 到达 forward, 激活像素路径/stride1)                        │
+│  └─ Flux2Klein: apply_model_patch (no-op, 原生 ref 路径)                  │
+│  │                                                                          │
 │  VAEEncode(resized_image) → tmp_latent                                     │
 │  │                                                                          │
-│  ├── get_model_clip(model, clip, loras) → model_to_use, clip_to_use        │
+│  ├── get_model_clip(patched model, clip, loras) → model_to_use(带补丁)     │
 │  │                                                                          │
-│  ├── [enable_edit] apply_model_patch (Krea2/Flux2Klein)                   │
+│  ├── [Krea2] pixel_state 动态参数（逐 block 覆写, forward 动态读取）:     │
+│  │   fit_mode = edit_mode (fit|crop 编辑几何)                              │
+│  │   ref_boost / ref_boost_a (注意力增强, 默认 4.0/1.0)                    │
+│  │   ref_boost_mask = resized_mask (enable_ref_boost_mask 开启时,         │
+│  │     即 context mask 限定增强区域)                                       │
 │  │                                                                          │
 │  ├── [context_reference] VAEEncode(history_image) → reference.reference_  │
 │  │                        latents.append()                                  │
 │  │                                                                          │
-│  ├── get_conditioning(positive/negative)                                   │
+│  ├── get_conditioning(positive/negative) [edit 开启时注入, 否则纯文本]      │
 │  │   ├── Flux2Klein: reference_latent=tmp_latent, reference_image=None     │
-│  │   └── Krea2: reference_latent=None, reference_image=resized_image       │
+│  │   └── Krea2: 纯 grounded encode (对齐 Krea2EditGroundedEncode)          │
+│  │       positive = prompt + 源图 (VLM 语义路径, conditioning 不带 latent)  │
+│  │       negative = 空 prompt + 同图 (匹配训练 unconditional)              │
+│  │       VLM 源图缩放上限 = block 级 grounding_px (默认 768, 正/负共用)    │
+│  │                                                                          │
+│  ├── [Krea2 edit] 节点级 pixel_state 注入 (对齐 source patch 数据流):     │
+│  │   source_latents = [tmp_latent.samples] (latent fallback)               │
+│  │   source_images 由 get_conditioning side-channel 写入 (像素路径)        │
+│  │   pre_encode_sources(@tmp_latent 网格, 采样外 VAE 预编码)                │
+│  │   [edit off] 清空残留 → 原生 forward                                    │
 │  │                                                                          │
 │  ├── _ksampler(model, positive, negative, tmp_latent, start/end_step)     │
+│  │   forward 读 pixel_state: source_images+vae → 像素路径 (fit/crop)      │
+│  │   否则 source_latents → latent 路径; 均无 → 原生 forward                │
 │  │  → sampled_latent                                                       │
 │  │                                                                          │
 │  ├── VAEDecode(sampled_latent) → decoded_image                            │
