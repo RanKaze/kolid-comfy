@@ -334,12 +334,24 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
                       <img src={contextPreview.image} alt="Context" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                    </div>
-                    <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
                       {contextPreview.mask ? (
-                        <img src={contextPreview.mask} alt="Mask" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                        <div style={{
+                          position: 'absolute',
+                          inset: 0,
+                          backgroundColor: 'rgba(255, 0, 0, 0.5)',
+                          WebkitMaskImage: `url(${contextPreview.mask})`,
+                          maskImage: `url(${contextPreview.mask})`,
+                          WebkitMaskSize: 'contain',
+                          maskSize: 'contain',
+                          WebkitMaskRepeat: 'no-repeat',
+                          maskRepeat: 'no-repeat',
+                          WebkitMaskPosition: 'center',
+                          maskPosition: 'center',
+                          maskMode: 'luminance',
+                          pointerEvents: 'none',
+                        } as React.CSSProperties} />
                       ) : (
-                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>No mask</div>
+                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>No mask</div>
                       )}
                     </div>
                   </div>
