@@ -851,6 +851,7 @@ class SnapshotDetailerSamplerServer:
                     if new_pipeline.mask is None and current_pipeline is not None and current_pipeline.mask is not None:
                         new_pipeline.mask = current_pipeline.mask
                     inst.node_instance._current_pipeline = new_pipeline.copy()
+                    inst.node_instance._base_pipeline = inst.node_instance._current_pipeline
                     new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
                     inst.node_instance._switch_image(inst, new_image, context_key=inst.current_context_key)
                     # Update lora_regex from new pipeline's architecture
@@ -1345,6 +1346,9 @@ class SnapshotDetailerSamplerNode:
         expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
 
         # First detailer block: crop_mask (using its crop_reserve)
+        # 整条链（含 interface block）都在 crop 工作区坐标系内运行；run 之前 crop，
+        # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
+        # 但其输出尺寸须与 crop 工作区连贯（由用户/子图保证，pipeline 内不做 resize）。
         first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
         first_bp = first_detailer.get('params', first_detailer)
         first_crop_reserve = int(first_bp.get('crop_reserve', 32))
@@ -1354,8 +1358,21 @@ class SnapshotDetailerSamplerNode:
             reserve=first_crop_reserve
         )
 
-        current_image = cropped_image
-        current_mask = cropped_mask
+        # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
+        # pixels / align 统一取自 first_bp（第一个 detailer block 的参数），取消每个
+        # block 各自的 pixels/align。interface 之后的 block 不再单独 limit，pipeline
+        # 内不做额外 resize。
+        limit_pixels_val = int(first_bp.get('pixels', 1048576))
+        limit_align = int(first_bp.get('align', 8))
+        resized_image, resized_mask, resize_info = limit_pixels(
+            image=cropped_image,
+            pixels=limit_pixels_val,
+            mask=cropped_mask,
+            align=limit_align,
+        )
+
+        current_image = resized_image
+        current_mask = resized_mask
         last_resize_info = None
         last_resized_mask = None
         last_resized_image = None
@@ -1457,23 +1474,15 @@ class SnapshotDetailerSamplerNode:
                         base_pipeline=next_pipeline,
                     )
 
-                    # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递）
-                    # mask 也需随 pipeline 注入传递（保留 interface 对 mask 的修改）；
-                    # 若 interface 返回的 mask 与 image 尺寸不一致（子图内部 resize 导致），
-                    # 将其 resize 对齐到 image 尺寸，保证下游 recover_crop 几何正确。
-                    out_mask = result_mask
-                    if out_mask is not None and result_img is not None and hasattr(result_img, 'shape'):
-                        m_b, m_h, m_w = out_mask.shape
-                        i_h, i_w = result_img.shape[1], result_img.shape[2]
-                        if m_h != i_h or m_w != i_w:
-                            out_mask = torch.nn.functional.interpolate(
-                                out_mask.unsqueeze(1).float(), size=(i_h, i_w), mode='bilinear', align_corners=False
-                            ).squeeze(1)
-                            print(f"[PipelineBlock {i+1}] Interface mask resized {m_h}x{m_w} → {i_h}x{i_w} to match image")
+                    # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递
+                    # 全部上下文：image/mask/model/clip/context/loras 等）。interface 子图
+                    # 的输出尺寸由其自身决定（与 crop 工作区连贯由用户/子图保证），直接注入
+                    # pipeline 原样往下传递——不在 pipeline 内做任何 image/mask 的 resize。
+                    # mask 也写回（但不做 mask 的 crop 重算等操作）。
                     next_pipeline.image = result_img
-                    next_pipeline.mask = out_mask
+                    next_pipeline.mask = result_mask
                     current_image = result_img
-                    current_mask = out_mask
+                    current_mask = result_mask
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
                     continue
 
@@ -1482,8 +1491,6 @@ class SnapshotDetailerSamplerNode:
                 add_noise = bp.get('add_noise', 'enable')
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
-                pixels = int(bp.get('pixels', 1048576))
-                align = int(bp.get('align', 8))
                 enable_edit = bp.get('enable_edit', False)
                 edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
                 ref_boost = float(bp.get('ref_boost', 4.0))
@@ -1496,15 +1503,11 @@ class SnapshotDetailerSamplerNode:
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
 
-                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, pixels={pixels}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
 
-                # limit_pixels (per-block resolution)
-                resized_image, resized_mask, resize_info = limit_pixels(
-                    image=current_image,
-                    pixels=pixels,
-                    mask=current_mask,
-                    align=align,
-                )
+                # 全局工作分辨率已在 crop 后一次性 limit 确定（见上方）。此处把当前 block
+                # 的实际输入（可能已被上游 interface 块替换）同步为处理图，不再重复 limit。
+                resized_image, resized_mask = current_image, current_mask
 
                 # VAEEncode
                 tmp_latent = VAEEncode().encode(
@@ -1694,12 +1697,16 @@ class SnapshotDetailerSamplerNode:
                 # model，避免补丁闭包（含 source_images/px_cache）跨运行滞留
                 next_pipeline.model = _orig_model
 
-        # Last block: recover_size + recover_crop
-        recovered_image, recovered_mask = recover_size(
-            image=current_image,
-            resize_info=last_resize_info,
-            mask=last_resized_mask
-        )
+        # Last block: recover_size (分辨率复原) + recover_crop (按 crop_info 贴回全图)
+        # 整条链（含 interface block）都在 crop 工作区坐标系运行，run 之后统一复原。
+        if last_resize_info is not None:
+            recovered_image, recovered_mask = recover_size(
+                image=current_image,
+                resize_info=last_resize_info,
+                mask=last_resized_mask
+            )
+        else:
+            recovered_image, recovered_mask = current_image, current_mask
 
         final_image, final_mask = recover_crop(
             background=original_image,
@@ -1874,6 +1881,16 @@ class SnapshotDetailerSamplerNode:
         base_mask = input_mask if input_mask is not None else (
             injected_pipeline.mask if injected_pipeline else None)
 
+        # 关键：把 resized 工作区图/mask 同步进 injected_pipeline，使子图内部通过
+        # pipeline.get_image()/pipeline.mask 取到的也是预处理后的工作区尺寸（而非原始全图）。
+        # 否则子图若从 pipeline 取 image，会拿到 crop/limit 之前的原始全图，与 mask 尺寸
+        # 不一致导致后续 recover_crop 崩溃。此处仅同步尺寸状态，不做额外 resize。
+        if injected_pipeline is not None:
+            if base_img is not None:
+                injected_pipeline.image = base_img
+            if base_mask is not None:
+                injected_pipeline.mask = base_mask
+
         # 构建端口级图片覆盖
         port_overrides = {}
         for port_num_str, key in image_keys.items():
@@ -1996,6 +2013,9 @@ class SnapshotDetailerSamplerNode:
         mm.throw_exception_if_processing_interrupted()
 
         self._current_pipeline = pipeline.copy() if pipeline else None
+        # 保存"原始 pipeline"引用：仅在初始化 / Pipeline tab 切换时设定。
+        # 每次 Run detailer 都基于它的副本执行，run 之间不共享、不累积修改。
+        self._base_pipeline = self._current_pipeline
 
         # Derive lora_regex from pipeline's architecture config if not explicitly provided
         if not lora_regex and pipeline and pipeline.config:
@@ -2094,8 +2114,18 @@ class SnapshotDetailerSamplerNode:
                             server.detail_error = 'Mask is required — draw a mask before running the detailer'
                             continue
 
+                        # 每次 Run 都基于"原始 pipeline"的副本执行——run 之间不共享、
+                        # 不累积上一轮对 pipeline 的修改。用户当前绘制的 mask 属于交互
+                        # 状态，单独合并进副本（原始 image / model 来自 base）。
+                        if self._base_pipeline is None:
+                            server.detail_status = 'error'
+                            server.detail_error = 'Pipeline not initialized — switch a pipeline in the Pipeline tab first'
+                            continue
+                        run_pipeline = self._base_pipeline.copy()
+                        run_pipeline.mask = current_mask.clone() if current_mask is not None else None
+
                         # 诊断：打印 mask 和 image 的尺寸信息
-                        diag_img = self._current_pipeline.image
+                        diag_img = run_pipeline.image
                         if diag_img is not None:
                             diag_img_h, diag_img_w = (diag_img.shape[1], diag_img.shape[2]) if diag_img.dim() == 4 else (diag_img.shape[0], diag_img.shape[1])
                         else:
@@ -2120,7 +2150,7 @@ class SnapshotDetailerSamplerNode:
                         blocks = server.blocks
 
                         next_pipeline, original_image, detailed_image, debug_data = self._run_pipeline_blocks(
-                            self._current_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
+                            run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
                         )
 
                         server.original_image = original_image
