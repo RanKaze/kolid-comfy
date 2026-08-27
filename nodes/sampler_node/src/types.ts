@@ -44,6 +44,8 @@ export interface DetailerBlockParams {
   grounding_px?: number;
   context_reference: boolean;
   context_reference_key: string | null;
+  /** 该 detailer block 解出 pipeline.context 的 lora/prompt 时使用的正则（默认 ".+"） */
+  context_regex?: string;
 }
 
 export interface InterfaceBlockParams {

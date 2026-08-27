@@ -1335,8 +1335,6 @@ class SnapshotDetailerSamplerNode:
         if next_pipeline.model is None:
             raise ValueError('PipelineData model is empty, cannot Detailer')
 
-        context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
-
         original_image = next_pipeline.get_image()
         if original_image is None:
             raise ValueError("No image available for detailer")
@@ -1431,8 +1429,10 @@ class SnapshotDetailerSamplerNode:
 
                     # 输入图/mask：优先用本 block 显式选择的 context image；否则沿用
                     # 上一 block 输出的 current_image / current_mask（即 pipeline 流水线传递）。
+                    # 注意：传入 interface 的 mask 需 clone 一个独立副本——interface 子图可能
+                    # in-place 修改传入的 mask tensor，若不隔离会通过引用共享污染上游 pipeline。
                     block_input_img = current_image
-                    block_input_mask = current_mask
+                    block_input_mask = current_mask.clone() if current_mask is not None else None
                     ctx_img_key = bp.get('context_image_key')
                     if ctx_img_key and server is not None:
                         sel_img = server.get_history_image(ctx_img_key)
@@ -1454,13 +1454,26 @@ class SnapshotDetailerSamplerNode:
                         input_image=block_input_img,
                         input_mask=block_input_mask,
                         return_image=True,
+                        base_pipeline=next_pipeline,
                     )
 
                     # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递）
+                    # mask 也需随 pipeline 注入传递（保留 interface 对 mask 的修改）；
+                    # 若 interface 返回的 mask 与 image 尺寸不一致（子图内部 resize 导致），
+                    # 将其 resize 对齐到 image 尺寸，保证下游 recover_crop 几何正确。
+                    out_mask = result_mask
+                    if out_mask is not None and result_img is not None and hasattr(result_img, 'shape'):
+                        m_b, m_h, m_w = out_mask.shape
+                        i_h, i_w = result_img.shape[1], result_img.shape[2]
+                        if m_h != i_h or m_w != i_w:
+                            out_mask = torch.nn.functional.interpolate(
+                                out_mask.unsqueeze(1).float(), size=(i_h, i_w), mode='bilinear', align_corners=False
+                            ).squeeze(1)
+                            print(f"[PipelineBlock {i+1}] Interface mask resized {m_h}x{m_w} → {i_h}x{i_w} to match image")
                     next_pipeline.image = result_img
-                    next_pipeline.mask = result_mask
+                    next_pipeline.mask = out_mask
                     current_image = result_img
-                    current_mask = result_mask
+                    current_mask = out_mask
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
                     continue
 
@@ -1479,6 +1492,9 @@ class SnapshotDetailerSamplerNode:
                 grounding_px = int(bp.get('grounding_px', 768))
                 context_reference = bp.get('context_reference', False)
                 context_reference_key = bp.get('context_reference_key')
+                # 每个 detailer block 自带 context_regex（默认 ".+"），覆盖全局值，
+                # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
+                block_context_regex = bp.get('context_regex', context_regex) or '.+'
 
                 print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, pixels={pixels}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
 
@@ -1504,7 +1520,9 @@ class SnapshotDetailerSamplerNode:
                 start_at_step = int(start_step_rate * steps)
                 end_at_step = int(end_step_rate * steps)
 
-                # Condition
+                # Condition — 每个 detailer block 实时从当前 pipeline.context 解出
+                # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
+                context_positive, context_negative, context_loras = next_pipeline.context.get_context(block_context_regex)
                 current_positive = ','.join([p for p in [context_positive, user_positive] if p])
                 current_negative = context_negative
                 current_loras = context_loras.copy()
@@ -1779,8 +1797,34 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Interface Package 执行
     # -------------------------------------------------------------------------
+    def _sync_pipeline_updates(self, target, source):
+        """将 source pipeline（interface 子图返回的、被修改过的 pipeline）中
+        实际输出/修改的字段合并回 target pipeline（chain 中的上游 pipeline）。
+
+        只覆盖 source 中非 None 的字段，且跳过 image/mask（image/mask 由
+        interface 的结果图单独写回），其余字段（model/clip/vae/context/
+        reference/config/sampler_name/scheduler/steps/cfg 等）均按 interface
+        的修改生效，使后续 detailer block 拿到被 interface 修改后的 model 等。
+        """
+        if target is None or source is None:
+            return
+        sync_fields = (
+            'model', 'clip', 'vae',
+            'sampler_name', 'scheduler', 'steps', 'cfg',
+            'context', 'reference', 'config',
+        )
+        for f in sync_fields:
+            val = getattr(source, f, None)
+            if val is not None and getattr(target, f, None) is not val:
+                setattr(target, f, val)
+        # loras 以 list 形式存在于 context 中，已在 context 同步时覆盖；
+        # 若 PipelineData 另有显式 loras 字段也一并同步
+        if hasattr(source, 'loras') and getattr(source, 'loras', None) is not None:
+            setattr(target, 'loras', getattr(source, 'loras'))
+
     def _execute_interface(self, server, interface_idx, manual_values, exec_options=None,
-                            input_image=None, input_mask=None, return_image=False):
+                            input_image=None, input_mask=None, return_image=False,
+                            base_pipeline=None):
         """Execute a sub-graph via InterfaceExecutor.
 
         Args:
@@ -1788,7 +1832,12 @@ class SnapshotDetailerSamplerNode:
                           不写入 history、不切换 context（用于 chain 内 interface 块，
                           结果作为 pipeline 流转的中间图）。
             input_image / input_mask: 显式指定的输入图/mask（chain 内由上一 block 提供）。
-                                      未指定时回退到 _current_pipeline 的 image/mask。
+                                      未指定时回退到 base_pipeline 的 image/mask。
+            base_pipeline: 执行所基于的 pipeline（chain 内为上一 block 输出的 pipeline，
+                          携带 model/clip/context/image/mask）。未指定时回退到
+                          self._current_pipeline（独立 interface tab 执行场景）。
+                          注意：chain 模式下不在此提前解析 prompt tab 的 lora/prompt，
+                          上下文完全由 pipeline 原样传递，由后续 detailer block 解析。
         """
         if interface_idx >= len(server.interface_packages):
             raise ValueError(f"Interface index {interface_idx} out of range ({len(server.interface_packages)} interface packages)")
@@ -1801,17 +1850,23 @@ class SnapshotDetailerSamplerNode:
         pkg = server.interface_packages[interface_idx]
         from .interface_node import InterfaceExecutor
 
-        # 将 prompt tab 的 lora/prompt 注入到 pipeline 副本中
-        user_positive, user_loras = self._parse_prompt(server.prompt_server)
-        injected_pipeline = self._current_pipeline.copy() if self._current_pipeline else None
-        if injected_pipeline and (user_positive or user_loras):
-            from .sampler_node import SamplerContext
-            entry = SamplerContext()
-            entry.positive = user_positive
-            entry.negative = ''
-            entry.loras = get_loras_from_string(user_loras) if user_loras else []
-            injected_pipeline.context.contexts['__prompt_tab__'] = entry
+        # pipeline 来源：优先使用 chain 传入的 base_pipeline（上一 block 输出的 pipeline，
+        # 携带正确的 model/clip/context/image/mask）；否则回退独立 tab 的 _current_pipeline。
+        chain_mode = base_pipeline is not None
+        base_src = base_pipeline if chain_mode else self._current_pipeline
+        injected_pipeline = base_src.copy() if base_src else None
 
+        # 仅在非 chain 模式（独立 interface tab）提前把 prompt tab 的 lora/prompt 注入到
+        # pipeline 上下文；chain 模式完全通过 pipeline 传递，不在此解析 prompt/lora。
+        if not chain_mode:
+            user_positive, user_loras = self._parse_prompt(server.prompt_server)
+            if injected_pipeline and (user_positive or user_loras):
+                from .sampler_node import SamplerContext
+                entry = SamplerContext()
+                entry.positive = user_positive
+                entry.negative = ''
+                entry.loras = get_loras_from_string(user_loras) if user_loras else []
+                injected_pipeline.context.contexts['__prompt_tab__'] = entry
         # 默认注入的图 + mask (context image)
         # chain 模式：优先使用调用方显式传入的输入图/mask（来自上一 block 的 pipeline）
         base_img = input_image if input_image is not None else (
@@ -1854,6 +1909,16 @@ class SnapshotDetailerSamplerNode:
         def _on_result_image(img, name):
             pass
 
+        # chain 模式：捕获 interface 返回的（被修改过的）pipeline，
+        # 将其 model/clip/context/lora 等修改写回上游 pipeline，
+        # 使后续 detailer block 拿到的就是被 interface 修改后的 model 等。
+        result_pipeline = None
+
+        def _on_result_pipeline(pipe, name):
+            nonlocal result_pipeline
+            if pipe is not None:
+                result_pipeline = pipe
+
         executor = InterfaceExecutor(
             extra_pnginfo=getattr(server, 'extra_pnginfo', None),
             on_progress=lambda cur, total: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
@@ -1861,7 +1926,7 @@ class SnapshotDetailerSamplerNode:
             get_image=lambda: injected_img,
             get_mask=lambda: injected_mask,
             on_result_image=_on_result_image,
-            on_result_pipeline=None,
+            on_result_pipeline=_on_result_pipeline if return_image else None,
             on_sampler_progress=lambda cur, total, node_id: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
         )
 
@@ -1899,6 +1964,11 @@ class SnapshotDetailerSamplerNode:
             if result_img is None:
                 print("[InterfaceExec] WARNING: no IMAGE result returned, keeping input")
                 result_img = base_img
+            # 将 interface 内部对 pipeline 的修改（model/clip/context/loras 等）写回上游
+            # pipeline，使后续 detailer block 拿到的是被 interface 修改后的 model 等。
+            if result_pipeline is not None and base_pipeline is not None:
+                self._sync_pipeline_updates(base_pipeline, result_pipeline)
+                print(f"[InterfaceExec] chain: synced interface pipeline updates (model/clip/context/loras) back to upstream pipeline")
             return result_img, result_mask
 
         # 以最终（可能已 uncrop）图加入 history，并记录 keys

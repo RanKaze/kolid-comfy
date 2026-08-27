@@ -408,6 +408,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           </select>
                         </div>
                         <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Ctx Regex</label>
+                          <input
+                            style={styles.paramInput}
+                            type="text"
+                            value={dp.context_regex ?? '.+'}
+                            placeholder=".+"
+                            onChange={e => updateBlockParam(block.id, 'context_regex', e.target.value || '.+')}
+                          />
+                        </div>
+                        <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Start Step</label>
                           <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.start_step_rate} onChange={e => updateBlockParam(block.id, 'start_step_rate', parseFloat(e.target.value))} />
                         </div>

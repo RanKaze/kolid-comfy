@@ -59,6 +59,7 @@ const App: React.FC = () => {
     grounding_px: 768,
     context_reference: false,
     context_reference_key: null,
+    context_regex: '.+',
   };
   const defaultInterfaceParams: InterfaceBlockParams = {
     interface_idx: 0,
