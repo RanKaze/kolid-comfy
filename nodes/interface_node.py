@@ -1774,6 +1774,47 @@ class InterfaceExecutor:
             traceback.print_exc()
             raise RuntimeError(f"External node {node_id} ({target.get('type', '?')}) failed: {e}")
 
+    def _normalize_image_value(self, val):
+        """把 ComfyUI 节点的 IMAGE 输出统一归一化为 tensor 列表。
+
+        支持：torch.Tensor / numpy.ndarray / NodeOutput / list / 含 'result' 或
+        'images' 字段的 preview dict（部分自定义节点会返回此类结构）。
+        """
+        import torch
+        try:
+            from comfy_api.latest._io import NodeOutput
+            has_node_output = True
+        except ImportError:
+            NodeOutput = None
+            has_node_output = False
+
+        # NodeOutput 包装
+        if has_node_output and isinstance(val, NodeOutput):
+            val = tuple(val.args) if val.args else None
+
+        # dict 形式（preview / 部分自定义节点）：优先取 result / images
+        if isinstance(val, dict):
+            for key in ('result', 'images', 'image', 'IMAGE'):
+                if key in val and val[key] is not None:
+                    val = val[key]
+                    break
+            else:
+                # 没有可识别字段，返回空（避免下游把 dict 当 tensor）
+                return []
+
+        # list / tuple：逐元素递归归一化
+        if isinstance(val, (list, tuple)):
+            out = []
+            for item in val:
+                out.extend(self._normalize_image_value(item))
+            return out
+
+        # tensor / numpy
+        if hasattr(val, 'shape') and len(getattr(val, 'shape', ())) >= 2:
+            return [val]
+
+        return []
+
     def _extract_results(self, pkg, end_id, output_values, interface_name):
         """从 End 节点输出提取结果。支持 list 输出：list 中每个元素作为独立结果。"""
         end_outputs = output_values.get(end_id, ())
@@ -1802,10 +1843,14 @@ class InterfaceExecutor:
                 if self.on_result_pipeline:
                     self.on_result_pipeline(val, name)
             elif ptype == 'IMAGE':
-                results.append(('IMAGE', val, name))
-                if self.on_result_image:
-                    self.on_result_image(val, name)
-                added_count += 1
+                # 归一化 IMAGE 输出：ComfyUI 节点可能返回 tensor / numpy / list / 或
+                # 含 'result'/'images' 字段的 preview dict（如部分自定义节点的返回结构）。
+                tensors = _normalize_image_value(val)
+                for img in tensors:
+                    results.append(('IMAGE', img, name))
+                    if self.on_result_image:
+                        self.on_result_image(img, name)
+                    added_count += 1
             else:
                 results.append((ptype, val, name))
                 added_count += 1
