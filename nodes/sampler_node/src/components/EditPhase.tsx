@@ -850,6 +850,24 @@ const InterfaceTab: React.FC<{
 
   const showProgress = (idx: number) => detailStatusByIdx[idx] === 'running' && (detailProgressByIdx[idx]?.total ?? 0) > 0;
 
+  // Evaluate a simple arithmetic expression (e.g. "1024*1024", "512*0.5") safely.
+  // Only digits, operators (+-*/), parentheses, dots, spaces and 'x'/'.' are allowed.
+  // Returns a number, or null if the expression is invalid/unsafe.
+  const safeEvalExpr = (raw: string): number | null => {
+    const expr = raw.replace(/x/gi, '*').replace(/\s+/g, '');
+    if (!/^[\d+\-*/().]+$/.test(expr)) return null;
+    if (expr === '' || /[+\-*/.]$/.test(expr) || /[+\-*/.]{2,}/.test(expr)) return null;
+    try {
+      // eslint-disable-next-line no-new-func
+      const fn = new Function('"use strict"; return (' + expr + ');');
+      const r = fn();
+      if (typeof r !== 'number' || !isFinite(r)) return null;
+      return r;
+    } catch {
+      return null;
+    }
+  };
+
   const renderPort = (port: InterfacePort, idx: number, isStart: boolean) => {
     const mv = manualValues[idx]?.[String(port.num)] ?? port.value ?? '';
     const cat = port.category;
@@ -858,31 +876,49 @@ const InterfaceTab: React.FC<{
     const label = cat === 'inject' ? '(inject)' : cat === 'manual' ? '(widget)' : '(port)';
 
     return (
-      <div key={port.num} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0' }}>
+      <div key={port.num} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', minWidth: 0 }}>
         {/* Port name */}
-        <div style={{ minWidth: 80, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{port.name}</div>
+        <div style={{ minWidth: 80, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{port.name}</div>
         {/* Type badge */}
-        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: badgeColor, color: badgeText, minWidth: 70, textAlign: 'center' }}>
+        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: badgeColor, color: badgeText, minWidth: 70, textAlign: 'center', flexShrink: 0 }}>
           {port.type}
         </span>
         {/* Category label */}
-        <span style={{ fontSize: 10, color: badgeText, fontWeight: 500, minWidth: 50 }}>{label}</span>
+        <span style={{ fontSize: 10, color: badgeText, fontWeight: 500, minWidth: 50, flexShrink: 0 }}>{label}</span>
 
         {/* Input controls for manual types */}
         {isStart && port.type === 'STRING' && (
-          <input style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+          <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
             value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))} />
         )}
-        {isStart && port.type === 'INT' && (
-          <input type="number" style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: parseInt(e.target.value) || 0 } }))} />
-        )}
-        {isStart && port.type === 'FLOAT' && (
-          <input type="number" step="0.01" style={{ flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: parseFloat(e.target.value) || 0 } }))} />
+        {isStart && (port.type === 'INT' || port.type === 'FLOAT') && (
+          <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+            value={mv}
+            placeholder={port.type === 'FLOAT' ? 'e.g. 1.5 or 512*0.5' : 'e.g. 1024*1024'}
+            onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))}
+            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            onBlur={e => {
+              const raw = e.target.value.trim();
+              const v = raw === '' ? (port.type === 'FLOAT' ? 0 : 0) : safeEvalExpr(raw);
+              if (v !== null) {
+                setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: port.type === 'FLOAT' ? v : Math.round(v) } }));
+              }
+            }}
+          />
         )}
         {isStart && port.type === 'BOOLEAN' && (
           <input type="checkbox" checked={!!mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.checked } }))} />
+        )}
+        {isStart && port.type === 'COMBO' && (
+          port.options && port.options.length > 0 ? (
+            <select style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+              value={mv ?? port.options[0]} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))}>
+              {port.options.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          ) : (
+            <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
+              value={mv ?? ''} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))} />
+          )
         )}
 
         {/* IMAGE port: per-port image selector with preview */}
