@@ -383,8 +383,10 @@ const App: React.FC = () => {
         return;
       }
       setTagResult(data.tag);
-      // Switch to prompt tab first so iframe is visible, then send tags
-      setTab('prompt');
+      // 若当前在 draw tab，不跳转到 prompt（tag 仍发送到 prompt iframe，切到 prompt 时可见）
+      if (tabRef.current !== 'draw') {
+        setTab('prompt');
+      }
       // Small delay to ensure tab switch + iframe render before postMessage
       setTimeout(() => {
         const iframe = promptIframeRef.current;

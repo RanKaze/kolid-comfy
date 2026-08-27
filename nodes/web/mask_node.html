@@ -254,6 +254,38 @@
             text-transform: uppercase;
             letter-spacing: 0.8px;
         }
+        /* Collapsible panel headers */
+        .controls > .detector-title:first-child,
+        .brush-panel > .detector-title:first-child {
+            cursor: pointer;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 2px 0;
+            border-radius: 6px;
+            transition: background 0.15s ease;
+        }
+        .controls > .detector-title:first-child:hover,
+        .brush-panel > .detector-title:first-child:hover {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .controls > .detector-title:first-child::after,
+        .brush-panel > .detector-title:first-child::after {
+            content: '▼';
+            font-size: 9px;
+            color: rgba(255, 255, 255, 0.5);
+            transition: transform 0.15s ease;
+        }
+        .controls.collapsed > .detector-title:first-child::after,
+        .brush-panel.collapsed > .detector-title:first-child::after {
+            content: '▶';
+        }
+        /* Collapsed: hide everything except the first header */
+        .controls.collapsed > *:not(:first-child),
+        .brush-panel.collapsed > *:not(:first-child) {
+            display: none;
+        }
         .brush-mode-btn.active, .eraser-mode-btn.active {
             background: rgba(0, 122, 255, 0.85);
             box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
@@ -514,6 +546,17 @@
         const detectorPanel = document.getElementById('detectorPanel');
         const confirmButton = document.getElementById('confirmButton');
 
+        // Collapsible panels: click the first title of Detector / Brush to toggle
+        function bindCollapse(panel) {
+            if (!panel) return;
+            const header = panel.querySelector(':scope > .detector-title:first-child');
+            if (header) {
+                header.addEventListener('click', () => panel.classList.toggle('collapsed'));
+            }
+        }
+        bindCollapse(detectorPanel);
+        bindCollapse(document.getElementById('brushPanel'));
+
         let isDrawing = false;
         let brushSize = 20;
         let isErasing = false;
@@ -530,6 +573,19 @@
         let maskConfirmed = false;
         let currentLoop = '0';
         let displayAlpha = 0.5; // controls how strong the mask appears on the canvas (0..1)
+
+        // Draw mode (from ?mode=draw): hide Confirm button and sync mask live to backend
+        const URL_PARAMS = new URLSearchParams(window.location.search);
+        const IS_DRAW_MODE = URL_PARAMS.get('mode') === 'draw';
+        if (IS_DRAW_MODE && confirmButton) {
+            confirmButton.style.display = 'none';
+        }
+        // Live-sync helper: only auto-send in draw mode (no confirm button there)
+        async function maybeLiveSync() {
+            if (IS_DRAW_MODE) {
+                await sendMask();
+            }
+        }
 
         // Brush mode state
         let brushMode = 'binary';
@@ -937,6 +993,7 @@
         window.addEventListener('mouseup', (e) => {
             if (isDrawing) {
                 commitStroke();
+                maybeLiveSync();
             }
             isDrawing = false;
             if (isAltResizing) {
@@ -985,7 +1042,10 @@
             lastY = y;
         }, { passive: false });
         canvas.addEventListener('touchend', () => {
-            if (isDrawing) commitStroke();
+            if (isDrawing) {
+                commitStroke();
+                maybeLiveSync();
+            }
             isDrawing = false;
         });
 
@@ -1006,6 +1066,7 @@
             } catch (err) {
                 console.error('Clear failed:', err);
             }
+            maybeLiveSync();
         });
 
         // Full - fill entire mask data with full strength
@@ -1018,6 +1079,7 @@
             redrawDisplay();
             status.textContent = 'Full mask applied';
             status.classList.add('success');
+            maybeLiveSync();
         });
 
         // Grow size slider
@@ -1052,6 +1114,7 @@
                         redrawDisplay();
                         status.textContent = 'Mask grown';
                         status.classList.add('success');
+                        maybeLiveSync();
                     };
                     maskImg.src = result.mask;
                 } else {
@@ -1108,6 +1171,7 @@
                         redrawDisplay();
                         status.textContent = 'Detection applied';
                         status.classList.add('success');
+                        maybeLiveSync();
                     };
                     maskImg.src = result.mask;
                 } else if (response.ok) {

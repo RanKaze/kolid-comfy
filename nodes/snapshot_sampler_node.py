@@ -1801,6 +1801,13 @@ class SnapshotDetailerSamplerNode:
             else:
                 print(f"[SnapshotDetailerSampler] Image size unchanged ({new_w}x{new_h}), mask preserved")
 
+        # 关键：切换 context 时同步 _base_pipeline 的 image/mask。
+        # run_detailer 每次基于 _base_pipeline.copy() 执行（见 sample()），若不在此同步，
+        # 注入的仍是初始化时的原始 image，导致用户切换 context 后 run 仍用旧图。
+        if self._base_pipeline is not None:
+            self._base_pipeline.image = new_image
+            self._base_pipeline.mask = self._current_pipeline.mask
+
     # -------------------------------------------------------------------------
     # Interface Package 执行
     # -------------------------------------------------------------------------
@@ -2176,21 +2183,26 @@ class SnapshotDetailerSamplerNode:
                                 p for p in (server.prompt_server.selected_prompts or [])
                                 if not (isinstance(p, dict) and p.get('source', 'normal') == 'program')
                             ]
+                            # 先保存完整的 program 处理后的结果（含 program 来源项），用于预览/快照，
+                            # 再剥离 program 项用于实际生成。
+                            full_loras = list(server.prompt_server.selected_loras) if isinstance(server.prompt_server.selected_loras, list) else []
+                            full_prefabs = list(server.prompt_server.selected_prefabs) if isinstance(server.prompt_server.selected_prefabs, list) else []
                             server.prompt_server.selected_loras = [
-                                l for l in (server.prompt_server.selected_loras or [])
+                                l for l in full_loras
                                 if l.get('source', 'normal') != 'program'
-                            ] if isinstance(server.prompt_server.selected_loras, list) else []
+                            ]
                             server.prompt_server.selected_prefabs = [
-                                p for p in (server.prompt_server.selected_prefabs or [])
+                                p for p in full_prefabs
                                 if p.get('source', 'normal') != 'program'
-                            ] if isinstance(server.prompt_server.selected_prefabs, list) else []
+                            ]
                             server.prompt_server.last_selected = [
                                 p['text'] if isinstance(p, dict) else p
                                 for p in server.prompt_server.selected_prompts
                                 if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') != 'program'
                             ]
-                            server.prompt_server.last_selected_loras = list(server.prompt_server.selected_loras)
-                            server.prompt_server.last_selected_prefabs = list(server.prompt_server.selected_prefabs)
+                            # 快照/预览使用完整结果（保留 program 添加/修改的 lora 与 prefab）
+                            server.prompt_server.last_selected_loras = full_loras
+                            server.prompt_server.last_selected_prefabs = full_prefabs
                             server.prompt_server.custom_prompts = ''
 
                     except Exception as e:
