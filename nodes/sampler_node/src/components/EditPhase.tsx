@@ -186,6 +186,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
   };
 
+  // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
+  const firstDetailer = blocks.find(b => b.type === 'detailer');
+  const firstDp = firstDetailer ? (firstDetailer.params as DetailerBlockParams) : undefined;
+
   // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
@@ -342,7 +346,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               )}
               {/* Global params */}
-              <div style={styles.sectionTitle}>Mask Settings</div>
+              <div style={styles.sectionTitle}>Preprocess Settings</div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Grow</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
@@ -350,6 +354,45 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Blur</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskBlur} onChange={e => onGlobalParamChange('mask_blur', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Crop Reserve</label>
+                <input
+                  style={styles.paramInput}
+                  type="number"
+                  min={0}
+                  max={256}
+                  step={1}
+                  disabled={!firstDp}
+                  value={firstDp ? (firstDp.crop_reserve ?? 32) : 32}
+                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'crop_reserve', parseInt(e.target.value))}
+                />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Pixels</label>
+                <input
+                  style={styles.paramInput}
+                  type="number"
+                  min={65536}
+                  max={16777216}
+                  step={65536}
+                  disabled={!firstDp}
+                  value={firstDp ? (firstDp.pixels ?? 1048576) : 1048576}
+                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'pixels', parseInt(e.target.value))}
+                />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Align</label>
+                <input
+                  style={styles.paramInput}
+                  type="number"
+                  min={1}
+                  max={64}
+                  step={1}
+                  disabled={!firstDp}
+                  value={firstDp ? (firstDp.align ?? 8) : 8}
+                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'align', parseInt(e.target.value))}
+                />
               </div>
 
               {/* Pipeline Blocks */}
@@ -424,18 +467,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>End Step</label>
                           <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Pixels</label>
-                          <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={dp.pixels} onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Align</label>
-                          <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={dp.align} onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value))} />
-                        </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Crop Reserve</label>
-                          <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={dp.crop_reserve} onChange={e => updateBlockParam(block.id, 'crop_reserve', parseInt(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Enable Edit</label>
@@ -595,7 +626,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <div style={styles.paramRow}>
                             <span style={styles.paramLabel}>Ctx Image</span>
                             <select
-                              style={styles.paramSelect}
+                              style={{ ...styles.paramSelect, minWidth: 0 }}
                               value={ip.context_image_key || ''}
                               onChange={e => updateIfaceParam('context_image_key', e.target.value || null)}
                             >
@@ -605,10 +636,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               ))}
                             </select>
                           </div>
+                          {ip.context_image_key && (() => {
+                            const img = history.find((h) => h.key === ip.context_image_key);
+                            return img ? (
+                              <div style={{ padding: '0 0 4px 88px' }}>
+                                <img src={img.src} alt={img.name}
+                                  style={{ maxWidth: '100%', maxHeight: 120, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.12)', display: 'block' }} />
+                              </div>
+                            ) : null;
+                          })()}
                           <div style={styles.paramRow}>
                             <span style={styles.paramLabel}>Ctx Mask</span>
                             <select
-                              style={styles.paramSelect}
+                              style={{ ...styles.paramSelect, minWidth: 0 }}
                               value={ip.context_mask_key || ''}
                               onChange={e => updateIfaceParam('context_mask_key', e.target.value || null)}
                             >
@@ -618,6 +658,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               ))}
                             </select>
                           </div>
+                          {ip.context_mask_key && (() => {
+                            const img = history.find((h) => h.key === ip.context_mask_key);
+                            return img ? (
+                              <div style={{ padding: '0 0 4px 88px' }}>
+                                <img src={img.src} alt={img.name}
+                                  style={{ maxWidth: '100%', maxHeight: 120, borderRadius: 8, border: '0.5px solid rgba(255,255,255,0.12)', display: 'block' }} />
+                              </div>
+                            ) : null;
+                          })()}
                         </div>
                       );
                     })()}
@@ -1393,7 +1442,7 @@ const styles: Record<string, React.CSSProperties> = {
   contextPreviewWrap: { position: 'relative', width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' },
   ctxPreviewImg: { width: '100%', height: '100%', objectFit: 'cover' },
   ctxPreviewMask: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' },
-  paramRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
   paramSelect: { flex: 1, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
