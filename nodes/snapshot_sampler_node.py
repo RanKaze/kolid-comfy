@@ -612,16 +612,59 @@ class SnapshotDetailerSamplerServer:
                     start_types = fresh_pkg.get('start_types', {})
                     end_types = fresh_pkg.get('types', {})
 
+                    # Resolve COMBO candidate options from the upstream node that
+                    # feeds this Start port (best-effort; falls back to []).
+                    sub_prompt = fresh_pkg.get('sub_prompt', {})
+                    start_id = fresh_pkg.get('start_node_id', '')
+                    start_inputs = sub_prompt.get(start_id, {}).get('inputs', {}) if start_id else {}
+
+                    def get_combo_options(port_num):
+                        link = start_inputs.get('value' + str(port_num))
+                        if not isinstance(link, (list, tuple)) or len(link) < 1:
+                            return []
+                        up_id = str(link[0])
+                        up_node = sub_prompt.get(up_id, {})
+                        up_type = up_node.get('class_type', '')
+                        if not up_type:
+                            return []
+                        try:
+                            import nodes as comfy_nodes
+                            cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(up_type)
+                            if not cls:
+                                return []
+                            it = cls.INPUT_TYPES()
+                        except Exception:
+                            return []
+                        options = []
+                        for cat in ('required', 'optional'):
+                            ci = it.get(cat, {})
+                            if not isinstance(ci, dict):
+                                continue
+                            for _name, val in ci.items():
+                                if isinstance(val, tuple) and len(val) >= 1 and isinstance(val[0], list):
+                                    options.extend(str(x) for x in val[0])
+                        # de-dup, preserve order
+                        seen = set()
+                        result = []
+                        for o in options:
+                            if o not in seen:
+                                seen.add(o)
+                                result.append(o)
+                        return result
+
                     def make_port(num, name, ptype):
                         is_inject = ptype in ('PIPELINE_DATA', 'IMAGE', 'MASK')
                         is_manual = ptype in ('STRING', 'INT', 'FLOAT', 'BOOLEAN', 'COMBO')
-                        return {
+                        port = {
                             'num': num,
                             'name': name,
                             'type': ptype,
                             'value': None,
                             'category': 'inject' if is_inject else ('manual' if is_manual else 'port'),
                         }
+                        if ptype == 'COMBO':
+                            port['options'] = get_combo_options(num)
+                        return port
 
                     # Start ports: ONLY from start_types (Start node's connected value ports)
                     start_ports = []

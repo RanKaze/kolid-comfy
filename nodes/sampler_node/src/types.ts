@@ -136,6 +136,7 @@ export interface InterfacePort {
   type: string;
   value: any;
   category: 'inject' | 'manual' | 'port';
+  options?: string[];
 }
 
 export interface InterfaceInfo {
