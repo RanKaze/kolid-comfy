@@ -46,11 +46,25 @@ export interface DetailerBlockParams {
   context_reference_key: string | null;
 }
 
+export interface InterfaceBlockParams {
+  /** 选中的 interface 子图索引（对应后端 interface_packages） */
+  interface_idx: number;
+  /** default = 直接执行; crop = 先 crop 再执行（带 crop_reserve 余量） */
+  operation: 'default' | 'crop';
+  crop_reserve: number;
+  /** 端口图片覆盖: { 端口num: history key }，从 history 选择 */
+  image_keys: Record<string, string>;
+  /** 可选的 context 源图/源mask（history key）；留空则沿用 pipeline 流式传递（上一 block 输出） */
+  context_image_key: string | null;
+  context_mask_key: string | null;
+  manual_values: Record<string, any>;
+}
+
 export interface PipelineBlock {
   id: string;
   type: 'detailer' | 'interface';
   name: string;
-  params: DetailerBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -59,6 +59,15 @@ const App: React.FC = () => {
     grounding_px: 768,
     context_reference: false,
     context_reference_key: null,
+  };
+  const defaultInterfaceParams: InterfaceBlockParams = {
+    interface_idx: 0,
+    operation: 'default',
+    crop_reserve: 32,
+    image_keys: {},
+    context_image_key: null,
+    context_mask_key: null,
+    manual_values: {},
   };
   const [blocks, setBlocks] = useState<PipelineBlock[]>([
     { id: 'block-1', type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } },
@@ -568,7 +577,7 @@ const App: React.FC = () => {
     const id = 'block-' + blockIdCounter.current++;
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
-      : { id, type: 'interface', name: 'Interface', params: { ...defaultBlockParams }, interface_index: 0 };
+      : { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } };
     setBlocks(prev => {
       const next = [...prev, newBlock];
       fetch('/api/update_config', {

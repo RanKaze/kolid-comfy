@@ -182,8 +182,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     ...(pipelinePackages.length > 0 ? [{ id: 'pipeline' as Tab, icon: 'pipeline', color: '#30d158' }] : []),
   ];
 
-  const updateBlockParam = (blockId: string, key: keyof DetailerBlockParams, value: string | number | boolean) => {
-    onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } } : b));
+  const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
+    onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
   };
 
   // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
@@ -397,47 +397,48 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                   {/* Block params */}
                   <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {block.type === 'detailer' && (
-                      <>
+                    {block.type === 'detailer' && (() => {
+                      const dp = block.params as DetailerBlockParams;
+                      return (<>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Add Noise</label>
-                          <select style={styles.paramSelect} value={block.params.add_noise} onChange={e => updateBlockParam(block.id, 'add_noise', e.target.value)}>
+                          <select style={styles.paramSelect} value={dp.add_noise} onChange={e => updateBlockParam(block.id, 'add_noise', e.target.value)}>
                             <option value="enable" style={{ background: '#1c1c1e', color: '#fff' }}>enable</option>
                             <option value="disable" style={{ background: '#1c1c1e', color: '#fff' }}>disable</option>
                           </select>
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Start Step</label>
-                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={block.params.start_step_rate} onChange={e => updateBlockParam(block.id, 'start_step_rate', parseFloat(e.target.value))} />
+                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.start_step_rate} onChange={e => updateBlockParam(block.id, 'start_step_rate', parseFloat(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>End Step</label>
-                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={block.params.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
+                          <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Pixels</label>
-                          <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={block.params.pixels} onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value))} />
+                          <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={dp.pixels} onChange={e => updateBlockParam(block.id, 'pixels', parseInt(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Align</label>
-                          <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={block.params.align} onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value))} />
+                          <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={dp.align} onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Crop Reserve</label>
-                          <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={block.params.crop_reserve} onChange={e => updateBlockParam(block.id, 'crop_reserve', parseInt(e.target.value))} />
+                          <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={dp.crop_reserve} onChange={e => updateBlockParam(block.id, 'crop_reserve', parseInt(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Enable Edit</label>
-                          <IOSToggle checked={block.params.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
+                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
                         </div>
-                        {block.params.enable_edit && (
+                        {dp.enable_edit && (
                           <div style={styles.editSubSection}>
                             {isKrea2 && (
                               <div style={styles.paramRow}>
                                 <label style={styles.paramLabel}>Edit Mode</label>
                                 <select
                                   style={styles.paramSelect}
-                                  value={block.params.edit_mode ?? 'fit'}
+                                  value={dp.edit_mode ?? 'fit'}
                                   title="fit: 整图适配目标网格 + stride-1 位置 ID（训练匹配几何，防模糊）。crop: center-crop 到目标宽高比（适合源/目标 AR 差距大的场景）。"
                                   onChange={e => updateBlockParam(block.id, 'edit_mode', e.target.value)}
                                 >
@@ -452,53 +453,164 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                   <label style={styles.paramLabel}>Grounding Px</label>
                                   <input style={styles.paramInput} type="number" min={0} max={2048} step={64}
                                     title="Grounded encode 的 VLM 看图分辨率上限（正/负提示词共用同一源图缩放）。更高 = 更清晰的语义理解但更多 vision tokens / 显存; 0 = 不限制。"
-                                    value={block.params.grounding_px ?? 768}
+                                    value={dp.grounding_px ?? 768}
                                     onChange={e => updateBlockParam(block.id, 'grounding_px', parseInt(e.target.value) || 0)} />
                                 </div>
                                 <div style={styles.paramRow}>
                                   <label style={styles.paramLabel}>Ref Boost</label>
                                   <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
                                     title="参考保真度: 最后一个参考（源图）的 target->ref 注意力乘数。>1 拉向参考外观, <1 放松。最优值因模型而异。"
-                                    value={block.params.ref_boost ?? 4.0}
+                                    value={dp.ref_boost ?? 4.0}
                                     onChange={e => updateBlockParam(block.id, 'ref_boost', parseFloat(e.target.value) || 0)} />
                                 </div>
                                 <div style={styles.paramRow}>
                                   <label style={styles.paramLabel}>Ref Boost A</label>
                                   <input style={styles.paramInput} type="number" min={0} max={1000} step={0.1}
                                     title="第一个参考（场景, 仅多参考如 Context Ref 时生效）的注意力乘数。单参考工作流无效果。"
-                                    value={block.params.ref_boost_a ?? 1.0}
+                                    value={dp.ref_boost_a ?? 1.0}
                                     onChange={e => updateBlockParam(block.id, 'ref_boost_a', parseFloat(e.target.value) || 0)} />
                                 </div>
                                 <div style={styles.paramRow} title="启用后以 context mask（当前块裁剪区 mask）限定 ref_boost 增强区域 — 仅 mask 内的参考 token 被增强, 保护 mask 外区域。">
                                   <label style={styles.paramLabel}>Ref Boost Mask</label>
-                                  <IOSToggle checked={block.params.enable_ref_boost_mask ?? false}
+                                  <IOSToggle checked={dp.enable_ref_boost_mask ?? false}
                                     onChange={v => updateBlockParam(block.id, 'enable_ref_boost_mask', v)} />
                                 </div>
                               </>
                             )}
                             <div style={styles.paramRow}>
                               <label style={styles.paramLabel}>Context Ref</label>
-                              <IOSToggle checked={block.params.context_reference} onChange={v => updateBlockParam(block.id, 'context_reference', v)} />
+                              <IOSToggle checked={dp.context_reference} onChange={v => updateBlockParam(block.id, 'context_reference', v)} />
                             </div>
-                            {block.params.context_reference && (
+                            {dp.context_reference && (
                               <div style={styles.paramRow}>
                                 <label style={styles.paramLabel}>Ref Image</label>
                                 <button style={styles.contextLoadBtn} onClick={() => setShowRefSelect(block.id)}>
-                                  {block.params.context_reference_key
-                                    ? (history.find(h => h.key === block.params.context_reference_key)?.name ?? 'Selected')
+                                  {dp.context_reference_key
+                                    ? (history.find(h => h.key === dp.context_reference_key)?.name ?? 'Selected')
                                     : 'Select'}
                                 </button>
                               </div>
                             )}
                           </div>
                         )}
-                      </>
-                    )}
-                    {block.type === 'interface' && (
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', padding: '4px 0' }}>
-                        Interface block — executes sub-graph (coming soon)
-                      </div>
-                    )}
+                      </>);
+                    })()}
+                    {block.type === 'interface' && (() => {
+                      const ip = block.params as any;
+                      // 仅允许：输入端口恰好 1 个 PIPELINE_DATA、输出端口恰好 1 个 PIPELINE_DATA 的 interface
+                      // （这样才能正确以 pipeline 串联注入）
+                      const isChainable = (itf: any) => {
+                        const inP = itf?.start_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
+                        const outP = itf?.end_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
+                        return inP === 1 && outP === 1;
+                      };
+                      const selectableInterfaces = interfaces.filter(isChainable);
+                      const safeInterfaces = selectableInterfaces.length > 0 ? selectableInterfaces : interfaces;
+                      // interface_idx 始终存完整 interfaces 列表中的真实下标（与后端 interface_packages 对齐）
+                      const toRealIdx = (listIdx: number) => interfaces.indexOf(safeInterfaces[listIdx]);
+                      // 若当前选中的真实下标对应 interface 不在可选列表（如旧配置/非 chainable），
+                      // 则纠正为当前 UI 选中的 chainable 项的真实下标，确保"显示=执行"，避免错乱。
+                      const uiIdx = safeInterfaces.findIndex(itf => itf === interfaces[ip.interface_idx]);
+                      const resolvedIdx = uiIdx >= 0 ? uiIdx : 0;
+                      const resolvedRealIdx = toRealIdx(resolvedIdx);
+                      if (resolvedRealIdx !== ip.interface_idx) {
+                        updateBlockParam(block.id, 'interface_idx', resolvedRealIdx);
+                      }
+                      const iface = safeInterfaces[resolvedIdx] || safeInterfaces[0];
+                      const updateIfaceParam = (key: string, value: any) => updateBlockParam(block.id, key, value);
+                      const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
+                      return (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 0' }}>
+                          {selectableInterfaces.length === 0 && (
+                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                              No chainable interface (need exactly 1 PIPELINE in &amp; 1 PIPELINE out)
+                            </div>
+                          )}
+                          {/* Interface sub-graph selection */}
+                          <div style={styles.paramRow}>
+                            <span style={styles.paramLabel}>Interface</span>
+                            <select
+                              style={styles.paramSelect}
+                              value={resolvedIdx}
+                              onChange={e => updateIfaceParam('interface_idx', toRealIdx(parseInt(e.target.value, 10)))}
+                            >
+                              {safeInterfaces.map((itf, idx) => (
+                                <option key={idx} value={idx} style={opt}>{itf.name || `Interface ${idx + 1}`}</option>
+                              ))}
+                            </select>
+                          </div>
+                          {/* Operation + crop_reserve */}
+                          <div style={styles.paramRow}>
+                            <span style={styles.paramLabel}>Operation</span>
+                            <select
+                              style={styles.paramSelect}
+                              value={ip.operation ?? 'default'}
+                              onChange={e => updateIfaceParam('operation', e.target.value)}
+                            >
+                              <option value="default" style={opt}>default</option>
+                              <option value="crop" style={opt}>crop</option>
+                            </select>
+                            {ip.operation === 'crop' && (
+                              <input
+                                style={{ ...styles.paramInput, width: 64, flex: 'none' }}
+                                type="number"
+                                min={0}
+                                value={ip.crop_reserve ?? 32}
+                                onChange={e => updateIfaceParam('crop_reserve', parseInt(e.target.value, 10) || 0)}
+                              />
+                            )}
+                          </div>
+                          {/* Per-port image selection from history (exclude auto-injected PIPELINE_DATA input) */}
+                          {iface?.start_ports?.filter((p: any) => p.category === 'inject' && p.type !== 'PIPELINE_DATA').map((port: any) => (
+                            <div style={styles.paramRow} key={port.num}>
+                              <span style={styles.paramLabel}>{port.name || `Port ${port.num}`}</span>
+                              <select
+                                style={styles.paramSelect}
+                                value={(ip.image_keys && ip.image_keys[port.num]) || ''}
+                                onChange={e => {
+                                  const cur = { ...(ip.image_keys || {}) };
+                                  if (e.target.value) cur[port.num] = e.target.value;
+                                  else delete cur[port.num];
+                                  updateIfaceParam('image_keys', cur);
+                                }}
+                              >
+                                <option value="" style={opt}>(none)</option>
+                                {history.map((h, hi) => (
+                                  <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
+                          {/* Optional context image / mask (defaults to pipeline flow) */}
+                          <div style={styles.paramRow}>
+                            <span style={styles.paramLabel}>Ctx Image</span>
+                            <select
+                              style={styles.paramSelect}
+                              value={ip.context_image_key || ''}
+                              onChange={e => updateIfaceParam('context_image_key', e.target.value || null)}
+                            >
+                              <option value="" style={opt}>(use pipeline)</option>
+                              {history.map((h, hi) => (
+                                <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div style={styles.paramRow}>
+                            <span style={styles.paramLabel}>Ctx Mask</span>
+                            <select
+                              style={styles.paramSelect}
+                              value={ip.context_mask_key || ''}
+                              onChange={e => updateIfaceParam('context_mask_key', e.target.value || null)}
+                            >
+                              <option value="" style={opt}>(use pipeline)</option>
+                              {history.map((h, hi) => (
+                                <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               ))}

@@ -1413,7 +1413,55 @@ class SnapshotDetailerSamplerNode:
                 is_last = (i == len(blocks) - 1)
 
                 if block.get('type') == 'interface':
-                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — skipping (not yet supported in chain)")
+                    # Interface 块在 chain 内执行：以当前 pipeline 的 image/mask 作为输入，
+                    # 执行子图后把结果写回 pipeline，作为下一 block 的输入（不加入 history）。
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — executing sub-graph (chain mode)")
+                    bp = block.get('params', block)
+                    interface_idx = int(bp.get('interface_idx', block.get('interface_index', -1)))
+                    if interface_idx < 0 or interface_idx >= len(server.interface_packages):
+                        print(f"[PipelineBlock {i+1}] WARNING: invalid interface_idx={interface_idx}, skipping block")
+                        continue
+
+                    exec_options = {
+                        'operation': bp.get('operation', 'default'),
+                        'crop_reserve': int(bp.get('crop_reserve', 32)),
+                        'image_keys': bp.get('image_keys', {}) or {},
+                    }
+                    manual_values = bp.get('manual_values', {}) or {}
+
+                    # 输入图/mask：优先用本 block 显式选择的 context image；否则沿用
+                    # 上一 block 输出的 current_image / current_mask（即 pipeline 流水线传递）。
+                    block_input_img = current_image
+                    block_input_mask = current_mask
+                    ctx_img_key = bp.get('context_image_key')
+                    if ctx_img_key and server is not None:
+                        sel_img = server.get_history_image(ctx_img_key)
+                        if sel_img is not None:
+                            block_input_img = sel_img
+                            print(f"[PipelineBlock {i+1}] Interface using context image key={ctx_img_key}")
+                        else:
+                            print(f"[PipelineBlock {i+1}] WARNING: context image key '{ctx_img_key}' not found, using pipeline image")
+                    ctx_mask_key = bp.get('context_mask_key')
+                    if ctx_mask_key and server is not None:
+                        sel_mask = server.get_history_image(ctx_mask_key)
+                        if sel_mask is not None:
+                            block_input_mask = sel_mask
+                            print(f"[PipelineBlock {i+1}] Interface using context mask key={ctx_mask_key}")
+
+                    result_img, result_mask = self._execute_interface(
+                        server, interface_idx, manual_values,
+                        exec_options=exec_options,
+                        input_image=block_input_img,
+                        input_mask=block_input_mask,
+                        return_image=True,
+                    )
+
+                    # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递）
+                    next_pipeline.image = result_img
+                    next_pipeline.mask = result_mask
+                    current_image = result_img
+                    current_mask = result_mask
+                    print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
                     continue
 
                 # Detailer block params (support both nested 'params' dict and flat)
@@ -1731,8 +1779,17 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Interface Package 执行
     # -------------------------------------------------------------------------
-    def _execute_interface(self, server, interface_idx, manual_values, exec_options=None):
-        """Execute a sub-graph via InterfaceExecutor."""
+    def _execute_interface(self, server, interface_idx, manual_values, exec_options=None,
+                            input_image=None, input_mask=None, return_image=False):
+        """Execute a sub-graph via InterfaceExecutor.
+
+        Args:
+            return_image: 若 True，执行结果只作为返回值 (result_img, result_mask)，
+                          不写入 history、不切换 context（用于 chain 内 interface 块，
+                          结果作为 pipeline 流转的中间图）。
+            input_image / input_mask: 显式指定的输入图/mask（chain 内由上一 block 提供）。
+                                      未指定时回退到 _current_pipeline 的 image/mask。
+        """
         if interface_idx >= len(server.interface_packages):
             raise ValueError(f"Interface index {interface_idx} out of range ({len(server.interface_packages)} interface packages)")
 
@@ -1756,8 +1813,11 @@ class SnapshotDetailerSamplerNode:
             injected_pipeline.context.contexts['__prompt_tab__'] = entry
 
         # 默认注入的图 + mask (context image)
-        base_img = injected_pipeline.get_image() if injected_pipeline else None
-        base_mask = injected_pipeline.mask if injected_pipeline else None
+        # chain 模式：优先使用调用方显式传入的输入图/mask（来自上一 block 的 pipeline）
+        base_img = input_image if input_image is not None else (
+            injected_pipeline.get_image() if injected_pipeline else None)
+        base_mask = input_mask if input_mask is not None else (
+            injected_pipeline.mask if injected_pipeline else None)
 
         # 构建端口级图片覆盖
         port_overrides = {}
@@ -1825,6 +1885,21 @@ class SnapshotDetailerSamplerNode:
                     uncropped_results.append(item)
             results = uncropped_results
             print(f"[InterfaceExec] uncropped {len(results)} results back to full size")
+
+        # 提取结果图 / mask
+        result_img = None
+        result_mask = base_mask
+        for ptype, img, name in results:
+            if ptype == 'IMAGE' and result_img is None:
+                result_img = img
+                print(f"[InterfaceExec] result image: {name} {img.shape if hasattr(img, 'shape') else ''}")
+
+        if return_image:
+            # chain 模式：仅返回结果，不写 history / 不切换 context
+            if result_img is None:
+                print("[InterfaceExec] WARNING: no IMAGE result returned, keeping input")
+                result_img = base_img
+            return result_img, result_mask
 
         # 以最终（可能已 uncrop）图加入 history，并记录 keys
         for ptype, img, name in results:
