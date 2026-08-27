@@ -43,6 +43,7 @@ const iconClipboard = <svg width="16" height="16" viewBox="0 0 24 24" fill="none
 const iconLoadFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>;
 const iconPlus = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M5 12h14"/></svg>;
 const iconCode = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>;
+const iconHelp = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
 const iconTagFromImage = <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle',marginRight:'6px'}}><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>;
 const iconSwapDown = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 5v14M19 12l-7 7-7-7"/></svg>;
 const iconSwapUp = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><path d="M12 19V5M5 12l7-7 7 7"/></svg>;
@@ -977,6 +978,7 @@ export function AppShell() {
   const [modalSliderMarks, setModalSliderMarks] = useState<{value: string; label: string}[]>([]);
   const [debugOutput, setDebugOutput] = useState<string | null>(null);
   const [debugErrorLine, setDebugErrorLine] = useState<number | null>(null);
+  const [showProgramHelp, setShowProgramHelp] = useState(false);
 
   const [modalMode, setModalMode] = useState('horizontal');
   const [modalSize, setModalSize] = useState('normal');
@@ -5472,7 +5474,15 @@ export function AppShell() {
               {/* Code + Debug terminal (vertical) */}
               <div style={{ flex: 3, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div className="edit-modal-section" style={{ flex: '0 0 600px', minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-                  <label>Code</label>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ marginBottom: 0 }}>Code</label>
+                    <button
+                      className="btn btn-secondary program-help-btn"
+                      style={{ fontSize: 13, height: 22, width: 22, minWidth: 22, padding: 0, flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                      onClick={() => setShowProgramHelp(true)}
+                      title="Program reference"
+                    >{iconHelp}</button>
+                  </div>
                   <ProgramCodeEditor
                     value={modalCustomPrompts}
                     onChange={(v) => { setModalCustomPrompts(v); setDebugErrorLine(null); }}
@@ -6249,6 +6259,57 @@ export function AppShell() {
           <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
             <h2>{modal.type}</h2>
             <div className="modal-buttons"><button className="btn btn-secondary" onClick={closeModal}>Close</button></div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Program help / reference modal */}
+      {showProgramHelp ? (
+        <div className="modal visible" onMouseDown={() => setShowProgramHelp(false)}>
+          <div className="modal-content" style={{ maxWidth: 720, maxHeight: '85vh', overflowY: 'auto' }} onMouseDown={e => e.stopPropagation()}>
+            <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{iconHelp} Program Reference</h2>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, marginTop: 0 }}>
+              在 Program 的 <code>Code</code> 区域中编写 JavaScript，函数需 <strong>返回</strong>一个对象，用于增删当前选择中的 tag / lora / prefab，或替换自定义提示词。
+            </p>
+
+            <h3 style={{ marginTop: 18, fontSize: 14 }}>返回值（Return）</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 6 }}>
+              返回对象可包含以下字段（<code>filter_*</code> 用于移除，<code>gen_*</code> 用于新增）：
+            </p>
+            <ul style={{ margin: '0 0 12px', paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: 'var(--text-secondary)' }}>
+              <li><code>filter_tag_groups</code> — 从选择中移除的 tag 组</li>
+              <li><code>filter_loras</code> — 从选择中移除的 lora</li>
+              <li><code>filter_prefabs</code> — 从选择中移除的 prefab</li>
+              <li><code>gen_tag_groups</code> — 新增的 tag 组</li>
+              <li><code>gen_loras</code> — 新增的 lora</li>
+              <li><code>gen_prefabs</code> — 新增的 prefab</li>
+              <li><code>custom_prompts</code> — 替换后的自定义提示词文本</li>
+            </ul>
+
+            <h3 style={{ marginTop: 14, fontSize: 14 }}>可用上下文（Context）</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 6 }}>
+              函数体内可直接访问以下全局变量：
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.7, color: 'var(--text-secondary)' }}>
+              <li><code>tag_groups</code> — 当前已选中的 tag 组（含 strength 与 source）</li>
+              <li><code>loras</code> — 当前已选中的 lora（含 strength 与激活状态）</li>
+              <li><code>prefabs</code> — 当前已选中的 prefab（合并后的数据）</li>
+              <li><code>custom_prompts</code> — 用户输入的自由提示词文本</li>
+              <li><code>prompts_data</code> — 完整的提示词库（按分类组织）</li>
+              <li><code>all_tags</code> — 提示词文本 → 元数据的查找表</li>
+              <li><code>prefab_context</code> — 根 program 注入的 prefab 上下文（开启 Prefab Context 时可用）</li>
+              <li><code>lora_context</code> — 根 program 注入的 lora 上下文（开启 Lora Context 时可用）</li>
+              <li><code>tag_context</code> — 根 program 注入的 tag 上下文（开启 Tag Context 时可用）</li>
+              <li><code>filter_tag_groups / filter_loras / filter_prefabs</code> — 父级 program 传入的待过滤项</li>
+              <li><code>gen_tag_groups / gen_loras / gen_prefabs</code> — 父级 program 传入的待生成项</li>
+              <li><code>prefab_builtin</code> — 共享的 prefab builtin 数据（始终可用）</li>
+              <li><code>lora_builtin</code> — 共享的 lora builtin 数据（始终可用）</li>
+              <li><code>tag_group_builtin</code> — 共享的 tag 组 builtin 数据（始终可用）</li>
+            </ul>
+
+            <div className="modal-buttons" style={{ marginTop: 20 }}>
+              <button className="btn btn-primary" onClick={() => setShowProgramHelp(false)}>Close</button>
+            </div>
           </div>
         </div>
       ) : null}

@@ -159,6 +159,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
   const [contextPreview, setContextPreview] = useState<{ image: string; mask: string | null } | null>(null);
   const [contextDragOver, setContextDragOver] = useState(false);
+  const [promptPreview, setPromptPreview] = useState<{ prompts: { name: string; prompt: string }[]; custom: string }>({ prompts: [], custom: '' });
+  const [loraPreview, setLoraPreview] = useState<{ name: string; strength: number; file: string }[]>([]);
 
   // Fetch context preview when entering draw tab
   React.useEffect(() => {
@@ -171,6 +173,76 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .catch(() => {});
     }
   }, [tab, currentContextKey, detailStatus]);
+
+  // Fetch prompt / lora preview for draw tab (from prompt server)
+  React.useEffect(() => {
+    if (tab !== 'draw') return;
+    const base = (promptUrl || '').replace(/\/[^/]*$/, '');
+    if (!base) return;
+    const load = () => {
+      Promise.all([
+        fetch(`${base}/prompts_data`).then(r => r.json()).catch(() => null),
+        fetch(`${base}/lora_data`).then(r => r.json()).catch(() => null),
+      ]).then(([pd, ld]) => {
+        if (pd) {
+          const categories = pd.categories || {};
+          const nameToPrompt: Record<string, string> = {};
+          for (const cat of Object.values(categories) as any[]) {
+            const prompts = (cat && cat.prompts) || [];
+            for (const p of prompts) {
+              if (p && p.name) nameToPrompt[p.name] = p.prompt || p.name;
+            }
+          }
+          // 优先使用实时选中的 prompt（selected_prompts，已是 program 增删改后的最终结果），回退 run 后的快照（last_selected）
+          let prompts: { name: string; prompt: string }[] = [];
+          if (pd.selected_prompts && pd.selected_prompts.length) {
+            prompts = (pd.selected_prompts as string[]).map((text) => ({ name: text, prompt: text }));
+          } else if (pd.last_selected && pd.last_selected.length) {
+            prompts = (pd.last_selected as string[]).map((name) => ({ name, prompt: nameToPrompt[name] || name }));
+          }
+          setPromptPreview({ prompts, custom: pd.custom_prompts || '' });
+        }
+        if (ld) {
+          // 优先使用实时选中的 lora（selected_loras），回退 run 后的快照（last_selected_loras）
+          const loras = ((ld.selected_loras || ld.last_selected_loras) || []) as any[];
+          setLoraPreview(loras.map((l: any) => ({
+            name: l.name || (l.file_path ? l.file_path.split('/').pop() : '') || '',
+            strength: typeof l.strength === 'number' ? l.strength : (l.strength == null ? 1 : Number(l.strength)),
+            file: (l.file_path || '').split('/').pop() || (l.file_path || ''),
+          })));
+        }
+      }).catch(() => {});
+    };
+    load();
+  }, [tab, currentContextKey, promptReady]);
+
+  // context image 改变时，通知 draw tab 常驻的 mask iframe 重新加载（reload-image）
+  React.useEffect(() => {
+    if (tab === 'draw' && drawMaskIframeRef.current?.contentWindow) {
+      // 等后端 _switch_image 更新 mask server 的图后再 reload
+      const t = setTimeout(() => {
+        drawMaskIframeRef.current?.contentWindow?.postMessage({ type: 'reload-image' }, '*');
+      }, 120);
+      return () => clearTimeout(t);
+    }
+  }, [tab, currentContextKey]);
+
+  // Draw-mode mask iframe 实时同步后会 postMessage('mask-confirmed')，重新拉取 preview 以反映最新 mask
+  React.useEffect(() => {
+    if (tab !== 'draw') return;
+    const onMsg = (e: MessageEvent) => {
+      if (e.data && e.data.type === 'mask-confirmed') {
+        fetch('/api/context_preview')
+          .then(r => r.json())
+          .then(data => {
+            if (data.image) setContextPreview({ image: data.image, mask: data.mask ?? null });
+          })
+          .catch(() => {});
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [tab]);
   const tabs: { id: Tab; icon: string; color: string }[] = [
     { id: 'mask', icon: 'mask', color: '#ff9f0a' },
     { id: 'tag', icon: 'tag', color: '#af52de' },
@@ -194,6 +266,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const drawMaskIframeRef = React.useRef<HTMLIFrameElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -725,69 +798,139 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               )}
 
-              {detailStatus === 'done' && resultImages && (
-                <div style={styles.resultGrid}>
-                  {(() => {
-                    const origKey = resultImages.originalKey;
-                    const origActive = origKey === currentContextKey;
-                    return (
-                      <div
-                        style={{
-                          ...styles.resultCard,
-                          borderColor: origActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                          boxShadow: origActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                          cursor: origKey && !origActive ? 'pointer' : 'default',
-                        }}
-                        onClick={() => origKey && !origActive && onSetContext(origKey)}
-                      >
-                        <div style={styles.resultLabel}>Original</div>
-                        <img src={resultImages.original} alt="Original" style={styles.resultImg} />
-                      </div>
-                    );
-                  })()}
-                  {(() => {
-                    const detKey = resultImages.detailedKey;
-                    const detActive = detKey === currentContextKey;
-                    return (
-                      <div
-                        style={{
-                          ...styles.resultCard,
-                          borderColor: detActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                          boxShadow: detActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                          cursor: detKey && !detActive ? 'pointer' : 'default',
-                        }}
-                        onClick={() => detKey && !detActive && onSetContext(detKey)}
-                      >
-                        <div style={styles.resultLabel}>Detailed</div>
-                        <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
-                      </div>
-                    );
-                  })()}
+              <div style={styles.drawSplit}>
+                {/* 左半：常驻 mask 编辑 iframe（同 mask tab 界面） */}
+                <div style={styles.drawMaskCol}>
+                  <div style={{ ...styles.sectionTitle, padding: '8px 10px 0' }}>Mask</div>
+                  <iframe
+                    ref={drawMaskIframeRef}
+                    src={`${maskUrl}?mode=draw`}
+                    style={styles.drawMaskFrame}
+                    title="Mask Editor"
+                  />
                 </div>
-              )}
 
-              {detailStatus === 'done' && debugData && (
+                {/* 右半：结果卡片 + debug */}
+                <div style={styles.drawResultCol}>
+                {detailStatus === 'done' && resultImages && (
+                  <div style={styles.resultGrid}>
+                    {(() => {
+                      const origKey = resultImages.originalKey;
+                      const origActive = origKey === currentContextKey;
+                      return (
+                        <div
+                          style={{
+                            ...styles.resultCard,
+                            borderColor: origActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                            boxShadow: origActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                            cursor: origKey && !origActive ? 'pointer' : 'default',
+                          }}
+                          onClick={() => origKey && !origActive && onSetContext(origKey)}
+                        >
+                          <div style={styles.resultLabel}>Original</div>
+                          <img src={resultImages.original} alt="Original" style={styles.resultImg} />
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const detKey = resultImages.detailedKey;
+                      const detActive = detKey === currentContextKey;
+                      return (
+                        <div
+                          style={{
+                            ...styles.resultCard,
+                            borderColor: detActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                            boxShadow: detActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                            cursor: detKey && !detActive ? 'pointer' : 'default',
+                          }}
+                          onClick={() => detKey && !detActive && onSetContext(detKey)}
+                        >
+                          <div style={styles.resultLabel}>Detailed</div>
+                          <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
                 <div style={styles.debugPanel}>
                   <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Debug</div>
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <DebugImage src={debugData.background} label="Background" />
-                    <DebugImage src={debugData.image} label="Image" />
-                    <DebugMask src={debugData.mask} label="Mask" />
-                    {debugData.reference_images && debugData.reference_images.map((ref, i) => (
-                      <DebugImage key={i} src={ref.src} label={ref.name} />
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                    <DebugString label="crop_x" value={debugData.crop_x} />
-                    <DebugString label="crop_y" value={debugData.crop_y} />
-                    <DebugString label="crop_w" value={debugData.crop_width} />
-                    <DebugString label="crop_h" value={debugData.crop_height} />
+                  {debugData ? (
+                    <>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <DebugImage src={debugData.background} label="Background" />
+                        <DebugImage src={debugData.image} label="Image" />
+                        <DebugMask src={debugData.mask} label="Mask" />
+                        {debugData.reference_images && debugData.reference_images.map((ref, i) => (
+                          <DebugImage key={i} src={ref.src} label={ref.name} />
+                        ))}
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+                        <DebugString label="crop_x" value={debugData.crop_x} />
+                        <DebugString label="crop_y" value={debugData.crop_y} />
+                        <DebugString label="crop_w" value={debugData.crop_width} />
+                        <DebugString label="crop_h" value={debugData.crop_height} />
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（运行后显示 Debug 信息）</div>
+                  )}
+                </div>
+
+                <div style={{ ...styles.debugPanel, marginTop: 12 }}>
+                    <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Prompt / LoRA</div>
+                    {promptPreview && (
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>Prompts</div>
+                        {promptPreview.prompts.length === 0 && !promptPreview.custom && (
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（未选择）</div>
+                        )}
+                        {promptPreview.prompts.length > 0 && (
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', lineHeight: 1.5 }}>
+                            {promptPreview.prompts.map((p, i) => (
+                              <span key={i}>
+                                {i > 0 && <span style={{ color: 'rgba(255,255,255,0.4)' }}>, </span>}
+                                <span style={{ color: '#0a84ff' }}>{p.name}</span>
+                                {p.prompt && p.prompt !== p.name && (
+                                  <span style={{ color: 'rgba(255,255,255,0.55)' }}>: {p.prompt}</span>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {promptPreview.custom && (
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 3 }}>＋ {promptPreview.custom}</div>
+                        )}
+                      </div>
+                    )}
+                    {loraPreview && (
+                      <div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>LoRA</div>
+                        {loraPreview.length === 0 && (
+                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（未选择）</div>
+                        )}
+                        {loraPreview.map((l, i) => (
+                          <div key={i} style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', marginBottom: 3 }}>
+                            <span style={{ color: '#30d158' }}>{l.name || l.file}</span>
+                            <span style={{ color: 'rgba(255,255,255,0.55)' }}> · {l.strength}</span>
+                            {l.file && l.file !== l.name && (
+                              <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11 }}> · {l.file}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
-              )}
+              </div>
 
-              {/* Run button bottom-right */}
-              <div style={styles.runBtnWrap}>
+              {/* Run button bottom-right + quick tag buttons */}
+              <div style={{ ...styles.runBtnWrap, display: 'flex', gap: 10, alignItems: 'center' }}>
+                <div style={styles.tagBtnRow}>
+                  <button style={styles.tagBtn} onClick={() => onRunTag('mask')} disabled={detailStatus === 'running'}>Mask Tag</button>
+                  <button style={styles.tagBtn} onClick={() => onRunTag('covered')} disabled={detailStatus === 'running'}>Covered Tag</button>
+                  <button style={styles.tagBtn} onClick={() => onRunTag('full')} disabled={detailStatus === 'running'}>Full Tag</button>
+                </div>
                 <button
                   style={{ ...styles.runBtn, opacity: detailStatus === 'running' ? 0.4 : 1, cursor: detailStatus === 'running' ? 'not-allowed' : 'pointer' }}
                   onClick={onRunDetailer}
@@ -1468,7 +1611,7 @@ const styles: Record<string, React.CSSProperties> = {
   progressBarTrack: { width: 280, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
   progressBarFill: { height: '100%', borderRadius: 3, background: '#0a84ff', transition: 'width 0.3s ease' },
 
-  resultGrid: { display: 'flex', gap: 12, flex: 1, minHeight: 0, flexWrap: 'nowrap' },
+  resultGrid: { display: 'flex', flexDirection: 'row', gap: 12, flex: 1, minHeight: 0, flexWrap: 'nowrap' },
   resultCard: { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 8, border: '0.5px solid rgba(255,255,255,0.08)' },
   resultLabel: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' },
   resultImg: { width: '100%', flex: 1, minHeight: 0, objectFit: 'contain', borderRadius: 8 },
@@ -1482,6 +1625,20 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 10, cursor: 'pointer',
     transition: 'all 0.2s ease', letterSpacing: '0.3px',
     boxShadow: '0 2px 12px rgba(48,209,88,0.2)',
+  },
+
+  // Draw tab — right side two-column: mask iframe (left) + result cards (right)
+  drawSplit: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 12 },
+  drawMaskCol: { flex: '1.7 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, background: 'rgba(28,28,30,0.4)', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.08)', overflow: 'hidden' },
+  drawMaskFrame: { flex: 1, minHeight: 0, width: '100%', border: 'none', borderRadius: 8 },
+  drawResultCol: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' },
+
+  // Quick tag buttons row (left of Run Detailer)
+  tagBtnRow: { display: 'flex', gap: 8, alignItems: 'center' },
+  tagBtn: {
+    padding: '8px 14px', fontSize: 12, fontWeight: 600, color: '#fff',
+    background: 'rgba(255,255,255,0.1)', border: '0.5px solid rgba(255,255,255,0.15)',
+    borderRadius: 8, cursor: 'pointer', transition: 'all 0.15s ease',
   },
 
   // Context — left/right split layout

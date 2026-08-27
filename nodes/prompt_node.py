@@ -962,21 +962,32 @@ class SnapshotPromptServer:
                     return
 
             elif self.path == '/prompts_data':
+                # 实时选中的 prompt（prompt 界面确认后立即更新，无需等待 run）。
+                # program 会在 prompt 界面内对 selection 做增删改，selected_prompts
+                # 已经是 program 处理后的最终 prompts，直接返回全部内容即可。
+                si = self.server_instance
+                live_selected = []
+                for p in (si.selected_prompts or []):
+                    if isinstance(p, dict):
+                        live_selected.append(p.get('text', ''))
+                    else:
+                        live_selected.append(p)
                 data = {
-                    'categories': self.server_instance.prompts_data,
-                    'libraries': self.server_instance.libraries_data,
-                    'programs': self.server_instance.programs_data,
-                    'last_selected': self.server_instance.last_selected,
-                    'category_display_modes': self.server_instance.category_display_modes,
-                    'category_size_modes': self.server_instance.category_size_modes,
-                    'custom_prompts': self.server_instance.custom_prompts,
-                    'last_selected_loras': self.server_instance._resolve_selected_loras_by_fingerprint(self.server_instance.last_selected_loras),
-                    'last_selected_prefabs': self.server_instance.last_selected_prefabs,
-                    'last_selected_programs': self.server_instance.last_selected_programs,
-                    'parsed_prompts': self.server_instance.parsed_prompts,
-                    'lora_regex': self.server_instance.lora_regex,
-                    'has_tagger': getattr(self.server_instance, 'tagger', None) is not None,
-                    'has_asset': bool(getattr(self.server_instance, 'asset', '')),
+                    'categories': si.prompts_data,
+                    'libraries': si.libraries_data,
+                    'programs': si.programs_data,
+                    'last_selected': si.last_selected,
+                    'selected_prompts': live_selected,
+                    'category_display_modes': si.category_display_modes,
+                    'category_size_modes': si.category_size_modes,
+                    'custom_prompts': si.custom_prompts,
+                    'last_selected_loras': si._resolve_selected_loras_by_fingerprint(si.last_selected_loras),
+                    'last_selected_prefabs': si.last_selected_prefabs,
+                    'last_selected_programs': si.last_selected_programs,
+                    'parsed_prompts': si.parsed_prompts,
+                    'lora_regex': si.lora_regex,
+                    'has_tagger': getattr(si, 'tagger', None) is not None,
+                    'has_asset': bool(getattr(si, 'asset', '')),
                 }
                 print(f"[SnapshotPrompt] /prompts_data: last_selected_programs={self.server_instance.last_selected_programs}")
                 self.send_response(200)
@@ -1011,11 +1022,18 @@ class SnapshotPromptServer:
                     return
 
             elif self.path == '/lora_data':
+                live_loras = []
+                if self.server_instance:
+                    # 优先使用完整快照 last_selected_loras（含 program 添加/修改后结果，run 时不再剥离），
+                    # 回退到实时选中的 selected_loras
+                    src = self.server_instance.last_selected_loras or self.server_instance.selected_loras
+                    live_loras = self.server_instance._resolve_selected_loras_by_fingerprint(src)
                 data = {
                     'folders': self.server_instance.lora_data if self.server_instance else {},
                     'folder_meta': self.server_instance.lora_folder_meta if self.server_instance else {},
                     'lora_slider_configs': self.server_instance._get_lora_slider_configs_by_filepath() if self.server_instance else {},
-                    'last_selected_loras': self.server_instance._resolve_selected_loras_by_fingerprint(self.server_instance.last_selected_loras) if self.server_instance else [],
+                    'selected_loras': live_loras,
+                    'last_selected_loras': live_loras,
                     'last_selected_prefabs': self.server_instance.last_selected_prefabs if self.server_instance else [],
                     'lora_regex': self.server_instance.lora_regex if self.server_instance else '',
                 }
