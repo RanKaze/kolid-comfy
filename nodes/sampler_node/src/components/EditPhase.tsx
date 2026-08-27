@@ -158,6 +158,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
   const [contextPreview, setContextPreview] = useState<{ image: string; mask: string | null } | null>(null);
+  const [contextDragOver, setContextDragOver] = useState(false);
 
   // Fetch context preview when entering draw tab
   React.useEffect(() => {
@@ -199,6 +200,35 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  const readFileAsContextImage = (file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      onAddContextImage(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleContextDragOver = (e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!contextDragOver) setContextDragOver(true);
+  };
+
+  const handleContextDragLeave = (e: React.DragEvent) => {
+    // Only clear when leaving the container itself, not entering a child
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setContextDragOver(false);
+  };
+
+  const handleContextDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setContextDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) readFileAsContextImage(file);
   };
 
   const toggleFinishSelection = (key: string) => {
@@ -604,7 +634,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Context — left/right split layout */}
         {tab === 'context' && (
-          <div style={styles.contextLayout}>
+          <div
+            style={{ ...styles.contextLayout, position: 'relative' }}
+            onDragOver={handleContextDragOver}
+            onDragLeave={handleContextDragLeave}
+            onDrop={handleContextDrop}
+          >
             {/* Left: large preview */}
             <div style={styles.contextPreview}>
               {hoveredHistory ? (
@@ -655,6 +690,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No history yet.</div>
               )}
             </div>
+            {/* Drag-to-add overlay */}
+            {contextDragOver && (
+              <div style={styles.contextDropOverlay}>
+                <div style={styles.contextDropInner}>Drop image to add to context</div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1273,6 +1314,8 @@ const styles: Record<string, React.CSSProperties> = {
   contextActiveDot: { width: 8, height: 8, borderRadius: '50%', background: '#0a84ff', boxShadow: '0 0 6px rgba(10,132,255,0.5)', flexShrink: 0, marginLeft: 'auto' },
   contextLoadBtns: { display: 'flex', gap: 6, marginBottom: 4 },
   contextLoadBtn: { flex: 1, padding: '6px 8px', fontSize: 11, fontWeight: 600, color: '#fff', background: 'rgba(255,255,255,0.1)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease' },
+  contextDropOverlay: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(10,132,255,0.12)', border: '2px dashed rgba(10,132,255,0.7)', borderRadius: 12, backdropFilter: 'blur(2px)', pointerEvents: 'none' },
+  contextDropInner: { padding: '14px 28px', fontSize: 15, fontWeight: 700, color: '#fff', background: 'rgba(10,132,255,0.85)', borderRadius: 10, boxShadow: '0 4px 16px rgba(10,132,255,0.3)' },
 
   // History (used in finish dialog)
   dialogHistoryGrid: { display: 'flex', flexWrap: 'wrap', gap: 12, alignContent: 'flex-start' },
