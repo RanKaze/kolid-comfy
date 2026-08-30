@@ -775,29 +775,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
             {/* Right: status / results / run button */}
             <div style={styles.drawMainArea}>
-              {detailStatus === 'running' && (
-                <div style={styles.drawStatusCenter}>
-                  <div style={styles.spinner} />
-                  <div style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>Running Detailer</div>
-                  {detailProgress.total > 0 && (
-                    <>
-                      <div style={styles.progressBarTrack}>
-                        <div style={{ ...styles.progressBarFill, width: `${detailProgress.progress * 100}%` }} />
-                      </div>
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
-                        Step {detailProgress.current} / {detailProgress.total}
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {detailStatus === 'error' && (
-                <div style={styles.drawStatusCenter}>
-                  <div style={{ fontSize: 17, fontWeight: 700, color: '#ff453a' }}>Error</div>
-                </div>
-              )}
-
               <div style={styles.drawSplit}>
                 {/* 左半：常驻 mask 编辑 iframe（同 mask tab 界面） */}
                 <div style={styles.drawMaskCol}>
@@ -808,6 +785,28 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     style={styles.drawMaskFrame}
                     title="Mask Editor"
                   />
+                  {(detailStatus === 'running' || detailStatus === 'error') && (
+                    <div style={styles.drawStatusCenter}>
+                      {detailStatus === 'running' ? (
+                        <>
+                          <div style={styles.spinner} />
+                          <div style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>Running Detailer</div>
+                          {detailProgress.total > 0 && (
+                            <>
+                              <div style={styles.progressBarTrack}>
+                                <div style={{ ...styles.progressBarFill, width: `${detailProgress.progress * 100}%` }} />
+                              </div>
+                              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
+                                Step {detailProgress.current} / {detailProgress.total}
+                              </div>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <div style={{ fontSize: 17, fontWeight: 700, color: '#ff453a' }}>Error</div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* 右半：结果卡片 + debug */}
@@ -1605,7 +1604,7 @@ const styles: Record<string, React.CSSProperties> = {
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
   drawMainArea: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 16, position: 'relative', overflowY: 'auto' },
 
-  drawStatusCenter: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14 },
+  drawStatusCenter: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)', borderRadius: 12, zIndex: 5 },
 
   // Progress bar — iOS style
   progressBarTrack: { width: 280, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
@@ -1629,7 +1628,7 @@ const styles: Record<string, React.CSSProperties> = {
 
   // Draw tab — right side two-column: mask iframe (left) + result cards (right)
   drawSplit: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 12 },
-  drawMaskCol: { flex: '1.7 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, background: 'rgba(28,28,30,0.4)', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.08)', overflow: 'hidden' },
+  drawMaskCol: { flex: '1.7 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, background: 'rgba(28,28,30,0.4)', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' },
   drawMaskFrame: { flex: 1, minHeight: 0, width: '100%', border: 'none', borderRadius: 8 },
   drawResultCol: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' },
 
