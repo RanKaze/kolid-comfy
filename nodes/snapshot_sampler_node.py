@@ -28,6 +28,12 @@ except ImportError as e:
     waitSnapShot = None
 
 try:
+    from .snapshot_draw_node import SnapshotDrawServer
+except ImportError as e:
+    print(f"[SnapshotDetailerSampler] Warning: cannot import snapshot_draw_node: {e}")
+    SnapshotDrawServer = None
+
+try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
 except ImportError as e:
     print(f"[SnapshotDetailerSampler] Warning: cannot import prompt_node: {e}")
@@ -163,10 +169,12 @@ class SnapshotDetailerSamplerServer:
 
         # 子服务器
         self.mask_server = None
+        self.draw_server = None
         self.prompt_server = None
         self.main_server = None
         self.main_port = None
         self.mask_url = ""
+        self.draw_url = ""
         self.prompt_url = ""
         self.browser_url = ""
         self.started = False
@@ -179,6 +187,14 @@ class SnapshotDetailerSamplerServer:
         """Mask 编辑器 confirm 回调。直接写入 pipeline.mask。"""
         if self.node_instance is not None:
             self.node_instance._on_mask_set(mask)
+
+    def _on_draw_set(self, draw_tensor):
+        """Draw 编辑器绘制回调。写回 pipeline.image 并同步 mask server 底图。"""
+        if self.node_instance is not None:
+            self.node_instance._on_draw_set(draw_tensor)
+        # mask server 底图同步为绘制后的图
+        if self.mask_server is not None and draw_tensor is not None:
+            self.mask_server.set_image(draw_tensor)
 
     # -------------------------------------------------------------------------
     # 生命周期
@@ -204,6 +220,30 @@ class SnapshotDetailerSamplerServer:
 
         _, mask_port = self.mask_server.server.server_address
         self.mask_url = f"http://localhost:{mask_port}/mask_node.html"
+
+        # 1b) Draw server (独立绘画编辑器，image in / image out)
+        if SnapshotDrawServer is not None:
+            self.draw_server = SnapshotDrawServer(
+                image=initial_image,
+            )
+            self.draw_server._on_draw_set = self._on_draw_set
+            t_draw = threading.Thread(target=self.draw_server.start)
+            t_draw.daemon = True
+            t_draw.start()
+
+            t0 = time.time()
+            while not self.draw_server.started:
+                if time.time() - t0 > 10:
+                    print("[SnapshotDetailerSampler] Draw server startup timeout, continuing without it")
+                    self.draw_server = None
+                    break
+                time.sleep(0.01)
+
+            if self.draw_server is not None:
+                _, draw_port = self.draw_server.server.server_address
+                self.draw_url = f"http://localhost:{draw_port}/draw_node.html"
+        else:
+            print("[SnapshotDetailerSampler] SnapshotDrawServer not available, draw tab will fall back to mask iframe")
 
         # 2) Prompt server
         if SnapshotPromptServer is None:
@@ -262,6 +302,8 @@ class SnapshotDetailerSamplerServer:
         print("[SnapshotDetailerSampler] stop() called")
         if self.mask_server:
             self.mask_server._on_mask_set = None
+        if self.draw_server:
+            self.draw_server._on_draw_set = None
         def _stop(server, name):
             if server:
                 try:
@@ -271,7 +313,7 @@ class SnapshotDetailerSamplerServer:
                 except Exception as e:
                     print(f"[SnapshotDetailerSampler] Error stopping {name}: {e}")
         threads = []
-        for s, name in [(self.mask_server, 'mask_server'), (self.prompt_server, 'prompt_server')]:
+        for s, name in [(self.mask_server, 'mask_server'), (self.draw_server, 'draw_server'), (self.prompt_server, 'prompt_server')]:
             t = threading.Thread(target=_stop, args=(s, name))
             t.daemon = True
             t.start()
@@ -547,6 +589,7 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/config':
                 self._send_json({
                     'mask_url': inst.mask_url if inst else '',
+                    'draw_url': inst.draw_url if inst else '',
                     'prompt_url': inst.prompt_url if inst else '',
                     'detail_status': inst.detail_status if inst else 'idle',
                     'add_noise': inst.add_noise if inst else 'enable',
@@ -1195,6 +1238,16 @@ class SnapshotDetailerSamplerNode:
         """Mask 编辑器 confirm → 直接写入 pipeline.mask。"""
         if self._current_pipeline is not None and mask is not None:
             self._current_pipeline.mask = mask.clone()
+
+    def _on_draw_set(self, image):
+        """Draw 编辑器绘制 → 写回 _current_pipeline.image（仅用于 context 预览）。
+
+        注意：不写 _base_pipeline —— draw 与 mask 一样属于交互状态，
+        由 run_detailer 执行时从 draw server 取最新合成图合并进副本。
+        """
+        if image is None or self._current_pipeline is None:
+            return
+        self._current_pipeline.image = image.clone()
 
     # -------------------------------------------------------------------------
     # Tag
@@ -1852,6 +1905,13 @@ class SnapshotDetailerSamplerNode:
             else:
                 print(f"[SnapshotDetailerSampler] Image size unchanged ({new_w}x{new_h}), mask preserved")
 
+        # Sync draw server image as well
+        if server.draw_server:
+            server.draw_server.set_image(new_image)
+            # 绘制内容属于旧图（_current_draw 是旧底图+笔迹的整图合成），
+            # 切换 context 一律清除，否则前端 reload 会用旧合成图盖住新底图
+            server.draw_server.clear()
+
         # 关键：切换 context 时同步 _base_pipeline 的 image/mask。
         # run_detailer 每次基于 _base_pipeline.copy() 执行（见 sample()），若不在此同步，
         # 注入的仍是初始化时的原始 image，导致用户切换 context 后 run 仍用旧图。
@@ -2181,6 +2241,16 @@ class SnapshotDetailerSamplerNode:
                             continue
                         run_pipeline = self._base_pipeline.copy()
                         run_pipeline.mask = current_mask.clone() if current_mask is not None else None
+
+                        # Draw 是输入图的最后一站：最终输入图一律取 draw 编辑器当前输出
+                        # （有笔迹用「底图+笔迹」合成图，无笔迹用其底图 = 当前 context 图），
+                        # 保证 run 的输入图永远经过 draw 这一步。
+                        if server.draw_server is not None:
+                            draw_img = server.draw_server.get_draw()
+                            if draw_img is None:
+                                draw_img = server.draw_server.get_image()
+                            if draw_img is not None:
+                                run_pipeline.image = draw_img.clone()
 
                         # 诊断：打印 mask 和 image 的尺寸信息
                         diag_img = run_pipeline.image

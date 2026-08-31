@@ -88,6 +88,7 @@ interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
   maskUrl: string;
+  drawUrl: string;
   promptUrl: string;
   maskConfirmed: boolean;
   promptReady: boolean;
@@ -140,7 +141,7 @@ interface EditPhaseProps {
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
-  tab, onTabChange, maskUrl, promptUrl,
+  tab, onTabChange, maskUrl, drawUrl, promptUrl,
   maskConfirmed, promptReady, autoTagging, hasTagger, tagPreviews, tagResult,
   debugData, detailStatus, detailProgress, resultImages,
   history, onRefreshHistory, promptIframeRef, maskIframeRef,
@@ -161,6 +162,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [contextDragOver, setContextDragOver] = useState(false);
   const [promptPreview, setPromptPreview] = useState<{ prompts: { name: string; prompt: string }[]; custom: string }>({ prompts: [], custom: '' });
   const [loraPreview, setLoraPreview] = useState<{ name: string; strength: number; file: string }[]>([]);
+  // draw tab 内部子模式：mask（遮罩编辑）/ draw（自由绘画）
+  const [drawMode, setDrawMode] = useState<'mask' | 'draw'>('mask');
   // 右键菜单
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: HistoryItem } | null>(null);
   // Resize Modal
@@ -260,12 +263,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     load();
   }, [tab, currentContextKey, promptReady]);
 
-  // context image 改变时，通知 draw tab 常驻的 mask iframe 重新加载（reload-image）
+  // context image 改变时，通知 draw tab 常驻的 mask / draw iframe 重新加载（reload-image）
   React.useEffect(() => {
-    if (tab === 'draw' && drawMaskIframeRef.current?.contentWindow) {
+    if (tab === 'draw') {
       // 等后端 _switch_image 更新 mask server 的图后再 reload
       const t = setTimeout(() => {
         drawMaskIframeRef.current?.contentWindow?.postMessage({ type: 'reload-image' }, '*');
+        drawEditorIframeRef.current?.contentWindow?.postMessage({ type: 'reload-image' }, '*');
       }, 120);
       return () => clearTimeout(t);
     }
@@ -275,7 +279,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   React.useEffect(() => {
     if (tab !== 'draw') return;
     const onMsg = (e: MessageEvent) => {
-      if (e.data && e.data.type === 'mask-confirmed') {
+      if (e.data && (e.data.type === 'mask-confirmed' || e.data.type === 'draw-confirmed')) {
         fetch('/api/context_preview')
           .then(r => r.json())
           .then(data => {
@@ -311,6 +315,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const drawMaskIframeRef = React.useRef<HTMLIFrameElement>(null);
+  const drawEditorIframeRef = React.useRef<HTMLIFrameElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -820,15 +825,34 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             {/* Right: status / results / run button */}
             <div style={styles.drawMainArea}>
               <div style={styles.drawSplit}>
-                {/* 左半：常驻 mask 编辑 iframe（同 mask tab 界面） */}
+                {/* 左半：遮罩/绘画编辑器（子 tab 切换 mask / draw），两个 iframe 常驻仅切换显示 */}
                 <div style={styles.drawMaskCol}>
-                  <div style={{ ...styles.sectionTitle, padding: '8px 10px 0' }}>Mask</div>
+                  <div style={styles.drawSubTabRow}>
+                    <button
+                      style={{ ...styles.drawSubTab, ...(drawMode === 'mask' ? styles.drawSubTabActive : {}) }}
+                      onClick={() => setDrawMode('mask')}
+                    >Mask</button>
+                    <button
+                      style={{ ...styles.drawSubTab, ...(drawMode === 'draw' ? styles.drawSubTabActive : {}) }}
+                      onClick={() => setDrawMode('draw')}
+                      disabled={!drawUrl}
+                    >Draw</button>
+                  </div>
                   <iframe
                     ref={drawMaskIframeRef}
                     src={`${maskUrl}?mode=draw`}
-                    style={styles.drawMaskFrame}
+                    style={{ ...styles.drawMaskFrame, display: drawMode === 'mask' ? 'block' : 'none' }}
                     title="Mask Editor"
                   />
+                  <iframe
+                    ref={drawEditorIframeRef}
+                    src={drawUrl ? `${drawUrl}?mode=draw` : undefined}
+                    style={{ ...styles.drawMaskFrame, display: drawMode === 'draw' && drawUrl ? 'block' : 'none' }}
+                    title="Draw Editor"
+                  />
+                  {!drawUrl && drawMode === 'draw' && (
+                    <div style={styles.drawFallbackHint}>Draw editor unavailable (draw_url not configured)</div>
+                  )}
                   {(detailStatus === 'running' || detailStatus === 'error') && (
                     <div style={styles.drawStatusCenter}>
                       {detailStatus === 'running' ? (
@@ -1933,6 +1957,10 @@ const styles: Record<string, React.CSSProperties> = {
   // Draw tab — right side two-column: mask iframe (left) + result cards (right)
   drawSplit: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 12 },
   drawMaskCol: { flex: '1.7 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, background: 'rgba(28,28,30,0.4)', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' },
+  drawSubTabRow: { display: 'flex', gap: 6, padding: '8px 10px 0' },
+  drawSubTab: { flex: 1, padding: '6px 0', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.5)', background: 'rgba(255,255,255,0.04)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 8, cursor: 'pointer', transition: 'all 0.15s ease' },
+  drawSubTabActive: { color: '#ff9f0a', background: 'rgba(255,159,10,0.12)', borderColor: 'rgba(255,159,10,0.35)' },
+  drawFallbackHint: { flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: 'rgba(255,255,255,0.35)' },
   drawMaskFrame: { flex: 1, minHeight: 0, width: '100%', border: 'none', borderRadius: 8 },
   drawResultCol: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' },
 

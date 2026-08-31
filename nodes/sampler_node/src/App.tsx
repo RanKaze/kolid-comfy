@@ -717,6 +717,7 @@ const App: React.FC = () => {
         tab={tab}
         onTabChange={handleTabChange}
         maskUrl={config.mask_url}
+        drawUrl={config.draw_url || ''}
         promptUrl={config.prompt_url}
         maskConfirmed={maskConfirmed}
         promptReady={promptReady}
