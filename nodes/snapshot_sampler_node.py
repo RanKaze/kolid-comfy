@@ -1475,6 +1475,9 @@ class SnapshotDetailerSamplerNode:
             for i, block in enumerate(blocks):
                 is_last = (i == len(blocks) - 1)
 
+                # 每个 block 执行前检查 interrupt 状态
+                mm.throw_exception_if_processing_interrupted()
+
                 if block.get('type') == 'interface':
                     # Interface 块在 chain 内执行：以当前 pipeline 的 image/mask 作为输入，
                     # 执行子图后把结果写回 pipeline，作为下一 block 的输入（不加入 history）。
@@ -2255,7 +2258,7 @@ class SnapshotDetailerSamplerNode:
 
                     except Exception as e:
                         # Check if this is a ComfyUI interrupt
-                        if mm.processing_interrupted() or 'Interrupt' in type(e).__name__:
+                        if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
                             print("[SnapshotDetailerSampler] Interrupted during detailer")
                             break
                         import traceback
@@ -2290,7 +2293,7 @@ class SnapshotDetailerSamplerNode:
                         server.interface_status = 'done'
                         server.interface_progress = 1.0
                     except Exception as e:
-                        if mm.processing_interrupted() or 'Interrupt' in type(e).__name__:
+                        if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
                             print("[SnapshotDetailerSampler] Interrupted during interface execution")
                             break
                         import traceback
@@ -2305,6 +2308,10 @@ class SnapshotDetailerSamplerNode:
             print("[SnapshotDetailerSampler] Stopping servers...")
             server.stop()
             print("[SnapshotDetailerSampler] Servers stopped.")
+
+        # 如果是因 interrupt 而 break 出循环，重新抛出异常通知 ComfyUI
+        if mm.processing_interrupted():
+            raise RuntimeError("Processing interrupted")
 
         if server.window_closed and not server.finished:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")

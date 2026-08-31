@@ -3,6 +3,7 @@ import json
 from ..libs.utils import AlwaysEqualProxy, ByPassTypeTuple
 
 from comfy_execution.graph_utils import is_link
+import comfy.model_management as mm
 
 MAX_INTERFACE_NUM = 20
 any_type = AlwaysEqualProxy("*")
@@ -1066,6 +1067,9 @@ class InterfaceExecutor:
         # 0. 缓存检查
         if nid in output_values:
             return output_values[nid]
+
+        # 中断检查：在每个节点执行前检查 ComfyUI 的 interrupt 状态
+        mm.throw_exception_if_processing_interrupted()
 
         # 循环检测
         if nid in self._eval_stack:
