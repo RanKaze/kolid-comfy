@@ -988,6 +988,54 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
+            if self.path == '/api/resize_image':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    key = body.get('key', '')
+                    width = int(body.get('width', 0))
+                    height = int(body.get('height', 0))
+                    if not key or width <= 0 or height <= 0:
+                        self._send_json({'success': False, 'error': 'Invalid key, width or height'}, 400)
+                        return
+                    # 获取历史图片 tensor
+                    tensor = inst.get_history_image(key)
+                    if tensor is None:
+                        self._send_json({'success': False, 'error': 'Image not found'}, 404)
+                        return
+                    # tensor 可能是 [B,H,W,C] 或 [H,W,C]
+                    if tensor.dim() == 4:
+                        img = tensor[0]
+                    elif tensor.dim() == 3:
+                        img = tensor
+                    else:
+                        self._send_json({'success': False, 'error': f'Unexpected tensor dim: {tensor.dim()}'}, 400)
+                        return
+                    # img: [H,W,C] float32 0-1
+                    orig_h, orig_w = img.shape[0], img.shape[1]
+                    # numpy → PIL resize → numpy
+                    arr = (img.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+                    pil_img = Image.fromarray(arr)
+                    pil_img = pil_img.resize((width, height), Image.LANCZOS)
+                    arr2 = np.array(pil_img).astype(np.float32) / 255.0
+                    resized_tensor = torch.from_numpy(arr2)
+                    if tensor.dim() == 4:
+                        resized_tensor = resized_tensor.unsqueeze(0)
+                    # 添加到历史
+                    name = None
+                    for h in inst.selected_history:
+                        if h['key'] == key:
+                            name = f"{h['name']} ({width}x{height})"
+                            break
+                    inst.add_history(resized_tensor, name=name)
+                    new_key = inst.selected_history[-1]['key']
+                    self._send_json({'success': True, 'key': new_key})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
             if self.path == '/api/load_from_assets':
                 try:
                     if inst.node_instance is None:

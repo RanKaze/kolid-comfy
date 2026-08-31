@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
 import type { PipelineBlock, DetailerBlockParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
 
@@ -161,6 +161,50 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [contextDragOver, setContextDragOver] = useState(false);
   const [promptPreview, setPromptPreview] = useState<{ prompts: { name: string; prompt: string }[]; custom: string }>({ prompts: [], custom: '' });
   const [loraPreview, setLoraPreview] = useState<{ name: string; strength: number; file: string }[]>([]);
+  // 右键菜单
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: HistoryItem } | null>(null);
+  // Resize Modal
+  const [resizeModal, setResizeModal] = useState<{ item: HistoryItem } | null>(null);
+
+  // 关闭右键菜单（点击任意处）
+  React.useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [contextMenu]);
+
+  // 右键菜单处理
+  const handleContextAction = useCallback((action: string, item: HistoryItem) => {
+    setContextMenu(null);
+    if (action === 'resize') {
+      setResizeModal({ item });
+    } else if (action === 'select') {
+      onSelectImage(item.key);
+    }
+  }, [onSelectImage]);
+
+  // Resize 提交
+  const handleResizeSubmit = useCallback(async (key: string, width: number, height: number) => {
+    try {
+      const res = await fetch('/api/resize_image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, width, height }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onRefreshHistory();
+      }
+    } catch (e) {
+      // ignore
+    }
+    setResizeModal(null);
+  }, [onRefreshHistory]);
 
   // Fetch context preview when entering draw tab
   React.useEffect(() => {
@@ -1005,6 +1049,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   }}
                   onMouseEnter={() => setHoveredHistory(h)}
                   onClick={() => onSelectImage(h.key)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setContextMenu({ x: e.clientX, y: e.clientY, item: h });
+                  }}
                 >
                   <img src={h.src} alt={h.name} style={styles.contextThumbImg} />
                   <div style={styles.contextThumbName}>{h.name}</div>
@@ -1120,6 +1169,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* 右键菜单 */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          item={contextMenu.item}
+          onAction={handleContextAction}
+        />
+      )}
+
+      {/* Resize Modal */}
+      {resizeModal && (
+        <ResizeModal
+          item={resizeModal.item}
+          onSubmit={handleResizeSubmit}
+          onCancel={() => setResizeModal(null)}
+        />
       )}
     </div>
   );
@@ -1533,6 +1601,242 @@ const PipelineTab: React.FC<{
       ))}
     </div>
   );
+};
+
+// ── 右键菜单 ──
+const ContextMenu: React.FC<{
+  x: number;
+  y: number;
+  item: HistoryItem;
+  onAction: (action: string, item: HistoryItem) => void;
+}> = ({ x, y, item, onAction }) => {
+  // 防止菜单超出视口
+  const menuWidth = 160;
+  const menuHeight = 100;
+  const adjX = Math.min(x, window.innerWidth - menuWidth - 8);
+  const adjY = Math.min(y, window.innerHeight - menuHeight - 8);
+
+  const items: { action: string; label: string; icon?: string }[] = [
+    { action: 'select', label: 'Select as Context', icon: '◉' },
+    { action: 'resize', label: 'Resize…', icon: '⤢' },
+  ];
+
+  return (
+    <div style={{
+      position: 'fixed',
+      left: adjX,
+      top: adjY,
+      zIndex: 200,
+      minWidth: menuWidth,
+      background: 'rgba(28,28,30,0.95)',
+      backdropFilter: 'blur(20px)',
+      WebkitBackdropFilter: 'blur(20px)',
+      borderRadius: 10,
+      border: '0.5px solid rgba(255,255,255,0.12)',
+      boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+      padding: 5,
+      overflow: 'hidden',
+    }}>
+      {items.map((mi) => (
+        <button
+          key={mi.action}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            width: '100%',
+            padding: '8px 12px',
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 6,
+            color: 'rgba(255,255,255,0.85)',
+            fontSize: 13,
+            fontWeight: 500,
+            cursor: 'pointer',
+            textAlign: 'left' as const,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onAction(mi.action, item);
+          }}
+        >
+          <span style={{ fontSize: 14, opacity: 0.7, width: 18, textAlign: 'center' as const }}>{mi.icon}</span>
+          <span>{mi.label}</span>
+        </button>
+      ))}
+      <div style={{ padding: '2px 12px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
+        {item.width && item.height ? `${item.width}×${item.height}` : ''}
+      </div>
+    </div>
+  );
+};
+
+// ── Resize Modal ──
+const ResizeModal: React.FC<{
+  item: HistoryItem;
+  onSubmit: (key: string, width: number, height: number) => void;
+  onCancel: () => void;
+}> = ({ item, onSubmit, onCancel }) => {
+  const origW = item.width || 0;
+  const origH = item.height || 0;
+  const [width, setWidth] = useState(origW);
+  const [height, setHeight] = useState(origH);
+  const [lockRatio, setLockRatio] = useState(true);
+  // 比例 = width / height
+  const ratioRef = useRef(origH > 0 ? origW / origH : 1);
+  // width 比例 和 height 比例 (相对原图)
+  const wPct = origW > 0 ? (width / origW * 100) : 100;
+  const hPct = origH > 0 ? (height / origH * 100) : 100;
+
+  const handleWidthChange = (val: number) => {
+    const clamped = Math.max(1, Math.round(val));
+    setWidth(clamped);
+    if (lockRatio && origH > 0) {
+      setHeight(Math.max(1, Math.round(clamped / ratioRef.current)));
+    }
+  };
+
+  const handleHeightChange = (val: number) => {
+    const clamped = Math.max(1, Math.round(val));
+    setHeight(clamped);
+    if (lockRatio && origW > 0) {
+      setWidth(Math.max(1, Math.round(clamped * ratioRef.current)));
+    }
+  };
+
+  const handleSubmit = () => {
+    const w = Math.max(1, Math.round(width));
+    const h = Math.max(1, Math.round(height));
+    onSubmit(item.key, w, h);
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={{ ...styles.dialog, width: 380, padding: 0, overflow: 'hidden' }} onClick={(e) => e.stopPropagation()}>
+        {/* Header */}
+        <div style={{ padding: '20px 24px 12px' }}>
+          <div style={styles.dialogTitle}>Resize Image</div>
+          <div style={styles.dialogSubtitle}>
+            {item.name}
+            {origW && origH ? `  ·  Original: ${origW}×${origH}` : ''}
+          </div>
+        </div>
+
+        {/* Preview */}
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '0 24px 16px' }}>
+          <div style={{
+            width: 120, height: 120, borderRadius: 10, overflow: 'hidden',
+            background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '0.5px solid rgba(255,255,255,0.08)',
+          }}>
+            <img src={item.src} alt={item.name} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+          </div>
+        </div>
+
+        {/* Inputs */}
+        <div style={{ padding: '0 24px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Width row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.7)', width: 50 }}>Width</label>
+            <input
+              type="number"
+              min={1}
+              value={width}
+              onChange={(e) => handleWidthChange(Number(e.target.value))}
+              style={resizeStyles.input}
+              onFocus={(e) => e.target.select()}
+            />
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', width: 48 }}>
+              {wPct.toFixed(1)}%
+            </span>
+          </div>
+
+          {/* Height row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.7)', width: 50 }}>Height</label>
+            <input
+              type="number"
+              min={1}
+              value={height}
+              onChange={(e) => handleHeightChange(Number(e.target.value))}
+              style={resizeStyles.input}
+              onFocus={(e) => e.target.select()}
+            />
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', width: 48 }}>
+              {hPct.toFixed(1)}%
+            </span>
+          </div>
+
+          {/* Lock ratio toggle */}
+          <div
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 12px', borderRadius: 8,
+              background: 'rgba(255,255,255,0.04)',
+              border: '0.5px solid rgba(255,255,255,0.06)',
+              cursor: 'pointer',
+            }}
+            onClick={() => {
+              if (!lockRatio) {
+                // 重新锁定时以当前 width 为基准计算比例
+                if (height > 0) ratioRef.current = width / height;
+              }
+              setLockRatio(!lockRatio);
+            }}
+          >
+            <div style={{
+              width: 18, height: 18, borderRadius: '50%',
+              border: lockRatio ? 'none' : '1.5px solid rgba(255,255,255,0.3)',
+              background: lockRatio ? '#0a84ff' : 'transparent',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.2s',
+            }}>
+              {lockRatio && (
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 6L3 12l6 6" />
+                  <path d="M15 6l6 6-6 6" />
+                </svg>
+              )}
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)' }}>
+              Lock Aspect Ratio
+            </span>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          ...styles.dialogActions,
+          padding: '12px 24px 20px',
+          marginTop: 0,
+          borderTop: '0.5px solid rgba(255,255,255,0.06)',
+        }}>
+          <button style={styles.cancelBtn} onClick={onCancel}>Cancel</button>
+          <button style={styles.confirmBtn} onClick={handleSubmit}>
+            Resize
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const resizeStyles: Record<string, React.CSSProperties> = {
+  input: {
+    flex: 1,
+    padding: '8px 12px',
+    fontSize: 14,
+    fontWeight: 500,
+    color: '#fff',
+    background: 'rgba(0,0,0,0.3)',
+    border: '0.5px solid rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    outline: 'none',
+    minWidth: 0,
+  },
 };
 
 const styles: Record<string, React.CSSProperties> = {
