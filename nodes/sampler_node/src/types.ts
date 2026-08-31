@@ -1,5 +1,6 @@
 export interface ServerConfig {
   mask_url: string;
+  draw_url: string;
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
   add_noise: string;

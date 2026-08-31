@@ -1,0 +1,17 @@
+{
+  "extends": "../packages/ui-utils/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "baseUrl": ".",
+    "paths": {
+      "@kolid/ui-utils": ["../packages/ui-utils/src/index.ts"],
+      "@kolid/ui-utils/react-entry": ["../packages/ui-utils/src/react-entry.tsx"],
+      "@kolid/ui-utils/vite": ["../packages/ui-utils/src/vite-config.ts"],
+      "@kolid/ui-utils/base.css": ["../packages/ui-utils/src/base.css"]
+    }
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
