@@ -519,12 +519,36 @@ class InterfacePackageNode:
 
         # Build sub_prompt
         sub_prompt = {}
+        # Map of SetNode widget names → node_id, for resolving GetNode references.
+        # SetNode stores a variable name in widgets_values[0] ("Constant" widget).
+        set_node_map = {}  # {var_name: set_node_id}
+        get_node_refs = []  # [(get_node_id, var_name)]
         for nid in sub_graph_ids:
             n = node_by_id.get(nid)
             if not n:
                 continue
 
             node_type = n.get("type", "")
+
+            # Track SetNode/GetNode (KJNodes virtual nodes — pure frontend,
+            # no backend class). They must be resolved to direct connections.
+            if node_type == "SetNode":
+                wv = n.get("widgets_values", [])
+                if wv and wv[0]:
+                    set_node_map[wv[0]] = nid
+                # SetNode itself is skipped, but its upstream must still be
+                # traversed so the real source node is included in sub_graph_ids.
+                for (up_origin, _, _) in self._get_node_upstream(nid, links):
+                    if up_origin not in sub_graph_ids:
+                        queue.append(up_origin)
+                continue  # Don't add SetNode to sub_prompt
+            elif node_type == "GetNode":
+                wv = n.get("widgets_values", [])
+                if wv and wv[0]:
+                    get_node_refs.append((nid, wv[0]))
+                # GetNode is skipped — its upstream is the SetNode's upstream,
+                # which is already handled by SetNode traversal above.
+                continue  # Don't add GetNode to sub_prompt
 
             # Check if this is a subgraph node
             if node_type in subgraph_by_type:
@@ -556,7 +580,77 @@ class InterfacePackageNode:
                 "_widgets_values": wv,
             }
 
-        # Infer types from End's value inputs
+        # Resolve GetNode references: replace any link pointing to a GetNode
+        # with the actual upstream link from its corresponding SetNode's input.
+        # GetNode/SetNode are pure frontend virtual nodes (KJNodes) with no
+        # backend class — ComfyUI's frontend resolves them during prompt
+        # serialization via getInputLink(), but interface sub_prompt is built
+        # directly from workflow JSON so we must do the resolution here.
+        if get_node_refs:
+            # Build a link lookup: link_id → [origin_id, origin_slot, ...]
+            link_by_id_local = {}
+            for link in links:
+                if isinstance(link, list) and len(link) >= 5:
+                    link_by_id_local[link[0]] = link
+
+            # If SetNode wasn't found in sub_graph_ids (e.g. it's outside the
+            # interface subgraph), search the entire workflow for it by name.
+            if not set_node_map:
+                for sn_id, sn_node in node_by_id.items():
+                    if sn_node.get("type") == "SetNode":
+                        sn_wv = sn_node.get("widgets_values", [])
+                        if sn_wv and sn_wv[0]:
+                            set_node_map[sn_wv[0]] = sn_id
+
+            # For each GetNode, find its SetNode's input link and record the
+            # mapping: get_node_id → (real_origin_id, real_origin_slot)
+            get_resolution = {}  # {get_node_id: [origin_id, origin_slot]}
+            for get_nid, var_name in get_node_refs:
+                set_nid = set_node_map.get(var_name)
+                if not set_nid:
+                    print(f"[InterfacePackageNode] WARNING: GetNode '{var_name}' has no matching SetNode")
+                    continue
+                set_node = node_by_id.get(set_nid, {})
+                # SetNode has one input (slot 0) — find the link connected to it
+                set_inputs = set_node.get("inputs", [])
+                resolved = False
+                for si in set_inputs:
+                    if isinstance(si, dict):
+                        lid = si.get("link")
+                        if lid is not None and lid in link_by_id_local:
+                            sl = link_by_id_local[lid]
+                            real_origin = str(sl[1])
+                            real_slot = sl[2]
+                            get_resolution[get_nid] = [real_origin, real_slot]
+                            # Ensure the real source node is in sub_graph_ids
+                            if real_origin not in sub_graph_ids:
+                                sub_graph_ids.add(real_origin)
+                                # Also add it to sub_prompt
+                                rn = node_by_id.get(real_origin)
+                                if rn:
+                                    r_inputs = self._get_node_inputs(rn, links)
+                                    sub_prompt[real_origin] = {
+                                        "class_type": rn.get("type", ""),
+                                        "inputs": r_inputs,
+                                        "_widgets_values": rn.get("widgets_values", []),
+                                    }
+                            resolved = True
+                            break
+                if not resolved:
+                    # SetNode input might be unconnected — value is from widget or None
+                    print(f"[InterfacePackageNode] WARNING: SetNode '{var_name}' has no connected input")
+
+            # Replace all references to GetNode IDs in sub_prompt links
+            if get_resolution:
+                for nid, node in sub_prompt.items():
+                    node_inputs = node.get("inputs", {})
+                    for name, val in list(node_inputs.items()):
+                        if is_link(val):
+                            origin_id = str(val[0])
+                            if origin_id in get_resolution:
+                                real_link = get_resolution[origin_id]
+                                node_inputs[name] = real_link
+                                print(f"[InterfacePackageNode] Resolved GetNode link: {nid}.{name} → {real_link[0]}:{real_link[1]}")
         types = {}
         for link in links:
             if len(link) >= 5 and str(link[3]) == node_id_str and link[4] >= 1:
@@ -1126,6 +1220,8 @@ class InterfaceExecutor:
                     inputs[name] = val
 
             # 2. 填充默认值（在 lazy check 之前，让 check_lazy_status 能看到 widget 值）
+            #    同时收集 optional 输入名称，供 check_lazy_status 调用时填充 None
+            optional_names = set()
             try:
                 it = class_def.INPUT_TYPES()
                 for rn, rd in it.get("required", {}).items():
@@ -1135,25 +1231,34 @@ class InterfaceExecutor:
                             inputs[rn] = opts["default"]
                         elif isinstance(rd[0], list) and rd[0]:
                             inputs[rn] = rd[0][0]
+                for on in it.get("optional", {}):
+                    optional_names.add(on)
             except Exception:
                 pass
 
             # 3. 懒求值：check_lazy_status
             has_lazy = callable(getattr(class_def, "check_lazy_status", None))
 
-            if has_lazy and pending_links:
+            if has_lazy:
                 # 用已有输入（pending links 设为 None）调用 check_lazy_status
+                # 同时把所有未连接的 optional 输入也以 None 填入，
+                # 这样 check_lazy_status 的 **kwargs 才能看到完整的 optional 输入列表
                 lazy_inputs = dict(inputs)
                 for name in pending_links:
                     lazy_inputs[name] = None
+                for on in optional_names:
+                    if on not in lazy_inputs and on not in pending_links:
+                        lazy_inputs[on] = None
                 obj_tmp = class_def()
                 try:
                     required = obj_tmp.check_lazy_status(**lazy_inputs)
-                except Exception:
+                    print(f"[InterfaceExecutor]   check_lazy_status returned: {required}")
+                except Exception as _lazy_err:
+                    print(f"[InterfaceExecutor]   check_lazy_status exception: {_lazy_err}")
                     required = None
 
                 if required:
-                    # 只求值 check_lazy_status 声明需要的 link 输入
+                    # 只求值 check_lazy_status 声明需要的输入
                     for name in required:
                         if name in pending_links:
                             origin_id, output_slot = pending_links[name]
@@ -1162,7 +1267,22 @@ class InterfaceExecutor:
                             if val is not _UNRESOLVED:
                                 inputs[name] = val
                                 del pending_links[name]
-                # 未被 check_lazy_status 要求的 pending links 跳过（懒求值）
+                        else:
+                            # 未连线的 optional 输入：保持 None，让节点函数能通过 kwargs 访问
+                            inputs[name] = None
+                    # 未被 check_lazy_status 要求的 pending links 跳过（懒求值）
+                else:
+                    # check_lazy_status 返回 None 或抛异常：回退到求值所有 pending links
+                    for name, (origin_id, output_slot) in list(pending_links.items()):
+                        self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid)
+                        val = self._get_output(origin_id, output_slot, output_values)
+                        if val is not _UNRESOLVED:
+                            inputs[name] = val
+                            del pending_links[name]
+                    # 填充所有未连接的 optional 输入为 None
+                    for on in optional_names:
+                        if on not in inputs:
+                            inputs[on] = None
 
             else:
                 # 没有 check_lazy_status：求值所有 pending links
@@ -1185,6 +1305,10 @@ class InterfaceExecutor:
                 else:
                     _dbg.append(f"{_k}={type(_v).__name__}")
             print(f"[InterfaceExecutor]   inputs: {_dbg}")
+            if pending_links:
+                print(f"[InterfaceExecutor]   pending_links: {list(pending_links.keys())}")
+            if has_lazy:
+                print(f"[InterfaceExecutor]   optional_names: {sorted(optional_names)}")
 
             try:
                 obj = class_def()
