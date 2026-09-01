@@ -4,7 +4,7 @@
 
 ---
 
-### FitNode
+### ImageFitNode
 
 图片适配缩放。将图片等比缩放后居中放入指定尺寸画布，空白区域用指定颜色填充。
 
@@ -21,15 +21,51 @@
 
 ---
 
-### RecoverFitNode
+### ImageRecoverFitNode
 
-配合 FitNode 使用。根据 FitInfo 将适配后的图片恢复到原始尺寸。
+配合 ImageFitNode 使用。根据 FitInfo 将适配后的图片恢复到原始尺寸。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | image | IMAGE | ✅ | 适配后的图片 |
-| fitInfo | FIT_INFO | ✅ | 来自 FitNode 的 FitInfo |
+| fitInfo | FIT_INFO | ✅ | 来自 ImageFitNode 的 FitInfo |
 | interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| mask | MASK | ❌ | 可选 mask，同步恢复 |
+
+**输出:** `Image` (IMAGE), `Mask` (MASK)
+
+---
+
+### ImageMeetNode
+
+图片覆盖裁剪。将图片等比缩放到完全覆盖指定尺寸画布（允许超出），再居中裁剪成 width×height，比例不变，无填充。
+
+| 输入 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| image | IMAGE | ✅ | 输入图片 |
+| width | INT | ✅ | 目标画布宽度 0-2048（默认 0=不限制） |
+| height | INT | ✅ | 目标画布高度 0-2048（默认 0=不限制） |
+| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| mask | MASK | ❌ | 可选 mask，同步缩放和裁剪 |
+
+**输出:** `Image` (IMAGE), `MeetInfo` (MEET_INFO), `Mask` (MASK)
+
+---
+
+### ImageRecoverMeetNode
+
+配合 ImageMeetNode 使用。将处理后的 meet 图恢复到原始尺寸。
+
+- 连接 `background`（原图）：把内容贴回原图，被裁剪的边缘保留原图内容，完美还原。
+- 不连接 `background`：有损还原，被裁剪的边缘用 padding_color 填充。
+
+| 输入 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| image | IMAGE | ✅ | 处理后的 meet 图 |
+| meetInfo | MEET_INFO | ✅ | 来自 ImageMeetNode 的 MeetInfo |
+| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| padding_color | STRING | ✅ | 有损还原时的填充颜色，支持 `R, G, B` 或 `#RRGGBB`（默认 "255, 255, 255"） |
+| background | IMAGE | ❌ | 原图背景，连接则贴回原图完美还原 |
 | mask | MASK | ❌ | 可选 mask，同步恢复 |
 
 **输出:** `Image` (IMAGE), `Mask` (MASK)

@@ -72,7 +72,7 @@ npm run build
 
 ### 4. 重启 ComfyUI
 
-重启 ComfyUI 后，节点会自动加载。在 ComfyUI 的节点搜索中输入节点名称（如 `FitNode`、`PipelineNode`、`SnapshotPromptNode` 等）即可找到。
+重启 ComfyUI 后，节点会自动加载。在 ComfyUI 的节点搜索中输入节点名称（如 `ImageFitNode`、`PipelineNode`、`SnapshotPromptNode` 等）即可找到。
 
 ---
 

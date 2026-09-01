@@ -37,8 +37,10 @@ from .nodes.interface_node import *
     
 
 NODE_CONFIG = {
-    "FitNode": {"class": FitNode, "name": "FitNode"},
-    "RecoverFitNode": {"class": RecoverFitNode, "name": "RecoverFitNode"},
+    "ImageFitNode": {"class": ImageFitNode, "name": "ImageFitNode"},
+    "ImageRecoverFitNode": {"class": ImageRecoverFitNode, "name": "ImageRecoverFitNode"},
+    "ImageMeetNode": {"class": ImageMeetNode, "name": "ImageMeetNode"},
+    "ImageRecoverMeetNode": {"class": ImageRecoverMeetNode, "name": "ImageRecoverMeetNode"},
     "RegexMatcherNode": {"class": RegexMatcherNode, "name": "RegexMatcherNode"},
     "StringToIntNode" : {"class": StringToIntNode, "name": "StringToIntNode"},
     "ExtractFolderNameNode" : {"class": ExtractFolderNameNode, "name": "ExtractFolderNameNode"},

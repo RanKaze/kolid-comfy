@@ -1257,7 +1257,7 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
         style={{
           background: '#fff',
           borderRadius: 12,
-          boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.28)',
           padding: '12px 16px',
           display: 'flex',
           flexDirection: 'column',
@@ -1611,49 +1611,55 @@ const Panel = forwardRef<PanelHandle, PanelProps>(({ editor: editorRef, onHeight
 
         {/* Prompt input row - only show when enablePrompt is true */}
         {enablePrompt && (
-          <input
-            type="text"
+          <textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Ask for help ..."
+            rows={2}
             style={{
               border: 'none',
               background: 'transparent',
               color: '#666',
               fontSize: 14,
+              fontFamily: 'inherit',
               outline: 'none',
               padding: 0,
               width: '100%',
+              resize: 'none',
+              overflowWrap: 'break-word',
+              whiteSpace: 'pre-wrap',
             }}
           />
         )}
-
-        {/* Bottom row: Confirm button with arrow icon */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button
-            onClick={handleLocalConfirm}
-            style={{
-              width: 36,
-              height: 36,
-              borderRadius: '50%',
-              border: 'none',
-              background: '#4a9eff',
-              color: '#fff',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              transition: 'background 0.2s',
-              flexShrink: 0,
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="19" x2="12" y2="5"></line>
-              <polyline points="5 12 12 5 19 12"></polyline>
-            </svg>
-          </button>
-        </div>
       </div>
+
+      {/* Confirm button - outside the card, on its right side, bottom-aligned */}
+      <button
+        onClick={handleLocalConfirm}
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          right: -52,
+          width: 36,
+          height: 36,
+          borderRadius: '50%',
+          border: 'none',
+          background: '#4a9eff',
+          color: '#fff',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          transition: 'background 0.2s',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.28)',
+        }}
+        title="Confirm"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="12" y1="19" x2="12" y2="5"></line>
+          <polyline points="5 12 12 5 19 12"></polyline>
+        </svg>
+      </button>
       {/* Custom scrollbar styles */}
       <style>{`
         /* Webkit browsers (Chrome, Safari, Edge) */
