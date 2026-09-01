@@ -41,8 +41,8 @@ def parse_image_config(config_str):
     defs = []
     if not config_str:
         return defs
-    for part in config_str.split(','):
-        part = part.strip()
+    # Split on top-level commas only (commas inside parentheses belong to (min,max,step))
+    for part in split_slot_config(config_str):
         if not part:
             continue
         # Match: name:type:value(optional params)
@@ -94,7 +94,7 @@ def parse_image_config(config_str):
 
 
 def split_slot_config(config_str):
-    """Split slot config on top-level commas (depth 0, not inside parentheses)."""
+    """Split config on top-level commas/newlines (depth 0, not inside parentheses)."""
     parts = []
     current = []
     depth = 0
@@ -105,7 +105,7 @@ def split_slot_config(config_str):
         elif char == ')':
             depth -= 1
             current.append(char)
-        elif char == ',' and depth == 0:
+        elif char in (',', '\n', '\r') and depth <= 0:
             parts.append(''.join(current).strip())
             current = []
         else:
@@ -364,7 +364,7 @@ class SnapshotAssetsServer:
                         if not part:
                             continue
                         # Match: Type:name(config_string) or Type:name
-                        m = re.match(r'^(Image|Video|Audio):(\S+?)\((.+)\)$', part)
+                        m = re.match(r'^(Image|Video|Audio):([^:()]+?)\((.+)\)$', part)
                         if m:
                             slot_type = m.group(1).strip().capitalize()
                             slot_name = m.group(2).strip()
@@ -889,15 +889,15 @@ class SnapshotAssetsNode:
                 "enable_prompt": ("BOOLEAN", {"default": False}),
                 "enable_image": ("BOOLEAN", {"default": True}),
                 "enable_image_config": ("BOOLEAN", {"default": False}),
-                "image_config": ("STRING", {"default": "test0:Float:1.0(0.0,1.0,0.1),test1:Float:0.5(0.0,1.0,0.1)", "multiline": False}),
+                "image_config": ("STRING", {"default": "", "multiline": True, "tooltip": "Format: name:type:default(min,max,step) per line or comma-separated. Types: Float/Int/Boolean/String. Only Float/Int have (min,max,step). e.g: 'strength:Float:1.0(0.0,1.0,0.1)'"}),
                 "enable_video": ("BOOLEAN", {"default": True}),
                 "enable_video_config": ("BOOLEAN", {"default": False}),
-                "video_config": ("STRING", {"default": "vtest0:Float:1.0(0.0,1.0,0.1)", "multiline": False}),
+                "video_config": ("STRING", {"default": "", "multiline": True, "tooltip": "Format: name:type:default(min,max,step) per line or comma-separated. Types: Float/Int/Boolean/String. e.g: 'strength:Float:1.0(0.0,1.0,0.1)'"}),
                 "enable_audio": ("BOOLEAN", {"default": True}),
                 "enable_audio_config": ("BOOLEAN", {"default": False}),
-                "audio_config": ("STRING", {"default": "atest0:Float:1.0(0.0,1.0,0.1)", "multiline": False}),
+                "audio_config": ("STRING", {"default": "", "multiline": True, "tooltip": "Format: name:type:default(min,max,step) per line or comma-separated. Types: Float/Int/Boolean/String. e.g: 'strength:Float:1.0(0.0,1.0,0.1)'"}),
                 "enable_slot": ("BOOLEAN", {"default": False}),
-                "slot_config": ("STRING", {"default": "Image:slot0(test0:Float:1.0(0.0,1.0,0.1)),Video:slot1", "multiline": False}),
+                "slot_config": ("STRING", {"default": "", "multiline": True, "tooltip": "Format: Type:name(config) per line or comma-separated. Type: Image/Video/Audio. config: name:type:default(min,max,step),... e.g: 'Image:slot0(strength:Float:1.0(0.0,1.0,0.1))'"}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -1159,7 +1159,7 @@ class SnapshotAssetsNode:
                 part = part.strip()
                 if not part:
                     continue
-                m = re.match(r'^(Image|Video|Audio):(\S+?)\((.+)\)$', part)
+                m = re.match(r'^(Image|Video|Audio):([^:()]+?)\((.+)\)$', part)
                 if m:
                     slot_type = m.group(1).strip().capitalize()
                     slot_name = m.group(2).strip()

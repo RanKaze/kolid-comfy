@@ -9,6 +9,71 @@ MAX_INTERFACE_NUM = 20
 any_type = AlwaysEqualProxy("*")
 _UNRESOLVED = object()  # sentinel for unresolved link values
 
+
+def _sg_boundary_widget_value(sg_node, sg_data, slot):
+    """Resolve a subgraph boundary input from the subgraph node's own widgets_values.
+
+    Promoted widget inputs (input entry has a 'widget' key, link is None) store
+    their value on the subgraph node instance's widgets_values array, not in any
+    link. The node's inputs[] index aligns with sg_data.inputs[] index, and
+    widgets_values aligns with the widget-bearing inputs in array order (inputs
+    that carry a link AND a widget still consume a widgets_values slot).
+
+    Returns _UNRESOLVED when the slot is not a promoted widget input or the
+    value is missing.
+    """
+    if not isinstance(sg_node, dict):
+        return _UNRESOLVED
+    node_inputs = sg_node.get("inputs") or []
+    wv = sg_node.get("widgets_values")
+    if not isinstance(wv, list) or not wv or not isinstance(node_inputs, list):
+        return _UNRESOLVED
+    defs = (sg_data or {}).get("inputs") or []
+
+    # Find the node's input entry for this boundary slot (index match, verified by name)
+    entry = None
+    if 0 <= slot < len(node_inputs) and isinstance(node_inputs[slot], dict):
+        cand = node_inputs[slot]
+        def_name = defs[slot].get("name") if slot < len(defs) and isinstance(defs[slot], dict) else None
+        if def_name is None or cand.get("name") == def_name:
+            entry = cand
+    if entry is None and slot < len(defs) and isinstance(defs[slot], dict):
+        # Fallback: match by definition name
+        def_name = defs[slot].get("name")
+        entry = next((i for i in node_inputs if isinstance(i, dict) and i.get("name") == def_name), None)
+    if not isinstance(entry, dict) or not entry.get("widget"):
+        return _UNRESOLVED
+
+    # widgets_values index = number of widget-bearing inputs preceding this entry
+    widx = 0
+    found = False
+    for i in node_inputs:
+        if not isinstance(i, dict) or not i.get("widget"):
+            continue
+        if i is entry:
+            found = True
+            break
+        widx += 1
+    if not found or widx >= len(wv):
+        return _UNRESOLVED
+
+    val = wv[widx]
+    # Light type conversion based on the boundary definition type
+    def_type = defs[slot].get("type", "") if slot < len(defs) and isinstance(defs[slot], dict) else ""
+    if def_type == "INT" and isinstance(val, str):
+        try:
+            val = int(float(val))
+        except (ValueError, TypeError):
+            pass
+    elif def_type == "FLOAT" and isinstance(val, str):
+        try:
+            val = float(val)
+        except (ValueError, TypeError):
+            pass
+    elif def_type == "BOOLEAN" and isinstance(val, str):
+        val = val.lower() in ("true", "1", "yes")
+    return val
+
 # Global injection dict: {start_node_id: {port_num: value}}
 _interface_injections = {}
 
@@ -418,16 +483,23 @@ class InterfacePackageNode:
                     resolved = True
                     break
 
-            # If not resolved via parent links, store as a pending virtual input
+            # If not resolved via parent links, try the subgraph node's own
+            # promoted widget values, then fall back to a pending virtual input
             # to be resolved at execution time using injected values
             if not resolved and internal_target in sub_prompt:
-                for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
-                    if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
-                        sub_prompt[internal_target]["inputs"][inp_name] = {
-                            "_virtual_input": True,
-                            "name": input_name,
-                            "type": input_type,
-                        }
+                wval = _sg_boundary_widget_value(sg_node, sg_data, origin_slot)
+                if wval is not _UNRESOLVED:
+                    for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
+                        if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
+                            sub_prompt[internal_target]["inputs"][inp_name] = wval
+                else:
+                    for inp_name, inp_val in sub_prompt[internal_target].get("inputs", {}).items():
+                        if isinstance(inp_val, dict) and inp_val.get("_sg_input_slot") == origin_slot:
+                            sub_prompt[internal_target]["inputs"][inp_name] = {
+                                "_virtual_input": True,
+                                "name": input_name,
+                                "type": input_type,
+                            }
 
         # Resolve subgraph output connections (proxy node or virtual negative IDs)
         output_aliases = sub_prompt.setdefault("_subgraph_output_aliases", {})
@@ -1145,7 +1217,7 @@ class InterfaceExecutor:
                     result[name] = val.lower() in ("true", "1", "yes")
                 else:
                     result[name] = bool(val)
-            return result
+        return result
 
     def _evaluate_node(self, nid, sub_prompt, start_id, end_id, pkg, output_values):
         """从 End 节点开始递归求值（懒求值）。
@@ -1480,8 +1552,9 @@ class InterfaceExecutor:
         vname = val.get("name", "")
         vtype = val.get("type", "")
 
-        # TODO: 从 sg_widget_values 查找（子图节点自身的 widget 值）
-        # 目前未实现
+        # Note: promoted widget boundary inputs are resolved eagerly from the
+        # subgraph node's widgets_values in _expand_subgraph, so they never
+        # reach this point. Placeholders here are genuinely unconnected ports.
 
         raise ValueError(
             f"Unresolved virtual input: name={vname!r}, type={vtype!r}. "
@@ -1583,8 +1656,14 @@ class InterfaceExecutor:
                                 if inp_def.get("type") == "PIPELINE_DATA" and self.get_pipeline is not None:
                                     n_inputs[nm] = self.get_pipeline()
                                     resolved = True
-                            if not resolved:
-                                print(f"[InterfaceExecutor]   Nested subgraph input slot {origin_slot} unresolved for {nested_prefix + n_id}.{nm}")
+                        if not resolved:
+                            # Promoted widget input — value lives on the nested subgraph node's widgets_values
+                            wval = _sg_boundary_widget_value(sn, sg_data, origin_slot)
+                            if wval is not _UNRESOLVED:
+                                n_inputs[nm] = wval
+                                resolved = True
+                        if not resolved:
+                            print(f"[InterfaceExecutor]   Nested subgraph input slot {origin_slot} unresolved for {nested_prefix + n_id}.{nm}")
                     else:
                         n_inputs[nm] = [nested_prefix + origin, origin_slot]
                 elif lid is not None:
@@ -1719,8 +1798,14 @@ class InterfaceExecutor:
                                     if inp_def.get("type") == "PIPELINE_DATA" and self.get_pipeline is not None:
                                         sn_inputs[name] = self.get_pipeline()
                                         resolved = True
-                                if not resolved:
-                                    print(f"[InterfaceExecutor]   Subgraph input slot {origin_slot} unresolved for {sn_id}.{name}")
+                            if not resolved:
+                                # Promoted widget input — value lives on the subgraph node's widgets_values
+                                wval = _sg_boundary_widget_value(sg_node, sg_data, origin_slot)
+                                if wval is not _UNRESOLVED:
+                                    sn_inputs[name] = wval
+                                    resolved = True
+                            if not resolved:
+                                print(f"[InterfaceExecutor]   Subgraph input slot {origin_slot} unresolved for {sn_id}.{name}")
                         else:
                             sn_inputs[name] = [prefix + origin, origin_slot]
                     elif link_id is not None:
