@@ -512,6 +512,66 @@ def recover_batch(image, batch_info, mask=None):
     return (recovered_images, recovered_masks)
 
 
+_GPU_CHUNK_BUDGET = 1024 * 1024 * 1024
+
+
+def _interpolate_chunked(src, dst, new_h, new_w, antialias, device):
+    """Resize [B,C,H,W] -> [B,C,new_h,new_w] in chunks into dst.
+
+    - GPU (CUDA) path uses a double-buffered pinned-memory pipeline so PCIe
+      upload, interpolation and download OVERLAP instead of serializing
+    - CPU / non-CUDA path falls back to plain chunked interpolation
+    - antialias is caller-controlled (only meaningful when downscaling)
+    """
+    B, C, H, W = src.shape
+    kwargs = dict(size=(new_h, new_w), mode='bicubic', align_corners=False, antialias=antialias)
+    bytes_per_frame = (H * W + new_h * new_w) * C * src.element_size()
+    chunk = max(1, int(_GPU_CHUNK_BUDGET // max(1, bytes_per_frame * 3)))
+
+    if device is None or not (isinstance(device, torch.device) and device.type == 'cuda'):
+        for i in range(0, B, chunk):
+            j = min(i + chunk, B)
+            dst[i:j].copy_(F.interpolate(src[i:j].contiguous(), **kwargs))
+        return
+
+    if chunk >= B:
+        # Whole batch fits: single upload/interpolate/download
+        x = src.contiguous().to(device, non_blocking=True)
+        dst.copy_(F.interpolate(x, **kwargs), non_blocking=True)
+        return
+
+    # Double-buffered pipeline: while the GPU interpolates/downloads chunk k,
+    # the CPU stages chunk k+1 into the other pinned buffer.
+    staging_in = [torch.empty((chunk, C, H, W), dtype=src.dtype, pin_memory=True)
+                  for _ in range(2)]
+    staging_out = [torch.empty((chunk, C, new_h, new_w), dtype=src.dtype, pin_memory=True)
+                   for _ in range(2)]
+    events_out = [torch.cuda.Event() for _ in range(2)]
+    pending = {}
+
+    def _collect(b):
+        if b in pending:
+            i0, m0 = pending.pop(b)
+            events_out[b].synchronize()
+            dst[i0:i0 + m0].copy_(staging_out[b][:m0])
+
+    for idx, i in enumerate(range(0, B, chunk)):
+        j = min(i + chunk, B)
+        m = j - i
+        b = idx % 2
+        if b in pending:
+            # GPU finished reading this buffer (d2h completed => h2d completed)
+            _collect(b)
+        staging_in[b][:m].copy_(src[i:j])
+        x = staging_in[b][:m].to(device, non_blocking=True)
+        y = F.interpolate(x, **kwargs)
+        staging_out[b][:m].copy_(y, non_blocking=True)
+        events_out[b].record()
+        pending[b] = (i, m)
+    for b in range(2):
+        _collect(b)
+
+
 def limit_pixels(image, pixels, mask=None, align=1):
     """
     Limit image pixel count by resizing if needed, with optional dimension alignment.
@@ -569,31 +629,36 @@ def limit_pixels(image, pixels, mask=None, align=1):
             new_width = max(16, new_width)
             new_height = max(16, new_height)
 
-        # ---------- 纯 PyTorch 批量缩放 ----------
-        img_tensor = image.permute(0, 3, 1, 2).contiguous()
+        # ---------- 分块缩放（自动上 GPU + 双缓冲流水线，antialias 仅缩小时启用） ----------
+        # antialias bicubic 在 CPU 上极慢；放大时 antialias 无意义，直接跳过
+        need_antialias = current_pixels > pixels
 
-        resized_img = F.interpolate(
-            img_tensor,
-            size=(new_height, new_width),
-            mode='bicubic',
-            align_corners=False,
-            antialias=True
-        )
+        device = image.device
+        try:
+            import comfy.model_management as mm
+            gpu = mm.get_torch_device()
+            if gpu is not None and gpu.type != "cpu":
+                device = gpu
+        except Exception:
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+        print(f"[limit_pixels] device={device}, antialias={need_antialias}, batch={B}")
 
-        resized_image = resized_img.permute(0, 2, 3, 1).contiguous()
+        src = image.permute(0, 3, 1, 2)                              # [B, C, H, W] 视图，不拷贝
+        resized_image = torch.empty((B, new_height, new_width, C),
+                                    dtype=image.dtype, device=image.device)
+        dst = resized_image.permute(0, 3, 1, 2)                      # [B, C, newH, newW] 视图
+
+        _interpolate_chunked(src, dst, new_height, new_width, need_antialias, device)
 
         # ---------- 处理 mask ----------
         resized_mask = mask
         if mask is not None:
-            mask_tensor = mask.unsqueeze(1)
-            resized_m = F.interpolate(
-                mask_tensor,
-                size=(new_height, new_width),
-                mode='bicubic',
-                align_corners=False,
-                antialias=True
-            )
-            resized_mask = resized_m.squeeze(1).clamp(0.0, 1.0)
+            mask_tensor = mask.unsqueeze(1)                          # [B, 1, H, W]
+            mask_dst = torch.empty((mask_tensor.shape[0], 1, new_height, new_width),
+                                   dtype=mask_tensor.dtype, device=mask_tensor.device)
+            _interpolate_chunked(mask_tensor, mask_dst, new_height, new_width, need_antialias, device)
+            resized_mask = mask_dst.squeeze(1).clamp(0.0, 1.0)
 
         # 创建 resize_info
         resize_info = {
