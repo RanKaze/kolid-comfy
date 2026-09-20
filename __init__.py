@@ -34,7 +34,12 @@ from .nodes.application_node import *
 from .nodes.assets_node import *
 from .nodes.assets_info_collect_node import *
 from .nodes.interface_node import *
-    
+from .nodes.video_segmentation_node import *
+from .nodes.video_fit_node import *
+from .nodes.video_mask_node import *
+from .nodes.subject_crop_node import *
+from .nodes.video_vae_node import *
+
 
 NODE_CONFIG = {
     "ImageFitNode": {"class": ImageFitNode, "name": "ImageFitNode"},
@@ -135,6 +140,22 @@ NODE_CONFIG = {
     "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
     "VideoFolderLoaderNode": {"class": VideoFolderLoaderNode, "name": "VideoFolderLoaderNode"},
     "VideoGetFileInfoNode": {"class": VideoGetFileInfoNode, "name": "VideoGetFileInfoNode"},
+    "VideoSegmentationNode": {"class": VideoSegmentationNode, "name": "VideoSegmentationNode"},
+    "VideoLimitPixelNode": {"class": VideoLimitPixelNode, "name": "VideoLimitPixelNode"},
+    "VideoMeetNode": {"class": VideoMeetNode, "name": "VideoMeetNode"},
+    "VideoFitNode": {"class": VideoFitNode, "name": "VideoFitNode"},
+    "VideoRecoverResizeNode": {"class": VideoRecoverResizeNode, "name": "VideoRecoverResizeNode"},
+    "VideoRecoverMeetNode": {"class": VideoRecoverMeetNode, "name": "VideoRecoverMeetNode"},
+    "VideoRecoverFitNode": {"class": VideoRecoverFitNode, "name": "VideoRecoverFitNode"},
+    "VideoCombineMaskNode": {"class": VideoCombineMaskNode, "name": "VideoCombineMaskNode"},
+    "VideoMaskFixNode": {"class": VideoMaskFixNode, "name": "VideoMaskFixNode"},
+    "VideoGrowMaskNode": {"class": VideoGrowMaskNode, "name": "VideoGrowMaskNode"},
+    "ImageSubjectCropNode": {"class": ImageSubjectCropNode, "name": "ImageSubjectCropNode"},
+    "ImageRecoverSubjectCropNode": {"class": ImageRecoverSubjectCropNode, "name": "ImageRecoverSubjectCropNode"},
+    "VideoSubjectCropNode": {"class": VideoSubjectCropNode, "name": "VideoSubjectCropNode"},
+    "VideoRecoverSubjectCropNode": {"class": VideoRecoverSubjectCropNode, "name": "VideoRecoverSubjectCropNode"},
+    "VideoLimitFpsNode": {"class": VideoLimitFpsNode, "name": "VideoLimitFpsNode"},
+    "VAEEncodeVideoNode": {"class": VAEEncodeVideoNode, "name": "VAEEncodeVideoNode"},
     "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
     "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
     "SnapshotDetailerSamplerNode": {"class": SnapshotDetailerSamplerNode, "name": "SnapshotDetailerSamplerNode"},

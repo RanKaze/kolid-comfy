@@ -3,6 +3,8 @@ import re
 import shutil
 import subprocess
 import json
+import threading
+from collections import deque
 from urllib.parse import urlparse
 from pathlib import Path
 from seleniumbase import Driver
@@ -118,7 +120,8 @@ def save_cookies_for_yt_dlp(cookies, cookie_file: str):
 
 
 INPUT_DIR = folder_paths.get_input_directory()
-CACHE_DIR = os.path.join(INPUT_DIR, "video_cache")
+# 视频缓存统一放在 ComfyUI output/videocache 下(所有 video 相关节点共用)
+CACHE_DIR = os.path.join(folder_paths.get_output_directory(), "videocache")
 AUDIO_CACHE_DIR = os.path.join(INPUT_DIR, "audio_cache")
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -340,6 +343,370 @@ def get_video_fps(video_path):
         raise Exception(f"Failed to open video: {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS)
     return fps
+
+
+# ==================== VHS-style fast segment extraction (ffmpeg pipe) ====================
+
+_FFPROBE_METADATA_CACHE = {}
+
+
+def _run_ffprobe_json(video_path):
+    """Run ffprobe and return parsed JSON metadata.
+
+    Uses Popen with explicit pipes instead of subprocess.run(capture_output=True),
+    because some ComfyUI plugin environments monkey-patch subprocess.run in ways
+    that silently drop captured output (stdout becomes None).
+    """
+    if not os.path.exists(FFPROBE_PATH):
+        raise FileNotFoundError(f"ffprobe not found: {FFPROBE_PATH}")
+
+    cmd = [
+        FFPROBE_PATH, '-v', 'quiet', '-print_format', 'json',
+        '-show_format', '-show_streams', video_path
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+
+    if proc.returncode != 0 or not stdout:
+        err = (stderr or b'').decode('utf-8', errors='replace')[:300]
+        raise Exception(f"ffprobe failed (code {proc.returncode}): {err}")
+
+    try:
+        return json.loads(stdout.decode('utf-8', errors='replace'))
+    except json.JSONDecodeError as e:
+        raise Exception(f"ffprobe returned invalid JSON: {e}")
+
+
+def _metadata_from_opencv(video_path):
+    """Fallback metadata via OpenCV (metadata-only query, no decoding).
+    Note: cannot detect audio stream, so has_audio is optimistic; downstream
+    code falls back to the legacy path if audio extraction then fails.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise Exception(f"Failed to open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    if fps <= 0:
+        fps = 30.0
+    duration = frame_count / fps if frame_count > 0 else 0.0
+    return {
+        "fps": fps,
+        "frame_count": max(0, frame_count),
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "has_audio": True,
+    }
+
+
+def get_video_metadata(video_path):
+    """Get video metadata via ffprobe, cached by (path, mtime).
+
+    Returns dict with: fps, frame_count, width, height, duration, has_audio.
+    width/height are the STORED dimensions (extraction uses -noautorotate,
+    matching decord/OpenCV legacy behavior).
+    """
+    video_path = os.path.abspath(video_path)
+    try:
+        mtime = os.path.getmtime(video_path)
+    except OSError:
+        mtime = 0
+    cache_key = (video_path, mtime)
+    if cache_key in _FFPROBE_METADATA_CACHE:
+        return _FFPROBE_METADATA_CACHE[cache_key]
+
+    try:
+        data = _run_ffprobe_json(video_path)
+    except Exception as e:
+        print(f"[VideoUtils] ffprobe metadata failed ({e}), falling back to OpenCV")
+        metadata = _metadata_from_opencv(video_path)
+        _FFPROBE_METADATA_CACHE[cache_key] = metadata
+        return metadata
+
+    vstream = None
+    astream = None
+    for s in data.get("streams", []):
+        if s.get("codec_type") == "video" and vstream is None:
+            vstream = s
+        elif s.get("codec_type") == "audio" and astream is None:
+            astream = s
+
+    if vstream is None:
+        raise Exception(f"No video stream found in {video_path}")
+
+    # FPS: prefer avg_frame_rate, fallback to r_frame_rate
+    fps = 0.0
+    for rate in (vstream.get("avg_frame_rate"), vstream.get("r_frame_rate")):
+        try:
+            if rate and rate not in ("0/0", "N/A"):
+                num, den = rate.split("/")
+                den_f = float(den)
+                if den_f > 0:
+                    candidate = float(num) / den_f
+                    if candidate > 0:
+                        fps = candidate
+                        break
+        except (ValueError, AttributeError):
+            continue
+    if fps <= 0:
+        raise Exception(f"Could not determine FPS for {video_path}")
+
+    width = int(vstream.get("width", 0))
+    height = int(vstream.get("height", 0))
+    if width <= 0 or height <= 0:
+        raise Exception(f"Could not determine resolution for {video_path}")
+
+    # NOTE: width/height are the STORED dimensions. Frame extraction uses
+    # -noautorotate (VHS/decord-compatible behavior), so the rawvideo pipe
+    # always matches these dims — no ambiguity, no reshape failures.
+
+    duration = 0.0
+    try:
+        duration = float(vstream.get("duration") or data.get("format", {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+
+    frame_count = 0
+    try:
+        frame_count = int(vstream.get("nb_frames") or 0)
+    except (TypeError, ValueError):
+        frame_count = 0
+    if frame_count <= 0 and duration > 0:
+        frame_count = int(duration * fps)
+    if frame_count <= 0:
+        # Last resort: OpenCV metadata query (fast, no decoding)
+        cap = cv2.VideoCapture(video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+
+    metadata = {
+        "fps": fps,
+        "frame_count": max(0, frame_count),
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "has_audio": astream is not None,
+    }
+    _FFPROBE_METADATA_CACHE[cache_key] = metadata
+    return metadata
+
+
+_STDERR_TAIL_LINES = 30
+_PIPE_CHUNK = 4 * 1024 * 1024
+
+
+def _read_ffmpeg_output(proc, num_bytes=None, chunk_size=_PIPE_CHUNK, on_chunk=None):
+    """Read proc.stdout in chunks until num_bytes are read, or until EOF when
+    num_bytes is None. Returns the bytes read.
+
+    Fail-fast: no timeouts, no retries, no artificial waits. The read finishes
+    as fast as ffmpeg produces data; if ffmpeg errors out, it exits and the
+    read returns immediately (EOF) with its stderr tail available for the error.
+    on_chunk(cumulative_bytes) fires after each chunk for progress reporting.
+    """
+    chunk_size = max(1, int(chunk_size))
+    chunks = []
+    total = 0
+    remaining = num_bytes
+    while True:
+        want = chunk_size if remaining is None else min(remaining, chunk_size)
+        if want <= 0:
+            break
+        chunk = proc.stdout.read(want)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if on_chunk is not None:
+            on_chunk(total)
+        if remaining is not None:
+            remaining -= len(chunk)
+            if remaining <= 0:
+                break
+    return b''.join(chunks)
+
+
+def _spawn_ffmpeg(cmd):
+    """Spawn ffmpeg and start a daemon thread draining stderr.
+
+    stderr MUST be drained concurrently: otherwise ffmpeg can block writing to
+    a full stderr pipe (64KB) while we block reading stdout -> permanent
+    deadlock (the classic "node stuck forever" failure).
+
+    Returns (proc, stderr_tail_deque).
+    """
+    if not os.path.exists(FFMPEG_PATH):
+        raise FileNotFoundError(f"ffmpeg not found: {FFMPEG_PATH}")
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stderr_tail = deque(maxlen=_STDERR_TAIL_LINES)
+
+    def _drain_stderr():
+        try:
+            for line in iter(proc.stderr.readline, b''):
+                text = line.decode('utf-8', errors='backslashreplace').strip()
+                if text:
+                    stderr_tail.append(text)
+        except Exception:
+            pass
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    return proc, stderr_tail
+
+
+def _reap_ffmpeg(proc):
+    """Close stdout and reap the process. Returns the returncode."""
+    try:
+        proc.stdout.close()
+    except Exception:
+        pass
+    return proc.wait()
+
+
+def _run_ffmpeg_pipe(cmd, num_bytes=None, label="ffmpeg", chunk_size=_PIPE_CHUNK, on_chunk=None):
+    """Run ffmpeg reading raw bytes from its stdout pipe.
+
+    - NO timeouts / watchdogs / retries: failures surface immediately —
+      ffmpeg exits on error and we raise with its stderr tail attached
+    - the process is always reaped, even on errors
+
+    Returns (data, returncode, stderr_tail_text).
+    """
+    proc, stderr_tail = _spawn_ffmpeg(cmd)
+    try:
+        data = _read_ffmpeg_output(proc, num_bytes, chunk_size, on_chunk)
+    except BaseException:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+    finally:
+        ret = _reap_ffmpeg(proc)
+
+    stderr_text = '\n'.join(stderr_tail)
+    return data, ret, stderr_text
+
+
+def extract_frames_segment_ffmpeg(video_path, start_sec, num_frames, video_filters=None, metadata=None, progress_cb=None):
+    """VHS-style fast frame extraction: two-stage seek (fast keyframe jump +
+    precise 4s alignment), decode ONLY the requested span, pipe raw RGB frames
+    back (single pass, no temp files, no full decode, no autorotate).
+
+    video_filters: optional list of ffmpeg -vf filters (e.g. ["fps=12", "scale=768:1365"])
+    applied during the same decode pass (VHS-style resize-at-load).
+    progress_cb(frames_done) is called periodically with the number of frames
+    decoded so far (int, capped at num_frames) for progress display.
+
+    Returns (image_tensor [N, H, W, 3] float32 in 0..1, frames_read).
+    """
+    if metadata is None:
+        metadata = get_video_metadata(video_path)
+    width = metadata["width"]
+    height = metadata["height"]
+    num_frames = int(num_frames)
+    if num_frames <= 0:
+        raise Exception("No frames to extract")
+
+    start_sec = max(0.0, float(start_sec))
+
+    # VHS ffmpeg_generator seek strategy: when target is > 4s into the file,
+    # seek fast to (start - 4) BEFORE -i (keyframe jump) and trim the remaining
+    # 4s precisely AFTER -i (decoder-level), guaranteeing alignment.
+    cmd = [FFMPEG_PATH, '-hide_banner', '-nostats', '-v', 'error',
+           '-nostdin', '-noautorotate']
+    if start_sec > 4.0:
+        cmd += ['-ss', f'{start_sec - 4.0:.6f}', '-i', video_path, '-ss', '4']
+    else:
+        cmd += ['-ss', f'{start_sec:.6f}', '-i', video_path]
+    if video_filters:
+        cmd += ['-vf', ','.join(video_filters)]
+    cmd += ['-frames:v', str(num_frames), '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1']
+
+    frame_bytes = width * height * 3
+    # Read+convert in whole-frame chunks (~16MB) so the progress bar covers the
+    # ENTIRE pipeline: decode AND float conversion, with no dead time afterwards.
+    chunk_size = max(1, (16 * 1024 * 1024) // frame_bytes) * frame_bytes
+
+    image_tensor = torch.empty((num_frames, height, width, 3), dtype=torch.float32)
+    frames_read = 0
+
+    proc, stderr_tail = _spawn_ffmpeg(cmd)
+    try:
+        while frames_read < num_frames:
+            want = min(chunk_size, (num_frames - frames_read) * frame_bytes)
+            chunk = proc.stdout.read(want)
+            if not chunk:
+                break  # EOF: stream ended early
+            n = len(chunk) // frame_bytes
+            if n > 0:
+                arr = np.frombuffer(chunk, dtype=np.uint8, count=n * frame_bytes).copy()
+                image_tensor[frames_read:frames_read + n] = (
+                    torch.from_numpy(arr.reshape(n, height, width, 3)).float())
+                image_tensor[frames_read:frames_read + n].div_(255.0)
+                frames_read += n
+            if progress_cb is not None:
+                progress_cb(frames_read)
+    except BaseException:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+    finally:
+        ret = _reap_ffmpeg(proc)
+
+    stderr_text = '\n'.join(stderr_tail)
+    if frames_read == 0:
+        raise Exception(f"ffmpeg frame extraction failed (code {ret}): {stderr_text[:500]}")
+    if ret != 0:
+        print(f"[VideoUtils] ffmpeg frame extraction warning (code {ret}): {stderr_text[:300]}")
+
+    print(f"[VideoUtils] ffmpeg extracted {frames_read}/{num_frames} frames @ {width}x{height}")
+    return image_tensor[:frames_read], frames_read
+
+
+def extract_audio_segment_ffmpeg(video_path, start_sec, duration, sample_rate=44100, channels=2):
+    """Decode ONLY the requested audio span via ffmpeg (s16le pipe, no temp files,
+    no full-track decode). Returns {waveform [1, C, T], sample_rate}.
+    """
+    duration = float(duration)
+    if duration <= 0:
+        raise ValueError("Audio duration must be positive")
+
+    cmd = [
+        FFMPEG_PATH, '-hide_banner', '-nostats', '-v', 'error', '-nostdin',
+        '-ss', f'{max(0.0, float(start_sec)):.6f}',
+        '-i', video_path,
+        '-t', f'{duration:.6f}',
+        '-vn', '-acodec', 'pcm_s16le',
+        '-ar', str(int(sample_rate)), '-ac', str(int(channels)),
+        '-f', 's16le', 'pipe:1'
+    ]
+    data, ret, stderr_text = _run_ffmpeg_pipe(cmd, label="ffmpeg audio extraction")
+
+    if len(data) == 0:
+        raise Exception(f"No audio decoded (code {ret}): {stderr_text[:300]}")
+
+    audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+    usable = (len(audio_np) // channels) * channels
+    audio_np = audio_np[:usable].reshape(-1, channels).T          # [C, T]
+    waveform = torch.from_numpy(audio_np.copy()).unsqueeze(0)     # [1, C, T]
+
+    print(f"[VideoUtils] ffmpeg audio segment: {waveform.shape[-1]} samples @ {sample_rate}Hz")
+    return {"waveform": waveform, "sample_rate": int(sample_rate)}
 
 
 def download_video_with_ytdlp(url, clear_cache=False):

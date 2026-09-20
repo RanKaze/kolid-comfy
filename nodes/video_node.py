@@ -20,10 +20,12 @@ from ..libs.timestamp import parse_timestamp
 from ..libs.video_utils import (
     download_pornhub, is_pornhub_url, download_youtube, is_youtube_url,
     download_hanime1, is_hanime1_url, download_video_with_ytdlp,
-    remux_to_mp4, get_video_correct_ext, get_video_fps, extract_images_segment
+    remux_to_mp4, get_video_correct_ext, get_video_fps, extract_images_segment,
+    get_video_metadata, extract_frames_segment_ffmpeg, extract_audio_segment_ffmpeg
 )
 from ..libs.folder_utils import scan_folder, get_video_list_from_input, get_video_dict_from_list, get_file_names_from_dict, get_file_names_list
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor
 import psutil
 from ..libs.audio_utils import extract_audio_from_video, extract_audio_segment
 from server import PromptServer
@@ -334,6 +336,98 @@ class UrlVideoNode:
         return video_path, fileName, subfolder
 
 
+def _compute_segment_plan(video, start_timestamp, start_frame_offset,
+                          end_timestamp, end_frame_offset, fps,
+                          custom_width=0, custom_height=0):
+    """Compute a fast-extraction plan consistent with the legacy decord logic.
+
+    Returns (video_path, metadata, start_sec, num_frames, video_filters, out_fps).
+    video_filters is a list of ffmpeg -vf filters (scale/fps) to apply while decoding.
+    """
+    video_path = video.get_stream_source()
+    video_start_time = 0.0
+    if hasattr(video, '_VideoFromFile__start_time'):
+        video_start_time = video._VideoFromFile__start_time
+
+    metadata = get_video_metadata(video_path)
+    orig_fps = metadata["fps"]
+    frame_count = metadata["frame_count"]
+
+    start_ts = parse_timestamp(start_timestamp)
+    end_ts = parse_timestamp(end_timestamp)
+
+    use_target_fps = fps is not None and fps > 0 and abs(fps - orig_fps) >= 0.001
+
+    if not use_target_fps:
+        # Legacy behavior: offsets are raw frame indices, end frame is EXCLUSIVE (range())
+        actual_start = max(0, int((video_start_time + start_ts) * orig_fps) + start_frame_offset)
+        actual_end = min(frame_count - 1, int((video_start_time + end_ts) * orig_fps) + end_frame_offset)
+        if actual_end < actual_start:
+            actual_start, actual_end = actual_end, actual_start
+        num_frames = actual_end - actual_start
+        start_sec = actual_start / orig_fps
+        target_fps_filter = None
+        out_fps = orig_fps
+    else:
+        # Legacy behavior: offsets are in target-fps frames (scaled to original fps),
+        # end frame is INCLUSIVE (stepping loop)
+        start_off = int(start_frame_offset / fps * orig_fps)
+        end_off = int(end_frame_offset / fps * orig_fps)
+        actual_start = max(0, int((video_start_time + start_ts) * orig_fps) + start_off)
+        actual_end = min(frame_count - 1, int((video_start_time + end_ts) * orig_fps) + end_off)
+        if actual_end < actual_start:
+            actual_start, actual_end = actual_end, actual_start
+        step = orig_fps / fps
+        num_frames = int((actual_end - actual_start) / step + 1e-6) + 1
+        start_sec = actual_start / orig_fps
+        target_fps_filter = fps
+        out_fps = fps
+
+    # VHS-style resize at decode time: scale+fps run in ONE decode pass, so the
+    # raw frames that hit the pipe (and CPU memory) are already the target size.
+    video_filters = []
+    src_w, src_h = metadata["width"], metadata["height"]
+    custom_width = int(custom_width or 0)
+    custom_height = int(custom_height or 0)
+    if custom_width > 0 or custom_height > 0:
+        if custom_width > 0 and custom_height > 0:
+            out_w, out_h = custom_width, custom_height
+        elif custom_width > 0:
+            out_w = custom_width
+            out_h = max(1, round(out_w * src_h / src_w))
+        else:
+            out_h = custom_height
+            out_w = max(1, round(out_h * src_w / src_h))
+        video_filters.append(f"scale={out_w}:{out_h}:flags=lanczos")
+        if target_fps_filter:
+            video_filters.append(f"fps={target_fps_filter}")
+    elif target_fps_filter:
+        video_filters.append(f"fps={target_fps_filter}")
+
+    return video_path, metadata, start_sec, num_frames, video_filters, out_fps
+
+
+def _make_frames_progress_cb(num_frames):
+    """Create a progress callback that drives a ComfyUI node progress bar over
+    the frame extraction. Returns None if the progress bar is unavailable."""
+    if num_frames is None or num_frames <= 1:
+        return None
+    try:
+        from comfy.utils import ProgressBar
+        pbar = ProgressBar(num_frames)
+    except Exception:
+        return None
+
+    state = {"last": 0}
+
+    def cb(frames_done):
+        if frames_done > state["last"]:
+            pbar.update(frames_done - state["last"])
+            state["last"] = frames_done
+
+    return cb
+
+
 class GetVideoImageNode:
     """Extract a single frame from a Video object at a specified timestamp with frame offset."""
 
@@ -367,60 +461,56 @@ class GetVideoImageNode:
         return f"{video_path}_{timestamp}_{frame_offset}"
 
     def get_frame(self, video, timestamp, frame_offset):
-        """Extract a frame from the video at timestamp position with frame offset."""
+        """Extract a frame from the video at timestamp position with frame offset.
+
+        Fast path: ffmpeg seek + decode a single frame (VHS-style).
+        Fallback: legacy OpenCV path.
+        """
         video_path = video.get_stream_source()
         print(f"[GetVideoImage] Video path: {video_path}")
 
         start_time = 0
-        duration = None
-
         if hasattr(video, '_VideoFromFile__start_time'):
             start_time = video._VideoFromFile__start_time
             print(f"[GetVideoImage] Video start time: {start_time}s")
 
-        if hasattr(video, 'get_duration'):
-            duration = video.get_duration()
-            print(f"[GetVideoImage] Video duration: {duration}s")
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise Exception(f"Failed to open video: {video_path}")
-
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        metadata = get_video_metadata(video_path)
+        fps = metadata["fps"]
+        frame_count = metadata["frame_count"]
         print(f"[GetVideoImage] Video info - frame_count: {frame_count}, fps: {fps}")
 
         timestamp_seconds = parse_timestamp(timestamp)
         print(f"[GetVideoImage] Requested timestamp: {timestamp_seconds}s")
-        base_time = start_time + timestamp_seconds
-        base_frame = int(base_time * fps)
-        print(f"[GetVideoImage] Base frame index: {base_frame}")
-
+        base_frame = int((start_time + timestamp_seconds) * fps)
         actual_frame = base_frame + frame_offset
         print(f"[GetVideoImage] Final frame index with offset: {actual_frame}")
 
-        if actual_frame >= frame_count:
+        if frame_count > 0 and actual_frame >= frame_count:
             print(f"[GetVideoImage] Warning: Frame index {actual_frame} exceeds frame count {frame_count}")
             actual_frame = frame_count - 1
         if actual_frame < 0:
             print(f"[GetVideoImage] Warning: Frame index {actual_frame} is negative, using 0")
             actual_frame = 0
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, actual_frame)
-        ret, frame_data = cap.read()
-        cap.release()
+        try:
+            # Fast path: single ffmpeg seek + 1-frame decode
+            image_tensor, _ = extract_frames_segment_ffmpeg(
+                video_path, actual_frame / fps, 1, None, metadata)
+        except Exception as fast_error:
+            print(f"[GetVideoImage] Fast path failed ({fast_error}), falling back to OpenCV")
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise Exception(f"Failed to open video: {video_path}")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, actual_frame)
+            ret, frame_data = cap.read()
+            cap.release()
+            if not ret:
+                raise Exception(f"Failed to read frame at index {actual_frame}")
+            frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
+            img_array = frame_rgb.astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(np.expand_dims(img_array, axis=0))
 
-        if not ret:
-            raise Exception(f"Failed to read frame at index {actual_frame}")
-
-        frame_rgb = cv2.cvtColor(frame_data, cv2.COLOR_BGR2RGB)
-
-        img_array = frame_rgb.astype(np.float32) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
-        image_tensor = torch.from_numpy(img_array)
-
-        print(f"[GetVideoImage] Frame loaded successfully: {frame_data.shape[1]}x{frame_data.shape[0]}")
-
+        print(f"[GetVideoImage] Frame loaded successfully: {image_tensor.shape[2]}x{image_tensor.shape[1]}")
         return (image_tensor,)
 
 
@@ -733,6 +823,20 @@ class GetVideoImagesNode:
                     "tooltip": "Target FPS for frame extraction. 0 means extract all frames.",
                 }),
             },
+            "optional": {
+                "custom_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "tooltip": "Resize frames to this width during decode (VHS-style). 0 = keep original. If only one of width/height is set, the other keeps aspect ratio.",
+                }),
+                "custom_height": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "tooltip": "Resize frames to this height during decode (VHS-style). 0 = keep original.",
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -741,22 +845,49 @@ class GetVideoImagesNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps):
+    def IS_CHANGED(s, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps,
+                   custom_width=0, custom_height=0):
         video_path = video.get_stream_source() if hasattr(video, 'get_stream_source') else str(video)
-        return f"{video_path}_{start_timestamp}_{start_frame_offset}_{end_timestamp}_{end_frame_offset}_{fps}"
+        return (f"{video_path}_{start_timestamp}_{start_frame_offset}_{end_timestamp}_"
+                f"{end_frame_offset}_{fps}_{custom_width}_{custom_height}")
 
-    def get_frames(self, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps):
-        """Extract multiple frames from the video."""
+    def get_frames(self, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps,
+                   custom_width=0, custom_height=0):
+        """Extract multiple frames from the video.
+
+        Fast path: ffmpeg single-seek + streaming decode of only the requested span
+        (optional scale/fps applied in the same decode pass, VHS-style).
+        Fallback: legacy decord path.
+        """
         try:
-            # Use the utility function to extract frames
-            image_tensor, fps = extract_images_segment(
-                video, 
-                start_timestamp=start_timestamp, 
-                start_frame_offset=start_frame_offset, 
-                end_timestamp=end_timestamp, 
-                end_frame_offset=end_frame_offset,
-                fps=fps
-            )
+            (video_path, metadata, start_sec, num_frames,
+             video_filters, out_fps) = _compute_segment_plan(
+                video, start_timestamp, start_frame_offset,
+                end_timestamp, end_frame_offset, fps,
+                custom_width, custom_height)
+
+            if num_frames <= 0:
+                raise Exception("No frames to extract")
+
+            print(f"[GetVideoImages] Plan: start={start_sec:.3f}s, frames={num_frames}, "
+                  f"filters={video_filters or 'original'}")
+
+            try:
+                progress_cb = _make_frames_progress_cb(num_frames)
+                image_tensor, _ = extract_frames_segment_ffmpeg(
+                    video_path, start_sec, num_frames, video_filters, metadata,
+                    progress_cb)
+            except Exception as fast_error:
+                print(f"[GetVideoImages] Fast path failed ({fast_error}), falling back to decord")
+                image_tensor, _ = extract_images_segment(
+                    video,
+                    start_timestamp=start_timestamp,
+                    start_frame_offset=start_frame_offset,
+                    end_timestamp=end_timestamp,
+                    end_frame_offset=end_frame_offset,
+                    fps=fps
+                )
+
             return (image_tensor,)
         except Exception as e:
             raise Exception(f"Failed to get frames: {e}")
@@ -848,6 +979,20 @@ class GetVideoSegmentNode:
                     "tooltip": "Target FPS for frame extraction. 0 means extract all frames.",
                 }),
             },
+            "optional": {
+                "custom_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "tooltip": "Resize frames to this width during decode (VHS-style). 0 = keep original. If only one of width/height is set, the other keeps aspect ratio.",
+                }),
+                "custom_height": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "tooltip": "Resize frames to this height during decode (VHS-style). 0 = keep original.",
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT")
@@ -856,54 +1001,87 @@ class GetVideoSegmentNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(s, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps):
+    def IS_CHANGED(s, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps,
+                   custom_width=0, custom_height=0):
         video_path = video.get_stream_source() if hasattr(video, 'get_stream_source') else str(video)
-        return f"{video_path}_{start_timestamp}_{start_frame_offset}_{end_timestamp}_{end_frame_offset}_{fps}"
+        return (f"{video_path}_{start_timestamp}_{start_frame_offset}_{end_timestamp}_"
+                f"{end_frame_offset}_{fps}_{custom_width}_{custom_height}")
 
-    def extract_segment(self, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps):
-        """Extract video segment (frames and audio)."""
+    def extract_segment(self, video, start_timestamp, start_frame_offset, end_timestamp, end_frame_offset, fps,
+                        custom_width=0, custom_height=0):
+        """Extract video segment (frames and audio).
+
+        Fast path (VHS-style): ffmpeg decodes ONLY the requested span —
+        video and audio run in parallel threads, no full-track audio decode,
+        no temp files. Optional scale/fps applied in the same decode pass.
+        Fallback: legacy decord + full-audio path.
+        """
         try:
-            # Extract frames using the utility function
-            image_tensor, original_fps = extract_images_segment(
-                video, 
-                start_timestamp=start_timestamp, 
-                start_frame_offset=start_frame_offset, 
-                end_timestamp=end_timestamp, 
-                end_frame_offset=end_frame_offset,
-                fps=fps
-            )
-            print(f"[GetVideoSegment] Successfully extracted frames")
+            (video_path, metadata, start_sec, num_frames,
+             video_filters, out_fps) = _compute_segment_plan(
+                video, start_timestamp, start_frame_offset,
+                end_timestamp, end_frame_offset, fps,
+                custom_width, custom_height)
 
-            # Extract full audio first
-            full_audio = extract_audio_from_video(video)
-            print(f"[GetVideoSegment] Successfully extracted full audio")
+            if num_frames <= 0:
+                raise Exception("No frames to extract")
 
-            # Calculate duration for audio segment
-            start_seconds = parse_timestamp(start_timestamp)
-            end_seconds = parse_timestamp(end_timestamp)
-            duration_seconds = end_seconds - start_seconds
-            
-            # Convert duration back to timestamp format
-            hours = int(duration_seconds // 3600)
-            minutes = int((duration_seconds % 3600) // 60)
-            seconds = duration_seconds % 60
-            duration = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+            print(f"[GetVideoSegment] Plan: start={start_sec:.3f}s, frames={num_frames}, "
+                  f"filters={video_filters or 'original'}")
 
-            # Extract audio segment
-            audio_segment = extract_audio_segment(
-                full_audio, 
-                start_timestamp, 
-                start_frame_offset, 
-                end_timestamp, 
-                end_frame_offset, 
-                original_fps
-            )
-            print(f"[GetVideoSegment] Successfully extracted audio segment")
+            # Audio timing — identical semantics to the legacy full-decode path
+            orig_fps = metadata["fps"]
+            start_ts = parse_timestamp(start_timestamp)
+            end_ts = parse_timestamp(end_timestamp)
+            audio_start = (int(start_ts * orig_fps) + start_frame_offset) / orig_fps
+            audio_end = (int(end_ts * orig_fps) + end_frame_offset) / orig_fps
+            audio_dur = audio_end - audio_start
+            if audio_dur <= 0:
+                raise ValueError("End timestamp must be after start timestamp")
 
-            if fps is None or fps <= 0:
-                return (image_tensor, audio_segment, float(original_fps))
-            else:
-                return (image_tensor, audio_segment, float(fps))
+            audio_segment = None
+            try:
+                # Fast path: video and audio decoded in parallel
+                frames_progress_cb = _make_frames_progress_cb(num_frames)
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    frames_future = executor.submit(
+                        extract_frames_segment_ffmpeg,
+                        video_path, start_sec, num_frames, video_filters, metadata,
+                        frames_progress_cb)
+                    audio_future = None
+                    if metadata.get("has_audio", True):
+                        audio_future = executor.submit(
+                            extract_audio_segment_ffmpeg,
+                            video_path, audio_start, audio_dur)
+                    image_tensor, _ = frames_future.result()
+                    if audio_future is not None:
+                        audio_segment = audio_future.result()
+            except Exception as fast_error:
+                print(f"[GetVideoSegment] Fast path failed ({fast_error}), falling back to legacy path")
+                image_tensor, original_fps = extract_images_segment(
+                    video,
+                    start_timestamp=start_timestamp,
+                    start_frame_offset=start_frame_offset,
+                    end_timestamp=end_timestamp,
+                    end_frame_offset=end_frame_offset,
+                    fps=fps
+                )
+                full_audio = extract_audio_from_video(video)
+                audio_segment = extract_audio_segment(
+                    full_audio,
+                    start_timestamp,
+                    start_frame_offset,
+                    end_timestamp,
+                    end_frame_offset,
+                    original_fps
+                )
+                out_fps = float(fps) if fps is not None and fps > 0 else float(original_fps)
+
+            if audio_segment is None:
+                raise Exception("Video has no audio stream")
+
+            print(f"[GetVideoSegment] Extracted {image_tensor.shape[0]} frames, fps={out_fps}")
+            return (image_tensor, audio_segment, float(out_fps))
 
         except Exception as e:
             raise Exception(f"Failed to extract video segment: {e}")
