@@ -214,11 +214,12 @@ class SnapshotDrawServer:
 
                 # Get original image dimensions
                 original_image = self.server_instance.get_image()
+                orig_channels = 3
                 if hasattr(original_image, 'shape'):
                     if len(original_image.shape) == 4:
-                        _, orig_h, orig_w, _ = original_image.shape
+                        _, orig_h, orig_w, orig_channels = original_image.shape
                     elif len(original_image.shape) == 3:
-                        orig_h, orig_w, _ = original_image.shape
+                        orig_h, orig_w, orig_channels = original_image.shape
                     else:
                         orig_h, orig_w = img.shape[0], img.shape[1]
                 else:
@@ -228,9 +229,11 @@ class SnapshotDrawServer:
                 if img.shape[0] != orig_h or img.shape[1] != orig_w:
                     img = cv2.resize(img, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
-                # Convert to RGB
+                # Convert to RGB（原图带 alpha 时保留 alpha，避免 RGBA 图经绘画后被压成 RGB）
                 if img.ndim == 2:
                     result = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                elif img.shape[2] == 4 and orig_channels == 4:
+                    result = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
                 elif img.shape[2] == 4:
                     result = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
                 else:

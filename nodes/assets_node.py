@@ -940,11 +940,14 @@ class SnapshotAssetsNode:
         else:
             raise ValueError(f"Unsupported image data format: {image_data[:50]}...")
 
-        if img.mode != 'RGB':
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要）
+            img = img.convert('RGBA')
+        elif img.mode != 'RGB':
             img = img.convert('RGB')
 
         arr = np.array(img).astype(np.float32) / 255.0
-        tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
+        tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3] 或带 alpha 的 [1, H, W, 4]
         return tensor
 
     def snapshot_assets(self, data="", enable_image_config=False, enable_prompt=False, image_config="", enable_slot=False, slot_config="", enable_image=True, enable_video=True, enable_video_config=False, video_config="", enable_audio=True, enable_audio_config=False, audio_config="", global_mode=False, unique_id=None):

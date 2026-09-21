@@ -83,9 +83,11 @@ class LocalImageLoaderNode:
             else:
                 target_file = image_files[index]
             
-            # 加载图片
+            # 加载图片（带 alpha 的图保留 4 通道，QwenImage21 这类 alpha 架构需要）
             image = Image.open(target_file)
-            if image.mode != "RGB":
+            if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+                image = image.convert("RGBA")
+            elif image.mode != "RGB":
                 image = image.convert("RGB")
             
             # 转换为ComfyUI需要的格式

@@ -205,7 +205,12 @@ class Base64ToImageNode:
                 base64_string = base64_string.split(",", 1)[1]
 
             img_bytes = base64.b64decode(base64_string.strip())
-            pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            pil_img = Image.open(io.BytesIO(img_bytes))
+            # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+            if pil_img.mode in ('RGBA', 'LA') or (pil_img.mode == 'P' and 'transparency' in pil_img.info):
+                pil_img = pil_img.convert('RGBA')
+            elif pil_img.mode != 'RGB':
+                pil_img = pil_img.convert('RGB')
 
             img_np = np.array(pil_img).astype(np.float32) / 255.0
             img_tensor = torch.from_numpy(img_np)[None, ...]

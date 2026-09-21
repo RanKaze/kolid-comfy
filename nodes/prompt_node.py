@@ -2473,7 +2473,12 @@ class SnapshotPromptServer:
                         import numpy as np
                         import torch
                         from ..libs.caption_utils import get_tag
-                        img = PILImage.open(_io.BytesIO(image_bytes)).convert('RGB')
+                        img = PILImage.open(_io.BytesIO(image_bytes))
+                        # 带 alpha 的图保留 4 通道：get_tag 内部按白底合成后再送打标模型
+                        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                            img = img.convert('RGBA')
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
                         img_np = np.array(img).astype(np.float32) / 255.0
                         img_tensor = torch.from_numpy(img_np)
                         tag = get_tag(tagger, img_tensor)

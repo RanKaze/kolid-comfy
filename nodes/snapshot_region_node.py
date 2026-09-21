@@ -113,6 +113,9 @@ def _render_preview(boxes, width, height, bg=None, brightness=50):
         long_edge = max(iw, ih)
         scale = min(1.0, 1024 / long_edge) if long_edge > 0 else 1.0
         rw, rh = max(1, round(iw * scale)), max(1, round(ih * scale))
+        if bg.mode in ("RGBA", "LA"):
+            # alpha VAE 输出：透明区域按白底合成，避免预览出现黑底
+            bg = Image.alpha_composite(Image.new("RGBA", bg.size, (255, 255, 255, 255)), bg.convert("RGBA"))
         base = bg.convert("RGB").resize((rw, rh), Image.LANCZOS)
         if brightness < 100:
             base = ImageEnhance.Brightness(base).enhance(max(0.0, brightness / 100.0))

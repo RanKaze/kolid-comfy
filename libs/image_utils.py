@@ -21,6 +21,33 @@ def image_to_base64(image_tensor):
     pil_img.save(buffer, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
 
+def align_alpha_channels(image_a, image_b):
+    """RGB(3 通道) 与 RGBA(4 通道) 混用时，把通道数少的一方补出不透明的 alpha(=1.0)。
+
+    QwenImage21 等带 alpha 的 VAE 会解码出 4 通道图，与图库里原有的 3 通道图
+    （背景/mask 预览等）做逐元素运算前需要先对齐通道。通道数差不是 1 时原样返回，
+    由调用方自己的 shape 校验报错。
+    """
+    channels_a = image_a.shape[-1]
+    channels_b = image_b.shape[-1]
+    if channels_a == channels_b:
+        return image_a, image_b
+    if channels_a + 1 == channels_b:
+        image_a = torch.cat([image_a, torch.ones_like(image_a[..., :1])], dim=-1)
+    elif channels_b + 1 == channels_a:
+        image_b = torch.cat([image_b, torch.ones_like(image_b[..., :1])], dim=-1)
+    return image_a, image_b
+
+
+def flatten_alpha_on_white(image):
+    """RGBA -> RGB，透明区域按白底合成（与模型的 vision 侧一致）。非 4 通道原样返回。"""
+    if image is None or image.shape[-1] != 4:
+        return image
+    rgb = image[..., :3]
+    alpha = image[..., 3:]
+    return rgb * alpha + (1.0 - alpha)
+
+
 def hex_to_rgb(hex_color: str):
     """将 #RRGGBB 或 #RGB 转为 torch tensor [3]"""
     hex_color = hex_color.lstrip('#').strip()
@@ -159,6 +186,9 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
 
         if None in (ow, oh, cx, cy):
             raise ValueError("Crop info missing required fields")
+
+        # QwenImage21 等 alpha VAE 解码出 4 通道，背景可能是 3 通道：先对齐再加权混合
+        background, image = align_alpha_channels(background, image)
 
         B, H, W, C = image.shape
 
@@ -829,9 +859,19 @@ def draw_mask(mask, color=(0, 255, 0, 128)):
     return tensor
 
 def tensor_to_base64(image_tensor: torch.Tensor) -> str:
-    """Convert an image tensor [B,H,W,C] or [1,H,W,C] to base64 JPEG data URL."""
-    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
-    img = Image.fromarray(img_array, mode='RGB')
+    """Convert an image tensor [B,H,W,C] or [1,H,W,C] to a base64 data URL.
+
+    4 通道 (RGBA) 走 PNG 以保留 alpha；否则走 JPEG。
+    """
+    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    if img_array.ndim == 3 and img_array.shape[-1] == 4:
+        buf = io.BytesIO()
+        Image.fromarray(img_array).save(buf, format='PNG')
+        b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        return f"data:image/png;base64,{b64}"
+    if img_array.ndim == 3 and img_array.shape[-1] > 3:
+        img_array = img_array[..., :3]
+    img = Image.fromarray(img_array)
     buf = io.BytesIO()
     img.save(buf, format='JPEG', quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
@@ -913,6 +953,12 @@ def batch_images(image0, image1):
         img0 = img0[0]
     if len(img1.shape) == 4 and img1.shape[0] == 1:
         img1 = img1[0]
+
+    # RGB 与 RGBA 混用时把少的一方补出不透明 alpha，避免因为通道数不同直接报错
+    if img0.shape[-1] + 1 == img1.shape[-1]:
+        img0 = np.concatenate([img0, np.ones_like(img0[..., :1])], axis=-1)
+    elif img1.shape[-1] + 1 == img0.shape[-1]:
+        img1 = np.concatenate([img1, np.ones_like(img1[..., :1])], axis=-1)
 
     # 检查尺寸是否一致
     if img0.shape != img1.shape:
