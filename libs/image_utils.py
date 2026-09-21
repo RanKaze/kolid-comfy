@@ -236,9 +236,13 @@ def crop_mask(image, mask, reserve):
             raise ValueError("Image and mask must have the same spatial dimensions")
 
         # ==================== 关键修复：统一设备 ====================
+        # 必须"阻塞"搬运：mask 常来自 GPU（expand_mask 会把 mask 放到 cuda），
+        # 而非阻塞的 D2H 拷贝返回时 CPU 侧数据可能尚未落地，紧接着做的
+        # bbox 统计会读到还没写入的 0 → 裁剪框算错（Full 遮罩被裁掉一部分，
+        # 表现为 debug 里 Mask 尺寸小于 Background）。这里去掉 non_blocking。
         device = image.device
         if mask.device != device:
-            mask = mask.to(device, non_blocking=True)
+            mask = mask.to(device)
 
         print(f"[crop_mask] {W}x{H} | reserve={reserve} | batch={B} | device={device}")
 
@@ -249,9 +253,13 @@ def crop_mask(image, mask, reserve):
         col_sum = m.sum(dim=(1, 2))
 
         def get_bounds(proj):
+            # 无效位置用哨兵填充：min 用 n（比任何合法下标都大），max 用 -1。
+            # 注意不能共用固定的 H+1：列方向的合法下标可到 W-1，当 W-1 > H+1 时
+            # 哨兵会被 min 当成真正的最小列号（例如只有右侧有内容的 mask）。
+            n = proj.shape[1]
             valid = proj > 0
-            indices = torch.arange(proj.shape[1], device=device, dtype=torch.long).unsqueeze(0).expand_as(proj)
-            min_idx = torch.where(valid, indices, torch.full_like(indices, H + 1))
+            indices = torch.arange(n, device=proj.device, dtype=torch.long).unsqueeze(0).expand_as(proj)
+            min_idx = torch.where(valid, indices, torch.full_like(indices, n))
             max_idx = torch.where(valid, indices, torch.full_like(indices, -1))
             min_val = min_idx.min(dim=1)[0]
             max_val = max_idx.max(dim=1)[0]
@@ -362,11 +370,13 @@ def recover_crop(background, image, crop_info, recover_method, mask=None):
         print(f"[recover_crop] {W}x{H} → {ow}x{oh} | method={recover_method}")
 
         # ==================== 统一设备 ====================
+        # 同样必须是阻塞搬运：下面马上要用 mask/image 参与逐元素运算与切片赋值，
+        # 非阻塞 D2H 会让这些读取拿到未落地的数据。
         device = background.device
         if image.device != device:
-            image = image.to(device, non_blocking=True)
+            image = image.to(device)
         if mask is not None and mask.device != device:
-            mask = mask.to(device, non_blocking=True)
+            mask = mask.to(device)
 
         # 从 background 克隆开始
         recovered = background.clone()
@@ -733,7 +743,9 @@ def _interpolate_chunked(src, dst, new_h, new_w, antialias, device):
     if chunk >= B:
         # Whole batch fits: single upload/interpolate/download
         x = src.contiguous().to(device, non_blocking=True)
-        dst.copy_(F.interpolate(x, **kwargs), non_blocking=True)
+        # D2H 必须阻塞：dst 是调用方马上要读的 CPU 张量，异步拷贝会让调用方
+        # 读到未写完的缓冲（表现为图片出现整块黑/缺失区域）。
+        dst.copy_(F.interpolate(x, **kwargs))
         return
 
     # Double-buffered pipeline: while the GPU interpolates/downloads chunk k,
@@ -892,9 +904,11 @@ def recover_size(image, resize_info, mask=None):
         print(f"[recover_size] {current_w}x{current_h} → {original_width}x{original_height}")
 
         # ==================== 统一设备 ====================
+        # 阻塞搬运：mask 会被直接 return 给调用方并立即参与后续运算，
+        # 非阻塞 D2H 会让调用方读到尚未落地的数据。
         device = image.device
         if mask is not None and mask.device != device:
-            mask = mask.to(device, non_blocking=True)
+            mask = mask.to(device)
 
         if current_w == original_width and current_h == original_height:
             return (image, mask)

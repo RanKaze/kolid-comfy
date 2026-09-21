@@ -301,6 +301,7 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 画布右下角悬浮 Blend 按钮 (原底部 toolbar 已移除); 侧栏第一栏就是 Layers (头部有 Clear All / Add), 当前工具只在 View 面板的按钮高亮上体现 (原顶部模式 chip 已移除)
 - 工具按钮只显示快捷键字母 (Transform=T, Mask=M, Decal=D, Hand=H, Zoom=Z, Rotate=R), 工具名与用法都在 tooltip (title) 里; 侧栏不再有常显的说明段落 — Layers / Transform / Mask·Decal / Brush / Eraser / View 的标题 (带 title 时 cursor: help) 承载说明, Brush/Eraser/Mask·Decal 的 tooltip 随绘制目标在 mask 与 decal 之间实时切换; 侧栏只保留动态读数 (canvasReadout / transformReadout / maskTargetLabel / viewReadout), 且读数在没内容时整行隐藏 (setReadout: 空文本 → display:none) — 未选图层或画布未建立时 Transform 读数不占位, 非绘制模式下不显示 "Mask — 图层名", 画布还没建时不显示跟随提示; Canvas 读数只有两种紧凑状态 (Following the bottom layer / Fixed), 完整解释在 Canvas 标题与 Canvas Size 的 tooltip 里
 - 图片可直接拖进画布成为图层: 拖拽到画面上方时画布区显示蓝色虚线投放提示 (Drop images to add them as layers), 松手后按文件顺序逐个 addLayer (新图层在最上并自动选中, 图层名取文件名去扩展名); 只接受图片 (image/* 或 png/jpg/webp/gif/bmp), 混入非图片文件时提示 Only image files can be dropped here; 多文件同时拖入逐张异步加载
+- 新加入的图层 (拖入 / Add 历史图 / 父窗口推图) 一律保持原图比例并 fit 进当前画布 (PS "Place" 的 contain 语义: scale = min(canvasW/natW, canvasH/natH), 居中放置, 不做拉伸变形), 落在画布内的实际盒子为 nat × scale; 画布还没有尺寸时 (= 第一张图) 画布分辨率仍取该图原生尺寸, 此时缩放系数为 1, 图层正好铺满画布
 - 拖入的图层没有 history key, 像素随 payload 以 `src` (data URL) 直接带给后端 (历史图层仍只传 key, `src` 为 null), 后端 blend_layers 在 key 缺失/无法解析时回退到 `src` 解码 (libs/image_utils.decode_image_dataurl → [H,W,4] 保留 alpha), 因此本地图片无需先进历史即可参与合成
 - 合成 (POST /api/blend_layers, payload 每层带 key|src + transform/mask/decal → composite_layers: 图层空间 decal source-over + 乘蒙版 + 预乘 alpha 采样 + 层间 source-over); 全不透明输出 3 通道, 否则保留 alpha
 - 结果加入 history
