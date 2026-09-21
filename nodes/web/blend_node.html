@@ -719,6 +719,10 @@ function autoCanvasSize() {
     let w = 0, h = 0;
     for (const l of layers) {
         if (!l.img) continue;                   // still loading — it must not shrink the canvas
+        // A fragment (a detailer patch carrying a crop rect) is cut FROM the canvas and lives at the
+        // run's work resolution — which is often LARGER than the context it was cut out of. Letting
+        // it drive the canvas would grow the canvas every time a detailer runs.
+        if (l.fragment) continue;
         const n = nativeSize(l.img);
         if (n.w > w) w = n.w;
         if (n.h > h) h = n.h;
@@ -1337,6 +1341,7 @@ function snapshotState() {
         layers: layers.map(l => ({
             id: l.id, key: l.key, name: l.name, src: l.src, img: l.img,
             visible: l.visible,
+            fragment: !!l.fragment,
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
         })),
@@ -1355,6 +1360,7 @@ function restoreState(s) {
     layers = s.layers.map(ls => ({
         id: ls.id, key: ls.key, name: ls.name, src: ls.src, img: ls.img,
         visible: ls.visible,
+        fragment: !!ls.fragment,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -1784,6 +1790,55 @@ function fitLayerToCanvas(l) {
     l.transform.h = n.h * scale / canvasH;
 }
 
+// "Recover Crop" off in the sampler's Preprocess Settings: the backend hands back the raw
+// crop-workspace patch instead of compositing it onto the full image, together with the rect it
+// was cropped from. The patch is RGBA — its alpha *is* the crop-workspace mask — so the layer
+// needs no separate mask surface: drawing it with its own alpha reproduces the old
+// recover_crop(mask_blend) look. Turning the rect into a layer transform is what puts the patch
+// back where it came from — and the transform's own scaling is the reason the run could skip
+// recover_resize altogether.
+//
+// The rect arrives measured in the run's own image pixels, NOT as fractions:
+//
+//     x, y, w, h   the crop box inside the run's image           (crop_mask's output)
+//     ow, oh       that image's size — i.e. the canvas at run time
+//     pw, ph       the returned patch's own pixels               (model's work resolution)
+//     sx, sy       pw/w, ph/h — the limit_pixels scaling the patch went through
+//
+// The whole patch must cover the whole crop box. That is exactly what the Recover Crop ON path
+// produces (recover_size resizes the patch back to w x h, then recover_crop pastes it at x, y),
+// so both paths must agree: patch pixels are stretched onto the crop box, whatever sx/sy happen
+// to be (limit_pixels can UPSCALE a small crop, so pw/ph routinely differ from w/h).
+//
+// Normalisation therefore divides by the CANVAS, and by ow/oh only insofar as the canvas *is*
+// that image. Adding the patch must not change the canvas (see `l.fragment` in autoCanvasSize) —
+// otherwise a big patch would grow the canvas, and with it every other layer. If the canvas did
+// change between the run and this insertion, layers were re-anchored around the canvas centre
+// keeping their absolute pixels (rescaleLayersForCanvas), so shift the rect by half the size
+// delta: that keeps the patch on the content it was cut from.
+// Returns null only for a rect that cannot describe a box: missing, non-finite or empty.
+function placeTransform(place) {
+    if (!place || typeof place !== 'object') return null;
+    const x = Number(place.x), y = Number(place.y);
+    const w = Number(place.w), h = Number(place.h);
+    const ow = Number(place.ow), oh = Number(place.oh);
+    if (![x, y, w, h, ow, oh].every(v => Number.isFinite(v))) return null;
+    if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0) return null;
+    if (!canvasW || !canvasH) return null;
+    const dx = (canvasW - ow) / 2, dy = (canvasH - oh) / 2;    // normally 0
+    const px = x + dx, py = y + dy;
+    // Refuse a rect that lands wholly outside the canvas: it was measured against some other
+    // canvas, and pasting the patch where nobody can reach it beats fitting it to no purpose.
+    if (px + w <= 0 || py + h <= 0 || px >= canvasW || py >= canvasH) return null;
+    return {
+        cx: (px + w / 2) / canvasW,
+        cy: (py + h / 2) / canvasH,
+        w: w / canvasW,
+        h: h / canvasH,
+        rotation: 0,
+    };
+}
+
 function addLayer(item) {
     loadImage(item.src, img => {
         const l = {
@@ -1801,16 +1856,21 @@ function addLayer(item) {
             decalCtx: null,
             decalThumbEl: null,
             canvasThumbEl: null,
+            // A detailer patch that came back with a crop rect: it is a piece OF this canvas, not
+            // another document dropped onto it, so it must never drive the canvas size.
+            fragment: !!item.place,
         };
         if (l.key) injectedKeys.add(l.key);
         layers.unshift(l);          // new images land on top
         selectedId = l.id;
         applyCanvasSize();
-        fitLayerToCanvas(l);
+        const placed = placeTransform(item.place);
+        if (placed) l.transform = placed; else fitLayerToCanvas(l);
         layoutCanvas();
         renderLayerList();
         render();
-        setStatus(layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added');
+        setStatus(placed ? 'Result placed back at its crop position — tweak it, then Blend'
+            : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added'));
         pushHistory();
     });
 }
@@ -3181,7 +3241,7 @@ async function exportCud() {
         for (const l of layers) {
             const n = nativeSize(l.img);
             records.push({
-                id: l.id, key: l.key, name: l.name, visible: l.visible,
+                id: l.id, key: l.key, name: l.name, visible: l.visible, fragment: !!l.fragment,
                 transform: cloneTransform(l.transform),
                 image: await addAsset('image', l.img, n.w, n.h),
                 mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
@@ -3400,6 +3460,7 @@ async function importCud(file) {
                 src: url,
                 img,
                 visible: rec.visible !== false,
+                fragment: !!rec.fragment,
                 transform: {
                     cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
                     cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,

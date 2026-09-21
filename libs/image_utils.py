@@ -56,6 +56,37 @@ def ensure_rgba(image):
     return torch.cat([image, torch.ones_like(image[..., :1])], dim=-1)
 
 
+def merge_mask_alpha(image, mask):
+    """把 mask 合进 image 的 alpha 通道 → [B,H,W,4] 的「带透明度的产出」。
+
+    「Recover Crop 关闭」的 detailer 产出就是这个形状：RGB 是 crop 工作区的产出像素，
+    alpha 是同一工作区的 mask 覆盖率（`last_resized_mask`）。它对外只是一张普通的 RGBA
+    图 —— 前端拿它当一个普通图层贴回原位，画布上的 alpha 合成天然等价于原来的
+    recover_crop(mask_blend)，所以不需要再单独传一张 mask 图。
+
+    image: [B,H,W,3]，或 [B,H,W,4]（4 通道时原 alpha 被 mask 顶替）
+    mask:  [B,H,W] / [B,H,W,1] / [H,W]；None 表示全可见（等价 ensure_rgba）
+          空间尺寸与 image 不一致时按双线性缩放到 image 尺寸。
+    """
+    if mask is None:
+        return ensure_rgba(image)
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+    if mask.dim() == 2:
+        mask = mask.unsqueeze(0)
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(-1)
+    b, h, w = image.shape[0], image.shape[1], image.shape[2]
+    mask = mask.to(device=image.device, dtype=image.dtype)
+    if mask.shape[0] != b:
+        # 单张 mask 服务整个 batch；反过来的情况（mask 比图多）不可表达，取第一张
+        mask = mask[:1].expand(b, -1, -1, -1)
+    if mask.shape[1] != h or mask.shape[2] != w:
+        mask = F.interpolate(mask.permute(0, 3, 1, 2), size=(h, w),
+                             mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+    return torch.cat([image[..., :3], mask.clamp(0.0, 1.0)], dim=-1)
+
+
 def warp_layer(image, transform, canvas_w, canvas_h):
     """把 [H,W,4] 图层按 transform 摆进 canvas_w x canvas_h 的画布。
 
@@ -1052,17 +1083,6 @@ def tensor_to_base64(image_tensor: torch.Tensor) -> str:
     if img_array.ndim == 3 and img_array.shape[-1] > 3:
         img_array = img_array[..., :3]
     img = Image.fromarray(img_array)
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=90)
-    b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    return f"data:image/jpeg;base64,{b64}"
-
-
-def mask_to_base64(mask_tensor: torch.Tensor) -> str:
-    """Convert a mask tensor [B,H,W] or [H,W] to base64 grayscale JPEG data URL."""
-    m = mask_tensor.squeeze().cpu().numpy()
-    img_array = (np.clip(m, 0, 1) * 255).astype(np.uint8)
-    img = Image.fromarray(img_array, mode='L')
     buf = io.BytesIO()
     img.save(buf, format='JPEG', quality=90)
     b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
