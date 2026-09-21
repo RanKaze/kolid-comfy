@@ -40,7 +40,7 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, composite_layers, decode_mask_alpha
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, composite_layers, decode_mask_alpha, decode_decal_rgba
 from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -420,7 +420,7 @@ class SnapshotDetailerSamplerServer:
     def blend_layers(self, layer_specs, width=0, height=0):
         """按图层列表合成一张新图并加入历史，返回新图 key。
 
-        layer_specs: [{'key', 'mask': dataURL|None, 'transform': {...}|None, 'visible': bool}]
+        layer_specs: [{'key', 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
         列表自下而上（[0] 是最底层）。画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
         """
         if not layer_specs:
@@ -437,6 +437,7 @@ class SnapshotDetailerSamplerServer:
                 'image': tensor,
                 'transform': spec.get('transform'),
                 'mask': spec.get('mask'),
+                'decal': spec.get('decal'),
                 'visible': spec.get('visible', True),
             })
         canvas_w = int(width or 0)
@@ -444,9 +445,10 @@ class SnapshotDetailerSamplerServer:
         if canvas_w <= 0 or canvas_h <= 0:
             canvas_h, canvas_w = resolved[0]['image'].shape[0], resolved[0]['image'].shape[1]
         for layer in resolved:
-            # 蒙版在图层自身尺寸下生效，随图层一起被 transform（缩放/旋转）
+            # 蒙版与 decal 都在图层自身尺寸下生效，随图层一起被 transform（缩放/旋转）
             layer_h, layer_w = layer['image'].shape[0], layer['image'].shape[1]
             layer['mask'] = decode_mask_alpha(layer['mask'], layer_w, layer_h)
+            layer['decal'] = decode_decal_rgba(layer['decal'], layer_w, layer_h)
         blended = composite_layers(resolved, canvas_w, canvas_h)
         self.add_history(blended, name=f'Blend #{len(self.selected_history)}')
         return self.selected_history[-1]['key']

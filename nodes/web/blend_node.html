@@ -34,17 +34,25 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 
 .layer-list { display: flex; flex-direction: column; gap: 4px; }
 .layer-empty { font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
-.layer-row { display: flex; align-items: center; gap: 6px; padding: 4px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
+.layer-row { display: flex; align-items: center; gap: 5px; padding: 4px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
 .layer-row:hover { background: rgba(255,255,255,0.08); }
 .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
 .layer-row.dragging { opacity: 0.4; }
 .layer-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
 .layer-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
 .layer-row.hidden-layer .layer-thumb, .layer-row.hidden-layer .layer-name { opacity: 0.35; }
-.layer-thumb { width: 42px; height: 28px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
 .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .layer-thumb.mask-thumb { background: #000; cursor: pointer; }
 .layer-thumb.mask-thumb canvas { width: 100%; height: 100%; display: block; }
+.layer-thumb.canvas-thumb { background: #0a0a0a; }
+.layer-thumb.canvas-thumb canvas { width: 100%; height: 100%; display: block; }
+/* Decal chip: transparency shows as a checkerboard, so painted pixels read as "added". */
+.layer-thumb.decal-thumb { cursor: pointer; background-color: #2a2a2a;
+    background-image: linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%),
+                      linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%);
+    background-size: 8px 8px; background-position: 0 0, 4px 4px; }
+.layer-thumb.decal-thumb canvas { width: 100%; height: 100%; display: block; }
 .layer-thumb.active { box-shadow: inset 0 0 0 2px #fff; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -63,17 +71,28 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .confirm-btn:hover { background: rgba(48,209,88,1.0); transform: translateY(-1px); }
 .confirm-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 
-.controls { position: absolute; top: 0; right: 0; background: rgba(28,28,30,0.6); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); padding: 14px; border-radius: 20px; z-index: 50; display: none; flex-direction: column; gap: 8px; min-width: 180px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 8px 32px rgba(0,0,0,0.35); }
-.detector-title { font-size: 11px; font-weight: 700; color: #64d2ff; text-transform: uppercase; letter-spacing: 0.8px; }
-.brush-mode-btn.active, .eraser-mode-btn.active { background: rgba(0,122,255,0.85); box-shadow: 0 2px 8px rgba(0,122,255,0.25); }
-.control-row { display: flex; align-items: center; gap: 10px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
-.control-row label { min-width: 50px; }
-.control-row input[type="range"] { flex: 1; }
-.control-row span { min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: rgba(255,255,255,0.7); }
+/* Mask tools live in the sidebar (no floating panel) */
+.tool-section { border: 1px solid transparent; border-radius: 10px; padding: 6px; margin: -6px; transition: background 0.15s ease, border-color 0.15s ease; }
+.tool-section.active-tool { background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.5); }
+.tool-key { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 4px; border-radius: 4px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 10px; letter-spacing: 0; }
+.tool-section.active-tool .tool-key { background: rgba(0,122,255,0.9); color: #fff; }
+/* Ring swatch mirrors the on-canvas brush ring, so the active tool's colour is visible in the UI too */
+.ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
+.ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
+.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.target-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+.control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
+.control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
+.control-row input[type="color"]::-moz-color-swatch { border: none; border-radius: 4px; }
+.control-row { display: flex; align-items: center; gap: 8px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
+.control-row label { min-width: 46px; font-size: 11px; }
+.control-row input[type="range"] { flex: 1; width: auto; }
+.control-row span { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: rgba(255,255,255,0.7); }
 
 #brushCursor { position: fixed; pointer-events: none; border-radius: 50%; z-index: 100; display: none; transform: translate(-50%,-50%); box-sizing: border-box; border: 1.5px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3); }
-#brushCursor.erase { border: 1.5px dashed rgba(255,255,255,0.9); }
+#brushCursor.erase { border: 1.5px dashed rgba(255,96,96,0.95); }
 #brushCursor::before, #brushCursor::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); background: rgba(255,255,255,0.7); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.5); }
+#brushCursor.erase::before, #brushCursor.erase::after { background: rgba(255,96,96,0.85); }
 #brushCursor::before { width: 1px; height: 16px; }
 #brushCursor::after { width: 16px; height: 1px; }
 
@@ -113,40 +132,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
         <div id="status">Add layers to start</div>
         <div id="brushCursor"></div>
-        <div class="controls" id="brushPanel">
-            <div class="detector-title" id="maskTargetLabel">Mask</div>
-            <div class="control-row" style="gap:4px; justify-content:center;">
-                <button class="control-button" id="maskInvertBtn" style="flex:1; padding:5px 8px; font-size:11px;">Invert</button>
-                <button class="control-button" id="maskResetBtn" style="flex:1; padding:5px 8px; font-size:11px;">Reset</button>
-            </div>
-
-            <div style="height:1px; background:rgba(255,255,255,0.08); margin: 4px 0;"></div>
-
-            <div class="detector-title">Brush</div>
-            <div class="control-row" style="gap:4px; justify-content:center;">
-                <button class="control-button brush-mode-btn" id="brushBinary" style="flex:1; padding:5px 8px; font-size:11px;">Binary</button>
-                <button class="control-button brush-mode-btn" id="brushLinear" style="flex:1; padding:5px 8px; font-size:11px;">Linear</button>
-                <button class="control-button brush-mode-btn active" id="brushExpo" style="flex:1; padding:5px 8px; font-size:11px;">Exponential</button>
-            </div>
-            <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0"><span id="brushStrengthValue">1.00</span></div>
-            <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0"><span id="brushCenterValue">1.00</span></div>
-            <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0"><span id="brushEdgeValue">0.00</span></div>
-            <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="brushGammaValue">2.0</span></div>
-            <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40"><span id="brushSizeValue">40</span></div>
-
-            <div style="height:1px; background:rgba(255,255,255,0.08); margin: 4px 0;"></div>
-
-            <div class="detector-title" style="color:#ff6b6b;">Eraser</div>
-            <div class="control-row" style="gap: 4px; justify-content: center;">
-                <button class="control-button eraser-mode-btn" id="eraserBinary" style="flex:1; padding: 5px 8px; font-size: 11px;">Binary</button>
-                <button class="control-button eraser-mode-btn" id="eraserLinear" style="flex:1; padding: 5px 8px; font-size: 11px;">Linear</button>
-                <button class="control-button eraser-mode-btn active" id="eraserExpo" style="flex:1; padding: 5px 8px; font-size: 11px;">Exponential</button>
-            </div>
-            <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0"><span id="eraserStrengthValue">1.00</span></div>
-            <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0"><span id="eraserCenterValue">1.00</span></div>
-            <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0"><span id="eraserEdgeValue">0.00</span></div>
-            <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="eraserGammaValue">2.0</span></div>
-        </div>
     </div>
     <div id="sidePanel">
         <div class="panel-section">
@@ -155,7 +140,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <button class="mini-btn" id="addLayerBtn">Add</button>
             </div>
             <div class="layer-list" id="layerList"></div>
-            <div class="panel-hint">Top of list draws on top · drag rows to reorder. Click the image chip to transform a layer, the mask chip to paint its mask.</div>
+            <div class="panel-hint">Top of list draws on top · drag rows to reorder. Chips: image (transform), decal (paint colour), canvas preview (transform), mask (paint coverage).</div>
         </div>
         <div class="panel-section">
             <div class="panel-head">
@@ -174,6 +159,54 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-hint" id="transformReadout">—</div>
             <div class="panel-hint">T / Ctrl+T shows the box · Enter hides it. Drag inside to move, handles to scale, circle to rotate. Shift snaps.</div>
+        </div>
+        <div class="panel-section tool-section" id="maskSection">
+            <div class="panel-head">
+                <div class="panel-label">Mask / Decal</div>
+                <div class="mini-group">
+                    <button class="mini-btn" id="maskInvertBtn">Invert</button>
+                    <button class="mini-btn" id="maskResetBtn">Reset</button>
+                </div>
+            </div>
+            <div class="mini-group">
+                <button class="mini-btn target-btn active" id="paintMaskBtn" title="Paint this layer's mask (coverage)">Mask <span class="tool-key">M</span></button>
+                <button class="mini-btn target-btn" id="paintDecalBtn" title="Paint this layer's decal (colour)">Decal <span class="tool-key">D</span></button>
+            </div>
+            <div class="panel-hint" id="maskTargetLabel" style="color:rgba(255,255,255,0.72); font-weight:600;">Mask — —</div>
+            <div class="panel-hint" id="paintHint">Left-drag uses the active tool, right-drag the other one. Alt + drag or the wheel resizes it.</div>
+        </div>
+        <div class="panel-section tool-section" id="brushSection">
+            <div class="panel-head">
+                <div class="panel-label">Brush <span class="tool-key">B</span></div>
+                <span class="ring-swatch" id="brushRingSwatch" title="Paints the mask in (visible)"></span>
+            </div>
+            <div class="mini-group">
+                <button class="mini-btn brush-mode-btn" id="brushBinary">Binary</button>
+                <button class="mini-btn brush-mode-btn" id="brushLinear">Linear</button>
+                <button class="mini-btn brush-mode-btn active" id="brushExpo">Exponential</button>
+            </div>
+            <div class="control-row" id="brushColorRow" style="display:none;"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
+            <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0"><span id="brushStrengthValue">1.00</span></div>
+            <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0"><span id="brushCenterValue">1.00</span></div>
+            <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0"><span id="brushEdgeValue">0.00</span></div>
+            <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="brushGammaValue">2.0</span></div>
+            <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40"><span id="brushSizeValue">40</span></div>
+        </div>
+        <div class="panel-section tool-section" id="eraserSection">
+            <div class="panel-head">
+                <div class="panel-label">Eraser <span class="tool-key">E</span></div>
+                <span class="ring-swatch erase" title="Erases the mask (hidden)"></span>
+            </div>
+            <div class="mini-group">
+                <button class="mini-btn eraser-mode-btn" id="eraserBinary">Binary</button>
+                <button class="mini-btn eraser-mode-btn" id="eraserLinear">Linear</button>
+                <button class="mini-btn eraser-mode-btn active" id="eraserExpo">Exponential</button>
+            </div>
+            <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0"><span id="eraserStrengthValue">1.00</span></div>
+            <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0"><span id="eraserCenterValue">1.00</span></div>
+            <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0"><span id="eraserEdgeValue">0.00</span></div>
+            <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="eraserGammaValue">2.0</span></div>
+            <div class="control-row"><label>Size</label><input type="range" id="eraserSize" min="2" max="9999" value="60"><span id="eraserSizeValue">60</span></div>
         </div>
         <div class="panel-section">
             <div class="panel-head">
@@ -231,7 +264,6 @@ const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
 const status = document.getElementById('status');
 const brushCursor = document.getElementById('brushCursor');
-const brushPanel = document.getElementById('brushPanel');
 const maskTargetLabel = document.getElementById('maskTargetLabel');
 const blendCtx = blendCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
@@ -271,12 +303,18 @@ let brushCenter = 1.0;
 let brushEdge = 0.0;
 let brushGamma = 2.0;
 
-// Eraser state (independent from brush)
+// Eraser state (independent from brush, including its own size)
+let maskTool = 'brush';        // 'brush' | 'eraser' — what the left mouse button paints with
 let eraserMode = 'exponential';
+let eraserSize = 60;
 let eraserStrength = 1.0;
 let eraserCenter = 1.0;
 let eraserEdge = 0.0;
 let eraserGamma = 2.0;
+
+// Both tools paint onto the same surface, chosen here: the layer's mask (coverage) or its decal (colour).
+let paintTarget = 'mask';      // 'mask' | 'decal'
+let brushColor = '#ff3b30';
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
 let dragRowId = null;
@@ -293,6 +331,8 @@ const snapshotCanvas = document.createElement('canvas');
 const snapshotCtx = snapshotCanvas.getContext('2d');
 const tmpCanvas = document.createElement('canvas');
 const tmpCtx = tmpCanvas.getContext('2d');
+const thumbCanvas = document.createElement('canvas');   // scratch for the per-layer canvas preview
+const thumbCtx = thumbCanvas.getContext('2d');
 
 function getLayer(id) { return layers.find(l => l.id === id) || null; }
 function getSelected() { return getLayer(selectedId); }
@@ -565,31 +605,83 @@ function updateHoverCursor(sp, docPos) {
 }
 
 // ==================== 渲染 ====================
+// The layer's pixels at native size: image + decal, cut out by the mask — what the transform then places on the canvas.
+function layerSource(l) {
+    if (!l.mask && !l.decal) return l.img;
+    const { w, h } = nativeSize(l.img);
+    if (tmpCanvas.width !== w || tmpCanvas.height !== h) { tmpCanvas.width = w; tmpCanvas.height = h; }
+    resetCtx(tmpCtx);
+    tmpCtx.clearRect(0, 0, w, h);
+    tmpCtx.drawImage(l.img, 0, 0, w, h);
+    if (l.decal) tmpCtx.drawImage(l.decal, 0, 0, w, h);      // decal sits on top of the image
+    if (l.mask) {
+        tmpCtx.globalCompositeOperation = 'destination-in';
+        tmpCtx.drawImage(l.mask, 0, 0, w, h);
+        tmpCtx.globalCompositeOperation = 'source-over';
+    }
+    return tmpCanvas;
+}
+
 function drawLayer(l) {
     if (!l.visible || !l.img) return;
     const tr = l.transform;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
-    const cx = tr.cx * canvasW, cy = tr.cy * canvasH;
-    let source = l.img;
-    if (l.mask) {
-        // Mask belongs to the layer, so cut it out at native size before the transform is applied.
-        const { w, h } = nativeSize(l.img);
-        if (tmpCanvas.width !== w || tmpCanvas.height !== h) { tmpCanvas.width = w; tmpCanvas.height = h; }
-        tmpCtx.setTransform(1, 0, 0, 1, 0, 0);
-        tmpCtx.globalAlpha = 1;
-        tmpCtx.globalCompositeOperation = 'source-over';
-        tmpCtx.clearRect(0, 0, w, h);
-        tmpCtx.drawImage(l.img, 0, 0, w, h);
-        tmpCtx.globalCompositeOperation = 'destination-in';
-        tmpCtx.drawImage(l.mask, 0, 0, w, h);
-        tmpCtx.globalCompositeOperation = 'source-over';
-        source = tmpCanvas;
-    }
     blendCtx.save();
-    blendCtx.translate(cx, cy);
+    blendCtx.translate(tr.cx * canvasW, tr.cy * canvasH);
     blendCtx.rotate(tr.rotation);
-    blendCtx.drawImage(source, -tw / 2, -th / 2, tw, th);
+    blendCtx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
     blendCtx.restore();
+}
+
+// Miniature of the layer as it sits on the canvas right now (position, scale, rotation, mask).
+function paintCanvasThumb(el, l) {
+    const w = el.width, h = el.height;
+    const c = el.getContext('2d');
+    resetCtx(c);
+    c.fillStyle = '#141414';
+    c.fillRect(0, 0, w, h);
+    if (!canvasW || !canvasH) return;
+    const s = Math.min(w / canvasW, h / canvasH);
+    const dw = Math.max(1, Math.round(canvasW * s)), dh = Math.max(1, Math.round(canvasH * s));
+    const ox = Math.round((w - dw) / 2), oy = Math.round((h - dh) / 2);
+    if (l.visible && l.img) {
+        if (thumbCanvas.width !== dw || thumbCanvas.height !== dh) { thumbCanvas.width = dw; thumbCanvas.height = dh; }
+        resetCtx(thumbCtx);
+        thumbCtx.clearRect(0, 0, dw, dh);
+        thumbCtx.save();
+        thumbCtx.beginPath();
+        thumbCtx.rect(0, 0, dw, dh);
+        thumbCtx.clip();
+        const tr = l.transform;
+        const tw = tr.w * dw, th = tr.h * dh;
+        thumbCtx.translate(tr.cx * dw, tr.cy * dh);
+        thumbCtx.rotate(tr.rotation);
+        thumbCtx.drawImage(l.img, -tw / 2, -th / 2, tw, th);
+        if (l.decal) thumbCtx.drawImage(l.decal, -tw / 2, -th / 2, tw, th);
+        if (l.mask) {
+            // Cut the mask inside the miniature, so no full-size composite is needed per frame.
+            thumbCtx.globalCompositeOperation = 'destination-in';
+            thumbCtx.drawImage(l.mask, -tw / 2, -th / 2, tw, th);
+            thumbCtx.globalCompositeOperation = 'source-over';
+        }
+        thumbCtx.restore();
+        c.drawImage(thumbCanvas, 0, 0, dw, dh, ox, oy, dw, dh);
+    }
+    c.strokeStyle = 'rgba(255,255,255,0.22)';
+    c.lineWidth = 1;
+    c.strokeRect(ox + 0.5, oy + 0.5, dw - 1, dh - 1);
+}
+
+function refreshCanvasThumb(l) {
+    if (l.canvasThumbEl && l.canvasThumbEl.isConnected) paintCanvasThumb(l.canvasThumbEl, l);
+}
+
+function refreshCanvasThumbs() {
+    for (const l of layers) {
+        refreshCanvasThumb(l);
+        refreshMaskThumb(l);
+        refreshDecalThumb(l);
+    }
 }
 
 function localToCanvas(l, u, v) {
@@ -683,6 +775,7 @@ function render() {
     }
     updateTransformReadout();
     updateMaskTargetLabel();
+    refreshCanvasThumbs();
     drawOverlay();
 }
 
@@ -718,6 +811,23 @@ function refreshMaskThumb(l) {
     if (l.maskThumbEl && l.maskThumbEl.isConnected) paintMaskThumb(l.maskThumbEl, l);
 }
 
+// The decal alone (transparent where nothing was painted — the CSS checkerboard shows through).
+function paintDecalThumb(el, l) {
+    const w = el.width, h = el.height;
+    const c = el.getContext('2d');
+    resetCtx(c);
+    c.clearRect(0, 0, w, h);
+    if (!l.decal) return;
+    const src = nativeSize(l.img);
+    const s = Math.min(w / src.w, h / src.h);
+    const dw = src.w * s, dh = src.h * s;
+    c.drawImage(l.decal, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+
+function refreshDecalThumb(l) {
+    if (l.decalThumbEl && l.decalThumbEl.isConnected) paintDecalThumb(l.decalThumbEl, l);
+}
+
 function renderLayerList() {
     layerListEl.innerHTML = '';
     if (!layers.length) {
@@ -751,8 +861,8 @@ function renderLayerList() {
 
         const maskThumb = document.createElement('div');
         maskThumb.className = 'layer-thumb mask-thumb';
-        maskThumb.title = 'Paint this layer\'s mask';
-        if (l.id === selectedId && mode === 'mask') maskThumb.classList.add('active');
+        maskThumb.title = 'Paint this layer\'s mask (coverage)';
+        if (l.id === selectedId && mode === 'mask' && paintTarget === 'mask') maskThumb.classList.add('active');
         const maskCanvasEl = document.createElement('canvas');
         maskCanvasEl.width = 84;
         maskCanvasEl.height = 56;
@@ -761,7 +871,42 @@ function renderLayerList() {
         maskThumb.appendChild(maskCanvasEl);
         maskThumb.addEventListener('click', ev => {
             ev.stopPropagation();
+            paintTarget = 'mask';
             selectLayer(l.id, 'mask');
+            renderLayerList();
+            syncPaintUI();
+        });
+
+        const decalThumb = document.createElement('div');
+        decalThumb.className = 'layer-thumb decal-thumb';
+        decalThumb.title = 'Paint this layer\'s decal (colour on top of the image)';
+        if (l.id === selectedId && mode === 'mask' && paintTarget === 'decal') decalThumb.classList.add('active');
+        const decalCanvasEl = document.createElement('canvas');
+        decalCanvasEl.width = 84;
+        decalCanvasEl.height = 56;
+        paintDecalThumb(decalCanvasEl, l);
+        l.decalThumbEl = decalCanvasEl;
+        decalThumb.appendChild(decalCanvasEl);
+        decalThumb.addEventListener('click', ev => {
+            ev.stopPropagation();
+            paintTarget = 'decal';
+            selectLayer(l.id, 'mask');
+            renderLayerList();          // repaint the chip outlines even when the layer was already selected
+            syncPaintUI();
+        });
+
+        const canvasThumb = document.createElement('div');
+        canvasThumb.className = 'layer-thumb canvas-thumb';
+        canvasThumb.title = 'This layer on the canvas — click to transform';
+        const canvasThumbEl = document.createElement('canvas');
+        canvasThumbEl.width = 84;
+        canvasThumbEl.height = 56;
+        paintCanvasThumb(canvasThumbEl, l);
+        l.canvasThumbEl = canvasThumbEl;
+        canvasThumb.appendChild(canvasThumbEl);
+        canvasThumb.addEventListener('click', ev => {
+            ev.stopPropagation();
+            selectLayer(l.id, 'transform');
         });
 
         const name = document.createElement('div');
@@ -769,6 +914,8 @@ function renderLayerList() {
         name.textContent = l.name;
 
         row.appendChild(thumb);
+        row.appendChild(decalThumb);
+        row.appendChild(canvasThumb);
         row.appendChild(maskThumb);
         row.appendChild(name);
 
@@ -846,6 +993,10 @@ function addLayer(item) {
             mask: null,
             maskCtx: null,
             maskThumbEl: null,
+            decal: null,
+            decalCtx: null,
+            decalThumbEl: null,
+            canvasThumbEl: null,
         };
         layers.unshift(l);          // new images land on top
         selectedId = l.id;
@@ -853,7 +1004,7 @@ function addLayer(item) {
         layoutCanvas();
         renderLayerList();
         render();
-        setStatus(layers.length === 1 ? 'Stretch/scale the layer, paint its mask, then Blend' : 'Layer added');
+        setStatus(layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added');
     });
 }
 
@@ -893,12 +1044,11 @@ function setMode(m) {
 }
 
 function syncModeUI() {
-    brushPanel.style.display = mode === 'mask' ? 'flex' : 'none';
-    modeChip.textContent = mode === 'mask' ? 'Mask Brush (M)' : 'Transform (T)';
+    modeChip.textContent = mode === 'mask' ? (isDecalTarget() ? 'Decal Brush (D)' : 'Mask Brush (M)') : 'Transform (T)';
     modeChip.classList.toggle('active', mode === 'transform');
     document.getElementById('transformAdjustBtn').classList.toggle('active', mode === 'transform');
+    syncToolUI();
     syncBrushCursor();
-    updateCursorMode();
     refreshCursor();
 }
 
@@ -911,19 +1061,99 @@ function syncBrushCursor() {
 
 function updateMaskTargetLabel() {
     const l = getSelected();
-    const text = mode === 'mask' ? `Mask — ${l ? l.name : '—'}` : 'Mask';
+    const which = isDecalTarget() ? 'Decal' : 'Mask';
+    const text = mode === 'mask' ? `${which} — ${l ? l.name : '—'}` : `${which} — —`;
     if (maskTargetLabel.textContent !== text) maskTargetLabel.textContent = text;
 }
 
+// ==================== 工具（画笔 / 橡皮） ====================
+// Left mouse button uses the active tool, the right button the other one.
+function strokeTool(e) { return e.button === 2 ? (maskTool === 'brush' ? 'eraser' : 'brush') : maskTool; }
+function erasingNow() { return (isDrawing || isAltResizing) ? isErasing : maskTool === 'eraser'; }
+
+function activeSizeValue() { return erasingNow() ? eraserSize : brushSize; }
+
+function setActiveSize(v) {
+    v = Math.max(2, Math.min(9999, Math.round(v)));
+    if (erasingNow()) eraserSize = v;
+    else brushSize = v;
+    syncSizeUI();
+    updateBrushCursorSize();
+}
+
+function syncSizeUI() {
+    document.getElementById('brushSize').value = brushSize;
+    document.getElementById('brushSizeValue').textContent = brushSize;
+    document.getElementById('eraserSize').value = eraserSize;
+    document.getElementById('eraserSizeValue').textContent = eraserSize;
+}
+
+function syncToolUI() {
+    const active = mode === 'mask';
+    document.getElementById('brushSection').classList.toggle('active-tool', active && maskTool === 'brush');
+    document.getElementById('eraserSection').classList.toggle('active-tool', active && maskTool === 'eraser');
+    document.getElementById('maskSection').classList.toggle('active-tool', active);
+    syncPaintUI();
+    updateBrushCursorSize();
+    updateCursorMode();
+}
+
+// Mask vs decal is a property of the paint session: both tools follow it.
+function syncPaintUI() {
+    const decal = isDecalTarget();
+    document.getElementById('paintMaskBtn').classList.toggle('active', !decal);
+    document.getElementById('paintDecalBtn').classList.toggle('active', decal);
+    document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
+    document.getElementById('maskResetBtn').textContent = decal ? 'Clear' : 'Reset';
+    document.getElementById('brushColorRow').style.display = decal ? 'flex' : 'none';
+    document.getElementById('paintHint').textContent = decal
+        ? 'Colour sits on top of the image and under the mask. Left-drag paints, right-drag erases.'
+        : 'Left-drag uses the active tool, right-drag the other one. Alt + drag or the wheel resizes it.';
+    updateMaskTargetLabel();
+    updateCursorMode();
+}
+
+function selectPaintTarget(target) {
+    paintTarget = target === 'decal' ? 'decal' : 'mask';
+    if (!getSelected()) {
+        syncPaintUI();
+        setStatus('Select a layer first', 'error');
+        return;
+    }
+    setMode('mask');
+    setStatus(paintTarget === 'decal'
+        ? 'Painting the decal (colour on top of the image)'
+        : 'Painting the mask (coverage)');
+}
+
+function setPaintColor(hex) {
+    brushColor = hex;
+    document.getElementById('brushColorValue').textContent = String(hex).toUpperCase();
+    updateCursorMode();
+}
+
+function selectTool(tool) {
+    if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
+    maskTool = tool;
+    if (mode !== 'mask') setMode('mask');
+    else { syncToolUI(); syncBrushCursor(); refreshCursor(); }
+    const target = isDecalTarget() ? 'the decal' : 'the mask';
+    setStatus(tool === 'brush' ? `Brush — left paints ${target}, right erases` : `Eraser — left erases ${target}, right paints in`);
+}
+
 function updateBrushCursorSize() {
-    const size = Math.max(4, brushSize * view.zoom);
+    const size = Math.max(4, activeSizeValue() * view.zoom);
     brushCursor.style.width = size + 'px';
     brushCursor.style.height = size + 'px';
 }
 
 function updateCursorMode() {
-    if (isErasing) brushCursor.classList.add('erase');
-    else brushCursor.classList.remove('erase');
+    const erasing = erasingNow();
+    brushCursor.classList.toggle('erase', erasing);
+    // Tint the ring (and its sidebar twin) with the paint colour, so the decal colour is visible while painting.
+    const tint = (!erasing && isDecalTarget()) ? brushColor : '';
+    brushCursor.style.borderColor = tint;
+    document.getElementById('brushRingSwatch').style.borderColor = isDecalTarget() ? brushColor : '';
 }
 
 function moveCursor(e) { brushCursor.style.left = e.clientX + 'px'; brushCursor.style.top = e.clientY + 'px'; }
@@ -1024,9 +1254,10 @@ function updateTransformDrag(e, pos) {
     render();
 }
 
-// ==================== 蒙版 ====================
-// Masks are stored at the layer's native resolution and are cut out before the transform,
-// so scaling/rotating a layer moves its mask with it.
+// ==================== 蒙版 / Decal ====================
+// Masks and decals are stored at the layer's native resolution and are cut out before the
+// transform, so scaling/rotating a layer moves them with it. A decal is a separate colour
+// surface painted on top of the image; the mask then cuts both.
 function ensureMask(l) {
     if (!l.mask) {
         const { w, h } = nativeSize(l.img);
@@ -1040,6 +1271,23 @@ function ensureMask(l) {
     }
     return l.mask;
 }
+
+function ensureDecal(l) {
+    if (!l.decal) {
+        const { w, h } = nativeSize(l.img);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        l.decal = c;
+        l.decalCtx = c.getContext('2d');
+    }
+    return l.decal;
+}
+
+// What the tools paint right now (and the surface a stroke composites into).
+const isDecalTarget = () => paintTarget === 'decal';
+function ensurePaintSurface(l) { return isDecalTarget() ? ensureDecal(l) : ensureMask(l); }
+function paintSurface(l) { return isDecalTarget() ? l.decal : l.mask; }
+function paintSurfaceCtx(l) { return isDecalTarget() ? l.decalCtx : l.maskCtx; }
 
 function invertMask(l) {
     const { w, h } = nativeSize(l.img);
@@ -1086,27 +1334,36 @@ function makeBrushGradient(ctx, cx, cy, r) {
     const center = isErasing ? eraserCenter : brushCenter;
     const edge = isErasing ? eraserEdge : brushEdge;
     const gamma = isErasing ? eraserGamma : brushGamma;
+    // Masks only care about alpha (coverage), so they always paint white; decals paint the chosen colour.
+    const [cr, cg, cb] = isDecalTarget() && !isErasing ? hexToRgbTriplet(brushColor) : [255, 255, 255];
+    const rgba = a => `rgba(${cr}, ${cg}, ${cb}, ${a})`;
     if (bm === 'binary') {
-        grad.addColorStop(0, `rgba(255, 255, 255, ${strength})`);
-        grad.addColorStop(1, `rgba(255, 255, 255, ${strength})`);
+        grad.addColorStop(0, rgba(strength));
+        grad.addColorStop(1, rgba(strength));
     } else if (bm === 'linear') {
-        grad.addColorStop(0, `rgba(255, 255, 255, ${center * strength})`);
-        grad.addColorStop(1, `rgba(255, 255, 255, ${edge * strength})`);
+        grad.addColorStop(0, rgba(center * strength));
+        grad.addColorStop(1, rgba(edge * strength));
     } else {
         const stops = 20;
         for (let i = 0; i <= stops; i++) {
             const t = i / stops;
             const a = strength * Math.pow(1 - t, gamma);
-            grad.addColorStop(t, `rgba(255, 255, 255, ${a})`);
+            grad.addColorStop(t, rgba(a));
         }
     }
     return grad;
 }
 
+function hexToRgbTriplet(hex) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex || '').trim());
+    if (!m) return [255, 255, 255];
+    return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
+}
+
 function drawDot(x, y) {
     const l = getSelected();
     if (!l) return;
-    const r = brushSize / 2;
+    const r = activeSizeValue() / 2;
     resetCtx(strokeCtx);
     setBrushCtxTransform(strokeCtx, l);
     strokeCtx.fillStyle = makeBrushGradient(strokeCtx, x, y, r);
@@ -1118,14 +1375,14 @@ function drawDot(x, y) {
 function drawStroke(x, y) {
     const l = getSelected();
     if (!l) return;
-    const r = brushSize / 2;
+    const r = activeSizeValue() / 2;
     resetCtx(strokeCtx);
     setBrushCtxTransform(strokeCtx, l);
     strokeCtx.strokeStyle = makeBrushGradient(strokeCtx, x, y, r);
     strokeCtx.fillStyle = strokeCtx.strokeStyle;
     strokeCtx.lineCap = 'round';
     strokeCtx.lineJoin = 'round';
-    strokeCtx.lineWidth = brushSize;
+    strokeCtx.lineWidth = activeSizeValue();
     strokeCtx.beginPath();
     strokeCtx.moveTo(lastX, lastY);
     strokeCtx.lineTo(x, y);
@@ -1138,13 +1395,13 @@ function drawStroke(x, y) {
 function beginStroke() {
     const l = getSelected();
     if (!l) return false;
-    ensureMask(l);
+    ensurePaintSurface(l);
     const { w, h } = nativeSize(l.img);
     if (strokeCanvas.width !== w || strokeCanvas.height !== h) { strokeCanvas.width = w; strokeCanvas.height = h; }
     if (snapshotCanvas.width !== w || snapshotCanvas.height !== h) { snapshotCanvas.width = w; snapshotCanvas.height = h; }
     resetCtx(snapshotCtx);
     snapshotCtx.clearRect(0, 0, w, h);
-    snapshotCtx.drawImage(l.mask, 0, 0, w, h);
+    snapshotCtx.drawImage(paintSurface(l), 0, 0, w, h);
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, w, h);
     return true;
@@ -1152,23 +1409,23 @@ function beginStroke() {
 
 function livePreviewStroke() {
     const l = getSelected();
-    if (!l || !l.mask) return;
+    if (!l || !paintSurface(l)) return;
     const { w, h } = nativeSize(l.img);
-    const c = l.maskCtx;
+    const c = paintSurfaceCtx(l);
     resetCtx(c);
     c.clearRect(0, 0, w, h);
     c.drawImage(snapshotCanvas, 0, 0, w, h);
     c.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
     c.drawImage(strokeCanvas, 0, 0, w, h);
     c.globalCompositeOperation = 'source-over';
-    refreshMaskThumb(l);
+    if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
     render();
 }
 
 function commitStroke() {
     livePreviewStroke();
     const l = getSelected();
-    if (l) refreshMaskThumb(l);
+    if (l) { refreshMaskThumb(l); refreshDecalThumb(l); }
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
 }
@@ -1194,17 +1451,19 @@ viewport.addEventListener('mousedown', e => {
     if (keyR && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
     if (e.altKey && mode === 'mask') {
         isAltResizing = true;
+        isErasing = strokeTool(e) === 'eraser';
         altResizeAnchorX = e.clientX;
-        altResizeBaseSize = brushSize;
+        altResizeBaseSize = activeSizeValue();
         altResizeBrushCenterX = e.clientX;
         altResizeBrushCenterY = e.clientY;
+        updateCursorMode();
         e.preventDefault();
         return;
     }
     if (mode === 'mask') {
         if (e.button !== 0 && e.button !== 2) return;
         if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
-        isErasing = e.button === 2;
+        isErasing = strokeTool(e) === 'eraser';
         updateCursorMode();
         if (!beginStroke()) return;
         isDrawing = true;
@@ -1245,10 +1504,7 @@ window.addEventListener('mousemove', e => {
     moveCursor(e);
     if (isAltResizing) {
         const dx = e.clientX - altResizeAnchorX;
-        brushSize = Math.max(2, Math.round(altResizeBaseSize + dx * ALT_RESIZE_SENSITIVITY));
-        document.getElementById('brushSize').value = brushSize;
-        document.getElementById('brushSizeValue').textContent = brushSize;
-        updateBrushCursorSize();
+        setActiveSize(altResizeBaseSize + dx * ALT_RESIZE_SENSITIVITY);
         brushCursor.style.left = altResizeBrushCenterX + 'px';
         brushCursor.style.top = altResizeBrushCenterY + 'px';
         return;
@@ -1294,10 +1550,7 @@ window.addEventListener('blur', () => {
 viewport.addEventListener('wheel', e => {
     if (mode === 'mask' && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        brushSize = Math.max(2, Math.min(9999, brushSize + (e.deltaY < 0 ? 2 : -2)));
-        document.getElementById('brushSize').value = brushSize;
-        document.getElementById('brushSizeValue').textContent = brushSize;
-        updateBrushCursorSize();
+        setActiveSize(activeSizeValue() + (e.deltaY < 0 ? 2 : -2));
         return;
     }
     e.preventDefault();
@@ -1312,7 +1565,7 @@ viewport.addEventListener('touchstart', e => {
     const pos = toDocCoords(t);
     if (mode === 'mask') {
         if (!getSelected()) return;
-        isErasing = false;
+        isErasing = maskTool === 'eraser';
         updateCursorMode();
         if (!beginStroke()) return;
         isDrawing = true;
@@ -1377,6 +1630,11 @@ document.getElementById('brushSize').addEventListener('input', e => {
     document.getElementById('brushSizeValue').textContent = brushSize;
     updateBrushCursorSize();
 });
+document.getElementById('eraserSize').addEventListener('input', e => {
+    eraserSize = parseInt(e.target.value);
+    document.getElementById('eraserSizeValue').textContent = eraserSize;
+    updateBrushCursorSize();
+});
 
 function setupEraserModeButtons() {
     const modes = [
@@ -1402,6 +1660,12 @@ document.getElementById('addLayerBtn').addEventListener('click', () => {
     if (window.parent !== window) window.parent.postMessage({ type: 'blend-select', role: 'layer' }, '*');
 });
 
+// Don't let a focused sidebar control swallow the canvas shortcuts (T/M/B/E, space, arrows…).
+document.getElementById('sidePanel').addEventListener('mouseup', e => {
+    const el = e.target.closest && e.target.closest('input, button');
+    if (el) el.blur();
+});
+
 document.getElementById('maskInvertBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
@@ -1413,12 +1677,24 @@ document.getElementById('maskInvertBtn').addEventListener('click', () => {
 document.getElementById('maskResetBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (isDecalTarget()) {
+        l.decal = null;
+        l.decalCtx = null;
+        renderLayerList();
+        render();
+        setStatus('Decal cleared');
+        return;
+    }
     l.mask = null;
     l.maskCtx = null;
     renderLayerList();
     render();
     setStatus('Mask reset (fully visible)');
 });
+
+document.getElementById('paintMaskBtn').addEventListener('click', () => selectPaintTarget('mask'));
+document.getElementById('paintDecalBtn').addEventListener('click', () => selectPaintTarget('decal'));
+document.getElementById('brushColor').addEventListener('input', e => setPaintColor(e.target.value));
 
 document.getElementById('transformAdjustBtn').addEventListener('click', () => {
     if (mode !== 'transform' && !getSelected()) { setStatus('Select a layer first', 'error'); return; }
@@ -1468,6 +1744,7 @@ blendBtn.addEventListener('click', () => {
         },
         visible: !!l.visible,
         mask: l.mask ? l.mask.toDataURL('image/png') : null,
+        decal: l.decal ? l.decal.toDataURL('image/png') : null,
     }));
     if (window.parent !== window) {
         window.parent.postMessage({ type: 'blend-layers-data', layers: specs, width: canvasW, height: canvasH }, '*');
@@ -1592,18 +1869,24 @@ window.addEventListener('keydown', e => {
         return;                 // no tools / view shortcuts while the dialog is up
     }
     const tag = (e.target && e.target.tagName || '').toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    const type = (e.target && e.target.type) || '';
+    if (tag === 'textarea' || tag === 'select' || (tag === 'input' && type !== 'range' && type !== 'checkbox')) return;
+    // Sliders and checkboxes keep their own key handling (arrows, space, enter).
+    if ((tag === 'input' || tag === 'button') && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     const l = getSelected();
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (!keyZ) { keyZ = true; onViewKeyChange(); } return; }
     if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (!keyR) { keyR = true; onViewKeyChange(); } return; }
+    if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
+    if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey || !e.altKey)) {
         e.preventDefault();
         if (l) setMode('transform');
         return;
     }
-    if (e.key === 'm' || e.key === 'M') { if (l) setMode('mask'); return; }
+    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('mask'); return; }
+    if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('decal'); return; }
     if (e.key === 'Enter') { if (mode === 'transform') { e.preventDefault(); setMode('none'); } return; }
     if (e.key === 'Escape') { e.preventDefault(); setMode('none'); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && l) { e.preventDefault(); removeLayer(l.id); return; }
@@ -1651,6 +1934,8 @@ document.getElementById('brushGammaRow').style.display = 'flex';
 document.getElementById('eraserCenterRow').style.display = 'none';
 document.getElementById('eraserEdgeRow').style.display = 'none';
 document.getElementById('eraserGammaRow').style.display = 'flex';
+syncSizeUI();
+setPaintColor(brushColor);
 updateBrushCursorSize();
 sizeOverlay();
 layoutCanvas();

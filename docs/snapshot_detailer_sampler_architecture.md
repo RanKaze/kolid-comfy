@@ -279,17 +279,23 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - Debug 面板 (Background + Image + Mask + Reference Images + crop info)
 
 ### 5. Blend 图层混合
-- blend_node.html iframe (图层系统: 可排序图层列表, 每行 = 图片缩略图 + 蒙版缩略图)
+- blend_node.html iframe (图层系统: 可排序图层列表, 每行 = 图片缩略图 + decal 缩略图 + 画布预览缩略图 + 蒙版缩略图)
+- 画布预览缩略图: 该图层在当前 transform 与画布尺寸下的样子 (图片 + decal 合成后经蒙版裁切, 再按 transform 摆到画布比例的小图里, 与最终合成一致); 蒙版/decal 绘制与 transform 拖拽时实时重绘, 点它即选中该图层的 transform
 - 图层选择器 (多选 history 图片, 新图层置于顶层)
 - 画布尺寸: 初始取最底层图片的像素尺寸; 在 Canvas 面板用弹窗 (Canvas Size…) 手动设置后即与图层解耦, 之后增删/重排图层都不再改变画布; 清空所有图层后回到跟随模式; 新图层默认拉伸铺满
 - Canvas Size 弹窗 (PS 式): 宽/高输入 + 比例锁 (默认锁定, 按当前值取基准; 解锁后可自由改比例), Match Bottom Layer 一键取底层尺寸, 上限 16384 px/边 与 40 MP; 开关 "Scale layers with the canvas" — 开 = 图层随新尺寸等比拉伸 (归一化 transform 不变), 关 = 图层的像素尺寸与位置保持不变、以画布中心为锚 (新区域透明, 画布变小则裁切)
-- 蒙版在图层自身像素空间, 随 transform 一起缩放/旋转/平移 (蒙版缩略图点开即画笔模式)
-- 蒙版画笔/橡皮 (默认 Exponential, 左键=显示 右键=隐藏; Invert/Reset 在画笔浮层)
+- 每个图层两张绘制面 (都在图层自身像素空间, 都随 transform 一起缩放/旋转/平移): 蒙版 (覆盖率, 白色 = 可见) 与 decal (叠在图片之上的颜色面)
+- 单层结算顺序: 原图 + decal (straight alpha source-over) → 乘蒙版 → 按 transform 采样进画布 → 层间 source-over 合并; 蒙版因此同时裁切图片与 decal
+- 绘制目标 Mask / Decal (M / D 键, 或点侧栏分段按钮/行内 chip): decal 模式下才显示颜色选择器 (默认 #ff3b30), 笔刷与光标色环、侧栏色环都按该颜色着色; 蒙版恒画白色 (只看 alpha); decal 模式下 Invert 隐藏, Reset 变 Clear (清空该层 decal)
+- 蒙版画笔 (B) 与橡皮 (E) 是两个独立工具: 各自独立的尺寸与参数 (模式/strength/center/edge/gamma), 用 B/E 键或侧栏点击切换; 左键用当前工具, 右键用另一个工具 (所以画笔右键 = 擦除, 橡皮右键 = 补回); 两个工具共用当前的绘制目标 (蒙版或 decal)
+- 无悬浮面板: Mask / Decal / Brush / Eraser 都在侧栏, 当前工具与所属 section 高亮 (.active-tool), 各自带色环标识 (实线白 = 画笔, 红色虚线 = 橡皮); 画布上的笔刷光标环同色同形, 并按正在生效的工具实时切换 (含右键与 Alt 拖拽中)
+- Alt + 拖拽或滚轮只改当前工具的尺寸 (画笔与橡皮互不影响), 两个尺寸滑块实时同步
+- 快捷键: T/Ctrl+T = transform, M = 蒙版绘制, D = decal 绘制, B = 画笔, E = 橡皮, 回车/Esc 退出; 侧栏控件在 mouseup 后自动 blur, 用过滑块/按钮后快捷键依然生效
 - 指针事件挂在 #viewport/window, 画笔移出画布仍保持笔刷光标且继续绘制 (可画到画布边缘)
 - Transform 调整框 (T/Ctrl+T): 移动 / 缩放 / 旋转 (Shift 吸附); 回车或 Esc 退出 (无框的 'none' 模式)
 - 调整框/控制点画在独立的屏幕空间 overlay canvas 上, 超出画布范围也可见可拖
 - 视图变换 (不影响导出): Z+左键放大 / Z+右键缩小 (单击步进), R+拖拽旋转视图 (Shift 15° 吸附, 单击 15°), Ctrl+F 水平翻转, 滚轮缩放, Space/中键拖拽平移; View 面板有 Fit/Reset/±/±15°/Flip H 与读数
-- 合成 (POST /api/blend_layers → composite_layers: 图层空间乘蒙版 + 预乘 alpha 采样 + source-over)
+- 合成 (POST /api/blend_layers, payload 每层带 transform/mask/decal → composite_layers: 图层空间 decal source-over + 乘蒙版 + 预乘 alpha 采样 + 层间 source-over); 全不透明输出 3 通道, 否则保留 alpha
 - 结果加入 history
 
 ### 6. Context 图像管理
