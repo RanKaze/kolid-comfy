@@ -243,7 +243,7 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 ## 功能点清单
 
 ### 1. Mask 绘制 (mask_node.html iframe)
-- 画笔/橡皮 (Binary/Linear/Exponential 模式)
+- 画笔/橡皮 (Binary/Linear/Exponential 模式, Alt+右键拖拽调尺寸)
 - Strength/Center/Edge/Gamma 参数
 - PS-style stroke (strokeCanvas + snapshotCanvas)
 - Grow (像素级 dilate, 保留 alpha)
@@ -279,8 +279,8 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - Debug 面板 (Background + Image + Mask + Reference Images + crop info)
 
 ### 5. Blend 图层混合
-- blend_node.html iframe (图层系统: 可排序图层列表, 每行 = 图片缩略图 + decal 缩略图 + 画布预览缩略图 + 蒙版缩略图)
-- 画布预览缩略图: 该图层在当前 transform 与画布尺寸下的样子 (图片 + decal 合成后经蒙版裁切, 再按 transform 摆到画布比例的小图里, 与最终合成一致); 蒙版/decal 绘制与 transform 拖拽时实时重绘, 点它即选中该图层的 transform
+- blend_node.html iframe (图层系统: 可排序图层列表, 每行 4 个缩略图, 顺序固定 0. 全图 → 1. 原图 → 2. decal → 3. 蒙版)
+- 行内缩略图: 0 全图 = 该图层在当前 transform 与画布尺寸下的样子 (图片 + decal 合成后经蒙版裁切, 再按 transform 摆到画布比例的小图里, 与最终合成一致), 蒙版/decal 绘制与 transform 拖拽时实时重绘, 点它即选中该图层的 transform; 1 原图 = 图层源图 (点它同样进入 transform); 2 decal / 3 蒙版 = 对应绘制面 (点它即切到该绘制目标)
 - 图层选择器 (多选 history 图片, 新图层置于顶层)
 - 画布尺寸: 初始取最底层图片的像素尺寸; 在 Canvas 面板用弹窗 (Canvas Size…) 手动设置后即与图层解耦, 之后增删/重排图层都不再改变画布; 清空所有图层后回到跟随模式; 新图层默认拉伸铺满
 - Canvas Size 弹窗 (PS 式): 宽/高输入 + 比例锁 (默认锁定, 按当前值取基准; 解锁后可自由改比例), Match Bottom Layer 一键取底层尺寸, 上限 16384 px/边 与 40 MP; 开关 "Scale layers with the canvas" — 开 = 图层随新尺寸等比拉伸 (归一化 transform 不变), 关 = 图层的像素尺寸与位置保持不变、以画布中心为锚 (新区域透明, 画布变小则裁切)
@@ -288,14 +288,20 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 单层结算顺序: 原图 + decal (straight alpha source-over) → 乘蒙版 → 按 transform 采样进画布 → 层间 source-over 合并; 蒙版因此同时裁切图片与 decal
 - 绘制目标 Mask / Decal (M / D 键, 或点侧栏分段按钮/行内 chip): decal 模式下才显示颜色选择器 (默认 #ff3b30), 笔刷与光标色环、侧栏色环都按该颜色着色; 蒙版恒画白色 (只看 alpha); decal 模式下 Invert 隐藏, Reset 变 Clear (清空该层 decal)
 - 蒙版画笔 (B) 与橡皮 (E) 是两个独立工具: 各自独立的尺寸与参数 (模式/strength/center/edge/gamma), 用 B/E 键或侧栏点击切换; 左键用当前工具, 右键用另一个工具 (所以画笔右键 = 擦除, 橡皮右键 = 补回); 两个工具共用当前的绘制目标 (蒙版或 decal)
-- 无悬浮面板: Mask / Decal / Brush / Eraser 都在侧栏, 当前工具与所属 section 高亮 (.active-tool), 各自带色环标识 (实线白 = 画笔, 红色虚线 = 橡皮); 画布上的笔刷光标环同色同形, 并按正在生效的工具实时切换 (含右键与 Alt 拖拽中)
-- Alt + 拖拽或滚轮只改当前工具的尺寸 (画笔与橡皮互不影响), 两个尺寸滑块实时同步
-- 快捷键: T/Ctrl+T = transform, M = 蒙版绘制, D = decal 绘制, B = 画笔, E = 橡皮, 回车/Esc 退出; 侧栏控件在 mouseup 后自动 blur, 用过滑块/按钮后快捷键依然生效
+- 无悬浮面板: Mask / Decal / Brush / Eraser 都在侧栏, 当前工具与所属 section 高亮 (.active-tool), 各自带色环标识 (实线白 = 画笔, 红色虚线 = 橡皮); 画布上的笔刷光标环同色同形, 并按正在生效的工具实时切换 (含右键与吸色中)
+- 绘制目标下按住 Alt = 吸色工具 (仅画笔生效; 橡皮下 Alt 不吸色): 取合成后的画布像素, 所见即所得: 左键抬起时才套用颜色 (同步写回 Brush 面板的取色器与其读数, 以及笔刷/色环着色), 按住期间只在光标旁 HUD 里预览 (色块 + #hex + R, G, B 实时跟随光标); Alt 按住时笔刷环隐藏、光标变吸管图标 (内联 SVG data URI 指针, 热点在管尖); 取到透明或画布外时不改颜色, 状态栏提示 Nothing to pick there
+- Alt + 右键拖拽 = 调节当前工具的尺寸 (PS 式 scrubby size, 与吸色互不抢占; 画笔与橡皮各自只改自己的尺寸): 水平拖拽按 2^(dx/160) 指数变化 (2 px – 9999 px), 拖拽期间光标为 ew-resize, 笔刷/橡皮环原地跟随放大缩小 (被拖的尺寸实时同步到侧栏滑块), 光标旁 HUD 显示 "N px + 工具名", 抬起时状态栏汇报最终值; 按住期间不绘制、不吸色
+- 滚轮只改当前工具的尺寸 (画笔与橡皮互不影响), 两个尺寸滑块实时同步
+- 快捷键: T/Ctrl+T = transform, Z = 缩放工具, H = 抓手 (平移视图), R = 旋转视图, M = 蒙版绘制, D = decal 绘制, B = 画笔, E = 橡皮, 回车/Esc 退出; 工具是"选中"而非开关 — 重复按同一个工具的键 (或再点同一个工具按钮) 保持该工具不变, 不会退回无工具状态, 退出只走回车/Esc; 侧栏控件在 mouseup 后自动 blur, 用过滑块/按钮后快捷键依然生效
 - 指针事件挂在 #viewport/window, 画笔移出画布仍保持笔刷光标且继续绘制 (可画到画布边缘)
 - Transform 调整框 (T/Ctrl+T): 移动 / 缩放 / 旋转 (Shift 吸附); 回车或 Esc 退出 (无框的 'none' 模式)
 - 调整框/控制点画在独立的屏幕空间 overlay canvas 上, 超出画布范围也可见可拖
-- 视图变换 (不影响导出): Z+左键放大 / Z+右键缩小 (单击步进), R+拖拽旋转视图 (Shift 15° 吸附, 单击 15°), Ctrl+F 水平翻转, 滚轮缩放, Space/中键拖拽平移; View 面板有 Fit/Reset/±/±15°/Flip H 与读数
-- 合成 (POST /api/blend_layers, payload 每层带 transform/mask/decal → composite_layers: 图层空间 decal source-over + 乘蒙版 + 预乘 alpha 采样 + 层间 source-over); 全不透明输出 3 通道, 否则保留 alpha
+- 视图变换 (不影响导出): H 切换抓手工具 (PS 式, 左键拖拽平移视图, 光标 grab/grabbing), Z 切换缩放工具 (工具态而非按住键), 该模式下左键单击放大 / 右键单击缩小 (1.25×), 左键向右拖 = 无极放大、向左拖 = 无极缩小 (2^(dx/220)); 缩放枢轴固定为按下左键时的那个文档点 (整个拖拽过程中它停在原屏幕位置不动, 与 PS 的 scrubby zoom 一致); R 切换旋转工具 (同样工具态, 光标为环形箭头图标), 左键拖拽 = 像转旋钮一样拧视图: 旋转量取"指针绕视口中心扫过的角度"(1:1 跟手, 向哪边拧就往哪边转, 与拖拽方向/距离无关 — 不是左右拖拽的比例映射), 按下的那个文档点会一直贴在指针下, 角增量为逐事件累加并对 ±180° 接缝做 wrap (跨接缝不会跳), Shift 吸附 15°, 原地单击 = 顺时针 15°; 指针落在视口中心 12 px 死区内时角度无意义 → 拖出死区那一刻重新取基准 (不会跳变); 四条旋转路径 (拖拽 / 单击 / ⟲ / ⟳) 的枢轴都是视口中心 (= 视图中心, 不是画布中心): 拖拽期间停在视口中心下的那个文档点保持不动 (实测偏差 < 1e-13 px), 画布偏出视野时依然绕视口中心转; Ctrl+F 水平翻转, 滚轮缩放, Space/中键拖拽平移; View 面板有 Hand/Zoom/Rotate/Fit/Reset/±/±15°/Flip H 与读数
+- 画布右下角悬浮 Blend 按钮 (原底部 toolbar 已移除); 侧栏第一栏就是 Layers (头部有 Clear All / Add), 当前工具只在 View 面板的按钮高亮上体现 (原顶部模式 chip 已移除)
+- 工具按钮只显示快捷键字母 (Transform=T, Mask=M, Decal=D, Hand=H, Zoom=Z, Rotate=R), 工具名与用法都在 tooltip (title) 里; 侧栏不再有常显的说明段落 — Layers / Transform / Mask·Decal / Brush / Eraser / View 的标题 (带 title 时 cursor: help) 承载说明, Brush/Eraser/Mask·Decal 的 tooltip 随绘制目标在 mask 与 decal 之间实时切换; 侧栏只保留动态读数 (canvasReadout / transformReadout / maskTargetLabel / viewReadout), 且读数在没内容时整行隐藏 (setReadout: 空文本 → display:none) — 未选图层或画布未建立时 Transform 读数不占位, 非绘制模式下不显示 "Mask — 图层名", 画布还没建时不显示跟随提示; Canvas 读数只有两种紧凑状态 (Following the bottom layer / Fixed), 完整解释在 Canvas 标题与 Canvas Size 的 tooltip 里
+- 图片可直接拖进画布成为图层: 拖拽到画面上方时画布区显示蓝色虚线投放提示 (Drop images to add them as layers), 松手后按文件顺序逐个 addLayer (新图层在最上并自动选中, 图层名取文件名去扩展名); 只接受图片 (image/* 或 png/jpg/webp/gif/bmp), 混入非图片文件时提示 Only image files can be dropped here; 多文件同时拖入逐张异步加载
+- 拖入的图层没有 history key, 像素随 payload 以 `src` (data URL) 直接带给后端 (历史图层仍只传 key, `src` 为 null), 后端 blend_layers 在 key 缺失/无法解析时回退到 `src` 解码 (libs/image_utils.decode_image_dataurl → [H,W,4] 保留 alpha), 因此本地图片无需先进历史即可参与合成
+- 合成 (POST /api/blend_layers, payload 每层带 key|src + transform/mask/decal → composite_layers: 图层空间 decal source-over + 乘蒙版 + 预乘 alpha 采样 + 层间 source-over); 全不透明输出 3 通道, 否则保留 alpha
 - 结果加入 history
 
 ### 6. Context 图像管理
