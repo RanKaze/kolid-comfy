@@ -127,11 +127,19 @@ def warp_layer(image, transform, canvas_w, canvas_h):
     return warped.permute(0, 2, 3, 1)[0]
 
 
-def decode_mask_alpha(mask_data_url, width, height):
+def decode_mask_alpha(mask_data_url, width, height, collapse_opaque=True):
     """前端蒙版 PNG（alpha 通道 = 覆盖率）→ [1,H,W,1] float 张量。
 
-    width/height 为目标图层尺寸（蒙版按图层空间生效，会缩放到该尺寸）。
-    返回 None 表示"无蒙版/全可见"（空串、解码失败或全不透明）。
+    width/height 为目标尺寸（蒙版按目标空间生效，会缩放到该尺寸）。
+
+    `collapse_opaque` 区分两种调用场景，语义完全相反，**不要混用**：
+
+    - `True`（默认，用于**图层自带的 mask**）：全不透明 → 返回 None，
+      因为"整张都可见"和"没有蒙版"对图层来说是同一件事。
+    - `False`（用于**画布顶层的纯 Mask 层**）：全不透明 → 返回全 1 张量。
+      这一层没有"没有蒙版"这种状态 —— 全白正是用户点 `Full`（或把整块画布
+      涂满）想要的结果。折叠成 None 会让调用方以为"用户什么都没画"，
+      于是弹出 "Mask is required"，而屏幕上明明画满了。
     """
     if not mask_data_url or not isinstance(mask_data_url, str):
         return None
@@ -146,7 +154,7 @@ def decode_mask_alpha(mask_data_url, width, height):
             tensor = F.interpolate(tensor.permute(0, 3, 1, 2), size=(height, width),
                                    mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
         tensor = tensor.clamp(0.0, 1.0)
-        if float(tensor.min()) >= 1.0 - 1e-4:
+        if collapse_opaque and float(tensor.min()) >= 1.0 - 1e-4:
             return None
         return tensor
     except Exception as e:

@@ -91,6 +91,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
 .layer-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
 .layer-row.hidden-layer .layer-thumb, .layer-row.hidden-layer .layer-name { opacity: 0.35; }
+/* A leftover duplicate: this history image already backs another row (see renderLayerList). */
+.layer-row.duplicate-layer { border-color: rgba(255,159,10,0.6); }
+.layer-row.duplicate-layer .layer-name { color: #ffb340; }
 .layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
 .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .layer-thumb.mask-thumb { background: #000; cursor: pointer; }
@@ -592,7 +595,15 @@ function setStatus(text, kind) {
     if (kind) statusTimer = setTimeout(() => { status.classList.remove('success', 'error'); }, 2600);
 }
 
-function loadImage(src, callback) { const img = new Image(); img.onload = () => callback(img); img.src = src; }
+// onerror is optional and only addLayer passes it: a history key is claimed before the image is
+// decoded (see incomingItems), so a decode failure has to hand the claim back or that image could
+// never be added again for the rest of the session.
+function loadImage(src, callback, onerror) {
+    const img = new Image();
+    img.onload = () => callback(img);
+    if (onerror) img.onerror = () => onerror();
+    img.src = src;
+}
 
 function nativeSize(img) { return img ? { w: img.naturalWidth || img.width || 1, h: img.naturalHeight || img.height || 1 } : { w: 1, h: 1 }; }
 
@@ -710,6 +721,23 @@ function maskPayload() {
     if (!maskLayer.visible) return null;
     if (!maskLayer.decal || !canvasW || !canvasH) return null;
     return maskLayer.decal.toDataURL('image/png');
+}
+
+// `maskPayload()` only tells you a surface EXISTS — and one is created the moment the canvas
+// has a size, so every fresh layer already satisfies it. What the backend actually rejects is
+// a mask with zero coverage, so look at the pixels. This is also what catches the most common
+// way to paint into the wrong place: a layer's OWN mask instead of the Mask layer.
+function maskHasInk() {
+    const surface = maskLayer.decal;
+    if (!surface || !surface.width || !surface.height) return false;
+    try {
+        const data = surface.getContext('2d').getImageData(0, 0, surface.width, surface.height).data;
+        for (let i = 3; i < data.length; i += 4) if (data[i] > 0) return true;
+        return false;
+    } catch (e) {
+        // Unreadable (e.g. a tainted canvas): never turn that into a false "empty" verdict.
+        return true;
+    }
 }
 
 // Auto canvas = the smallest box that fits every layer at its OWN native resolution (per axis).
@@ -1625,9 +1653,17 @@ function renderLayerList() {
         layerListEl.appendChild(empty);
         return;
     }
+    // A history key can only ever back one layer now (see incomingItems), but a session that
+    // started before that fix may still hold a duplicate — and a duplicate is invisible: it looks
+    // exactly like the layer you just deleted and keeps being composited. Flag it on the row so it
+    // can be found and removed instead of quietly riding along in every Blend.
+    const keyUse = {};
+    for (const l of layers) if (l.key) keyUse[l.key] = (keyUse[l.key] || 0) + 1;
     for (const l of layers) {
         const row = document.createElement('div');
         row.className = 'layer-row';
+        const duplicate = !!l.key && keyUse[l.key] > 1;
+        if (duplicate) row.classList.add('duplicate-layer');
         row.draggable = true;
         row.dataset.id = String(l.id);
         if (l.id === selectedId) row.classList.add('selected');
@@ -1699,7 +1735,11 @@ function renderLayerList() {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = l.name;
+        name.textContent = duplicate ? l.name + ' · duplicate' : l.name;
+        if (duplicate) {
+            row.title = 'This history image already backs another layer — a leftover from before '
+                + 'duplicates were blocked. Delete this extra copy, or Blend keeps compositing it.';
+        }
 
         const eye = document.createElement('button');
         eye.className = 'icon-btn';
@@ -1840,6 +1880,11 @@ function placeTransform(place) {
 }
 
 function addLayer(item) {
+    // Second line of defence behind the claim in incomingItems(): whatever routed this item here,
+    // a history key that is already a layer never becomes a second one. Two layers sharing a key
+    // are indistinguishable in the panel and in the composite, and deleting one of them leaves
+    // the other behind — exactly the "I deleted it but Blend still paints it" ghost.
+    if (item.key && layers.some(l => l.key === item.key)) return;
     loadImage(item.src, img => {
         const l = {
             id: ++layerSeq,
@@ -1872,6 +1917,11 @@ function addLayer(item) {
         setStatus(placed ? 'Result placed back at its crop position — tweak it, then Blend'
             : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added'));
         pushHistory();
+    }, () => {
+        // Decoding failed, so no layer was created: give the key back instead of keeping it
+        // claimed forever by an image that never arrived.
+        if (item.key) injectedKeys.delete(item.key);
+        setStatus('Could not load that image', 'error');
     });
 }
 
@@ -2881,7 +2931,21 @@ function sendBlendAction(action, opts) {
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
     const mask = maskPayload();
     const needsMask = action === 'detailer' || (action === 'tag' && opts && opts.tagMode !== 'full');
-    if (needsMask && !mask) { setStatus('Paint the Mask layer first', 'error'); return; }
+    if (needsMask && !mask) {
+        setStatus(maskLayer.visible ? 'Paint the Mask layer first' : 'The Mask layer is hidden — show it (eye icon) to send it', 'error');
+        return;
+    }
+    if (needsMask && !maskHasInk()) {
+        // The mask that reaches the backend is the Mask LAYER's, never a layer's own mask —
+        // say which surface is empty instead of letting the backend reject it blindly.
+        const l = getSelected();
+        if (l && !l.isMaskLayer) {
+            setStatus(`You painted 「${l.name}」's own mask — pick the Mask row in Layers for the one sent to the backend`, 'error');
+        } else {
+            setStatus('The Mask layer is empty — paint on it, or use Full to cover the whole canvas', 'error');
+        }
+        return;
+    }
     if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
     const payload = {
         type: 'blend-action',
@@ -3559,10 +3623,25 @@ syncIoUI();
 
 // ==================== 父窗口通信 ====================
 // A history key can only ever become one layer: this is what stops a freshly generated image
-// from being injected twice when history refreshes.
+// from being injected twice when history refreshes or when two injections overlap.
+//
+// The claim happens HERE, synchronously, and NOT inside addLayer's image callback. The callback
+// only runs once the image has decoded, so a check made at that point lets two copies that arrive
+// back to back both through — and a key with two layers behind it is a ghost: the panel shows two
+// identical rows, deleting one leaves the other, and Blend/the detailer keep painting it. That is
+// the "I deleted that layer but the composite still has it" bug.
 function incomingItems(d) {
     const items = Array.isArray(d.items) ? d.items : (d.key ? [d] : []);
-    return items.filter(it => it && it.src && !(it.key && injectedKeys.has(it.key)));
+    const accepted = [];
+    for (const it of items) {
+        if (!it || !it.src) continue;
+        if (it.key) {
+            if (injectedKeys.has(it.key)) continue;
+            injectedKeys.add(it.key);          // taken before anything async can look at it again
+        }
+        accepted.push(it);
+    }
+    return accepted;
 }
 
 window.addEventListener('message', event => {
