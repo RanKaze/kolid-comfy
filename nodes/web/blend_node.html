@@ -28,7 +28,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* ---- Document I/O — the first row of the right column, above the Canvas section ----
    Export unfolds into a menu (the whole context as a .cud, or the composite as a PNG);
    Import takes either of those plus any plain image format. */
-#ioBar { position: relative; flex: 0 0 auto; display: flex; align-items: stretch; gap: 6px; }
+#ioBar { position: relative; flex: 0 0 auto; display: flex; align-items: stretch; gap: 6px; padding: 0 6px; margin-right: 6px; }
 .io-btn { flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
     background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 7px 10px;
     color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s ease; }
@@ -54,8 +54,17 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
 #sidePanel { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; padding: 12px; gap: 10px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow: hidden; }
 #panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
-#layersDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 0.5px solid rgba(255,255,255,0.09); }
-.panel-section { display: flex; flex-direction: column; gap: 6px; }
+/* The dock sits outside #panelScroll, so it has to give back the scroll gutter itself: this
+   keeps its divider and its buttons on the same rails as the sections above it. */
+#layersDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
+/* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
+   up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
+#layersSpacer { flex: 0 0 48px; pointer-events: none; }
+/* Every section carries the same 6px inner rail. The highlight box of an active tool section
+   is its own border box, which is full column width, so the label of a highlighted section and
+   the label of a plain one land on the same x — and the box lines up with its neighbours
+   instead of hanging 6px over each side. */
+.panel-section { display: flex; flex-direction: column; gap: 6px; padding: 0 6px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .panel-label { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.5px; }
 .panel-hint { font-size: 10.5px; color: rgba(255,255,255,0.35); line-height: 1.45; }
@@ -98,17 +107,22 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The pure Mask layer pins to the top of the list and lives outside `layers`: it is a data
    channel handed to the backend (alpha = coverage), never something that gets composited. */
-.layer-row.mask-layer-row { background: rgba(255,59,48,0.10); gap: 3px; }
+.layer-row.mask-layer-row { background: rgba(255,59,48,0.10); }
 .layer-row.mask-layer-row:hover { background: rgba(255,59,48,0.16); }
 .layer-row.mask-layer-row.selected { border-color: rgba(255,59,48,0.9); background: rgba(255,59,48,0.2); }
 .layer-row.mask-layer-row .layer-name { font-weight: 600; color: rgba(255,255,255,0.92); }
 .layer-row.mask-layer-row.off .layer-thumb, .layer-row.mask-layer-row.off .layer-name { opacity: 0.35; }
 /* Head line of the Mask row: same shape as a normal layer's head line. */
 .mask-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.mask-opacity { display: flex; align-items: center; gap: 6px; padding: 0 3px 1px; }
+/* Pinned to the same 24px as a normal row's chip line, so the Mask row is exactly as tall
+   as every other row and the list keeps one rhythm. */
+.mask-opacity { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 3px; }
 .mask-opacity-label { font-size: 10px; color: rgba(255,255,255,0.45); letter-spacing: 0.2px; flex-shrink: 0; }
 .mask-opacity input[type="range"] { flex: 1; min-width: 0; height: 14px; margin: 0; padding: 0; accent-color: #ff3b30; cursor: pointer; }
 .mask-opacity-val { font-size: 10px; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; color: rgba(255,255,255,0.6); flex-shrink: 0; }
+/* Every other row ends with [eye][×]. The Mask row has no ×, so this pad holds the slot
+   open and keeps its eye on the same rail as the rest of the list. */
+.layer-row-tail-gap { width: 13px; height: 1px; flex-shrink: 0; }
 .layer-note { font-size: 9.5px; font-weight: 700; color: rgba(255,59,48,0.8); text-transform: uppercase; letter-spacing: 0.4px; }
 .layer-thumb.masklayer-thumb { background-color: #141414; cursor: default;
     background-image: linear-gradient(45deg, #262626 25%, transparent 25%, transparent 75%, #262626 75%),
@@ -159,7 +173,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-button:disabled { opacity: 0.5; cursor: default; }
 
 /* Mask tools live in the sidebar (no floating panel) */
-.tool-section { border: 1px solid transparent; border-radius: 10px; padding: 6px; margin: -6px; transition: background 0.15s ease, border-color 0.15s ease; }
+/* Bleeds vertically only: horizontally the box already fills the column, so an active section
+   never sticks out past a plain one. */
+/* 5px padding + a 1px transparent border = the same 6px inner rail a plain section has from
+   `.panel-section`, so toggling the highlight never shifts the label by a pixel. Bleeds
+   vertically only: horizontally the box already spans the whole column. */
+.tool-section { border: 1px solid transparent; border-radius: 10px; padding: 5px; margin: -5px 0; transition: background 0.15s ease, border-color 0.15s ease; }
 .tool-section.active-tool { background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.5); }
 .tool-key { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 4px; border-radius: 4px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 10px; letter-spacing: 0; }
 .tool-section.active-tool .tool-key { background: rgba(0,122,255,0.9); color: #fff; }
@@ -293,6 +312,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="panel-label" id="maskDecalLabel">Mask / Decal</div>
                     <div class="mini-group">
                         <button class="mini-btn" id="maskInvertBtn" title="Invert the mask: hidden areas become visible and the other way round">Invert</button>
+                        <button class="mini-btn" id="maskFullBtn" title="Cover the whole canvas with the Mask layer">Full</button>
                         <button class="mini-btn" id="maskResetBtn" title="Reset the mask to fully visible">Reset</button>
                     </div>
                 </div>
@@ -372,6 +392,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="layer-list" id="layerList"></div>
         </div>
+        <!-- Blank area under the palette: lifts the whole Layers block up off the bottom corner. -->
+        <div id="layersSpacer" aria-hidden="true"></div>
     </div>
 </div>
 <div class="modal-overlay" id="canvasModal">
@@ -628,37 +650,51 @@ function refreshMaskLayerThumb() {
     if (maskLayer.decalThumbEl && maskLayer.decalThumbEl.isConnected) paintDecalThumb(maskLayer.decalThumbEl, maskLayer);
 }
 
-// Swap in a blank surface rather than clearing the existing one — the canvas on top of the
-// undo stack is still referenced by it, and copy-on-write is what keeps that snapshot intact.
-function clearMaskLayer() {
-    if (!maskLayer.decal) return;
+// The three whole-layer Mask actions (invert / full / clear) are one move: swap in a fresh
+// surface rather than clearing the current one — the canvas on top of the undo stack is still
+// referenced by it, and copy-on-write is what keeps that snapshot intact. They return false
+// when there is no canvas to act on, so a caller can say so instead of reporting a success
+// that never happened.
+function replaceMaskSurface(paint) {
+    if (!canvasW || !canvasH) return false;
+    const w = Math.round(canvasW), h = Math.round(canvasH);
+    const prev = maskLayer.decal;
     const next = document.createElement('canvas');
-    next.width = maskLayer.decal.width;
-    next.height = maskLayer.decal.height;
-    maskLayer.decal = next;
-    maskLayer.decalCtx = next.getContext('2d');
-    refreshMaskLayerThumb();
-    render();
-    pushHistory();
-}
-
-function invertMaskLayer() {
-    if (!maskLayer.decal) return;
-    const w = maskLayer.decal.width, h = maskLayer.decal.height;
-    const next = document.createElement('canvas');
-    next.width = w; next.height = h;
+    next.width = w;
+    next.height = h;
     const nctx = next.getContext('2d');
-    nctx.fillStyle = '#fff';
-    nctx.fillRect(0, 0, w, h);
-    nctx.globalCompositeOperation = 'destination-out';
-    nctx.drawImage(maskLayer.decal, 0, 0, w, h);
-    nctx.globalCompositeOperation = 'source-over';
+    if (paint) paint(nctx, prev, w, h);
     maskLayer.decal = next;
     maskLayer.decalCtx = nctx;
     refreshMaskLayerThumb();
     render();
     pushHistory();
+    return true;
 }
+
+// Clear: nothing covered, so the actions run on the whole image.
+function clearMaskLayer() { return replaceMaskSurface(null); }
+
+// Full: every pixel covered — the missing "the whole canvas is the mask" case.
+function fillMaskLayer() {
+    return replaceMaskSurface((ctx, _prev, w, h) => {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+    });
+}
+
+function invertMaskLayer() {
+    return replaceMaskSurface((ctx, prev, w, h) => {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        if (prev && prev.width && prev.height) {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.drawImage(prev, 0, 0, w, h);
+            ctx.globalCompositeOperation = 'source-over';
+        }
+    });
+}
+
 
 function selectMaskLayer() {
     selectedId = MASK_LAYER_ID;
@@ -1513,6 +1549,7 @@ function renderMaskLayerRow() {
     const note = document.createElement('span');
     note.className = 'layer-note';
     note.textContent = 'output';
+    note.title = 'Output — the surface the backend receives as the mask';
 
     const eye = document.createElement('button');
     eye.className = 'icon-btn';
@@ -1533,6 +1570,9 @@ function renderMaskLayerRow() {
     head.appendChild(name);
     head.appendChild(note);
     head.appendChild(eye);
+    const tailGap = document.createElement('span');
+    tailGap.className = 'layer-row-tail-gap';   // stands in for the × a normal row has
+    head.appendChild(tailGap);
     row.appendChild(head);
 
     // Tint slider — display only. Drag events never bubble: the row's click handler would
@@ -1888,16 +1928,24 @@ function syncPaintUI() {
     document.getElementById('paintTargetRow').style.display = maskLayerSel ? 'none' : '';
     document.getElementById('paintMaskBtn').classList.toggle('active', !decal);
     document.getElementById('paintDecalBtn').classList.toggle('active', decal);
-    document.getElementById('maskInvertBtn').style.display = maskLayerSel ? '' : (decal ? 'none' : '');
+    // Invert needs coverage to flip, so the decal target hides it. Full exists for the Mask
+    // layer only: there 'Reset to fully covered' is not what Clear means, and there was no way
+    // to cover the whole canvas without painting it by hand.
+    document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
+    document.getElementById('maskInvertBtn').title = maskLayerSel
+        ? 'Invert the Mask layer — covered pixels become uncovered and the other way round'
+        : 'Invert the mask: hidden areas become visible and the other way round';
+    document.getElementById('maskFullBtn').style.display = maskLayerSel ? '' : 'none';
+    document.getElementById('maskFullBtn').title = 'Fill the Mask layer — every pixel of the canvas covered';
     document.getElementById('maskResetBtn').textContent = maskLayerSel ? 'Clear' : (decal ? 'Clear' : 'Reset');
     document.getElementById('maskResetBtn').title = maskLayerSel
-        ? 'Clear the Mask layer'
+        ? 'Clear the Mask layer — nothing covered, so the actions run on the whole image'
         : (decal ? 'Clear this layer\'s decal (the painted colour)' : 'Reset the mask to fully visible');
     document.getElementById('brushColorRow').style.display = decal ? 'flex' : 'none';
     maskDecalLabel.textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
     maskDecalLabel.title = maskLayerSel
-        ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. Invert / Clear act on the whole layer.'
+        ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. Invert / Full / Clear act on the whole layer.'
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.';
@@ -2626,17 +2674,31 @@ document.getElementById('sidePanel').addEventListener('mouseup', e => {
 document.getElementById('maskInvertBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (l.isMaskLayer) { invertMaskLayer(); setStatus('Mask layer inverted'); return; }
+    if (l.isMaskLayer) {
+        if (invertMaskLayer()) setStatus('Mask layer inverted');
+        else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
+        return;
+    }
+    if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
     invertMask(l);
     renderLayerList();
     render();
     setStatus('Mask inverted');
     pushHistory();
 });
+document.getElementById('maskFullBtn').addEventListener('click', () => {
+    if (!isMaskLayerTarget()) { setStatus('Full covers the Mask layer — select it in the Layers list', 'error'); return; }
+    if (fillMaskLayer()) setStatus('Mask layer filled — every pixel covered');
+    else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
+});
 document.getElementById('maskResetBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (l.isMaskLayer) { clearMaskLayer(); setStatus('Mask layer cleared'); return; }
+    if (l.isMaskLayer) {
+        if (clearMaskLayer()) setStatus('Mask layer cleared — nothing covered');
+        else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
+        return;
+    }
     if (isDecalTarget()) {
         l.decal = null;
         l.decalCtx = null;
@@ -2653,6 +2715,7 @@ document.getElementById('maskResetBtn').addEventListener('click', () => {
     setStatus('Mask reset (fully visible)');
     pushHistory();
 });
+
 
 document.getElementById('paintMaskBtn').addEventListener('click', () => selectPaintTarget('mask'));
 document.getElementById('paintDecalBtn').addEventListener('click', () => selectPaintTarget('decal'));
