@@ -456,11 +456,16 @@ def _stream_pipes(dec_specs, enc_specs, frame_fn, n_expected):
     dec_specs: [(path, w, h, pixfmt)]  pixfmt: 'rgb24' | 'gray'
     enc_specs: [(out_path, w, h, fps, pixfmt, is_mask)]
     frame_fn(frames: list[np.ndarray]) -> list[np.ndarray] 与 enc_specs 对齐
+
+    只处理前 n_expected 帧(调用方取各源帧数的最小值),任一路先耗尽即停止。
+    停止后仍有剩余帧未消费的解码进程必须主动终止:只关 stdout 的话 ffmpeg
+    写管道会得到 EPIPE(AVERROR(EPIPE),Windows 上回显为 4294967264)并非零
+    退出,会被误判成解码失败。
     """
     decoders, encoders = [], []
     try:
         for path, w, h, fmt in dec_specs:
-            decoders.append((subprocess.Popen(
+            decoders.append((path, subprocess.Popen(
                 [FFMPEG_PATH, "-noautorotate", "-loglevel", "warning", "-i", path,
                  "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", fmt, "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE), fmt, w, h))
@@ -480,44 +485,66 @@ def _stream_pipes(dec_specs, enc_specs, frame_fn, n_expected):
             return 3 if fmt == "rgb24" else 1
 
         count = 0
-        while True:
+        eof_idx = -1
+        while count < n_expected:
             frames = []
-            eof = False
-            for proc, fmt, w, h in decoders:
+            for idx, (_, proc, fmt, w, h) in enumerate(decoders):
                 size = w * h * unit(fmt)
                 buf = proc.stdout.read(size)
                 if not buf or len(buf) < size:
-                    eof = True
+                    eof_idx = idx
                     break
                 if fmt == "rgb24":
                     frames.append(np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3))
                 else:
                     frames.append(np.frombuffer(buf, dtype=np.uint8).reshape(h, w))
-            if eof:
+            if eof_idx >= 0:
                 break
             outs = frame_fn(frames)
-            for (proc, _), o in zip(encoders, outs):
-                proc.stdin.write(np.ascontiguousarray(o).tobytes())
+            try:
+                for (proc, _), o in zip(encoders, outs):
+                    proc.stdin.write(np.ascontiguousarray(o).tobytes())
+            except OSError:
+                break  # 编码器提前退出:退出码与 stderr 在收尾处统一报告
             count += 1
 
         errors = []
-        for proc, _ in encoders:
-            proc.stdin.close()
+        for proc, out_path in encoders:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
             err = proc.stderr.read()
             if proc.wait() != 0:
-                errors.append((err or b'').decode('utf-8', errors='replace')[-500:])
-        for proc, fmt, w, h in decoders:
+                errors.append(
+                    f"encoder -> {os.path.basename(out_path)}: "
+                    f"{(err or b'').decode('utf-8', errors='replace')[-500:]}")
+        for idx, (path, proc, fmt, w, h) in enumerate(decoders):
+            if idx != eof_idx and proc.poll() is None:
+                # 剩余帧不再消费(已处理够帧数,或其它流先耗尽):主动终止
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                proc.kill()
+                proc.wait()
+                proc.stderr.read()
+                continue
             try:
                 proc.stdout.close()
             except Exception:
                 pass
-            proc.stderr.read()
+            err = proc.stderr.read()
             if proc.wait() != 0:
-                errors.append(f"decoder exited with {proc.returncode}")
+                errors.append(
+                    f"decoder ({os.path.basename(path)}) exited with "
+                    f"{proc.returncode}: "
+                    f"{(err or b'').decode('utf-8', errors='replace')[-500:]}")
         if errors:
             raise RuntimeError("; ".join(errors))
         if count != n_expected:
-            print(f"[stream] warning: processed {count} frames, expected {n_expected}")
+            print(f"[stream] warning: processed {count} frames, expected {n_expected} "
+                  f"(truncated to the shortest source)")
         return count
     finally:
         for proc, _ in encoders:
@@ -527,7 +554,7 @@ def _stream_pipes(dec_specs, enc_specs, frame_fn, n_expected):
                 except Exception:
                     pass
                 proc.kill()
-        for proc, _, _, _ in decoders:
+        for _, proc, _, _, _ in decoders:
             if proc.poll() is None:
                 proc.kill()
 
@@ -552,7 +579,8 @@ class VideoSubjectCropNode:
     """按主体掩码逐帧规划裁剪框,流式裁出等尺寸视频(带磁盘缓存)。
 
     规划仅逐帧记录主体范围(内存恒定);执行为 rawvideo 逐帧管道。
-    输出 image_video(crf18)+ mask_video(无损灰度)+ VIDEO_SUBJECT_CROP_INFO。
+    输出 cropped_image_video(crf18)+ cropped_mask_video(无损灰度)
+    + VIDEO_SUBJECT_CROP_INFO。
     """
 
     @classmethod
@@ -576,7 +604,7 @@ class VideoSubjectCropNode:
         }
 
     RETURN_TYPES = ("VIDEO", "VIDEO", "VIDEO_SUBJECT_CROP_INFO")
-    RETURN_NAMES = ("image_video", "mask_video", "subject_crop_info")
+    RETURN_NAMES = ("cropped_image_video", "cropped_mask_video", "subject_crop_info")
     FUNCTION = "crop"
     CATEGORY = CATEGORY
 

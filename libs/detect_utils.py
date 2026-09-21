@@ -18,6 +18,59 @@ def detect_mask(detector, image, threshold=0.5, dilation=4,
     Florence-2 detect_mask - 最终干净版
     支持 fill_mask 参数（参考 Florence2Run 逻辑）
     """
+    # EOVSAM3 (EOVSAM: RADIO + SAM3 开放词汇分割)
+    if isinstance(detector, dict) and "eovsam_checkpoint" in detector:
+        try:
+            from .eovsam.eovsam_model import get_or_build_model
+
+            if not prompt or not str(prompt).strip():
+                raise ValueError(
+                    "EOVSAM3 需要 prompt（逗号分隔的类别词表），例如: 'person, car, dog'"
+                )
+            class_names = [w.strip() for w in str(prompt).split(",") if w.strip()]
+            if not class_names:
+                raise ValueError(f"prompt 无法解析出类别词表: '{prompt}'")
+
+            resolution = int(detector.get("resolution", 1152))
+            model = get_or_build_model(
+                checkpoint_path=detector["eovsam_checkpoint"],
+                precision=detector.get("precision", "bf16"),
+            )
+
+            print(f"✅ EOVSAM3 detect_mask | 词表: {class_names} | threshold: {threshold} | resolution: {resolution}")
+
+            masks, labels, scores = model.detect(
+                image=image,
+                class_names=class_names,
+                resolution=resolution,
+                threshold=float(threshold),
+            )
+
+            if not masks:
+                raise RuntimeError(
+                    f"EOVSAM3 未检测到任何对象。\n词表: {class_names}\nthreshold: {threshold}\n"
+                    "建议降低 threshold（如 0.3）或更换类别词"
+                )
+
+            print(f"✅ EOVSAM3 检测到 {len(masks)} 个对象: "
+                  + ", ".join(f"{l}({s:.2f})" for l, s in zip(labels, scores)))
+
+            # 统一为 CPU float32（与 Florence-2 分支返回约定一致，避免 bf16/GPU 张量泄漏到调用方）
+            masks = [m.detach().float().cpu() for m in masks]
+
+            # 膨胀处理（与 Florence-2 路径一致）
+            if dilation > 0:
+                import torch.nn.functional as NF
+                k = int(dilation * 2 + 1)
+                masks = [
+                    NF.max_pool2d(m.unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=dilation)
+                    .squeeze(0).squeeze(0)
+                    for m in masks
+                ]
+            return masks
+
+        except Exception as e:
+            raise RuntimeError(f"EOVSAM3 detect_mask 执行失败: {e}") from e
     # SAM3
     if isinstance(detector, dict) and all(k in detector for k in ("checkpoint_path", "bpe_path", "dtype")):
         try:

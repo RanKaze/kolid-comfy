@@ -145,6 +145,69 @@ def cache_output_paths(key):
 
 
 # ============================================================
+# 内存视频源落盘
+# ============================================================
+
+def _video_ext_from_head(head):
+    """按文件头猜测容器扩展名(ffmpeg 按内容探测,扩展名仅供预览引用)。"""
+    if head[4:8] == b"ftyp":
+        return ".mp4"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return ".mkv"
+    if head[8:12] == b"AVI ":
+        return ".avi"
+    if head[:4] == b"OggS":
+        return ".ogv"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    return ".mp4"
+
+
+def video_stream_to_file(stream):
+    """把 VIDEO 的内存流(BytesIO)落盘到缓存目录,返回文件路径。
+
+    VIDEO 来自内存实现(VideoFromComponents / VideoFromList 等)时,
+    get_stream_source() 返回 BytesIO 而非路径,而 ffprobe 与 ffmpeg 变换
+    都需要磁盘路径。文件名取内容 MD5 → 同一内容只写一次,使 IS_CHANGED
+    与变换缓存 key 在多次执行之间保持稳定。
+    """
+    tmp_path = os.path.join(
+        CACHE_DIR, f"_inmem_{os.getpid()}_{threading.get_ident()}.tmp")
+    md5 = hashlib.md5()
+    head = b""
+    try:
+        stream.seek(0)
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = stream.read(_HASH_CHUNK_SIZE)
+                if not chunk:
+                    break
+                if len(head) < 16:
+                    head = (head + chunk)[:16]
+                md5.update(chunk)
+                f.write(chunk)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        stream.seek(0)
+
+    path = os.path.join(
+        CACHE_DIR, f"inmem_{md5.hexdigest()}{_video_ext_from_head(head)}")
+    if os.path.exists(path):
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    else:
+        os.replace(tmp_path, path)
+    return path
+
+
+# ============================================================
 # ffmpeg 执行
 # ============================================================
 
@@ -340,36 +403,59 @@ def compute_meet_dims(src_w, src_h, width, height):
 # 逐帧流式处理管道(视频掩码算子节点用)
 # ============================================================
 
-def stream_transform_video(sources, out_path, out_width, out_height, out_fps, frame_fn):
-    """逐帧流式视频处理:多路 rawvideo 解码 → frame_fn → 无损灰度编码。
+def stream_transform_video(sources, out_path, out_width, out_height, out_fps, frame_fn,
+                           src_formats=None, mode="mask", audio_source=None):
+    """逐帧流式视频处理:多路 rawvideo 解码 → frame_fn → 编码。
 
     最佳内存管理:任意时刻每路视频只有 1 帧驻留内存(4K 灰度单帧约 8MB),
     全程不缓存帧序列,适合任意分辨率/时长的视频。
 
-    sources:   [(path, width, height), ...];第 0 路为主源(定义输出帧数与 fps),
-               其余路按帧索引对齐,耗尽后以黑帧补齐
-    out_fps:   输出帧率(取主源 fps)
-    frame_fn:  fn(frames: list[np.ndarray uint8 HxW]) -> np.ndarray uint8 (out_height x out_width)
+    sources:     [(path, width, height), ...];第 0 路为主源(定义输出帧数与 fps),
+                 其余路按帧索引对齐,耗尽后以黑帧补齐
+    out_fps:     输出帧率(取主源 fps)
+    frame_fn:    fn(frames: list[np.ndarray uint8]) -> np.ndarray uint8
+                 (out_height x out_width[, 3];各路形状由 src_formats 决定)
+    src_formats: 每路解码像素格式("gray" / "rgb24"),默认全 gray;
+                 gray → HxW,rgb24 → HxWx3
+    mode:        "mask" 无损灰度输出(-qp 0 + gray,掩码用,默认);
+                 "image" 彩色输出(crf18 + yuv420p + faststart)
+    audio_source: mode="image" 时可选,从该文件取音频转 aac 一并封装
     返回处理的帧数。
     """
     decoders = []
     encoder = None
     try:
-        for path, w, h in sources:
+        if src_formats is None:
+            src_formats = ["gray"] * len(sources)
+        for (path, w, h), fmt in zip(sources, src_formats):
             decoders.append(subprocess.Popen(
                 [FFMPEG_PATH, "-noautorotate", "-loglevel", "warning", "-i", path,
-                 "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                 "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", fmt, "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE))
-        encoder = subprocess.Popen(
-            [FFMPEG_PATH, "-y", "-loglevel", "warning",
-             "-f", "rawvideo", "-pix_fmt", "gray",
-             "-s", f"{out_width}x{out_height}", "-framerate", f"{out_fps:.6f}", "-i", "-",
-             "-c:v", "libx264", "-preset", "veryfast", "-qp", "0",
-             "-pix_fmt", "gray", out_path],
-            stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        frame_bytes = [w * h for _, w, h in sources]
-        shapes = [(h, w) for _, w, h in sources]
+        if mode == "image":
+            cmd = [FFMPEG_PATH, "-y", "-loglevel", "warning",
+                   "-f", "rawvideo", "-pix_fmt", "rgb24",
+                   "-s", f"{out_width}x{out_height}", "-framerate", f"{out_fps:.6f}", "-i", "-"]
+            if audio_source:
+                # 不加 -shortest:主源是 stdin 管道,ffmpeg 未知其长度,
+                # 若音频略短会导致末尾视频帧被截掉
+                cmd += ["-i", audio_source, "-map", "0:v:0", "-map", "1:a?",
+                        "-c:a", "aac", "-b:a", "192k"]
+            cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
+        else:
+            cmd = [FFMPEG_PATH, "-y", "-loglevel", "warning",
+                   "-f", "rawvideo", "-pix_fmt", "gray",
+                   "-s", f"{out_width}x{out_height}", "-framerate", f"{out_fps:.6f}", "-i", "-",
+                   "-c:v", "libx264", "-preset", "veryfast", "-qp", "0",
+                   "-pix_fmt", "gray", out_path]
+        encoder = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        frame_bytes = [w * h * (3 if f == "rgb24" else 1)
+                       for (_, w, h), f in zip(sources, src_formats)]
+        shapes = [((h, w, 3) if f == "rgb24" else (h, w))
+                  for (_, w, h), f in zip(sources, src_formats)]
         count = 0
         while True:
             buf = decoders[0].stdout.read(frame_bytes[0])
