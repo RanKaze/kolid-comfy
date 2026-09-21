@@ -534,12 +534,14 @@ class SnapshotSwitchNode:
         img_bytes = base64.b64decode(custom_image_b64)
         img = Image.open(io.BytesIO(img_bytes))
 
-        # Convert to RGB
-        if img.mode != 'RGB':
+        # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            img = img.convert('RGBA')
+        elif img.mode != 'RGB':
             img = img.convert('RGB')
 
         arr = np.array(img).astype(np.float32) / 255.0
-        tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3]
+        tensor = torch.from_numpy(arr).unsqueeze(0)  # [1, H, W, 3] 或带 alpha 的 [1, H, W, 4]
         return tensor
 
     def _maybe_save_snapshot(self, unique_id, output, use_global=False):

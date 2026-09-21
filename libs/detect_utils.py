@@ -18,6 +18,12 @@ def detect_mask(detector, image, threshold=0.5, dilation=4,
     Florence-2 detect_mask - 最终干净版
     支持 fill_mask 参数（参考 Florence2Run 逻辑）
     """
+    # alpha VAE (QwenImage21) 解码出 4 通道，检测模型只要 RGB：透明区域按白底合成
+    if image.dim() >= 3 and image.shape[-1] == 4:
+        rgb = image[..., :3]
+        alpha = image[..., 3:]
+        image = rgb * alpha + (1.0 - alpha)
+
     # EOVSAM3 (EOVSAM: RADIO + SAM3 开放词汇分割)
     if isinstance(detector, dict) and "eovsam_checkpoint" in detector:
         try:

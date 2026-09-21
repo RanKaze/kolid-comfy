@@ -41,7 +41,13 @@ def get_tag(tagger, image, sep=", "):
                 single_image = image
             else:
                 raise ValueError(f"Unsupported image dimensions: {image.dim()}")
-                
+
+            # alpha VAE 的输出是 RGBA，打标模型只要 RGB：透明区域按白底合成
+            if single_image.shape[-1] == 4:
+                rgb = single_image[..., :3]
+                alpha = single_image[..., 3:]
+                single_image = rgb * alpha + (1.0 - alpha)
+
             # 转换为 PIL Image
             image_pil = F.to_pil_image(single_image.permute(2, 0, 1).float())
 

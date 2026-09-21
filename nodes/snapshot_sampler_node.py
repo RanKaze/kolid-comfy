@@ -40,7 +40,7 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, align_alpha_channels
 from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -405,7 +405,10 @@ class SnapshotDetailerSamplerServer:
                         b64_data = src
                     img_bytes = base64.b64decode(b64_data)
                     img = Image.open(io.BytesIO(img_bytes))
-                    if img.mode != 'RGB':
+                    # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                        img = img.convert('RGBA')
+                    elif img.mode != 'RGB':
                         img = img.convert('RGB')
                     arr = np.array(img).astype(np.float32) / 255.0
                     return torch.from_numpy(arr).unsqueeze(0)
@@ -1019,7 +1022,10 @@ class SnapshotDetailerSamplerServer:
                         b64_data = image_b64
                     img_bytes = base64.b64decode(b64_data)
                     img = Image.open(io.BytesIO(img_bytes))
-                    if img.mode != 'RGB':
+                    # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                        img = img.convert('RGBA')
+                    elif img.mode != 'RGB':
                         img = img.convert('RGB')
                     arr = np.array(img).astype(np.float32) / 255.0
                     tensor = torch.from_numpy(arr).unsqueeze(0)
@@ -1111,6 +1117,8 @@ class SnapshotDetailerSamplerServer:
                     if bg_img is None or fg_img is None:
                         self._send_json({'success': False, 'error': 'Image not found'}, 400)
                         return
+                    # RGB / RGBA 混用时补齐通道，否则逐元素混合会因通道数不同直接报错
+                    bg_img, fg_img = align_alpha_channels(bg_img, fg_img)
                     # Ensure same dimensions — resize fg to match bg
                     bg_h, bg_w = bg_img.shape[1], bg_img.shape[2]
                     if fg_img.shape[1] != bg_h or fg_img.shape[2] != bg_w:

@@ -213,10 +213,17 @@ def image_to_base64(image_tensor):
         image_tensor: 图片张量，形状为 (1, H, W, C)，值范围 [0, 1]
     
     Returns:
-        str: base64编码的图片字符串
+        str: base64编码的图片字符串（4 通道走 PNG 保留 alpha，否则走 JPEG）
     """
     # 转换为numpy数组并反归一化
-    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    # QwenImage21 等 alpha VAE 的输出是 RGBA，JPEG 存不下 alpha，改用 PNG
+    if img_array.ndim == 3 and img_array.shape[-1] == 4:
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA))
+        base64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{base64_str}"
+    if img_array.ndim == 3 and img_array.shape[-1] > 3:
+        img_array = img_array[..., :3]
     # 转换为BGR格式
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     # 编码为jpg

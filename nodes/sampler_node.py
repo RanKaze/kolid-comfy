@@ -3081,11 +3081,11 @@ class PipelineVideoSamplerAdvancedNode:
             image_tensor = images[idx]
 
             np_image = (image_tensor * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
-            mode = "RGBA" if np_image.shape[-1] == 4 else "RGB"
-            if np_image.shape[-1] > 3:
-                np_image = np_image[..., :3]
+            # RGBA 保留 alpha（Pillow 依据通道数自动判定 mode）
+            if np_image.shape[-1] >= 4:
+                np_image = np_image[..., :4]
 
-            pil_image = Image.fromarray(np_image, mode=mode)
+            pil_image = Image.fromarray(np_image)
             save_path = os.path.join(output_dir, f"{current_num:06d}.png")
 
             try:
