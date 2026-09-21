@@ -973,7 +973,9 @@ class SnapshotDetailerSamplerServer:
                     arr = np.array(img).astype(np.float32) / 255.0
                     tensor = torch.from_numpy(arr).unsqueeze(0)
                     inst.add_history(tensor, name=f'Loaded #{len(inst.selected_history) + 1}')
-                    self._send_json({'success': True})
+                    # 拖上来的图要立刻能被设成「参考图」，所以把新 key 回给调用方
+                    new_key = inst.selected_history[-1]['key'] if inst.selected_history else None
+                    self._send_json({'success': True, 'key': new_key})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -1489,7 +1491,8 @@ class SnapshotDetailerSamplerNode:
                 ref_boost_a = float(bp.get('ref_boost_a', 1.0))
                 enable_ref_boost_mask = bp.get('enable_ref_boost_mask', False)
                 grounding_px = int(bp.get('grounding_px', 768))
-                context_reference = bp.get('context_reference', False)
+                # Context Ref 没有开关：选了参考图就走该通道。
+                # 'context_reference' 只是旧配置里的遗留字段，不再参与判定。
                 context_reference_key = bp.get('context_reference_key')
                 # 每个 detailer block 自带 context_regex（默认 ".+"），覆盖全局值，
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
@@ -1562,7 +1565,7 @@ class SnapshotDetailerSamplerNode:
                     )
 
                 # Context Reference injection (per-block)
-                if enable_edit and context_reference and context_reference_key and server is not None:
+                if enable_edit and context_reference_key and server is not None:
                     ref_img = server.get_history_image(context_reference_key)
                     if ref_img is not None:
                         ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]

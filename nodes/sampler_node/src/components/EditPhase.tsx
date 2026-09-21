@@ -107,7 +107,8 @@ interface EditPhaseProps {
   showFinishDialog: boolean;
   onFinish: (selectedKeys?: string[]) => void;
   onCloseFinishDialog: () => void;
-  onAddContextImage: (base64: string) => void;
+  /** 返回新加入历史的那张图的 key（拖到 Ref Image 上时要立刻选中它） */
+  onAddContextImage: (base64: string) => Promise<string | null>;
   onLoadFromAssets: () => void;
   loadingAssets: boolean;
   currentContextKey: string | null;
@@ -277,6 +278,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setContextDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) readFileAsContextImage(file);
+  };
+
+  // Ref Image 可以直接把文件拖上来：上传即选中，不必先拖进 context 再回来选。
+  const [refDragOver, setRefDragOver] = React.useState<string | null>(null);
+
+  const addRefImageFromFile = (blockId: string, file: File) => {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      void onAddContextImage(reader.result as string).then(key => {
+        if (key) updateBlockParam(blockId, 'context_reference_key', key);
+      });
+    };
+    reader.readAsDataURL(file);
   };
 
   const toggleFinishSelection = (key: string) => {
@@ -552,20 +567,37 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 </div>
                               </>
                             )}
+                            {/* Context Ref 没有开关：选中一张 Ref Image 本身就是启用。 */}
                             <div style={styles.paramRow}>
-                              <label style={styles.paramLabel}>Context Ref</label>
-                              <IOSToggle checked={dp.context_reference} onChange={v => updateBlockParam(block.id, 'context_reference', v)} />
+                              <label style={styles.paramLabel}>Ref Image</label>
+                              <button
+                                style={refDragOver === block.id
+                                  ? { ...styles.contextLoadBtn, borderColor: '#0a84ff', background: 'rgba(10,132,255,0.20)' }
+                                  : styles.contextLoadBtn}
+                                title="Click to pick one from history, or drop an image file here to upload and use it as the reference (any resolution)"
+                                onClick={() => setShowRefSelect(block.id)}
+                                onDragOver={e => {
+                                  if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+                                  e.preventDefault();
+                                  e.dataTransfer.dropEffect = 'copy';
+                                  if (refDragOver !== block.id) setRefDragOver(block.id);
+                                }}
+                                onDragLeave={e => {
+                                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                                  setRefDragOver(null);
+                                }}
+                                onDrop={e => {
+                                  e.preventDefault();
+                                  setRefDragOver(null);
+                                  const file = e.dataTransfer.files?.[0];
+                                  if (file) addRefImageFromFile(block.id, file);
+                                }}
+                              >
+                                {dp.context_reference_key
+                                  ? (history.find(h => h.key === dp.context_reference_key)?.name ?? 'Selected')
+                                  : (refDragOver === block.id ? 'Drop to upload' : 'Drop or select')}
+                              </button>
                             </div>
-                            {dp.context_reference && (
-                              <div style={styles.paramRow}>
-                                <label style={styles.paramLabel}>Ref Image</label>
-                                <button style={styles.contextLoadBtn} onClick={() => setShowRefSelect(block.id)}>
-                                  {dp.context_reference_key
-                                    ? (history.find(h => h.key === dp.context_reference_key)?.name ?? 'Selected')
-                                    : 'Select'}
-                                </button>
-                              </div>
-                            )}
                           </div>
                         )}
                       </>);
@@ -819,14 +851,28 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
       {/* Reference image select modal */}
       {showRefSelect && (() => {
-        const cur = history.find(h => h.key === currentContextKey);
-        const cw = cur?.width, ch = cur?.height;
-        const eligible = history.filter(h => h.key !== currentContextKey &&
-          (!cw || !ch || (h.width === cw && h.height === ch)));
+        // 任何分辨率都可以作参考图 —— 以前要求与当前 context 同尺寸，
+        // 结果大部分历史图根本选不到。现在只排除当前这张（自己参考自己没有意义）。
+        const eligible = history.filter(h => h.key !== currentContextKey);
         return (
           <div style={styles.overlay}>
-            <div style={styles.dialog}>
-              <div style={styles.dialogTitle}>Select Reference Image{cw && ch ? ' (' + cw + 'x' + ch + ')' : ''}</div>
+            <div
+              style={styles.dialog}
+              onDragOver={e => {
+                if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+              }}
+              onDrop={e => {
+                e.preventDefault();
+                const file = e.dataTransfer.files?.[0];
+                if (!file) return;
+                addRefImageFromFile(showRefSelect, file);
+                setShowRefSelect(null);
+              }}
+            >
+              <div style={styles.dialogTitle}>Select Reference Image</div>
+              <div style={styles.dialogSubtitle}>Any resolution — click to use it, or drop an image file here</div>
               {eligible.length === 0 ? (
                 <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No eligible images available.</div>
               ) : (
