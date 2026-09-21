@@ -440,8 +440,10 @@ class SnapshotDetailerSamplerServer:
             layer['mask'] = decode_mask_alpha(layer['mask'], layer_w, layer_h)
             layer['decal'] = decode_decal_rgba(layer['decal'], layer_w, layer_h)
         blended = composite_layers(resolved, canvas_w, canvas_h)
-        # 纯 Mask 层整体按画布尺寸栅格化，squeeze 成 [1,H,W] 与 pipeline.mask 同构
-        blend_mask = decode_mask_alpha(mask_data_url, canvas_w, canvas_h)
+        # 纯 Mask 层整体按画布尺寸栅格化，squeeze 成 [1,H,W] 与 pipeline.mask 同构。
+        # collapse_opaque=False：这一层「全白」= 整块画布都被覆盖，绝不能当成「没有蒙版」
+        # （那样 Full / 涂满画布都会被误判成没画，弹出 "Mask is required"）。
+        blend_mask = decode_mask_alpha(mask_data_url, canvas_w, canvas_h, collapse_opaque=False)
         if blend_mask is not None:
             blend_mask = blend_mask.squeeze(-1)
         return blended, blend_mask
@@ -1337,7 +1339,7 @@ class SnapshotDetailerSamplerNode:
         # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
         # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
         # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
-        recover_crop = bool(first_bp.get('recover_crop', True))
+        do_recover_crop = bool(first_bp.get('recover_crop', True))
         cropped_image, cropped_mask, crop_info = crop_mask(
             image=original_image,
             mask=expanded_mask,
@@ -1682,7 +1684,7 @@ class SnapshotDetailerSamplerNode:
         # 连同裁剪矩形一起交给前端，由 Blend 画布作为新图层用 transform 贴回原位 ——
         # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
         detail_meta = None
-        if recover_crop:
+        if do_recover_crop:
             if last_resize_info is not None:
                 recovered_image, recovered_mask = recover_size(
                     image=current_image,
@@ -1719,7 +1721,7 @@ class SnapshotDetailerSamplerNode:
 
         # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
         # 只是画布上的一块 patch，更不能顶替整幅 context，故保持原合成图。
-        next_pipeline.image = final_image if recover_crop else original_image
+        next_pipeline.image = final_image if do_recover_crop else original_image
         next_pipeline.latent = None
         next_pipeline.mask = user_mask
 

@@ -42,6 +42,11 @@ const App: React.FC = () => {
   useEffect(() => { currentContextKeyRef.current = currentContextKey; }, [currentContextKey]);
   const historyRef = useRef<HistoryItem[]>([]);
   useEffect(() => { historyRef.current = history; }, [history]);
+  // Which detailer result has already been handed to the workbench. The done branch below is
+  // reached from a 500 ms poll and runs three requests (the history payload is big), so a second
+  // tick can arrive before React has torn the interval down — and injecting one key twice put two
+  // identical layers on the canvas, which the user then cannot get rid of by deleting one.
+  const injectedDetailKeyRef = useRef<string | null>(null);
 
   const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
@@ -212,7 +217,8 @@ const App: React.FC = () => {
           try {
             const result = await fetch('/api/result').then(r => r.json());
             const key = result?.detailed_key;
-            if (!key) return;
+            if (!key || injectedDetailKeyRef.current === key) return;
+            injectedDetailKeyRef.current = key;      // claimed before the awaits below, not after
             const list = await fetch('/api/history').then(r => r.json());
             const item = (list?.history || []).find((h: HistoryItem) => h.key === key);
             if (item) {
