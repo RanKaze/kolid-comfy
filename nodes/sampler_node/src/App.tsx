@@ -1,26 +1,20 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
 
 const App: React.FC = () => {
-  const [tab, setTab] = useState<Tab>('mask');
-  const tabRef = useRef<Tab>('mask');
+  const [tab, setTab] = useState<Tab>('draw');
+  const tabRef = useRef<Tab>('draw');
   useEffect(() => { tabRef.current = tab; }, [tab]);
 
   const [config, setConfig] = useState<ServerConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [maskConfirmed, setMaskConfirmed] = useState(false);
   const [promptReady, setPromptReady] = useState(false);
-  const [autoTagging, setAutoTagging] = useState(false);
-  const [tagPreviews, setTagPreviews] = useState<TagPreviews | null>(null);
-  const [tagResult, setTagResult] = useState<string | null>(null);
-  const [debugData, setDebugData] = useState<DebugRecoverData | null>(null);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [detailProgress, setDetailProgress] = useState({ progress: 0, current: 0, total: 0 });
   const [interfaceStatusByIdx, setInterfaceStatusByIdx] = useState<Record<number, 'idle' | 'running' | 'done' | 'error'>>({});
   const [interfaceProgressByIdx, setInterfaceProgressByIdx] = useState<Record<number, { progress: number; current: number; total: number }>>({});
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -30,8 +24,7 @@ const App: React.FC = () => {
   const [syncingTab, setSyncingTab] = useState(false);
   const syncingTabRef = useRef(false);
   useEffect(() => { syncingTabRef.current = syncingTab; }, [syncingTab]);
-  // Track whether the latest mask-confirmed/prompt-confirmed was consumed by handleTabChange sync
-  const consumedMaskConfirmedRef = useRef(false);
+  // Track whether the latest prompt-confirmed was consumed by handleTabChange sync
   const consumedPromptConfirmedRef = useRef(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
   const [blendSelect, setBlendSelect] = useState<{ role: 'layer' } | null>(null);
@@ -41,8 +34,14 @@ const App: React.FC = () => {
   const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
   const [interfaceResults, setInterfaceResults] = useState<Record<number, HistoryItem[]>>({});
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
-  const maskIframeRef = useRef<HTMLIFrameElement>(null);
+  // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
+  // Mask layer, which would be lost if React unmounted it on every tab switch.
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
+  // Stable mirrors so the window message listener never reads a stale closure.
+  const currentContextKeyRef = useRef<string | null>(null);
+  useEffect(() => { currentContextKeyRef.current = currentContextKey; }, [currentContextKey]);
+  const historyRef = useRef<HistoryItem[]>([]);
+  useEffect(() => { historyRef.current = history; }, [history]);
 
   const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
@@ -124,23 +123,10 @@ const App: React.FC = () => {
 
   useEffect(() => { refreshHistory(); }, [refreshHistory]);
 
-  // Load tag previews when entering tag tab
-  useEffect(() => {
-    if (tab !== 'tag') return;
-    // Mask is already synced via handleTabChange → sync-mask → handleMask
-    // Just load tag previews using the synced mask
-    fetch('/api/tag_previews')
-      .then(r => r.json())
-      .then((data: TagPreviews) => {
-        if (data.full || data.mask || data.covered) setTagPreviews(data);
-      })
-      .catch(e => setError('Failed to load tag previews: ' + e.message));
-  }, [tab]);
-
+  // Leaving the prompt tab flushes the prompt editor into prompt_server first.
   const handleTabChange = useCallback((newTab: Tab) => {
-    const needMaskSync = tab === 'mask' && newTab !== 'mask';
     const needPromptSync = tab === 'prompt' && newTab !== 'prompt';
-    if (!needMaskSync && !needPromptSync) {
+    if (!needPromptSync) {
       setTab(newTab);
       return;
     }
@@ -148,26 +134,16 @@ const App: React.FC = () => {
     const targetTab = newTab;
     let syncDone = false;
     const checkSyncDone = (event: MessageEvent) => {
-      const done = (needMaskSync && event.data?.type === 'mask-confirmed') ||
-                   (needPromptSync && event.data?.type === 'prompt-synced');
-      if (!done) return;
+      if (event.data?.type !== 'prompt-synced') return;
       syncDone = true;
       window.removeEventListener('message', checkSyncDone);
       setSyncingTab(false);
-      // Mark that this mask-confirmed/prompt-confirmed was consumed by sync
-      if (needMaskSync) consumedMaskConfirmedRef.current = true;
-      if (needPromptSync) consumedPromptConfirmedRef.current = true;
+      consumedPromptConfirmedRef.current = true;
       setTab(targetTab);
     };
     window.addEventListener('message', checkSyncDone);
-    if (needMaskSync) {
-      const iframe = maskIframeRef.current;
-      if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-mask' }, '*');
-    }
-    if (needPromptSync) {
-      const iframe = promptIframeRef.current;
-      if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-prompt' }, '*');
-    }
+    const iframe = promptIframeRef.current;
+    if (iframe?.contentWindow) iframe.contentWindow.postMessage({ type: 'sync-prompt' }, '*');
     // Timeout fallback
     setTimeout(() => {
       if (syncDone) return;
@@ -176,63 +152,6 @@ const App: React.FC = () => {
       setTab(targetTab);
     }, 3000);
   }, [tab]);
-
-  // Listen for postMessage from mask/prompt iframes
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'mask-confirmed') {
-        setMaskConfirmed(true);
-        // Skip auto-advance if this was consumed by handleTabChange sync
-        if (consumedMaskConfirmedRef.current) {
-          consumedMaskConfirmedRef.current = false;
-          return;
-        }
-        // Auto-advance only on user-initiated confirm (not during tab switch sync)
-        if (tabRef.current === 'mask' && !syncingTabRef.current) {
-          setTab(config?.has_tagger ? 'tag' : 'prompt');
-        }
-      } else if (event.data?.type === 'prompt-confirmed') {
-        setPromptReady(true);
-        // Skip auto-advance if this was consumed by handleTabChange sync
-        if (consumedPromptConfirmedRef.current) {
-          consumedPromptConfirmedRef.current = false;
-          return;
-        }
-        // Auto-advance: prompt → draw
-        if (tabRef.current === 'prompt' && !syncingTabRef.current) {
-          setTab('draw');
-        }
-      } else if (event.data?.type === 'blend-select') {
-        // Blend iframe requests image selection
-        setBlendSelect({ role: event.data.role });
-      } else if (event.data?.type === 'blend-layers-data') {
-        // Blend iframe hands over the layer stack (bottom → top)
-        const { layers, width, height } = event.data;
-        if (Array.isArray(layers) && layers.length) {
-          handleBlendLayers(layers, width, height);
-        }
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [config]);
-
-  // Poll mask status — auto-advance to tag/prompt when mask is drawn
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch('/api/has_mask');
-        const data = await res.json();
-        if (!cancelled && data.has_mask && !maskConfirmed) {
-          setMaskConfirmed(true);
-        }
-      } catch { /* ignore */ }
-    };
-    poll();
-    const interval = setInterval(poll, POLL_INTERVAL);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [config, maskConfirmed]);
 
   // Poll prompt status (fallback)
   useEffect(() => {
@@ -249,34 +168,63 @@ const App: React.FC = () => {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // Poll status when draw is running
+  // Poll while the detailer runs, and drive the Blend workbench from the result.
   useEffect(() => {
-    if (tab !== 'draw' || detailStatus !== 'running') return;
+    if (detailStatus !== 'running') return;
     let cancelled = false;
+    let idleTicks = 0;               // the action may not have reached the main loop yet
+    const post = (payload: Record<string, any>) => {
+      blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-run-status', ...payload }, '*');
+    };
     const poll = async () => {
       try {
         const res = await fetch('/api/status');
         const data: StatusResponse = await res.json();
         if (cancelled) return;
-        setDetailStatus(data.detail_status);
-        setDetailProgress({
+        const st = data.detail_status;
+        if (st === 'idle') {
+          // The backend has not picked the action up yet. Keep waiting, but do not hang forever
+          // if the main loop is stuck on something else (e.g. an interface run).
+          if (++idleTicks > 40) {
+            setDetailStatus('error');
+            post({ status: 'error', error: 'The detailer never started' });
+            setError('The detailer never started');
+          }
+          return;
+        }
+        const progress = {
           progress: data.progress || 0,
           current: data.current_step || 0,
           total: data.total_steps || 0,
-        });
-        if (data.detail_status === 'done') {
-          // Refresh config to get updated current_context_key
-          fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
-            if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
-          }).catch(() => {});
-        } else if (data.detail_status === 'error') {
+        };
+        setDetailStatus(st);
+        if (st === 'running') {
+          post({ status: 'running', ...progress });
+        } else if (st === 'error') {
+          post({ status: 'error', error: data.error || 'Detailer failed' });
           setError(data.error || 'Detailer failed');
+        } else if (st === 'done') {
+          post({ status: 'done' });
+          // The result never becomes the Context (the composite already is the Context): it is
+          // archived into history and dropped onto the canvas as a new layer.
+          await refreshHistory();
+          try {
+            const result = await fetch('/api/result').then(r => r.json());
+            const key = result?.detailed_key;
+            if (!key) return;
+            const list = await fetch('/api/history').then(r => r.json());
+            const item = (list?.history || []).find((h: HistoryItem) => h.key === key);
+            if (item) {
+              blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-add-layer', items: [item] }, '*');
+            }
+          } catch { /* the layer is a convenience, not a hard requirement */ }
         }
       } catch { /* ignore */ }
     };
+    poll();
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [tab, detailStatus, refreshHistory]);
+  }, [detailStatus, refreshHistory]);
 
   // Poll status when interface is running (mutual exclusion: only one runs at a time)
   useEffect(() => {
@@ -325,87 +273,8 @@ const App: React.FC = () => {
     return () => { cancelled = true; clearInterval(interval); };
   }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshHistory]);
 
-  // Fetch debug data when detail is done
-  useEffect(() => {
-    if (detailStatus !== 'done') return;
-    fetch('/api/debug_recover_data')
-      .then(r => r.json())
-      .then(data => {
-        if (!data.error) setDebugData(data);
-      })
-      .catch(() => {});
-  }, [detailStatus]);
-
-  // Fetch result images when detail is done
-  const [resultImages, setResultImages] = useState<{original: string; detailed: string; originalKey: string | null; detailedKey: string | null} | null>(null);
-  useEffect(() => {
-    if (detailStatus !== 'done') return;
-    // Refresh history so new detailed image is available in blend/select dialogs
-    // without requiring a visit to the context tab
-    refreshHistory();
-    fetch('/api/result')
-      .then(r => r.json())
-      .then(data => {
-        if (data.original_image && data.detailed_image) {
-          setResultImages({
-            original: data.original_image,
-            detailed: data.detailed_image,
-            originalKey: data.original_key ?? null,
-            detailedKey: data.detailed_key ?? null,
-          });
-          // Auto-set context to detailed image after Run Detailer
-          setCurrentContextKey(data.current_context_key ?? data.detailed_key ?? null);
-        }
-      })
-      .catch(() => {});
-    // Tell mask iframe to reload the new image
-    setTimeout(() => {
-      const iframe = maskIframeRef.current;
-      if (iframe?.contentWindow) {
-        iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
-      }
-    }, 200);
-  }, [detailStatus, refreshHistory]);
-
-  const handleRunTag = useCallback(async (mode: 'mask' | 'covered' | 'full') => {
-    setError(null);
-    setAutoTagging(true);
-    try {
-      const res = await fetch('/api/run_tag', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || 'Tag failed');
-        setAutoTagging(false);
-        return;
-      }
-      setTagResult(data.tag);
-      // 若当前在 draw tab，不跳转到 prompt（tag 仍发送到 prompt iframe，切到 prompt 时可见）
-      if (tabRef.current !== 'draw') {
-        setTab('prompt');
-      }
-      // Small delay to ensure tab switch + iframe render before postMessage
-      setTimeout(() => {
-        const iframe = promptIframeRef.current;
-        if (iframe?.contentWindow) {
-          iframe.contentWindow.postMessage({
-            type: 'auto-tag',
-            tag: data.tag,
-            tags: data.tags || [],
-            custom: data.custom || '',
-          }, '*');
-        }
-      }, 100);
-    } catch (e: any) {
-      setError('Tag error: ' + e.message);
-    } finally {
-      setAutoTagging(false);
-    }
-  }, []);
-
+  // Flush the prompt editor into prompt_server. The detailer reads the prompt from there, so a
+  // Run Detailer must not start while the editor still holds unsaved edits.
   const syncPrompt = useCallback((): Promise<void> => {
     return new Promise((resolve) => {
       const iframe = promptIframeRef.current;
@@ -429,27 +298,119 @@ const App: React.FC = () => {
     });
   }, []);
 
-  const handleRunDetailer = useCallback(async () => {
+  // The Blend workbench asks for the current context image so its canvas is never empty.
+  const seedBlendCanvas = useCallback(async () => {
+    const iframe = blendIframeRef.current;
+    if (!iframe?.contentWindow) return;
+    const key = currentContextKeyRef.current;
+    let item = key ? historyRef.current.find(h => h.key === key) : undefined;
+    if (!item) {
+      try {
+        const r = await fetch('/api/history').then(r => r.json());
+        const list: HistoryItem[] = r?.history || [];
+        setHistory(list);
+        item = key ? list.find(h => h.key === key) : list[list.length - 1];
+      } catch { /* nothing to seed with */ }
+    }
+    if (!item) return;
+    iframe.contentWindow.postMessage({
+      type: 'blend-init-layer',
+      items: [{ key: item.key, name: item.name, src: item.src }],
+    }, '*');
+  }, []);
+
+  /**
+   * Single entry point for the workbench toolbar. The backend composites the canvas
+   * (blend_action) and then either archives it, tags it, or hands it to the detailer —
+   * the composite is the Context Image, so nothing here switches context.
+   */
+  const handleBlendAction = useCallback(async (body: Record<string, any>) => {
     setError(null);
-    setDetailStatus('running');
-    setDetailProgress({ progress: 0, current: 0, total: 0 });
-    setDebugData(null);
-    setResultImages(null);
-
-    // Ensure prompt is synced before running detailer
-    await syncPrompt();
-
+    const reply = (success: boolean, extra: Record<string, any> = {}) => {
+      blendIframeRef.current?.contentWindow?.postMessage(
+        { type: 'blend-action-result', action: body?.action, success, ...extra }, '*');
+    };
+    // A run reads the prompt from prompt_server, so flush the editor first.
+    if (body.action === 'detailer') await syncPrompt();
     try {
-      await fetch('/api/run_detailer', {
+      const res = await fetch('/api/blend_action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({
+          action: body.action,
+          tag_mode: body.tag_mode,
+          layers: body.layers,
+          width: body.width,
+          height: body.height,
+          mask: body.mask,
+          extra_prompt: body.extra_prompt,
+        }),
       });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || 'Blend action failed');
+        reply(false, { error: data.error || 'Blend action failed' });
+        return;
+      }
+      if (body.action === 'blend') {
+        refreshHistory();
+        reply(true, { key: data.key });
+      } else if (body.action === 'tag') {
+        reply(true, { tag: data.tag });
+        setPromptReady(true);
+        // Tag output belongs to the prompt stage: push it into the prompt editor's tags.
+        setTimeout(() => {
+          promptIframeRef.current?.contentWindow?.postMessage({
+            type: 'auto-tag',
+            tag: data.tag,
+            tags: data.tags || [],
+            custom: data.custom || '',
+          }, '*');
+        }, 100);
+      } else {
+        // The run itself is asynchronous — progress arrives through the status poller.
+        setDetailStatus('running');
+        reply(true);
+      }
     } catch (e: any) {
-      setError('Failed to start detailer: ' + e.message);
-      setDetailStatus('idle');
+      setError('Blend action error: ' + e.message);
+      reply(false, { error: e.message });
     }
-  }, [syncPrompt]);
+  }, [refreshHistory, syncPrompt]);
+
+  // Listen for postMessage from the prompt iframe and the Blend workbench.
+  // Declared after the handlers so the listener always closes over the current ones.
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'prompt-confirmed') {
+        setPromptReady(true);
+        // Skip auto-advance if this was consumed by handleTabChange sync
+        if (consumedPromptConfirmedRef.current) {
+          consumedPromptConfirmedRef.current = false;
+          return;
+        }
+        // Auto-advance: prompt → draw
+        if (tabRef.current === 'prompt' && !syncingTabRef.current) {
+          setTab('draw');
+        }
+      } else if (event.data?.type === 'blend-select') {
+        // Blend workbench asks for history images (its Add / layer picker)
+        setBlendSelect({ role: event.data.role });
+      } else if (event.data?.type === 'blend-action') {
+        // Blend workbench action: blend (archive) / tag / detailer
+        handleBlendAction(event.data);
+      } else if (event.data?.type === 'blend-request-init') {
+        // Seed the canvas with the current context image and report the tagger availability
+        // (the Tag buttons disable themselves without one).
+        const iframe = blendIframeRef.current;
+        if (!iframe?.contentWindow) return;
+        iframe.contentWindow.postMessage({ type: 'blend-config', hasTagger: !!config?.has_tagger }, '*');
+        seedBlendCanvas();
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [config, handleBlendAction, seedBlendCanvas]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
@@ -488,18 +449,9 @@ const App: React.FC = () => {
         fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
           setArchitecture(cfg.architecture ?? null);
         }).catch(() => {});
-        // Refresh context preview + mask iframe
-        fetch('/api/context_preview').then(r => r.json()).then(() => {}).catch(() => {});
+        // Notify prompt iframe to reload lora data (lora_regex may have changed)
         setTimeout(() => {
-          const iframe = maskIframeRef.current;
-          if (iframe?.contentWindow) {
-            iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
-          }
-          // Notify prompt iframe to reload lora data (lora_regex may have changed)
-          const promptIframe = promptIframeRef.current;
-          if (promptIframe?.contentWindow) {
-            promptIframe.contentWindow.postMessage({ type: 'reload-lora-data' }, '*');
-          }
+          promptIframeRef.current?.contentWindow?.postMessage({ type: 'reload-lora-data' }, '*');
         }, 100);
       } else {
         setError(data.error || 'Failed to switch pipeline');
@@ -517,26 +469,15 @@ const App: React.FC = () => {
         body: JSON.stringify({ key }),
       });
       // Reset state for next iteration
-      setMaskConfirmed(false);
       setPromptReady(false);
-      setTagResult(null);
       setDetailStatus('idle');
-      setResultImages(null);
-      setDebugData(null);
       setCurrentContextKey(key);
-      // Tell mask iframe to reload its image
-      setTimeout(() => {
-        const iframe = maskIframeRef.current;
-        if (iframe?.contentWindow) {
-          iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
-        }
-      }, 100);
     } catch (e: any) {
       setError('Failed to select image: ' + e.message);
     }
   }, []);
 
-  // Set context without leaving the current tab or resetting Draw results
+  // Set the context image without leaving the current tab
   const handleSetContext = useCallback(async (key: string) => {
     setCurrentContextKey(key);  // Immediate UI feedback
     try {
@@ -545,13 +486,6 @@ const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key }),
       });
-      // Tell mask iframe to reload its image (so mask tab is ready when user switches)
-      setTimeout(() => {
-        const iframe = maskIframeRef.current;
-        if (iframe?.contentWindow) {
-          iframe.contentWindow.postMessage({ type: 'reload-image' }, '*');
-        }
-      }, 100);
     } catch (e: any) {
       setError('Failed to set context: ' + e.message);
     }
@@ -665,32 +599,6 @@ const App: React.FC = () => {
     }
   }, [refreshHistory]);
 
-  const handleBlendLayers = useCallback(async (layers: any[], width: number, height: number) => {
-    setError(null);
-    const iframe = blendIframeRef.current;
-    const reply = (success: boolean, msg?: string) => {
-      iframe?.contentWindow?.postMessage({ type: 'blend-layers-result', success, error: msg }, '*');
-    };
-    try {
-      const res = await fetch('/api/blend_layers', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ layers, width, height }),
-      });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || 'Blend failed');
-        reply(false, data.error || 'Blend failed');
-      } else {
-        reply(true);
-      }
-      refreshHistory();
-    } catch (e: any) {
-      setError('Blend error: ' + e.message);
-      reply(false, e.message);
-    }
-  }, [refreshHistory]);
-
   if (!config) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#888' }}>
@@ -724,23 +632,12 @@ const App: React.FC = () => {
       <EditPhase
         tab={tab}
         onTabChange={handleTabChange}
-        maskUrl={config.mask_url}
-        drawUrl={config.draw_url || ''}
         promptUrl={config.prompt_url}
-        maskConfirmed={maskConfirmed}
         promptReady={promptReady}
-        autoTagging={autoTagging}
-        hasTagger={!!config?.has_tagger}
-        tagPreviews={tagPreviews}
-        tagResult={tagResult}
-        debugData={debugData}
         detailStatus={detailStatus}
-        detailProgress={detailProgress}
-        resultImages={resultImages}
         history={history}
         onRefreshHistory={refreshHistory}
         promptIframeRef={promptIframeRef}
-        maskIframeRef={maskIframeRef}
         blocks={blocks}
         architecture={architecture}
         maskGrow={maskGrow}
@@ -750,8 +647,6 @@ const App: React.FC = () => {
         onAddBlock={handleAddBlock}
         onRemoveBlock={handleRemoveBlock}
         onReorderBlocks={handleReorderBlocks}
-        onRunTag={handleRunTag}
-        onRunDetailer={handleRunDetailer}
         onSelectImage={handleSelectImage}
         onFinishClick={handleFinishClick}
         showFinishDialog={showFinishDialog}

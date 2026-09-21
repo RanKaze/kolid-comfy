@@ -3520,5 +3520,55 @@ resetHistory();          // the empty canvas is step 0; everything from here on 
 // The parent only answers when it can resolve one, and the dedupe set keeps this idempotent.
 if (window.parent !== window) window.parent.postMessage({ type: 'blend-request-init' }, '*');
 </script>
-</body>
+
+<style>
+/* diagnostic harness: the Mask section and the Layers dock side by side, large */
+#canvasArea { display: none !important; }
+#sidePanel { width: 100% !important; max-width: none !important; border-left: none !important; }
+#panelScroll > .panel-section:not(#maskSection) { display: none !important; }
+#layersDock { border-top: 2px solid #666 !important; padding-top: 14px !important; }
+#layerList { max-height: none !important; }
+</style>
+
+<script>
+function __seed(mode, cb) {
+  canvasW = 1400; canvasH = 900;
+  layoutCanvas();
+  ensureMaskLayer(false);
+  var mc = maskLayer.decalCtx;
+  mc.fillStyle = '#ffffff';
+  mc.beginPath(); mc.ellipse(canvasW * 0.5, canvasH * 0.5, canvasW * 0.30, canvasH * 0.28, 0, 0, 7); mc.fill();
+  mc.beginPath(); mc.arc(canvasW * 0.22, canvasH * 0.24, 130, 0, 7); mc.fill();
+
+  var c = document.createElement('canvas'); c.width = 1200; c.height = 800;
+  var cx = c.getContext('2d');
+  var g = cx.createLinearGradient(0, 0, 1200, 800);
+  g.addColorStop(0, '#2b3a67'); g.addColorStop(1, '#8b5cf6');
+  cx.fillStyle = g; cx.fillRect(0, 0, 1200, 800);
+  cx.fillStyle = '#ffd166'; cx.beginPath(); cx.arc(600, 400, 220, 0, 7); cx.fill();
+  addLayer({ name: 'hero-shot.png', src: c.toDataURL('image/png'), key: 'k1' });
+
+  setTimeout(function () {
+    var l = layers[0];
+    var d = document.createElement('canvas'); d.width = 1200; d.height = 800;
+    var dc = d.getContext('2d');
+    dc.fillStyle = '#ff3b30';
+    dc.beginPath(); dc.ellipse(400, 250, 200, 120, 0.4, 0, 7); dc.fill();
+    l.decal = d; l.decalCtx = dc;
+    var m = document.createElement('canvas'); m.width = 1200; m.height = 800;
+    var mcx = m.getContext('2d');
+    var mg = mcx.createLinearGradient(0, 0, 1200, 0);
+    mg.addColorStop(0, '#000'); mg.addColorStop(1, '#fff');
+    mcx.fillStyle = mg; mcx.fillRect(0, 0, 1200, 800);
+    l.mask = m; l.maskCtx = mcx;
+
+    if (mode === 'masklayer') selectMaskLayer();
+    else { paintTarget = 'decal'; selectLayer(l.id, 'mask'); }
+    syncModeUI(); syncPaintUI(); renderLayerList(); render();
+    document.title = 'READY';
+    cb && cb();
+  }, 500);
+}
+</script>
+<script>window.addEventListener('load',function(){setTimeout(function(){__seed('masklayer');},300);});</script></body>
 </html>

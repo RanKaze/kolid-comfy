@@ -1,6 +1,4 @@
 export interface ServerConfig {
-  mask_url: string;
-  draw_url: string;
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
   add_noise: string;
@@ -145,7 +143,12 @@ export interface InterfaceExecOptions {
   crop_reserve: number;
 }
 
-export type Tab = 'mask' | 'tag' | 'prompt' | 'draw' | 'blend' | 'context' | 'interface' | 'pipeline';
+/**
+ * `draw` is now the Blend workbench: its canvas composite IS the Context Image, and the pure
+ * Mask layer supplies the mask. The standalone `mask` / `blend` / `tag` tabs were folded into
+ * it (the Tag buttons live in its toolbar).
+ */
+export type Tab = 'prompt' | 'draw' | 'context' | 'interface' | 'pipeline';
 
 export interface InterfacePort {
   num: number;

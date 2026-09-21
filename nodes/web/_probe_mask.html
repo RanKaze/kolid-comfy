@@ -3520,5 +3520,106 @@ resetHistory();          // the empty canvas is step 0; everything from here on 
 // The parent only answers when it can resolve one, and the dedupe set keeps this idempotent.
 if (window.parent !== window) window.parent.postMessage({ type: 'blend-request-init' }, '*');
 </script>
+
+<script>
+(function () {
+  var lines = [];
+  function L(s) { lines.push(s); }
+  function fmt(label, sel) {
+    var e = document.querySelector(sel);
+    if (!e) { L(label + ' :: ABSENT'); return; }
+    var r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+    L(label + ' :: x=' + Math.round(r.left) + ' y=' + Math.round(r.top) + ' w=' + Math.round(r.width) +
+      ' h=' + Math.round(r.height) + ' r=' + Math.round(r.right) + ' disp=' + cs.display +
+      ' ovf=' + (e.scrollWidth > e.clientWidth + 1 && e.clientWidth > 0 ? 'CLIP' : '-'));
+  }
+  function probe(tag) {
+    L('--- ' + tag + ' ---');
+    L('label=' + document.getElementById('maskDecalLabel').textContent +
+      ' | invert=' + JSON.stringify(document.getElementById('maskInvertBtn').style.display) +
+      ' | clearText=' + document.getElementById('maskResetBtn').textContent +
+      ' | targetRow=' + JSON.stringify(document.getElementById('paintTargetRow').style.display) +
+      ' | hint=' + JSON.stringify(document.getElementById('maskTargetLabel').textContent) +
+      ' disp=' + JSON.stringify(document.getElementById('maskTargetLabel').style.display) +
+      ' | mode=' + mode + ' | section=' + document.getElementById('maskSection').className);
+    fmt('label  ', '#maskDecalLabel'); fmt('invert ', '#maskInvertBtn'); fmt('clear  ', '#maskResetBtn');
+    fmt('hint   ', '#maskTargetLabel'); fmt('target ', '#paintTargetRow');
+    var row = document.querySelector('.mask-layer-row');
+    if (row) {
+      L('maskRow h=' + Math.round(row.getBoundingClientRect().height) + ' kids=' +
+        Array.prototype.map.call(row.children, function (c) { return c.className; }).join(' | '));
+      var main = row.querySelector('.mask-row-main');
+      L(' rowX=' + Math.round(row.getBoundingClientRect().left));
+      Array.prototype.forEach.call(main.children, function (c) {
+        var r = c.getBoundingClientRect();
+        L('   main child ' + c.className + ' x=' + Math.round(r.left) + ' w=' + Math.round(r.width) + ' h=' + Math.round(r.height));
+      });
+      var op = row.querySelector('.mask-opacity');
+      if (op) {
+        L(' opacity h=' + Math.round(op.getBoundingClientRect().height));
+        Array.prototype.forEach.call(op.children, function (c) {
+          var r = c.getBoundingClientRect();
+          L('   op child ' + c.className + '/tag=' + c.tagName + ' x=' + Math.round(r.left) + ' w=' + Math.round(r.width));
+        });
+      }
+    }
+    var n = document.querySelector('.layer-row:not(.mask-layer-row)');
+    if (n) {
+      L('normalRow h=' + Math.round(n.getBoundingClientRect().height));
+      var h = n.querySelector('.layer-row-main');
+      Array.prototype.forEach.call(h.children, function (c) {
+        var r = c.getBoundingClientRect();
+        L('   main child ' + c.className + ' x=' + Math.round(r.left) + ' w=' + Math.round(r.width) + ' h=' + Math.round(r.height));
+      });
+    }
+  }
+  function fakeLayer(id, name) {
+    return { id: id, key: null, name: name, src: '', img: null, visible: true,
+             transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+             mask: null, maskCtx: null, maskThumbEl: null,
+             decal: null, decalCtx: null, decalThumbEl: null, canvasThumbEl: null };
+  }
+  try {
+    canvasW = 1400; canvasH = 900;
+    layoutCanvas();
+    ensureMaskLayer(false);
+    var mc = maskLayer.decalCtx;
+    mc.fillStyle = '#fff'; mc.beginPath(); mc.ellipse(700, 450, 420, 250, 0, 0, 7); mc.fill();
+    layers.unshift(fakeLayer(++layerSeq, 'hero-shot.png'));
+
+    selectMaskLayer();
+    renderLayerList(); render();
+    L('panel x=' + Math.round(document.getElementById('sidePanel').getBoundingClientRect().left) +
+      ' w=' + Math.round(document.getElementById('sidePanel').getBoundingClientRect().width));
+    probe('MASK LAYER SELECTED');
+
+    var l2 = layers[0];
+    paintTarget = 'decal'; selectLayer(l2.id, 'mask'); renderLayerList(); render();
+    probe('DECAL TARGET (normal layer)');
+
+    var l3 = layers[0];
+    paintTarget = 'mask'; selectLayer(l3.id, 'mask'); renderLayerList(); render();
+    probe('MASK TARGET (normal layer)');
+
+    // overflow sweep, done in the decal state (the busiest header)
+    var panel = document.getElementById('sidePanel'), pr = panel.getBoundingClientRect();
+    var all = panel.querySelectorAll('*'), bad = [];
+    for (var i = 0; i < all.length; i++) {
+      var e = all[i], r = e.getBoundingClientRect();
+      if (!r.width && !r.height) continue;
+      if (r.right > pr.right + 0.5 || r.left < pr.left - 0.5) {
+        bad.push('OUT ' + (e.id || e.className || e.tagName) + ' ' + Math.round(r.left) + '..' + Math.round(r.right) + ' vs ' + Math.round(pr.left) + '..' + Math.round(pr.right));
+      }
+    }
+    L('overflow: ' + (bad.length ? bad.join(' ;; ') : 'none'));
+  } catch (err) { L('ERROR ' + (err && err.message)); L(String(err && err.stack).slice(0, 300)); }
+
+  document.body.innerHTML = '';
+  var pre = document.createElement('pre');
+  pre.setAttribute('style', 'color:#0f0;background:#000;font:12px/1.4 monospace;white-space:pre;padding:8px;margin:0');
+  pre.textContent = lines.join('\n');
+  document.body.appendChild(pre);
+})();
+</script>
 </body>
 </html>

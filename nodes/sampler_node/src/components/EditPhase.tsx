@@ -1,6 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
-import type { PipelineBlock, DetailerBlockParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
+import type { PipelineBlock, DetailerBlockParams, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -87,23 +86,12 @@ const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> 
 interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
-  maskUrl: string;
-  drawUrl: string;
   promptUrl: string;
-  maskConfirmed: boolean;
   promptReady: boolean;
-  autoTagging: boolean;
-  hasTagger: boolean;
-  tagPreviews: TagPreviews | null;
-  tagResult: string | null;
-  debugData: DebugRecoverData | null;
   detailStatus: 'idle' | 'running' | 'done' | 'error';
-  detailProgress: { progress: number; current: number; total: number };
-  resultImages: { original: string; detailed: string; originalKey: string | null; detailedKey: string | null } | null;
   history: HistoryItem[];
   onRefreshHistory: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
-  maskIframeRef: React.RefObject<HTMLIFrameElement>;
   blocks: PipelineBlock[];
   /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
   architecture: string | null;
@@ -114,8 +102,6 @@ interface EditPhaseProps {
   onAddBlock: (type: 'detailer' | 'interface') => void;
   onRemoveBlock: (blockId: string) => void;
   onReorderBlocks: (fromIdx: number, toIdx: number) => void;
-  onRunTag: (mode: 'mask' | 'covered' | 'full') => void;
-  onRunDetailer: () => void;
   onSelectImage: (key: string) => void;
   onFinishClick: () => void;
   showFinishDialog: boolean;
@@ -141,12 +127,11 @@ interface EditPhaseProps {
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
-  tab, onTabChange, maskUrl, drawUrl, promptUrl,
-  maskConfirmed, promptReady, autoTagging, hasTagger, tagPreviews, tagResult,
-  debugData, detailStatus, detailProgress, resultImages,
-  history, onRefreshHistory, promptIframeRef, maskIframeRef,
+  tab, onTabChange, promptUrl,
+  promptReady, detailStatus,
+  history, onRefreshHistory, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
-  onRunTag, onRunDetailer, onSelectImage,
+  onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
@@ -158,16 +143,37 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
-  const [contextPreview, setContextPreview] = useState<{ image: string; mask: string | null } | null>(null);
   const [contextDragOver, setContextDragOver] = useState(false);
-  const [promptPreview, setPromptPreview] = useState<{ prompts: { name: string; prompt: string }[]; custom: string }>({ prompts: [], custom: '' });
-  const [loraPreview, setLoraPreview] = useState<{ name: string; strength: number; file: string }[]>([]);
-  // draw tab 内部子模式：mask（遮罩编辑）/ draw（自由绘画）
-  const [drawMode, setDrawMode] = useState<'mask' | 'draw'>('mask');
   // 右键菜单
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: HistoryItem } | null>(null);
   // Resize Modal
   const [resizeModal, setResizeModal] = useState<{ item: HistoryItem } | null>(null);
+  // Blend layer picker (the workbench iframe asks the host for images to add as layers)
+  const [blendPicked, setBlendPicked] = useState<string[]>([]);
+  // Live thumbnail of the workbench composite — that composite *is* the Context Image.
+  const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
+  // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
+  // one that only tints the canvas. The tinting itself happens in the iframe, so we forward it.
+  const [previewTint, setPreviewTint] = useState(0.3);
+
+  useEffect(() => { if (showBlendSelect) setBlendPicked([]); }, [showBlendSelect]);
+
+  useEffect(() => {
+    const onPreview = (event: MessageEvent) => {
+      if (event.data?.type !== 'blend-preview') return;
+      const image = event.data.image as string | null;
+      if (!image) { setBlendPreview(null); return; }
+      const w = Number(event.data.width) || 0, h = Number(event.data.height) || 0;
+      setBlendPreview({ image, size: w && h ? `${w}×${h}` : '' });
+    };
+    window.addEventListener('message', onPreview);
+    return () => window.removeEventListener('message', onPreview);
+  }, []);
+
+  const applyPreviewTint = useCallback((v: number) => {
+    setPreviewTint(v);
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-preview-tint', value: v }, '*');
+  }, [blendIframeRef]);
 
   // 关闭右键菜单（点击任意处）
   React.useEffect(() => {
@@ -209,94 +215,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setResizeModal(null);
   }, [onRefreshHistory]);
 
-  // Fetch context preview when entering draw tab
-  React.useEffect(() => {
-    if (tab === 'draw') {
-      fetch('/api/context_preview')
-        .then(r => r.json())
-        .then(data => {
-          if (data.image) setContextPreview({ image: data.image, mask: data.mask ?? null });
-        })
-        .catch(() => {});
-    }
-  }, [tab, currentContextKey, detailStatus]);
-
-  // Fetch prompt / lora preview for draw tab (from prompt server)
-  React.useEffect(() => {
-    if (tab !== 'draw') return;
-    const base = (promptUrl || '').replace(/\/[^/]*$/, '');
-    if (!base) return;
-    const load = () => {
-      Promise.all([
-        fetch(`${base}/prompts_data`).then(r => r.json()).catch(() => null),
-        fetch(`${base}/lora_data`).then(r => r.json()).catch(() => null),
-      ]).then(([pd, ld]) => {
-        if (pd) {
-          const categories = pd.categories || {};
-          const nameToPrompt: Record<string, string> = {};
-          for (const cat of Object.values(categories) as any[]) {
-            const prompts = (cat && cat.prompts) || [];
-            for (const p of prompts) {
-              if (p && p.name) nameToPrompt[p.name] = p.prompt || p.name;
-            }
-          }
-          // 优先使用实时选中的 prompt（selected_prompts，已是 program 增删改后的最终结果），回退 run 后的快照（last_selected）
-          let prompts: { name: string; prompt: string }[] = [];
-          if (pd.selected_prompts && pd.selected_prompts.length) {
-            prompts = (pd.selected_prompts as string[]).map((text) => ({ name: text, prompt: text }));
-          } else if (pd.last_selected && pd.last_selected.length) {
-            prompts = (pd.last_selected as string[]).map((name) => ({ name, prompt: nameToPrompt[name] || name }));
-          }
-          setPromptPreview({ prompts, custom: pd.custom_prompts || '' });
-        }
-        if (ld) {
-          // 优先使用实时选中的 lora（selected_loras），回退 run 后的快照（last_selected_loras）
-          const loras = ((ld.selected_loras || ld.last_selected_loras) || []) as any[];
-          setLoraPreview(loras.map((l: any) => ({
-            name: l.name || (l.file_path ? l.file_path.split('/').pop() : '') || '',
-            strength: typeof l.strength === 'number' ? l.strength : (l.strength == null ? 1 : Number(l.strength)),
-            file: (l.file_path || '').split('/').pop() || (l.file_path || ''),
-          })));
-        }
-      }).catch(() => {});
-    };
-    load();
-  }, [tab, currentContextKey, promptReady]);
-
-  // context image 改变时，通知 draw tab 常驻的 mask / draw iframe 重新加载（reload-image）
-  React.useEffect(() => {
-    if (tab === 'draw') {
-      // 等后端 _switch_image 更新 mask server 的图后再 reload
-      const t = setTimeout(() => {
-        drawMaskIframeRef.current?.contentWindow?.postMessage({ type: 'reload-image' }, '*');
-        drawEditorIframeRef.current?.contentWindow?.postMessage({ type: 'reload-image' }, '*');
-      }, 120);
-      return () => clearTimeout(t);
-    }
-  }, [tab, currentContextKey]);
-
-  // Draw-mode mask iframe 实时同步后会 postMessage('mask-confirmed')，重新拉取 preview 以反映最新 mask
-  React.useEffect(() => {
-    if (tab !== 'draw') return;
-    const onMsg = (e: MessageEvent) => {
-      if (e.data && (e.data.type === 'mask-confirmed' || e.data.type === 'draw-confirmed')) {
-        fetch('/api/context_preview')
-          .then(r => r.json())
-          .then(data => {
-            if (data.image) setContextPreview({ image: data.image, mask: data.mask ?? null });
-          })
-          .catch(() => {});
-      }
-    };
-    window.addEventListener('message', onMsg);
-    return () => window.removeEventListener('message', onMsg);
-  }, [tab]);
+  // `draw` is the Blend workbench: the canvas composite is the Context Image and the pure Mask
+  // layer is the mask, so the old mask / blend / tag tabs are gone (the Tag buttons live in the
+  // workbench toolbar).
   const tabs: { id: Tab; icon: string; color: string }[] = [
-    { id: 'mask', icon: 'mask', color: '#ff9f0a' },
-    { id: 'tag', icon: 'tag', color: '#af52de' },
     { id: 'prompt', icon: 'prompt', color: '#0a84ff' },
     { id: 'draw', icon: 'draw', color: '#30d158' },
-    { id: 'blend', icon: 'blend', color: '#ff9f0a' },
     { id: 'context', icon: 'context', color: '#64d2ff' },
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
     ...(pipelinePackages.length > 0 ? [{ id: 'pipeline' as Tab, icon: 'pipeline', color: '#30d158' }] : []),
@@ -314,8 +238,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const drawMaskIframeRef = React.useRef<HTMLIFrameElement>(null);
-  const drawEditorIframeRef = React.useRef<HTMLIFrameElement>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -382,7 +304,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       {/* Sidebar — vertical icon tabs */}
       <div style={styles.sidebar}>
         <div style={styles.sidebarTabs}>
-          {tabs.filter(t => t.id !== 'tag' || hasTagger).map(t => (
+          {tabs.map(t => (
             <button
               key={t.id}
               title={t.id}
@@ -398,7 +320,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               }}
             >
               <TabIcon icon={t.icon} />
-              {t.id === 'mask' && maskConfirmed && <span style={styles.sidebarDot} />}
               {t.id === 'prompt' && promptReady && <span style={styles.sidebarDot} />}
               {t.id === 'draw' && detailStatus === 'done' && <span style={styles.sidebarDot} />}
             </button>
@@ -415,70 +336,41 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
       {/* Tab content — iframes always mounted, hidden via display:none */}
       <div style={styles.content}>
-        {/* Mask — always mounted */}
-        <div style={{ ...styles.iframeWrap, display: tab === 'mask' ? 'flex' : 'none' }}>
-          <iframe ref={maskIframeRef} src={maskUrl} style={styles.iframe} title="Mask" allow="clipboard-write" />
-        </div>
-
-        {/* Tag */}
-        {tab === 'tag' && (
-          <div style={styles.scrollContent}>
-            <div style={styles.tagGrid}>
-              <TagCard label="Mask Tag" description="Cropped to mask" image={tagPreviews?.mask} onClick={() => onRunTag('mask')} disabled={autoTagging} />
-              <TagCard label="Covered Tag" description="Mask kept, outside white" image={tagPreviews?.covered} onClick={() => onRunTag('covered')} disabled={autoTagging} />
-              <TagCard label="Full Tag" description="Full image" image={tagPreviews?.full} onClick={() => onRunTag('full')} disabled={autoTagging} />
-            </div>
-            {autoTagging && (
-              <div style={styles.centerRow}><div style={styles.spinner} /><span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600 }}>Running tagger…</span></div>
-            )}
-            {tagResult && (
-              <div style={styles.tagResultBar}>
-                <span style={{ color: '#64d2ff', fontSize: 12, fontWeight: 600 }}>Tag:</span>
-                <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: 12, marginLeft: 6 }}>{tagResult}</span>
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Prompt — always mounted */}
         <div style={{ ...styles.iframeWrap, display: tab === 'prompt' ? 'flex' : 'none' }}>
           <iframe ref={promptIframeRef} src={promptUrl} style={styles.iframe} title="Prompt" allow="clipboard-write" />
         </div>
 
-        {/* Draw */}
-        {tab === 'draw' && (
-          <div style={styles.drawLayout}>
-            {/* Left: settings */}
+        {/* Blend workbench — this tab stays mounted for the whole session: the iframe owns
+            the layer stack and the Mask layer, so unmounting it would lose them. */}
+        <div style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
+          {/* Left: settings */}
             <div style={styles.drawSettingsPanel}>
-              {contextPreview && contextPreview.image && (
-                <div style={styles.contextPreviewBox}>
-                  <div style={styles.sectionTitle}>Context</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={{ position: 'relative', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' }}>
-                      <img src={contextPreview.image} alt="Context" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                      {contextPreview.mask ? (
-                        <div style={{
-                          position: 'absolute',
-                          inset: 0,
-                          backgroundColor: 'rgba(255, 0, 0, 0.5)',
-                          WebkitMaskImage: `url(${contextPreview.mask})`,
-                          maskImage: `url(${contextPreview.mask})`,
-                          WebkitMaskSize: 'contain',
-                          maskSize: 'contain',
-                          WebkitMaskRepeat: 'no-repeat',
-                          maskRepeat: 'no-repeat',
-                          WebkitMaskPosition: 'center',
-                          maskPosition: 'center',
-                          maskMode: 'luminance',
-                          pointerEvents: 'none',
-                        } as React.CSSProperties} />
-                      ) : (
-                        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 11 }}>No mask</div>
-                      )}
-                    </div>
-                  </div>
+              {/* Live preview of the workbench composite. The composite IS the Context Image,
+                  so this is what Run Detailer feeds on (tinted where the Mask layer is painted). */}
+              <div style={styles.contextPreviewBox}>
+                <div style={styles.sectionTitle}>Context</div>
+                <div style={styles.contextPreviewWrap}>
+                  {blendPreview ? (
+                    <>
+                      <img src={blendPreview.image} alt="Context preview" style={styles.blendPreviewImg} />
+                      {blendPreview.size && <div style={styles.blendPreviewBadge}>{blendPreview.size}</div>}
+                    </>
+                  ) : (
+                    <div style={styles.blendPreviewEmpty}>Add a layer to preview the composite</div>
+                  )}
                 </div>
-              )}
+                <div style={styles.previewTintRow}>
+                  <label style={styles.previewTintLabel}>Mask Tint</label>
+                  <input
+                    style={styles.previewTintRange}
+                    type="range" min={0} max={1} step={0.01} value={previewTint}
+                    onChange={e => applyPreviewTint(parseFloat(e.target.value))}
+                    title="How strongly the Mask layer reads in this preview. Independent from the workbench's own Mask layer tint."
+                  />
+                  <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
+                </div>
+              </div>
               {/* Global params */}
               <div style={styles.sectionTitle}>Preprocess Settings</div>
               <div style={styles.paramRow}>
@@ -822,198 +714,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </div>
             </div>
 
-            {/* Right: status / results / run button */}
-            <div style={styles.drawMainArea}>
-              <div style={styles.drawSplit}>
-                {/* 左半：遮罩/绘画编辑器（子 tab 切换 mask / draw），两个 iframe 常驻仅切换显示 */}
-                <div style={styles.drawMaskCol}>
-                  <div style={styles.drawSubTabRow}>
-                    <button
-                      style={{ ...styles.drawSubTab, ...(drawMode === 'mask' ? styles.drawSubTabActive : {}) }}
-                      onClick={() => setDrawMode('mask')}
-                    >Mask</button>
-                    <button
-                      style={{ ...styles.drawSubTab, ...(drawMode === 'draw' ? styles.drawSubTabActive : {}) }}
-                      onClick={() => setDrawMode('draw')}
-                      disabled={!drawUrl}
-                    >Draw</button>
-                  </div>
-                  <iframe
-                    ref={drawMaskIframeRef}
-                    src={`${maskUrl}?mode=draw`}
-                    style={{ ...styles.drawMaskFrame, display: drawMode === 'mask' ? 'block' : 'none' }}
-                    title="Mask Editor"
-                  />
-                  <iframe
-                    ref={drawEditorIframeRef}
-                    src={drawUrl ? `${drawUrl}?mode=draw` : undefined}
-                    style={{ ...styles.drawMaskFrame, display: drawMode === 'draw' && drawUrl ? 'block' : 'none' }}
-                    title="Draw Editor"
-                  />
-                  {!drawUrl && drawMode === 'draw' && (
-                    <div style={styles.drawFallbackHint}>Draw editor unavailable (draw_url not configured)</div>
-                  )}
-                  {(detailStatus === 'running' || detailStatus === 'error') && (
-                    <div style={styles.drawStatusCenter}>
-                      {detailStatus === 'running' ? (
-                        <>
-                          <div style={styles.spinner} />
-                          <div style={{ fontSize: 17, fontWeight: 700, color: '#fff' }}>Running Detailer</div>
-                          {detailProgress.total > 0 && (
-                            <>
-                              <div style={styles.progressBarTrack}>
-                                <div style={{ ...styles.progressBarFill, width: `${detailProgress.progress * 100}%` }} />
-                              </div>
-                              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)' }}>
-                                Step {detailProgress.current} / {detailProgress.total}
-                              </div>
-                            </>
-                          )}
-                        </>
-                      ) : (
-                        <div style={{ fontSize: 17, fontWeight: 700, color: '#ff453a' }}>Error</div>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                {/* 右半：结果卡片 + debug */}
-                <div style={styles.drawResultCol}>
-                {detailStatus === 'done' && resultImages && (
-                  <div style={styles.resultGrid}>
-                    {(() => {
-                      const origKey = resultImages.originalKey;
-                      const origActive = origKey === currentContextKey;
-                      return (
-                        <div
-                          style={{
-                            ...styles.resultCard,
-                            borderColor: origActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                            boxShadow: origActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                            cursor: origKey && !origActive ? 'pointer' : 'default',
-                          }}
-                          onClick={() => origKey && !origActive && onSetContext(origKey)}
-                        >
-                          <div style={styles.resultLabel}>Original</div>
-                          <img src={resultImages.original} alt="Original" style={styles.resultImg} />
-                        </div>
-                      );
-                    })()}
-                    {(() => {
-                      const detKey = resultImages.detailedKey;
-                      const detActive = detKey === currentContextKey;
-                      return (
-                        <div
-                          style={{
-                            ...styles.resultCard,
-                            borderColor: detActive ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                            boxShadow: detActive ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                            cursor: detKey && !detActive ? 'pointer' : 'default',
-                          }}
-                          onClick={() => detKey && !detActive && onSetContext(detKey)}
-                        >
-                          <div style={styles.resultLabel}>Detailed</div>
-                          <img src={resultImages.detailed} alt="Detailed" style={styles.resultImg} />
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                <div style={styles.debugPanel}>
-                  <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Debug</div>
-                  {debugData ? (
-                    <>
-                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <DebugImage src={debugData.background} label="Background" />
-                        <DebugImage src={debugData.image} label="Image" />
-                        <DebugMask src={debugData.mask} label="Mask" />
-                        {debugData.reference_images && debugData.reference_images.map((ref, i) => (
-                          <DebugImage key={i} src={ref.src} label={ref.name} />
-                        ))}
-                      </div>
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
-                        <DebugString label="crop_x" value={debugData.crop_x} />
-                        <DebugString label="crop_y" value={debugData.crop_y} />
-                        <DebugString label="crop_w" value={debugData.crop_width} />
-                        <DebugString label="crop_h" value={debugData.crop_height} />
-                      </div>
-                    </>
-                  ) : (
-                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（运行后显示 Debug 信息）</div>
-                  )}
-                </div>
-
-                <div style={{ ...styles.debugPanel, marginTop: 12 }}>
-                    <div style={{ ...styles.resultLabel, marginBottom: 8 }}>Prompt / LoRA</div>
-                    {promptPreview && (
-                      <div style={{ marginBottom: 10 }}>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>Prompts</div>
-                        {promptPreview.prompts.length === 0 && !promptPreview.custom && (
-                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（未选择）</div>
-                        )}
-                        {promptPreview.prompts.length > 0 && (
-                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', lineHeight: 1.5 }}>
-                            {promptPreview.prompts.map((p, i) => (
-                              <span key={i}>
-                                {i > 0 && <span style={{ color: 'rgba(255,255,255,0.4)' }}>, </span>}
-                                <span style={{ color: '#0a84ff' }}>{p.name}</span>
-                                {p.prompt && p.prompt !== p.name && (
-                                  <span style={{ color: 'rgba(255,255,255,0.55)' }}>: {p.prompt}</span>
-                                )}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {promptPreview.custom && (
-                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 3 }}>＋ {promptPreview.custom}</div>
-                        )}
-                      </div>
-                    )}
-                    {loraPreview && (
-                      <div>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 4 }}>LoRA</div>
-                        {loraPreview.length === 0 && (
-                          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>（未选择）</div>
-                        )}
-                        {loraPreview.map((l, i) => (
-                          <div key={i} style={{ fontSize: 12, color: 'rgba(255,255,255,0.8)', marginBottom: 3 }}>
-                            <span style={{ color: '#30d158' }}>{l.name || l.file}</span>
-                            <span style={{ color: 'rgba(255,255,255,0.55)' }}> · {l.strength}</span>
-                            {l.file && l.file !== l.name && (
-                              <span style={{ color: 'rgba(255,255,255,0.35)', fontSize: 11 }}> · {l.file}</span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Run button bottom-right + quick tag buttons */}
-              <div style={{ ...styles.runBtnWrap, display: 'flex', gap: 10, alignItems: 'center' }}>
-                <div style={styles.tagBtnRow}>
-                  <button style={styles.tagBtn} onClick={() => onRunTag('mask')} disabled={detailStatus === 'running'}>Mask Tag</button>
-                  <button style={styles.tagBtn} onClick={() => onRunTag('covered')} disabled={detailStatus === 'running'}>Covered Tag</button>
-                  <button style={styles.tagBtn} onClick={() => onRunTag('full')} disabled={detailStatus === 'running'}>Full Tag</button>
-                </div>
-                <button
-                  style={{ ...styles.runBtn, opacity: detailStatus === 'running' ? 0.4 : 1, cursor: detailStatus === 'running' ? 'not-allowed' : 'pointer' }}
-                  onClick={onRunDetailer}
-                  disabled={detailStatus === 'running'}
-                >
-                  {detailStatus === 'running' ? 'Running…' : 'Run Detailer'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Blend — iframe-based blend page with live preview */}
-        {tab === 'blend' && (
-          <BlendTab history={history} blendIframeRef={blendIframeRef} showBlendSelect={showBlendSelect} onBlendSelectImages={onBlendSelectImages} onCloseBlendSelect={onCloseBlendSelect} />
-        )}
+          {/* Right: the workbench. Its canvas composite IS the Context Image, and the
+              pure Mask layer is the mask sent to the backend. */}
+          <iframe
+            ref={blendIframeRef}
+            src="/blend_node.html"
+            style={styles.blendFrame}
+            title="Blend"
+            allow="clipboard-write"
+            onLoad={() => applyPreviewTint(previewTint)}
+          />
+        </div>
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
@@ -1213,24 +924,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           onCancel={() => setResizeModal(null)}
         />
       )}
-    </div>
-  );
-};
 
-// ── BlendTab ──
-const BlendTab: React.FC<{
-  history: HistoryItem[];
-  blendIframeRef: React.RefObject<HTMLIFrameElement>;
-  showBlendSelect: { role: 'layer' } | null;
-  onBlendSelectImages: (items: { key: string; name: string; src: string }[]) => void;
-  onCloseBlendSelect: () => void;
-}> = ({ history, blendIframeRef, showBlendSelect, onBlendSelectImages, onCloseBlendSelect }) => {
-  const [picked, setPicked] = useState<string[]>([]);
-  useEffect(() => { if (showBlendSelect) setPicked([]); }, [showBlendSelect]);
-  return (
-    <>
-      <iframe ref={blendIframeRef} src="/blend_node.html" style={{ width: '100%', height: '100%', border: 'none', background: '#0d0d0d' }} title="Blend" allow="clipboard-write" />
-      {/* Layer picker modal — multi-select */}
+      {/* Blend layer picker — the workbench asks for images, each picked one becomes a layer */}
       {showBlendSelect && (
         <div style={styles.overlay}>
           <div style={styles.dialog}>
@@ -1238,7 +933,7 @@ const BlendTab: React.FC<{
             <div style={styles.dialogSubtitle}>Pick one or more images. Each becomes a layer — the top of the list draws on top.</div>
             <div style={styles.dialogHistoryGrid}>
               {history.map(h => {
-                const on = picked.includes(h.key);
+                const on = blendPicked.includes(h.key);
                 return (
                   <button
                     key={h.key}
@@ -1247,7 +942,7 @@ const BlendTab: React.FC<{
                       borderColor: on ? '#0a84ff' : 'rgba(255,255,255,0.08)',
                       boxShadow: on ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
                     }}
-                    onClick={() => setPicked(p => (on ? p.filter(k => k !== h.key) : [...p, h.key]))}
+                    onClick={() => setBlendPicked(p => (on ? p.filter(k => k !== h.key) : [...p, h.key]))}
                   >
                     <div style={styles.historyImgWrap}>
                       <img src={h.src} alt={h.name} style={styles.historyImg} />
@@ -1270,29 +965,19 @@ const BlendTab: React.FC<{
             <div style={styles.dialogActions}>
               <button style={styles.cancelBtn} onClick={onCloseBlendSelect}>Cancel</button>
               <button
-                style={{ ...styles.confirmBtn, opacity: picked.length ? 1 : 0.45, cursor: picked.length ? 'pointer' : 'default' }}
-                disabled={!picked.length}
-                onClick={() => onBlendSelectImages(history.filter(h => picked.includes(h.key)).map(h => ({ key: h.key, name: h.name, src: h.src })))}
+                style={{ ...styles.confirmBtn, opacity: blendPicked.length ? 1 : 0.45, cursor: blendPicked.length ? 'pointer' : 'default' }}
+                disabled={!blendPicked.length}
+                onClick={() => onBlendSelectImages(history.filter(h => blendPicked.includes(h.key)).map(h => ({ key: h.key, name: h.name, src: h.src })))}
               >
-                {picked.length ? `Add ${picked.length} layer${picked.length > 1 ? 's' : ''}` : 'Add'}
+                {blendPicked.length ? `Add ${blendPicked.length} layer${blendPicked.length > 1 ? 's' : ''}` : 'Add'}
               </button>
             </div>
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 };
-
-const TagCard: React.FC<{ label: string; description: string; image?: string; onClick: () => void; disabled: boolean }> = ({ label, description, image, onClick, disabled }) => (
-  <button style={{ ...styles.tagCard, opacity: disabled ? 0.5 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }} onClick={onClick} disabled={disabled}>
-    <div style={styles.tagCardImageWrap}>
-      {image ? <img src={image} alt={label} style={styles.tagCardImage} /> : <div style={styles.tagCardPlaceholder}>No preview</div>}
-    </div>
-    <div style={styles.tagCardLabel}>{label}</div>
-    <div style={styles.tagCardDesc}>{description}</div>
-  </button>
-);
 
 // ── InterfaceTab ──
 const InterfaceTab: React.FC<{
@@ -1924,58 +1609,42 @@ const styles: Record<string, React.CSSProperties> = {
   iframe: { width: '100%', height: '100%', border: 'none', background: '#0d0d0d' },
 
   // Scrollable content
-  scrollContent: { flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 },
 
   // Tag cards — flex:1 equal width
-  tagGrid: { display: 'flex', gap: 12 },
-  tagCard: {
-    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 8,
-    background: 'rgba(28,28,30,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12,
-    cursor: 'pointer', transition: 'all 0.2s ease', textAlign: 'center',
-  },
-  tagCardImageWrap: { width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  tagCardImage: { width: '100%', height: '100%', objectFit: 'contain' },
-  tagCardPlaceholder: { fontSize: 10, color: 'rgba(255,255,255,0.3)', fontWeight: 500 },
-  tagCardLabel: { fontSize: 12, fontWeight: 700, color: '#fff' },
-  tagCardDesc: { fontSize: 10, fontWeight: 500, color: 'rgba(255,255,255,0.4)' },
 
-  centerRow: { display: 'flex', alignItems: 'center', gap: 8 },
-  tagResultBar: { display: 'flex', alignItems: 'center', background: 'rgba(100,210,255,0.08)', padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(100,210,255,0.15)' },
 
   // Draw tab layout: left settings + right main area
   drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
+  blendFrame: { flex: 1, minWidth: 0, alignSelf: 'stretch', height: '100%', border: 'none', background: '#0d0d0d', display: 'block' },
   drawSettingsPanel: {
     width: 260, flexShrink: 0, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
     background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
   contextPreviewBox: { marginBottom: 12 },
+  previewTintRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 },
+  previewTintLabel: { fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 58 },
+  previewTintRange: { flex: 1, minWidth: 0, accentColor: '#ff3b30' },
+  previewTintValue: { fontSize: 11, color: 'rgba(255,255,255,0.5)', minWidth: 26, textAlign: 'right' as const, fontVariantNumeric: 'tabular-nums' },
   contextPreviewWrap: { position: 'relative', width: '100%', aspectRatio: '1', borderRadius: 8, overflow: 'hidden', background: '#1a1a1a' },
-  ctxPreviewImg: { width: '100%', height: '100%', objectFit: 'cover' },
-  ctxPreviewMask: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' },
+  blendPreviewImg: { width: '100%', height: '100%', objectFit: 'contain', display: 'block' },
+  blendPreviewEmpty: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12, textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 11 } as React.CSSProperties,
+  blendPreviewBadge: { position: 'absolute', right: 6, bottom: 6, padding: '2px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.78)', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
   paramSelect: { flex: 1, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
-  drawMainArea: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 16, position: 'relative', overflowY: 'auto' },
 
-  drawStatusCenter: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(2px)', borderRadius: 12, zIndex: 5 },
 
   // Progress bar — iOS style
-  progressBarTrack: { width: 280, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 3, background: '#0a84ff', transition: 'width 0.3s ease' },
 
-  resultGrid: { display: 'flex', flexDirection: 'row', gap: 12, flex: 1, minHeight: 0, flexWrap: 'nowrap' },
   resultCard: { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 8, border: '0.5px solid rgba(255,255,255,0.08)' },
   resultLabel: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' },
-  resultImg: { width: '100%', flex: 1, minHeight: 0, objectFit: 'contain', borderRadius: 8 },
 
-  debugPanel: { background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 12, border: '0.5px solid rgba(255,69,58,0.15)', marginTop: 12 },
 
   // Run button — bottom right
-  runBtnWrap: { position: 'absolute', bottom: 16, right: 16, },
   runBtn: {
     padding: '10px 28px', fontSize: 14, fontWeight: 700, color: '#fff',
     background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 10, cursor: 'pointer',
@@ -1984,22 +1653,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   // Draw tab — right side two-column: mask iframe (left) + result cards (right)
-  drawSplit: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 12 },
-  drawMaskCol: { flex: '1.7 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 6, background: 'rgba(28,28,30,0.4)', borderRadius: 12, border: '0.5px solid rgba(255,255,255,0.08)', overflow: 'hidden', position: 'relative' },
-  drawSubTabRow: { display: 'flex', gap: 6, padding: '8px 10px 0' },
-  drawSubTab: { flex: 1, padding: '6px 0', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.5)', background: 'rgba(255,255,255,0.04)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 8, cursor: 'pointer', transition: 'all 0.15s ease' },
-  drawSubTabActive: { color: '#ff9f0a', background: 'rgba(255,159,10,0.12)', borderColor: 'rgba(255,159,10,0.35)' },
-  drawFallbackHint: { flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, color: 'rgba(255,255,255,0.35)' },
-  drawMaskFrame: { flex: 1, minHeight: 0, width: '100%', border: 'none', borderRadius: 8 },
-  drawResultCol: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' },
 
   // Quick tag buttons row (left of Run Detailer)
-  tagBtnRow: { display: 'flex', gap: 8, alignItems: 'center' },
-  tagBtn: {
-    padding: '8px 14px', fontSize: 12, fontWeight: 600, color: '#fff',
-    background: 'rgba(255,255,255,0.1)', border: '0.5px solid rgba(255,255,255,0.15)',
-    borderRadius: 8, cursor: 'pointer', transition: 'all 0.15s ease',
-  },
 
   // Context — left/right split layout
   contextLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
