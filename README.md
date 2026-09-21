@@ -112,7 +112,7 @@ npm run build
 
 - **PipelineNode** — 管线数据容器，整合 model/clip/vae/image/latent/mask/sampler/scheduler/steps/cfg/context/reference/config，支持链式传递和增量更新
 - **PipelineDetailerAdvancedNode** — 完整 Detailer 管线：Crop → Limit Pixels → KSamplerAdvanced → Recover Size → Recover Crop，支持 detector 自动检测、tagger 打标、inpaint 模式、foreach_mask（多 mask 独立处理）
-- **架构扩展系统** — ConfigArchitectureNode 设置架构名称（Krea2 / Flux2Klein / QwenEdit），PipelineEnableEditNode / PipelineEnableQwenEditNode 启用对应架构的编辑模式，自动应用模型 patch 和特殊 conditioning
+- **架构扩展系统** — ConfigArchitectureNode 设置架构名称（Krea2 / Flux2Klein / QwenEdit / QwenImage21），PipelineEnableEditNode / PipelineEnableQwenEditNode 启用对应架构的编辑模式，自动应用模型 patch 和特殊 conditioning；QwenImage21（Qwen-Image-2.1）参考图同时走 Qwen3-VL vision slots 与 reference_latents，ConfigQwenImage21Node 可调参考图缩放
 - **双模型 CFG** — ConfigModelNegativeNode 设置负向模型，采样时正向用 model、负向用 model_negative（DualModelCFGGuider）
 - **Context 系统** — ContextNode 按名称管理多组 prompt/LoRA，ContextQueryNode 通过相似度模型自动选择上下文，采样器通过 context_regex 正则匹配
 

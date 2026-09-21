@@ -376,6 +376,7 @@ class ContextData:
 from ..architecture import Krea2 as arch_krea2
 from ..architecture import Flux2Klein as arch_flux2klein
 from ..architecture import QwenEdit as arch_qwen_edit
+from ..architecture import QwenImage21 as arch_qwen_image21
 
 
 class ReferenceData:
@@ -701,6 +702,11 @@ class PipelineData:
             )
         elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
             condition = arch_flux2klein.get_conditioning(
+                self, mode, clip, vae, prompt, reference_latent, reference_image,
+                reference, conditioning_set_values, VAEDecode
+            )
+        elif arch_qwen_image21.matches(self.config):
+            condition = arch_qwen_image21.get_conditioning(
                 self, mode, clip, vae, prompt, reference_latent, reference_image,
                 reference, conditioning_set_values, VAEDecode
             )
@@ -1692,6 +1698,14 @@ class PipelineDetailerAdvancedNode:
         if next_pipeline.model is None:
             raise ValueError("PipelineData 中 model 为空，无法 Detailer")
 
+        # QwenImage2.1: 参考图与采样目标同尺寸时编辑质量最好，且 crop 尺寸需与
+        # vision token / latent 共享的 32 像素格对齐（每 vision token = 2x2 latent）
+        if arch_qwen_image21.matches(next_pipeline.config):
+            new_align = arch_qwen_image21.adjust_align(align)
+            if new_align != align:
+                print(f"[QwenImage21] align {align} -> {new_align}（crop 尺寸对齐 vision/latent 网格）")
+            align = new_align
+
         # ==================== 公共项 ====================
         
         context_positive, context_negative, context_loras = next_pipeline.context.get_context(context_regex)
@@ -2278,6 +2292,8 @@ class PipelineEnableEditNode:
             elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
                 next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
                 print("[EnableEdit] Flux2Klein: no model patch needed")
+            elif arch_qwen_image21.matches(next_pipeline.config):
+                print("[EnableEdit] QwenImage21: no model patch needed (reference_latents 原生支持)")
 
         return (next_pipeline,)
 

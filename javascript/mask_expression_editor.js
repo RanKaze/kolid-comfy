@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 
 /**
- * ImageDetectNode(prompt) / VideoSegmentationNode(text_prompt) 的掩码表达式
+ * ImageSegmentationNode(prompt) / VideoSegmentationNode(text_prompt) 的掩码表达式
  * 语法高亮编辑器。设计参考 application_node.js 的 DOM widget 编辑器：
  *   <pre> 高亮层 + 透明 <textarea> 叠加，同名 addDOMWidget 保证序列化。
  *
@@ -10,6 +10,11 @@ import { app } from "../../scripts/app.js";
  *   运算符: & 交集  + | 并集  - 差集
  *   函数: max(...) / min(...) / grow(表达式, 像素数)，参数逗号分隔，可嵌套
  *         grow 像素数为负 = 向内腐蚀（缩小），如 grow(body:0.2, -8)
+ *   语句: ';' 或换行分隔（一条语句一行即可），'名字 = 表达式' 赋值后即可复用
+ *         （只计算一次），最后一条语句的值即结果。如:
+ *         x=grow(character:0.1,20); y=grow((arm:0.2+hand:0.2),-2); x-y
+ *         行尾是运算符/逗号/左括号、或下一行以运算符开头时视为续行，
+ *         长语句可在运算符处折行。
  */
 
 // ── CSS 注入（一次） ─────────────────────────────────────────────
@@ -68,6 +73,9 @@ if (!document.getElementById(STYLE_ID)) {
 .kolid-expr-sep { color: #666; }            /* 函数参数逗号 */
 .kolid-expr-func { color: #c58fff; font-weight: bold; }  /* max / min / grow */
 .kolid-expr-num { color: #44dd44; }         /* 阈值数字 */
+.kolid-expr-var { color: #e5c07b; }         /* 变量名与引用 */
+.kolid-expr-assign { color: #ff9427; }      /* 赋值 '=' */
+.kolid-expr-semi { color: #999; }           /* 语句分隔 ';' */
 .kolid-expr-error { color: #ff4444; text-decoration: wavy underline; }
 .kolid-expr-warn { color: #ffaa00; text-decoration: wavy underline; }
 
@@ -89,7 +97,14 @@ if (!document.getElementById(STYLE_ID)) {
 
 // ── 词法/语法（与 libs/mask_expression.py 对齐） ─────────────────
 
-const EXPR_SPECIAL = "()&+|-:,";
+const EXPR_SPECIAL = "()&+|-:,;=";
+
+// 保留字：函数名不能被赋值遮蔽
+const RESERVED_NAMES = ["max", "min", "grow"];
+
+// 换行的续行判定（与后端 _normalize_newlines 一致）
+const CONT_AFTER = "&+|-=(,:";   // 行尾是这些字符 → 续行
+const CONT_BEFORE = "&+|-),;:="; // 下一行行首是这些字符 → 续行
 
 function escapeHTML(str) {
     return str.replace(/&/g, '&amp;')
@@ -99,24 +114,96 @@ function escapeHTML(str) {
               .replace(/'/g, '&#039;');
 }
 
-/** 切分为 [{kind:'special'|'atom', value}]，与后端 _tokenize 一致。 */
-function tokenizeExpr(text) {
+/**
+ * 切分为 [{kind:'special'|'atom'|'newline'}]，与后端 _tokenize 一致。
+ * newline 单独成 token，由 normalizeNewlines 换算成语句分隔或续行。
+ */
+/**
+ * 分词。keepSpace=true 时保留纯空白片段（kind:"space"），仅用于高亮层——
+ * 高亮层与 textarea 逐字符对齐，少一个空格后面的着色就会整体错位。
+ * 解析路径 keepSpace=false，与后端 _tokenize_line 丢弃纯空白片段的行为一致。
+ */
+function tokenizeExpr(text, keepSpace = false) {
     const tokens = [];
+    const lines = String(text).replace(/\r\n?/g, "\n").split("\n");
+    for (let i = 0; i < lines.length; i++) {
+        if (i) tokens.push({ kind: "newline", value: "\n" });
+        tokenizeLine(lines[i], tokens, keepSpace);
+    }
+    return tokens;
+}
+
+function tokenizeLine(line, tokens, keepSpace = false) {
     let i = 0;
-    while (i < text.length) {
-        const c = text[i];
+    while (i < line.length) {
+        const c = line[i];
         if (EXPR_SPECIAL.includes(c)) {
             tokens.push({ kind: "special", value: c });
             i += 1;
         } else {
             let j = i;
-            while (j < text.length && !EXPR_SPECIAL.includes(text[j])) j += 1;
-            const raw = text.slice(i, j);
+            while (j < line.length && !EXPR_SPECIAL.includes(line[j])) j += 1;
+            const raw = line.slice(i, j);
             if (raw.trim()) tokens.push({ kind: "atom", value: raw });
+            else if (keepSpace) tokens.push({ kind: "space", value: raw });
             i = j;
         }
     }
     return tokens;
+}
+
+/** 跳过换行/空白片段找邻居（换行与空格不参与着色判定）。 */
+function nthRelevant(tokens, start, step) {
+    for (let j = start; j >= 0 && j < tokens.length; j += step) {
+        if (tokens[j].kind !== "newline" && tokens[j].kind !== "space") return tokens[j];
+    }
+    return null;
+}
+
+/**
+ * 换行 → 语句分隔（等价 ';'）；续行的换行直接丢弃（与后端 _normalize_newlines 一致）。
+ */
+function normalizeNewlines(tokens) {
+    const out = [];
+    for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t.kind !== "newline") { out.push(t); continue; }
+        const prev = nthRelevant(out, out.length - 1, -1);
+        const nxt = nthRelevant(tokens, i + 1, 1);
+        if (prev && prev.kind === "special" && CONT_AFTER.includes(prev.value)) continue;
+        if (nxt && nxt.kind === "special" && CONT_BEFORE.includes(nxt.value)) continue;
+        out.push({ kind: "special", value: ";" });
+    }
+    return out;
+}
+
+/**
+ * 预扫所有赋值目标（atom 后紧跟 '='），与后端 _scan_var_names 一致。
+ * 赋值过的名字在整条表达式中一律按变量解析（遮蔽同名术语）。
+ */
+function scanVarNames(tokens) {
+    const names = new Set();
+    for (let i = 0; i < tokens.length - 1; i++) {
+        const t = tokens[i];
+        if (t.kind !== "atom") continue;
+        const n = nthRelevant(tokens, i + 1, 1);   // 跳过空白/换行（'x = a:0.2' 也要认出来）
+        if (!n || n.kind !== "special" || n.value !== "=") continue;
+        const name = t.value.trim();
+        if (name && !RESERVED_NAMES.includes(name)) names.add(name);
+    }
+    return names;
+}
+
+/** 变量名校验，返回错误消息或 null（与后端 _validate_var_name 一致）。 */
+function validateVarName(name) {
+    if (!name) return "变量名为空";
+    if (RESERVED_NAMES.includes(name)) {
+        return `变量名 '${name}' 是保留的函数名（${RESERVED_NAMES.join("/")}），请换一个名字。`;
+    }
+    if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(name)) {
+        return `变量名 '${name}' 不能是数字。`;
+    }
+    return null;
 }
 
 function parseThresholdValue(s) {
@@ -140,11 +227,14 @@ function suspectMissingColon(name) {
  */
 function validateExpression(text) {
     if (!text || !text.trim()) return { ok: false, error: "表达式为空", warning: null };
-    const tokens = tokenizeExpr(text);
+    const tokens = normalizeNewlines(tokenizeExpr(text));
     let pos = 0;
     const peek = (k) => tokens[pos + (k || 0)] || null;
     const next = () => tokens[pos++];
     let warning = null;
+    const addWarning = (msg) => { warning = warning ? `${warning} | ${msg}` : msg; };
+    const varNames = scanVarNames(tokens);
+    const defined = new Set();
 
     function parsePrimary() {
         const t = peek();
@@ -173,6 +263,25 @@ function validateExpression(text) {
         if (name === "grow" && n2 && n2.kind === "special" && n2.value === "(") {
             return parseGrowArgs();
         }
+        // 变量引用：赋值过的名字一律按变量解析（遮蔽同名术语）
+        if (varNames.has(name)) {
+            if (n2 && n2.kind === "special" && n2.value === "=") {
+                return "'=' 只能用于语句开头的变量赋值（如 'x = 表达式'）。";
+            }
+            if (n2 && n2.kind === "special" && n2.value === ":") {
+                return `变量 '${name}' 不能带阈值（阈值只用于术语）。`;
+            }
+            if (n2 && n2.kind === "special" && n2.value === "(") {
+                const n3 = peek(1), n4 = peek(2);
+                if (n3 && n3.kind === "atom" && n4 && n4.kind === "special" && n4.value === ")") {
+                    return `变量 '${name}' 不能带阈值（阈值只用于术语）。`;
+                }
+            }
+            if (!defined.has(name)) {
+                return `变量 '${name}' 在定义之前被使用，请先写 '${name} = 表达式'。`;
+            }
+            return null;
+        }
         // name:0.3
         if (n2 && n2.kind === "special" && n2.value === ":") {
             next();
@@ -198,7 +307,7 @@ function validateExpression(text) {
         }
         // 裸术语：疑似漏写 ':'（head0.2 → head:0.2）
         if (suspectMissingColon(name) !== null) {
-            warning = `术语 '${name}' 末尾像阈值，是否漏了 ':' ？`;
+            addWarning(`术语 '${name}' 末尾像阈值，是否漏了 ':' ？`);
         }
         return null;
     }
@@ -266,29 +375,89 @@ function validateExpression(text) {
                 next();
                 err = parsePrimary();
                 if (err) return err;
+            } else if (t && t.kind === "special" && t.value === "=") {
+                return "'=' 只能用于语句开头的变量赋值（如 'x = 表达式'）。";
             } else {
                 return null;
             }
         }
     }
 
-    const err = parseExpr();
-    if (err) return { ok: false, error: err, warning: null };
-    if (pos < tokens.length) {
-        return { ok: false, error: `在 '${tokens[pos].value}' 处存在多余内容`, warning: null };
+    // 语句：'名字 = 表达式' 赋值，或裸表达式
+    function parseStmt() {
+        const t = peek(), n = peek(1);
+        if (t && t.kind === "atom" && n && n.kind === "special" && n.value === "=") {
+            const name = t.value.trim();
+            const nameErr = validateVarName(name);
+            if (nameErr) return nameErr;
+            next(); // name
+            next(); // '='
+            const e = parseExpr();
+            if (e) return e;
+            // 先解析右侧再登记：'x = x - a' 中右侧的 x 指向上一次绑定
+            defined.add(name);
+            return null;
+        }
+        return parseExpr();
     }
-    return { ok: true, error: null, warning };
+
+    // 程序：语句以 ';' 或换行分隔（容忍空语句 / 行尾分号）
+    const stmtIsAssign = [];
+    while (true) {
+        while (peek() && peek().kind === "special" && peek().value === ";") next();
+        if (!peek()) break;
+        const t0 = peek(), n0 = peek(1);
+        const isAssign = !!(t0 && t0.kind === "atom" && n0 && n0.kind === "special" && n0.value === "=");
+        const err = parseStmt();
+        if (err) return { ok: false, error: err, warning: null };
+        stmtIsAssign.push(isAssign);
+        const t = peek();
+        if (!t) break;
+        if (!(t.kind === "special" && t.value === ";")) {
+            return { ok: false, error: `在 '${t.value}' 处存在多余内容（语句之间用 ';' 或换行分隔）`, warning: null };
+        }
+    }
+    if (!stmtIsAssign.length) return { ok: false, error: "表达式为空", warning: null };
+    // 只有最后一条语句的值是结果，前面的裸表达式语句属于死代码
+    for (let k = 0; k < stmtIsAssign.length - 1; k++) {
+        if (!stmtIsAssign[k]) {
+            addWarning(`第 ${k + 1} 条语句不是赋值，其值不会被使用（结果取最后一条语句的值）`);
+        }
+    }
+    return { ok: true, error: null, warning, vars: [...defined] };
 }
 
 /** 逐 token 着色为 HTML。 */
 function buildExprHighlightedHTML(text) {
     if (!text) return "";
-    const tokens = tokenizeExpr(text);
+    const tokens = tokenizeExpr(text, true);   // 保留空白片段，保证与 textarea 逐字符对齐
+    const varNames = scanVarNames(normalizeNewlines(tokens));
+    // 邻居查找跳过换行/空白 token（换行只是语句分隔/续行，不参与着色判定）
+    const nthPrev = (i, k) => {
+        let n = 0;
+        for (let j = i - 1; j >= 0; j--) {
+            if (tokens[j].kind === "newline" || tokens[j].kind === "space") continue;
+            if (++n === k) return tokens[j];
+        }
+        return null;
+    };
+    const nthNext = (i, k) => {
+        let n = 0;
+        for (let j = i + 1; j < tokens.length; j++) {
+            if (tokens[j].kind === "newline" || tokens[j].kind === "space") continue;
+            if (++n === k) return tokens[j];
+        }
+        return null;
+    };
     let html = "";
     for (let i = 0; i < tokens.length; i++) {
         const t = tokens[i];
-        const prev = tokens[i - 1] || null;
-        const nxt = tokens[i + 1] || null;
+        if (t.kind === "newline" || t.kind === "space") {
+            html += escapeHTML(t.value);   // 原样保留，保证与 textarea 字符对齐
+            continue;
+        }
+        const prev = nthPrev(i, 1);
+        const nxt = nthNext(i, 1);
         let cls = null;
 
         if (t.kind === "special") {
@@ -299,21 +468,25 @@ function buildExprHighlightedHTML(text) {
             }
             else if (t.value === ",") cls = "kolid-expr-sep";
             else if (t.value === ":") cls = "kolid-expr-colon";
+            else if (t.value === "=") cls = "kolid-expr-assign";
+            else if (t.value === ";") cls = "kolid-expr-semi";
             else cls = "kolid-expr-paren";
         } else {
             const name = t.value.trim();
-            const p2 = tokens[i - 2] || null;
+            const p2 = nthPrev(i, 2);
             const afterComma = prev && prev.kind === "special" && prev.value === ",";
             const afterMinusInArgs = prev && prev.kind === "special" && prev.value === "-"
                 && p2 && p2.kind === "special" && p2.value === ",";
             if ((name === "max" || name === "min" || name === "grow") && nxt && nxt.kind === "special" && nxt.value === "(") {
                 cls = "kolid-expr-func";
+            } else if (varNames.has(name)) {
+                cls = "kolid-expr-var";
             } else if (prev && prev.kind === "special" && prev.value === ":") {
                 cls = parseThresholdValue(t.value) === null ? "kolid-expr-error" : "kolid-expr-num";
             } else if ((afterComma || afterMinusInArgs) && /^\d+(?:\.\d+)?$/.test(name)) {
                 cls = "kolid-expr-num";  // grow 的像素参数（可带负号）
             } else {
-                const n2 = tokens[i + 2] || null;
+                const n2 = nthNext(i, 2);
                 const isSuffixNum = prev && prev.kind === "special" && prev.value === "("
                     && p2 && p2.kind === "atom"
                     && n2 && n2.kind === "special" && n2.value === ")";
@@ -347,7 +520,7 @@ function createExpressionEditor(initialValue, placeholder) {
     const textarea = document.createElement("textarea");
     textarea.className = "kolid-expr-input";
     textarea.value = initialValue || "";
-    textarea.placeholder = placeholder || "(body:0.2-face:0.2)&(human:0.1)";
+    textarea.placeholder = placeholder || "x=grow(body:0.2,5);x-face:0.2";
     textarea.rows = 1;
     editorWrap.appendChild(textarea);
 
@@ -360,7 +533,8 @@ function createExpressionEditor(initialValue, placeholder) {
         const empty = !textarea.value.trim();
         if (empty) {
             status.className = "kolid-expr-status";
-            status.textContent = "例: (body:0.2-face:0.2)&(human:0.1) | max(a:0.2,b:0.3) | grow(a:0.2,5) | grow(a:0.2,-5)";
+            status.textContent = "例: (body:0.2-face:0.2)&(human:0.1) | "
+                + "x=grow(skin:0.2,5);x-face:0.2（语句用 ';' 或换行分隔）";
         } else {
             const v = validateExpression(textarea.value);
             if (!v.ok) {
@@ -371,7 +545,9 @@ function createExpressionEditor(initialValue, placeholder) {
                 status.textContent = "⚠ " + v.warning;
             } else {
                 status.className = "kolid-expr-status ok";
-                status.textContent = "✓ 表达式有效";
+                status.textContent = v.vars && v.vars.length
+                    ? `✓ 表达式有效（变量 ${v.vars.join(", ")}）`
+                    : "✓ 表达式有效";
             }
         }
     }
@@ -384,8 +560,9 @@ function createExpressionEditor(initialValue, placeholder) {
 
 // ── 注册到节点 ─────────────────────────────────────────────────
 
-// 节点名 → 表达式 widget 名
+// 节点名 → 表达式 widget 名（ImageDetectNode 是旧名，旧工作流仍需要编辑器）
 const EXPR_WIDGETS = {
+    ImageSegmentationNode: "prompt",
     ImageDetectNode: "prompt",
     VideoSegmentationNode: "text_prompt",
 };

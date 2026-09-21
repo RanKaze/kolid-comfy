@@ -192,6 +192,32 @@ class ConfigKrea2EditNode:
         return (config,)
 
 
+class ConfigQwenImage21Node:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "config": ("CONFIG_DATA",),
+                "resolution": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 32,
+                                       "tooltip": "参考图缩放边长（32 的倍数，保持宽高比）。0=保持参考图自身尺寸并与采样目标同尺寸（detailer/编辑推荐，其它尺寸会偏移编辑）。"}),
+            }
+        }
+
+    RETURN_TYPES = ("CONFIG_DATA",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "process"
+    CATEGORY = "sampling/custom"
+
+    def process(self, config=None, resolution=0):
+        from .sampler_node import ConfigData
+        if config is None:
+            config = ConfigData()
+        else:
+            config = config.copy()
+        config["qwen_image21_resolution"] = resolution
+        return (config,)
+
+
 class SamplerConfigNode:
     @classmethod
     def INPUT_TYPES(cls):

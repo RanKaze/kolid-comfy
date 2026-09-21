@@ -46,7 +46,7 @@ from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
 from .image_node import mask_to_base64 as mask_to_red_base64
-from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein
+from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
 
 
@@ -1465,6 +1465,9 @@ class SnapshotDetailerSamplerNode:
         # 内不做额外 resize。
         limit_pixels_val = int(first_bp.get('pixels', 1048576))
         limit_align = int(first_bp.get('align', 8))
+        # QwenImage2.1: crop 尺寸需与 vision token / latent 共享的 32 像素格对齐
+        if arch_qwen_image21.matches(next_pipeline.config):
+            limit_align = arch_qwen_image21.adjust_align(limit_align)
         resized_image, resized_mask, resize_info = limit_pixels(
             image=cropped_image,
             pixels=limit_pixels_val,

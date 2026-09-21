@@ -1,3 +1,4 @@
 from .Krea2 import *
 from .Flux2Klein import *
 from .QwenEdit import *
+from .QwenImage21 import *

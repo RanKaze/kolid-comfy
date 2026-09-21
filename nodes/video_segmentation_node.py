@@ -22,6 +22,12 @@ text_prompt 掩码表达式格式（如 "(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.
       min(a, b, ...)  逐像素取最小
       grow(x, n)      n>0 掩码膨胀 n 像素,n<0 掩码腐蚀 |n| 像素(缩小),
                       如 "grow(person:0.2, 5)"、"grow(person:0.2, -8)"
+  - 变量与语句（';' 或换行分隔，一条语句一行即可；最后一条语句的值即结果）:
+      x = grow(character:0.1, 20)   赋值（只计算一次，可反复引用）
+      x - y                         引用变量
+      如 "x=grow(character:0.1,20);y=grow((arm:0.2+hand:0.2),-2);z=x-y;z+cloth:0.2"
+      赋值过的名字在整条表达式中都按变量解析（遮蔽同名术语），必须先赋值后使用
+      行尾是运算符/逗号/左括号、或下一行以运算符开头时视为续行
   - 同一术语在一帧内检测到多个实例时，取所有实例掩码的并集
 
 模型依赖 ComfyUI-SAM3（LoadSAM3Model 节点输出的 SAM3_MODEL_CONFIG），
@@ -124,11 +130,13 @@ def _model_config_key(detector):
 
 
 def _stream_segment_video(source, start_time, out_path, width, height, fps,
-                          root, unique_terms, process_frame, total_hint):
+                          root, unique_terms, process_frame, total_hint,
+                          invert=False):
     """逐帧流式分割：ffmpeg rgb24 解码 → process_frame 逐帧推理 → 无损灰度编码。
 
     process_frame(pil_image) -> {(name, threshold): [H, W] float mask}，
     由检测器种类（SAM3 / EOVSAM3）决定具体实现。
+    invert=True 时输出取反（1 - mask），用于"抠掉目标只留背景"等场景。
     最佳内存管理：任意时刻仅 1 帧 + 检测模型驻留内存，不缓存帧序列，
     适合任意分辨率/时长的视频。掩码编码与其它 Video 掩码节点一致
     （libx264 -qp 0 + gray，边缘零损失）。返回处理的帧数。
@@ -170,6 +178,8 @@ def _stream_segment_video(source, start_time, out_path, width, height, fps,
 
             # 按表达式合成最终掩码（从左到右布尔运算），写为 uint8 灰度帧
             final_mask = eval_expression(root, term_masks)
+            if invert:
+                final_mask = 1.0 - final_mask
             out_frame = (final_mask.clamp(0.0, 1.0) * 255.0 + 0.5).to(torch.uint8)
             encoder.stdin.write(out_frame.numpy().tobytes())
 
@@ -278,6 +288,9 @@ class VideoSegmentationNode:
     每帧独立 grounding 检测（无跟踪传播），每术语的阈值逐帧生效。
     运算符从左到右计算：& 交集、+ 并集、- 差集，可用括号分组。
     函数：max/min 逐像素取最值，grow(x, n) 膨胀（n>0）/腐蚀（n<0，即缩小）。
+    语句：';' 或换行分隔，'x = 表达式' 赋值后可用 x 复用（只计算一次），
+    如 "x=grow(skin:0.2,5);x-face:0.2" 或一行一条语句。
+    invert=True 时输出掩码取反（1 - mask），即保留背景、抠掉目标。
     输出为无损灰度掩码视频（与其它 Video 掩码节点格式一致），
     流式处理 + 磁盘缓存命中复用。
     """
@@ -298,11 +311,21 @@ class VideoSegmentationNode:
                     "multiline": False,
                     "tooltip": "Mask expression, e.g. '(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.1)'. "
                                "Operators (left-to-right): & intersect, + union, - subtract, | union. "
-                               "Term syntax: name, name:0.3, name(0.3), (name:0.3).",
+                               "Term syntax: name, name:0.3, name(0.3), (name:0.3). "
+                               "Functions: max(a,b,...), min(a,b,...), grow(x,n) "
+                               "(n>0 dilate, n<0 shrink/erode). "
+                               "Statements: ';' or newline separated, 'x = expr' then reuse x "
+                               "(each variable is evaluated only once, so grow/detection is not repeated), "
+                               "e.g. 'x=grow(skin:0.2,5);x-face:0.2'.",
                 }),
                 "default_threshold": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Confidence threshold used by terms without an explicit threshold.",
+                }),
+                "invert": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Invert the mask (output 1 - mask): keep the background instead of the "
+                               "detected objects. Applied after the whole expression.",
                 }),
             },
         }
@@ -313,13 +336,13 @@ class VideoSegmentationNode:
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(cls, detector, image_video, text_prompt, default_threshold=0.2):
+    def IS_CHANGED(cls, detector, image_video, text_prompt, default_threshold=0.2, invert=False):
         return _is_changed_tag(
             [_video_source_path(image_video) if image_video else None],
             {"text_prompt": text_prompt, "default_threshold": default_threshold,
-             "model": _model_config_key(detector)})
+             "invert": bool(invert), "model": _model_config_key(detector)})
 
-    def execute(self, detector, image_video, text_prompt, default_threshold=0.2):
+    def execute(self, detector, image_video, text_prompt, default_threshold=0.2, invert=False):
         """每帧对每个术语独立 grounding 检测，按表达式合成掩码，流式写入掩码视频。"""
         import comfy.model_management
 
@@ -345,7 +368,7 @@ class VideoSegmentationNode:
             "VideoSegmentationNode",
             {"source": source},
             {"text_prompt": text_prompt, "default_threshold": default_threshold,
-             "model": _model_config_key(detector)})
+             "invert": bool(invert), "model": _model_config_key(detector)})
         hit = cache_lookup(key)
         if hit is not None:
             print(f"[VideoSegmentationNode] Cache hit: {key[:12]}")
@@ -403,7 +426,8 @@ class VideoSegmentationNode:
 
         count = _stream_segment_video(
             source, start_time, out_path, w, h, fps,
-            root, unique_terms, process_frame, total)
+            root, unique_terms, process_frame, total,
+            invert=bool(invert))
 
         if count <= 0:
             raise ValueError("没有可处理的帧。")
