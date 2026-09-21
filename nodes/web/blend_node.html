@@ -1058,6 +1058,16 @@ function selectLayer(id, nextMode) {
     render();
 }
 
+// A newly added image keeps its own aspect ratio and is contained inside the canvas (PS "Place").
+// The first image defines the canvas, so it stays 1:1 with no letterboxing.
+function fitLayerToCanvas(l) {
+    const n = nativeSize(l.img);
+    if (!canvasW || !canvasH || !n.w || !n.h) return;
+    const scale = Math.min(canvasW / n.w, canvasH / n.h);
+    l.transform.w = n.w * scale / canvasW;
+    l.transform.h = n.h * scale / canvasH;
+}
+
 function addLayer(item) {
     loadImage(item.src, img => {
         const l = {
@@ -1079,6 +1089,7 @@ function addLayer(item) {
         layers.unshift(l);          // new images land on top
         selectedId = l.id;
         applyCanvasSize();
+        fitLayerToCanvas(l);
         layoutCanvas();
         renderLayerList();
         render();
