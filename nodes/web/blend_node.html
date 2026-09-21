@@ -1587,10 +1587,14 @@ function cancelPick() {
 }
 
 // ==================== 尺寸拖拽（Alt + 右键，PS 式） ====================
-// Horizontal scrub, exponential like the zoom scrub so it stays usable from 2 px to 9999 px.
+// Linear like the original brush resize: SIZE_DRAG_SENSITIVITY px of size per px dragged.
+// The ring stays pinned to the press point (PS behaviour) and only grows/shrinks — the
+// pointer can travel away, only the HUD follows it.
+const SIZE_DRAG_SENSITIVITY = 0.5;
 function beginSizeDrag(e) {
     const tool = maskTool;
     sizeDrag = { tool, startX: e.clientX, startY: e.clientY, startSize: toolSize(tool), moved: false };
+    moveCursor(e);
     syncSizeHud(e);
     setCursor('ew-resize');
     syncBrushCursor();
@@ -1603,7 +1607,7 @@ function updateSizeDrag(e) {
         if (Math.abs(dx) <= 2) return;
         d.moved = true;
     }
-    setToolSize(d.tool, d.startSize * Math.pow(2, dx / 160));
+    setToolSize(d.tool, d.startSize + dx * SIZE_DRAG_SENSITIVITY);
     syncSizeHud(e);
 }
 
@@ -1617,11 +1621,12 @@ function syncSizeHud(e) {
     sizeHudTool.textContent = d.tool === 'eraser' ? 'Eraser' : 'Brush';
 }
 
-function endSizeDrag() {
+function endSizeDrag(e) {
     const d = sizeDrag;
     sizeDrag = null;
     sizeHud.style.display = 'none';
     if (d && d.moved) setStatus(`${d.tool === 'eraser' ? 'Eraser' : 'Brush'} size ${toolSize(d.tool)} px`);
+    if (e) moveCursor(e);           // 松手后笔刷环重新贴到指针上
     syncBrushCursor();
     refreshCursor();
 }
@@ -1689,8 +1694,8 @@ viewport.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefaul
 // Pointer handling lives on the window, so strokes and transform drags keep following
 // the cursor after it leaves the canvas (and the brush keeps painting at the edges).
 window.addEventListener('mousemove', e => {
+    if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
-    if (sizeDrag) { updateSizeDrag(e); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
@@ -1709,7 +1714,7 @@ window.addEventListener('mousemove', e => {
 
 window.addEventListener('mouseup', e => {
     if (picking) endPick(e);
-    if (sizeDrag) endSizeDrag();
+    if (sizeDrag) endSizeDrag(e);
     if (viewDrag) endViewDrag(e);
     if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
     if (drag) {
