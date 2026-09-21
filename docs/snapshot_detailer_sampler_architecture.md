@@ -33,7 +33,7 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 │  │  │  │   .html      │  │   .html      │  │   preview        │  │      │  │
 │  │  │  │ (iframe)     │  │ (iframe)     │  │ /api/tag_previews│  │      │  │
 │  │  │  │              │  │              │  │ /api/run_tag     │  │      │  │
-│  │  │  │              │  │              │  │ /api/blend       │  │      │  │
+│  │  │  │              │  │              │  │ /api/blend_layers│  │      │  │
 │  │  │  │              │  │              │  │ /api/execute_    │  │      │  │
 │  │  │  │              │  │              │  │   interface      │  │      │  │
 │  │  │  │              │  │              │  │ /api/debug_     │  │      │  │
@@ -90,14 +90,16 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 │  │   ├── Enable Edit (IOSToggle) → Context Reference (IOSToggle) + Picker  │
 │  │   ├── Results: Original + Detailed cards (click → setContext)            │
 │  │   └── Debug: Background + Image + Mask + Refs (inline) + crop info       │
-│  ├── Blend tab   → iframe(blend_node.html) + image selector modal           │
+│  ├── Blend tab   → iframe(blend_node.html 图层系统) + layer picker modal     │
 │  ├── Context tab → History gallery (hover preview + select)                 │
 │  └── Interface tab → Port display + injection options + Execute button      │
 │                                                                             │
 │  前端→后端通信:                                                               │
 │  ├── fetch (REST API to Main Server)                                       │
 │  ├── postMessage (parent↔iframe: sync-mask, sync-prompt, reload-image,    │
-│  │                 mask-confirmed, prompt-confirmed, mask-data, blend-data) │
+│  │                 mask-confirmed, prompt-confirmed, mask-data, blend-select,│
+│  │                 blend-image-selected, blend-layers-data, blend-layers-   │
+│  │                 result)                                                  │
 │  └── Finish dialog → multi-select history images → POST /api/finish        │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -276,11 +278,18 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 结果展示 (Original + Detailed cards)
 - Debug 面板 (Background + Image + Mask + Reference Images + crop info)
 
-### 5. Blend 混合
-- blend_node.html iframe
-- BG/FG 选择器 (从 history 选)
-- 画笔/橡皮 (默认 Exponential)
-- Alpha blend (bg × (1-mask) + fg × mask)
+### 5. Blend 图层混合
+- blend_node.html iframe (图层系统: 可排序图层列表, 每行 = 图片缩略图 + 蒙版缩略图)
+- 图层选择器 (多选 history 图片, 新图层置于顶层)
+- 画布尺寸: 初始取最底层图片的像素尺寸; 在 Canvas 面板用弹窗 (Canvas Size…) 手动设置后即与图层解耦, 之后增删/重排图层都不再改变画布; 清空所有图层后回到跟随模式; 新图层默认拉伸铺满
+- Canvas Size 弹窗 (PS 式): 宽/高输入 + 比例锁 (默认锁定, 按当前值取基准; 解锁后可自由改比例), Match Bottom Layer 一键取底层尺寸, 上限 16384 px/边 与 40 MP; 开关 "Scale layers with the canvas" — 开 = 图层随新尺寸等比拉伸 (归一化 transform 不变), 关 = 图层的像素尺寸与位置保持不变、以画布中心为锚 (新区域透明, 画布变小则裁切)
+- 蒙版在图层自身像素空间, 随 transform 一起缩放/旋转/平移 (蒙版缩略图点开即画笔模式)
+- 蒙版画笔/橡皮 (默认 Exponential, 左键=显示 右键=隐藏; Invert/Reset 在画笔浮层)
+- 指针事件挂在 #viewport/window, 画笔移出画布仍保持笔刷光标且继续绘制 (可画到画布边缘)
+- Transform 调整框 (T/Ctrl+T): 移动 / 缩放 / 旋转 (Shift 吸附); 回车或 Esc 退出 (无框的 'none' 模式)
+- 调整框/控制点画在独立的屏幕空间 overlay canvas 上, 超出画布范围也可见可拖
+- 视图变换 (不影响导出): Z+左键放大 / Z+右键缩小 (单击步进), R+拖拽旋转视图 (Shift 15° 吸附, 单击 15°), Ctrl+F 水平翻转, 滚轮缩放, Space/中键拖拽平移; View 面板有 Fit/Reset/±/±15°/Flip H 与读数
+- 合成 (POST /api/blend_layers → composite_layers: 图层空间乘蒙版 + 预乘 alpha 采样 + source-over)
 - 结果加入 history
 
 ### 6. Context 图像管理

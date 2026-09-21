@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { DebugImage, DebugMask, DebugString } from '@kolid/ui-utils';
 import type { PipelineBlock, DetailerBlockParams, Tab, TagPreviews, DebugRecoverData, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
 
@@ -127,8 +127,8 @@ interface EditPhaseProps {
   currentContextKey: string | null;
   onSetContext: (key: string) => void;
   blendIframeRef: React.RefObject<HTMLIFrameElement>;
-  showBlendSelect: { role: 'background' | 'foreground' } | null;
-  onBlendSelectImage: (key: string, name: string, src: string) => void;
+  showBlendSelect: { role: 'layer' } | null;
+  onBlendSelectImages: (items: { key: string; name: string; src: string }[]) => void;
   onCloseBlendSelect: () => void;
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
@@ -150,7 +150,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
   currentContextKey, onSetContext,
-  blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect,
+  blendIframeRef, showBlendSelect, onBlendSelectImages, onCloseBlendSelect,
   interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
   pipelinePackages, onSwitchPipeline, currentPipelineKey,
 }) => {
@@ -1012,7 +1012,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Blend — iframe-based blend page with live preview */}
         {tab === 'blend' && (
-          <BlendTab history={history} blendIframeRef={blendIframeRef} showBlendSelect={showBlendSelect} onBlendSelectImage={onBlendSelectImage} onCloseBlendSelect={onCloseBlendSelect} />
+          <BlendTab history={history} blendIframeRef={blendIframeRef} showBlendSelect={showBlendSelect} onBlendSelectImages={onBlendSelectImages} onCloseBlendSelect={onCloseBlendSelect} />
         )}
 
         {/* Interface — package-driven sub-graph execution */}
@@ -1221,32 +1221,61 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 const BlendTab: React.FC<{
   history: HistoryItem[];
   blendIframeRef: React.RefObject<HTMLIFrameElement>;
-  showBlendSelect: { role: 'background' | 'foreground' } | null;
-  onBlendSelectImage: (key: string, name: string, src: string) => void;
+  showBlendSelect: { role: 'layer' } | null;
+  onBlendSelectImages: (items: { key: string; name: string; src: string }[]) => void;
   onCloseBlendSelect: () => void;
-}> = ({ history, blendIframeRef, showBlendSelect, onBlendSelectImage, onCloseBlendSelect }) => {
+}> = ({ history, blendIframeRef, showBlendSelect, onBlendSelectImages, onCloseBlendSelect }) => {
+  const [picked, setPicked] = useState<string[]>([]);
+  useEffect(() => { if (showBlendSelect) setPicked([]); }, [showBlendSelect]);
   return (
     <>
       <iframe ref={blendIframeRef} src="/blend_node.html" style={{ width: '100%', height: '100%', border: 'none', background: '#0d0d0d' }} title="Blend" allow="clipboard-write" />
-      {/* Image selection modal */}
+      {/* Layer picker modal — multi-select */}
       {showBlendSelect && (
         <div style={styles.overlay}>
           <div style={styles.dialog}>
-            <div style={styles.dialogTitle}>Select {showBlendSelect.role === 'background' ? 'Background' : 'Foreground'}</div>
+            <div style={styles.dialogTitle}>Add Layers</div>
+            <div style={styles.dialogSubtitle}>Pick one or more images. Each becomes a layer — the top of the list draws on top.</div>
             <div style={styles.dialogHistoryGrid}>
-              {history.map(h => (
-                <button key={h.key} style={styles.historyCard} onClick={() => {
-                  onBlendSelectImage(h.key, h.name, h.src);
-                }}>
-                  <div style={styles.historyImgWrap}>
-                    <img src={h.src} alt={h.name} style={styles.historyImg} />
-                  </div>
-                  <div style={styles.historyName}>{h.name}</div>
-                </button>
-              ))}
+              {history.map(h => {
+                const on = picked.includes(h.key);
+                return (
+                  <button
+                    key={h.key}
+                    style={{
+                      ...styles.historyCard,
+                      borderColor: on ? '#0a84ff' : 'rgba(255,255,255,0.08)',
+                      boxShadow: on ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                    }}
+                    onClick={() => setPicked(p => (on ? p.filter(k => k !== h.key) : [...p, h.key]))}
+                  >
+                    <div style={styles.historyImgWrap}>
+                      <img src={h.src} alt={h.name} style={styles.historyImg} />
+                      {on && (
+                        <div style={styles.historyCheck}>
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M5 13l4 4L19 7" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                    <div style={styles.historyName}>{h.name}</div>
+                  </button>
+                );
+              })}
             </div>
+            {history.length === 0 && (
+              <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: '12px 0' }}>No history yet.</div>
+            )}
             <div style={styles.dialogActions}>
               <button style={styles.cancelBtn} onClick={onCloseBlendSelect}>Cancel</button>
+              <button
+                style={{ ...styles.confirmBtn, opacity: picked.length ? 1 : 0.45, cursor: picked.length ? 'pointer' : 'default' }}
+                disabled={!picked.length}
+                onClick={() => onBlendSelectImages(history.filter(h => picked.includes(h.key)).map(h => ({ key: h.key, name: h.name, src: h.src })))}
+              >
+                {picked.length ? `Add ${picked.length} layer${picked.length > 1 ? 's' : ''}` : 'Add'}
+              </button>
             </div>
           </div>
         </div>
