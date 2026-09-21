@@ -7,8 +7,22 @@ import torchaudio
 import torch.nn.functional as F
 import numpy as np
 from ..libs.timestamp import parse_timestamp
-from ..libs.video_utils import FFMPEG_PATH, AUDIO_CACHE_DIR
+from ..libs.video_utils import FFMPEG_PATH, AUDIO_CACHE_DIR, get_video_metadata
 from ..libs.audio_utils import load_audio_from_file, extract_audio_segment, extract_audio_from_video
+from ..libs.video_transform import (
+    _run_ffmpeg,
+    cache_lookup,
+    cache_store,
+    cache_output_paths,
+    compute_transform_key,
+)
+from .video_fit_node import (
+    _video_source_path,
+    _video_output,
+    _preview_ui,
+    _is_changed_tag,
+)
+from comfy_api.latest import io
 
 
 
@@ -238,3 +252,110 @@ class VAEEncodeAudioTiled:
         # --- encode (SFT: _vae_encode_with_optional_tiling) ---
         t = vae.encode_tiled(waveform.movedim(1, -1), tile_y=1)
         return ({"samples": t},)
+
+
+class VideoReplaceAudioNode:
+    """替换视频音轨：视频流无损 copy，音轨替换为输入的 AUDIO。
+
+    原视频无论有没有音轨都可工作（只取其视频流）；
+    输出时长以原视频为准：音频过长被截断、过短则尾部静音。
+    最佳内存管理：ffmpeg 文件到文件流式 remux（-c:v copy 不重编码）；
+    结果按视频内容哈希 + 音频内容哈希磁盘缓存命中复用（output/videocache）。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO", {
+                    "tooltip": "Input video (its audio track, if any, will be replaced)"
+                }),
+                "audio": ("AUDIO", {
+                    "tooltip": "New audio track"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    FUNCTION = "execute"
+    CATEGORY = "Kolid-Toolkit"
+
+    @classmethod
+    def IS_CHANGED(cls, video, audio):
+        src = _video_source_path(video) if video is not None else None
+        wf = audio.get("waveform") if isinstance(audio, dict) else None
+        fp = "none"
+        if wf is not None:
+            fp = (f"{tuple(wf.shape)}_{float(wf.float().abs().sum()):.3f}"
+                  f"_{audio.get('sample_rate')}")
+        return _is_changed_tag([src], {"audio_fp": fp})
+
+    @staticmethod
+    def _audio_hash(audio):
+        """音频内容哈希 + 规范化后的 [C, T] 波形与采样率。"""
+        wf = audio["waveform"]
+        sr = int(audio.get("sample_rate") or 0)
+        if sr <= 0:
+            sr = 44100
+        wf = wf.detach().cpu().contiguous().float()
+        if wf.dim() == 1:
+            wf = wf.unsqueeze(0)
+        if wf.dim() == 3:
+            wf = wf[0]
+        if wf.dim() != 2:
+            raise ValueError(f"音频波形维度异常: {tuple(wf.shape)}")
+        # 宽扁 [T, C]（C<=8）转置为 [C, T]
+        if wf.shape[0] > 8 and wf.shape[1] <= 8:
+            wf = wf.T
+        if wf.numel() == 0:
+            raise ValueError("输入音频为空，无法替换音轨。")
+        h = hashlib.sha1(wf.numpy().tobytes() + sr.to_bytes(4, "little")).hexdigest()[:16]
+        return h, wf, sr
+
+    def execute(self, video, audio):
+        src = _video_source_path(video)
+        ahash, wf, sr = self._audio_hash(audio)
+
+        key = compute_transform_key(
+            "VideoReplaceAudioNode", {"video": src},
+            {"audio": ahash, "sr": sr},
+        )
+        cached = cache_lookup(key)
+        if cached:
+            print(f"[VideoReplaceAudio] cache hit: {os.path.basename(cached['image'])}")
+            return io.NodeOutput(
+                _video_output(cached["image"]), ui=_preview_ui(cached["image"]))
+
+        # ---- waveform [C, T] → 16bit PCM wav（复用 input/audio_cache）----
+        import wave as _wave
+        wav_path = os.path.join(AUDIO_CACHE_DIR, f"vra_{ahash}_{sr}.wav")
+        if not os.path.exists(wav_path):
+            pcm = (wf.clamp(-1, 1) * 32767.0).round().to(torch.int16)
+            pcm = pcm.numpy().T  # [T, C] 交错
+            with _wave.open(wav_path, "wb") as f:
+                f.setnchannels(int(wf.shape[0]))
+                f.setsampwidth(2)
+                f.setframerate(sr)
+                f.writeframes(pcm.tobytes())
+
+        # ---- remux：只取源视频流 + 新音轨，视频流无损 copy ----
+        meta = get_video_metadata(src)
+        dur = float(meta.get("duration") or 0)
+        out_path, _ = cache_output_paths(key)
+        cmd = [
+            FFMPEG_PATH, "-y",
+            "-i", src, "-i", wav_path,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+        ]
+        if dur > 0:
+            # 输出时长以原视频为准：音频过长截断，过短尾部静音
+            cmd += ["-t", f"{dur:.6f}"]
+        cmd += ["-movflags", "+faststart", out_path]
+        _run_ffmpeg(cmd)
+
+        cache_store(key, out_path)
+        print(f"[VideoReplaceAudio] done: {os.path.basename(out_path)} "
+              f"(dur={dur:.2f}s, audio {wf.shape[-1] / sr:.2f}s @{sr}Hz)")
+        return io.NodeOutput(_video_output(out_path), ui=_preview_ui(out_path))

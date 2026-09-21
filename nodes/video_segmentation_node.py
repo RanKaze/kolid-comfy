@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-VideoSegmentationNode - 逐帧文本掩码表达式分割节点（基于 SAM3）
+VideoSegmentationNode - 逐帧文本掩码表达式分割节点（SAM3 / EOVSAM3）
 
 参考 ComfyUI-SAM3 的 SAM3Grounding / SAM3VideoSegmentation 设计：
 每帧独立进行文本 grounding 检测（非跟踪传播），因此每个术语的
 置信度阈值在每一帧上都生效。
+
+输入 image_video（VIDEO），输出 mask_video（VIDEO）：无损灰度掩码视频
+（libx264 -qp 0 + gray，与其它 Video 掩码节点格式一致）。
+最佳内存管理：ffmpeg rawvideo 流式进出，任意时刻仅 1 帧驻留内存；
+结果按内容哈希+参数磁盘缓存命中复用（命中时不加载模型）。
 
 text_prompt 掩码表达式格式（如 "(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.1)"）：
   - 术语:  name / name:0.3 / name(0.3) / (name:0.3)，支持多词概念（如 "red car:0.4"）
@@ -12,232 +17,49 @@ text_prompt 掩码表达式格式（如 "(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.
       &  交集
       +  并集（| 为别名）
       -  差集
+  - 函数（参数间逗号分隔，可嵌套）:
+      max(a, b, ...)  逐像素取最大
+      min(a, b, ...)  逐像素取最小
+      grow(x, n)      n>0 掩码膨胀 n 像素,n<0 掩码腐蚀 |n| 像素(缩小),
+                      如 "grow(person:0.2, 5)"、"grow(person:0.2, -8)"
   - 同一术语在一帧内检测到多个实例时，取所有实例掩码的并集
 
 模型依赖 ComfyUI-SAM3（LoadSAM3Model 节点输出的 SAM3_MODEL_CONFIG），
 通过 sys.modules 共享其模型缓存，不会重复加载模型。
 """
 import gc
-import hashlib
 import importlib
+import json
 import logging
 import os
+import subprocess
 import sys
 
 import numpy as np
 import torch
 from PIL import Image
+from comfy_api.latest import io
+
+from ..libs.mask_expression import (
+    parse_mask_expression,
+    collect_terms,
+    eval_expression,
+)
+from ..libs.video_utils import FFMPEG_PATH, get_video_metadata
+from ..libs.video_transform import (
+    cache_lookup,
+    cache_output_paths,
+    cache_store,
+    compute_transform_key,
+)
+from .video_fit_node import (
+    _video_source_path,
+    _preview_ui,
+    _is_changed_tag,
+    _video_output,
+)
 
 log = logging.getLogger("kolid-comfy")
-
-
-# =============================================================================
-# 掩码表达式解析
-# =============================================================================
-
-_SPECIAL_CHARS = "()&+|-|:"
-
-
-class _Term:
-    """叶子节点：术语（名称 + 置信度阈值）"""
-    __slots__ = ("name", "threshold")
-
-    def __init__(self, name, threshold):
-        self.name = name
-        self.threshold = threshold
-
-
-class _Group:
-    """括号分组节点"""
-    __slots__ = ("inner",)
-
-    def __init__(self, inner):
-        self.inner = inner
-
-
-class _BinOp:
-    """二元运算节点：& / + / | / -"""
-    __slots__ = ("op", "left", "right")
-
-    def __init__(self, op, left, right):
-        self.op = op
-        self.left = left
-        self.right = right
-
-
-def _tokenize(text):
-    """切分为 ('special', 字符) 与 ('atom', 原文) 两类 token。
-
-    atom 允许包含空格（多词概念），边界仅由特殊字符决定。
-    """
-    tokens = []
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c in _SPECIAL_CHARS:
-            tokens.append(("special", c))
-            i += 1
-        else:
-            j = i
-            while j < n and text[j] not in _SPECIAL_CHARS:
-                j += 1
-            raw = text[i:j]
-            # 丢弃纯空白片段（运算符周围、行首尾的空白），
-            # 保留 atom 内部的空白（多词概念）
-            if raw.strip():
-                tokens.append(("atom", raw))
-            i = j
-    return tokens
-
-
-def _parse_threshold(raw):
-    s = raw.strip()
-    try:
-        t = float(s)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"掩码表达式中的阈值 '{s}' 无效，应为 [0, 1] 内的数字。"
-        )
-    if not (0.0 <= t <= 1.0):
-        raise ValueError(f"阈值必须在 [0, 1] 内，当前为 {t}。")
-    return t
-
-
-class _Parser:
-    """递归下降解析器：expr := primary (OP primary)*"""
-
-    def __init__(self, tokens, default_threshold):
-        self.tokens = tokens
-        self.pos = 0
-        self.default_threshold = default_threshold
-
-    def _peek(self, k=0):
-        idx = self.pos + k
-        if idx < len(self.tokens):
-            return self.tokens[idx]
-        return (None, None)
-
-    def _next(self):
-        tok = self._peek()
-        self.pos += 1
-        return tok
-
-    def parse(self):
-        if not self.tokens:
-            raise ValueError("掩码表达式为空。")
-        node = self._parse_expr()
-        if self.pos != len(self.tokens):
-            kind, val = self._peek()
-            raise ValueError(f"掩码表达式在第 {self.pos} 个 token '{val}' 处存在多余内容。")
-        return node
-
-    def _parse_expr(self):
-        node = self._parse_primary()
-        while True:
-            kind, val = self._peek()
-            if kind == "special" and val in ("&", "+", "-", "|"):
-                self._next()
-                right = self._parse_primary()
-                node = _BinOp(val, node, right)
-            else:
-                return node
-
-    def _parse_primary(self):
-        kind, val = self._peek()
-        if kind is None:
-            raise ValueError("掩码表达式意外结束。")
-
-        if kind == "special":
-            if val == "(":
-                self._next()
-                node = self._parse_expr()
-                kind, val = self._peek()
-                if not (kind == "special" and val == ")"):
-                    raise ValueError("掩码表达式中缺少 ')'。")
-                self._next()
-                return _Group(node)
-            raise ValueError(f"掩码表达式中出现意外的 '{val}'，此处应为术语名或 '('。")
-
-        # atom：术语名（可带阈值）
-        self._next()
-        name = val.strip()
-        if not name:
-            raise ValueError("掩码表达式中的术语名为空。")
-        threshold = self.default_threshold
-
-        kind2, val2 = self._peek()
-        if kind2 == "special" and val2 == ":":
-            # name:0.3 形式
-            self._next()
-            kind3, val3 = self._peek()
-            if kind3 != "atom":
-                raise ValueError(f"术语 '{name}' 之后的 ':' 后缺少阈值数值。")
-            self._next()
-            threshold = _parse_threshold(val3)
-        elif kind2 == "special" and val2 == "(":
-            # name(0.3) 后缀阈值形式：需要向前看两步（数字 + ')'）
-            kind3, val3 = self._peek(1)
-            kind4, val4 = self._peek(2)
-            if kind3 == "atom" and kind4 == "special" and val4 == ")":
-                self._next()
-                self._next()
-                self._next()
-                threshold = _parse_threshold(val3)
-
-        return _Term(name, threshold)
-
-
-def parse_mask_expression(text, default_threshold=0.2):
-    """将掩码表达式字符串解析为 AST。
-
-    示例："(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.1)"
-    """
-    if text is None:
-        raise ValueError("掩码表达式为 None。")
-    return _Parser(_tokenize(text), default_threshold).parse()
-
-
-def collect_terms(node, out=None):
-    """收集 AST 中去重后的 (name, threshold) 术语列表（保持顺序）。"""
-    if out is None:
-        out = []
-    if isinstance(node, _Term):
-        key = (node.name, node.threshold)
-        if key not in out:
-            out.append(key)
-    elif isinstance(node, _Group):
-        collect_terms(node.inner, out)
-    elif isinstance(node, _BinOp):
-        collect_terms(node.left, out)
-        collect_terms(node.right, out)
-    else:
-        raise TypeError(f"未知的 AST 节点类型: {type(node)}")
-    return out
-
-
-def eval_expression(node, term_masks):
-    """基于每术语的 [H, W] float 掩码（0/1）对 AST 求值。
-
-    运算符：& 交集、+ / | 并集、- 差集。
-    """
-    if isinstance(node, _Term):
-        key = (node.name, node.threshold)
-        if key not in term_masks:
-            raise KeyError(f"术语 '{node.name}:{node.threshold}' 未检测。")
-        return term_masks[key]
-    if isinstance(node, _Group):
-        return eval_expression(node.inner, term_masks)
-    if isinstance(node, _BinOp):
-        left = eval_expression(node.left, term_masks)
-        right = eval_expression(node.right, term_masks)
-        if node.op == "&":
-            return left * right
-        if node.op in ("+", "|"):
-            return torch.clamp(left + right, max=1.0)
-        if node.op == "-":
-            return left * (1.0 - right)
-        raise ValueError(f"未知运算符 '{node.op}'。")
-    raise TypeError(f"未知的 AST 节点类型: {type(node)}")
 
 
 # =============================================================================
@@ -290,57 +112,158 @@ def _get_sam3_model_cache():
 
 
 # =============================================================================
-# 帧迭代器
+# 逐帧流式分割管道（ffmpeg rawvideo 解码 → SAM3 → 无损灰度编码）
 # =============================================================================
 
-def _tensor_frames_iter(video_frames):
-    """将 [N, H, W, C] 图像张量逐帧转为 PIL。返回 (生成器, 帧数)。"""
-    n = int(video_frames.shape[0])
-
-    def gen():
-        for i in range(n):
-            frame = video_frames[i].cpu().numpy()
-            frame = (np.clip(frame, 0.0, 1.0) * 255.0).astype(np.uint8)
-            yield Image.fromarray(frame)
-
-    return gen(), n
+def _model_config_key(detector):
+    """SAM3 模型配置 → 稳定字符串（LoadSAM3Model 输出为 JSON-safe dict）。"""
+    try:
+        return json.dumps(detector, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return str(detector)
 
 
-def _video_frames_iter(video):
-    """将 ComfyUI VIDEO 对象（文件源）逐帧读取为 PIL。返回 (生成器, 总帧数)。"""
-    import cv2
+def _stream_segment_video(source, start_time, out_path, width, height, fps,
+                          root, unique_terms, process_frame, total_hint):
+    """逐帧流式分割：ffmpeg rgb24 解码 → process_frame 逐帧推理 → 无损灰度编码。
 
-    source = video.get_stream_source()
-    if not isinstance(source, str):
-        # 非 file-backed 源（如 BytesIO）：物化帧后走张量路径
-        components = video.get_components()
-        return _tensor_frames_iter(components.images)
+    process_frame(pil_image) -> {(name, threshold): [H, W] float mask}，
+    由检测器种类（SAM3 / EOVSAM3）决定具体实现。
+    最佳内存管理：任意时刻仅 1 帧 + 检测模型驻留内存，不缓存帧序列，
+    适合任意分辨率/时长的视频。掩码编码与其它 Video 掩码节点一致
+    （libx264 -qp 0 + gray，边缘零损失）。返回处理的帧数。
+    """
+    import comfy.model_management
+    import comfy.utils
 
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        raise ValueError(f"无法打开视频: {source}")
-
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # VideoFromFile 对象可能引用从 start_time 开始的子片段
-    start_time = getattr(video, "_VideoFromFile__start_time", 0.0) or 0.0
+    dec_cmd = [FFMPEG_PATH, "-noautorotate", "-loglevel", "warning"]
     if start_time > 0:
-        cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000.0)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total = max(0, int(total - start_time * fps))
+        # VideoFromFile 对象可能引用从 start_time 开始的子片段
+        dec_cmd += ["-ss", f"{start_time:.6f}"]
+    dec_cmd += ["-i", source, "-map", "0:v:0",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
 
-    def gen():
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                yield Image.fromarray(rgb)
-        finally:
-            cap.release()
+    frame_size = width * height * 3
+    decoder = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    encoder = subprocess.Popen(
+        [FFMPEG_PATH, "-y", "-loglevel", "warning",
+         "-f", "rawvideo", "-pix_fmt", "gray",
+         "-s", f"{width}x{height}", "-framerate", f"{fps:.6f}", "-i", "-",
+         "-c:v", "libx264", "-preset", "veryfast", "-qp", "0",
+         "-pix_fmt", "gray", out_path],
+        stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    return gen(), max(total, 0)
+    pbar = comfy.utils.ProgressBar(total_hint) if total_hint > 0 else None
+    count = 0
+    try:
+        while True:
+            buf = decoder.stdout.read(frame_size)
+            if not buf or len(buf) < frame_size:
+                break
+            comfy.model_management.throw_exception_if_processing_interrupted()
+
+            frame = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+            pil_image = Image.fromarray(frame.copy())
+
+            # 逐术语检测（检测器无关回调）
+            term_masks = process_frame(pil_image)
+
+            # 按表达式合成最终掩码（从左到右布尔运算），写为 uint8 灰度帧
+            final_mask = eval_expression(root, term_masks)
+            out_frame = (final_mask.clamp(0.0, 1.0) * 255.0 + 0.5).to(torch.uint8)
+            encoder.stdin.write(out_frame.numpy().tobytes())
+
+            del term_masks, final_mask
+            count += 1
+            if pbar is not None:
+                pbar.update(1)
+            if count % 10 == 0:
+                if total_hint > 0:
+                    print(f"[VideoSegmentation] processed {count}/{total_hint} frames")
+                else:
+                    print(f"[VideoSegmentation] processed {count} frames")
+                gc.collect()
+
+        if pbar is not None and count > 0:
+            # 实际帧数与估算不一致时校正，保证前端进度条收在 100%
+            pbar.update_absolute(count, total=count)
+
+        encoder.stdin.close()
+        enc_err = encoder.stderr.read()
+        enc_rc = encoder.wait()
+        decoder.stdout.close()
+        dec_err = decoder.stderr.read()
+        dec_rc = decoder.wait()
+        if dec_rc != 0:
+            raise Exception(f"ffmpeg decoder exited with code {dec_rc}: "
+                            f"{(dec_err or b'').decode('utf-8', errors='replace')[-800:]}")
+        if enc_rc != 0:
+            raise Exception((enc_err or b'').decode('utf-8', errors='replace')[-800:])
+        return count
+    finally:
+        # 异常退出时终止子进程，防止残留进程与管道死锁
+        if encoder.poll() is None:
+            try:
+                encoder.stdin.close()
+            except Exception:
+                pass
+            encoder.kill()
+        if decoder.poll() is None:
+            decoder.kill()
+
+
+def _make_sam3_process_frame(processor, unique_terms, height, width):
+    """SAM3 检测回调：每帧 set_image 后逐术语 grounding 检测，实例并集。"""
+
+    def process_frame(pil_image):
+        # 提取本帧图像特征（每帧一次）
+        state = processor.set_image(pil_image)
+        term_masks = {}
+        for name, threshold in unique_terms:
+            # 直接赋值阈值属性：set_confidence_threshold() 在 state 已含
+            # boxes 时会用旧文本重跑一次 grounding 推理（每术语多一次浪费），
+            # 属性赋值无副作用，set_text_prompt 内部推理时读取该属性。
+            processor.confidence_threshold = threshold
+            state = processor.set_text_prompt(name, state)
+            det_masks = state.get("masks")
+            if det_masks is None or det_masks.numel() == 0 or det_masks.shape[0] == 0:
+                term_mask = torch.zeros(height, width)
+            else:
+                if det_masks.ndim == 4 and det_masks.shape[1] == 1:
+                    det_masks = det_masks.squeeze(1)
+                # 该术语所有实例的并集
+                term_mask = det_masks.any(dim=0).float().cpu()
+            term_masks[(name, threshold)] = term_mask
+        return term_masks
+
+    return process_frame
+
+
+def _make_eovsam_process_frame(model, unique_terms, height, width, resolution):
+    """EOVSAM3 检测回调：每帧逐术语 detect（返回二值 mask），实例取并集。"""
+
+    def process_frame(pil_image):
+        img = torch.from_numpy(np.asarray(pil_image).copy()).float() / 255.0  # [H, W, C]
+        term_masks = {}
+        for name, threshold in unique_terms:
+            try:
+                # detect 返回 (masks, labels, scores) 三元组，取 masks 列表
+                det_masks, _, _ = model.detect(
+                    image=img, class_names=[name],
+                    resolution=resolution, threshold=threshold,
+                )
+            except RuntimeError:
+                det_masks = []
+            term_mask = torch.zeros(height, width)
+            for m in det_masks:
+                if tuple(m.shape) != (height, width):
+                    continue
+                # detect 返回二值 mask（0/1，可能 bf16/cuda）→ CPU fp32 后取并集
+                term_mask = torch.maximum(term_mask, m.to(device="cpu", dtype=torch.float32))
+            term_masks[(name, threshold)] = term_mask
+        return term_masks
+
+    return process_frame
 
 
 # =============================================================================
@@ -348,20 +271,27 @@ def _video_frames_iter(video):
 # =============================================================================
 
 class VideoSegmentationNode:
-    """逐帧 SAM3 掩码表达式分割节点。
+    """逐帧文本掩码表达式分割节点（SAM3 / EOVSAM3，输入 image_video，输出 mask_video）。
 
     text_prompt 格式: "(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.1)"
 
     每帧独立 grounding 检测（无跟踪传播），每术语的阈值逐帧生效。
     运算符从左到右计算：& 交集、+ 并集、- 差集，可用括号分组。
+    函数：max/min 逐像素取最值，grow(x, n) 膨胀（n>0）/腐蚀（n<0，即缩小）。
+    输出为无损灰度掩码视频（与其它 Video 掩码节点格式一致），
+    流式处理 + 磁盘缓存命中复用。
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "sam3_model_config": ("SAM3_MODEL_CONFIG", {
-                    "tooltip": "SAM3 model config from LoadSAM3Model node (ComfyUI-SAM3)",
+                "image_video": ("VIDEO", {
+                    "tooltip": "Input video to segment (e.g. from UrlVideoNode / VideoFolderLoaderNode)",
+                }),
+                "detector": ("*", {
+                    "tooltip": "检测器: SAM3 model config (LoadSAM3Model, ComfyUI-SAM3) "
+                               "或 EOVSAM3_MODEL (LoadEovSAM3Model)",
                 }),
                 "text_prompt": ("STRING", {
                     "default": "",
@@ -370,15 +300,6 @@ class VideoSegmentationNode:
                                "Operators (left-to-right): & intersect, + union, - subtract, | union. "
                                "Term syntax: name, name:0.3, name(0.3), (name:0.3).",
                 }),
-            },
-            "optional": {
-                "video_frames": ("IMAGE", {
-                    "tooltip": "Video frames as batch [N, H, W, C]. Used when 'video' is not connected.",
-                }),
-                "video": ("VIDEO", {
-                    "tooltip": "Video object (e.g. from UrlVideoNode / VideoFolderLoaderNode). "
-                               "Takes priority over video_frames if both connected.",
-                }),
                 "default_threshold": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Confidence threshold used by terms without an explicit threshold.",
@@ -386,56 +307,29 @@ class VideoSegmentationNode:
             },
         }
 
-    RETURN_TYPES = ("MASK", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("masks", "frames", "visualization")
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("mask_video",)
     FUNCTION = "execute"
     CATEGORY = "Kolid-Toolkit"
 
     @classmethod
-    def IS_CHANGED(cls, sam3_model_config, text_prompt, video_frames=None, video=None,
-                   default_threshold=0.2):
-        # 内容指纹：避免同输入重复推理
-        h = hashlib.md5()
-        if video is not None:
-            try:
-                source = video.get_stream_source()
-                if isinstance(source, str):
-                    h.update(source.encode())
-                    try:
-                        h.update(str(os.path.getmtime(source)).encode())
-                        h.update(str(os.path.getsize(source)).encode())
-                    except OSError:
-                        h.update(b"file_error")
-                else:
-                    h.update(str(video.get_frame_count()).encode())
-                    h.update(str(video.get_dimensions()).encode())
-            except Exception:
-                h.update(str(id(video)).encode())
-        elif video_frames is not None:
-            h.update(str(video_frames.shape).encode())
-            first = video_frames[0].cpu().numpy()
-            last = video_frames[-1].cpu().numpy()
-            h.update(first[0, 0, :].tobytes())
-            h.update(first[-1, -1, :].tobytes())
-            h.update(last[0, 0, :].tobytes())
-            h.update(last[-1, -1, :].tobytes())
-        else:
-            h.update(b"no_input")
-        return f"{h.hexdigest()}_{text_prompt}_{default_threshold}_{sam3_model_config}"
+    def IS_CHANGED(cls, detector, image_video, text_prompt, default_threshold=0.2):
+        return _is_changed_tag(
+            [_video_source_path(image_video) if image_video else None],
+            {"text_prompt": text_prompt, "default_threshold": default_threshold,
+             "model": _model_config_key(detector)})
 
-    def execute(self, sam3_model_config, text_prompt, video_frames=None, video=None,
-                default_threshold=0.2):
-        """每帧对每个术语独立 grounding 检测，再按表达式合成掩码。"""
+    def execute(self, detector, image_video, text_prompt, default_threshold=0.2):
+        """每帧对每个术语独立 grounding 检测，按表达式合成掩码，流式写入掩码视频。"""
         import comfy.model_management
-        import comfy.utils
 
-        if video is None and video_frames is None:
-            raise ValueError("请连接 'video' 或 'video_frames' 输入之一。")
         if not text_prompt or not text_prompt.strip():
             raise ValueError(
                 "text_prompt 为空。请输入掩码表达式，例如 "
                 "'(skin:0.2)&(head:0.3)-eye(0.1)+(nose:0.1)'。"
             )
+
+        source = _video_source_path(image_video)
 
         # 解析表达式，收集去重术语（每帧每术语只推理一次）
         try:
@@ -446,97 +340,82 @@ class VideoSegmentationNode:
         print(f"[VideoSegmentation] expression: '{text_prompt}'")
         print(f"[VideoSegmentation] terms (name, threshold): {unique_terms}")
 
-        # 加载模型（与 ComfyUI-SAM3 官方节点共享模块级缓存）
-        model_cache = _get_sam3_model_cache()
-        sam3_model = model_cache.get_or_build_model(sam3_model_config)
-        comfy.model_management.load_models_gpu([sam3_model])
+        # 磁盘缓存：命中直接复用（不加载模型）
+        key = compute_transform_key(
+            "VideoSegmentationNode",
+            {"source": source},
+            {"text_prompt": text_prompt, "default_threshold": default_threshold,
+             "model": _model_config_key(detector)})
+        hit = cache_lookup(key)
+        if hit is not None:
+            print(f"[VideoSegmentationNode] Cache hit: {key[:12]}")
+            return io.NodeOutput(_video_output(hit["image"]), ui=_preview_ui(hit["image"]))
+        out_path, _ = cache_output_paths(key)
+        print(f"[VideoSegmentationNode] Cache miss: {key[:12]} -> processing")
 
-        processor = sam3_model.processor
-        device = sam3_model.current_device
-        if hasattr(processor, "sync_device_with_model"):
-            processor.sync_device_with_model()
-        elif hasattr(processor, "device") and str(processor.device) != str(device):
-            processor.device = str(device)
+        meta = get_video_metadata(source)
+        w, h = meta["width"], meta["height"]
+        fps = meta["fps"]
+        total = meta["frame_count"]
+        if total <= 0 and fps > 0:
+            # 容器缺帧数时按时长估算，保证前端进度条可用
+            dur = float(meta.get("duration") or 0)
+            if dur > 0:
+                total = int(dur * fps)
 
-        # 帧来源（video 优先）
-        if video is not None:
-            frames_iter, total = _video_frames_iter(video)
+        if w <= 0 or h <= 0 or fps <= 0:
+            raise ValueError(f"无效的视频元数据: {w}x{h} @ {fps}fps ({source})")
+
+        # VideoFromFile 对象可能引用从 start_time 开始的子片段
+        start_time = getattr(image_video, "_VideoFromFile__start_time", 0.0) or 0.0
+        if start_time > 0:
+            total = max(0, int(total - start_time * fps))
+
+        if isinstance(detector, dict) and "eovsam_checkpoint" in detector:
+            # ---- EOVSAM3（LoadEovSAM3Model 输出；模型在 get_or_build_model 内缓存）----
+            from ..libs.eovsam.eovsam_model import get_or_build_model as _get_eovsam
+            eovsam_model = _get_eovsam(
+                checkpoint_path=detector["eovsam_checkpoint"],
+                precision=detector.get("precision", "bf16"),
+            )
+            process_frame = _make_eovsam_process_frame(
+                eovsam_model, unique_terms, h, w,
+                int(detector.get("resolution", 1152)))
+            print(f"[VideoSegmentation] detector: EOVSAM3 (precision="
+                  f"{detector.get('precision', 'bf16')})")
         else:
-            frames_iter, total = _tensor_frames_iter(video_frames)
+            # ---- SAM3（LoadSAM3Model 输出；与 ComfyUI-SAM3 官方节点共享模块级缓存）----
+            model_cache = _get_sam3_model_cache()
+            sam3_model = model_cache.get_or_build_model(detector)
+            comfy.model_management.load_models_gpu([sam3_model])
 
-        if total <= 0:
+            processor = sam3_model.processor
+            device = sam3_model.current_device
+            if hasattr(processor, "sync_device_with_model"):
+                processor.sync_device_with_model()
+            elif hasattr(processor, "device") and str(processor.device) != str(device):
+                processor.device = str(device)
+
+            process_frame = _make_sam3_process_frame(processor, unique_terms, h, w)
+            print(f"[VideoSegmentation] detector: SAM3")
+
+        print(f"[VideoSegmentation] {w}x{h} @ {fps:g}fps, {os.path.basename(source)}")
+
+        count = _stream_segment_video(
+            source, start_time, out_path, w, h, fps,
+            root, unique_terms, process_frame, total)
+
+        if count <= 0:
             raise ValueError("没有可处理的帧。")
 
-        # 预分配 CPU 输出（逐帧填充；实际帧数与容器头不符时最后裁剪）
-        first_pil = next(frames_iter)
-        w, h = first_pil.size
-        masks_out = torch.zeros(total, h, w)
-        frames_out = torch.zeros(total, h, w, 3)
-        vis_out = torch.zeros(total, h, w, 3)
-
-        pbar = comfy.utils.ProgressBar(total)
-        frame_idx = 0
-        for pil_image in [first_pil] + list(frames_iter):
-            comfy.model_management.throw_exception_if_processing_interrupted()
-
-            # 提取本帧图像特征（每帧一次）
-            state = processor.set_image(pil_image)
-
-            # 对每个术语独立 grounding 检测
-            term_masks = {}
-            for name, threshold in unique_terms:
-                # 直接赋值阈值属性：set_confidence_threshold() 在 state 已含
-                # boxes 时会用旧文本重跑一次 grounding 推理（每术语多一次浪费），
-                # 属性赋值无副作用，set_text_prompt 内部推理时读取该属性。
-                processor.confidence_threshold = threshold
-                state = processor.set_text_prompt(name, state)
-                det_masks = state.get("masks")
-                if det_masks is None or det_masks.numel() == 0 or det_masks.shape[0] == 0:
-                    term_mask = torch.zeros(h, w)
-                else:
-                    if det_masks.ndim == 4 and det_masks.shape[1] == 1:
-                        det_masks = det_masks.squeeze(1)
-                    # 该术语所有实例的并集
-                    term_mask = det_masks.any(dim=0).float().cpu()
-                term_masks[(name, threshold)] = term_mask
-
-            # 按表达式合成最终掩码（从左到右布尔运算）
-            final_mask = eval_expression(root, term_masks)
-
-            frame_np = np.asarray(pil_image, dtype=np.float32) / 255.0
-            masks_out[frame_idx] = final_mask
-            frames_out[frame_idx] = torch.from_numpy(frame_np)
-            vis_out[frame_idx] = self._visualize(frame_np, final_mask)
-
-            del state, term_masks
-            frame_idx += 1
-            pbar.update(1)
-
-            if frame_idx % 10 == 0:
-                print(f"[VideoSegmentation] processed {frame_idx}/{total} frames")
-                gc.collect()
-
-        # 实际帧数与容器头不一致时裁剪
-        if frame_idx != total:
-            print(f"[VideoSegmentation] 容器报告 {total} 帧，实际解码 {frame_idx} 帧")
-            masks_out = masks_out[:frame_idx]
-            frames_out = frames_out[:frame_idx]
-            vis_out = vis_out[:frame_idx]
-
-        print(f"[VideoSegmentation] done: {frame_idx} frames, size {w}x{h}")
+        cache_store(key, out_path)
+        print(f"[VideoSegmentationNode] Cached: {os.path.basename(out_path)} ({count} frames)")
+        print(f"[VideoSegmentation] done: {count} frames, size {w}x{h}")
 
         gc.collect()
         comfy.model_management.soft_empty_cache()
 
-        return (masks_out, frames_out, vis_out)
-
-    @staticmethod
-    def _visualize(frame_np, mask, alpha=0.5):
-        """将 [H, W] 0/1 掩码以青色半透明叠加到 [H, W, 3] 帧上。"""
-        frame_t = torch.from_numpy(frame_np)
-        m3 = mask.unsqueeze(-1)
-        color = torch.tensor([0.0, 1.0, 1.0])
-        return frame_t * (1.0 - alpha * m3) + color * (alpha * m3)
+        return io.NodeOutput(_video_output(out_path), ui=_preview_ui(out_path))
 
 
 NODE_CLASS_MAPPINGS = {

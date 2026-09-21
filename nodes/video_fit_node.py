@@ -33,6 +33,7 @@ from ..libs.video_transform import (
     parse_padding_color,
     transform_recover_meet_with_background,
     transform_video_file,
+    video_stream_to_file,
 )
 
 CATEGORY = "Kolid-Toolkit"
@@ -43,13 +44,22 @@ CATEGORY = "Kolid-Toolkit"
 # ============================================================
 
 def _video_source_path(video):
-    """从 VIDEO 对象解析源文件路径并校验存在。"""
+    """从 VIDEO 对象解析源文件路径并校验存在。
+
+    内存视频(VideoFromComponents / VideoFromList 等)的
+    get_stream_source() 返回 BytesIO,先落盘到 videocache 再用路径处理。
+    """
     if video is None:
         return None
-    path = video.get_stream_source() if hasattr(video, "get_stream_source") else str(video)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Video file not found: {path}")
-    return path
+    source = (video.get_stream_source()
+              if hasattr(video, "get_stream_source") else str(video))
+    if hasattr(source, "read"):
+        source = video_stream_to_file(source)
+    else:
+        source = os.fspath(source)
+    if not os.path.exists(source):
+        raise FileNotFoundError(f"Video file not found: {source}")
+    return source
 
 
 def _validate_mask_video(mask_path, src_w, src_h, src_frame_count=0):

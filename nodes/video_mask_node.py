@@ -8,6 +8,8 @@
   腐蚀/膨胀、填洞、去孤立像素、平滑、模糊
 - VideoGrowMaskNode     参照 ComfyUI 核心的 "Grow Mask"(GrowMask):
   正向膨胀 / 负向收缩,tapered_corners 十字核或方形核
+- VideoGetMaskNode      将无损灰度掩码视频解码为 MASK(output_mode 切换:
+                        batch = 单个 [N, H, W] 批次;list = N 个 [1, H, W] 逐帧项)
 
 最佳内存管理:逐帧流式处理(ffmpeg rawvideo 进出),任意时刻每路视频
 仅 1 帧驻留内存;输出为无损灰度视频(libx264 -qp 0 + gray,平坦区域压缩
@@ -21,7 +23,7 @@ import torch
 import torchvision.transforms.v2 as T
 from comfy_api.latest import io, ui, InputImpl
 
-from ..libs.video_utils import get_video_metadata
+from ..libs.video_utils import get_video_metadata, FFMPEG_PATH
 from ..libs.video_transform import (
     cache_lookup,
     cache_output_paths,
@@ -328,3 +330,110 @@ class VideoGrowMaskNode:
                 [(source, w, h)], out, w, h, meta["fps"], frame_fn))
 
         return io.NodeOutput(_video_output(out_path), ui=_preview_ui(out_path))
+
+
+# ============================================================
+# VideoGetMaskNode(掩码视频 → MASK 张量批次)
+# ============================================================
+
+class VideoGetMaskNode:
+    """将无损灰度掩码视频解码为 MASK 张量(值域 [0, 1])。
+
+    output_mode 决定输出形态:
+    - batch: 只含 1 项的列表,该项为完整 [N, H, W] 批次(下游节点整体处理一次)
+    - list:  N 个 [1, H, W] 逐帧项(下游节点按帧执行 N 次,与逐帧图像批对齐)
+
+    ComfyUI 的 OUTPUT_IS_LIST 是静态类属性,无法逐次执行切换,因此两种模式
+    都走列表通道:batch 模式把整批装进单个列表项,语义上等价于"一个批次"。
+
+    内存说明:MASK 输出本身要求完整张量驻留内存(输出类型即如此);list 模式
+    的各项是同一张量的视图,不额外占内存。解码侧走 ffmpeg rawvideo 流式管道,
+    uint8 帧逐帧读入、转换后立即释放,峰值内存 ≈ 最终张量的 1.25 倍。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mask_video": ("VIDEO", {
+                    "tooltip": "Lossless grayscale mask video "
+                               "(e.g. from VideoSegmentationNode / VideoMaskFixNode)",
+                }),
+                "output_mode": (["batch", "list"], {
+                    "default": "batch",
+                    "tooltip": "batch: 输出单个 [N,H,W] 批次(整体处理一次);"
+                               "list: 逐帧输出 N 个 [1,H,W] 项(下游按帧执行 N 次)",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("masks",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "get_masks"
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, mask_video, output_mode):
+        return _is_changed_tag(
+            [_video_source_path(mask_video) if mask_video else None],
+            {"output_mode": output_mode})
+
+    def get_masks(self, mask_video, output_mode="batch"):
+        """流式解码灰度掩码视频为 [N, H, W] float32 MASK(值域 [0, 1])。"""
+        import subprocess
+
+        import comfy.model_management
+        import comfy.utils
+
+        source = _video_source_path(mask_video)
+        meta = get_video_metadata(source)
+        w, h = meta["width"], meta["height"]
+        if w <= 0 or h <= 0:
+            raise ValueError(f"无效的视频元数据: {w}x{h} ({source})")
+
+        # ffmpeg rawvideo 流式解码,逐帧读入 uint8(浮点批次的 1/4 内存)
+        frame_size = w * h
+        decoder = subprocess.Popen(
+            [FFMPEG_PATH, "-noautorotate", "-loglevel", "warning", "-i", source,
+             "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        total = meta["frame_count"]
+        pbar = comfy.utils.ProgressBar(total) if total > 0 else None
+        frames = []
+        try:
+            while True:
+                buf = decoder.stdout.read(frame_size)
+                if not buf or len(buf) < frame_size:
+                    break
+                comfy.model_management.throw_exception_if_processing_interrupted()
+                frames.append(np.frombuffer(buf, dtype=np.uint8).reshape(h, w))
+                if pbar is not None:
+                    pbar.update(1)
+            decoder.stdout.close()
+            err = decoder.stderr.read()
+            rc = decoder.wait()
+            if rc != 0:
+                raise Exception(f"ffmpeg decoder exited with code {rc}: "
+                                f"{(err or b'').decode('utf-8', errors='replace')[-800:]}")
+        finally:
+            if decoder.poll() is None:
+                decoder.kill()
+
+        if not frames:
+            raise ValueError(f"没有可解码的帧: {source}")
+
+        # uint8 [N,H,W] → float32 [0,1](与 _u8_to_mask 同值域),峰值 ≈ 1.25×
+        masks = torch.from_numpy(np.stack(frames)).float().div_(255.0)
+        del frames
+
+        if output_mode == "list":
+            out = [masks[i:i + 1] for i in range(masks.shape[0])]
+        else:
+            out = [masks]
+
+        print(f"[VideoGetMaskNode] {w}x{h} {masks.shape[0]} frames ({output_mode}) "
+              f"<- {os.path.basename(source)}")
+
+        return (out,)

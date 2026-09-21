@@ -36,9 +36,12 @@ from .nodes.assets_info_collect_node import *
 from .nodes.interface_node import *
 from .nodes.video_segmentation_node import *
 from .nodes.video_fit_node import *
+from .nodes.video_create_node import *
 from .nodes.video_mask_node import *
 from .nodes.subject_crop_node import *
 from .nodes.video_vae_node import *
+from .nodes.mask_preview_node import *
+from .nodes.eovsam_node import *
 
 
 NODE_CONFIG = {
@@ -135,6 +138,7 @@ NODE_CONFIG = {
     "GetVideoAudioNode": {"class": GetVideoAudioNode, "name": "GetVideoAudioNode"},
     "GetAudioInfoNode": {"class": GetAudioInfoNode, "name": "GetAudioInfoNode"},
     "GetAudioSegmentNode": {"class": GetAudioSegmentNode, "name": "GetAudioSegmentNode"},
+    "VideoReplaceAudioNode": {"class": VideoReplaceAudioNode, "name": "VideoReplaceAudioNode"},
     "VAEEncodeAudioTiled": {"class": VAEEncodeAudioTiled, "name": "VAE Encode Audio (Tiled)"},
     "GetVideoSegmentNode": {"class": GetVideoSegmentNode, "name": "GetVideoSegmentNode"},
     "VideoWallpaperEngineNode": {"class": VideoWallpaperEngineNode, "name": "VideoWallpaperEngineNode"},
@@ -150,11 +154,17 @@ NODE_CONFIG = {
     "VideoCombineMaskNode": {"class": VideoCombineMaskNode, "name": "VideoCombineMaskNode"},
     "VideoMaskFixNode": {"class": VideoMaskFixNode, "name": "VideoMaskFixNode"},
     "VideoGrowMaskNode": {"class": VideoGrowMaskNode, "name": "VideoGrowMaskNode"},
+    "VideoGetMaskNode": {"class": VideoGetMaskNode, "name": "VideoGetMaskNode"},
+    "VideoAndMaskPreviewNode": {"class": VideoAndMaskPreviewNode, "name": "VideoAndMaskPreviewNode"},
+    "ImageAndMaskPreviewNode": {"class": ImageAndMaskPreviewNode, "name": "ImageAndMaskPreviewNode"},
     "ImageSubjectCropNode": {"class": ImageSubjectCropNode, "name": "ImageSubjectCropNode"},
     "ImageRecoverSubjectCropNode": {"class": ImageRecoverSubjectCropNode, "name": "ImageRecoverSubjectCropNode"},
     "VideoSubjectCropNode": {"class": VideoSubjectCropNode, "name": "VideoSubjectCropNode"},
     "VideoRecoverSubjectCropNode": {"class": VideoRecoverSubjectCropNode, "name": "VideoRecoverSubjectCropNode"},
+    "LoadEovSAM3Model": {"class": LoadEovSAM3Model, "name": "LoadEovSAM3Model"},
+    "ImageDetectNode": {"class": ImageDetectNode, "name": "ImageDetectNode"},
     "VideoLimitFpsNode": {"class": VideoLimitFpsNode, "name": "VideoLimitFpsNode"},
+    "CreateVideoNode": {"class": CreateVideoNode, "name": "CreateVideoNode"},
     "VAEEncodeVideoNode": {"class": VAEEncodeVideoNode, "name": "VAEEncodeVideoNode"},
     "SnapshotPromptNode": {"class": SnapshotPromptNode, "name": "SnapshotPromptNode"},
     "SnapshotSwitchNode": {"class": SnapshotSwitchNode, "name": "SnapshotSwitchNode"},
