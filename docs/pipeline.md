@@ -211,7 +211,7 @@ IP-Adapter 参考设置。支持多种预设，配置风格/构图权重、embed
 
 ### ConfigArchitectureNode
 
-设置模型架构名称（如 Krea2、Flux2Klein、QwenEdit）。
+设置模型架构名称（如 Krea2、Flux2Klein、QwenEdit、QwenImage21）。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -272,6 +272,26 @@ Krea2 编辑参数配置。设置参考保真度、VLM 图像分辨率等。
 | ref_boost_a | FLOAT | ❌ | 第一个参考（场景）的 boost（默认 1.0，单参考时无效） |
 | ref_boost_mask | MASK | ❌ | 可选区域 mask，限制最后一个参考的 boost 范围 |
 | grounding_px | INT | ❌ | VLM 输入图像最长边上限 0-4096（默认 768，0=原始分辨率） |
+
+**输出:** `config` (CONFIG_DATA)
+
+---
+
+### ConfigQwenImage21Node
+
+Qwen-Image-2.1 编辑参数配置。设置参考图缩放边长（`config["qwen_image21_resolution"]`）。
+
+架构名设置 `QwenImage21` 时启用该架构的编辑模式（等价于 ComfyUI `TextEncodeQwenImage21` 节点的设计）：
+
+- 参考图（Detailer 为 crop 图）与采样目标同尺寸，缩放按 32 取整（vision token 与 2x2 latent 网格对齐）
+- 图像同时进入 Qwen3-VL text encoder（vision slots，prompt 里可用 `<image1>` 引用）与 `reference_latents`（DiT 原生拼接）
+- 无需 model patch；PipelineEnableEditNode 对该架构为空操作
+- Detailer 会强制 crop 尺寸 32 对齐（`PipelineDetailerAdvancedNode` 的 align、快照 Detailer 的 align 均自动提升到 32）
+
+| 输入 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| config | CONFIG_DATA | ❌ | 上游配置 |
+| resolution | INT | ❌ | 参考图缩放边长，32 的倍数（默认 0=保持参考图自身尺寸并与采样目标同尺寸，推荐；>0 时面积约 resolution²，其它尺寸会偏移编辑） |
 
 **输出:** `config` (CONFIG_DATA)
 
@@ -483,7 +503,7 @@ Krea2 编辑参数配置。设置参考保真度、VLM 图像分辨率等。
 
 ### PipelineEnableEditNode
 
-启用编辑模式。设置 config["enable_edit"] 并根据架构应用模型 patch（Krea2 / Flux2Klein）。
+启用编辑模式。设置 config["enable_edit"] 并根据架构应用模型 patch（Krea2 / Flux2Klein；QwenImage21 无需 patch）。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
