@@ -10,7 +10,6 @@ import time
 import base64
 import io
 import numpy as np
-import cv2
 from PIL import Image
 import torch
 import comfy.model_management as mm
@@ -21,31 +20,17 @@ import comfy.model_management as mm
 from ..libs.utils import AlwaysEqualProxy
 
 try:
-    from .image_node import SnapshotMaskNodeServer, waitSnapShot
-except ImportError as e:
-    print(f"[SnapshotDetailerSampler] Warning: cannot import image_node: {e}")
-    SnapshotMaskNodeServer = None
-    waitSnapShot = None
-
-try:
-    from .snapshot_draw_node import SnapshotDrawServer
-except ImportError as e:
-    print(f"[SnapshotDetailerSampler] Warning: cannot import snapshot_draw_node: {e}")
-    SnapshotDrawServer = None
-
-try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
 except ImportError as e:
     print(f"[SnapshotDetailerSampler] Warning: cannot import prompt_node: {e}")
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl
-from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl
+from ..libs.mask_utils import expand_mask
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
-from .image_node import mask_to_base64 as mask_to_red_base64
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
 
@@ -162,19 +147,20 @@ class SnapshotDetailerSamplerServer:
         self.detailed_image = None
         self.original_key = None   # history key of the original image
         self.detailed_key = None   # history key of the detailed image
-        self.debug_recover_data = None
+
+        # Blend 工作台（Draw tab）：画布合成图就是 Context Image，
+        # 合成结果 + 纯 Mask 层随 blend_action 一次性送达，不再走 history key 切换。
+        self.blend_image = None
+        self.blend_mask = None
+        self.blend_prompt = ''
 
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
 
         # 子服务器
-        self.mask_server = None
-        self.draw_server = None
         self.prompt_server = None
         self.main_server = None
         self.main_port = None
-        self.mask_url = ""
-        self.draw_url = ""
         self.prompt_url = ""
         self.browser_url = ""
         self.started = False
@@ -183,69 +169,11 @@ class SnapshotDetailerSamplerServer:
         self._action_queue = queue.Queue()
         self._action_event = threading.Event()
 
-    def _on_mask_set(self, mask, loop_index=None):
-        """Mask 编辑器 confirm 回调。直接写入 pipeline.mask。"""
-        if self.node_instance is not None:
-            self.node_instance._on_mask_set(mask)
-
-    def _on_draw_set(self, draw_tensor):
-        """Draw 编辑器绘制回调。写回 pipeline.image 并同步 mask server 底图。"""
-        if self.node_instance is not None:
-            self.node_instance._on_draw_set(draw_tensor)
-        # mask server 底图同步为绘制后的图
-        if self.mask_server is not None and draw_tensor is not None:
-            self.mask_server.set_image(draw_tensor)
-
     # -------------------------------------------------------------------------
     # 生命周期
     # -------------------------------------------------------------------------
     def start(self, initial_image=None):
-        # 1) Mask server
-        if SnapshotMaskNodeServer is None:
-            raise RuntimeError("SnapshotMaskNodeServer not available")
-        self.mask_server = SnapshotMaskNodeServer(
-            image=initial_image,
-            detector=self.detector,
-        )
-        self.mask_server._on_mask_set = self._on_mask_set
-        t_mask = threading.Thread(target=self.mask_server.start)
-        t_mask.daemon = True
-        t_mask.start()
-
-        t0 = time.time()
-        while not self.mask_server.started:
-            if time.time() - t0 > 10:
-                raise RuntimeError("[SnapshotDetailerSampler] Mask server startup timeout")
-            time.sleep(0.01)
-
-        _, mask_port = self.mask_server.server.server_address
-        self.mask_url = f"http://localhost:{mask_port}/mask_node.html"
-
-        # 1b) Draw server (独立绘画编辑器，image in / image out)
-        if SnapshotDrawServer is not None:
-            self.draw_server = SnapshotDrawServer(
-                image=initial_image,
-            )
-            self.draw_server._on_draw_set = self._on_draw_set
-            t_draw = threading.Thread(target=self.draw_server.start)
-            t_draw.daemon = True
-            t_draw.start()
-
-            t0 = time.time()
-            while not self.draw_server.started:
-                if time.time() - t0 > 10:
-                    print("[SnapshotDetailerSampler] Draw server startup timeout, continuing without it")
-                    self.draw_server = None
-                    break
-                time.sleep(0.01)
-
-            if self.draw_server is not None:
-                _, draw_port = self.draw_server.server.server_address
-                self.draw_url = f"http://localhost:{draw_port}/draw_node.html"
-        else:
-            print("[SnapshotDetailerSampler] SnapshotDrawServer not available, draw tab will fall back to mask iframe")
-
-        # 2) Prompt server
+        # 1) Prompt server
         if SnapshotPromptServer is None:
             raise RuntimeError("SnapshotPromptServer not available")
         self.prompt_server = SnapshotPromptServer(
@@ -270,7 +198,7 @@ class SnapshotDetailerSamplerServer:
 
         self.prompt_url = self.prompt_server.browser_url
 
-        # 3) Main server
+        # 2) Main server
         class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
             pass
         for port in range(8700, 8800):
@@ -291,7 +219,6 @@ class SnapshotDetailerSamplerServer:
         self.MainHandler.server_instance = self
 
         print(f"[SnapshotDetailerSampler] Main server on {self.main_port}")
-        print(f"[SnapshotDetailerSampler] Mask server at {self.mask_url}")
         print(f"[SnapshotDetailerSampler] Prompt server at {self.prompt_url}")
 
         t_main = threading.Thread(target=self.main_server.serve_forever)
@@ -300,10 +227,6 @@ class SnapshotDetailerSamplerServer:
 
     def stop(self):
         print("[SnapshotDetailerSampler] stop() called")
-        if self.mask_server:
-            self.mask_server._on_mask_set = None
-        if self.draw_server:
-            self.draw_server._on_draw_set = None
         def _stop(server, name):
             if server:
                 try:
@@ -313,7 +236,7 @@ class SnapshotDetailerSamplerServer:
                 except Exception as e:
                     print(f"[SnapshotDetailerSampler] Error stopping {name}: {e}")
         threads = []
-        for s, name in [(self.mask_server, 'mask_server'), (self.draw_server, 'draw_server'), (self.prompt_server, 'prompt_server')]:
+        for s, name in [(self.prompt_server, 'prompt_server')]:
             t = threading.Thread(target=_stop, args=(s, name))
             t.daemon = True
             t.start()
@@ -417,12 +340,15 @@ class SnapshotDetailerSamplerServer:
                     return None
         return None
 
-    def blend_layers(self, layer_specs, width=0, height=0):
-        """按图层列表合成一张新图并加入历史，返回新图 key。
+    def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None):
+        """把图层栈合成成一张图（不写历史），返回 (image, mask)。
 
         layer_specs: [{'key'|'src', 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
         列表自下而上（[0] 是最底层）。图层像素优先用 history key；拖入的本地图片没有 key，
         改用它自己的 data URL（'src'）。画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
+
+        mask_data_url 是画布顶层的「纯 Mask 层」（alpha = 覆盖率，按画布尺寸栅格化），
+        与图层自身的 coverage mask 无关 —— 返回的 mask 为 [1,H,W] float 或 None（无遮罩）。
         """
         if not layer_specs:
             raise ValueError('Missing layers')
@@ -453,8 +379,31 @@ class SnapshotDetailerSamplerServer:
             layer['mask'] = decode_mask_alpha(layer['mask'], layer_w, layer_h)
             layer['decal'] = decode_decal_rgba(layer['decal'], layer_w, layer_h)
         blended = composite_layers(resolved, canvas_w, canvas_h)
-        self.add_history(blended, name=f'Blend #{len(self.selected_history)}')
-        return self.selected_history[-1]['key']
+        # 纯 Mask 层整体按画布尺寸栅格化，squeeze 成 [1,H,W] 与 pipeline.mask 同构
+        blend_mask = decode_mask_alpha(mask_data_url, canvas_w, canvas_h)
+        if blend_mask is not None:
+            blend_mask = blend_mask.squeeze(-1)
+        return blended, blend_mask
+
+    def _apply_tag_result(self, tag):
+        """把打标结果写进 prompt 阶段：替换 parsing 来源的项，保留 normal/program。
+
+        返回 (parsed_selected, parsed_custom)。由 /api/blend_action 的 tag 分派调用，
+        保证「Tag 只产出 prompt、不碰 Context」这一语义。
+        """
+        self.tag_result = tag
+        parsed_selected, parsed_custom = [], tag
+        if self.prompt_server is not None:
+            if SnapshotPromptNode is not None:
+                parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
+            new_prompts = [
+                p for p in (self.prompt_server.selected_prompts or [])
+                if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
+            ]
+            new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
+            self.prompt_server.selected_prompts = new_prompts
+            self.prompt_server.custom_prompts = parsed_custom
+        return parsed_selected, parsed_custom
 
     # -------------------------------------------------------------------------
     # 参数同步
@@ -630,8 +579,6 @@ class SnapshotDetailerSamplerServer:
 
             if self.path == '/api/config':
                 self._send_json({
-                    'mask_url': inst.mask_url if inst else '',
-                    'draw_url': inst.draw_url if inst else '',
                     'prompt_url': inst.prompt_url if inst else '',
                     'detail_status': inst.detail_status if inst else 'idle',
                     'add_noise': inst.add_noise if inst else 'enable',
@@ -787,25 +734,6 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({"pipeline_packages": pipeline_packages})
                 return
 
-            if self.path == '/api/has_mask':
-                has = inst.mask_server is not None and inst.mask_server.peek_latest_mask() is not None
-                self._send_json({'has_mask': has})
-                return
-
-            if self.path == '/api/context_preview':
-                try:
-                    pipeline = inst.node_instance.get_current_pipeline() if inst and inst.node_instance else None
-                    if pipeline is not None and pipeline.image is not None:
-                        resp = {'image': tensor_to_base64(pipeline.image)}
-                        if pipeline.mask is not None:
-                            resp['mask'] = mask_to_red_base64(pipeline.mask)
-                        self._send_json(resp)
-                    else:
-                        self._send_json({'image': None, 'mask': None})
-                except Exception as e:
-                    self._send_json({'image': None, 'mask': None, 'error': str(e)})
-                return
-
             if self.path == '/api/has_prompt':
                 has = (inst.prompt_server is not None and
                        (getattr(inst.prompt_server, 'selected_prompts', None) or
@@ -834,28 +762,6 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'history': inst.get_history_list() if inst else []})
                 return
 
-            if self.path == '/api/tag_previews':
-                if inst is None or inst.node_instance is None:
-                    self._send_json({'error': 'not ready'})
-                    return
-                pipeline = inst.node_instance.get_current_pipeline()
-                # 使用 pipeline 中已应用的 mask（由 /api/submit_mask 在进入 Tag 前设置）
-                mask = pipeline.mask if pipeline else None
-                previews = inst.node_instance._generate_tag_previews(pipeline, mask)
-                self._send_json(previews)
-                return
-
-            if self.path == '/api/debug_recover_data':
-                if inst is None:
-                    self._send_json({'error': 'not ready'})
-                    return
-                data = inst.debug_recover_data
-                if data is None:
-                    self._send_json({'error': 'debug data not available yet'})
-                    return
-                self._send_json(data)
-                return
-
             self.send_error(404)
 
         def do_POST(self):
@@ -865,13 +771,6 @@ class SnapshotDetailerSamplerServer:
                 length = int(self.headers.get('Content-Length', 0))
                 data = json.loads(self.rfile.read(length)) if length else {}
                 inst._apply_params(data)
-                self._send_json({'ok': True})
-                return
-
-            if self.path == '/api/run_detailer':
-                length = int(self.headers.get('Content-Length', 0))
-                body = json.loads(self.rfile.read(length)) if length else {}
-                inst.put_action('run_detailer', **body)
                 self._send_json({'ok': True})
                 return
 
@@ -959,62 +858,6 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
-            if self.path == '/api/submit_mask':
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = json.loads(self.rfile.read(length)) if length else {}
-                    mask_b64 = body.get('mask', '')
-                    brush_mode = body.get('brush_mode', 'binary')
-                    strength = float(body.get('strength', 1.0))
-                    center = float(body.get('center', 1.0))
-                    edge = float(body.get('edge', 0.0))
-                    gamma = float(body.get('gamma', 2.0))
-                    if not mask_b64:
-                        self._send_json({'success': False, 'error': 'No mask data'}, 400)
-                        return
-                    if inst.node_instance is None or inst.node_instance._current_pipeline is None:
-                        self._send_json({'success': False, 'error': 'Pipeline not ready'}, 400)
-                        return
-                    pipeline = inst.node_instance._current_pipeline
-                    img = pipeline.image
-                    if img is None:
-                        img = pipeline.get_image()
-                    if img is None:
-                        self._send_json({'success': False, 'error': 'No image'}, 400)
-                        return
-                    orig_h, orig_w = (img.shape[1], img.shape[2]) if img.dim() == 4 else (img.shape[0], img.shape[1])
-                    # Decode base64 mask
-                    raw = mask_b64.split(',')[1] if ',' in mask_b64 else mask_b64
-                    mask_bytes = base64.b64decode(raw)
-                    mask_img = Image.open(io.BytesIO(mask_bytes))
-                    if mask_img.mode != 'RGBA':
-                        mask_img = mask_img.convert('RGBA')
-                    # Use alpha channel as mask
-                    mask_gray = np.array(mask_img)[:, :, 3].astype(np.float32) / 255.0
-                    # Resize to match pipeline image dimensions
-                    if mask_gray.shape[0] != orig_h or mask_gray.shape[1] != orig_w:
-                        mask_gray = cv2.resize(mask_gray, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-                    # Apply brush mode transform
-                    # Brush softness is already baked into the alpha channel (radial gradient in canvas)
-                    # Binary: threshold any non-zero alpha to full strength
-                    if brush_mode == 'binary':
-                        mask_gray = (mask_gray > 0).astype(np.float32) * strength
-                    else:
-                        # Linear / Exponential: alpha already encodes the gradient, just clip
-                        mask_gray = np.clip(mask_gray, 0, 1)
-                    mask_tensor = torch.from_numpy(mask_gray).unsqueeze(0)  # [1, H, W]
-                    print(f"[DIAG] submit_mask: received mask_img={mask_img.size} mode={mask_img.mode} → gray_shape={mask_gray.shape} sum={mask_gray.sum():.1f} max={mask_gray.max():.3f} → tensor_shape={mask_tensor.shape} brush_mode={brush_mode}")
-                    inst.node_instance._on_mask_set(mask_tensor)
-                    # Also update mask server's stored mask so peek_latest_mask works
-                    if inst.mask_server:
-                        inst.mask_server.set_mask(mask_tensor)
-                    self._send_json({'success': True})
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self._send_json({'success': False, 'error': str(e)}, 500)
-                return
-
             if self.path == '/api/select_image':
                 length = int(self.headers.get('Content-Length', 0))
                 body = json.loads(self.rfile.read(length)) if length else {}
@@ -1038,9 +881,7 @@ class SnapshotDetailerSamplerServer:
                 inst.finished = True
                 inst.put_action('finish')
                 print("[SnapshotDetailerSampler] Finish action received, selected_keys:", inst.finish_selected_keys)
-                # 唤醒 mask/prompt 以防阻塞
-                if inst.mask_server:
-                    inst.mask_server.screenshot_event.set()
+                # 唤醒 prompt 以防阻塞
                 if inst.prompt_server:
                     inst.prompt_server.prompt_event.set()
                 self._send_json({'ok': True})
@@ -1141,13 +982,50 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
-            if self.path == '/api/blend_layers':
+            if self.path == '/api/blend_action':
+                # Blend 工作台的统一入口：一次合成（图在 tensor 上，不走 PNG 往返），三种分派。
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    new_key = inst.blend_layers(body.get('layers') or [],
-                                                width=body.get('width'), height=body.get('height'))
-                    self._send_json({'success': True, 'key': new_key})
+                    action = body.get('action', '')
+                    if action not in ('blend', 'tag', 'detailer'):
+                        self._send_json({'success': False, 'error': f'Unknown action: {action}'}, 400)
+                        return
+                    image, mask = inst.compose_blend(
+                        body.get('layers') or [],
+                        width=body.get('width'), height=body.get('height'),
+                        mask_data_url=body.get('mask'),
+                    )
+
+                    if action == 'blend':
+                        # 归档：合成图进历史画廊，不动 Context（Context 就是画布本身）
+                        inst.add_history(image, name=f'Blend #{len(inst.selected_history) + 1}')
+                        self._send_json({'success': True, 'key': inst.selected_history[-1]['key']})
+                        return
+
+                    if action == 'tag':
+                        # 纯读取：拿画布合成图 + Mask 层打标，结果只写进 prompt 阶段
+                        if inst.tagger is None:
+                            self._send_json({'success': False, 'error': 'Tagger not configured'})
+                            return
+                        if inst.node_instance is None:
+                            self._send_json({'success': False, 'error': 'Node not ready'})
+                            return
+                        mode = body.get('tag_mode', 'mask')
+                        tag = inst.node_instance._run_tag_on_image(image, mask, inst.tagger, mode)
+                        parsed_selected, parsed_custom = inst._apply_tag_result(tag)
+                        self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': parsed_custom})
+                        return
+
+                    # action == 'detailer'：合成结果交给主循环执行（主循环在另一个线程）
+                    if mask is None or float(mask.sum()) == 0:
+                        self._send_json({'success': False, 'error': 'Mask is required — paint the mask layer before running the detailer'}, 400)
+                        return
+                    inst.blend_image = image
+                    inst.blend_mask = mask
+                    inst.blend_prompt = (body.get('extra_prompt') or '').strip()
+                    inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
+                    self._send_json({'success': True})
                 except LookupError as e:
                     self._send_json({'success': False, 'error': str(e)}, 404)
                 except ValueError as e:
@@ -1156,39 +1034,6 @@ class SnapshotDetailerSamplerServer:
                     import traceback
                     traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)}, 500)
-                return
-
-            if self.path == '/api/run_tag':
-                try:
-                    if inst.tagger is None:
-                        self._send_json({'success': False, 'error': 'Tagger not configured'})
-                        return
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = json.loads(self.rfile.read(length)) if length else {}
-                    mode = body.get('mode', 'mask')
-                    tag = ''
-                    if inst.node_instance:
-                        pipeline = inst.node_instance.get_current_pipeline()
-                        mask = pipeline.mask if pipeline else None
-                        tag = inst.node_instance._run_tag(pipeline, mask, inst.tagger, mode)
-                    inst.tag_result = tag
-                    if inst.prompt_server:
-                        parsed_selected, parsed_custom = [], tag
-                        if SnapshotPromptNode is not None:
-                            parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
-                        # 移除旧的 parsing tag，保留 normal/program tag，然后添加新的 parsing tag
-                        new_prompts = [
-                            p for p in (inst.prompt_server.selected_prompts or [])
-                            if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
-                        ]
-                        new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
-                        inst.prompt_server.selected_prompts = new_prompts
-                        inst.prompt_server.custom_prompts = parsed_custom
-                    self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': parsed_custom})
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self._send_json({'success': False, 'error': str(e)})
                 return
 
             if self.path == '/window_closed':
@@ -1251,55 +1096,13 @@ class SnapshotDetailerSamplerNode:
     def get_current_pipeline(self):
         return getattr(self, '_current_pipeline', None)
 
-    def _on_mask_set(self, mask):
-        """Mask 编辑器 confirm → 直接写入 pipeline.mask。"""
-        if self._current_pipeline is not None and mask is not None:
-            self._current_pipeline.mask = mask.clone()
-
-    def _on_draw_set(self, image):
-        """Draw 编辑器绘制 → 写回 _current_pipeline.image（仅用于 context 预览）。
-
-        注意：不写 _base_pipeline —— draw 与 mask 一样属于交互状态，
-        由 run_detailer 执行时从 draw server 取最新合成图合并进副本。
-        """
-        if image is None or self._current_pipeline is None:
-            return
-        self._current_pipeline.image = image.clone()
-
     # -------------------------------------------------------------------------
     # Tag
     # -------------------------------------------------------------------------
-    def _generate_tag_previews(self, pipeline, mask):
-        if pipeline is None or pipeline.image is None or mask is None:
-            return {}
-        try:
-            from ..libs.image_utils import crop_mask
-            img = pipeline.image
-            if img.dim() == 3:
-                img = img.unsqueeze(0)
-            if mask.dim() == 2:
-                mask = mask.unsqueeze(0)
-            previews = {'full': tensor_to_base64(img)}
-            try:
-                cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
-                previews['mask'] = tensor_to_base64(cropped_img)
-                white_bg = torch.ones_like(cropped_img)
-                mask_expanded = cropped_mask.unsqueeze(-1).float()
-                covered = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
-                previews['covered'] = tensor_to_base64(covered)
-            except Exception as e:
-                print(f'[TagPreview] crop failed: {e}')
-                previews['mask'] = previews['full']
-                previews['covered'] = previews['full']
-            return previews
-        except Exception as e:
-            print(f'[TagPreview] error: {e}')
-            return {}
-
-    def _run_tag(self, pipeline, mask, tagger, mode='mask'):
+    def _run_tag_on_image(self, tag_image, mask, tagger, mode='mask'):
+        """对给定图像 + 遮罩打标，与 pipeline 状态无关（供 Blend 工作台直接调用）。"""
         from ..libs.caption_utils import get_tag
         from ..libs.image_utils import crop_mask
-        tag_image = pipeline.image if pipeline is not None else None
         if mask is not None:
             try:
                 img = tag_image
@@ -1496,8 +1299,6 @@ class SnapshotDetailerSamplerNode:
         current_mask = resized_mask
         last_resize_info = None
         last_resized_mask = None
-        last_resized_image = None
-        last_block_debug = {}
 
         # Save original pipeline state for restoration after each block
         _orig_enable_edit = next_pipeline.config.get("enable_edit") if next_pipeline.config else None
@@ -1789,18 +1590,6 @@ class SnapshotDetailerSamplerNode:
 
                 last_resize_info = resize_info
                 last_resized_mask = resized_mask
-                last_resized_image = resized_image
-
-                last_block_debug = {
-                    'enable_edit': enable_edit,
-                    'edit_mode': edit_mode,
-                    'ref_boost': ref_boost,
-                    'ref_boost_a': ref_boost_a,
-                    'enable_ref_boost_mask': enable_ref_boost_mask,
-                    'grounding_px': grounding_px,
-                    'context_reference': context_reference,
-                    'context_reference_key': context_reference_key,
-                }
 
                 print(f"[Block {i+1}] Done: decoded shape={decoded_image.shape}")
         finally:
@@ -1842,58 +1631,6 @@ class SnapshotDetailerSamplerNode:
 
         detailed_image = final_image
 
-        # Debug data
-        try:
-            debug_mask = user_mask
-            if debug_mask is not None and crop_info is not None:
-                cx = crop_info.get('crop_x', 0)
-                cy = crop_info.get('crop_y', 0)
-                cw = crop_info.get('crop_width', debug_mask.shape[-1])
-                ch = crop_info.get('crop_height', debug_mask.shape[-2])
-                debug_mask = debug_mask[:, cy:cy+ch, cx:cx+cw]
-                if debug_mask.shape[-2:] != recovered_image.shape[1:3]:
-                    import torch.nn.functional as F
-                    debug_mask = F.interpolate(debug_mask.unsqueeze(1), size=(recovered_image.shape[1], recovered_image.shape[2]), mode='bilinear', align_corners=False).squeeze(1)
-
-            debug_recover_data = {
-                'background': tensor_to_base64(original_image),
-                'image': tensor_to_base64(recovered_image),
-                'mask': mask_to_red_base64(debug_mask if debug_mask is not None else recovered_mask),
-                'crop_x': crop_info.get('crop_x', 0),
-                'crop_y': crop_info.get('crop_y', 0),
-                'crop_width': crop_info.get('crop_width', 0),
-                'crop_height': crop_info.get('crop_height', 0),
-                'original_width': crop_info.get('original_width', 0),
-                'original_height': crop_info.get('original_height', 0),
-                'reference_images': [],
-            }
-
-            ref_imgs = []
-            if last_resized_image is not None:
-                ref_imgs.append(('source (resized)', last_resized_image))
-            if last_block_debug.get('enable_edit') and last_block_debug.get('context_reference') and last_block_debug.get('context_reference_key') and server is not None:
-                ctx_img = server.get_history_image(last_block_debug['context_reference_key'])
-                if ctx_img is not None:
-                    ref_imgs.append((f'context ref ({last_block_debug["context_reference_key"]})', ctx_img))
-            for i, lat in enumerate(_orig_ref_latents):
-                try:
-                    decoded_ref = VAEDecode().decode(vae=next_pipeline.vae, samples=lat)[0]
-                    ref_imgs.append((f'reference_latent[{i}]', decoded_ref))
-                except Exception:
-                    pass
-
-            for name, img in ref_imgs:
-                try:
-                    debug_recover_data['reference_images'].append({
-                        'name': name,
-                        'src': tensor_to_base64(img),
-                    })
-                except Exception:
-                    pass
-        except Exception as dbg_e:
-            print(f'[Debug] failed to save debug data: {dbg_e}')
-            debug_recover_data = None
-
         next_pipeline.image = final_image
         next_pipeline.latent = None
         next_pipeline.mask = user_mask
@@ -1901,7 +1638,7 @@ class SnapshotDetailerSamplerNode:
         gc.collect()
         mm.soft_empty_cache()
 
-        return next_pipeline, original_image, detailed_image, debug_recover_data
+        return next_pipeline, original_image, detailed_image
 
     # -------------------------------------------------------------------------
     # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
@@ -1915,22 +1652,6 @@ class SnapshotDetailerSamplerNode:
         self._current_pipeline.image = new_image
         server.current_context_key = context_key
 
-        if server.mask_server:
-            server.mask_server.set_image(new_image)
-            if old_h != new_h or old_w != new_w:
-                # 尺寸不同，mask 不通用，清除
-                server.mask_server.clear()
-                self._current_pipeline.mask = None
-                print(f"[SnapshotDetailerSampler] Image size changed ({old_w}x{old_h} → {new_w}x{new_h}), mask cleared")
-            else:
-                print(f"[SnapshotDetailerSampler] Image size unchanged ({new_w}x{new_h}), mask preserved")
-
-        # Sync draw server image as well
-        if server.draw_server:
-            server.draw_server.set_image(new_image)
-            # 绘制内容属于旧图（_current_draw 是旧底图+笔迹的整图合成），
-            # 切换 context 一律清除，否则前端 reload 会用旧合成图盖住新底图
-            server.draw_server.clear()
 
         # 关键：切换 context 时同步 _base_pipeline 的 image/mask。
         # run_detailer 每次基于 _base_pipeline.copy() 执行（见 sample()），若不在此同步，
@@ -2242,14 +1963,28 @@ class SnapshotDetailerSamplerNode:
                     comfy.utils.set_progress_bar_global_hook(_progress_hook)
                     try:
                         user_positive, user_loras = self._parse_prompt(server.prompt_server)
-                        current_mask = self._current_pipeline.mask
+
+                        # Blend 工作台：输入图 = 画布合成图，遮罩 = 纯 Mask 层，两者随 action 送达。
+                        # 走这条路时完全不动 _current_pipeline 的 image/mask，也就没有 context 切换。
+                        from_blend = bool(action.get('from_blend'))
+                        blend_image = server.blend_image if from_blend else None
+                        if from_blend:
+                            current_mask = server.blend_mask
+                        else:
+                            current_mask = self._current_pipeline.mask
                         if current_mask is not None:
                             current_mask = current_mask.clone()
+
+                        # 追加 prompt：只拼在 _parse_prompt 的结果之后，不写回 prompt 阶段状态，
+                        # 所以语义上是「追加描述」而不是「替换 prompt」。
+                        extra_prompt = (action.get('extra_prompt') or '').strip() if from_blend else ''
+                        if extra_prompt:
+                            user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
 
                         # 遮罩必须存在，否则 detailer 无意义
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
                             server.detail_status = 'error'
-                            server.detail_error = 'Mask is required — draw a mask before running the detailer'
+                            server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
                             continue
 
                         # 每次 Run 都基于"原始 pipeline"的副本执行——run 之间不共享、
@@ -2262,15 +1997,9 @@ class SnapshotDetailerSamplerNode:
                         run_pipeline = self._base_pipeline.copy()
                         run_pipeline.mask = current_mask.clone() if current_mask is not None else None
 
-                        # Draw 是输入图的最后一站：最终输入图一律取 draw 编辑器当前输出
-                        # （有笔迹用「底图+笔迹」合成图，无笔迹用其底图 = 当前 context 图），
-                        # 保证 run 的输入图永远经过 draw 这一步。
-                        if server.draw_server is not None:
-                            draw_img = server.draw_server.get_draw()
-                            if draw_img is None:
-                                draw_img = server.draw_server.get_image()
-                            if draw_img is not None:
-                                run_pipeline.image = draw_img.clone()
+                        # Blend 工作台：输入图就是画布合成图（Blend 画布 = Context Image）。
+                        if blend_image is not None:
+                            run_pipeline.image = blend_image.clone()
 
                         # 诊断：打印 mask 和 image 的尺寸信息
                         diag_img = run_pipeline.image
@@ -2297,14 +2026,15 @@ class SnapshotDetailerSamplerNode:
                         }
                         blocks = server.blocks
 
-                        next_pipeline, original_image, detailed_image, debug_data = self._run_pipeline_blocks(
+                        next_pipeline, original_image, detailed_image = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
                         )
 
                         server.original_image = original_image
                         server.detailed_image = detailed_image
-                        server.original_key = server.current_context_key  # 记录 detailer 运行前的 context key
-                        server.debug_recover_data = debug_data
+                        # Context 就是 Blend 画布本身，detailer 产出不再接管 context，
+                        # 所以这里不记 context key（产出图由前端作为新图层叠加到画布上）。
+                        server.original_key = None
                         server.detail_status = 'done'
 
                         # 添加到历史画廊
@@ -2312,11 +2042,8 @@ class SnapshotDetailerSamplerNode:
                         new_key = server.selected_history[-1]['key']
                         server.detailed_key = new_key
 
-                        # 更新 pipeline
+                        # 更新 pipeline（保留 model/vae/latent 等流转状态）
                         self._current_pipeline = next_pipeline
-
-                        # 更新 mask server 的图片（与 select_image 相同逻辑：尺寸相同则保留 mask）
-                        self._switch_image(server, next_pipeline.image, context_key=new_key)
 
                         # 清理 prompt 中的 program-sourced 项（parsing tag 保留，在 tag 阶段转换）
                         if server.prompt_server:
@@ -2358,6 +2085,10 @@ class SnapshotDetailerSamplerNode:
                     finally:
                         comfy.utils.set_progress_bar_global_hook(orig_hook)
                         server.detail_progress = 1.0 if server.detail_status == 'done' else server.detail_progress
+                        # 本次 run 的 blend 输入已消费完，释放引用
+                        server.blend_image = None
+                        server.blend_mask = None
+                        server.blend_prompt = ''
 
                     gc.collect()
                     mm.soft_empty_cache()
