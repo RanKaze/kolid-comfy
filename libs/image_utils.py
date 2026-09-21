@@ -123,11 +123,40 @@ def decode_mask_alpha(mask_data_url, width, height):
         return None
 
 
+def decode_decal_rgba(decal_data_url, width, height):
+    """前端 decal PNG → [1,H,W,4] float 张量（直通 alpha，未预乘）。
+
+    width/height 为目标图层尺寸（decal 与图层原图同空间，会缩放到该尺寸）。
+    返回 None 表示"无 decal/完全透明"（空串、解码失败或 alpha 全 0）。
+    """
+    if not decal_data_url or not isinstance(decal_data_url, str):
+        return None
+    try:
+        raw = decal_data_url.split(',', 1)[1] if ',' in decal_data_url else decal_data_url
+        img = Image.open(io.BytesIO(base64.b64decode(raw)))
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        arr = np.array(img).astype(np.float32) / 255.0
+        tensor = torch.from_numpy(arr).unsqueeze(0)  # [1,h,w,4]
+        if tensor.shape[1] != height or tensor.shape[2] != width:
+            tensor = F.interpolate(tensor.permute(0, 3, 1, 2), size=(height, width),
+                                   mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+        tensor = tensor.clamp(0.0, 1.0)
+        if float(tensor[..., 3].max()) <= 1e-4:
+            return None
+        return tensor
+    except Exception as e:
+        print(f"[BlendLayers] decal decode failed: {e}")
+        return None
+
+
 def composite_layers(layers, canvas_w, canvas_h):
     """自下而上合成图层，返回 [1,H,W,C]。
 
-    layers: [{'image': [H,W,C] float, 'transform': {...}|None, 'mask': dataURL|None, 'visible': bool}]
-    先在图层自身尺寸下乘蒙版（蒙版跟随 transform），再按 transform 采样
+    layers: [{'image': [H,W,C] float, 'transform': {...}|None, 'mask': dataURL|None,
+              'decal': dataURL|None, 'visible': bool}]
+    每个图层先在自身尺寸下合成 decal（source-over 叠在原图之上），再乘蒙版
+    （蒙版跟随 transform，同时裁切原图与 decal），然后按 transform 采样
     （用预乘 alpha 避免缩放/旋转边缘出现黑边），最后 source-over 叠加。
     结果全部不透明时返回 3 通道，否则保留 alpha(4 通道)。
     """
@@ -142,6 +171,13 @@ def composite_layers(layers, canvas_w, canvas_h):
         image = ensure_rgba(layer['image'])
         if image.dim() == 3:
             image = image.unsqueeze(0)
+        decal = layer.get('decal')
+        if decal is not None:
+            d_a = decal[..., 3:4]
+            image = torch.cat([
+                decal[..., :3] * d_a + image[..., :3] * (1.0 - d_a),
+                d_a + image[..., 3:4] * (1.0 - d_a),
+            ], dim=-1)
         mask = layer.get('mask')
         if mask is not None:
             image = image * mask
