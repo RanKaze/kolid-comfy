@@ -26,13 +26,65 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha
 from ..libs.mask_utils import expand_mask
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
+
+
+# =============================================================================
+# Detailer 产出回贴几何（Recover Crop 关闭时）
+# =============================================================================
+def detail_place_rect(crop_info, patch=None):
+    """crop_info + 产出图 → Blend 画布把它贴回原位所需的全部几何。
+
+    坐标链（每一步都在压缩这幅图，贴回去就是原路反演）：
+
+        original_image (ow x oh)                 ← Blend 画布，run 时的 context
+          └ crop_mask  → cropped image (cw x ch)，左上角落在 (crop_x, crop_y)
+              └ limit_pixels → patch (pw x ph)   ← 模型真正跑的工作分辨率，sx/sy 是这一步的缩放比
+
+    注意 limit_pixels 是**会放大**的（当前像素数小于目标时按 aspect 放大并对齐 align），
+    所以 pw x ph 通常既不等于 cw x ch，也不是同一边长比例：pw/ph 只能近似 cx 的比例。
+    唯一的硬约束是「整张 patch 必须盖满 crop 矩形的 cw x ch」——这正是开着 Recover Crop
+    时 recover_size + recover_crop 的结果（recover_size 先把 patch 拉回 cw x ch，再由
+    recover_crop 贴到 [crop_y:, crop_x:]），两条路径必须在画布上得到同一个矩形。
+
+    于是这里给出的不是一个画好的 transform，而是让前端自己算的原始量：crop 矩形用
+    **这次 run 的原始图像素**表示（ow/oh 同单位），外加 patch 自身尺寸与缩放比便于核对。
+    纯算术、不依赖 torch，方便单测。
+    """
+    info = crop_info or {}
+    ow = int(info.get('original_width') or 0)
+    oh = int(info.get('original_height') or 0)
+    if ow <= 0 or oh <= 0:
+        return None
+    x = int(info.get('crop_x') or 0)
+    y = int(info.get('crop_y') or 0)
+    # 缺 crop_width/height 时退回整图（对齐 crop_mask 的空 mask 分支语义）
+    w = int(info.get('crop_width') or ow)
+    h = int(info.get('crop_height') or oh)
+    # 夹回原图范围：crop_mask 正常不会越界，但越界会把 patch 贴到画布外
+    x = max(0, min(x, ow - 1))
+    y = max(0, min(y, oh - 1))
+    w = max(1, min(w, ow - x))
+    h = max(1, min(h, oh - y))
+
+    pw, ph = 0, 0
+    if patch is not None and hasattr(patch, 'shape') and len(patch.shape) >= 3:
+        ph = int(patch.shape[-3])
+        pw = int(patch.shape[-2])
+
+    return {
+        'x': x, 'y': y, 'w': w, 'h': h,     # crop 矩形，单位 = 本次 run 的原始图像素
+        'ow': ow, 'oh': oh,                 # 同一幅原始图的尺寸（= run 时的画布尺寸）
+        'pw': pw, 'ph': ph,                 # 返回的 patch 自身像素尺寸
+        'sx': (pw / w) if w else 0.0,       # limit_pixels 施加的缩放比，供前端核对
+        'sy': (ph / h) if h else 0.0,
+    }
 
 
 # =============================================================================
@@ -109,6 +161,7 @@ class SnapshotDetailerSamplerServer:
                     'pixels': self.pixels,
                     'align': self.align,
                     'crop_reserve': self.crop_reserve,
+                    'recover_crop': True,
                     'enable_edit': self.enable_edit,
                     'edit_mode': self.edit_mode,
                     'ref_boost': self.ref_boost,
@@ -281,8 +334,14 @@ class SnapshotDetailerSamplerServer:
     # -------------------------------------------------------------------------
     # 历史画廊
     # -------------------------------------------------------------------------
-    def add_history(self, image, name=None):
-        """添加一张图片到历史画廊。保留 tensor 引用以避免 base64 往返。"""
+    def add_history(self, image, name=None, place=None):
+        """添加一张图片到历史画廊。保留 tensor 引用以避免 base64 往返。
+
+        place 只有「Recover Crop 关闭」的 detailer run 会提供：归一化的放置矩形
+        (x, y, w, h, ow, oh)。此时 image 是 RGBA —— alpha 就是 crop 工作区的 mask，
+        图层自带的 alpha 承担裁剪，所以 history 项不再需要额外的 mask 字段。前端
+        据此把它作为一个新图层贴回原位，而不是由后端合成。
+        """
         self._history_counter += 1
         key = f'history_{self._history_counter}'
         # 记录尺寸供前端过滤同尺寸图片
@@ -301,6 +360,7 @@ class SnapshotDetailerSamplerServer:
             'name': name or f'#{self._history_counter}',
             'width': w,
             'height': h,
+            'place': place,
         })
         if len(self.selected_history) > 20:
             old = self.selected_history.pop(0)
@@ -309,7 +369,8 @@ class SnapshotDetailerSamplerServer:
     def get_history_list(self):
         """返回历史画廊列表（base64 缩略图）。"""
         return [{'key': h['key'], 'name': h['name'], 'src': h['src'],
-                 'width': h.get('width', 0), 'height': h.get('height', 0)}
+                 'width': h.get('width', 0), 'height': h.get('height', 0),
+                 'place': h.get('place')}
                 for h in self.selected_history]
 
     def get_history_image(self, key):
@@ -1273,6 +1334,10 @@ class SnapshotDetailerSamplerNode:
         first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
         first_bp = first_detailer.get('params', first_detailer)
         first_crop_reserve = int(first_bp.get('crop_reserve', 32))
+        # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
+        # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
+        # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
+        recover_crop = bool(first_bp.get('recover_crop', True))
         cropped_image, cropped_mask, crop_info = crop_mask(
             image=original_image,
             mask=expanded_mask,
@@ -1610,35 +1675,58 @@ class SnapshotDetailerSamplerNode:
                 # model，避免补丁闭包（含 source_images/px_cache）跨运行滞留
                 next_pipeline.model = _orig_model
 
-        # Last block: recover_size (分辨率复原) + recover_crop (按 crop_info 贴回全图)
-        # 整条链（含 interface block）都在 crop 工作区坐标系运行，run 之后统一复原。
-        if last_resize_info is not None:
-            recovered_image, recovered_mask = recover_size(
-                image=current_image,
-                resize_info=last_resize_info,
-                mask=last_resized_mask
+        # 收尾：整条链（含 interface block）都在 crop 工作区坐标系里跑，这里把它落地。
+        # Recover Crop 开 → recover_size（分辨率复原）+ recover_crop（按 crop_info 合成
+        # 回全图），即原行为。
+        # Recover Crop 关 → 两个都不做：patch 保持工作分辨率，工作区 mask 合进它的 alpha，
+        # 连同裁剪矩形一起交给前端，由 Blend 画布作为新图层用 transform 贴回原位 ——
+        # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
+        detail_meta = None
+        if recover_crop:
+            if last_resize_info is not None:
+                recovered_image, recovered_mask = recover_size(
+                    image=current_image,
+                    resize_info=last_resize_info,
+                    mask=last_resized_mask
+                )
+            else:
+                recovered_image, recovered_mask = current_image, current_mask
+
+            final_image, final_mask = recover_crop(
+                background=original_image,
+                image=recovered_image,
+                crop_info=crop_info,
+                recover_method='mask_blend',
+                mask=recovered_mask
             )
         else:
-            recovered_image, recovered_mask = current_image, current_mask
-
-        final_image, final_mask = recover_crop(
-            background=original_image,
-            image=recovered_image,
-            crop_info=crop_info,
-            recover_method='mask_blend',
-            mask=recovered_mask
-        )
+            # 工作区 mask 合进产出图的 alpha：这张 RGBA 就是「要贴回原位的新图层」本身。
+            # 前端不再需要额外的 mask 字段 —— 图层自带的 alpha 就承担了裁剪，
+            # 贴回去的观感与 recover_crop(mask_blend) 一致，而这次得到的是一个
+            # 普通图层，可以继续改 transform / 继续画。
+            work_mask = last_resized_mask if last_resized_mask is not None else current_mask
+            # place 用 merge 之前的 current_image 量 patch 尺寸 —— merge 不动空间尺寸，
+            # 但这样就不依赖 merge 的返回形状。
+            place = detail_place_rect(crop_info, current_image)
+            final_image = merge_mask_alpha(current_image, work_mask)
+            detail_meta = {'place': place}
+            print(f"[Detailer] Recover Crop off — returning the RGBA crop-workspace patch "
+                  f"{tuple(final_image.shape)} covering the crop rect "
+                  f"({place['x']},{place['y']}) {place['w']}x{place['h']} of {place['ow']}x{place['oh']} "
+                  f"(patch scale sx={place['sx']:.4f} sy={place['sy']:.4f})")
 
         detailed_image = final_image
 
-        next_pipeline.image = final_image
+        # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
+        # 只是画布上的一块 patch，更不能顶替整幅 context，故保持原合成图。
+        next_pipeline.image = final_image if recover_crop else original_image
         next_pipeline.latent = None
         next_pipeline.mask = user_mask
 
         gc.collect()
         mm.soft_empty_cache()
 
-        return next_pipeline, original_image, detailed_image
+        return next_pipeline, original_image, detailed_image, detail_meta
 
     # -------------------------------------------------------------------------
     # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
@@ -2026,7 +2114,7 @@ class SnapshotDetailerSamplerNode:
                         }
                         blocks = server.blocks
 
-                        next_pipeline, original_image, detailed_image = self._run_pipeline_blocks(
+                        next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
                         )
 
@@ -2037,8 +2125,14 @@ class SnapshotDetailerSamplerNode:
                         server.original_key = None
                         server.detail_status = 'done'
 
-                        # 添加到历史画廊
-                        server.add_history(detailed_image, name=f'Detail #{len(server.selected_history)}')
+                        # 添加到历史画廊。Recover Crop 关闭时带放置矩形 —— 产出图本身已是
+                        # RGBA（alpha = 工作区 mask），Blend 工作台据此把它作为新图层
+                        # transform 贴回原位。
+                        server.add_history(
+                            detailed_image,
+                            name=f'Detail #{len(server.selected_history)}',
+                            place=(detail_meta or {}).get('place'),
+                        )
                         new_key = server.selected_history[-1]['key']
                         server.detailed_key = new_key
 

@@ -394,6 +394,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'crop_reserve', parseInt(e.target.value))}
                 />
               </div>
+              <div style={styles.paramRow}
+                title="开 = 按 crop 几何把产出合成回整幅图（原行为）。关 = 不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，作为新图层由画布用 transform 贴回原来的位置，可继续微调。">
+                <label style={styles.paramLabel}>Recover Crop</label>
+                <IOSToggle
+                  checked={firstDp ? (firstDp.recover_crop ?? true) : true}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'recover_crop', v)}
+                />
+              </div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Pixels</label>
                 <input

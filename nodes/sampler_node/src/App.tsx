@@ -50,6 +50,7 @@ const App: React.FC = () => {
     pixels: 1048576,
     align: 8,
     crop_reserve: 32,
+    recover_crop: true,
     enable_edit: false,
     edit_mode: 'fit' as const,
     ref_boost: 4.0,

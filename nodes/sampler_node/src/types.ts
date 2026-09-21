@@ -30,6 +30,9 @@ export interface DetailerBlockParams {
   pixels: number;
   align: number;
   crop_reserve: number;
+  /** 关掉时不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，
+   *  作为新图层由 Blend 画布用 transform 贴回原位；开 = 合成回整幅图（原行为）。 */
+  recover_crop?: boolean;
   enable_edit: boolean;
   /** Krea2 source-patch 编辑模式: fit = 整图适配 + stride-1 位置（防模糊）; crop = center-crop 几何 */
   edit_mode?: 'fit' | 'crop';
@@ -127,14 +130,17 @@ export interface HistoryItem {
   key: string;
   name: string;
   src: string;
-}
-
-export interface HistoryItem {
-  key: string;
-  name: string;
-  src: string;
   width?: number;
   height?: number;
+  /** Recover Crop 关闭时：产出 patch 要贴回哪块画布区域。此模式下 src 是 RGBA —— alpha
+   *  就是 crop 工作区的 mask，图层自带裁剪。
+   *  x/y/w/h 是 crop 矩形，单位 = 本次 run 的原始图像素（ow x oh）；
+   *  pw/ph 是 patch 自身的像素尺寸，sx/sy 是 limit_pixels 施加的缩放比。 */
+  place?: {
+    x: number; y: number; w: number; h: number;
+    ow: number; oh: number;
+    pw: number; ph: number; sx: number; sy: number;
+  } | null;
 }
 
 export interface InterfaceExecOptions {
