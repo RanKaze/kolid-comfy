@@ -51,9 +51,18 @@ def waitSnapShot(event, check_interval=0.05):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def image_to_base64(image_tensor):
-    """Convert IMAGE tensor [B,H,W,C] float32 0-1 → base64 JPEG data URL."""
+    """Convert IMAGE tensor [B,H,W,C] float32 0-1 → base64 data URL.
+
+    4 通道（alpha VAE 输出）走 PNG 保留 alpha；3 通道仍走 JPEG。
+    """
     import cv2
-    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+    img_array = (image_tensor.squeeze(0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    if img_array.ndim == 3 and img_array.shape[-1] == 4:
+        _, buffer = cv2.imencode('.png', cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGRA))
+        b64_str = base64.b64encode(buffer).decode('utf-8')
+        return f"data:image/png;base64,{b64_str}"
+    if img_array.ndim == 3 and img_array.shape[-1] > 3:
+        img_array = img_array[..., :3]
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
     _, buffer = cv2.imencode('.jpg', img_bgr)
     b64_str = base64.b64encode(buffer).decode('utf-8')

@@ -1,5 +1,6 @@
 import io
 import base64
+import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -46,6 +47,115 @@ def flatten_alpha_on_white(image):
     rgb = image[..., :3]
     alpha = image[..., 3:]
     return rgb * alpha + (1.0 - alpha)
+
+
+def ensure_rgba(image):
+    """3 通道补不透明 alpha 得到 4 通道；已是 4 通道原样返回。"""
+    if image.shape[-1] == 4:
+        return image
+    return torch.cat([image, torch.ones_like(image[..., :1])], dim=-1)
+
+
+def warp_layer(image, transform, canvas_w, canvas_h):
+    """把 [H,W,4] 图层按 transform 摆进 canvas_w x canvas_h 的画布。
+
+    transform: {cx, cy, w, h, rotation}；cx/cy 为图层中心在画布中的归一化位置，
+    w/h 为图层占画布的归一化宽高，rotation 为弧度（画布坐标系，y 向下，正值为视觉顺时针）。
+    与前端 canvas 的 translate(cx*W, cy*H) → rotate(θ) → drawImage(居中, tw*W, th*H) 等价。
+
+    采样前给源图 replicate 补 1 个像素的边：放大图层时最外一圈画布像素的 bilinear
+    取样点会落到源图边界之外，不补边会掺进 padding 的 0，使图层边缘变成半透明
+    （默认铺满画布时表现为画布四边发虚）。
+    """
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+    _, h, w, c = image.shape
+    transform = transform or {}
+    cx = float(transform.get('cx', 0.5)) * canvas_w
+    cy = float(transform.get('cy', 0.5)) * canvas_h
+    tw = max(float(transform.get('w', 1.0)) * canvas_w, 1e-3)
+    th = max(float(transform.get('h', 1.0)) * canvas_h, 1e-3)
+    rot = float(transform.get('rotation', 0.0))
+    cos_r, sin_r = math.cos(rot), math.sin(rot)
+
+    pad = 1
+    pad_w, pad_h = w + 2 * pad, h + 2 * pad
+    # 画布归一化坐标 → 补边后图层的归一化坐标（align_corners=False）
+    theta = torch.tensor([[
+        cos_r * canvas_w * w / (tw * pad_w), sin_r * canvas_h * w / (tw * pad_w),
+        (cos_r * (canvas_w / 2 - cx) + sin_r * (canvas_h / 2 - cy)) * 2 * w / (tw * pad_w),
+    ], [
+        -sin_r * canvas_w * h / (th * pad_h), cos_r * canvas_h * h / (th * pad_h),
+        (-sin_r * (canvas_w / 2 - cx) + cos_r * (canvas_h / 2 - cy)) * 2 * h / (th * pad_h),
+    ]], dtype=image.dtype, device=image.device).unsqueeze(0)
+
+    padded = F.pad(image.permute(0, 3, 1, 2), (pad, pad, pad, pad), mode='replicate')
+    grid = F.affine_grid(theta, size=(1, c, canvas_h, canvas_w), align_corners=False)
+    warped = F.grid_sample(padded, grid, mode='bilinear',
+                           padding_mode='zeros', align_corners=False)
+    return warped.permute(0, 2, 3, 1)[0]
+
+
+def decode_mask_alpha(mask_data_url, width, height):
+    """前端蒙版 PNG（alpha 通道 = 覆盖率）→ [1,H,W,1] float 张量。
+
+    width/height 为目标图层尺寸（蒙版按图层空间生效，会缩放到该尺寸）。
+    返回 None 表示"无蒙版/全可见"（空串、解码失败或全不透明）。
+    """
+    if not mask_data_url or not isinstance(mask_data_url, str):
+        return None
+    try:
+        raw = mask_data_url.split(',', 1)[1] if ',' in mask_data_url else mask_data_url
+        img = Image.open(io.BytesIO(base64.b64decode(raw)))
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        alpha = np.array(img)[..., 3].astype(np.float32) / 255.0
+        tensor = torch.from_numpy(alpha).unsqueeze(0).unsqueeze(-1)  # [1,h,w,1]
+        if tensor.shape[1] != height or tensor.shape[2] != width:
+            tensor = F.interpolate(tensor.permute(0, 3, 1, 2), size=(height, width),
+                                   mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
+        tensor = tensor.clamp(0.0, 1.0)
+        if float(tensor.min()) >= 1.0 - 1e-4:
+            return None
+        return tensor
+    except Exception as e:
+        print(f"[BlendLayers] mask decode failed: {e}")
+        return None
+
+
+def composite_layers(layers, canvas_w, canvas_h):
+    """自下而上合成图层，返回 [1,H,W,C]。
+
+    layers: [{'image': [H,W,C] float, 'transform': {...}|None, 'mask': dataURL|None, 'visible': bool}]
+    先在图层自身尺寸下乘蒙版（蒙版跟随 transform），再按 transform 采样
+    （用预乘 alpha 避免缩放/旋转边缘出现黑边），最后 source-over 叠加。
+    结果全部不透明时返回 3 通道，否则保留 alpha(4 通道)。
+    """
+    canvas_w, canvas_h = max(int(canvas_w), 1), max(int(canvas_h), 1)
+    dtype = layers[0]['image'].dtype if layers else torch.float32
+    out_pm = torch.zeros(1, canvas_h, canvas_w, 3, dtype=dtype)
+    out_a = torch.zeros(1, canvas_h, canvas_w, 1, dtype=dtype)
+
+    for layer in layers:
+        if not layer.get('visible', True):
+            continue
+        image = ensure_rgba(layer['image'])
+        if image.dim() == 3:
+            image = image.unsqueeze(0)
+        mask = layer.get('mask')
+        if mask is not None:
+            image = image * mask
+        premultiplied = torch.cat([image[..., :3] * image[..., 3:4], image[..., 3:4]], dim=-1)
+        warped = warp_layer(premultiplied, layer.get('transform'), canvas_w, canvas_h)
+        rgb, alpha = warped[..., :3], warped[..., 3:4]
+        out_pm = rgb + out_pm * (1.0 - alpha)
+        out_a = alpha + out_a * (1.0 - alpha)
+        out_pm = out_pm.clamp(0.0, 1.0)
+        out_a = out_a.clamp(0.0, 1.0)
+
+    if float(out_a.min()) >= 1.0 - 1e-4:
+        return out_pm.clamp(0.0, 1.0)
+    return torch.cat([out_pm / out_a.clamp(min=1e-6), out_a], dim=-1).clamp(0.0, 1.0)
 
 
 def hex_to_rgb(hex_color: str):

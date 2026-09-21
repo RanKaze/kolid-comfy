@@ -34,7 +34,7 @@ const App: React.FC = () => {
   const consumedMaskConfirmedRef = useRef(false);
   const consumedPromptConfirmedRef = useRef(false);
   const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
-  const [blendSelect, setBlendSelect] = useState<{ role: 'background' | 'foreground' } | null>(null);
+  const [blendSelect, setBlendSelect] = useState<{ role: 'layer' } | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
   const [currentPipelineKey, setCurrentPipelineKey] = useState<string | null>(null);
@@ -205,11 +205,11 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-select') {
         // Blend iframe requests image selection
         setBlendSelect({ role: event.data.role });
-      } else if (event.data?.type === 'blend-data') {
-        // Blend iframe returns blend data (bg/fg keys + mask)
-        const { bgKey, fgKey, mask } = event.data;
-        if (bgKey && fgKey && mask) {
-          handleBlend(bgKey, fgKey, mask);
+      } else if (event.data?.type === 'blend-layers-data') {
+        // Blend iframe hands over the layer stack (bottom → top)
+        const { layers, width, height } = event.data;
+        if (Array.isArray(layers) && layers.length) {
+          handleBlendLayers(layers, width, height);
         }
       }
     };
@@ -665,21 +665,29 @@ const App: React.FC = () => {
     }
   }, [refreshHistory]);
 
-  const handleBlend = useCallback(async (bgKey: string, fgKey: string, maskBase64: string) => {
+  const handleBlendLayers = useCallback(async (layers: any[], width: number, height: number) => {
     setError(null);
+    const iframe = blendIframeRef.current;
+    const reply = (success: boolean, msg?: string) => {
+      iframe?.contentWindow?.postMessage({ type: 'blend-layers-result', success, error: msg }, '*');
+    };
     try {
-      const res = await fetch('/api/blend', {
+      const res = await fetch('/api/blend_layers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ background_key: bgKey, foreground_key: fgKey, mask: maskBase64 }),
+        body: JSON.stringify({ layers, width, height }),
       });
       const data = await res.json();
       if (!data.success) {
         setError(data.error || 'Blend failed');
+        reply(false, data.error || 'Blend failed');
+      } else {
+        reply(true);
       }
       refreshHistory();
     } catch (e: any) {
       setError('Blend error: ' + e.message);
+      reply(false, e.message);
     }
   }, [refreshHistory]);
 
@@ -756,15 +764,9 @@ const App: React.FC = () => {
         onSetContext={handleSetContext}
         blendIframeRef={blendIframeRef}
         showBlendSelect={blendSelect}
-        onBlendSelectImage={(key, name, src) => {
-          if (blendSelect) {
-            const iframe = blendIframeRef.current;
-            iframe?.contentWindow?.postMessage({
-              type: 'blend-image-selected',
-              role: blendSelect.role,
-              key, name, src,
-            }, '*');
-          }
+        onBlendSelectImages={(items) => {
+          const iframe = blendIframeRef.current;
+          iframe?.contentWindow?.postMessage({ type: 'blend-image-selected', items }, '*');
           setBlendSelect(null);
         }}
         onCloseBlendSelect={() => setBlendSelect(null)}
