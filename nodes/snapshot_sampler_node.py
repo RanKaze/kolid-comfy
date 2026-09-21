@@ -40,7 +40,7 @@ except ImportError as e:
     SnapshotPromptServer = None
     SnapshotPromptNode = None
 
-from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, composite_layers, decode_mask_alpha, decode_decal_rgba
+from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, draw_mask, draw_mask_on_image, batch_images, tensor_to_base64, set_inpaint_mask, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl
 from ..libs.mask_utils import expand_mask, combine_masks, create_empty_mask, invert_mask, parse_mask_base64
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
@@ -420,17 +420,20 @@ class SnapshotDetailerSamplerServer:
     def blend_layers(self, layer_specs, width=0, height=0):
         """按图层列表合成一张新图并加入历史，返回新图 key。
 
-        layer_specs: [{'key', 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
-        列表自下而上（[0] 是最底层）。画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
+        layer_specs: [{'key'|'src', 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
+        列表自下而上（[0] 是最底层）。图层像素优先用 history key；拖入的本地图片没有 key，
+        改用它自己的 data URL（'src'）。画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
         """
         if not layer_specs:
             raise ValueError('Missing layers')
         resolved = []
         for spec in layer_specs:
-            key = spec.get('key', '')
+            key = spec.get('key') or ''
             tensor = self.get_history_image(key) if key else None
             if tensor is None:
-                raise LookupError(f'Image not found: {key}')
+                tensor = decode_image_dataurl(spec.get('src'))
+            if tensor is None:
+                raise LookupError(f'Image not found: {key or "dropped image"}')
             if tensor.dim() == 4:
                 tensor = tensor[0]
             resolved.append({

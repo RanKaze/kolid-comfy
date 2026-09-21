@@ -27,7 +27,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .panel-label { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.5px; }
 .panel-hint { font-size: 10.5px; color: rgba(255,255,255,0.35); line-height: 1.45; }
-.mini-group { display: flex; gap: 4px; }
+.mini-group { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .mini-btn { background: rgba(255,255,255,0.08); border: none; border-radius: 7px; padding: 4px 9px; color: rgba(255,255,255,0.85); font-size: 11px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }
 .mini-btn:hover { background: rgba(255,255,255,0.16); }
 .mini-btn.active { background: rgba(0,122,255,0.85); color: #fff; }
@@ -58,18 +58,24 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
 
-.bottom-bar { flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px 20px; background: rgba(28,28,30,0.6); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border-top: 1px solid rgba(255,255,255,0.06); z-index: 50; }
+/* Blend lives in the canvas corner; the sidebar holds the layer list and tool settings. */
+.blend-fab { position: absolute; right: 14px; bottom: 14px; z-index: 60; padding: 11px 30px; font-size: 14px; font-weight: 700; color: #fff; border: none; border-radius: 12px; cursor: pointer; transition: background 0.2s ease, transform 0.2s ease; background: rgba(48,209,88,0.92); box-shadow: 0 6px 20px rgba(0,0,0,0.45); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
+.blend-fab:hover { background: rgba(48,209,88,1.0); transform: translateY(-1px); }
+.blend-fab:disabled { opacity: 0.5; cursor: default; transform: none; }
+.hud { position: fixed; z-index: 120; display: none; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 10px; background: rgba(28,28,30,0.82); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 6px 24px rgba(0,0,0,0.45); pointer-events: none; transform: translate(14px, -50%); }
+.hud .pick-swatch { width: 18px; height: 18px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.35); flex-shrink: 0; }
+.hud .pick-hex { font-size: 12px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+.hud .pick-rgb { font-size: 11px; color: rgba(255,255,255,0.6); font-variant-numeric: tabular-nums; }
+/* Drag-and-drop target: covers the canvas area, never swallows pointer events. */
+#dropOverlay { position: absolute; inset: 0; z-index: 110; display: none; align-items: center; justify-content: center; border-radius: 12px; background: rgba(0,122,255,0.10); border: 2px dashed rgba(0,122,255,0.8); pointer-events: none; }
+#dropOverlay .drop-card { padding: 12px 20px; border-radius: 12px; background: rgba(28,28,30,0.88); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.16); box-shadow: 0 6px 24px rgba(0,0,0,0.45); color: #fff; font-size: 13px; font-weight: 600; }
 label { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); white-space: nowrap; }
 input[type="range"] { cursor: pointer; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.15); outline: none; width: 100px; }
 input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); cursor: pointer; margin-top: -6px; }
-.bottom-divider { width: 1px; height: 28px; background: rgba(255,255,255,0.1); flex-shrink: 0; }
 .control-button { background: rgba(255,255,255,0.1); border: none; border-radius: 10px; padding: 7px 14px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; }
 .control-button:hover { background: rgba(255,255,255,0.18); }
 .control-button.active { background: rgba(0,122,255,0.85); }
 .control-button:disabled { opacity: 0.5; cursor: default; }
-.confirm-btn { padding: 10px 32px; font-size: 14px; font-weight: 700; color: #fff; border: none; border-radius: 12px; cursor: pointer; transition: all 0.2s ease; background: rgba(48,209,88,0.9); box-shadow: 0 2px 8px rgba(0,0,0,0.25); }
-.confirm-btn:hover { background: rgba(48,209,88,1.0); transform: translateY(-1px); }
-.confirm-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 
 /* Mask tools live in the sidebar (no floating panel) */
 .tool-section { border: 1px solid transparent; border-radius: 10px; padding: 6px; margin: -6px; transition: background 0.15s ease, border-color 0.15s ease; }
@@ -80,6 +86,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
 .ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
 .mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.target-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+/* Key-only tool buttons: the badge is the whole label, the name and usage live in the tooltip. */
+.mini-btn.key-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 4px 8px; }
+.mini-btn.key-btn .tool-key { margin-left: 0; min-width: 18px; height: 18px; font-size: 11px; font-weight: 700; }
+.panel-label[title] { cursor: help; }
+/* Brush / Eraser settings stay folded until the header row is clicked. */
+.tool-section.foldable > .panel-head { cursor: pointer; user-select: none; }
+.tool-section.foldable > .panel-head .panel-label { cursor: pointer; }
+.fold-caret { display: inline-block; width: 9px; margin-right: 5px; color: rgba(255,255,255,0.5); transition: transform 0.18s ease; }
+.fold-caret::before { content: '\25B8'; font-size: 9px; }
+.tool-section.foldable:not(.collapsed) .fold-caret { transform: rotate(90deg); }
+.tool-section.foldable.collapsed .tool-body { display: none; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
@@ -131,89 +148,100 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <canvas id="overlayCanvas"></canvas>
         </div>
         <div id="status">Add layers to start</div>
+        <div id="dropOverlay"><div class="drop-card">Drop images to add them as layers</div></div>
         <div id="brushCursor"></div>
+        <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
+        <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
+        <button class="blend-fab" id="blendBtn">Blend</button>
     </div>
     <div id="sidePanel">
         <div class="panel-section">
             <div class="panel-head">
-                <div class="panel-label">Layers</div>
-                <button class="mini-btn" id="addLayerBtn">Add</button>
-            </div>
-            <div class="layer-list" id="layerList"></div>
-            <div class="panel-hint">Top of list draws on top · drag rows to reorder. Chips: image (transform), decal (paint colour), canvas preview (transform), mask (paint coverage).</div>
-        </div>
-        <div class="panel-section">
-            <div class="panel-head">
-                <div class="panel-label">Canvas</div>
-                <button class="mini-btn" id="canvasSizeBtn" title="Set the canvas resolution">Canvas Size…</button>
-            </div>
-            <div class="panel-hint" id="canvasReadout">Follows the bottom layer until you set a size.</div>
-        </div>
-        <div class="panel-section">
-            <div class="panel-head">
-                <div class="panel-label">Transform</div>
+                <div class="panel-label" id="layersLabel">Layers</div>
                 <div class="mini-group">
-                    <button class="mini-btn" id="transformAdjustBtn">Adjust</button>
-                    <button class="mini-btn" id="transformFillBtn">Fill</button>
+                    <button class="mini-btn" id="clearBtn" title="Remove every layer">Clear All</button>
+                    <button class="mini-btn" id="addLayerBtn" title="Add the selected history image as a new layer">Add</button>
                 </div>
             </div>
-            <div class="panel-hint" id="transformReadout">—</div>
-            <div class="panel-hint">T / Ctrl+T shows the box · Enter hides it. Drag inside to move, handles to scale, circle to rotate. Shift snaps.</div>
+            <div class="layer-list" id="layerList"></div>
+        </div>
+        <div class="panel-section">
+            <div class="panel-head">
+                <div class="panel-label" id="canvasLabel" title="The canvas keeps its resolution while layers come and go. Before you set one it follows the bottom layer.">Canvas</div>
+                <button class="mini-btn" id="canvasSizeBtn" title="Set a fixed canvas resolution. Until you set one the canvas follows the bottom layer; image files can also be dropped onto the canvas to become layers.">Canvas Size…</button>
+            </div>
+            <div class="panel-hint" id="canvasReadout" style="display:none;"></div>
+        </div>
+        <div class="panel-section">
+            <div class="panel-head">
+                <div class="panel-label" id="transformLabel">Transform</div>
+                <div class="mini-group">
+                    <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T / Ctrl+T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter hides it, Shift snaps."><span class="tool-key">T</span></button>
+                    <button class="mini-btn" id="transformFillBtn" title="Stretch this layer to cover the whole canvas">Fill</button>
+                </div>
+            </div>
+            <div class="panel-hint" id="transformReadout" title="This layer's transform: centre X/Y, size and rotation as a share of the canvas" style="display:none;"></div>
         </div>
         <div class="panel-section tool-section" id="maskSection">
             <div class="panel-head">
-                <div class="panel-label">Mask / Decal</div>
+                <div class="panel-label" id="maskDecalLabel">Mask / Decal</div>
                 <div class="mini-group">
-                    <button class="mini-btn" id="maskInvertBtn">Invert</button>
-                    <button class="mini-btn" id="maskResetBtn">Reset</button>
+                    <button class="mini-btn" id="maskInvertBtn" title="Invert the mask: hidden areas become visible and the other way round">Invert</button>
+                    <button class="mini-btn" id="maskResetBtn" title="Reset the mask to fully visible">Reset</button>
                 </div>
             </div>
             <div class="mini-group">
-                <button class="mini-btn target-btn active" id="paintMaskBtn" title="Paint this layer's mask (coverage)">Mask <span class="tool-key">M</span></button>
-                <button class="mini-btn target-btn" id="paintDecalBtn" title="Paint this layer's decal (colour)">Decal <span class="tool-key">D</span></button>
+                <button class="mini-btn target-btn active" id="paintMaskBtn" title="Mask (M) — paint this layer's mask (coverage): white shows the image, black hides it."><span class="tool-key">M</span></button>
+                <button class="mini-btn target-btn" id="paintDecalBtn" title="Decal (D) — paint colour on top of this layer's image, under the mask."><span class="tool-key">D</span></button>
             </div>
-            <div class="panel-hint" id="maskTargetLabel" style="color:rgba(255,255,255,0.72); font-weight:600;">Mask — —</div>
-            <div class="panel-hint" id="paintHint">Left-drag uses the active tool, right-drag the other one. Alt + drag or the wheel resizes it.</div>
+            <div class="panel-hint" id="maskTargetLabel" title="Paint target and the layer being painted" style="display:none; color:rgba(255,255,255,0.72); font-weight:600;"></div>
         </div>
-        <div class="panel-section tool-section" id="brushSection">
+        <div class="panel-section tool-section foldable collapsed" id="brushSection">
             <div class="panel-head">
-                <div class="panel-label">Brush <span class="tool-key">B</span></div>
+                <div class="panel-label" id="brushLabel"><span class="fold-caret"></span>Brush <span class="tool-key">B</span></div>
                 <span class="ring-swatch" id="brushRingSwatch" title="Paints the mask in (visible)"></span>
             </div>
-            <div class="mini-group">
-                <button class="mini-btn brush-mode-btn" id="brushBinary">Binary</button>
-                <button class="mini-btn brush-mode-btn" id="brushLinear">Linear</button>
-                <button class="mini-btn brush-mode-btn active" id="brushExpo">Exponential</button>
+            <div class="tool-body">
+                <div class="mini-group">
+                    <button class="mini-btn brush-mode-btn" id="brushBinary" title="Hard edge: full strength inside the outline, nothing outside">Binary</button>
+                    <button class="mini-btn brush-mode-btn" id="brushLinear" title="Linear falloff from Center to Edge">Linear</button>
+                    <button class="mini-btn brush-mode-btn active" id="brushExpo" title="Exponential falloff shaped by Center, Edge and Gamma">Exponential</button>
+                </div>
+                <div class="control-row" id="brushColorRow" style="display:none;"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
+                <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0" title="Opacity of a single pass (0 = nothing, 1 = full)"><span id="brushStrengthValue">1.00</span></div>
+                <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0" title="Inner share of the radius that stays at full strength (Linear / Exponential)"><span id="brushCenterValue">1.00</span></div>
+                <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="brushEdgeValue">0.00</span></div>
+                <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0" title="Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in"><span id="brushGammaValue">2.0</span></div>
+                <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40" title="Brush size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="brushSizeValue">40</span></div>
             </div>
-            <div class="control-row" id="brushColorRow" style="display:none;"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
-            <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0"><span id="brushStrengthValue">1.00</span></div>
-            <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0"><span id="brushCenterValue">1.00</span></div>
-            <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0"><span id="brushEdgeValue">0.00</span></div>
-            <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="brushGammaValue">2.0</span></div>
-            <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40"><span id="brushSizeValue">40</span></div>
         </div>
-        <div class="panel-section tool-section" id="eraserSection">
+        <div class="panel-section tool-section foldable collapsed" id="eraserSection">
             <div class="panel-head">
-                <div class="panel-label">Eraser <span class="tool-key">E</span></div>
+                <div class="panel-label" id="eraserLabel"><span class="fold-caret"></span>Eraser <span class="tool-key">E</span></div>
                 <span class="ring-swatch erase" title="Erases the mask (hidden)"></span>
             </div>
-            <div class="mini-group">
-                <button class="mini-btn eraser-mode-btn" id="eraserBinary">Binary</button>
-                <button class="mini-btn eraser-mode-btn" id="eraserLinear">Linear</button>
-                <button class="mini-btn eraser-mode-btn active" id="eraserExpo">Exponential</button>
+            <div class="tool-body">
+                <div class="mini-group">
+                    <button class="mini-btn eraser-mode-btn" id="eraserBinary" title="Hard edge: full strength inside the outline, nothing outside">Binary</button>
+                    <button class="mini-btn eraser-mode-btn" id="eraserLinear" title="Linear falloff from Center to Edge">Linear</button>
+                    <button class="mini-btn eraser-mode-btn active" id="eraserExpo" title="Exponential falloff shaped by Center, Edge and Gamma">Exponential</button>
+                </div>
+                <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0" title="Opacity of a single pass (0 = nothing, 1 = full)"><span id="eraserStrengthValue">1.00</span></div>
+                <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0" title="Inner share of the radius that stays at full strength (Linear / Exponential)"><span id="eraserCenterValue">1.00</span></div>
+                <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="eraserEdgeValue">0.00</span></div>
+                <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0" title="Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in"><span id="eraserGammaValue">2.0</span></div>
+                <div class="control-row"><label>Size</label><input type="range" id="eraserSize" min="2" max="9999" value="60" title="Eraser size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="eraserSizeValue">60</span></div>
             </div>
-            <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0"><span id="eraserStrengthValue">1.00</span></div>
-            <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0"><span id="eraserCenterValue">1.00</span></div>
-            <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0"><span id="eraserEdgeValue">0.00</span></div>
-            <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0"><span id="eraserGammaValue">2.0</span></div>
-            <div class="control-row"><label>Size</label><input type="range" id="eraserSize" min="2" max="9999" value="60"><span id="eraserSizeValue">60</span></div>
         </div>
         <div class="panel-section">
             <div class="panel-head">
-                <div class="panel-label">View</div>
+                <div class="panel-label" id="viewLabel">View</div>
                 <div class="mini-group">
-                    <button class="mini-btn" id="viewFitBtn">Fit</button>
-                    <button class="mini-btn" id="viewResetBtn">Reset</button>
+                    <button class="mini-btn key-btn" id="panToolBtn" title="Hand (H) — drag with the left button to pan the view. Space or middle-drag pans too."><span class="tool-key">H</span></button>
+                    <button class="mini-btn key-btn" id="zoomToolBtn" title="Zoom (Z) — left click zooms in, right click zooms out; drag right/left to zoom continuously around the point you press."><span class="tool-key">Z</span></button>
+                    <button class="mini-btn key-btn" id="rotateToolBtn" title="Rotate (R) — turn the view like a knob: it follows how you swing the pointer around the view centre. Shift snaps to 15°, a plain click steps 15°."><span class="tool-key">R</span></button>
+                    <button class="mini-btn" id="viewFitBtn" title="Fit the canvas into the view">Fit</button>
+                    <button class="mini-btn" id="viewResetBtn" title="Reset zoom, rotation, flip and pan">Reset</button>
                 </div>
             </div>
             <div style="display:flex; gap:4px;">
@@ -224,15 +252,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <button class="mini-btn" id="viewFlipBtn" title="Flip view horizontally" style="flex:1.4;">Flip H</button>
             </div>
             <div class="panel-hint" id="viewReadout">100% · 0°</div>
-            <div class="panel-hint">Z + left-drag zooms in, Z + right-drag zooms out (a click steps once). R + drag rotates the view — Shift snaps to 15°, a click steps 15°. Ctrl+F flips horizontally. Wheel zooms, Space or middle-drag pans. Fit restores the framing.</div>
         </div>
     </div>
-</div>
-<div class="bottom-bar">
-    <button class="control-button" id="modeChip">Transform (T)</button>
-    <button class="control-button" id="clearBtn">Clear All</button>
-    <div class="bottom-divider"></div>
-    <button class="confirm-btn" id="blendBtn">Blend</button>
 </div>
 <div class="modal-overlay" id="canvasModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Canvas Size">
@@ -268,12 +289,29 @@ const maskTargetLabel = document.getElementById('maskTargetLabel');
 const blendCtx = blendCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
 const blendBtn = document.getElementById('blendBtn');
-const modeChip = document.getElementById('modeChip');
+const pickHud = document.getElementById('pickHud');
+const pickSwatch = document.getElementById('pickSwatch');
+const pickHex = document.getElementById('pickHex');
+const pickRgb = document.getElementById('pickRgb');
+const sizeHud = document.getElementById('sizeHud');
+const sizeHudValue = document.getElementById('sizeHudValue');
+const sizeHudTool = document.getElementById('sizeHudTool');
+const dropOverlay = document.getElementById('dropOverlay');
+// Section headers carry the explanations as tooltips instead of permanent sidebar text.
+const layersLabel = document.getElementById('layersLabel');
+const transformLabel = document.getElementById('transformLabel');
+const maskDecalLabel = document.getElementById('maskDecalLabel');
+const brushLabel = document.getElementById('brushLabel');
+const eraserLabel = document.getElementById('eraserLabel');
+const viewLabel = document.getElementById('viewLabel');
+layersLabel.title = 'Top of list draws on top · drag rows to reorder. Chips: 0 full view (click to transform), 1 original image, 2 decal (click to paint colour), 3 mask (click to paint coverage).';
+transformLabel.title = 'T / Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps.';
+viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
 let layers = [];
 let selectedId = null;
-let mode = 'transform';        // 'transform' | 'mask' | 'none'
+let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'none'
 let canvasW = 0, canvasH = 0;
 let canvasCustom = false;      // once set from the dialog the canvas stops following the bottom layer
 const MAX_CANVAS_SIDE = 16384, MAX_CANVAS_PIXELS = 40e6;
@@ -281,20 +319,20 @@ let layerSeq = 0;
 
 // View transform: screen = pan + R(rotation) · S(zoom*flipX, zoom) · doc
 const MIN_ZOOM = 0.02, MAX_ZOOM = 64;
+const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angle is still meaningful
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
-let keySpace = false, keyZ = false, keyR = false;
+let keySpace = false, keyAlt = false;
 let lastScreen = null, lastDoc = null;
 
 let isDrawing = false;
 let isErasing = false;
-let isAltResizing = false;
-let altResizeAnchorX = 0;
-let altResizeBaseSize = 40;
-let altResizeBrushCenterX = 0;
-let altResizeBrushCenterY = 0;
-const ALT_RESIZE_SENSITIVITY = 0.5;
+// Eyedropper: Alt + left button in paint mode samples what is on the canvas; the colour is
+// applied on release, while holding just previews it (swatch + hex + rgb next to the cursor).
+let picking = null;            // {doc:{x,y}, clientX, clientY, rgb:[r,g,b]|null}
+// Alt + right-drag scrubs the active tool's size (PS-style); the tool is captured on press.
+let sizeDrag = null;           // {tool:'brush'|'eraser', startX, startY, startSize, moved}
 let brushSize = 40;
 let lastX = 0, lastY = 0;
 let brushMode = 'exponential';
@@ -413,6 +451,12 @@ function setCanvasSize(w, h, scaleLayers) {
     return true;
 }
 
+// A readout only takes up sidebar space while it has something to say.
+function setReadout(el, text) {
+    if (el.textContent !== text) el.textContent = text;
+    el.style.display = text ? '' : 'none';
+}
+
 function updateCanvasReadout() {
     const btn = document.getElementById('canvasSizeBtn');
     if (btn) {
@@ -420,9 +464,7 @@ function updateCanvasReadout() {
         if (btn.textContent !== text) btn.textContent = text;
     }
     const el = document.getElementById('canvasReadout');
-    if (el) el.textContent = canvasW && canvasH
-        ? (canvasCustom ? 'Fixed — layers no longer change it.' : 'Following the bottom layer.')
-        : 'Follows the bottom layer until you set a size.';
+    if (el) setReadout(el, canvasW && canvasH ? (canvasCustom ? 'Fixed' : 'Follows the bottom layer') : '');
 }
 
 // ==================== 视图（缩放 / 旋转 / 翻转 / 平移） ====================
@@ -529,20 +571,28 @@ function sizeOverlay() {
     overlayCanvas.style.height = r.height + 'px';
 }
 
+// PS-style pipette pointer for the eyedropper; the hotspot sits at the tip (bottom-left).
+const EYEDROPPER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M17.67 3c-.26 0-.51.1-.71.29l-3.12 3.12-1.93-1.91-1.41 1.41 1.42 1.42L3 16.25V21h4.75l8.92-8.92 1.42 1.42 1.41-1.41-1.92-1.92 3.12-3.12c.4-.4.4-1.03.01-1.42l-2.34-2.34c-.2-.19-.45-.29-.7-.29z' fill='%23fff' stroke='%23000' stroke-width='1' stroke-linejoin='round'/%3E%3C/svg%3E") 3 21, crosshair`;
+// Circular-arrow pointer for the rotate tool; the hotspot sits at the arc centre.
+const ROTATE_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg stroke='%23000' stroke-width='4.6'%3E%3Cpath d='M19.6 12a7.6 7.6 0 1 1-2.3-5.4'/%3E%3Cpath d='M17.3 2.6v3.9h3.9'/%3E%3C/g%3E%3Cg stroke='%23fff' stroke-width='2.2'%3E%3Cpath d='M19.6 12a7.6 7.6 0 1 1-2.3-5.4'/%3E%3Cpath d='M17.3 2.6v3.9h3.9'/%3E%3C/g%3E%3C/svg%3E") 12 12, crosshair`;
+
 function setCursor(c) { viewport.style.cursor = c; }
 
 // Restores the cursor implied by the current tool / held view keys.
 function refreshCursor() {
-    if (viewDrag || drag || isDrawing) return;
+    if (viewDrag || drag || isDrawing || sizeDrag) return;
     if (keySpace) { setCursor('grab'); return; }
-    if (keyZ) { setCursor('zoom-in'); return; }
-    if (keyR) { setCursor('grab'); return; }
-    if (mode === 'mask') { setCursor('none'); return; }
+    if (mode === 'pan') { setCursor('grab'); return; }
+    if (mode === 'zoom') { setCursor('zoom-in'); return; }
+    if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
+    if (mode === 'mask') { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
     if (mode === 'transform' && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     setCursor('default');
 }
 
 function beginViewDrag(kind, e, sp) {
+    const c = vpCenter();
+    const r = Math.hypot(sp.x - c.x, sp.y - c.y);
     viewDrag = {
         kind,
         sign: kind === 'zoom' ? (e.button === 2 ? -1 : 1) : 1,
@@ -550,10 +600,14 @@ function beginViewDrag(kind, e, sp) {
         startY: e.clientY,
         startView: { zoom: view.zoom, rotation: view.rotation, panX: view.panX, panY: view.panY },
         anchorDoc: screenToDoc(sp),
-        centerDoc: screenToDoc(vpCenter()),
+        anchorScreen: { x: sp.x, y: sp.y },   // where the button went down: the zoom pivot stays here
+        centerDoc: screenToDoc(c),
+        lastAngle: Math.atan2(sp.y - c.y, sp.x - c.x),
+        swept: 0,                             // radians turned so far since the drag was armed
+        armed: r >= MIN_ROTATE_RADIUS,        // a press at the pivot has no meaningful angle yet
         moved: false,
     };
-    setCursor(kind === 'zoom' ? (viewDrag.sign > 0 ? 'zoom-in' : 'zoom-out') : 'grabbing');
+    setCursor(kind === 'zoom' ? (viewDrag.sign > 0 ? 'zoom-in' : 'zoom-out') : (kind === 'rotate' ? ROTATE_CURSOR : 'grabbing'));
     syncBrushCursor();
 }
 
@@ -570,12 +624,33 @@ function updateViewDrag(e, sp) {
         view.panY = d.startView.panY + dy;
     } else if (d.kind === 'zoom') {
         view.zoom = clampZoom(d.startView.zoom * Math.pow(2, (dx * d.sign) / 220));
-        anchorView(sp, d.anchorDoc);          // the doc point under the pointer stays under it
+        // Pivot on the press point: the doc pixel picked there stays put while the zoom scrubs,
+        // instead of sliding along with the pointer.
+        anchorView(d.anchorScreen, d.anchorDoc);
     } else {
-        let rot = d.startView.rotation + (dx / 200) * (Math.PI / 4);
-        if (e.shiftKey) { const step = Math.PI / 12; rot = Math.round(rot / step) * step; }
+        const c = vpCenter();
+        const r = Math.hypot(sp.x - c.x, sp.y - c.y);
+        const a = Math.atan2(sp.y - c.y, sp.x - c.x);
+        // Turn it like a knob: the view follows the angle the pointer sweeps around the view
+        // centre, so the grabbed point stays under the pointer wherever you drag. Right at the
+        // pivot the angle is meaningless, so re-base once the pointer clears the dead zone.
+        if (!d.armed || r < MIN_ROTATE_RADIUS) {
+            if (r < MIN_ROTATE_RADIUS) return;
+            d.armed = true;
+            d.startView.rotation = view.rotation;
+            d.swept = 0;
+            d.lastAngle = a;
+            return;
+        }
+        let step = a - d.lastAngle;           // incremental, wrapped: crossing ±180° must not jump
+        if (step > Math.PI) step -= Math.PI * 2;
+        else if (step < -Math.PI) step += Math.PI * 2;
+        d.lastAngle = a;
+        d.swept += step;
+        let rot = d.startView.rotation + d.swept;
+        if (e.shiftKey) { const step15 = Math.PI / 12; rot = Math.round(rot / step15) * step15; }
         view.rotation = rot;
-        anchorView(vpCenter(), d.centerDoc);  // rotate about the viewport centre
+        anchorView(c, d.centerDoc);           // the view centre stays the pivot
     }
     applyView();
 }
@@ -584,8 +659,8 @@ function endViewDrag(e) {
     const d = viewDrag;
     viewDrag = null;
     if (d && !d.moved) {
-        // A bare Z/R click steps once, so the modifiers work without dragging.
-        if (d.kind === 'zoom') zoomAt(toScreenCoords(e), d.sign > 0 ? 1.25 : 1 / 1.25);
+        // A bare click steps once, so both view tools work without dragging.
+        if (d.kind === 'zoom') zoomAt(d.anchorScreen, d.sign > 0 ? 1.25 : 1 / 1.25);
         else if (d.kind === 'rotate') rotateView(Math.PI / 12);
     }
     syncBrushCursor();
@@ -593,7 +668,10 @@ function endViewDrag(e) {
 }
 
 function updateHoverCursor(sp, docPos) {
-    if (mode !== 'transform') { setCursor(mode === 'mask' ? 'none' : 'default'); return; }
+    if (mode === 'pan') { setCursor('grab'); return; }
+    if (mode === 'zoom') { setCursor('zoom-in'); return; }
+    if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
+    if (mode !== 'transform') { setCursor(mode === 'mask' ? (altPickActive() ? EYEDROPPER_CURSOR : 'none') : 'default'); return; }
     const l = getSelected();
     let cursor = 'default';
     if (l && l.visible) {
@@ -782,9 +860,9 @@ function render() {
 function updateTransformReadout() {
     const el = document.getElementById('transformReadout');
     const l = getSelected();
-    if (!l || !canvasW) { el.textContent = '—'; return; }
+    if (!l || !canvasW) { setReadout(el, ''); return; }
     const tr = l.transform;
-    el.textContent = `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`;
+    setReadout(el, `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`);
 }
 
 // ==================== 图层列表 ====================
@@ -848,7 +926,7 @@ function renderLayerList() {
 
         const thumb = document.createElement('div');
         thumb.className = 'layer-thumb';
-        thumb.title = 'Transform this layer';
+        thumb.title = '1 · Original image — click to transform this layer';
         if (l.id === selectedId && mode === 'transform') thumb.classList.add('active');
         const img = document.createElement('img');
         img.src = l.src;
@@ -861,7 +939,7 @@ function renderLayerList() {
 
         const maskThumb = document.createElement('div');
         maskThumb.className = 'layer-thumb mask-thumb';
-        maskThumb.title = 'Paint this layer\'s mask (coverage)';
+        maskThumb.title = '3 · Mask — click to paint coverage';
         if (l.id === selectedId && mode === 'mask' && paintTarget === 'mask') maskThumb.classList.add('active');
         const maskCanvasEl = document.createElement('canvas');
         maskCanvasEl.width = 84;
@@ -879,7 +957,7 @@ function renderLayerList() {
 
         const decalThumb = document.createElement('div');
         decalThumb.className = 'layer-thumb decal-thumb';
-        decalThumb.title = 'Paint this layer\'s decal (colour on top of the image)';
+        decalThumb.title = '2 · Decal — click to paint colour on top of the image';
         if (l.id === selectedId && mode === 'mask' && paintTarget === 'decal') decalThumb.classList.add('active');
         const decalCanvasEl = document.createElement('canvas');
         decalCanvasEl.width = 84;
@@ -897,7 +975,7 @@ function renderLayerList() {
 
         const canvasThumb = document.createElement('div');
         canvasThumb.className = 'layer-thumb canvas-thumb';
-        canvasThumb.title = 'This layer on the canvas — click to transform';
+        canvasThumb.title = '0 · Full view — this layer on the canvas, click to transform';
         const canvasThumbEl = document.createElement('canvas');
         canvasThumbEl.width = 84;
         canvasThumbEl.height = 56;
@@ -913,9 +991,9 @@ function renderLayerList() {
         name.className = 'layer-name';
         name.textContent = l.name;
 
+        row.appendChild(canvasThumb);
         row.appendChild(thumb);
         row.appendChild(decalThumb);
-        row.appendChild(canvasThumb);
         row.appendChild(maskThumb);
         row.appendChild(name);
 
@@ -1043,10 +1121,15 @@ function setMode(m) {
     render();
 }
 
+// Picking the tool that is already active keeps it: tools are switched, never toggled off.
+// Enter / Esc are the way back to no tool at all.
+function activateMode(m) { if (mode !== m) setMode(m); }
+
 function syncModeUI() {
-    modeChip.textContent = mode === 'mask' ? (isDecalTarget() ? 'Decal Brush (D)' : 'Mask Brush (M)') : 'Transform (T)';
-    modeChip.classList.toggle('active', mode === 'transform');
     document.getElementById('transformAdjustBtn').classList.toggle('active', mode === 'transform');
+    document.getElementById('zoomToolBtn').classList.toggle('active', mode === 'zoom');
+    document.getElementById('panToolBtn').classList.toggle('active', mode === 'pan');
+    document.getElementById('rotateToolBtn').classList.toggle('active', mode === 'rotate');
     syncToolUI();
     syncBrushCursor();
     refreshCursor();
@@ -1055,31 +1138,34 @@ function syncModeUI() {
 // The brush stays visible while painting, even when the pointer leaves the viewport,
 // so canvas edges can be painted without the cursor snapping back to an arrow.
 function syncBrushCursor() {
-    const show = mode === 'mask' && !keySpace && !keyZ && !keyR && !canvasModalOpen() && (cursorInside || isDrawing);
+    const show = mode === 'mask' && !altPickActive() && !keySpace && !canvasModalOpen()
+        && (cursorInside || isDrawing || !!sizeDrag);
     brushCursor.style.display = show ? 'block' : 'none';
 }
 
 function updateMaskTargetLabel() {
     const l = getSelected();
     const which = isDecalTarget() ? 'Decal' : 'Mask';
-    const text = mode === 'mask' ? `${which} — ${l ? l.name : '—'}` : `${which} — —`;
-    if (maskTargetLabel.textContent !== text) maskTargetLabel.textContent = text;
+    setReadout(maskTargetLabel, mode === 'mask' && l ? `${which} — ${l.name}` : '');
 }
 
 // ==================== 工具（画笔 / 橡皮） ====================
 // Left mouse button uses the active tool, the right button the other one.
 function strokeTool(e) { return e.button === 2 ? (maskTool === 'brush' ? 'eraser' : 'brush') : maskTool; }
-function erasingNow() { return (isDrawing || isAltResizing) ? isErasing : maskTool === 'eraser'; }
+function erasingNow() { return (isDrawing ? isErasing : maskTool === 'eraser'); }
 
 function activeSizeValue() { return erasingNow() ? eraserSize : brushSize; }
+function toolSize(tool) { return tool === 'eraser' ? eraserSize : brushSize; }
 
-function setActiveSize(v) {
+function setToolSize(tool, v) {
     v = Math.max(2, Math.min(9999, Math.round(v)));
-    if (erasingNow()) eraserSize = v;
+    if (tool === 'eraser') eraserSize = v;
     else brushSize = v;
     syncSizeUI();
     updateBrushCursorSize();
 }
+
+function setActiveSize(v) { setToolSize(erasingNow() ? 'eraser' : 'brush', v); }
 
 function syncSizeUI() {
     document.getElementById('brushSize').value = brushSize;
@@ -1105,10 +1191,14 @@ function syncPaintUI() {
     document.getElementById('paintDecalBtn').classList.toggle('active', decal);
     document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
     document.getElementById('maskResetBtn').textContent = decal ? 'Clear' : 'Reset';
+    document.getElementById('maskResetBtn').title = decal ? 'Clear this layer\'s decal (the painted colour)' : 'Reset the mask to fully visible';
     document.getElementById('brushColorRow').style.display = decal ? 'flex' : 'none';
-    document.getElementById('paintHint').textContent = decal
-        ? 'Colour sits on top of the image and under the mask. Left-drag paints, right-drag erases.'
-        : 'Left-drag uses the active tool, right-drag the other one. Alt + drag or the wheel resizes it.';
+    const target = decal ? 'the decal' : 'the mask';
+    maskDecalLabel.title = decal
+        ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints, right-drag erases; the wheel resizes the active tool and Alt + right-drag scrubs its size. M / D switch target.'
+        : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag uses the active tool, right-drag the other one; the wheel resizes it, Alt + right-drag scrubs its size. M / D switch target.';
+    brushLabel.title = `Brush (B) — left-drag paints ${target}, right-drag erases. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release). Click the header to fold the settings.`;
+    eraserLabel.title = `Eraser (E) — left-drag erases ${target}, right-drag paints back in. Wheel resizes it, Alt + right-drag scrubs the size. Click the header to fold the settings.`;
     updateMaskTargetLabel();
     updateCursorMode();
 }
@@ -1128,6 +1218,9 @@ function selectPaintTarget(target) {
 
 function setPaintColor(hex) {
     brushColor = hex;
+    // The picker input drives the swatch the user sees, so it has to follow picks too.
+    const input = document.getElementById('brushColor');
+    if (input.value !== hex) input.value = hex;
     document.getElementById('brushColorValue').textContent = String(hex).toUpperCase();
     updateCursorMode();
 }
@@ -1430,6 +1523,109 @@ function commitStroke() {
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
 }
 
+// ==================== 吸色（画笔模式下按住 Alt + 左键） ====================
+// Samples the composited canvas, not the layer source: what you see is what you pick.
+// The colour is applied on release, so the button can be held to preview swatch + exact values.
+// The eraser never picks: with it active Alt is inert on the left button and Alt+right scrubs.
+function altPickActive() { return mode === 'mask' && maskTool === 'brush' && !sizeDrag && (keyAlt || !!picking); }
+
+function pickColorAt(docPos) {
+    const x = Math.round(docPos.x), y = Math.round(docPos.y);
+    if (x < 0 || y < 0 || x >= canvasW || y >= canvasH) return null;
+    const d = blendCtx.getImageData(x, y, 1, 1).data;
+    return d[3] < 8 ? null : [d[0], d[1], d[2]];
+}
+
+function rgbToHex(rgb) {
+    return '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+function syncPickHud() {
+    if (!picking) { pickHud.style.display = 'none'; return; }
+    const rgb = picking.rgb;
+    pickHud.style.display = 'flex';
+    pickHud.style.left = picking.clientX + 'px';
+    pickHud.style.top = picking.clientY + 'px';
+    pickSwatch.style.background = rgb ? rgbToHex(rgb) : 'transparent';
+    pickHex.textContent = rgb ? rgbToHex(rgb).toUpperCase() : '—';
+    pickRgb.textContent = rgb ? `${rgb[0]}, ${rgb[1]}, ${rgb[2]}` : 'transparent';
+}
+
+function beginPick(e, pos) {
+    picking = { clientX: e.clientX, clientY: e.clientY, rgb: pickColorAt(pos) };
+    setCursor(EYEDROPPER_CURSOR);
+    syncPickHud();
+    syncBrushCursor();
+}
+
+function updatePick(e) {
+    if (!picking) return;
+    picking.clientX = e.clientX;
+    picking.clientY = e.clientY;
+    picking.rgb = pickColorAt(screenToDoc(toScreenCoords(e)));
+    syncPickHud();
+}
+
+function endPick(e) {
+    const rgb = picking && picking.rgb;
+    cancelPick();
+    if (rgb) {
+        const hex = rgbToHex(rgb);
+        setPaintColor(hex);
+        setStatus(`Picked ${hex.toUpperCase()} (${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
+    } else {
+        setStatus('Nothing to pick there', 'error');
+    }
+}
+
+function cancelPick() {
+    if (!picking) return;
+    picking = null;
+    pickHud.style.display = 'none';
+    syncBrushCursor();
+    refreshCursor();
+}
+
+// ==================== 尺寸拖拽（Alt + 右键，PS 式） ====================
+// Horizontal scrub, exponential like the zoom scrub so it stays usable from 2 px to 9999 px.
+function beginSizeDrag(e) {
+    const tool = maskTool;
+    sizeDrag = { tool, startX: e.clientX, startY: e.clientY, startSize: toolSize(tool), moved: false };
+    syncSizeHud(e);
+    setCursor('ew-resize');
+    syncBrushCursor();
+}
+
+function updateSizeDrag(e) {
+    const d = sizeDrag;
+    const dx = e.clientX - d.startX;
+    if (!d.moved) {
+        if (Math.abs(dx) <= 2) return;
+        d.moved = true;
+    }
+    setToolSize(d.tool, d.startSize * Math.pow(2, dx / 160));
+    syncSizeHud(e);
+}
+
+function syncSizeHud(e) {
+    if (!sizeDrag) { sizeHud.style.display = 'none'; return; }
+    const d = sizeDrag;
+    sizeHud.style.display = 'flex';
+    sizeHud.style.left = e.clientX + 'px';
+    sizeHud.style.top = e.clientY + 'px';
+    sizeHudValue.textContent = toolSize(d.tool) + ' px';
+    sizeHudTool.textContent = d.tool === 'eraser' ? 'Eraser' : 'Brush';
+}
+
+function endSizeDrag() {
+    const d = sizeDrag;
+    sizeDrag = null;
+    sizeHud.style.display = 'none';
+    if (d && d.moved) setStatus(`${d.tool === 'eraser' ? 'Eraser' : 'Brush'} size ${toolSize(d.tool)} px`);
+    syncBrushCursor();
+    refreshCursor();
+}
+
 // ==================== 画布交互 ====================
 viewport.addEventListener('mouseenter', () => {
     cursorInside = true;
@@ -1447,19 +1643,11 @@ viewport.addEventListener('mousedown', e => {
     const pos = screenToDoc(sp);
     // View gestures win over the tools.
     if (e.button === 1 || (keySpace && e.button === 0)) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
-    if (keyZ && (e.button === 0 || e.button === 2)) { beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
-    if (keyR && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
-    if (e.altKey && mode === 'mask') {
-        isAltResizing = true;
-        isErasing = strokeTool(e) === 'eraser';
-        altResizeAnchorX = e.clientX;
-        altResizeBaseSize = activeSizeValue();
-        altResizeBrushCenterX = e.clientX;
-        altResizeBrushCenterY = e.clientY;
-        updateCursorMode();
-        e.preventDefault();
-        return;
-    }
+    if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
+    if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
+    if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
+    if (mode === 'mask' && e.altKey && e.button === 2) { beginSizeDrag(e); e.preventDefault(); return; }
+    if (mode === 'mask' && e.altKey && e.button === 0 && maskTool === 'brush') { beginPick(e, pos); e.preventDefault(); return; }
     if (mode === 'mask') {
         if (e.button !== 0 && e.button !== 2) return;
         if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
@@ -1502,13 +1690,8 @@ viewport.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefaul
 // the cursor after it leaves the canvas (and the brush keeps painting at the edges).
 window.addEventListener('mousemove', e => {
     moveCursor(e);
-    if (isAltResizing) {
-        const dx = e.clientX - altResizeAnchorX;
-        setActiveSize(altResizeBaseSize + dx * ALT_RESIZE_SENSITIVITY);
-        brushCursor.style.left = altResizeBrushCenterX + 'px';
-        brushCursor.style.top = altResizeBrushCenterY + 'px';
-        return;
-    }
+    if (sizeDrag) { updateSizeDrag(e); return; }
+    if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
     const pos = screenToDoc(sp);
@@ -1525,6 +1708,8 @@ window.addEventListener('mousemove', e => {
 });
 
 window.addEventListener('mouseup', e => {
+    if (picking) endPick(e);
+    if (sizeDrag) endSizeDrag();
     if (viewDrag) endViewDrag(e);
     if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
     if (drag) {
@@ -1533,7 +1718,7 @@ window.addEventListener('mouseup', e => {
         const sp = toScreenCoords(e);
         updateHoverCursor(sp, screenToDoc(sp));
     }
-    if (isAltResizing) { isAltResizing = false; moveCursor(e); }
+    refreshCursor();
 });
 
 // Safety net: releasing the button outside the frame (or tab switch) must not leave a tool stuck.
@@ -1541,8 +1726,10 @@ window.addEventListener('blur', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
     if (drag) { drag = null; render(); }
     viewDrag = null;
-    isAltResizing = false;
-    keySpace = keyZ = keyR = false;
+    cancelPick();
+    sizeDrag = null;
+    sizeHud.style.display = 'none';
+    keySpace = keyAlt = false;
     syncBrushCursor();
     refreshCursor();
 });
@@ -1660,6 +1847,37 @@ document.getElementById('addLayerBtn').addEventListener('click', () => {
     if (window.parent !== window) window.parent.postMessage({ type: 'blend-select', role: 'layer' }, '*');
 });
 
+// ==================== 拖入本地图片 ====================
+// Local files have no history key, so the layer keeps its data URL and the Blend payload
+// hands the pixels to the backend directly.
+function dropHasFiles(dt) { return !!dt && Array.prototype.indexOf.call(dt.types || [], 'Files') >= 0; }
+function baseName(name) { return String(name || 'Layer').replace(/\.[^.]+$/, '') || 'Layer'; }
+
+window.addEventListener('dragover', e => {
+    if (!dropHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    dropOverlay.style.display = 'flex';
+});
+window.addEventListener('dragleave', e => {
+    if (!e.relatedTarget) dropOverlay.style.display = 'none';   // only when the pointer leaves the frame
+});
+window.addEventListener('drop', e => {
+    if (!dropHasFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dropOverlay.style.display = 'none';
+    const files = Array.prototype.slice.call(e.dataTransfer.files || [])
+        .filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name));
+    if (!files.length) { setStatus('Only image files can be dropped here', 'error'); return; }
+    for (const f of files) {
+        const reader = new FileReader();
+        reader.onload = () => addLayer({ key: null, name: baseName(f.name), src: String(reader.result) });
+        reader.onerror = () => setStatus(`Could not read ${f.name}`, 'error');
+        reader.readAsDataURL(f);
+    }
+    setStatus(files.length === 1 ? `Added ${baseName(files[0].name)}` : `Adding ${files.length} images…`);
+});
+
 // Don't let a focused sidebar control swallow the canvas shortcuts (T/M/B/E, space, arrows…).
 document.getElementById('sidePanel').addEventListener('mouseup', e => {
     const el = e.target.closest && e.target.closest('input, button');
@@ -1698,7 +1916,7 @@ document.getElementById('brushColor').addEventListener('input', e => setPaintCol
 
 document.getElementById('transformAdjustBtn').addEventListener('click', () => {
     if (mode !== 'transform' && !getSelected()) { setStatus('Select a layer first', 'error'); return; }
-    setMode(mode === 'transform' ? 'none' : 'transform');
+    activateMode('transform');
 });
 document.getElementById('transformFillBtn').addEventListener('click', () => {
     const l = getSelected();
@@ -1717,7 +1935,16 @@ document.getElementById('viewRotateCWBtn').addEventListener('click', () => rotat
 document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rotateView(-Math.PI / 12));
 document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
 
-modeChip.addEventListener('click', () => setMode(mode === 'transform' ? 'none' : 'transform'));
+// ---- Folding tool sections ----
+// Brush and Eraser start folded; clicking their header row shows or hides the settings.
+for (const id of ['brushSection', 'eraserSection']) {
+    const section = document.getElementById(id);
+    section.querySelector('.panel-head').addEventListener('click', () => section.classList.toggle('collapsed'));
+}
+
+document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
+document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
+document.getElementById('rotateToolBtn').addEventListener('click', () => activateMode('rotate'));
 
 document.getElementById('clearBtn').addEventListener('click', () => {
     if (!layers.length) return;
@@ -1734,9 +1961,11 @@ document.getElementById('clearBtn').addEventListener('click', () => {
 
 blendBtn.addEventListener('click', () => {
     if (!layers.length) { setStatus('Add at least one layer first', 'error'); return; }
-    // List must go bottom → top for the backend compositor.
+    // List must go bottom → top for the backend compositor. Layers that came from history are
+    // referenced by key; dropped local files travel as their own data URL instead.
     const specs = layers.slice().reverse().map(l => ({
-        key: l.key,
+        key: l.key || null,
+        src: l.key ? null : l.src,
         transform: {
             cx: l.transform.cx, cy: l.transform.cy,
             w: l.transform.w, h: l.transform.h,
@@ -1875,19 +2104,21 @@ window.addEventListener('keydown', e => {
     if ((tag === 'input' || tag === 'button') && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     const l = getSelected();
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
-    if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (!keyZ) { keyZ = true; onViewKeyChange(); } return; }
-    if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (!keyR) { keyR = true; onViewKeyChange(); } return; }
+    if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
+    if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('zoom'); return; }
+    if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('pan'); return; }
+    if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rotate'); return; }
     if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey || !e.altKey)) {
         e.preventDefault();
-        if (l) setMode('transform');
+        if (l) activateMode('transform');
         return;
     }
     if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('mask'); return; }
     if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('decal'); return; }
-    if (e.key === 'Enter') { if (mode === 'transform') { e.preventDefault(); setMode('none'); } return; }
+    if (e.key === 'Enter') { if (mode !== 'none') { e.preventDefault(); setMode('none'); } return; }
     if (e.key === 'Escape') { e.preventDefault(); setMode('none'); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && l) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || mode !== 'transform') return;
@@ -1904,8 +2135,7 @@ window.addEventListener('keydown', e => {
 
 window.addEventListener('keyup', e => {
     if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
-    if (e.key === 'z' || e.key === 'Z') { keyZ = false; onViewKeyChange(); return; }
-    if (e.key === 'r' || e.key === 'R') { keyR = false; onViewKeyChange(); }
+    if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
 });
 
 // ==================== 父窗口通信 ====================

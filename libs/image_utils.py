@@ -150,6 +150,26 @@ def decode_decal_rgba(decal_data_url, width, height):
         return None
 
 
+def decode_image_dataurl(image_data_url):
+    """前端拖入的本地图片 data URL → [H,W,4] float 直通 alpha 张量。
+
+    这类图层没有 history key，像素由前端直接带过来，所以按前端画布的
+    RGBA 语义解码（保留透明像素），失败返回 None。
+    """
+    if not image_data_url or not isinstance(image_data_url, str):
+        return None
+    try:
+        raw = image_data_url.split(',', 1)[1] if ',' in image_data_url else image_data_url
+        img = Image.open(io.BytesIO(base64.b64decode(raw)))
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        arr = np.array(img).astype(np.float32) / 255.0
+        return torch.from_numpy(arr)  # [H,W,4]
+    except Exception as e:
+        print(f"[BlendLayers] layer image decode failed: {e}")
+        return None
+
+
 def composite_layers(layers, canvas_w, canvas_h):
     """自下而上合成图层，返回 [1,H,W,C]。
 
