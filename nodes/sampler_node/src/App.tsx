@@ -62,7 +62,8 @@ const App: React.FC = () => {
     ref_boost_a: 1.0,
     enable_ref_boost_mask: false,
     grounding_px: 768,
-    context_reference: false,
+    // Context Ref 不再有开关（是否启用只看有没有选参考图）；此处仅保留字段以兼容旧配置。
+    context_reference: true,
     context_reference_key: null,
     context_regex: '.+',
   };
@@ -576,16 +577,20 @@ const App: React.FC = () => {
     window.close();
   }, []);
 
-  const handleAddContextImage = useCallback(async (base64: string) => {
+  // 返回新加入历史的那张图的 key —— 拖到 Ref Image 上时要立刻把它设成参考图。
+  const handleAddContextImage = useCallback(async (base64: string): Promise<string | null> => {
     try {
-      await fetch('/api/add_context_image', {
+      const res = await fetch('/api/add_context_image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: base64 }),
       });
+      const data = await res.json().catch(() => ({}));
       refreshHistory();
+      return (data && data.key) ? data.key : null;
     } catch (e: any) {
       setError('Failed to add image: ' + e.message);
+      return null;
     }
   }, [refreshHistory]);
 
