@@ -217,7 +217,19 @@ def composite_layers(layers, canvas_w, canvas_h):
     每个图层先在自身尺寸下合成 decal（source-over 叠在原图之上），再乘蒙版
     （蒙版跟随 transform，同时裁切原图与 decal），然后按 transform 采样
     （用预乘 alpha 避免缩放/旋转边缘出现黑边），最后 source-over 叠加。
-    结果全部不透明时返回 3 通道，否则保留 alpha(4 通道)。
+    结果全部不透明时返回 3 通道，否则返回 4 通道。
+
+    ⚠️ 返回值是**预乘 alpha**（`rgb` 已经乘过自己的 `alpha`），不是直通 alpha —— 
+    这是刻意的：整个栈都在预乘空间里做 source-over，而下游消费方（pipeline 的
+    `image`、把 alpha 乘回去的绘制方）都按预乘语义读它。
+    只有「全部不透明」（`alpha == 1`）时两者等价，此时直接返回 3 通道 RGB。
+
+    **不要**在这里除以 alpha 得到「直通 RGBA」。那是以前的写法，也是「蒙版覆盖率
+    不为 0/1 的地方发灰」的根因：`out_pm` 已经是整个栈合成后的**预乘**结果，而
+    `out_a` 是**栈的**不透明度、不是 `out_pm` 自己的透明度；拿前者除后者会把颜色
+    按 `1/out_a` 放大（两层各 50% 覆盖时纯红叠纯蓝被放大成 [0.33,0,0.67]，
+    正确值应是 [0.25,0,0.5]），下游再乘一次 alpha → 颜色被拉向灰。alpha 越低越灰，
+    所以「多层 + 蒙版遮蔽」时最明显。
     """
     canvas_w, canvas_h = max(int(canvas_w), 1), max(int(canvas_h), 1)
     dtype = layers[0]['image'].dtype if layers else torch.float32
@@ -249,8 +261,12 @@ def composite_layers(layers, canvas_w, canvas_h):
         out_a = out_a.clamp(0.0, 1.0)
 
     if float(out_a.min()) >= 1.0 - 1e-4:
+        # Fully opaque everywhere: premultiplied == straight, so hand back plain RGB.
         return out_pm.clamp(0.0, 1.0)
-    return torch.cat([out_pm / out_a.clamp(min=1e-6), out_a], dim=-1).clamp(0.0, 1.0)
+    # Keep the premultiplied colour. Dividing by out_a here would inflate it by
+    # 1/out_a and make every semi-covered pixel read as grey once a consumer
+    # multiplies by alpha again (the old behaviour — see the docstring).
+    return torch.cat([out_pm, out_a], dim=-1).clamp(0.0, 1.0)
 
 
 def hex_to_rgb(hex_color: str):
