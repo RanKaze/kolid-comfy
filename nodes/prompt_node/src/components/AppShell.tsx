@@ -18,7 +18,7 @@ import {
 import { useApi } from '../hooks/useApi';
 import { useTempContext } from '../hooks/useTempContext';
 import { useProgram, buildAllTagsLookup, enrichTagGroups, buildLoraSelectionData } from '../hooks/useProgram';
-import { PRESET_SCOPE, savePromptPresetSelection } from '../blockScope';
+import { PRESET_SCOPE, QUERY_SCOPE, answerQuerySelection, savePromptPresetSelection } from '../blockScope';
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
@@ -2489,18 +2489,26 @@ export function AppShell() {
     // Preset scope: save the RAW selection to the shared preset (not the prompt node) and
     // close. Programs keep running live in this UI for preview; they are re-executed at run
     // time on the merged selection by the backend engine.
+    // The RAW selection: both embedded scopes hand it to the host and let the backend run
+    // the programs on the merged selection, so nothing program-derived is baked in here.
+    const rawSelection = {
+      tags: selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) })),
+      custom_prompts: customPrompts,
+      loras: buildLoraSelectionData(selectedLoras, loraSelections as any),
+      prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
+      programs: selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_tag_texts: a.context_tag_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_tag_inactive: a.context_tag_inactive })),
+    };
     if (PRESET_SCOPE) {
-      const selection = {
-        tags: selectedTags.map(g => ({ ...g, tags: g.tags.map(t => ({ ...t })) })),
-        custom_prompts: customPrompts,
-        loras: buildLoraSelectionData(selectedLoras, loraSelections as any),
-        prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
-        programs: selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_tag_texts: a.context_tag_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_tag_inactive: a.context_tag_inactive })),
-      };
-      void savePromptPresetSelection(selection).then(ok => {
+      void savePromptPresetSelection(rawSelection).then(ok => {
         if (!ok) console.error('[PresetScope] failed to save prompt preset selection');
         if (window.parent === window) window.close();
       });
+      return;
+    }
+    // Query scope: a run is parked on this block. Hand the answer to the host and let it
+    // close the dialog — nothing is written to the prompt node or to a preset.
+    if (QUERY_SCOPE) {
+      if (!answerQuerySelection(rawSelection)) console.error('[QueryScope] no host to answer');
       return;
     }
     // Flush pending region confirm (don't wait for debounce timer)

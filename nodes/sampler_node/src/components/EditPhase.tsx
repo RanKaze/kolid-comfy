@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
 const tabActionBtn: React.CSSProperties = {
@@ -10,6 +10,15 @@ const tabInputStyle: React.CSSProperties = {
   background: 'rgba(10,132,255,0.15)', border: '0.5px solid rgba(10,132,255,0.6)', borderRadius: 999,
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
+
+// What the "Add +" dropdown offers. Query is the only kind that interacts with the user
+// mid-run: the chain stops there and waits for a prompt choice.
+const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; label: string; color: string; hint: string }[] = [
+  { kind: 'detailer', label: 'Detailer', color: '#30d158', hint: 'Refine the masked region' },
+  { kind: 'interface', label: 'Interface', color: '#bf5af2', hint: 'Run an interface sub-graph inside the chain' },
+  { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
+  { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
+];
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -109,7 +118,15 @@ interface EditPhaseProps {
   maskBlur: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
   onGlobalParamChange: (key: 'mask_grow' | 'mask_blur', value: number) => void;
-  onAddBlock: (type: 'detailer' | 'interface' | 'prompt') => void;
+  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query') => void;
+  /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
+  pendingQuery: PendingQuery | null;
+  /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
+  onRunPreset: (presetId: string) => void;
+  /** 把用户在弹窗里挑好的 prompt 交给后端，唤醒停在 Query 块上的 run */
+  onQueryAnswer: (selection: Record<string, any>) => void;
+  /** 关掉 Query 弹窗 = 中止整条链 */
+  onQueryCancel: () => void;
   onRemoveBlock: (blockId: string) => void;
   onReorderBlocks: (fromIdx: number, toIdx: number) => void;
   /** 多套 Pipeline Blocks（tabs）；blocks = 激活那一套的镜像 */
@@ -151,6 +168,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   history, onRefreshHistory, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onSwitchBlockSet,
+  pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
@@ -187,6 +205,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [presetsLoaded, setPresetsLoaded] = useState(false);
   // Inline rename of a preset (replaces the card's select while active).
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
+  // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
 
   useEffect(() => { if (showBlendSelect) setBlendPicked([]); }, [showBlendSelect]);
@@ -243,6 +263,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       }
     } catch { /* ignore */ }
   }, []);
+
+  // A Query-scope prompt iframe hands the picked selection straight back to the host; the
+  // backend (not this UI) merges it, so all we do is forward it and close the dialog.
+  useEffect(() => {
+    const onAnswered = (event: MessageEvent) => {
+      if (event.data?.type !== 'prompt-query-answered') return;
+      onQueryAnswer(event.data.selection || {});
+    };
+    window.addEventListener('message', onAnswered);
+    return () => window.removeEventListener('message', onAnswered);
+  }, [onQueryAnswer]);
 
   // The preset-scope prompt iframe saves to the shared preset through the backend AND
   // notifies us — refresh the list (new content) and close the editor.
@@ -515,23 +546,40 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       />
                     );
                   }
+                  // A capsule: the left half IS the tab (click to switch, double-click to
+                  // rename) and the right half runs this preset right now — one click
+                  // instead of "switch the tab, then go and press Run".
                   return (
-                    <button key={set.id}
-                      title={missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time` : set.name}
-                      onClick={() => onSwitchBlockSet(set.id)}
-                      onDoubleClick={() => { setRenamingSetId(set.id); setRenamingValue(set.name); }}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 5,
-                        padding: '4px 10px', borderRadius: 999, fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
-                        border: '0.5px solid ' + (isActive ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.1)'),
-                        background: isActive ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.04)',
-                        color: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
-                      }}>
-                      <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
-                      {missing > 0 && (
-                        <span style={{ background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700 }}>Missing ×{missing}</span>
-                      )}
-                    </button>
+                    <div key={set.id} style={{
+                      display: 'flex', alignItems: 'stretch', borderRadius: 999, overflow: 'hidden',
+                      border: '0.5px solid ' + (isActive ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.1)'),
+                      background: isActive ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.04)',
+                    }}>
+                      <button
+                        title={missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time` : set.name}
+                        onClick={() => onSwitchBlockSet(set.id)}
+                        onDoubleClick={() => { setRenamingSetId(set.id); setRenamingValue(set.name); }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          padding: '4px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                          border: 'none', background: 'none',
+                          color: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
+                        }}>
+                        <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
+                        {missing > 0 && (
+                          <span style={{ background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700 }}>Missing ×{missing}</span>
+                        )}
+                      </button>
+                      <button
+                        title={`Run 「${set.name}」 now — the canvas composite, masked by the Mask layer`}
+                        onClick={() => onRunPreset(set.id)}
+                        style={{
+                          display: 'flex', alignItems: 'center', padding: '4px 9px',
+                          border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
+                          background: 'rgba(255,255,255,0.06)', cursor: 'pointer', lineHeight: 1,
+                          color: isActive ? '#30d158' : 'rgba(48,209,88,0.65)', fontSize: 11,
+                        }}>▶</button>
+                    </div>
                   );
                 })}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 'auto' }}>
@@ -606,7 +654,40 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
 
-              <div style={styles.sectionTitle}>Pipeline Blocks</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
+                <div style={styles.sectionTitle}>Pipeline Blocks</div>
+                <button
+                  title="Append a block to this preset"
+                  onClick={() => setAddMenuOpen(v => !v)}
+                  style={{
+                    background: addMenuOpen ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.06)',
+                    border: '0.5px solid ' + (addMenuOpen ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.12)'),
+                    borderRadius: 999, color: addMenuOpen ? '#fff' : 'rgba(255,255,255,0.7)',
+                    fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
+                  }}>Add +</button>
+                {addMenuOpen && (
+                  <>
+                    {/* A menu, not a modal: clicking anywhere else dismisses it. */}
+                    <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setAddMenuOpen(false)} />
+                    <div style={{
+                      position: 'absolute', top: '100%', right: 0, zIndex: 41, marginTop: 4,
+                      background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
+                      padding: 4, minWidth: 152, boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
+                    }}>
+                      {ADD_BLOCK_KINDS.map(opt => (
+                        <button key={opt.kind}
+                          title={opt.hint}
+                          onClick={() => { onAddBlock(opt.kind); setAddMenuOpen(false); }}
+                          style={{
+                            display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px',
+                            background: 'none', border: 'none', borderRadius: 7, cursor: 'pointer',
+                            color: opt.color, fontSize: 12, fontWeight: 600,
+                          }}>{opt.label}</button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
               {blocks.map((block, blockIdx) => (
                 <div key={block.id} style={{
                   background: 'rgba(255,255,255,0.03)',
@@ -638,7 +719,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {/* Centered title */}
                     <span style={{
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
-                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : '#bf5af2',
+                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : '#bf5af2',
                     }}>{block.name}</span>
                     {ifaceIsMissing(block) && (
                       <span title="The bound interface no longer exists — this block will be bypassed at run time"
@@ -728,6 +809,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         }}>{summary}</div>
                       </>);
                     })()}
+                    {block.type === 'query' && (
+                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
+                        执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。
+                      </div>
+                    )}
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
                       return (<>
@@ -983,24 +1069,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                 </div>
               ))}
-              {/* Add block buttons — bottom */}
-              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-                <button style={{
-                  flex: 1, padding: '8px 0', borderRadius: 8,
-                  background: 'rgba(48,209,88,0.1)', border: '0.5px solid rgba(48,209,88,0.2)',
-                  color: '#30d158', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                }} onClick={() => onAddBlock('detailer')}>+ Detailer</button>
-                <button style={{
-                  flex: 1, padding: '8px 0', borderRadius: 8,
-                  background: 'rgba(191,90,242,0.1)', border: '0.5px solid rgba(191,90,242,0.2)',
-                  color: '#bf5af2', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                }} onClick={() => onAddBlock('interface')}>+ Interface</button>
-                <button style={{
-                  flex: 1, padding: '8px 0', borderRadius: 8,
-                  background: 'rgba(100,210,255,0.1)', border: '0.5px solid rgba(100,210,255,0.2)',
-                  color: '#64d2ff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                }} onClick={() => onAddBlock('prompt')}>+ Prompt</button>
-              </div>
             </div>
 
           {/* Right: the workbench. Its canvas composite IS the Context Image, and the
@@ -1198,6 +1266,49 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <iframe
                 src={src}
                 title="Prompt preset editor"
+                style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#0d0d0d' }}
+              />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Query dialog — a run is parked on a Query block and waits for this answer. The
+          prompt UI opens in query scope: it starts EMPTY and hands the RAW selection to the
+          host, which forwards it to the backend (the merge and the programs happen there).
+          Closing it cancels, and cancelling aborts the whole chain. */}
+      {pendingQuery && (() => {
+        const qParams = 'sampler_base=' + encodeURIComponent(window.location.origin) + '&scope=query';
+        const qSrc = (promptUrl || '/prompt_node.html') + (promptUrl.includes('?') ? '&' : '?') + qParams;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 1001,
+            background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <div style={{
+              width: '94vw', height: '92vh', background: '#0d0d0d', borderRadius: 14,
+              border: '0.5px solid rgba(255,255,255,0.12)', display: 'flex', flexDirection: 'column',
+              overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 16px', flexShrink: 0, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#ffd60a' }}>
+                  Query — {pendingQuery.name}
+                  <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: 8 }}>
+                    挑好 prompt 后 Confirm 继续；关闭 = 中止整条链
+                  </span>
+                </div>
+                <button
+                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
+                  title="Cancel — aborts the whole chain"
+                  onClick={() => onQueryCancel()}
+                >✕</button>
+              </div>
+              <iframe
+                src={qSrc}
+                title="Query prompt"
                 style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#0d0d0d' }}
               />
             </div>

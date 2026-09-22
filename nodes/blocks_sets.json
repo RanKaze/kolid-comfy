@@ -33,6 +33,12 @@
       "name": "Generate",
       "blocks": [
         {
+          "id": "block-2",
+          "type": "query",
+          "name": "Query",
+          "params": {}
+        },
+        {
           "id": "block-3",
           "type": "detailer",
           "name": "Detailer",
@@ -95,5 +101,5 @@
       ]
     }
   ],
-  "active_block_set": "set-1"
+  "active_block_set": "set-3"
 }

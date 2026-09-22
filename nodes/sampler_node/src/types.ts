@@ -99,11 +99,16 @@ export interface PromptBlockParams {
   preset_id?: string | null;
 }
 
+/** Query 块没有可调参数：run 到它时链条暂停并弹出 prompt UI，用户挑完 Confirm 才继续。
+ *  回答按 prompt 块同样的语义合并（全局在前 + 本次选择在后 + programs 跑在合并结果上），
+ *  只影响其后的 detailer；关掉弹窗 = 中止整条链。 */
+export type QueryBlockParams = Record<string, never>;
+
 export interface PipelineBlock {
   id: string;
-  type: 'detailer' | 'interface' | 'prompt';
+  type: 'detailer' | 'interface' | 'prompt' | 'query';
   name: string;
-  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
 }
@@ -123,6 +128,13 @@ export interface DetailerParams {
   context_reference_key: string | null;
 }
 
+/** 一个正停在链条里等用户回答的 Query 块（/api/status 下发；null = 没有块在等）。 */
+export interface PendingQuery {
+  id: string;
+  name: string;
+  index: number;
+}
+
 export interface StatusResponse {
   detail_status: 'idle' | 'running' | 'done' | 'error';
   error?: string;
@@ -135,6 +147,7 @@ export interface StatusResponse {
   interface_current_step?: number;
   interface_total_steps?: number;
   interface_result_keys?: string[];
+  pending_query?: PendingQuery | null;
 }
 
 export interface TagPreviews {

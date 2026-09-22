@@ -4,7 +4,7 @@ import type {
   CategoryDisplayModes, CategorySizeModes,
   LoraFolders, LoraSelectionData, LoraSliderConfig, AllPrograms,
 } from '../types';
-import { PRESET_SCOPE, SAMPLER_BASE, fetchPromptPresetSelection } from '../blockScope';
+import { PRESET_SCOPE, SCOPED_SELECTION, SAMPLER_BASE, fetchPromptPresetSelection } from '../blockScope';
 
 const API_BASE = '';
 
@@ -37,16 +37,17 @@ export function useApi() {
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
     setCategorySizeModes(data.category_size_modes || {});
-    setLastSelected(PRESET_SCOPE ? [] : (data.last_selected || []));
-    setLastSelectedLoras((presetSelection?.loras as LoraSelectionData[]) || (PRESET_SCOPE ? [] : (data.last_selected_loras || [])));
-    setLastSelectedPrefabs((presetSelection?.prefabs as { guid: string; active?: boolean }[]) || (PRESET_SCOPE ? [] : (data.last_selected_prefabs || [])));
-    setCustomPrompts(PRESET_SCOPE ? (presetSelection?.custom_prompts ?? '') : (data.custom_prompts || ''));
+    // A Query starts EMPTY on purpose: the user picks this pass's prompt from scratch.
+    setLastSelected(SCOPED_SELECTION ? [] : (data.last_selected || []));
+    setLastSelectedLoras((presetSelection?.loras as LoraSelectionData[]) || (SCOPED_SELECTION ? [] : (data.last_selected_loras || [])));
+    setLastSelectedPrefabs((presetSelection?.prefabs as { guid: string; active?: boolean }[]) || (SCOPED_SELECTION ? [] : (data.last_selected_prefabs || [])));
+    setCustomPrompts(SCOPED_SELECTION ? (presetSelection?.custom_prompts ?? '') : (data.custom_prompts || ''));
     setLoraRegex(data.lora_regex || '');
     setParsedPrompts(data.parsed_prompts || []);
     setHasTagger(data.has_tagger || false);
     setHasAsset(data.has_asset || false);
     setAllPrograms(data.programs || {});
-    setLastSelectedPrograms((presetSelection?.programs as any[]) || (PRESET_SCOPE ? [] : (data.last_selected_programs || [])));
+    setLastSelectedPrograms((presetSelection?.programs as any[]) || (SCOPED_SELECTION ? [] : (data.last_selected_programs || [])));
     return { ...data, preset_selection: presetSelection };
   }, []);
 
