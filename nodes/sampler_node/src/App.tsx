@@ -627,11 +627,13 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleAddBlock = useCallback((type: 'detailer' | 'interface') => {
+  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt') => {
     const id = 'block-' + blockIdCounter.current++;
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
-      : { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } };
+      : type === 'interface'
+        ? { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } }
+        : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
     handleBlocksChange([...blocks, newBlock]);
   }, [blocks, handleBlocksChange]);
 

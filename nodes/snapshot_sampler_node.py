@@ -33,6 +33,7 @@ from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
+import uuid
 
 
 # =============================================================================
@@ -650,6 +651,110 @@ class SnapshotDetailerSamplerServer:
             self.context_reference = bool(bp.get('context_reference', self.context_reference))
             self.context_reference_key = bp.get('context_reference_key', self.context_reference_key)
 
+    # ------------------------------------------------------------------
+    # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
+    # 预设内容（tags/custom/loras/prefabs/programs 的 raw selection）存 nodes/prompt_presets.json，
+    # 编辑 preset 即影响所有引用它的块；run 时按块顺序注入其后的 detailer（纯临时）。
+    # ------------------------------------------------------------------
+    def _prompt_presets_file(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prompt_presets.json')
+
+    def _load_prompt_presets(self):
+        """Persisted prompt presets: [{'id','name','selection'}]. Absent/corrupt file -> []."""
+        try:
+            with open(self._prompt_presets_file(), encoding='utf-8') as f:
+                data = json.load(f)
+            presets = data.get('presets') if isinstance(data, dict) else data
+            if isinstance(presets, list):
+                return [p for p in presets if isinstance(p, dict) and p.get('id')]
+        except Exception:
+            pass
+        return []
+
+    def _save_prompt_presets(self, presets):
+        with open(self._prompt_presets_file(), 'w', encoding='utf-8') as f:
+            json.dump({'presets': presets}, f, ensure_ascii=False, indent=2)
+
+    def _find_prompt_preset(self, preset_id):
+        if not preset_id:
+            return None
+        for p in self._load_prompt_presets():
+            if isinstance(p, dict) and p.get('id') == preset_id:
+                return p
+        return None
+
+    def _prompt_preset_selection(self, preset_id):
+        """Raw selection of the referenced preset; {} when unset/missing (block = pass-through)."""
+        preset = self._find_prompt_preset(preset_id)
+        sel = preset.get('selection') if isinstance(preset, dict) else None
+        return sel if isinstance(sel, dict) else {}
+
+    def _create_prompt_preset(self, name=None):
+        presets = self._load_prompt_presets()
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+        else:
+            existing = {p.get('name') for p in presets}
+            k = 1
+            while f'Preset {k}' in existing:
+                k += 1
+            name = f'Preset {k}'
+        preset = {'id': 'preset-' + uuid.uuid4().hex[:12], 'name': name, 'selection': {}}
+        presets.append(preset)
+        self._save_prompt_presets(presets)
+        return preset
+
+    def _save_prompt_preset_selection(self, preset_id, selection):
+        presets = self._load_prompt_presets()
+        for p in presets:
+            if p.get('id') == preset_id:
+                p['selection'] = selection
+                self._save_prompt_presets(presets)
+                return True
+        return False
+
+    def _rename_prompt_preset(self, preset_id, name):
+        if not isinstance(name, str) or not name.strip():
+            return False
+        presets = self._load_prompt_presets()
+        for p in presets:
+            if p.get('id') == preset_id:
+                p['name'] = name.strip()
+                self._save_prompt_presets(presets)
+                return True
+        return False
+
+    def _delete_prompt_preset(self, preset_id):
+        """Delete a preset AND clear every prompt-block reference to it (the block falls
+        back to 'not configured' instead of a dangling id), covering blocks_sets + the
+        active-chain mirror."""
+        presets = self._load_prompt_presets()
+        kept = [p for p in presets if p.get('id') != preset_id]
+        if len(kept) == len(presets):
+            return False
+        self._save_prompt_presets(kept)
+        dirty = False
+        for b in (self.blocks or []):
+            if self._clear_prompt_block_preset_ref(b, preset_id):
+                dirty = True
+        for s in (self.blocks_sets or []):
+            for b in (s.get('blocks') or []):
+                if self._clear_prompt_block_preset_ref(b, preset_id):
+                    dirty = True
+        if dirty:
+            self._save_blocks_sets_file()
+        return True
+
+    @staticmethod
+    def _clear_prompt_block_preset_ref(block, preset_id):
+        if not (isinstance(block, dict) and block.get('type') == 'prompt'):
+            return False
+        bp = block.get('params')
+        if isinstance(bp, dict) and bp.get('preset_id') == preset_id:
+            bp['preset_id'] = None
+            return True
+        return False
+
     # -------------------------------------------------------------------------
     # HTTP 请求处理器
     # -------------------------------------------------------------------------
@@ -901,6 +1006,10 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'history': inst.get_history_list() if inst else []})
                 return
 
+            if self.path == '/api/prompt_presets':
+                self._send_json({'presets': inst._load_prompt_presets() if inst else []})
+                return
+
             self.send_error(404)
 
         def do_POST(self):
@@ -911,6 +1020,40 @@ class SnapshotDetailerSamplerServer:
                 data = json.loads(self.rfile.read(length)) if length else {}
                 inst._apply_params(data)
                 self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/prompt_presets':
+                # Prompt preset 管理：Prompt 块引用的共享 selection 模板（prompt_node.html
+                # 的 preset 作用域 iframe 通过 action=save 写入），持久化到
+                # nodes/prompt_presets.json。action: create | save | rename | delete。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    action = body.get('action') or ''
+                    if action == 'create':
+                        self._send_json({'ok': True, 'preset': inst._create_prompt_preset(body.get('name'))})
+                    elif action == 'save':
+                        selection = body.get('selection')
+                        if not isinstance(selection, dict):
+                            self._send_json({'ok': False, 'error': 'selection must be an object'}, 400)
+                        elif inst._save_prompt_preset_selection(body.get('id') or '', selection):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found'}, 404)
+                    elif action == 'rename':
+                        if inst._rename_prompt_preset(body.get('id') or '', body.get('name')):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found or bad name'}, 404)
+                    elif action == 'delete':
+                        if inst._delete_prompt_preset(body.get('id') or ''):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found'}, 404)
+                    else:
+                        self._send_json({'ok': False, 'error': f'unknown action {action!r}'}, 400)
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/execute_interface':
@@ -1381,10 +1524,12 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Prompt 解析
     # -------------------------------------------------------------------------
-    def _expand_prefabs(self, prompt_server):
-        """Expand the prompt server's selected prefabs into (prompt_texts, loras).
+    def _expand_prefabs(self, prompt_server, selected=None):
+        """Expand selected prefab instances into (prompt_texts, loras).
 
-        A synced prefab entry carries only INSTANCE state — guid, active flag, per-tag-group
+        `selected` defaults to the prompt server's own selection; the prompt-BLOCK runner
+        passes an explicit (program-resolved) instance list instead. A synced prefab entry
+        carries only INSTANCE state — guid, active flag, per-tag-group
         active flags, per-lora active flags (see the prompt iframe's sync-prompt payload). The
         tag and lora CONTENT lives in the prefab library, looked up by guid. Without this
         expansion a user whose prompt lives in a prefab — the common case, and the log proves
@@ -1401,7 +1546,8 @@ class SnapshotDetailerSamplerNode:
         loras = []
         if prompt_server is None:
             return texts, loras
-        selected = getattr(prompt_server, 'selected_prefabs', None) or []
+        if selected is None:
+            selected = getattr(prompt_server, 'selected_prefabs', None) or []
         if not selected:
             return texts, loras
         guid_to_prefab = {}
@@ -1547,6 +1693,112 @@ class SnapshotDetailerSamplerNode:
                 user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
             for text in prefab_texts:
                 user_positive = f"{user_positive}, {text}" if user_positive else text
+        return user_positive, user_loras
+
+    # -------------------------------------------------------------------------
+    # Prompt block（pipeline block type='prompt'）运行时解析
+    # -------------------------------------------------------------------------
+    def _resolve_prompt_block(self, server, block_params):
+        """Resolve a prompt block into (user_positive, user_loras) for the detailers AFTER it.
+
+        Semantics (与产品确认过的行为一致):
+          - 合并 = prompt 节点全局最终选择（selected_prompts/loras/prefabs，已是全局
+            program 的产物）在前 + 块引用 preset 的 raw selection 追加在后（source='program'
+            的项剥离——它们会由 block 的 program 重新生成，与前端 useProgram 语义一致）。
+          - block 的 applications(programs) 在**合并后的整体 selection**上执行（后端
+            quickjs 引擎，移植 useProgram.ts），所以 block 程序能过滤/修改全局内容。
+          - 输出拼装顺序与 _parse_prompt 完全一致：texts + custom -> <lora:...> ->
+            trigger words -> prefab texts。全局在前、block 在后由合并顺序保证。
+          - 纯临时：只影响本次 run 中排在该 block 之后的 detailer，不写回任何状态。
+        """
+        ps = server.prompt_server if server else None
+        if ps is None:
+            return '', ''
+        # 块只存 preset 引用；内容来自共享 preset（未配置/被删 = 空 selection = 直通）
+        sel = server._prompt_preset_selection((block_params or {}).get('preset_id'))
+
+        # --- 合并 tags：全局在前（text -> 单 tag TagGroup），block 在后 ---
+        merged_tags = []
+        for p in (getattr(ps, 'selected_prompts', None) or []):
+            text = p.get('text') if isinstance(p, dict) else str(p)
+            src = p.get('source', 'normal') if isinstance(p, dict) else 'normal'
+            if text.startswith('<') and text.endswith('>'):
+                text = text[1:-1]
+            if not text:
+                continue
+            merged_tags.append({'tags': [{'name': text, 'prompt': text, 'category': ''}],
+                                'strength': 1.0, 'source': src})
+        for g in (sel.get('tags') or []):
+            if isinstance(g, dict) and g.get('source', 'normal') == 'program':
+                continue
+            if isinstance(g, dict):
+                merged_tags.append(copy.deepcopy(g))
+
+        # --- 合并 loras（按 file_path 去重，全局优先）与 prefabs（按 guid 去重）---
+        merged_loras = []
+        seen_lora = set()
+        for l in list(getattr(ps, 'selected_loras', None) or []) + list(sel.get('loras') or []):
+            if not isinstance(l, dict):
+                continue
+            fp = l.get('file_path') or l.get('file_name')
+            if not fp or fp in seen_lora:
+                continue
+            seen_lora.add(fp)
+            merged_loras.append(copy.deepcopy(l))
+        merged_prefabs = []
+        seen_guid = set()
+        for p in list(getattr(ps, 'selected_prefabs', None) or []) + list(sel.get('prefabs') or []):
+            if not isinstance(p, dict):
+                continue
+            guid = p.get('guid')
+            if not guid or guid in seen_guid:
+                continue
+            seen_guid.add(guid)
+            merged_prefabs.append(copy.deepcopy(p))
+
+        custom_parts = [c for c in [getattr(ps, 'custom_prompts', '') or '', sel.get('custom_prompts') or ''] if c]
+        merged_custom = '\n'.join(custom_parts)
+
+        # --- block 的 programs 在合并 selection 上执行（无 programs = 原样通过）---
+        from .prompt_program_engine import PromptProgramEngine, tags_to_display_string
+        engine = PromptProgramEngine(ps)
+        result = engine.run(sel.get('programs') or [], merged_tags, merged_loras, merged_prefabs, merged_custom)
+
+        # --- 拼装（与 _parse_prompt 相同的顺序与格式）---
+        parts = []
+        for g in result['result_tags']:
+            text = tags_to_display_string(g)
+            if text.startswith('<') and text.endswith('>'):
+                text = text[1:-1]
+            if text:
+                parts.append(text)
+        if result['result_custom_prompts']:
+            parts.append(result['result_custom_prompts'])
+        user_positive = ','.join(parts)
+
+        loras = list(result['result_loras'])
+        prefab_texts, prefab_loras = self._expand_prefabs(ps, selected=result['result_prefabs'])
+        loras.extend(prefab_loras)
+        lora_str_parts = []
+        trigger_words = []
+        for lora_item in loras:
+            if isinstance(lora_item, dict):
+                if not lora_item.get('active', True):
+                    continue
+                file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                if hasattr(ps, '_resolve_lora_file_path'):
+                    file_path = ps._resolve_lora_file_path(file_path)
+                strength = lora_item.get('strength', 1.0)
+                lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
+                trigger_words.extend(lora_item.get('active_tags', []))
+            else:
+                lora_str_parts.append(str(lora_item))
+        user_loras = ','.join(lora_str_parts)
+        if trigger_words:
+            trigger_str = ', '.join(trigger_words)
+            user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
+        for text in prefab_texts:
+            user_positive = f"{user_positive}, {text}" if user_positive else text
         return user_positive, user_loras
 
     # -------------------------------------------------------------------------
@@ -1733,6 +1985,26 @@ class SnapshotDetailerSamplerNode:
                     current_image = result_img
                     current_mask = result_mask
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
+                    continue
+
+                if block.get('type') == 'prompt':
+                    # Prompt 块：把「全局选择 + 块引用 preset 的 selection」合并后跑 preset
+                    # 的 programs（后端 quickjs 引擎），替换此后的 user_positive / user_loras。
+                    # 纯临时注入 —— 只影响排在该块之后的 detailer，不写回任何状态。
+                    bp = block.get('params', block)
+                    preset_id = bp.get('preset_id') if isinstance(bp, dict) else None
+                    if not preset_id or server._find_prompt_preset(preset_id) is None:
+                        print(f"[PipelineBlock {i+1}] Prompt block has no preset selected — skipped (prompt unchanged)")
+                        continue
+                    try:
+                        user_positive, user_loras = self._resolve_prompt_block(server, bp)
+                        print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
+                              f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
+                    except Exception as e:
+                        # fail-open：程序执行失败保留之前的 prompt，不中断整条链
+                        import traceback
+                        traceback.print_exc()
+                        print(f"[PipelineBlock {i+1}] WARNING: prompt block failed ({e}) — keeping previous prompt")
                     continue
 
                 # Detailer block params (support both nested 'params' dict and flat)
