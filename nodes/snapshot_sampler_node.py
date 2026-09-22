@@ -9,6 +9,7 @@ import webbrowser
 import time
 import base64
 import io
+import copy
 import numpy as np
 from PIL import Image
 import torch
@@ -233,6 +234,13 @@ class SnapshotDetailerSamplerServer:
         # 逐 run 的 pipeline preset 选择（blocks_sets 里某一 set 的 id）。
         # 由「图层右键 → Generate」的 enum 下发；主循环取用后立即清空，避免污染下一次普通 Run。
         self.pending_generate_preset = None
+
+        # Query 块：run 到它时链条停在这里等用户在弹窗里挑 prompt。run 循环阻塞在
+        # pending_query['event'] 上；前端轮询 /api/status 看到 pending_query 就弹窗，
+        # 回答 POST 到 /api/query_answer 唤醒。None = 当前没有块在等。
+        self.pending_query = None
+        # 一个 Query 块等多久（秒）。超时按用户的选择 = 中止整条链。
+        self.query_timeout = 600
 
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
@@ -736,6 +744,38 @@ class SnapshotDetailerSamplerServer:
         self._save_prompt_presets(kept)
         return True
 
+    def _pending_query_view(self):
+        """What /api/status publishes: which Query block is parked waiting for an answer.
+
+        The run loop owns the wait (it blocks on the event); this is only the read-only
+        projection the sampler polls to know it must open the prompt dialog. The event
+        itself never crosses the wire.
+        """
+        q = self.pending_query
+        if not q:
+            return None
+        return {'id': q.get('id'), 'name': q.get('name'), 'index': q.get('index')}
+
+    def _answer_pending_query(self, selection=None, cancelled=False):
+        """Release a parked Query block with the user's choice (or their cancellation).
+
+        `selection` is the RAW prompt-node selection — the run loop merges it and runs its
+        programs exactly like a prompt block's preset. `cancelled` (closing the dialog,
+        not answering) aborts the whole chain. False = nothing was waiting.
+        """
+        q = self.pending_query
+        if not q:
+            return False
+        if cancelled:
+            q['cancelled'] = True
+        else:
+            q['answer'] = selection if isinstance(selection, dict) else {}
+        self.pending_query = None
+        evt = q.get('event')
+        if evt is not None:
+            evt.set()
+        return True
+
     # -------------------------------------------------------------------------
     # HTTP 请求处理器
     # -------------------------------------------------------------------------
@@ -841,6 +881,7 @@ class SnapshotDetailerSamplerServer:
                     'interface_current_step': getattr(inst, 'interface_current_step', 0) if inst else 0,
                     'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
+                    'pending_query': inst._pending_query_view() if inst else None,
                 })
                 return
 
@@ -1148,6 +1189,24 @@ class SnapshotDetailerSamplerServer:
                 if inst.prompt_server:
                     inst.prompt_server.prompt_event.set()
                 self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/query_answer':
+                # 一个 Query 块正停在链条里等用户挑 prompt。`selection` 是 prompt UI 的 raw
+                # 选择（后端按 prompt 块同样的规则合并 + 跑 programs）；`cancelled` = 用户
+                # 关掉了弹窗 —— 整条链中止。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    answered = inst._answer_pending_query(
+                        selection=body.get('selection'),
+                        cancelled=bool(body.get('cancelled')),
+                    ) if inst else False
+                    self._send_json({'success': answered})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
             if self.path == '/api/add_context_image':
@@ -1687,23 +1746,31 @@ class SnapshotDetailerSamplerNode:
     # Prompt block（pipeline block type='prompt'）运行时解析
     # -------------------------------------------------------------------------
     def _resolve_prompt_block(self, server, block_params):
-        """Resolve a prompt block into (user_positive, user_loras) for the detailers AFTER it.
+        # 块只存 preset 引用；内容来自共享 preset（未配置/被删 = 空 selection = 直通）
+        sel = server._prompt_preset_selection((block_params or {}).get('preset_id'))
+        return self._resolve_prompt_selection(server, sel)
+
+    def _resolve_prompt_selection(self, server, sel):
+        """Resolve one raw selection into (user_positive, user_loras) for the detailers AFTER it.
+
+        Shared by the prompt block (whose selection is a persisted preset) and the Query
+        block (whose selection is picked by the user at run time) — both are transient
+        injections with identical semantics.
 
         Semantics (与产品确认过的行为一致):
           - 合并 = prompt 节点全局最终选择（selected_prompts/loras/prefabs，已是全局
-            program 的产物）在前 + 块引用 preset 的 raw selection 追加在后（source='program'
-            的项剥离——它们会由 block 的 program 重新生成，与前端 useProgram 语义一致）。
-          - block 的 applications(programs) 在**合并后的整体 selection**上执行（后端
-            quickjs 引擎，移植 useProgram.ts），所以 block 程序能过滤/修改全局内容。
+            program 的产物）在前 + 该 raw selection 追加在后（source='program'
+            的项剥离——它们会由 selection 的 program 重新生成，与前端 useProgram 语义一致）。
+          - selection 的 applications(programs) 在**合并后的整体 selection**上执行（后端
+            quickjs 引擎，移植 useProgram.ts），所以程序能过滤/修改全局内容。
           - 输出拼装顺序与 _parse_prompt 完全一致：texts + custom -> <lora:...> ->
-            trigger words -> prefab texts。全局在前、block 在后由合并顺序保证。
-          - 纯临时：只影响本次 run 中排在该 block 之后的 detailer，不写回任何状态。
+            trigger words -> prefab texts。全局在前、selection 在后由合并顺序保证。
+          - 纯临时：只影响本次 run 中排在该块之后的 detailer，不写回任何状态。
         """
         ps = server.prompt_server if server else None
         if ps is None:
             return '', ''
-        # 块只存 preset 引用；内容来自共享 preset（未配置/被删 = 空 selection = 直通）
-        sel = server._prompt_preset_selection((block_params or {}).get('preset_id'))
+        sel = sel or {}
 
         # --- 合并 tags：全局在前（text -> 单 tag TagGroup），block 在后 ---
         merged_tags = []
@@ -1788,6 +1855,43 @@ class SnapshotDetailerSamplerNode:
         for text in prefab_texts:
             user_positive = f"{user_positive}, {text}" if user_positive else text
         return user_positive, user_loras
+
+    def _await_query_answer(self, server, block, index):
+        """Park the chain on a Query block until the user answers its prompt dialog.
+
+        The run loop blocks on an Event while /api/status publishes the pending query and
+        /api/query_answer releases it. ComfyUI's interrupt still reaches a parked chain.
+        Cancelling the dialog (or never answering) ABORTS the whole chain — the user asked
+        for the run to stop rather than continue with a prompt they never chose.
+        """
+        import threading as _threading
+        import time as _time
+        evt = _threading.Event()
+        query = {
+            'id': 'query-%d-%d' % (index, int(_time.time() * 1000)),
+            'name': (block.get('name') if isinstance(block, dict) else None) or 'Query',
+            'index': index,
+            'event': evt,
+            'answer': None,
+            'cancelled': False,
+        }
+        server.pending_query = query
+        print(f"[PipelineBlock {index + 1}] Query block '{query['name']}' — waiting for the user's prompt choice")
+        timeout = float(getattr(server, 'query_timeout', 600) or 600)
+        deadline = _time.time() + timeout
+        try:
+            while not evt.wait(0.5):
+                mm.throw_exception_if_processing_interrupted()
+                if _time.time() >= deadline:
+                    raise RuntimeError(f'Query timed out after {int(timeout)}s — the chain was aborted')
+        finally:
+            # Whatever happens (answer / cancel / interrupt), nothing stays parked.
+            server.pending_query = None
+        if query['cancelled']:
+            raise RuntimeError('Query cancelled — the chain was aborted')
+        if query['answer'] is None:
+            raise RuntimeError('Query answered with nothing — the chain was aborted')
+        return query['answer']
 
     # -------------------------------------------------------------------------
     # Detailer
@@ -1973,6 +2077,16 @@ class SnapshotDetailerSamplerNode:
                     current_image = result_img
                     current_mask = result_mask
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
+                    continue
+
+                if block.get('type') == 'query':
+                    # Query 块：链条停在这里，前端弹 prompt UI 让用户现场挑；回答按 prompt 块
+                    # 的语义合并注入（全局在前 + 本次选择在后 + programs 在合并结果上执行），
+                    # 只影响其后的 detailer。取消/超时 = 中止整条链（用户明确要求）。
+                    answer = self._await_query_answer(server, block, i)
+                    user_positive, user_loras = self._resolve_prompt_selection(server, answer)
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
+                          f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                     continue
 
                 if block.get('type') == 'prompt':

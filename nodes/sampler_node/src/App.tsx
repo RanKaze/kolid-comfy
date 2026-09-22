@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo, BlockSet } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -32,6 +32,8 @@ const App: React.FC = () => {
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
   const [currentPipelineKey, setCurrentPipelineKey] = useState<string | null>(null);
   const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
+  // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
+  const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
   const [interfaceResults, setInterfaceResults] = useState<Record<number, HistoryItem[]>>({});
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
@@ -210,6 +212,9 @@ const App: React.FC = () => {
         const res = await fetch('/api/status');
         const data: StatusResponse = await res.json();
         if (cancelled) return;
+        // A Query block parks the run: open its dialog as soon as the backend says so, and
+        // let the same field going back to null close it (answered / cancelled / aborted).
+        setPendingQuery(data.pending_query || null);
         const st = data.detail_status;
         if (st === 'idle') {
           // The backend has not picked the action up yet. Keep waiting, but do not hang forever
@@ -627,13 +632,15 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt') => {
+  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt' | 'query') => {
     const id = 'block-' + blockIdCounter.current++;
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
       : type === 'interface'
         ? { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } }
-        : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
+        : type === 'query'
+          ? { id, type: 'query', name: 'Query', params: {} }
+          : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
     handleBlocksChange([...blocks, newBlock]);
   }, [blocks, handleBlocksChange]);
 
@@ -648,6 +655,40 @@ const App: React.FC = () => {
     next.splice(toIdx, 0, moved);
     handleBlocksChange(next);
   }, [blocks, handleBlocksChange]);
+
+  /**
+   * Run one pipeline preset right now — the ▶ half of the sampler's Pipeline Presets
+   * capsule. The canvas and the Mask layer live in the Blend workbench, so the workbench
+   * issues the run; we only name which preset it should use. Its reply is the ordinary
+   * blend-action, which starts the status poller like the toolbar's Run.
+   */
+  const handleRunPreset = useCallback((presetId: string) => {
+    setError(null);
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-run-preset', preset_id: presetId }, '*');
+  }, []);
+
+  /** Answer a parked Query block. The selection is the prompt UI's RAW choice — the run
+   *  merges it and runs its programs, exactly like a prompt block's preset. */
+  const handleQueryAnswer = useCallback(async (selection: Record<string, any>) => {
+    setPendingQuery(null);
+    try {
+      await fetch('/api/query_answer', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selection }),
+      });
+    } catch { /* the run aborts on its own if the answer never lands */ }
+  }, []);
+
+  /** Closing the Query dialog aborts the whole chain — the user chose to stop, not to skip. */
+  const handleQueryCancel = useCallback(async () => {
+    setPendingQuery(null);
+    try {
+      await fetch('/api/query_answer', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cancelled: true }),
+      });
+    } catch { /* as above */ }
+  }, []);
 
   // ── Pipeline Blocks tabs（多套 blocks，每套独立持久化在后端 config）──
   const persistSets = useCallback((nextSets: BlockSet[], nextActiveId: string) => {
@@ -824,6 +865,10 @@ const App: React.FC = () => {
         onBlocksChange={handleBlocksChange}
         onGlobalParamChange={handleGlobalParamChange}
         onAddBlock={handleAddBlock}
+        pendingQuery={pendingQuery}
+        onRunPreset={handleRunPreset}
+        onQueryAnswer={handleQueryAnswer}
+        onQueryCancel={handleQueryCancel}
         onRemoveBlock={handleRemoveBlock}
         onReorderBlocks={handleReorderBlocks}
         blockSets={blockSets}

@@ -11,6 +11,8 @@ const params = typeof window !== 'undefined'
   : new URLSearchParams();
 
 export const PRESET_SCOPE = params.get('scope') === 'prompt_preset';
+/** `?scope=query`: the prompt UI answering a Pipeline Query block mid-run. */
+export const QUERY_SCOPE = params.get('scope') === 'query';
 export const PRESET_ID = params.get('preset_id') || '';
 export const SAMPLER_BASE = params.get('sampler_base') || '';
 
@@ -21,6 +23,10 @@ export interface PromptPresetSelectionPayload {
   prefabs: any[];
   programs: any[];
 }
+
+/** True when this window is embedded for one specific consumer (preset editor / Query
+ *  answer), so the prompt node's own global selection must NOT be restored into it. */
+export const SCOPED_SELECTION = PRESET_SCOPE || QUERY_SCOPE;
 
 /** Fetch the referenced preset's saved selection from the sampler server (null = not configured). */
 export async function fetchPromptPresetSelection(): Promise<any | null> {
@@ -34,6 +40,15 @@ export async function fetchPromptPresetSelection(): Promise<any | null> {
   } catch {
     return null;
   }
+}
+
+/** Hand a Query answer back to the host (the sampler): it forwards the RAW selection to
+ *  the parked run, which merges it and runs its programs. Nothing is persisted here —
+ *  a Query is a one-off answer, not a preset. */
+export function answerQuerySelection(selection: PromptPresetSelectionPayload): boolean {
+  if (!QUERY_SCOPE || window.parent === window) return false;
+  window.parent.postMessage({ type: 'prompt-query-answered', selection }, '*');
+  return true;
 }
 
 /** Save the selection into the shared preset and notify the host (EditPhase) so it can close the modal. */

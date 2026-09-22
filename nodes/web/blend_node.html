@@ -4965,6 +4965,20 @@ window.addEventListener('message', event => {
         setGenPresets(d.presets, d.active_id);
         return;
     }
+    if (d.type === 'blend-run-preset') {
+        // The sampler's Pipeline Presets capsule: its ▶ runs this preset NOW. The canvas
+        // composite and the Mask layer are here, so the run is issued from this side —
+        // the host only names the preset. Adopting the id also makes the next plain Run
+        // (and the settings dialog) show the same choice.
+        const rpId = (d.preset_id || '').toString();
+        if (rpId) {
+            runPrefs.preset_id = rpId;
+            saveRunPrefs();
+            if (runPresetSelect) runPresetSelect.value = rpId;
+        }
+        sendBlendAction('detailer');
+        return;
+    }
     if (d.type === 'blend-preview-tint') {
         // Host-side Mask Tint slider. Clamp defensively: the value crosses a window boundary.
         const v = Number(d.value);
