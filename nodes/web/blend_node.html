@@ -12,6 +12,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
 #viewport { position: absolute; inset: 0 0 62px 0; overflow: hidden; touch-action: none; cursor: default; }
 #blendCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45);
+    /* The transparency checkerboard: two 45deg gradients with hard 25%/75% stops tile a 16px box
+       into an 8px alternate of #1a1a1a / #242424. The host preview reproduces this in canvas 2D
+       (paintCheckerboard) so a thumbnail never shows a flat backdrop — keep the two in sync. */
     background-color: #1a1a1a;
     background-image: linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%),
                       linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%);
@@ -56,7 +59,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
 /* The dock sits outside #panelScroll, so it has to give back the scroll gutter itself: this
    keeps its divider and its buttons on the same rails as the sections above it. */
-#layersDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
+/* Docked at the bottom of the right column. Fixed height, NOT content height: the palette is a
+   fixed 520px tall block whose header stays put and whose list scrolls inside it, so the tool
+   sections above never get shoved around by a long/short layer stack. */
+#layersDock { flex: 0 0 520px; height: 520px; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 /* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
    up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
 #layersSpacer { flex: 0 0 48px; pointer-events: none; }
@@ -68,17 +74,48 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .panel-label { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.5px; }
 .panel-hint { font-size: 10.5px; color: rgba(255,255,255,0.35); line-height: 1.45; }
-.mini-group { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.mini-group { position: relative; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .mini-btn { background: rgba(255,255,255,0.08); border: none; border-radius: 7px; padding: 4px 9px; color: rgba(255,255,255,0.85); font-size: 11px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }
 .mini-btn:hover { background: rgba(255,255,255,0.16); }
 .mini-btn.active { background: rgba(0,122,255,0.85); color: #fff; }
 .mini-btn:disabled { opacity: 0.35; cursor: default; background: rgba(255,255,255,0.05); }
 .mini-btn.ico-btn { min-width: 26px; padding: 4px 7px; font-size: 13px; font-weight: 700; line-height: 1; }
+/* The Add menu reuses the .io-menu card but hangs off the Layers dock at the bottom of the
+   column, so it unfolds upward and anchors under the button rather than across the column. */
+.add-caret { font-size: 8px; line-height: 1; opacity: 0.7; margin-left: 3px; }
+.add-menu { top: auto; bottom: calc(100% + 6px); left: auto; right: 0; width: 216px; z-index: 95; }
 
 .layer-list { display: flex; flex-direction: column; gap: 4px; }
-/* Docked at the bottom of the right column: cap the height and scroll in place so a long list
-   never pushes the tool sections out of view. */
-#layerList { max-height: 36vh; overflow-y: auto; overscroll-behavior: contain; padding-right: 2px; }
+/* Fills the rest of the fixed-height dock and scrolls in place, so a long list never pushes the
+   dock's header out of view. `min-height: 0` is what lets a flex child actually shrink and
+   scroll instead of growing past its parent. */
+#layerList { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+
+/* iOS-style dark scrollbar for the column's two scroll areas (the tool sections and the layer
+   list). Overlay look: no track, a slim translucent thumb that only reads as a faint grey pill
+   against the dark panel. Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-*
+   properties; everything else gets the WebKit set. `scrollbar-gutter: stable` keeps the layer
+   rows from shifting sideways when the thumb appears. */
+#panelScroll, #layerList {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.22) transparent;
+}
+#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar { width: 10px; height: 10px; }
+#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track { background: transparent; }
+#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.22);
+    border-radius: 999px;
+    /* Inset the pill from both edges with a transparent border + padding-box clip: this is what
+       gives the overlay look instead of a full-width bar. */
+    border: 3px solid transparent;
+    background-clip: padding-box;
+}
+#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
+/* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
+#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner { background: transparent; }
+#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 .layer-empty { font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
 /* PS-style two-line layer row: identity on the head line (original image, name, eye, remove),
    the three working chips on the second line (result preview, Decal, Mask). */
@@ -115,14 +152,19 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row.mask-layer-row.selected { border-color: rgba(255,59,48,0.9); background: rgba(255,59,48,0.2); }
 .layer-row.mask-layer-row .layer-name { font-weight: 600; color: rgba(255,255,255,0.92); }
 .layer-row.mask-layer-row.off .layer-thumb, .layer-row.mask-layer-row.off .layer-name { opacity: 0.35; }
-/* Head line of the Mask row: same shape as a normal layer's head line. */
-.mask-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
-/* Pinned to the same 24px as a normal row's chip line, so the Mask row is exactly as tall
-   as every other row and the list keeps one rhythm. */
-.mask-opacity { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 3px; }
-.mask-opacity-label { font-size: 10px; color: rgba(255,255,255,0.45); letter-spacing: 0.2px; flex-shrink: 0; }
-.mask-opacity input[type="range"] { flex: 1; min-width: 0; height: 14px; margin: 0; padding: 0; accent-color: #ff3b30; cursor: pointer; }
-.mask-opacity-val { font-size: 10px; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; color: rgba(255,255,255,0.6); flex-shrink: 0; }
+/* The Mask row is a *single* line: its head line, and nothing else. The Tint slider that used
+   to sit underneath is gone — the one remaining tint is the host's Mask Tint under the preview,
+   which the canvas overlay reads while Ctrl is held. Height is pinned so the row keeps the same
+   48px rhythm the two-line rows have (head 24px + chip line 24px). */
+.layer-row.mask-layer-row { height: 48px; justify-content: center; }
+/* The space a normal row gives its name goes to the row's own whole-layer actions. They act on
+   the Mask layer itself, never on whatever happens to be selected. */
+.mask-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; width: 100%; }
+.mask-row-actions { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+.mask-row-btn { background: rgba(255,255,255,0.08); border: none; border-radius: 7px; padding: 3px 7px;
+    color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    transition: background 0.15s ease; }
+.mask-row-btn:hover { background: rgba(255,255,255,0.18); }
 /* Every other row ends with [eye][×]. The Mask row has no ×, so this pad holds the slot
    open and keeps its eye on the same rail as the rest of the list. */
 .layer-row-tail-gap { width: 13px; height: 1px; flex-shrink: 0; }
@@ -390,7 +432,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <button class="mini-btn ico-btn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
                     <button class="mini-btn ico-btn" id="redoBtn" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" disabled>&#8631;</button>
                     <button class="mini-btn" id="clearBtn" title="Remove every layer">Clear All</button>
-                    <button class="mini-btn" id="addLayerBtn" title="Add the selected history image as a new layer">Add</button>
+                    <button class="mini-btn" id="addLayerBtn" aria-haspopup="menu" aria-expanded="false"
+                            title="Add a layer: one the size of the canvas, or one you draw out at any resolution">Add<span class="add-caret">&#9662;</span></button>
+                    <!-- Anchored to the Layers dock, so it unfolds upward over the palette. -->
+                    <div class="io-menu add-menu" id="addLayerMenu" role="menu" hidden>
+                        <button class="io-menu-item" id="addDefaultLayerBtn" role="menuitem"
+                                title="A blank layer covering the canvas, one image pixel per canvas pixel.">
+                            <span class="io-menu-title">Default Layer</span>
+                            <span class="io-menu-sub">Canvas sized and 1:1 with it — a transparent surface to paint on.</span>
+                        </button>
+                        <button class="io-menu-item" id="addDynamicLayerBtn" role="menuitem"
+                                title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
+                            <span class="io-menu-title">Dynamic Layer</span>
+                            <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
+                        </button>
+                    </div>
                 </div>
             </div>
             <div class="layer-list" id="layerList"></div>
@@ -418,6 +474,28 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div style="flex:1;"></div>
             <button class="modal-btn ghost" id="canvasCancelBtn">Cancel</button>
             <button class="modal-btn primary" id="canvasApplyBtn">Apply</button>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="dynamicModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Dynamic Layer">
+        <div class="modal-title">Dynamic Layer</div>
+        <div class="modal-sub">The rectangle you dragged, at a resolution you choose. The layer covers those canvas pixels and is placed where you drew it.</div>
+        <div class="canvas-fields">
+            <div class="canvas-field"><span>WIDTH</span><input type="number" id="dynWInput" min="1" max="16384" step="1" inputmode="numeric"></div>
+            <button class="lock-btn locked" id="dynLockBtn" title="Keep aspect ratio" aria-label="Keep aspect ratio">
+                <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8.3 11.7a3 3 0 0 0 4.2 0l2.4-2.4a3 3 0 1 0-4.2-4.2l-1 1"/><path d="M11.7 8.3a3 3 0 0 0-4.2 0l-2.4 2.4a3 3 0 1 0 4.2 4.2l1-1"/></svg>
+            </button>
+            <div class="canvas-field"><span>HEIGHT</span><input type="number" id="dynHInput" min="1" max="16384" step="1" inputmode="numeric"></div>
+        </div>
+        <div class="canvas-fields">
+            <div class="canvas-field"><span>RESOLUTION RATE</span><input type="number" id="dynRateInput" min="0.05" max="16" step="0.05" inputmode="decimal"></div>
+        </div>
+        <div class="modal-hint" id="dynRatioHint">&#8212;</div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="dynCancelBtn">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn primary" id="dynApplyBtn">Add Layer</button>
         </div>
     </div>
 </div>
@@ -505,13 +583,10 @@ let maskLayer = {
 const injectedKeys = new Set();
 let actionBusy = false;
 let hasTagger = true;
-// On-canvas visibility of the Mask layer, as a pure display aid: the exported mask payload is
-// alpha-based and ignores this. 0 hides the tint, 1 makes it fully opaque.
-let maskOpacity = 0.3;
-// Strength of the same red tint *inside the host's Context preview*. Deliberately a separate
-// value: the host owns its own Mask Tint slider under the preview, so you can read the mask
-// clearly in the thumbnail without changing what the canvas shows while you paint (and the
-// other way round). The host forwards changes via the 'blend-preview-tint' message.
+// Strength of the red Mask tint. One single value now feeds two places: the host's Context
+// preview (below the preview image) and the on-canvas overlay that only appears while Ctrl is
+// held. The host owns the slider and forwards changes via the 'blend-preview-tint' message;
+// the canvas row no longer has a Tint of its own.
 let previewMaskOpacity = 0.3;
 const MASK_TINT_RGB = '255,59,48';
 function maskTintRGBA(alpha) { return `rgba(${MASK_TINT_RGB},${alpha})`; }
@@ -526,7 +601,7 @@ const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angl
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
-let keySpace = false, keyAlt = false;
+let keySpace = false, keyAlt = false, keyCtrl = false;
 let lastScreen = null, lastDoc = null;
 
 let isDrawing = false;
@@ -559,6 +634,11 @@ let brushColor = '#ff3b30';
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
 let dragRowId = null;
+// Dynamic Layer: after Add ▸ Dynamic Layer the next left-drag on the canvas sweeps out a
+// rectangle in canvas pixels. The rect is only a spec for a new layer, so it lives in doc
+// space and is thrown away (or taken to the modal) on release.
+let rectDrag = null;           // {x0, y0, x1, y1} in canvas pixels — always normalised on read
+let rectArmed = false;
 let cursorInside = false;
 let statusTimer = null;
 
@@ -1192,10 +1272,14 @@ function hitHandleScreen(sp, docPos, l) {
 }
 
 // The Mask layer is a separate surface (never part of the composite), so it has to be shown
-// as a tint on the overlay canvas — otherwise painting it would be invisible.
+// as a tint on the overlay canvas — otherwise painting it would be invisible. The tint is
+// Ctrl-gated on purpose: the canvas stays clean while you compose, and holding Ctrl reveals
+// the coverage so you can see what you are about to paint or erase with Ctrl+left / Ctrl+right.
+// Its strength is the single shared Mask Tint value (the host's slider under the preview).
 function drawMaskTint() {
     if (!canvasW || !canvasH) return;
-    if (!maskLayer.visible || !maskLayer.decal || maskOpacity <= 0) return;
+    if (!keyCtrl || isDecalTarget()) return;
+    if (!maskLayer.visible || !maskLayer.decal || previewMaskOpacity <= 0) return;
     const tl = docToScreen({ x: 0, y: 0 });
     const br = docToScreen({ x: canvasW, y: canvasH });
     if (!(Math.hypot(br.x - tl.x, br.y - tl.y) > 2)) return;
@@ -1206,7 +1290,7 @@ function drawMaskTint() {
     maskTintCtx.drawImage(maskLayer.decal, 0, 0, w, h);
     // Recolour in place so only painted pixels get tinted.
     maskTintCtx.globalCompositeOperation = 'source-in';
-    maskTintCtx.fillStyle = maskTintRGBA(maskOpacity);
+    maskTintCtx.fillStyle = maskTintRGBA(previewMaskOpacity);
     maskTintCtx.fillRect(0, 0, w, h);
     maskTintCtx.globalCompositeOperation = 'source-over';
     const cos = Math.cos(view.rotation), sin = Math.sin(view.rotation);
@@ -1218,11 +1302,113 @@ function drawMaskTint() {
     overlayCtx.restore();
 }
 
+// Ctrl is the one key that changes what the canvas *shows* rather than what it does: holding it
+// reveals the Mask tint, releasing it takes the tint away. Repaint on both edges so the overlay
+// does not lag behind the key.
+function setKeyCtrl(down) {
+    if (keyCtrl === down) return;
+    keyCtrl = down;
+    render();
+    syncBrushCursor();
+    refreshCursor();
+}
+
+// ---- Dynamic Layer rectangle ----
+// The drag sweeps a box in canvas pixels; these give it a canonical x/y/w/h whatever way it was
+// dragged (any of the four directions is fine, and a 0-width sweep is not a box).
+function rectBox(r) {
+    const x = Math.min(r.x0, r.x1), y = Math.min(r.y0, r.y1);
+    const w = Math.abs(r.x1 - r.x0), h = Math.abs(r.y1 - r.y0);
+    return { x, y, w, h };
+}
+// Rounds the swept box to whole canvas pixels and clamps it to the canvas: a layer has to cover
+// an integer number of pixels, and half a pixel off the edge is not something to hand the user.
+function rectBoxPixels(r) {
+    const b = rectBox(r);
+    const x0 = Math.max(0, Math.floor(b.x)), y0 = Math.max(0, Math.floor(b.y));
+    const x1 = Math.min(canvasW, Math.ceil(b.x + b.w)), y1 = Math.min(canvasH, Math.ceil(b.y + b.h));
+    return { x: x0, y: y0, w: Math.max(0, x1 - x0), h: Math.max(0, y1 - y0) };
+}
+// A sweep has to be deliberate: a stray few pixels is a click, not a rectangle.
+function rectBoxUsable(b) { return b.w >= 2 && b.h >= 2; }
+
+// Arms the mode without starting a drag: the rectangle begins when the button actually goes down.
+function armRectDrag() {
+    if (!canvasW || !canvasH) {
+        setStatus('Set a canvas size, or add an image, before drawing a dynamic layer', 'error');
+        return false;
+    }
+    rectArmed = true;
+    setCursor('crosshair');
+    setStatus('Drag a rectangle on the canvas to place the new layer');
+    return true;
+}
+
+function beginRectDrag(pos) {
+    rectArmed = false;
+    rectDrag = { x0: pos.x, y0: pos.y, x1: pos.x, y1: pos.y };
+    setCursor('crosshair');
+}
+
+function updateRectDrag(pos) {
+    if (!rectDrag) return;
+    rectDrag.x1 = pos.x; rectDrag.y1 = pos.y;
+    drawOverlay();
+}
+
+// The button came up: a usable sweep opens the resolution modal, anything smaller just cancels
+// the mode rather than silently making a 1px layer.
+function endRectDrag() {
+    if (!rectDrag) return false;
+    const box = rectBoxPixels(rectDrag);
+    rectDrag = null;
+    if (!rectBoxUsable(box)) {
+        refreshCursor();
+        render();
+        setStatus('Rectangle too small — drag a bigger one', 'error');
+        return false;
+    }
+    openDynamicModal(box);
+    return true;
+}
+
+function cancelRectDrag(silent) {
+    const wasArmed = rectArmed || !!rectDrag;
+    rectArmed = false;
+    rectDrag = null;
+    if (!wasArmed) return false;
+    refreshCursor();
+    render();
+    if (!silent) setStatus('Dynamic Layer cancelled');
+    return true;
+}
+
+function drawRectPreview() {
+    if (!rectDrag) return;
+    const b = rectBox(rectDrag);
+    const ctx = overlayCtx;
+    const p = docToScreen({ x: b.x, y: b.y });
+    // `docToScreen` maps a point, not a size, so the opposite corner gives the on-screen box.
+    const q = docToScreen({ x: b.x + b.w, y: b.y + b.h });
+    ctx.save();
+    ctx.fillStyle = 'rgba(10,132,255,0.16)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.lineWidth = 1;
+    ctx.fillRect(p.x, p.y, q.x - p.x, q.y - p.y);
+    ctx.strokeRect(p.x + 0.5, p.y + 0.5, q.x - p.x - 1, q.y - p.y - 1);
+    // A hairline dash on top keeps the box readable over both dark and light artwork.
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+    ctx.strokeRect(p.x + 0.5, p.y + 0.5, q.x - p.x - 1, q.y - p.y - 1);
+    ctx.restore();
+}
+
 function drawOverlay() {
     const w = overlayCanvas.width / overlayDpr, h = overlayCanvas.height / overlayDpr;
     overlayCtx.setTransform(overlayDpr, 0, 0, overlayDpr, 0, 0);
     overlayCtx.clearRect(0, 0, w, h);
     drawMaskTint();
+    drawRectPreview();
     if (mode !== 'transform' || !canvasW) return;
     const l = getSelected();
     if (!l || !l.visible || l.isMaskLayer) return;
@@ -1266,9 +1452,38 @@ function drawOverlay() {
 // The canvas composite IS the Context Image, so the host shows a live thumbnail of it next to
 // the detailer settings. Throttled to ~8 fps: `render()` runs on every pointermove while
 // painting, and encoding a PNG each time would stall the stroke.
+//
+// ⚠️ JPEG has NO alpha channel. Handing it a canvas that still has transparent pixels makes the
+// browser flatten the composite onto an OPAQUE BLACK backdrop, so every pixel whose alpha sits
+// strictly between 0 and 1 comes out darkened — the "grey" you see wherever masks overlap
+// softly (a 50%-covered white reads as 128,128,128 instead of white).
+//
+// The backdrop has to be the CHECKERBOARD, not a flat colour: a flat fill would make a
+// genuinely empty (alpha = 0) region indistinguishable from a region painted that colour.
+// Painting the same 8px #1a1a1a/#242424 checker the canvas itself sits on (see #blendCanvas in
+// the stylesheet) keeps "nothing here" readable as transparency AND makes the thumbnail look
+// like what is on the canvas. Keep the encode as JPEG — the throttle exists to keep strokes
+// smooth, and the checkerboard satisfies JPEG's need for an opaque backdrop.
 const PREVIEW_MAX_SIDE = 512;
 const PREVIEW_INTERVAL_MS = 120;
+const CHECKER_SIZE = 8;                     // must match #blendCanvas background-size
+const CHECKER_DARK = '#1a1a1a';             // must match #blendCanvas background-color
+const CHECKER_LIGHT = '#242424';            // must match the #blendCanvas gradient colour
 let previewTimer = null;
+
+// The transparency checkerboard, drawn at 1:1 so its squares keep the same on-screen size no
+// matter how much the preview is downscaled. `#242424` sits where (col + row) is odd; that is
+// the phase the CSS gradients actually produce (verified against a rendered screenshot).
+function paintCheckerboard(ctx, w, h) {
+    ctx.fillStyle = CHECKER_DARK;
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = CHECKER_LIGHT;
+    for (let y = 0, row = 0; y < h; y += CHECKER_SIZE, row++) {
+        for (let x = row % 2 ? 0 : CHECKER_SIZE; x < w; x += CHECKER_SIZE * 2) {
+            ctx.fillRect(x, y, CHECKER_SIZE, Math.min(CHECKER_SIZE, h - y));
+        }
+    }
+}
 
 function schedulePreview() {
     if (window.parent === window) return;      // standalone: there is nobody to send it to
@@ -1293,6 +1508,11 @@ function pushPreview() {
     if (previewCanvas.width !== w || previewCanvas.height !== h) { previewCanvas.width = w; previewCanvas.height = h; }
     resetCtx(previewCtx);
     previewCtx.clearRect(0, 0, w, h);
+    // Opaque checkerboard underlay, then the composite on top. The host's <img> is a JPEG and a
+    // JPEG cannot store alpha, so SOMETHING opaque has to be behind the composite — but it must
+    // be the checkerboard, not a flat fill: a flat fill would make an alpha = 0 region look like
+    // a painted one. This also mirrors what the canvas shows on screen.
+    paintCheckerboard(previewCtx, w, h);
     previewCtx.drawImage(blendCanvas, 0, 0, w, h);
     // Tint strength comes from the host slider, not from the canvas one — independent on purpose.
     if (maskLayer.visible && maskLayer.decal && previewMaskOpacity > 0) {
@@ -1576,14 +1796,25 @@ function renderMaskLayerRow() {
     maskLayer.decalThumbEl = c;
     thumb.appendChild(c);
 
-    const name = document.createElement('div');
-    name.className = 'layer-name';
-    name.textContent = 'Mask';
-
-    const note = document.createElement('span');
-    note.className = 'layer-note';
-    note.textContent = 'output';
-    note.title = 'Output — the surface the backend receives as the mask';
+    // No name and no OUTPUT note: the row is pinned, unnamed and single-purpose, so the head
+    // line spends its width on the three whole-layer actions instead.
+    const actions = document.createElement('div');
+    actions.className = 'mask-row-actions';
+    for (const spec of [
+        { kind: 'invert', text: 'Invert', title: 'Invert the Mask layer — covered pixels become uncovered and the other way round' },
+        { kind: 'full',   text: 'Full',   title: 'Fill the Mask layer — every pixel of the canvas covered' },
+        { kind: 'clear',  text: 'Clear',  title: 'Clear the Mask layer — nothing covered, so the actions run on the whole image' },
+    ]) {
+        const b = document.createElement('button');
+        b.className = 'mask-row-btn';
+        b.textContent = spec.text;
+        b.title = spec.title;
+        b.addEventListener('click', ev => {
+            ev.stopPropagation();       // don't re-select the row and overwrite this action's status
+            runMaskRowAction(spec.kind);
+        });
+        actions.appendChild(b);
+    }
 
     const eye = document.createElement('button');
     eye.className = 'icon-btn';
@@ -1601,46 +1832,32 @@ function renderMaskLayerRow() {
     const head = document.createElement('div');
     head.className = 'mask-row-main';
     head.appendChild(thumb);
-    head.appendChild(name);
-    head.appendChild(note);
+    head.appendChild(actions);
     head.appendChild(eye);
     const tailGap = document.createElement('span');
     tailGap.className = 'layer-row-tail-gap';   // stands in for the × a normal row has
     head.appendChild(tailGap);
     row.appendChild(head);
 
-    // Tint slider — display only. Drag events never bubble: the row's click handler would
-    // re-select the layer, re-render the list and destroy the slider mid-drag.
-    const opacity = document.createElement('div');
-    opacity.className = 'mask-opacity';
-    const opLabel = document.createElement('span');
-    opLabel.className = 'mask-opacity-label';
-    opLabel.textContent = 'Tint';
-    const opRange = document.createElement('input');
-    opRange.type = 'range';
-    opRange.min = '0';
-    opRange.max = '1';
-    opRange.step = '0.01';
-    opRange.value = String(maskOpacity);
-    opRange.title = 'How strongly the Mask layer is tinted on the canvas. Display only — the mask sent to the backend is unchanged. The Context preview has its own Mask Tint slider, below the preview image.';
-    const opVal = document.createElement('span');
-    opVal.className = 'mask-opacity-val';
-    opVal.textContent = maskOpacity.toFixed(2);
-    opRange.addEventListener('input', () => {
-        maskOpacity = parseFloat(opRange.value);
-        opVal.textContent = maskOpacity.toFixed(2);
-        render();                       // repaint the tint (list is untouched, so the drag survives)
-    });
-    for (const evName of ['pointerdown', 'click', 'input', 'pointerup']) {
-        opRange.addEventListener(evName, ev => ev.stopPropagation());
-    }
-    opacity.appendChild(opLabel);
-    opacity.appendChild(opRange);
-    opacity.appendChild(opVal);
-    row.appendChild(opacity);
-
     row.addEventListener('click', () => selectMaskLayer());
     return row;
+}
+
+// Invert / Full / Clear on the Mask row. They act on the Mask layer itself — never on
+// whatever is selected — so they keep working when the row is not the selection. Each one
+// says why it failed: "no canvas" is the only failure mode, and a silent no-op with a
+// success message is exactly the bug this guards against.
+function runMaskRowAction(kind) {
+    const ran = kind === 'invert' ? invertMaskLayer()
+              : kind === 'full' ? fillMaskLayer()
+              : clearMaskLayer();
+    if (ran) {
+        setStatus({ invert: 'Mask layer inverted — covered pixels are now uncovered',
+                    full: 'Mask layer filled — every pixel covered',
+                    clear: 'Mask layer cleared — nothing covered' }[kind]);
+        return;
+    }
+    setStatus('No canvas yet — drop an image in, or set a canvas size first', 'error');
 }
 
 function renderLayerList() {
@@ -2038,24 +2255,24 @@ function syncPaintUI() {
     document.getElementById('paintTargetRow').style.display = maskLayerSel ? 'none' : '';
     document.getElementById('paintMaskBtn').classList.toggle('active', !decal);
     document.getElementById('paintDecalBtn').classList.toggle('active', decal);
-    // Invert needs coverage to flip, so the decal target hides it. Full exists for the Mask
-    // layer only: there 'Reset to fully covered' is not what Clear means, and there was no way
-    // to cover the whole canvas without painting it by hand.
+    // Two buttons on this line, and the third slot changes with the target: a layer's own mask
+    // gets Reset-to-fully-visible, a decal gets Clear, the Mask layer gets Clear-only — its
+    // whole-layer actions moved onto the Mask row in the Layers list, where they act on the
+    // layer itself instead of on whatever happens to be selected.
     document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
-    document.getElementById('maskInvertBtn').title = maskLayerSel
-        ? 'Invert the Mask layer — covered pixels become uncovered and the other way round'
-        : 'Invert the mask: hidden areas become visible and the other way round';
-    document.getElementById('maskFullBtn').style.display = maskLayerSel ? '' : 'none';
+    document.getElementById('maskInvertBtn').title =
+        'Invert the mask: hidden areas become visible and the other way round';
+    document.getElementById('maskFullBtn').style.display = 'none';
     document.getElementById('maskFullBtn').title = 'Fill the Mask layer — every pixel of the canvas covered';
-    document.getElementById('maskResetBtn').textContent = maskLayerSel ? 'Clear' : (decal ? 'Clear' : 'Reset');
-    document.getElementById('maskResetBtn').title = maskLayerSel
-        ? 'Clear the Mask layer — nothing covered, so the actions run on the whole image'
-        : (decal ? 'Clear this layer\'s decal (the painted colour)' : 'Reset the mask to fully visible');
+    document.getElementById('maskResetBtn').textContent = decal ? 'Clear' : 'Reset';
+    document.getElementById('maskResetBtn').title = decal
+        ? 'Clear this layer\'s decal (the painted colour)'
+        : 'Reset this layer\'s mask to fully visible';
     document.getElementById('brushColorRow').style.display = decal ? 'flex' : 'none';
     maskDecalLabel.textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
     maskDecalLabel.title = maskLayerSel
-        ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. Invert / Full / Clear act on the whole layer.'
+        ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer.'
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.';
@@ -2381,6 +2598,52 @@ function beginStroke() {
     return true;
 }
 
+// Ctrl + left / Ctrl + right on the canvas: a shortcut that paints the top-level Mask layer
+// no matter what is selected, and no matter which tool the toolbar shows — left always paints,
+// right always erases.
+//
+// The stroke machinery itself (beginStroke / drawDot / livePreviewStroke) resolves its target
+// through getSelected() → paintSurface(), so "paint the Mask layer" cannot be expressed by
+// passing a flag: the selection has to actually BE the Mask layer for the duration. It is
+// parked here on press and restored on release, so the shortcut leaves no trace in the panel.
+let maskShortcutPrevSelected = null;
+let maskShortcutActive = false;
+
+function beginMaskStroke(pos, erase, label) {
+    if (!ensureMaskLayer()) { setStatus('Add an image (or set a canvas size) before painting the mask', 'error'); return false; }
+    // Park the selection and dive into the Mask layer. Only the first Ctrl-press of a gesture
+    // saves it: pressing Ctrl again mid-stroke must not overwrite the original.
+    if (!maskShortcutActive) {
+        maskShortcutPrevSelected = selectedId;
+        maskShortcutActive = true;
+        selectedId = MASK_LAYER_ID;
+        renderLayerList();
+        render();
+    }
+    isErasing = erase;
+    updateCursorMode();
+    if (!beginStroke()) { endMaskShortcut(); return false; }
+    isDrawing = true;
+    lastX = pos.x; lastY = pos.y;
+    drawDot(pos.x, pos.y);
+    livePreviewStroke();
+    syncBrushCursor();
+    setStatus(label);
+    return true;
+}
+
+// Restores whatever was selected before the Ctrl gesture. Safe to call twice (mouseup and blur
+// both land here).
+function endMaskShortcut() {
+    if (!maskShortcutActive) return;
+    maskShortcutActive = false;
+    if (maskShortcutPrevSelected !== null) selectedId = maskShortcutPrevSelected;
+    maskShortcutPrevSelected = null;
+    renderLayerList();
+    render();
+    refreshCursor();
+}
+
 function livePreviewStroke() {
     const l = getSelected();
     if (!l || !paintSurface(l)) return;
@@ -2528,11 +2791,28 @@ viewport.addEventListener('mousedown', e => {
     if (!canvasW) return;
     const sp = toScreenCoords(e);
     const pos = screenToDoc(sp);
+    // The Dynamic Layer rectangle outranks everything: the user explicitly asked for it, so the
+    // next left-press is a box, not a paint stroke. Any other button cancels the mode and is
+    // consumed with it — cancelling must not also start whatever that button normally does,
+    // or Ctrl+right would drop the rectangle AND erase the Mask layer in one press.
+    if (rectArmed) {
+        e.preventDefault();
+        if (e.button === 0) beginRectDrag(pos); else cancelRectDrag();
+        return;
+    }
     // View gestures win over the tools.
     if (e.button === 1 || (keySpace && e.button === 0)) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
     if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
+    // Ctrl is the Mask shortcut and it outranks everything below: while it is held the canvas
+    // paints the top-level Mask layer itself, whatever is selected and whatever the toolbar shows.
+    // Left always paints, right always erases. Ctrl wins over Alt, so Alt+Ctrl is not a pick/size.
+    if (e.ctrlKey && (e.button === 0 || e.button === 2)) {
+        e.preventDefault();
+        beginMaskStroke(pos, e.button === 2, e.button === 2 ? 'Ctrl + right — erasing the Mask layer' : 'Ctrl + left — painting the Mask layer');
+        return;
+    }
     if (mode === 'mask' && e.altKey && e.button === 2) { beginSizeDrag(e); e.preventDefault(); return; }
     if (mode === 'mask' && e.altKey && e.button === 0 && maskTool === 'brush') { beginPick(e, pos); e.preventDefault(); return; }
     if (mode === 'mask') {
@@ -2579,6 +2859,7 @@ viewport.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefaul
 window.addEventListener('mousemove', e => {
     if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
+    if (rectDrag) { updateRectDrag(screenToDoc(toScreenCoords(e))); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
@@ -2598,8 +2879,10 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('mouseup', e => {
     if (picking) endPick(e);
     if (sizeDrag) endSizeDrag(e);
+    if (rectDrag) endRectDrag();
     if (viewDrag) endViewDrag(e);
     if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
+    if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
     if (drag) {
         const target = getLayer(drag.layerId);
         const moved = !!target && transformChangedSince(drag.startTransform, target);
@@ -2615,18 +2898,14 @@ window.addEventListener('mouseup', e => {
 // Safety net: releasing the button outside the frame (or tab switch) must not leave a tool stuck.
 window.addEventListener('blur', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
-    if (drag) {
-        const target = getLayer(drag.layerId);
-        const moved = !!target && transformChangedSince(drag.startTransform, target);
-        drag = null;
-        render();
-        if (moved) pushHistory();
-    }
-    viewDrag = null;
+    endMaskShortcut();
     cancelPick();
+    rectArmed = false;
+    rectDrag = null;
     sizeDrag = null;
     sizeHud.style.display = 'none';
     keySpace = keyAlt = false;
+    setKeyCtrl(false);          // a tab switch swallows the keyup, so the tint would stay stuck on
     syncBrushCursor();
     refreshCursor();
 });
@@ -2647,6 +2926,11 @@ viewport.addEventListener('touchstart', e => {
     e.preventDefault();
     const t = e.touches[0];
     const pos = toDocCoords(t);
+    // A finger has one button only, so the Ctrl shortcut paints here (never erases).
+    if (keyCtrl) {
+        beginMaskStroke(pos, false, 'Ctrl + drag — painting the Mask layer');
+        return;
+    }
     if (mode === 'mask') {
         if (!getSelected()) return;
         isErasing = maskTool === 'eraser';
@@ -2676,6 +2960,7 @@ viewport.addEventListener('touchmove', e => {
 }, { passive: false });
 viewport.addEventListener('touchend', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
+    endMaskShortcut();
     if (drag) {
         const target = getLayer(drag.layerId);
         const moved = !!target && transformChangedSince(drag.startTransform, target);
@@ -2746,9 +3031,99 @@ function setupEraserModeButtons() {
 setupEraserModeButtons();
 
 // ==================== 面板按钮 ====================
-document.getElementById('addLayerBtn').addEventListener('click', () => {
-    if (window.parent !== window) window.parent.postMessage({ type: 'blend-select', role: 'layer' }, '*');
+// ---- the Add menu: one click unfolds the two kinds of layer you can create by hand ----
+// The old Add behaviour asked the host for the selected history image. That is a different
+// thing from "make a layer" and the host has its own button for it, so Add now only creates
+// blank layers.
+const layersDockEl = document.getElementById('layersDock');
+const addLayerBtn = document.getElementById('addLayerBtn');
+const addLayerMenu = document.getElementById('addLayerMenu');
+const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
+const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
+let addMenuOpen = false;
+
+function openAddMenu() {
+    addMenuOpen = true;
+    addLayerMenu.hidden = false;
+    addLayerBtn.setAttribute('aria-expanded', 'true');
+}
+function closeAddMenu() {
+    addMenuOpen = false;
+    addLayerMenu.hidden = true;
+    addLayerBtn.setAttribute('aria-expanded', 'false');
+}
+
+addLayerBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (addMenuOpen) closeAddMenu(); else openAddMenu();
 });
+document.addEventListener('mousedown', e => {
+    if (addMenuOpen && !layersDockEl.contains(e.target)) closeAddMenu();
+});
+
+addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(); });
+addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(); });
+
+// A blank layer whose image element is a canvas, so `nativeSize()` reports the pixel box we
+// asked for and every downstream path (composite, mask, decal, thumbs, .cud export) treats it
+// like any other layer. Nothing is baked into the canvas size: the transform carries the box.
+function makeBlankCanvas(w, h) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+}
+
+// A hand-made layer: `img` is a scratch canvas rather than a decoded file, so it has a
+// `key` of null (it is not from the history) and a `fragment` of false — a Dynamic Layer is a
+// piece of this canvas, exactly like a detailer patch, and must never drive the canvas size.
+function addSurfaceLayer(opts) {
+    const { pw, ph, transform, name } = opts;
+    if (!(pw >= 1 && ph >= 1)) return null;
+    if (pw > MAX_CANVAS_SIDE || ph > MAX_CANVAS_SIDE || pw * ph > MAX_CANVAS_PIXELS) {
+        setStatus(`Layer too large (max ${MAX_CANVAS_SIDE} px per side, ${MAX_CANVAS_PIXELS / 1e6} MP)`, 'error');
+        return null;
+    }
+    const l = {
+        id: ++layerSeq,
+        key: null,
+        name: name || 'Layer',
+        src: '',
+        img: makeBlankCanvas(pw, ph),
+        visible: true,
+        transform: cloneTransform(transform),
+        mask: null,
+        maskCtx: null,
+        maskThumbEl: null,
+        decal: null,
+        decalCtx: null,
+        decalThumbEl: null,
+        canvasThumbEl: null,
+        fragment: false,
+    };
+    layers.unshift(l);              // new layers land on top, above the Mask layer row
+    selectedId = l.id;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    pushHistory();
+    return l;
+}
+
+// Default Layer: exactly the canvas, one image pixel per canvas pixel, so painting on it needs
+// no resampling at all.
+function addDefaultLayer() {
+    if (!canvasW || !canvasH) {
+        setStatus('Set a canvas size, or add an image, before adding a layer', 'error');
+        return null;
+    }
+    const l = addSurfaceLayer({
+        pw: canvasW, ph: canvasH,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        name: `Layer ${layers.length + 1}`,
+    });
+    if (l) setStatus(`Default Layer added — ${canvasW} × ${canvasH}, 1:1 with the canvas`);
+    return l;
+}
 
 // ==================== 拖入本地图片 ====================
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
@@ -2784,11 +3159,8 @@ document.getElementById('sidePanel').addEventListener('mouseup', e => {
 document.getElementById('maskInvertBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (l.isMaskLayer) {
-        if (invertMaskLayer()) setStatus('Mask layer inverted');
-        else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
-        return;
-    }
+    // The Mask layer never reaches this button: its own row owns Invert / Full / Clear.
+    if (l.isMaskLayer) { runMaskRowAction('invert'); return; }
     if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
     invertMask(l);
     renderLayerList();
@@ -2797,18 +3169,13 @@ document.getElementById('maskInvertBtn').addEventListener('click', () => {
     pushHistory();
 });
 document.getElementById('maskFullBtn').addEventListener('click', () => {
-    if (!isMaskLayerTarget()) { setStatus('Full covers the Mask layer — select it in the Layers list', 'error'); return; }
-    if (fillMaskLayer()) setStatus('Mask layer filled — every pixel covered');
-    else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
+    if (!isMaskLayerTarget()) { setStatus('The Mask layer carries Full — select it in the Layers list', 'error'); return; }
+    runMaskRowAction('full');
 });
 document.getElementById('maskResetBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (l.isMaskLayer) {
-        if (clearMaskLayer()) setStatus('Mask layer cleared — nothing covered');
-        else setStatus('No canvas yet — drop an image in or set a canvas size first', 'error');
-        return;
-    }
+    if (l.isMaskLayer) { runMaskRowAction('clear'); return; }
     if (isDecalTarget()) {
         l.decal = null;
         l.decalCtx = null;
@@ -2983,7 +3350,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen(); }
+function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -3074,6 +3441,124 @@ canvasModalEl.addEventListener('keydown', e => {
     else if (e.key === 'Escape') { e.preventDefault(); closeCanvasModal(); }
 });
 
+// ==================== Dynamic Layer 弹窗 ====================
+// A Dynamic Layer is a layer that covers a rectangle OF the canvas at a resolution you choose.
+// The rectangle is the placement and the base pixel box; the resolution rate multiplies its
+// linear size, so the rate is a pixel-count multiplier of rate² (1 = 1:1, 2 = four times the pixels).
+const MAX_RATE = 16;
+
+let dynBox = null;             // the swept rect in canvas pixels, kept while the modal is up
+let dynLocked = true;
+let dynRatio = 1;
+
+const dynamicModalEl = document.getElementById('dynamicModal');
+const dynWInput = document.getElementById('dynWInput');
+const dynHInput = document.getElementById('dynHInput');
+const dynRateInput = document.getElementById('dynRateInput');
+const dynLockBtn = document.getElementById('dynLockBtn');
+const dynRatioHint = document.getElementById('dynRatioHint');
+
+function dynamicModalOpen() { return dynamicModalEl.classList.contains('open'); }
+
+function rateText(rate) {
+    const r = Number(rate);
+    if (!Number.isFinite(r) || r <= 0) return '—';
+    const pct = r * r * 100;
+    return `1:${pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)}% of those pixels`;
+}
+
+function updateDynRatioHint() {
+    const w = Number(dynWInput.value), h = Number(dynHInput.value);
+    const rate = Number(dynRateInput.value);
+    const base = dynBox ? `${dynBox.w} × ${dynBox.h}` : '—';
+    dynRatioHint.textContent = `${canvasRatioText(w, h)} · rate ${Number.isFinite(rate) ? rate : '—'} ⇒ ${rateText(rate)} · rectangle ${base}`;
+}
+
+function syncDynLockedField(source) {
+    if (!dynLocked) return;
+    const w = Number(dynWInput.value), h = Number(dynHInput.value);
+    if (source === 'w' && w >= 1) dynHInput.value = String(Math.max(1, Math.round(w / dynRatio)));
+    else if (source === 'h' && h >= 1) dynWInput.value = String(Math.max(1, Math.round(h * dynRatio)));
+}
+
+// The sweep already gave the placement; the modal only decides how many pixels the layer bakes.
+// The layer's transform is the placement box divided by the canvas, so the extra resolution
+// lands on the surface, not on the canvas — the canvas is never resized by this.
+function openDynamicModal(box) {
+    dynBox = box;
+    dynWInput.value = String(box.w);
+    dynHInput.value = String(box.h);
+    dynRateInput.value = '1';
+    dynRatio = box.w / box.h;
+    dynLocked = true;
+    dynLockBtn.classList.add('locked');
+    updateDynRatioHint();
+    dynamicModalEl.classList.add('open');
+    syncBrushCursor();
+    dynRateInput.focus();
+    dynRateInput.select();
+}
+
+function closeDynamicModal() {
+    dynamicModalEl.classList.remove('open');
+    dynBox = null;
+    syncBrushCursor();
+    refreshCursor();
+}
+
+function applyDynamicModal() {
+    const box = dynBox;
+    if (!box) { closeDynamicModal(); return; }
+    const rate = Math.max(0.01, Math.min(MAX_RATE, Number(dynRateInput.value) || 1));
+    // The fields are the final word: the rate only seeds them, so a user who overrides W or H
+    // gets exactly what they typed rather than the rectangle times the rate.
+    const pw = Math.max(1, Math.round(Number(dynWInput.value) || 0));
+    const ph = Math.max(1, Math.round(Number(dynHInput.value) || 0));
+    closeDynamicModal();
+    const l = addSurfaceLayer({
+        pw, ph,
+        transform: {
+            cx: (box.x + box.w / 2) / canvasW,
+            cy: (box.y + box.h / 2) / canvasH,
+            w: box.w / canvasW,
+            h: box.h / canvasH,
+            rotation: 0,
+        },
+        name: `Dynamic ${pw}×${ph}`,
+    });
+    if (l) setStatus(`Dynamic Layer added — ${pw} × ${ph} over a ${box.w} × ${box.h} canvas area (rate ${rate})`);
+    render();
+}
+
+document.getElementById('dynCancelBtn').addEventListener('click', closeDynamicModal);
+document.getElementById('dynApplyBtn').addEventListener('click', applyDynamicModal);
+dynamicModalEl.addEventListener('mousedown', e => { if (e.target === dynamicModalEl) closeDynamicModal(); });
+dynLockBtn.addEventListener('click', () => {
+    dynLocked = !dynLocked;
+    dynLockBtn.classList.toggle('locked', dynLocked);
+    if (dynLocked) {
+        const w = Number(dynWInput.value), h = Number(dynHInput.value);
+        if (w >= 1 && h >= 1) dynRatio = w / h;
+    }
+    updateDynRatioHint();
+});
+// Changing the rate rescales the pixel fields from the rectangle, keeping the lock honest.
+dynRateInput.addEventListener('input', () => {
+    if (!dynBox) return;
+    const rate = Number(dynRateInput.value);
+    if (!Number.isFinite(rate) || rate <= 0) { updateDynRatioHint(); return; }
+    dynWInput.value = String(Math.max(1, Math.round(dynBox.w * rate)));
+    dynHInput.value = String(Math.max(1, Math.round(dynBox.h * rate)));
+    dynRatio = Number(dynWInput.value) / Number(dynHInput.value);
+    updateDynRatioHint();
+});
+dynWInput.addEventListener('input', () => { syncDynLockedField('w'); updateDynRatioHint(); });
+dynHInput.addEventListener('input', () => { syncDynLockedField('h'); updateDynRatioHint(); });
+dynamicModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); applyDynamicModal(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeDynamicModal(); }
+});
+
 // ==================== 键盘 ====================
 function onViewKeyChange() {
     syncBrushCursor();
@@ -3092,12 +3577,19 @@ window.addEventListener('keydown', e => {
         else if (e.key === 'Enter') { e.preventDefault(); applyCanvasModal(); }
         return;                 // no tools / view shortcuts while the dialog is up
     }
+    if (dynamicModalOpen()) {
+        if (e.key === 'Escape') { e.preventDefault(); closeDynamicModal(); }
+        else if (e.key === 'Enter') { e.preventDefault(); applyDynamicModal(); }
+        return;
+    }
     // Esc closes the Export menu first; otherwise it drops the active tool AND straightens the
     // view. It sits before the text-field guard so it keeps working while the extra-prompt box
     // has focus — Esc has no native use in a text box.
     if (e.key === 'Escape') {
         e.preventDefault();
         if (exportMenuOpen) { closeExportMenu(); return; }
+        if (addMenuOpen) { closeAddMenu(); return; }
+        if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
         setMode('none');
         if (resetViewRotation()) setStatus('View rotation reset');
         return;
@@ -3120,6 +3612,7 @@ window.addEventListener('keydown', e => {
     const l = getSelected();
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
+    if (e.key === 'Control' || e.metaKey) { setKeyCtrl(true); return; }
     if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('zoom'); return; }
     if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('pan'); return; }
     if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rotate'); return; }
@@ -3151,6 +3644,7 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
     if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
     if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
+    if (e.key === 'Control' || e.key === 'Meta') { setKeyCtrl(false); return; }
 });
 
 // ==================== .cud / PNG 导出 · 导入 ====================
@@ -3324,7 +3818,7 @@ async function exportCud() {
             view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
             selection: { selectedId, mode, paintTarget },
             tools: {
-                maskTool, maskOpacity, previewMaskOpacity,
+                maskTool, previewMaskOpacity,
                 extraPrompt: extraPromptInput.value,
                 brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor },
                 eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
@@ -3426,8 +3920,10 @@ function applyCudTools(t) {
         setNumberControl('eraserGamma', 'eraserGammaValue', eraserGamma);
     }
     maskTool = t.maskTool === 'eraser' ? 'eraser' : 'brush';
-    if (Number.isFinite(t.maskOpacity)) maskOpacity = clamp(t.maskOpacity, 0, 1);
     if (Number.isFinite(t.previewMaskOpacity)) previewMaskOpacity = clamp(t.previewMaskOpacity, 0, 1);
+    // Legacy documents carried a second, canvas-only tint. There is one tint now, so it is still
+    // read (never written back) to keep old .cud files looking the way they were saved.
+    else if (Number.isFinite(t.maskOpacity)) previewMaskOpacity = clamp(t.maskOpacity, 0, 1);
     extraPromptInput.value = typeof t.extraPrompt === 'string' ? t.extraPrompt : '';
     syncSizeUI();
 }
