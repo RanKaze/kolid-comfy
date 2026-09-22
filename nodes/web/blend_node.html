@@ -133,6 +133,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row.duplicate-layer .layer-name { color: #ffb340; }
 .layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
 .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
+/* An image-less layer (Default / Dynamic Layer, before a Generate fills it in) has no `src`, so a
+   real <img> would render the browser's broken-image glyph. Show a deliberate red X instead. */
+.layer-thumb.no-image { background: #1c1113; box-shadow: inset 0 0 0 1px rgba(255,59,48,0.35); }
+.layer-thumb.no-image svg { width: 14px; height: 14px; display: block; }
 .layer-thumb.mask-thumb { background: #000; cursor: pointer; }
 .layer-thumb.mask-thumb canvas { width: 100%; height: 100%; display: block; }
 .layer-thumb.canvas-thumb { background: #0a0a0a; }
@@ -525,7 +529,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     <div class="modal" role="dialog" aria-modal="true" aria-label="Generate from layer">
         <div class="modal-title" id="genModalTitle">Generate</div>
         <div class="modal-sub" id="genModalSub">&#8212;</div>
-        <div class="modal-hint">Runs the Detailer on <strong>this layer's own image</strong> with <strong>this layer's own mask</strong>. The result replaces this layer's image in place &#8212; no new layer is added.</div>
+        <label class="modal-check"><input type="checkbox" id="genLayerCtxToggle" checked><span>Layer Context &#8212; composite of all layers over this layer's region</span></label>
+        <div class="modal-hint">Runs the Detailer on the context image (this layer's own when Layer Context is off, the layer-region composite when it is on) with <strong>this layer's own mask</strong>. The result replaces this layer's image in place &#8212; no new layer is added.</div>
         <div class="gen-steps" id="genStepFields"></div>
         <div class="modal-hint" id="genStepHint">&#8212;</div>
         <div class="modal-actions">
@@ -733,6 +738,29 @@ function loadImage(src, callback, onerror) {
 
 function nativeSize(img) { return img ? { w: img.naturalWidth || img.width || 1, h: img.naturalHeight || img.height || 1 } : { w: 1, h: 1 }; }
 
+// A layer "has an image" when there is a file to show: either a decoded <img> from the history /
+// a dropped file, or an explicit data URL. A hand-made layer is a blank scratch canvas with
+// `src === ''` — it has pixels, but nothing to render in an <img>, and it is the case the row
+// must present as "no image yet" rather than letting the browser draw a broken-image glyph.
+function hasLayerImage(l) { return !!(l && l.img && l.src); }
+
+// The red X that stands in for a missing image. Inline SVG so it needs no asset and scales with
+// the chip; the stroke is currentColor so the CSS class owns the colour.
+function noImageGlyph() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M4 4 L12 12 M12 4 L4 12');
+    path.setAttribute('stroke', '#ff3b30');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('stroke-linecap', 'round');
+    path.setAttribute('fill', 'none');
+    svg.appendChild(path);
+    return svg;
+}
+
 // ==================== 画布尺寸 / 布局 ====================
 function sizeCanvasElement() {
     blendCanvas.width = canvasW;
@@ -874,6 +902,51 @@ function surfaceDataUrl(surface) {
     try { return surface.toDataURL('image/png'); } catch (e) { return null; }
 }
 
+// The mask that goes out with a layer Generate run. A mask is a coverage map, so an unpainted
+// mask IS the full mask — but "send nothing" is not an option (the backend rejects a
+// zero-coverage mask) and neither is sending the untouched transparent canvas, which decodes to
+// exactly that. So: the user's strokes when there are any, an explicit all-white PNG at the
+// layer's own resolution otherwise — all-white decodes to an all-ones tensor = whole layer.
+// The raw "has ink" question is the RIGHT one here: this decides "send as-is vs synthesise",
+// it is not a gate. Gating lives in layerMaskIsMeaningful().
+function generateMaskDataUrl(l) {
+    if (l.mask && surfaceHasInk(l.mask)) return surfaceDataUrl(l.mask);
+    const { w, h } = nativeSize(l.img);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    return c.toDataURL('image/png');
+}
+
+// A layer with no image of its own (a blank Default / Dynamic layer) still needs context to
+// generate from. Noise is the honest answer: it carries no structure the detailer could be
+// misled by, so whatever appears comes from the prompt and the mask alone. The RENDER RESOLUTION
+// is the layer's own pixel size, so the result lands 1:1 on the layer instead of being resampled.
+// Drawn into `generateCanvas` (the same scratch the decal-baking path uses) and returned as a
+// data URL, because every cross-window payload must be a string.
+function noiseImageForGenerate(l) {
+    const { w, h } = nativeSize(l.img);
+    if (generateCanvas.width !== w || generateCanvas.height !== h) {
+        generateCanvas.width = w; generateCanvas.height = h;
+    }
+    resetCtx(generateCtx);
+    const data = generateCtx.createImageData(w, h);
+    const px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+        // Uniform white noise across all three channels. `crypto.getRandomValues` fills 32 bits at
+        // a time and would impose a 4-byte alignment dance for no benefit here; Math.random is
+        // plenty for a denoise seed and keeps this readable.
+        px[i] = (Math.random() * 256) | 0;
+        px[i + 1] = (Math.random() * 256) | 0;
+        px[i + 2] = (Math.random() * 256) | 0;
+        px[i + 3] = 255;
+    }
+    generateCtx.putImageData(data, 0, 0);
+    return surfaceDataUrl(generateCanvas);
+}
+
 // The layer's own image for a Generate run — deliberately NOT layerSource().
 //
 // layerSource() cuts the image by the mask (destination-in) because that is what the *canvas*
@@ -889,16 +962,57 @@ function surfaceDataUrl(surface) {
 // would vanish silently.
 function layerSourceForGenerate(l) {
     if (!l.img) return null;
-    if (!l.decal) return l.src || (l.img.src || null);
+    // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
+    if (!hasLayerImage(l)) return noiseImageForGenerate(l);
+    const { w, h } = nativeSize(l.img);
+    if (!l.decal) return l.src || surfaceDataUrl(renderLayerToScratch(l, w, h));
+    renderLayerToScratch(l, w, h);
+    return surfaceDataUrl(generateCanvas);
+}
+
+// The Layer Context image: the composite of ALL layers, cropped to the region THIS layer covers.
+//
+// Rendered into the layer's OWN pixel grid by inverting its placement transform exactly
+// (drawLayer() does translate(Cx,Cy) · rotate(θ) · drawImage at (-tw/2,-th/2,tw,th), so the
+// inverse is translate(w/2,h/2) · rotate(-θ) · scale(w/tw,h/th) · translate(-Cx,-Cy)). That way
+// the composite's copy of this layer lands 1:1 where its own image sits, and the layer's own
+// mask — sent alongside at native size — stays perfectly aligned even when the layer is scaled
+// or rotated. The source is blendCanvas itself: after every render its pixels ARE the canvas
+// composite (visible layers bottom→top, each already cut by its own mask and carrying its
+// decal; the singleton Mask layer is an overlay and was never part of it). Areas outside the
+// canvas composite through as transparent.
+//
+// Returns a PNG data URL, never the canvas itself: this crosses a window boundary (see
+// layerSourceForGenerate on why a live canvas would die as a silent DataCloneError).
+function layerCompositeForGenerate(l) {
     const { w, h } = nativeSize(l.img);
     if (generateCanvas.width !== w || generateCanvas.height !== h) {
         generateCanvas.width = w; generateCanvas.height = h;
     }
     resetCtx(generateCtx);
     generateCtx.clearRect(0, 0, w, h);
-    generateCtx.drawImage(l.img, 0, 0, w, h);
-    generateCtx.drawImage(l.decal, 0, 0, w, h);
+    const tr = l.transform;
+    const tw = tr.w * canvasW, th = tr.h * canvasH;
+    generateCtx.save();
+    generateCtx.translate(w / 2, h / 2);
+    generateCtx.rotate(-tr.rotation);
+    generateCtx.scale(w / tw, h / th);
+    generateCtx.translate(-tr.cx * canvasW, -tr.cy * canvasH);
+    generateCtx.drawImage(blendCanvas, 0, 0);
+    generateCtx.restore();
     return surfaceDataUrl(generateCanvas);
+}
+
+// Draw the layer's image plus its decal into `generateCanvas` at the given size.
+function renderLayerToScratch(l, w, h) {
+    if (generateCanvas.width !== w || generateCanvas.height !== h) {
+        generateCanvas.width = w; generateCanvas.height = h;
+    }
+    resetCtx(generateCtx);
+    generateCtx.clearRect(0, 0, w, h);
+    generateCtx.drawImage(l.img, 0, 0, w, h);
+    if (l.decal) generateCtx.drawImage(l.decal, 0, 0, w, h);
+    return generateCanvas;
 }
 
 // Auto canvas = the smallest box that fits every layer at its OWN native resolution (per axis).
@@ -1985,10 +2099,19 @@ function renderLayerList() {
         thumb.className = 'layer-thumb';
         thumb.title = '1 · Original image — click to transform this layer';
         if (l.id === selectedId && mode === 'transform') thumb.classList.add('active');
-        const img = document.createElement('img');
-        img.src = l.src;
-        img.draggable = false;
-        thumb.appendChild(img);
+        // A hand-made layer (Default / Dynamic) is a blank scratch canvas with `src === ''`, so it
+        // has no file to show. An <img src=""> would render the browser's broken-image glyph, so it
+        // gets an explicit red X instead — the row then says "no image yet" instead of "corrupt".
+        if (hasLayerImage(l)) {
+            const img = document.createElement('img');
+            img.src = l.src;
+            img.draggable = false;
+            thumb.appendChild(img);
+        } else {
+            thumb.classList.add('no-image');
+            thumb.title = '1 · No image yet — run Generate (right-click the row) or drop an image here';
+            thumb.appendChild(noImageGlyph());
+        }
         thumb.addEventListener('click', ev => {
             ev.stopPropagation();
             selectLayer(l.id, 'transform');
@@ -2585,16 +2708,20 @@ function updateTransformDrag(e, pos) {
 // Masks and decals are stored at the layer's native resolution and are cut out before the
 // transform, so scaling/rotating a layer moves them with it. A decal is a separate colour
 // surface painted on top of the image; the mask then cuts both.
+// NOTE: the mask starts EMPTY (fully transparent), exactly like a decal.
+// A mask is a coverage multiplier (backend does `image = image * mask`), so "all white"
+// and "no mask at all" mean the same thing — fully visible. Pre-filling white made that
+// state impossible to tell apart from a real edit: allocating a blank white canvas on the
+// first stroke left the mask 100% opaque with not a single pixel actually painted, which
+// then read as "this layer already has a mask" for the rest of the session.
+// An empty surface keeps the two honest: what the brush covers is what the mask covers.
 function ensureMask(l) {
     if (!l.mask) {
         const { w, h } = nativeSize(l.img);
         const c = document.createElement('canvas');
         c.width = w; c.height = h;
-        const mctx = c.getContext('2d');
-        mctx.fillStyle = '#fff';
-        mctx.fillRect(0, 0, w, h);
         l.mask = c;
-        l.maskCtx = mctx;
+        l.maskCtx = c.getContext('2d');
     }
     return l.mask;
 }
@@ -3532,9 +3659,14 @@ function closeLayerMenu() {
 function openLayerMenu(l, clientX, clientY) {
     const menu = ensureLayerMenu();
     menu.innerHTML = '';
-    // Generate needs a real image and a painted mask, and it needs the host to be listening.
-    const hasMask = !!paintSurfaceMaskHasInk(l);
-    const disabled = !l.img || !hasMask;
+    // Generate is available to every normal layer: an unpainted mask IS the full mask (a mask is
+    // a coverage multiplier, so "nothing painted" = "cover everything" = regenerate the layer).
+    // See layerMaskIsMeaningful() for why neither "the mask canvas exists" nor "the mask has ink"
+    // is the right question. An image-less layer is fine too: Generate synthesises a noise image
+    // at the layer's own resolution, so a blank Default/Dynamic layer is a legitimate start.
+    const hasImg = hasLayerImage(l);
+    const canGenerate = layerMaskIsMeaningful(l);
+    const disabled = !canGenerate;
 
     const item = document.createElement('button');
     item.className = 'layer-menu-item';
@@ -3542,8 +3674,9 @@ function openLayerMenu(l, clientX, clientY) {
     item.setAttribute('role', 'menuitem');
     item.textContent = 'Generate';
     item.disabled = disabled;
-    item.title = !l.img ? 'This layer has no image yet'
-        : (!hasMask ? `Paint 「${l.name}」's own mask first — Generate sends it as the context mask` : '');
+    item.title = !canGenerate ? `「${l.name}」is the Mask layer itself — not a Generate target`
+        : (hasImg ? `Refine「${l.name}」from its own image and mask (nothing painted = the whole layer)`
+            : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
     item.addEventListener('click', ev => {
         ev.stopPropagation();
         closeLayerMenu();
@@ -3561,17 +3694,32 @@ function openLayerMenu(l, clientX, clientY) {
     layerMenuLayerId = l.id;
 }
 
-// Does THIS layer carry mask ink of its own? Distinct from maskHasInk(), which asks about the
-// singleton top-level Mask layer, and from l.mask merely existing (it is allocated with the layer).
-function paintSurfaceMaskHasInk(l) {
-    if (!l || l.isMaskLayer) return false;
-    return surfaceHasInk(l.mask);
+// Can THIS layer be a Generate target?
+//
+// For Generate the answer is "yes" for every normal layer, because a mask is a *coverage* map
+// (the backend multiplies the image by it, 1.0 = fully visible) and an unpainted mask is
+// semantically the FULL mask: a freshly created layer reads as "regenerate everything", which is
+// exactly what Generate into a new layer should do — no fumbling with the brush first. The mask
+// that actually goes out is built by generateMaskDataUrl(): the user's strokes if there are any,
+// an explicit all-white PNG otherwise (the backend rejects a zero-coverage mask).
+//
+// History, so nobody re-tightens this into the old trap: the gate once asked `!!l.mask` (false
+// until a stroke allocated the canvas) and later "the canvas has at least one covered pixel".
+// Both made a fresh layer's Generate grey — the exact reported bug. Only the singleton Mask
+// layer is not a Generate target: it is the mask surface itself, not a layer to regenerate.
+function layerMaskIsMeaningful(l) {
+    return !!l && !l.isMaskLayer;
 }
 
 // ==================== Generate 弹窗 ====================
 const genModalEl = document.getElementById('genModal');
 const genModalTitle = document.getElementById('genModalTitle');
 const genModalSub = document.getElementById('genModalSub');
+// Layer Context toggle: ON sends the composite of all layers over the target layer's region as
+// the context image instead of the layer's own pixels. Defaults to checked on every open (the
+// common img2img-with-surroundings case), and the subtitle describes whichever image will go.
+const genLayerCtxToggle = document.getElementById('genLayerCtxToggle');
+genLayerCtxToggle.addEventListener('change', updateGenModalSub);
 const genStepFields = document.getElementById('genStepFields');
 const genStepHint = document.getElementById('genStepHint');
 
@@ -3643,13 +3791,29 @@ function updateGenStepHint() {
 
 // The layer the modal was opened for, kept so Confirm still refers to the right one even if the
 // selection changed while the dialog was up.
+// The subtitle describes exactly what Confirm will send, and follows the Layer Context toggle
+// live (its 'change' event calls this too).
+function updateGenModalSub() {
+    const l = layers.find(x => x.id === genTargetLayerId);
+    if (!l) return;
+    const n = nativeSize(l.img);
+    const ctxPart = genLayerCtxToggle.checked
+        ? `Context image: the composite of all layers over 「${l.name}」's region (${n.w} × ${n.h}). `
+        : (hasLayerImage(l)
+            ? `Context image: 「${l.name}」's own image. `
+            : `Context image: fresh noise at ${n.w} × ${n.h} (this layer is still empty). `);
+    genModalSub.textContent = ctxPart
+        + `Context mask: its own mask. The result replaces this layer's image in place.`;
+}
+
 function openGenModal(layerId) {
     const l = layers.find(x => x.id === layerId);
     if (!l) return;
     genTargetLayerId = layerId;
     genModalTitle.textContent = `Generate — ${l.name}`;
-    genModalSub.textContent = `Context image: 「${l.name}」's own image. Context mask: its own mask. `
-        + `The result replaces this layer's image in place.`;
+    // Layer Context defaults to ON every time the modal opens.
+    genLayerCtxToggle.checked = true;
+    updateGenModalSub();
     renderGenFields();
     genModalEl.classList.add('open');
     syncBrushCursor();
@@ -3677,9 +3841,13 @@ function copyGenStepsFromPipeline() {
 function confirmGenModal() {
     const l = layers.find(x => x.id === genTargetLayerId);
     if (!l) { closeGenModal(); return; }
-    if (!l.img) { setStatus('This layer has no image yet', 'error'); return; }
-    if (!paintSurfaceMaskHasInk(l)) {
-        setStatus(`Paint 「${l.name}」's own mask before generating`, 'error');
+    if (!l.img) { setStatus('This layer has no surface to generate into', 'error'); return; }
+    // Same predicate the menu gates on, so "clickable" and "accepted" can never disagree. It only
+    // refuses the Mask layer itself: an unpainted mask is the full mask (generateMaskDataUrl()
+    // sends an explicit all-white PNG for it), and an image-less layer passes too —
+    // layerSourceForGenerate() hands the backend noise at the layer's own resolution.
+    if (!layerMaskIsMeaningful(l)) {
+        setStatus(`「${l.name}」is the Mask layer itself — not a Generate target`, 'error');
         return;
     }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
@@ -3690,14 +3858,16 @@ function confirmGenModal() {
     // Both images must be strings before they cross the window boundary.
     let image = null, mask = null;
     try {
-        image = layerSourceForGenerate(l);
-        mask = surfaceDataUrl(l.mask);
+        // Layer Context ON -> the composite of all layers over this layer's region (aligned to
+        // the layer's own pixel grid, so the mask stays valid); OFF -> the layer's own image.
+        image = genLayerCtxToggle.checked ? layerCompositeForGenerate(l) : layerSourceForGenerate(l);
+        mask = generateMaskDataUrl(l);
     } catch (err) {
         setStatus('Could not read that layer\'s pixels: ' + err.message, 'error');
         return;
     }
     if (!image) { setStatus('That layer has no image to send', 'error'); return; }
-    if (!mask) { setStatus('That layer has no mask to send', 'error'); return; }
+    if (!mask) { setStatus('Could not build that layer\'s mask', 'error'); return; }
     const size = nativeSize(l.img);
     closeGenModal();
     // The workbench owes the host two images that are NOT the composite: this layer's source and
