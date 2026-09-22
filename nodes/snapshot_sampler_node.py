@@ -174,6 +174,29 @@ class SnapshotDetailerSamplerServer:
             }]
 
         self.tag_result = None
+
+        # Multi-set Pipeline Blocks ("tabs" in the workbench). Legacy configs only carry the flat
+        # `blocks` list — migrate it into a single "Default" set so the tab model and the runner's
+        # flat chain always agree. `self.blocks` keeps mirroring the ACTIVE set: the runner and
+        # the Blend workbench only ever see one chain, the sets are a UI/存储 layer on top.
+        self.blocks_sets = cfg.get('blocks_sets')
+        if not (isinstance(self.blocks_sets, list) and self.blocks_sets):
+            self.blocks_sets = [{'id': 'set-1', 'name': 'Default', 'blocks': self.blocks}]
+        self.active_block_set = cfg.get('active_block_set')
+        if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+            self.active_block_set = self.blocks_sets[0].get('id')
+        active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+        if active_set and active_set.get('blocks'):
+            self.blocks = active_set['blocks']
+        # Disk persistence: the tab sets survive ComfyUI restarts (the in-memory chain only lives
+        # as long as the session). The file wins over the migrated config when it exists.
+        f_sets, f_active = self._load_blocks_sets_file()
+        if f_sets:
+            self.blocks_sets = f_sets
+            self.active_block_set = f_active if any(s.get('id') == f_active for s in f_sets) else f_sets[0].get('id')
+            active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+            if active_set and active_set.get('blocks'):
+                self.blocks = active_set['blocks']
         self.detail_status = 'idle'
         self.detail_error = None
         self.detail_progress = 0       # 0..1
@@ -521,6 +544,30 @@ class SnapshotDetailerSamplerServer:
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Widget sync failed: {e}")
 
+    def _blocks_sets_file(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blocks_sets.json')
+
+    def _load_blocks_sets_file(self):
+        """Persisted tab sets from disk, or (None, None) when absent/corrupt."""
+        try:
+            with open(self._blocks_sets_file(), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            sets = data.get('blocks_sets') if isinstance(data, dict) else None
+            if isinstance(sets, list) and sets:
+                return sets, data.get('active_block_set')
+        except Exception:
+            pass
+        return None, None
+
+    def _save_blocks_sets_file(self):
+        try:
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump({'blocks_sets': self.blocks_sets,
+                           'active_block_set': self.active_block_set},
+                          f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save blocks_sets: {e}")
+
     def _apply_params(self, data):
         dirty = False
         if 'add_noise' in data:
@@ -555,29 +602,53 @@ class SnapshotDetailerSamplerServer:
             dirty = True
         if 'context_reference_key' in data:
             self.context_reference_key = data['context_reference_key']
+        # Multi-set Pipeline Blocks (the workbench's tabs). Sets/active arrive together with the
+        # active set's blocks mirrored in `blocks`; either way the active set wins and the runner
+        # only ever sees its flat chain.
+        if 'blocks_sets' in data:
+            sets = data['blocks_sets']
+            if isinstance(sets, list) and sets:
+                self.blocks_sets = sets
+        if 'active_block_set' in data and data['active_block_set']:
+            self.active_block_set = data['active_block_set']
+        if 'blocks_sets' in data or 'active_block_set' in data:
+            if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+                self.active_block_set = self.blocks_sets[0].get('id')
+            active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+            if active_set is not None:
+                self._set_blocks(active_set.get('blocks') or [])
+                dirty = True
+            self._save_blocks_sets_file()
         if 'blocks' in data:
-            self.blocks = data['blocks']
-            # Sync individual params from first detailer block for ComfyUI widget display
-            first_detailer = next((b for b in self.blocks if b.get('type') == 'detailer'), None)
-            if first_detailer:
-                bp = first_detailer.get('params', first_detailer)
-                self.add_noise = bp.get('add_noise', self.add_noise)
-                self.start_step_rate = float(bp.get('start_step_rate', self.start_step_rate))
-                self.end_step_rate = float(bp.get('end_step_rate', self.end_step_rate))
-                self.pixels = int(bp.get('pixels', self.pixels))
-                self.align = int(bp.get('align', self.align))
-                self.crop_reserve = int(bp.get('crop_reserve', self.crop_reserve))
-                self.enable_edit = bool(bp.get('enable_edit', self.enable_edit))
-                self.edit_mode = bp.get('edit_mode', self.edit_mode)
-                self.ref_boost = float(bp.get('ref_boost', self.ref_boost))
-                self.ref_boost_a = float(bp.get('ref_boost_a', self.ref_boost_a))
-                self.enable_ref_boost_mask = bool(bp.get('enable_ref_boost_mask', self.enable_ref_boost_mask))
-                self.grounding_px = int(bp.get('grounding_px', self.grounding_px))
-                self.context_reference = bool(bp.get('context_reference', self.context_reference))
-                self.context_reference_key = bp.get('context_reference_key', self.context_reference_key)
+            self._set_blocks(data['blocks'])
             dirty = True
         if dirty:
             self._sync_widgets()
+
+    def _set_blocks(self, blocks):
+        """Adopt a flat block chain as the active one and sync widget-visible params.
+
+        Used by both the legacy `blocks` key and the multi-set tabs path — whichever way the
+        chain arrives, the first detailer's params still drive the ComfyUI widget display."""
+        self.blocks = blocks or []
+        # Sync individual params from first detailer block for ComfyUI widget display
+        first_detailer = next((b for b in self.blocks if isinstance(b, dict) and b.get('type') == 'detailer'), None)
+        if first_detailer:
+            bp = first_detailer.get('params', first_detailer)
+            self.add_noise = bp.get('add_noise', self.add_noise)
+            self.start_step_rate = float(bp.get('start_step_rate', self.start_step_rate))
+            self.end_step_rate = float(bp.get('end_step_rate', self.end_step_rate))
+            self.pixels = int(bp.get('pixels', self.pixels))
+            self.align = int(bp.get('align', self.align))
+            self.crop_reserve = int(bp.get('crop_reserve', self.crop_reserve))
+            self.enable_edit = bool(bp.get('enable_edit', self.enable_edit))
+            self.edit_mode = bp.get('edit_mode', self.edit_mode)
+            self.ref_boost = float(bp.get('ref_boost', self.ref_boost))
+            self.ref_boost_a = float(bp.get('ref_boost_a', self.ref_boost_a))
+            self.enable_ref_boost_mask = bool(bp.get('enable_ref_boost_mask', self.enable_ref_boost_mask))
+            self.grounding_px = int(bp.get('grounding_px', self.grounding_px))
+            self.context_reference = bool(bp.get('context_reference', self.context_reference))
+            self.context_reference_key = bp.get('context_reference_key', self.context_reference_key)
 
     # -------------------------------------------------------------------------
     # HTTP 请求处理器
@@ -666,6 +737,8 @@ class SnapshotDetailerSamplerServer:
                     'has_pipeline_package': bool(inst and inst.pipeline_packages),
                     'pipeline_package_count': len(inst.pipeline_packages) if inst else 0,
                     'blocks': inst.blocks if inst else [],
+                    'blocks_sets': inst.blocks_sets if inst else [],
+                    'active_block_set': inst.active_block_set if inst else None,
                 })
                 return
 
@@ -1472,7 +1545,21 @@ class SnapshotDetailerSamplerNode:
                     # 执行子图后把结果写回 pipeline，作为下一 block 的输入（不加入 history）。
                     print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — executing sub-graph (chain mode)")
                     bp = block.get('params', block)
-                    interface_idx = int(bp.get('interface_idx', block.get('interface_index', -1)))
+                    # 按接口名绑定（接口包重排/增删不会错绑到别的接口）；旧配置没有名字时
+                    # 回退到下标。名字解不出 = 接口已不存在 → 标记性跳过（bypass），不中断 chain。
+                    interface_name = bp.get('interface_name')
+                    interface_idx = -1
+                    if interface_name:
+                        interface_idx = next(
+                            (j for j, p in enumerate(server.interface_packages)
+                             if isinstance(p, dict) and (p.get('name') or '') == interface_name),
+                            -1)
+                        if interface_idx < 0:
+                            print(f"[PipelineBlock {i+1}] WARNING: interface '{interface_name}' not found "
+                                  f"({len(server.interface_packages)} interface packages) — MISSING, bypassing block")
+                            continue
+                    else:
+                        interface_idx = int(bp.get('interface_idx', block.get('interface_index', -1)))
                     if interface_idx < 0 or interface_idx >= len(server.interface_packages):
                         print(f"[PipelineBlock {i+1}] WARNING: invalid interface_idx={interface_idx}, skipping block")
                         continue

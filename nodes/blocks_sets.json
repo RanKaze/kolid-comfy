@@ -1,0 +1,33 @@
+{
+  "blocks_sets": [
+    {
+      "id": "set-1",
+      "name": "Default",
+      "blocks": [
+        {
+          "id": "block-1",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": "0.6",
+            "end_step_rate": "1.0",
+            "pixels": "1548576",
+            "align": "32",
+            "crop_reserve": "32",
+            "recover_crop": false,
+            "enable_edit": false,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": false,
+            "context_reference_key": null
+          }
+        }
+      ]
+    }
+  ],
+  "active_block_set": "set-1"
+}
