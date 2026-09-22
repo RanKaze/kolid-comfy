@@ -206,6 +206,9 @@ class SnapshotDetailerSamplerServer:
         self.blend_image = None
         self.blend_mask = None
         self.blend_prompt = ''
+        # 逐 run 的 start_step_rate 覆盖（按 detailer block 的位置索引）。
+        # 由「图层右键 → Generate」下发；主循环取用后立即清空，避免污染下一次普通 Run。
+        self.pending_start_steps = []
 
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
@@ -1053,9 +1056,43 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     action = body.get('action', '')
-                    if action not in ('blend', 'tag', 'detailer'):
+                    if action not in ('blend', 'tag', 'detailer', 'layer_generate'):
                         self._send_json({'success': False, 'error': f'Unknown action: {action}'}, 400)
                         return
+
+                    # layer_generate does NOT go through compose_blend: the caller sends one layer's
+                    # own image and that layer's own mask as separate payloads, because the layer may
+                    # be smaller than / offset on the canvas and the canvas composite is not what it
+                    # wants refined. Nothing about the canvas is involved.
+                    if action == 'layer_generate':
+                        layer_image = decode_image_dataurl(body.get('layer_image'))
+                        if layer_image is None:
+                            self._send_json({'success': False, 'error': 'That layer has no decodable image'}, 400)
+                            return
+                        # The layer's own mask is authored at the layer's native size, so it is
+                        # decoded in that space rather than against the canvas.
+                        layer_h, layer_w = int(layer_image.shape[0]), int(layer_image.shape[1])
+                        layer_mask = decode_mask_alpha(
+                            body.get('layer_mask'), layer_w, layer_h, collapse_opaque=False,
+                        )
+                        if layer_mask is None or float(layer_mask.sum()) == 0:
+                            self._send_json({'success': False, 'error': 'Mask is required — paint that layer\'s own mask before generating'}, 400)
+                            return
+                        if layer_image.dim() == 3:
+                            layer_image = layer_image.unsqueeze(0)
+                        start_steps = body.get('start_steps')
+                        if not isinstance(start_steps, list):
+                            start_steps = []
+                        inst.blend_image = layer_image
+                        inst.blend_mask = layer_mask.squeeze(-1)
+                        inst.blend_prompt = (body.get('extra_prompt') or '').strip()
+                        # Consumed once by the main loop, then cleared, so a later toolbar run is
+                        # not silently stuck on these overrides.
+                        inst.pending_start_steps = [float(v) for v in start_steps]
+                        inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
+                        self._send_json({'success': True})
+                        return
+
                     image, mask = inst.compose_blend(
                         body.get('layers') or [],
                         width=body.get('width'), height=body.get('height'),
@@ -1315,6 +1352,11 @@ class SnapshotDetailerSamplerNode:
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
         context_regex = global_params['context_regex']
+        # Per-run start_step_rate overrides, indexed by the position of a detailer block in the
+        # pipeline. This is how the workbench's per-layer "Generate" dialog replaces the pipeline's
+        # start step for one run without editing the pipeline itself. An empty list (the normal
+        # case) leaves every block on its configured value.
+        start_step_overrides = global_params.get('start_step_overrides') or []
 
         next_pipeline = pipeline.copy()
         if next_pipeline.cache is None:
@@ -1415,6 +1457,10 @@ class SnapshotDetailerSamplerNode:
                 print("[Detailer] Flux2Klein edit patch applied to pipeline model")
 
         try:
+            # Position of the current block among the detailer blocks only. The workbench's
+            # start-step overrides are indexed that way, so interface blocks must not consume an
+            # index (see start_step_overrides above).
+            detailer_idx = -1
             for i, block in enumerate(blocks):
                 is_last = (i == len(blocks) - 1)
 
@@ -1484,6 +1530,14 @@ class SnapshotDetailerSamplerNode:
                 bp = block.get('params', block)
                 add_noise = bp.get('add_noise', 'enable')
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
+                # A per-run override, positional across detailer blocks. `None` is "no override",
+                # which is why this cannot be a plain falsy check: 0.0 is a legitimate value.
+                detailer_idx += 1
+                if detailer_idx < len(start_step_overrides):
+                    _ovr = start_step_overrides[detailer_idx]
+                    if _ovr is not None:
+                        start_step_rate = max(0.0, min(1.0, float(_ovr)))
+                        print(f"[PipelineBlock {i+1}] start_step_rate overridden to {start_step_rate} for this run")
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
                 enable_edit = bp.get('enable_edit', False)
                 edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
@@ -2111,11 +2165,16 @@ class SnapshotDetailerSamplerNode:
                         print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
 
                         # Build global_params and blocks for pipeline execution
+                        # 逐 run 的 start step 覆盖：取用即清空，这样下一次普通 Run 一定回落到
+                        # pipeline 自己的值（否则上一轮 Generate 的覆盖会偷偷留下来）。
+                        start_step_overrides = list(server.pending_start_steps or [])
+                        server.pending_start_steps = []
                         global_params = {
                             'seed': seed,
                             'mask_grow': server.mask_grow,
                             'mask_blur': server.mask_blur,
                             'context_regex': context_regex,
+                            'start_step_overrides': start_step_overrides,
                         }
                         blocks = server.blocks
 

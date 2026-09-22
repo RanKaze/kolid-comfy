@@ -763,6 +763,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             title="Blend"
             allow="clipboard-write"
             onLoad={() => applyPreviewTint(previewTint)}
+            onMouseEnter={() => {
+              // Keyboard shortcuts inside the workbench (notably the Ctrl mask reveal, and
+              // Ctrl+Z / Esc) only fire when the iframe document holds focus — the iframe owns
+              // its own window, so a host-level key listener never sees its keys. Focus drifts
+              // out to the surrounding controls constantly, and then the modifier keys silently
+              // stop working. Handing focus back the moment the pointer enters the frame keeps
+              // focus in sync with where the user is actually working.
+              // Guarded so it never steals focus from an open dialog.
+              if (document.activeElement?.tagName === 'INPUT') return;
+              blendIframeRef.current?.contentWindow?.focus();
+            }}
           />
         </div>
 

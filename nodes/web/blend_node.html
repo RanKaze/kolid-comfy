@@ -285,6 +285,28 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .modal-btn.danger:hover { filter: brightness(1.12); }
 .modal-btn:disabled { opacity: 0.4; cursor: default; }
 .modal-btn:disabled:hover { background: rgba(255,255,255,0.1); filter: none; }
+/* One override field per Detailer block. The label column takes the slack so a long block name
+   cannot push the number field out of the dialog. */
+.gen-steps { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
+.gen-step-row { display: flex; align-items: center; gap: 10px; }
+.gen-step-label { flex: 1 1 auto; min-width: 0; font-size: 12.5px; font-weight: 500; color: rgba(255,255,255,0.85);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gen-step-input { flex: 0 0 84px; width: 84px; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18);
+    border-radius: 8px; padding: 6px 8px; color: #fff; font-size: 12.5px; font-weight: 600; outline: none; }
+.gen-step-input:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
+.gen-empty { font-size: 12.5px; color: rgba(255,255,255,0.5); padding: 4px 0; }
+/* The layer context menu. Fixed-positioned so it can be clamped into the window from JS. */
+.layer-menu { position: fixed; z-index: 300; display: none; flex-direction: column; gap: 2px; min-width: 168px;
+    padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
+    backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 8px 28px rgba(0,0,0,0.5); }
+.layer-menu.open { display: flex; }
+.layer-menu-item { display: block; width: 100%; text-align: left; background: transparent; border: none;
+    border-radius: 7px; padding: 7px 10px; color: rgba(255,255,255,0.9); font-size: 12.5px; font-weight: 600;
+    cursor: pointer; transition: background 0.12s ease; }
+.layer-menu-item:hover { background: rgba(255,255,255,0.12); }
+.layer-menu-item:disabled { opacity: 0.4; cursor: default; }
+.layer-menu-item:disabled:hover { background: transparent; }
 </style>
 </head>
 <body>
@@ -499,6 +521,22 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
+<div class="modal-overlay" id="genModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Generate from layer">
+        <div class="modal-title" id="genModalTitle">Generate</div>
+        <div class="modal-sub" id="genModalSub">&#8212;</div>
+        <div class="modal-hint">Runs the Detailer on <strong>this layer's own image</strong> with <strong>this layer's own mask</strong>. The result replaces this layer's image in place &#8212; no new layer is added.</div>
+        <div class="gen-steps" id="genStepFields"></div>
+        <div class="modal-hint" id="genStepHint">&#8212;</div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="genCancelBtn">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn ghost" id="genCopyBtn">Copy From Pipeline</button>
+            <button class="modal-btn primary" id="genConfirmBtn">Confirm</button>
+        </div>
+    </div>
+</div>
+<div class="layer-menu" id="layerMenu" role="menu"></div>
 <div class="modal-overlay" id="cudReplaceModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Replace the current project">
         <div class="modal-title">Replace the current project?</div>
@@ -602,6 +640,10 @@ const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true }
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
 let keySpace = false, keyAlt = false, keyCtrl = false;
+// While Ctrl is held the canvas is in Mask-shortcut mode: the *button* decides the tool, so the
+// cursor has to follow the last button the user pressed. Left = brush, right = eraser, and the
+// right-press is live (see the mousedown handler) rather than only known at paint time.
+let ctrlErase = false;
 let lastScreen = null, lastDoc = null;
 
 let isDrawing = false;
@@ -652,6 +694,10 @@ const snapshotCanvas = document.createElement('canvas');
 const snapshotCtx = snapshotCanvas.getContext('2d');
 const tmpCanvas = document.createElement('canvas');
 const tmpCtx = tmpCanvas.getContext('2d');
+// Scratch for the layer Generate path. Separate from tmpCanvas because layerSource() reuses that
+// one mid-render — sharing it would let a Generate read a half-rendered layer.
+const generateCanvas = document.createElement('canvas');
+const generateCtx = generateCanvas.getContext('2d');
 const thumbCanvas = document.createElement('canvas');   // scratch for the per-layer canvas preview
 const thumbCtx = thumbCanvas.getContext('2d');
 const maskTintCanvas = document.createElement('canvas'); // scratch for the Mask layer's on-canvas tint
@@ -807,8 +853,7 @@ function maskPayload() {
 // has a size, so every fresh layer already satisfies it. What the backend actually rejects is
 // a mask with zero coverage, so look at the pixels. This is also what catches the most common
 // way to paint into the wrong place: a layer's OWN mask instead of the Mask layer.
-function maskHasInk() {
-    const surface = maskLayer.decal;
+function surfaceHasInk(surface) {
     if (!surface || !surface.width || !surface.height) return false;
     try {
         const data = surface.getContext('2d').getImageData(0, 0, surface.width, surface.height).data;
@@ -818,6 +863,42 @@ function maskHasInk() {
         // Unreadable (e.g. a tainted canvas): never turn that into a false "empty" verdict.
         return true;
     }
+}
+
+function maskHasInk() { return surfaceHasInk(maskLayer.decal); }
+
+// A surface as a PNG data URL, or null when there is nothing to send. Used by the layer Generate
+// path, where the mask is a *layer's own* mask rather than the singleton Mask layer.
+function surfaceDataUrl(surface) {
+    if (!surface || !surface.width || !surface.height) return null;
+    try { return surface.toDataURL('image/png'); } catch (e) { return null; }
+}
+
+// The layer's own image for a Generate run — deliberately NOT layerSource().
+//
+// layerSource() cuts the image by the mask (destination-in) because that is what the *canvas*
+// needs: a masked layer contributes nothing outside its mask. Generate is the opposite case: it
+// sends the image and the mask to the backend as two separate things, and the backend is what
+// applies the mask. Sending an already-cut image would hand it an image whose outside-mask pixels
+// are transparent AND a mask, so the detailer would denoise against a hole it did not create.
+// The decal, on the other hand, IS baked in: it is paint the user put on the layer, not a
+// selection, so it belongs to the pixels the detailer sees.
+//
+// Returns a PNG data URL, never the canvas itself: the result crosses a window boundary, and a
+// canvas cannot be structured-cloned — postMessage would throw a DataCloneError and the message
+// would vanish silently.
+function layerSourceForGenerate(l) {
+    if (!l.img) return null;
+    if (!l.decal) return l.src || (l.img.src || null);
+    const { w, h } = nativeSize(l.img);
+    if (generateCanvas.width !== w || generateCanvas.height !== h) {
+        generateCanvas.width = w; generateCanvas.height = h;
+    }
+    resetCtx(generateCtx);
+    generateCtx.clearRect(0, 0, w, h);
+    generateCtx.drawImage(l.img, 0, 0, w, h);
+    generateCtx.drawImage(l.decal, 0, 0, w, h);
+    return surfaceDataUrl(generateCanvas);
 }
 
 // Auto canvas = the smallest box that fits every layer at its OWN native resolution (per axis).
@@ -1054,7 +1135,9 @@ function refreshCursor() {
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
-    if (mode === 'mask') { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
+    // The managed brush ring replaces the native cursor; Ctrl's shortcut mode shows the same ring
+    // even when the toolbar is on some other tool.
+    if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
     if (mode === 'transform' && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     setCursor('default');
 }
@@ -1140,7 +1223,10 @@ function updateHoverCursor(sp, docPos) {
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
-    if (mode !== 'transform') { setCursor(mode === 'mask' ? (altPickActive() ? EYEDROPPER_CURSOR : 'none') : 'default'); return; }
+    // Ctrl borrows the Mask tool's ring cursor even when another tool is active, so the shortcut
+    // looks like what it does.
+    if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
+    if (mode !== 'transform') { setCursor('default'); return; }
     const l = getSelected();
     let cursor = 'default';
     // The Mask layer is canvas-locked, so it has no adjustment box to hover.
@@ -1279,7 +1365,11 @@ function hitHandleScreen(sp, docPos, l) {
 function drawMaskTint() {
     if (!canvasW || !canvasH) return;
     if (!keyCtrl || isDecalTarget()) return;
-    if (!maskLayer.visible || !maskLayer.decal || previewMaskOpacity <= 0) return;
+    // The Ctrl reveal deliberately ignores `maskLayer.visible`: the eye toggle decides whether the
+    // Mask layer takes part in the composite, but Ctrl is the one way to look at what you are about
+    // to paint, and that has to keep working while the layer is hidden (hiding it is exactly how
+    // people compose without the mask in the way).
+    if (!maskLayer.decal || previewMaskOpacity <= 0) return;
     const tl = docToScreen({ x: 0, y: 0 });
     const br = docToScreen({ x: canvasW, y: canvasH });
     if (!(Math.hypot(br.x - tl.x, br.y - tl.y) > 2)) return;
@@ -1308,8 +1398,12 @@ function drawMaskTint() {
 function setKeyCtrl(down) {
     if (keyCtrl === down) return;
     keyCtrl = down;
+    // Leaving Ctrl ends the shortcut: the button-driven tool choice has no meaning afterwards, and
+    // a stale `true` would tint the ring red the next time Ctrl comes down before a press.
+    if (!down) ctrlErase = false;
     render();
     syncBrushCursor();
+    updateCursorMode();
     refreshCursor();
 }
 
@@ -1998,6 +2092,14 @@ function renderLayerList() {
         row.appendChild(chips);
 
         row.addEventListener('click', () => selectLayer(l.id, mode));
+        // Right-click offers Generate. Selecting first means the menu always acts on the row the
+        // user pointed at, and it also stops the canvas's own contextmenu from firing instead.
+        row.addEventListener('contextmenu', ev => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (selectedId !== l.id) selectLayer(l.id, mode);
+            openLayerMenu(l, ev.clientX, ev.clientY);
+        });
         row.addEventListener('dragstart', ev => {
             dragRowId = l.id;
             row.classList.add('dragging');
@@ -2142,6 +2244,50 @@ function addLayer(item) {
     });
 }
 
+// Generate wrote a new image and it belongs to the layer it came from: swap it in rather than
+// stacking a second copy on top. The mask, the decal and the transform all stay, because the caller
+// asked for the layer to be refined in place, not replaced by a fresh layer.
+//
+// The new image can be a different size from the old one (the detailer works at its own resolution
+// and may hand back a crop), so the surfaces that are sized to the image are rescaled to match --
+// an old mask stretched over a differently shaped image would put coverage in the wrong place.
+// Everything happens inside the loadImage callback, so the swap is atomic: one pushHistory.
+function replaceLayerImage(id, item) {
+    const l = layers.find(x => x.id === id);
+    if (!l || !item || !item.src) {
+        setStatus('The Generate result could not be matched to its layer', 'error');
+        return;
+    }
+    loadImage(item.src, img => {
+        const next = nativeSize(img);
+        const prev = nativeSize(l.img);
+        // Rescale the mask / decal only when the aspect actually changed; a same-shape image keeps
+        // its surfaces untouched (and their full crispness) rather than going through a resample.
+        const rescale = !!l.img && (prev.w !== next.w || prev.h !== next.h);
+        const resampleSurface = surface => {
+            if (!surface || !rescale) return surface;
+            const c = document.createElement('canvas');
+            c.width = next.w; c.height = next.h;
+            c.getContext('2d').drawImage(surface, 0, 0, next.w, next.h);
+            return c;
+        };
+        l.img = img;
+        l.src = item.src;
+        // The layer no longer refers to the image it was created from, so drop the history key:
+        // keeping it would make `injectedKeys` claim an image this layer no longer shows.
+        if (l.key) { injectedKeys.delete(l.key); l.key = null; }
+        if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
+        if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+        layoutCanvas();
+        renderLayerList();
+        render();
+        refreshMaskThumb(l);
+        refreshDecalThumb(l);
+        pushHistory();               // one Generate = one undo step
+        setStatus('Generated result written back onto the layer', 'success');
+    }, () => setStatus('Could not load the Generate result', 'error'));
+}
+
 function removeLayer(id) {
     const i = layers.findIndex(l => l.id === id);
     if (i < 0) return;              // the Mask layer is not in `layers`, so it can never be removed here
@@ -2194,10 +2340,15 @@ function syncModeUI() {
     refreshCursor();
 }
 
+// Ctrl is the Mask shortcut: while it is held the canvas behaves like the Mask tool no matter what
+// the toolbar says (left paints, right erases), so the pointer has to say the same thing. This is
+// the single predicate the cursor layer asks, so the ring and the native arrow can never disagree.
+function ctrlMaskMode() { return keyCtrl && !modalOpen() && !!canvasW; }
+
 // The brush stays visible while painting, even when the pointer leaves the viewport,
 // so canvas edges can be painted without the cursor snapping back to an arrow.
 function syncBrushCursor() {
-    const show = mode === 'mask' && !altPickActive() && !keySpace && !modalOpen()
+    const show = (mode === 'mask' || ctrlMaskMode()) && !altPickActive() && !keySpace && !modalOpen()
         && (cursorInside || isDrawing || !!sizeDrag);
     brushCursor.style.display = show ? 'block' : 'none';
 }
@@ -2215,7 +2366,7 @@ function updateMaskTargetLabel() {
 
 // ==================== 工具（画笔 / 橡皮） ====================
 // The left button paints with the active tool; the right button is inert — it never swaps tools.
-function erasingNow() { return (isDrawing ? isErasing : maskTool === 'eraser'); }
+function erasingNow() { return (isDrawing ? isErasing : ctrlMaskMode() ? ctrlErase : maskTool === 'eraser'); }
 
 function activeSizeValue() { return erasingNow() ? eraserSize : brushSize; }
 function toolSize(tool) { return tool === 'eraser' ? eraserSize : brushSize; }
@@ -2327,6 +2478,9 @@ function updateCursorMode() {
     const tint = (!erasing && isDecalTarget()) ? brushColor : '';
     brushCursor.style.borderColor = tint;
     document.getElementById('brushRingSwatch').style.borderColor = isDecalTarget() ? brushColor : '';
+    // The brush and the eraser keep separate sizes, so switching tool by button has to resize the
+    // ring too — otherwise the cursor would promise the brush's diameter and erase with another.
+    updateBrushCursorSize();
 }
 
 function moveCursor(e) { brushCursor.style.left = e.clientX + 'px'; brushCursor.style.top = e.clientY + 'px'; }
@@ -2807,9 +2961,14 @@ viewport.addEventListener('mousedown', e => {
     if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
     // Ctrl is the Mask shortcut and it outranks everything below: while it is held the canvas
     // paints the top-level Mask layer itself, whatever is selected and whatever the toolbar shows.
-    // Left always paints, right always erases. Ctrl wins over Alt, so Alt+Ctrl is not a pick/size.
+    // Left always paints, right always erases — and the button also drives the cursor, so the ring
+    // shows the tool the button in hand will actually use. Ctrl wins over Alt, so Alt+Ctrl is not a
+    // pick/size.
     if (e.ctrlKey && (e.button === 0 || e.button === 2)) {
         e.preventDefault();
+        ctrlErase = (e.button === 2);
+        updateCursorMode();
+        refreshCursor();
         beginMaskStroke(pos, e.button === 2, e.button === 2 ? 'Ctrl + right — erasing the Mask layer' : 'Ctrl + left — painting the Mask layer');
         return;
     }
@@ -3337,6 +3496,244 @@ runDetailerBtn.addEventListener('click', () => sendBlendAction('detailer'));
 // Enter in the prompt box must not fall through to the canvas keyboard shortcuts.
 extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
 
+// ==================== 图层右键菜单 · Generate ====================
+// Right-clicking a layer row offers Generate: run the Detailer on THAT layer instead of on the
+// canvas composite. Unlike every other toolbar action, this one does not send the composite — the
+// layer's own image becomes the context image and the layer's own mask becomes the context mask,
+// so a single image can be refined where it sits instead of adding another copy on top.
+//
+// The pipeline's `start_step_rate` is per Detailer block, so the modal offers one field per
+// Detailer block. They default to 0 rather than to the pipeline's value: "override" is the whole
+// point, and 0 means "denoise from the very first step". Copy From Pipeline fills in the real
+// values for the cases where that default is not what you want.
+
+let layerMenuEl = null;
+let layerMenuLayerId = null;
+let genTargetLayerId = null;
+
+// One entry per Detailer block, in pipeline order, each remembering the value the pipeline holds so
+// Copy From Pipeline has something to copy.
+let genBlocks = [];
+
+function layerMenuOpen() { return !!layerMenuEl && layerMenuEl.classList.contains('open'); }
+
+// The menu is a single shared element positioned with fixed coords, so it can be opened, moved and
+// closed without touching the layer rows themselves.
+function ensureLayerMenu() {
+    if (!layerMenuEl) layerMenuEl = document.getElementById('layerMenu');
+    return layerMenuEl;
+}
+
+function closeLayerMenu() {
+    if (layerMenuEl) layerMenuEl.classList.remove('open');
+    layerMenuLayerId = null;
+}
+
+function openLayerMenu(l, clientX, clientY) {
+    const menu = ensureLayerMenu();
+    menu.innerHTML = '';
+    // Generate needs a real image and a painted mask, and it needs the host to be listening.
+    const hasMask = !!paintSurfaceMaskHasInk(l);
+    const disabled = !l.img || !hasMask;
+
+    const item = document.createElement('button');
+    item.className = 'layer-menu-item';
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.textContent = 'Generate';
+    item.disabled = disabled;
+    item.title = !l.img ? 'This layer has no image yet'
+        : (!hasMask ? `Paint 「${l.name}」's own mask first — Generate sends it as the context mask` : '');
+    item.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeLayerMenu();
+        openGenModal(l.id);
+    });
+    menu.appendChild(item);
+
+    menu.classList.add('open');
+    // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
+    const r = menu.getBoundingClientRect();
+    const x = Math.min(clientX, window.innerWidth - r.width - 6);
+    const y = Math.min(clientY, window.innerHeight - r.height - 6);
+    menu.style.left = Math.max(6, x) + 'px';
+    menu.style.top = Math.max(6, y) + 'px';
+    layerMenuLayerId = l.id;
+}
+
+// Does THIS layer carry mask ink of its own? Distinct from maskHasInk(), which asks about the
+// singleton top-level Mask layer, and from l.mask merely existing (it is allocated with the layer).
+function paintSurfaceMaskHasInk(l) {
+    if (!l || l.isMaskLayer) return false;
+    return surfaceHasInk(l.mask);
+}
+
+// ==================== Generate 弹窗 ====================
+const genModalEl = document.getElementById('genModal');
+const genModalTitle = document.getElementById('genModalTitle');
+const genModalSub = document.getElementById('genModalSub');
+const genStepFields = document.getElementById('genStepFields');
+const genStepHint = document.getElementById('genStepHint');
+
+function genModalOpen() { return genModalEl.classList.contains('open'); }
+
+// `blocks` arrives from the host with the pipeline: one row per Detailer block, carrying the block
+// name and the start step currently configured there.
+function setGenBlocks(blocks) {
+    genBlocks = Array.isArray(blocks) ? blocks : [];
+}
+
+function genFieldId(i) { return 'genStep' + i; }
+
+function renderGenFields() {
+    genStepFields.innerHTML = '';
+    if (!genBlocks.length) {
+        const empty = document.createElement('div');
+        empty.className = 'gen-empty';
+        empty.textContent = 'No Detailer blocks in the pipeline — nothing to override.';
+        genStepFields.appendChild(empty);
+        updateGenStepHint();
+        return;
+    }
+    genBlocks.forEach((b, i) => {
+        const row = document.createElement('div');
+        row.className = 'gen-step-row';
+        const label = document.createElement('span');
+        label.className = 'gen-step-label';
+        label.textContent = b.name || `Detailer ${i + 1}`;
+        label.title = b.name || `Detailer ${i + 1}`;
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.id = genFieldId(i);
+        input.className = 'gen-step-input';
+        input.min = '0';
+        input.max = '1';
+        input.step = '0.01';
+        input.inputMode = 'decimal';
+        input.value = '0';                       // override means "not the pipeline value" by default
+        input.dataset.pipeline = String(b.start_step_rate);
+        input.dataset.default = '0';
+        input.addEventListener('input', updateGenStepHint);
+        row.appendChild(label);
+        row.appendChild(input);
+        genStepFields.appendChild(row);
+    });
+    updateGenStepHint();
+}
+
+function readGenSteps() {
+    return genBlocks.map((_, i) => {
+        const el = document.getElementById(genFieldId(i));
+        const v = parseFloat(el && el.value);
+        return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+    });
+}
+
+function updateGenStepHint() {
+    if (!genBlocks.length) { genStepHint.textContent = '—'; return; }
+    const applied = readGenSteps();
+    const parts = genBlocks.map((b, i) => {
+        const p = Number(b.start_step_rate);
+        const v = applied[i];
+        const copied = Number.isFinite(p) && Math.abs(p - v) < 1e-9;
+        return `${b.name || ('Detailer ' + (i + 1))} ${v}${copied ? ' (from pipeline)' : ''}`;
+    });
+    genStepHint.textContent = 'start step · ' + parts.join(' · ');
+}
+
+// The layer the modal was opened for, kept so Confirm still refers to the right one even if the
+// selection changed while the dialog was up.
+function openGenModal(layerId) {
+    const l = layers.find(x => x.id === layerId);
+    if (!l) return;
+    genTargetLayerId = layerId;
+    genModalTitle.textContent = `Generate — ${l.name}`;
+    genModalSub.textContent = `Context image: 「${l.name}」's own image. Context mask: its own mask. `
+        + `The result replaces this layer's image in place.`;
+    renderGenFields();
+    genModalEl.classList.add('open');
+    syncBrushCursor();
+    const first = document.getElementById(genFieldId(0));
+    if (first) { first.focus(); first.select(); }
+}
+
+function closeGenModal() {
+    genModalEl.classList.remove('open');
+    genTargetLayerId = null;
+    syncBrushCursor();
+    refreshCursor();
+}
+
+function copyGenStepsFromPipeline() {
+    genBlocks.forEach((b, i) => {
+        const el = document.getElementById(genFieldId(i));
+        if (!el) return;
+        const p = Number(b.start_step_rate);
+        el.value = String(Number.isFinite(p) ? p : 0);
+    });
+    updateGenStepHint();
+}
+
+function confirmGenModal() {
+    const l = layers.find(x => x.id === genTargetLayerId);
+    if (!l) { closeGenModal(); return; }
+    if (!l.img) { setStatus('This layer has no image yet', 'error'); return; }
+    if (!paintSurfaceMaskHasInk(l)) {
+        setStatus(`Paint 「${l.name}」's own mask before generating`, 'error');
+        return;
+    }
+    if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
+    if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
+    const starts = readGenSteps();
+    const targetId = l.id;
+    const targetName = l.name;
+    // Both images must be strings before they cross the window boundary.
+    let image = null, mask = null;
+    try {
+        image = layerSourceForGenerate(l);
+        mask = surfaceDataUrl(l.mask);
+    } catch (err) {
+        setStatus('Could not read that layer\'s pixels: ' + err.message, 'error');
+        return;
+    }
+    if (!image) { setStatus('That layer has no image to send', 'error'); return; }
+    if (!mask) { setStatus('That layer has no mask to send', 'error'); return; }
+    const size = nativeSize(l.img);
+    closeGenModal();
+    // The workbench owes the host two images that are NOT the composite: this layer's source and
+    // this layer's own mask. Both go out at native resolution; the backend owns the geometry.
+    window.parent.postMessage({
+        type: 'blend-layer-generate',
+        layer_id: targetId,
+        layer_name: targetName,
+        image,
+        mask,
+        width: size.w,
+        height: size.h,
+        start_steps: starts,
+        extra_prompt: extraPromptInput.value.trim(),
+    }, '*');
+    setActionBusy(true, 'detailer');
+    setStatus(`Generating on 「${targetName}」…`);
+}
+
+genModalEl.addEventListener('mousedown', e => { if (e.target === genModalEl) closeGenModal(); });
+document.getElementById('genCancelBtn').addEventListener('click', closeGenModal);
+document.getElementById('genCopyBtn').addEventListener('click', copyGenStepsFromPipeline);
+document.getElementById('genConfirmBtn').addEventListener('click', confirmGenModal);
+genModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeGenModal(); }
+    else if (e.key === 'Enter') { e.preventDefault(); confirmGenModal(); }
+});
+
+// A click anywhere else, or Esc, dismisses the context menu.
+window.addEventListener('mousedown', e => {
+    if (!layerMenuOpen()) return;
+    if (layerMenuEl.contains(e.target)) return;
+    closeLayerMenu();
+}, true);
+window.addEventListener('blur', () => closeLayerMenu());
+
 // ==================== 画布尺寸弹窗 ====================
 let canvasLocked = true;
 let canvasRatio = 1;
@@ -3350,7 +3747,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen(); }
+function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen() || genModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -3577,6 +3974,11 @@ window.addEventListener('keydown', e => {
         else if (e.key === 'Enter') { e.preventDefault(); applyCanvasModal(); }
         return;                 // no tools / view shortcuts while the dialog is up
     }
+    if (genModalOpen()) {
+        if (e.key === 'Escape') { e.preventDefault(); closeGenModal(); }
+        else if (e.key === 'Enter') { e.preventDefault(); confirmGenModal(); }
+        return;
+    }
     if (dynamicModalOpen()) {
         if (e.key === 'Escape') { e.preventDefault(); closeDynamicModal(); }
         else if (e.key === 'Enter') { e.preventDefault(); applyDynamicModal(); }
@@ -3587,6 +3989,7 @@ window.addEventListener('keydown', e => {
     // has focus — Esc has no native use in a text box.
     if (e.key === 'Escape') {
         e.preventDefault();
+        if (layerMenuOpen()) { closeLayerMenu(); return; }
         if (exportMenuOpen) { closeExportMenu(); return; }
         if (addMenuOpen) { closeAddMenu(); return; }
         if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
@@ -4148,6 +4551,11 @@ window.addEventListener('message', event => {
         syncActionButtons();
         return;
     }
+    if (d.type === 'blend-pipeline-blocks') {
+        // One start-step override field per Detailer block, in pipeline order.
+        setGenBlocks(d.blocks);
+        return;
+    }
     if (d.type === 'blend-preview-tint') {
         // Host-side Mask Tint slider. Clamp defensively: the value crosses a window boundary.
         const v = Number(d.value);
@@ -4168,6 +4576,13 @@ window.addEventListener('message', event => {
         if (!valid.length) return;
         for (const it of valid) addLayer(it);
         setStatus('Detailer result added as a new layer below the Mask', 'success');
+        return;
+    }
+    if (d.type === 'blend-replace-layer') {
+        // A layer-initiated Generate: the result overwrites the layer it came from. Deliberately
+        // NOT routed through addLayer — that would append a second copy and leave the original's
+        // (now stale) image on the canvas underneath.
+        replaceLayerImage(d.layer_id, d.items && d.items[0]);
         return;
     }
     if (d.type === 'blend-action-result') {

@@ -47,6 +47,10 @@ const App: React.FC = () => {
   // tick can arrive before React has torn the interval down — and injecting one key twice put two
   // identical layers on the canvas, which the user then cannot get rid of by deleting one.
   const injectedDetailKeyRef = useRef<string | null>(null);
+  // A layer-initiated Generate writes its result back into that layer instead of adding a new one.
+  // The poller cannot tell the two apart from the status alone, so the target is parked here while
+  // the run is in flight and consumed once, in the `done` branch.
+  const layerGenerateRef = useRef<{ layerId: number; startSteps: number[] } | null>(null);
 
   const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
@@ -213,7 +217,10 @@ const App: React.FC = () => {
         } else if (st === 'done') {
           post({ status: 'done' });
           // The result never becomes the Context (the composite already is the Context): it is
-          // archived into history and dropped onto the canvas as a new layer.
+          // archived into history and then either written back over the layer it came from
+          // (a layer-initiated Generate) or dropped on as a new layer (the toolbar's Run Detailer).
+          const generateTarget = layerGenerateRef.current;
+          layerGenerateRef.current = null;
           await refreshHistory();
           try {
             const result = await fetch('/api/result').then(r => r.json());
@@ -222,7 +229,13 @@ const App: React.FC = () => {
             injectedDetailKeyRef.current = key;      // claimed before the awaits below, not after
             const list = await fetch('/api/history').then(r => r.json());
             const item = (list?.history || []).find((h: HistoryItem) => h.key === key);
-            if (item) {
+            if (!item) return;
+            if (generateTarget) {
+              // Replace in place. The workbench keeps the layer's mask / decal / transform and
+              // only swaps the image, so there is no new layer and nothing to de-duplicate.
+              blendIframeRef.current?.contentWindow?.postMessage(
+                { type: 'blend-replace-layer', layer_id: generateTarget.layerId, items: [item] }, '*');
+            } else {
               blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-add-layer', items: [item] }, '*');
             }
           } catch { /* the layer is a convenience, not a hard requirement */ }
@@ -386,6 +399,60 @@ const App: React.FC = () => {
     }
   }, [refreshHistory, syncPrompt]);
 
+  /**
+   * Generate on a single layer, driven from the layer row's context menu.
+   *
+   * The difference from the toolbar's Run Detailer is what is sent: the toolbar composites the
+   * whole canvas and uses the singleton Mask layer, whereas this sends *that layer's* own image as
+   * the context image and *that layer's* own mask as the context mask. The result is written back
+   * over that layer's image rather than added as a new layer.
+   *
+   * `start_steps` overrides the pipeline's per-Detailer-block start step for this run only.
+   */
+  const handleLayerGenerate = useCallback(async (body: Record<string, any>) => {
+    setError(null);
+    const layerId = Number(body.layer_id);
+    const reply = (success: boolean, extra: Record<string, any> = {}) => {
+      blendIframeRef.current?.contentWindow?.postMessage(
+        { type: 'blend-action-result', action: 'layer-generate', success, ...extra }, '*');
+    };
+    if (!body.image) { reply(false, { error: 'That layer has no image' }); return; }
+    if (!body.mask) { reply(false, { error: 'That layer has no mask painted' }); return; }
+    await syncPrompt();
+    try {
+      const res = await fetch('/api/blend_action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'layer_generate',
+          layer_image: body.image,
+          layer_mask: body.mask,
+          width: body.width,
+          height: body.height,
+          start_steps: Array.isArray(body.start_steps) ? body.start_steps : [],
+          extra_prompt: body.extra_prompt,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        setError(data.error || 'Generate failed');
+        reply(false, { error: data.error || 'Generate failed' });
+        return;
+      }
+      // Park the target so the `done` branch knows to replace instead of inject. Set *before* the
+      // first poll can see `done`, for the same reason injectedDetailKeyRef is.
+      layerGenerateRef.current = {
+        layerId,
+        startSteps: Array.isArray(body.start_steps) ? body.start_steps : [],
+      };
+      setDetailStatus('running');
+      reply(true);
+    } catch (e: any) {
+      setError('Generate error: ' + e.message);
+      reply(false, { error: e.message });
+    }
+  }, [syncPrompt]);
+
   // Listen for postMessage from the prompt iframe and the Blend workbench.
   // Declared after the handlers so the listener always closes over the current ones.
   useEffect(() => {
@@ -407,18 +474,33 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-action') {
         // Blend workbench action: blend (archive) / tag / detailer
         handleBlendAction(event.data);
+      } else if (event.data?.type === 'blend-layer-generate') {
+        // Generate from the layer row's context menu: that layer in, that layer out.
+        handleLayerGenerate(event.data);
       } else if (event.data?.type === 'blend-request-init') {
         // Seed the canvas with the current context image and report the tagger availability
         // (the Tag buttons disable themselves without one).
         const iframe = blendIframeRef.current;
         if (!iframe?.contentWindow) return;
         iframe.contentWindow.postMessage({ type: 'blend-config', hasTagger: !!config?.has_tagger }, '*');
+        // The Generate dialog offers one start-step override per Detailer block, so the workbench
+        // needs the current pipeline's blocks. Only Detailer blocks carry a start step.
+        iframe.contentWindow.postMessage({
+          type: 'blend-pipeline-blocks',
+          blocks: (config?.blocks || [])
+            .filter((b: PipelineBlock) => b.type === 'detailer')
+            .map((b: PipelineBlock) => ({
+              id: b.id,
+              name: b.name,
+              start_step_rate: Number((b.params as any)?.start_step_rate ?? 0.8),
+            })),
+        }, '*');
         seedBlendCanvas();
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, handleBlendAction, seedBlendCanvas]);
+  }, [config, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
