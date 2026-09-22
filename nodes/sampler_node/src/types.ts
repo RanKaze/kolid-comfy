@@ -77,11 +77,33 @@ export interface InterfaceBlockParams {
   manual_values: Record<string, any>;
 }
 
+/** prompt block 的私有 selection（prompt_node 界面 block 作用域保存的 raw 选择）。
+ *  run 时与 prompt 节点全局选择合并，block 的 programs 在合并结果上执行（临时注入）。 */
+export interface PromptBlockSelection {
+  tags?: any[];
+  custom_prompts?: string;
+  loras?: any[];
+  prefabs?: any[];
+  programs?: any[];
+}
+
+/** Prompt 块引用的共享、持久化 preset（内容存后端 prompt_presets.json，块只存 id）。 */
+export interface PromptPreset {
+  id: string;
+  name: string;
+  selection?: PromptBlockSelection | null;
+}
+
+export interface PromptBlockParams {
+  /** 引用的 preset id；null = 未配置（运行时跳过该块） */
+  preset_id?: string | null;
+}
+
 export interface PipelineBlock {
   id: string;
-  type: 'detailer' | 'interface';
+  type: 'detailer' | 'interface' | 'prompt';
   name: string;
-  params: DetailerBlockParams | InterfaceBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
 }

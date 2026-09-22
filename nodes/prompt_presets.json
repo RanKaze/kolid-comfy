@@ -1,0 +1,38 @@
+{
+  "presets": [
+    {
+      "id": "preset-30377841a62f",
+      "name": "抠图",
+      "selection": {
+        "tags": [
+          {
+            "tags": [
+              {
+                "name": "Alpha图层",
+                "prompt": "这是一张带有透明度的RGBA图像,该图像具有alpha通道,背景是透明的.",
+                "category": "编辑"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "扣出图1中的人物",
+                "prompt": "将图1中的人物从图像中扣出",
+                "category": "编辑"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          }
+        ],
+        "custom_prompts": "",
+        "loras": [],
+        "prefabs": [],
+        "programs": []
+      }
+    }
+  ]
+}

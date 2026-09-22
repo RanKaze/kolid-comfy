@@ -4,6 +4,7 @@ import type {
   CategoryDisplayModes, CategorySizeModes,
   LoraFolders, LoraSelectionData, LoraSliderConfig, AllPrograms,
 } from '../types';
+import { PRESET_SCOPE, SAMPLER_BASE, fetchPromptPresetSelection } from '../blockScope';
 
 const API_BASE = '';
 
@@ -27,23 +28,26 @@ export function useApi() {
   const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[]>([]);
 
   const loadData = useCallback(async () => {
+    // Preset scope: restore the referenced preset's selection instead of the prompt node's
+    // global one — the same UI edits a shared preset referenced by Pipeline prompt blocks.
+    const presetSelection = await fetchPromptPresetSelection();
     const res = await fetch(`${API_BASE}/prompts_data`);
     const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; programs?: AllPrograms; last_selected_programs?: any[] } = await res.json();
     setAllPrompts(data.categories);
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
     setCategorySizeModes(data.category_size_modes || {});
-    setLastSelected(data.last_selected || []);
-    setLastSelectedLoras(data.last_selected_loras || []);
-    setLastSelectedPrefabs(data.last_selected_prefabs || []);
-    setCustomPrompts(data.custom_prompts || '');
+    setLastSelected(PRESET_SCOPE ? [] : (data.last_selected || []));
+    setLastSelectedLoras((presetSelection?.loras as LoraSelectionData[]) || (PRESET_SCOPE ? [] : (data.last_selected_loras || [])));
+    setLastSelectedPrefabs((presetSelection?.prefabs as { guid: string; active?: boolean }[]) || (PRESET_SCOPE ? [] : (data.last_selected_prefabs || [])));
+    setCustomPrompts(PRESET_SCOPE ? (presetSelection?.custom_prompts ?? '') : (data.custom_prompts || ''));
     setLoraRegex(data.lora_regex || '');
     setParsedPrompts(data.parsed_prompts || []);
     setHasTagger(data.has_tagger || false);
     setHasAsset(data.has_asset || false);
     setAllPrograms(data.programs || {});
-    setLastSelectedPrograms(data.last_selected_programs || []);
-    return data;
+    setLastSelectedPrograms((presetSelection?.programs as any[]) || (PRESET_SCOPE ? [] : (data.last_selected_programs || [])));
+    return { ...data, preset_selection: presetSelection };
   }, []);
 
   const submitSelection = useCallback(async (prompts: { text: string; source: string }[], custom: string, loras: LoraSelectionData[], prefabs?: any[], programs?: any[], filterTags?: any[], filterLoras?: any[], filterPrefabs?: any[], onBeforeClose?: () => void, keepParsing?: boolean) => {

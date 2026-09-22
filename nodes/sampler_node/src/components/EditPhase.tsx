@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet } from '../types';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
 const tabActionBtn: React.CSSProperties = {
@@ -109,7 +109,7 @@ interface EditPhaseProps {
   maskBlur: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
   onGlobalParamChange: (key: 'mask_grow' | 'mask_blur', value: number) => void;
-  onAddBlock: (type: 'detailer' | 'interface') => void;
+  onAddBlock: (type: 'detailer' | 'interface' | 'prompt') => void;
   onRemoveBlock: (blockId: string) => void;
   onReorderBlocks: (fromIdx: number, toIdx: number) => void;
   /** 多套 Pipeline Blocks（tabs）；blocks = 激活那一套的镜像 */
@@ -178,8 +178,85 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Inline rename of a Pipeline Blocks tab (set): which set is being renamed and the draft text.
   const [renamingSetId, setRenamingSetId] = useState<string | null>(null);
   const [renamingValue, setRenamingValue] = useState('');
+  // Prompt preset editor: which prompt block's PRESET is being edited in the prompt_node
+  // iframe (full prompt UI, saved to the shared preset — persisted, referenced by id).
+  const [editingPromptBlockId, setEditingPromptBlockId] = useState<string | null>(null);
+  // Shared prompt presets (backend prompt_presets.json). Blocks reference them by id;
+  // editing a preset affects every block that references it.
+  const [promptPresets, setPromptPresets] = useState<PromptPreset[]>([]);
+  const [presetsLoaded, setPresetsLoaded] = useState(false);
+  // Inline rename of a preset (replaces the card's select while active).
+  const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
+  const [renamingPresetValue, setRenamingPresetValue] = useState('');
 
   useEffect(() => { if (showBlendSelect) setBlendPicked([]); }, [showBlendSelect]);
+
+  // Shared prompt presets: loaded once, re-fetched after the preset editor saves so card
+  // summaries reflect the new content without a full config refetch.
+  const refreshPromptPresets = useCallback(async () => {
+    try {
+      const res = await fetch('/api/prompt_presets');
+      const data = await res.json();
+      setPromptPresets(Array.isArray(data?.presets) ? data.presets : []);
+    } catch { /* keep whatever we had */ }
+    setPresetsLoaded(true);
+  }, []);
+  useEffect(() => { void refreshPromptPresets(); }, [refreshPromptPresets]);
+
+  const createPromptPreset = useCallback(async (): Promise<PromptPreset | null> => {
+    try {
+      const res = await fetch('/api/prompt_presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create' }),
+      });
+      const data = await res.json();
+      if (data?.ok && data.preset) {
+        setPromptPresets(list => [...list, data.preset]);
+        return data.preset;
+      }
+    } catch { /* fall through */ }
+    return null;
+  }, []);
+
+  const renamePromptPreset = useCallback(async (id: string, name: string) => {
+    try {
+      const res = await fetch('/api/prompt_presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rename', id, name }),
+      });
+      const data = await res.json();
+      if (data?.ok) setPromptPresets(list => list.map(p => p.id === id ? { ...p, name } : p));
+    } catch { /* ignore */ }
+  }, []);
+
+  const deletePromptPreset = useCallback(async (id: string) => {
+    try {
+      const res = await fetch('/api/prompt_presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', id }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setPromptPresets(list => list.filter(p => p.id !== id));
+        // Clear dangling references: a block whose preset is gone goes back to 'not configured'.
+        onBlocksChange(blocks.map(b => b.type === 'prompt' && (b.params as PromptBlockParams).preset_id === id
+          ? { ...b, params: { ...b.params, preset_id: null } as any }
+          : b));
+      }
+    } catch { /* ignore */ }
+  }, [blocks, onBlocksChange]);
+
+  // The preset-scope prompt iframe saves to the shared preset through the backend AND
+  // notifies us — refresh the list (new content) and close the editor.
+  useEffect(() => {
+    const onSaved = (event: MessageEvent) => {
+      if (event.data?.type !== 'prompt-preset-saved') return;
+      void refreshPromptPresets();
+      setEditingPromptBlockId(null);
+    };
+    window.addEventListener('message', onSaved);
+    return () => window.removeEventListener('message', onSaved);
+  }, [refreshPromptPresets]);
 
   useEffect(() => {
     const onPreview = (event: MessageEvent) => {
@@ -563,7 +640,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {/* Centered title */}
                     <span style={{
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
-                      color: block.type === 'detailer' ? '#30d158' : '#bf5af2',
+                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : '#bf5af2',
                     }}>{block.name}</span>
                     {ifaceIsMissing(block) && (
                       <span title="The bound interface no longer exists — this block will be bypassed at run time"
@@ -573,7 +650,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         }}>Missing</span>
                     )}
                     {/* Action buttons */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: 28, flexShrink: 0, justifyContent: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: block.type === 'prompt' ? 56 : 28, flexShrink: 0, justifyContent: 'center' }}>
+                      {block.type === 'prompt' && (
+                        <button title="Edit the preset this block references" style={{ background: 'none', border: 'none', color: '#64d2ff', cursor: 'pointer', fontSize: 11, fontWeight: 600, padding: '2px 4px', lineHeight: 1 }}
+                          onClick={() => { if ((block.params as PromptBlockParams).preset_id) setEditingPromptBlockId(block.id); }}>Edit</button>
+                      )}
                       {blocks.length > 1 && (
                         <button title="Remove" style={{ background: 'none', border: 'none', color: 'rgba(255,90,90,0.5)', cursor: 'pointer', fontSize: 13, padding: '2px 4px', lineHeight: 1 }}
                           onClick={() => onRemoveBlock(block.id)}>✕</button>
@@ -582,6 +663,80 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                   {/* Block params */}
                   <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {block.type === 'prompt' && (() => {
+                      const pp = block.params as PromptBlockParams;
+                      const preset = pp.preset_id ? promptPresets.find(p => p.id === pp.preset_id) : null;
+                      const sel = preset?.selection;
+                      const nTags = (sel?.tags || []).length;
+                      const nLoras = (sel?.loras || []).length;
+                      const nPrefabs = (sel?.prefabs || []).length;
+                      const nPrograms = (sel?.programs || []).length;
+                      const summary = !preset
+                        ? '未选择 preset — 从下拉选择或新建一个'
+                        : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
+                      const startRename = () => {
+                        setRenamingPresetId(preset?.id || null);
+                        setRenamingPresetValue(preset?.name || '');
+                      };
+                      const commitRename = () => {
+                        if (renamingPresetId && renamingPresetValue.trim()) {
+                          void renamePromptPreset(renamingPresetId, renamingPresetValue.trim());
+                        }
+                        setRenamingPresetId(null);
+                      };
+                      const iconBtnStyle = (enabled: boolean): React.CSSProperties => ({
+                        background: 'none', border: 'none', color: enabled ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)',
+                        cursor: enabled ? 'pointer' : 'default', fontSize: 12, padding: '2px 4px', lineHeight: 1, flexShrink: 0,
+                      });
+                      return (<>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%' }}>
+                          {renamingPresetId && preset ? (
+                            <input
+                              autoFocus
+                              value={renamingPresetValue}
+                              onChange={e => setRenamingPresetValue(e.target.value)}
+                              onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingPresetId(null); }}
+                              onBlur={commitRename}
+                              style={{ flex: 1, minWidth: 0, padding: '4px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(100,210,255,0.4)', color: '#fff', fontSize: 11.5, outline: 'none' }}
+                            />
+                          ) : (
+                            <select
+                              value={pp.preset_id || ''}
+                              onChange={e => updateBlockParam(block.id, 'preset_id', e.target.value || null)}
+                              title="Which shared prompt preset this block injects"
+                              style={{ flex: 1, minWidth: 0, padding: '4px 6px', borderRadius: 6, background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: 11.5 }}
+                            >
+                              <option value="" style={{ background: '#1c1c1e' }}>— 选择 preset —</option>
+                              {pp.preset_id && presetsLoaded && !promptPresets.some(p => p.id === pp.preset_id) && (
+                                <option value={pp.preset_id} style={{ background: '#1c1c1e' }}>(missing)</option>
+                              )}
+                              {promptPresets.map(p => <option key={p.id} value={p.id} style={{ background: '#1c1c1e' }}>{p.name}</option>)}
+                            </select>
+                          )}
+                          <button title="New preset and use it on this block" style={iconBtnStyle(true)}
+                            onClick={async () => { const p = await createPromptPreset(); if (p) updateBlockParam(block.id, 'preset_id', p.id); }}>＋</button>
+                          <button title="Rename this preset" disabled={!preset} style={iconBtnStyle(!!preset)} onClick={startRename}>✎</button>
+                          <button title="Delete this preset (referencing blocks become unconfigured)" disabled={!preset} style={iconBtnStyle(!!preset)}
+                            onClick={() => {
+                              if (!preset) return;
+                              if (window.confirm(`删除 preset「${preset.name}」？引用它的块会变回未配置。`)) void deletePromptPreset(preset.id);
+                            }}>🗑</button>
+                        </div>
+                        <button
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                            width: '100%', padding: '6px 10px', borderRadius: 8, textAlign: 'left',
+                            background: 'rgba(100,210,255,0.06)', border: '0.5px solid rgba(100,210,255,0.18)',
+                            color: '#64d2ff', fontSize: 11.5, cursor: preset ? 'pointer' : 'default', opacity: preset ? 1 : 0.55,
+                          }}
+                          title={preset ? 'Open the prompt editor for this preset' : 'Select or create a preset first'}
+                          onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}
+                        >
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sel ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.4)' }}>{summary}</span>
+                          <span style={{ flexShrink: 0, fontWeight: 600 }}>Edit →</span>
+                        </button>
+                      </>);
+                    })()}
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
                       return (<>
@@ -849,6 +1004,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   background: 'rgba(191,90,242,0.1)', border: '0.5px solid rgba(191,90,242,0.2)',
                   color: '#bf5af2', fontSize: 12, fontWeight: 600, cursor: 'pointer',
                 }} onClick={() => onAddBlock('interface')}>+ Interface</button>
+                <button style={{
+                  flex: 1, padding: '8px 0', borderRadius: 8,
+                  background: 'rgba(100,210,255,0.1)', border: '0.5px solid rgba(100,210,255,0.2)',
+                  color: '#64d2ff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }} onClick={() => onAddBlock('prompt')}>+ Prompt</button>
               </div>
             </div>
 
@@ -1002,6 +1162,53 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <div style={styles.dialogActions}>
                 <button style={styles.cancelBtn} onClick={() => setShowRefSelect(null)}>Cancel</button>
               </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Prompt preset editor — the FULL prompt_node UI in preset scope. Its selection is
+          saved to the SHARED preset (persisted server-side); every block referencing that
+          preset picks it up, injected only for the detailers after that block in a run. */}
+      {editingPromptBlockId && (() => {
+        const blk = blocks.find(b => b.id === editingPromptBlockId);
+        const pid = blk ? (blk.params as PromptBlockParams).preset_id : null;
+        const preset = pid ? promptPresets.find(p => p.id === pid) : null;
+        if (!pid) return null;
+        const params = 'sampler_base=' + encodeURIComponent(window.location.origin)
+          + '&scope=prompt_preset&preset_id=' + encodeURIComponent(pid);
+        const src = (promptUrl || '/prompt_node.html') + (promptUrl.includes('?') ? '&' : '?') + params;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }} onClick={() => setEditingPromptBlockId(null)}>
+            <div style={{
+              width: '94vw', height: '92vh', background: '#0d0d0d', borderRadius: 14,
+              border: '0.5px solid rgba(255,255,255,0.12)', display: 'flex', flexDirection: 'column',
+              overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+            }} onClick={(e) => e.stopPropagation()}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 16px', flexShrink: 0, borderBottom: '0.5px solid rgba(255,255,255,0.08)',
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#64d2ff' }}>
+                  Prompt Preset — {preset?.name || pid}
+                  <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: 8 }}>
+                    共享持久化 · 引用它的块随改随生效
+                  </span>
+                </div>
+                <button
+                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.6)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
+                  title="Close"
+                  onClick={() => setEditingPromptBlockId(null)}
+                >✕</button>
+              </div>
+              <iframe
+                src={src}
+                title="Prompt preset editor"
+                style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#0d0d0d' }}
+              />
             </div>
           </div>
         );

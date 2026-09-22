@@ -1,0 +1,56 @@
+/**
+ * Prompt-preset scope: when the prompt UI is embedded as the editor of a Pipeline "prompt"
+ * block's PRESET (iframe in the sampler workbench), the URL carries scope/preset_id/
+ * sampler_base and the selection is saved to the SHARED preset (persisted server-side in
+ * prompt_presets.json), not to the prompt node's global state. Every block referencing the
+ * preset picks up edits; at run time the backend injects it only for the detailers after
+ * that block.
+ */
+const params = typeof window !== 'undefined'
+  ? new URLSearchParams(window.location.search)
+  : new URLSearchParams();
+
+export const PRESET_SCOPE = params.get('scope') === 'prompt_preset';
+export const PRESET_ID = params.get('preset_id') || '';
+export const SAMPLER_BASE = params.get('sampler_base') || '';
+
+export interface PromptPresetSelectionPayload {
+  tags: any[];
+  custom_prompts: string;
+  loras: any[];
+  prefabs: any[];
+  programs: any[];
+}
+
+/** Fetch the referenced preset's saved selection from the sampler server (null = not configured). */
+export async function fetchPromptPresetSelection(): Promise<any | null> {
+  if (!PRESET_SCOPE || !PRESET_ID || !SAMPLER_BASE) return null;
+  try {
+    const res = await fetch(`${SAMPLER_BASE}/api/prompt_presets`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const preset = (data.presets || []).find((p: any) => p && p.id === PRESET_ID);
+    return (preset && preset.selection) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Save the selection into the shared preset and notify the host (EditPhase) so it can close the modal. */
+export async function savePromptPresetSelection(selection: PromptPresetSelectionPayload): Promise<boolean> {
+  if (!PRESET_SCOPE || !PRESET_ID || !SAMPLER_BASE) return false;
+  try {
+    const res = await fetch(`${SAMPLER_BASE}/api/prompt_presets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'save', id: PRESET_ID, selection }),
+    });
+    if (!res.ok) return false;
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: 'prompt-preset-saved', preset_id: PRESET_ID, selection }, '*');
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -945,7 +945,12 @@ class SnapshotPromptServer:
         server_instance = None
 
         def do_GET(self):
-            if self.path in ('/', '/prompt_node.html'):
+            # Match the HTML route with the query string stripped: embedded scopes open
+            # /prompt_node.html?scope=...&preset_id=...&sampler_base=..., and an exact
+            # self.path match would fall through every branch below and return without
+            # sending any bytes (browser shows ERR_EMPTY_RESPONSE / "未发送任何数据").
+            path_only = self.path.split('?', 1)[0]
+            if path_only in ('/', '/prompt_node.html'):
                 try:
                     web_dir = os.path.join(os.path.dirname(__file__), "web")
                     file_path = os.path.join(web_dir, "prompt_node.html")

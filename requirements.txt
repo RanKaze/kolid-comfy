@@ -10,3 +10,4 @@ psutil
 pywebview
 onnxruntime
 decord
+quickjs
