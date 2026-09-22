@@ -237,14 +237,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       });
       const data = await res.json();
       if (data?.ok) {
+        // References stay dangling on purpose: the block keeps the id, its dropdown shows
+        // `(missing)`, and a run treats the missing preset as an empty selection.
         setPromptPresets(list => list.filter(p => p.id !== id));
-        // Clear dangling references: a block whose preset is gone goes back to 'not configured'.
-        onBlocksChange(blocks.map(b => b.type === 'prompt' && (b.params as PromptBlockParams).preset_id === id
-          ? { ...b, params: { ...b.params, preset_id: null } as any }
-          : b));
       }
     } catch { /* ignore */ }
-  }, [blocks, onBlocksChange]);
+  }, []);
 
   // The preset-scope prompt iframe saves to the shared preset through the backend AND
   // notifies us — refresh the list (new content) and close the editor.
@@ -650,11 +648,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         }}>Missing</span>
                     )}
                     {/* Action buttons */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: block.type === 'prompt' ? 56 : 28, flexShrink: 0, justifyContent: 'center' }}>
-                      {block.type === 'prompt' && (
-                        <button title="Edit the preset this block references" style={{ background: 'none', border: 'none', color: '#64d2ff', cursor: 'pointer', fontSize: 11, fontWeight: 600, padding: '2px 4px', lineHeight: 1 }}
-                          onClick={() => { if ((block.params as PromptBlockParams).preset_id) setEditingPromptBlockId(block.id); }}>Edit</button>
-                      )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: 28, flexShrink: 0, justifyContent: 'center' }}>
                       {blocks.length > 1 && (
                         <button title="Remove" style={{ background: 'none', border: 'none', color: 'rgba(255,90,90,0.5)', cursor: 'pointer', fontSize: 13, padding: '2px 4px', lineHeight: 1 }}
                           onClick={() => onRemoveBlock(block.id)}>✕</button>
@@ -671,9 +665,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       const nLoras = (sel?.loras || []).length;
                       const nPrefabs = (sel?.prefabs || []).length;
                       const nPrograms = (sel?.programs || []).length;
-                      const summary = !preset
-                        ? '未选择 preset — 从下拉选择或新建一个'
-                        : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
+                      const presetMissing = !!pp.preset_id && presetsLoaded && !preset;
+                      const summary = presetMissing
+                        ? '⚠ preset 已被删除 (missing) — 请重新选择或新建'
+                        : !preset
+                          ? '未选择 preset — 从下拉选择或新建一个'
+                          : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
                       const startRename = () => {
                         setRenamingPresetId(preset?.id || null);
                         setRenamingPresetValue(preset?.name || '');
@@ -716,25 +713,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <button title="New preset and use it on this block" style={iconBtnStyle(true)}
                             onClick={async () => { const p = await createPromptPreset(); if (p) updateBlockParam(block.id, 'preset_id', p.id); }}>＋</button>
                           <button title="Rename this preset" disabled={!preset} style={iconBtnStyle(!!preset)} onClick={startRename}>✎</button>
-                          <button title="Delete this preset (referencing blocks become unconfigured)" disabled={!preset} style={iconBtnStyle(!!preset)}
+                          <button title={preset ? 'Open the prompt editor for this preset' : presetMissing ? 'This preset was deleted — pick another one' : 'Select or create a preset first'}
+                            disabled={!preset} style={iconBtnStyle(!!preset)}
+                            onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}>⚙</button>
+                          <button title="Delete this preset (referencing blocks will show (missing))" disabled={!preset} style={iconBtnStyle(!!preset)}
                             onClick={() => {
                               if (!preset) return;
-                              if (window.confirm(`删除 preset「${preset.name}」？引用它的块会变回未配置。`)) void deletePromptPreset(preset.id);
+                              if (window.confirm(`删除 preset「${preset.name}」？引用它的块会保留引用并显示 (missing)，run 时按空处理。`)) void deletePromptPreset(preset.id);
                             }}>🗑</button>
                         </div>
-                        <button
-                          style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-                            width: '100%', padding: '6px 10px', borderRadius: 8, textAlign: 'left',
-                            background: 'rgba(100,210,255,0.06)', border: '0.5px solid rgba(100,210,255,0.18)',
-                            color: '#64d2ff', fontSize: 11.5, cursor: preset ? 'pointer' : 'default', opacity: preset ? 1 : 0.55,
-                          }}
-                          title={preset ? 'Open the prompt editor for this preset' : 'Select or create a preset first'}
-                          onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}
-                        >
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: sel ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.4)' }}>{summary}</span>
-                          <span style={{ flexShrink: 0, fontWeight: 600 }}>Edit →</span>
-                        </button>
+                        <div style={{
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          fontSize: 11, color: presetMissing ? '#ff9f0a' : 'rgba(255,255,255,0.45)',
+                        }}>{summary}</div>
                       </>);
                     })()}
                     {block.type === 'detailer' && (() => {

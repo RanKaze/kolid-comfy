@@ -184,7 +184,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 
 /* ---- Bottom action toolbar ----
    The composite IS the Context Image, so these buttons are the only exit points:
-   Blend archives it, the Tag buttons read it, Run Detailer generates from it. */
+   Blend archives it, the Tag button reads it, Run generates from it. */
 #toolbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 60; display: flex; align-items: center; gap: 8px;
     padding: 8px 10px; border-radius: 14px; background: rgba(28,28,30,0.75); border: 0.5px solid rgba(255,255,255,0.1);
     box-shadow: 0 6px 24px rgba(0,0,0,0.42); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
@@ -202,6 +202,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .tb-btn.tag:hover:not(:disabled) { background: rgba(175,82,222,1); }
 .tb-btn.run { background: rgba(10,132,255,0.92); box-shadow: 0 2px 10px rgba(10,132,255,0.25); }
 .tb-btn.run:hover:not(:disabled) { background: rgba(10,132,255,1); transform: translateY(-1px); }
+/* Run is one pill with two halves: the left half runs, the right opens its settings. */
+.tb-pill { display: flex; align-items: stretch; }
+.tb-pill .pill-main { border-radius: 9px 0 0 9px; }
+.tb-pill .pill-set { border-radius: 0 9px 9px 0; padding: 8px 11px; margin-left: 1px; font-size: 13px; line-height: 1; }
 /* Progress strip drawn over the toolbar while a run is in flight. */
 #toolbarProgress { position: absolute; left: 14px; right: 14px; bottom: 0; height: 3px; border-radius: 0 0 14px 14px; overflow: hidden; background: rgba(255,255,255,0.08); display: none; }
 #toolbarProgress.on { display: block; }
@@ -297,6 +301,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     border-radius: 8px; padding: 6px 8px; color: #fff; font-size: 12.5px; font-weight: 600; outline: none; }
 .gen-preset-row select:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 .gen-preset-row select option { background: #1c1c1e; color: #fff; }
+.tag-mode-list { display: flex; flex-direction: column; gap: 8px; }
+.tag-mode-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px;
+    border-radius: 10px; background: rgba(255,255,255,0.05); border: 0.5px solid rgba(255,255,255,0.12);
+    color: #fff; cursor: pointer; text-align: left; font-family: inherit; }
+.tag-mode-item:hover:not(:disabled) { background: rgba(175,82,222,0.22); border-color: rgba(175,82,222,0.5); }
+.tag-mode-item:disabled { opacity: 0.45; cursor: default; }
+.tag-mode-thumb { flex: 0 0 auto; width: 96px; height: 64px; border-radius: 6px; background: #101012;
+    border: 0.5px solid rgba(255,255,255,0.1); }
+.tag-mode-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tag-mode-name { font-size: 12.5px; font-weight: 700; }
+.tag-mode-desc { font-size: 11px; color: rgba(255,255,255,0.55); line-height: 1.35; }
 /* The layer context menu. Fixed-positioned so it can be clamped into the window from JS. */
 .layer-menu { position: fixed; z-index: 300; display: none; flex-direction: column; gap: 2px; min-width: 168px;
     padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
@@ -325,12 +340,13 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
         <div id="toolbar">
             <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
-                   placeholder="Extra prompt — appended after the prompt stage (Run Detailer only)">
+                   placeholder="Extra prompt — appended after the prompt stage (Run only)">
             <button class="tb-btn archive" id="blendBtn" title="Composite the layers and archive the result into the history gallery">Blend</button>
-            <button class="tb-btn tag" id="maskTagBtn" title="Tag the composite cropped to the Mask layer">Mask Tag</button>
-            <button class="tb-btn tag" id="coveredTagBtn" title="Tag the composite with the Mask layer area kept and the rest white">Covered Tag</button>
-            <button class="tb-btn tag" id="fullTagBtn" title="Tag the whole composite, ignoring the Mask layer">Full Tag</button>
-            <button class="tb-btn run" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.">Run Detailer</button>
+            <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
+            <div class="tb-pill">
+                <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.">Run</button>
+                <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
+            </div>
         </div>
         <div id="toolbarProgress"><i></i></div>
     </div>
@@ -540,6 +556,32 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
+<div class="modal-overlay" id="tagModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Tag the composite">
+        <div class="modal-title">Tag</div>
+        <div class="modal-sub">Which part of the composite the tagger reads. The result only feeds the prompt stage — the canvas is untouched.</div>
+        <div class="tag-mode-list" id="tagModeList"></div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="tagCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="runSettingsModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Run settings">
+        <div class="modal-title">Run — settings</div>
+        <div class="modal-sub">Which pipeline preset (a Pipeline Blocks tab) the Run button executes on the composite.</div>
+        <div class="gen-preset-row">
+            <span class="gen-preset-label">Pipeline Preset</span>
+            <select id="runPresetSelect" title="Which pipeline preset (block-set tab) the Run button uses"></select>
+        </div>
+        <div class="modal-hint">Defaults to the tab that is active in the workbench. The choice is remembered, so the next Run uses it too.</div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="runSettingsCancelBtn">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn primary" id="runSettingsApplyBtn">Use this preset</button>
+        </div>
+    </div>
+</div>
 <div class="layer-menu" id="layerMenu" role="menu"></div>
 <div class="modal-overlay" id="cudReplaceModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Replace the current project">
@@ -567,14 +609,13 @@ const blendCtx = blendCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
 const blendBtn = document.getElementById('blendBtn');
 const extraPromptInput = document.getElementById('extraPrompt');
-const maskTagBtn = document.getElementById('maskTagBtn');
-const coveredTagBtn = document.getElementById('coveredTagBtn');
-const fullTagBtn = document.getElementById('fullTagBtn');
+const tagBtn = document.getElementById('tagBtn');
 const runDetailerBtn = document.getElementById('runDetailerBtn');
+const runSettingsBtn = document.getElementById('runSettingsBtn');
 const toolbarProgress = document.getElementById('toolbarProgress');
 const toolbarProgressFill = toolbarProgress.querySelector('i');
-const TAG_ACTION_BTNS = [maskTagBtn, coveredTagBtn, fullTagBtn];
-const ACTION_BTNS = [blendBtn].concat(TAG_ACTION_BTNS, [runDetailerBtn]);
+const TAG_ACTION_BTNS = [tagBtn];
+const ACTION_BTNS = [blendBtn].concat(TAG_ACTION_BTNS, [runDetailerBtn, runSettingsBtn]);
 const pickHud = document.getElementById('pickHud');
 const pickSwatch = document.getElementById('pickSwatch');
 const pickHex = document.getElementById('pickHex');
@@ -3570,7 +3611,7 @@ function setActionBusy(busy, label) {
         toolbarProgress.classList.remove('on');
         toolbarProgressFill.style.width = '0';
         blendBtn.textContent = 'Blend';
-        runDetailerBtn.textContent = 'Run Detailer';
+        runDetailerBtn.textContent = 'Run';
     } else {
         toolbarProgress.classList.add('on');
         if (label === 'blend') blendBtn.textContent = 'Blending…';
@@ -3610,17 +3651,22 @@ function sendBlendAction(action, opts) {
         mask,
     };
     if (opts && opts.tagMode) payload.tag_mode = opts.tagMode;
-    if (action === 'detailer') payload.extra_prompt = extraPromptInput.value.trim();
+    if (action === 'detailer') {
+        payload.extra_prompt = extraPromptInput.value.trim();
+        // Which pipeline preset this Run executes (the Run settings dialog). With no id
+        // the backend falls back to the runner's own chain, i.e. the active tab.
+        const runPreset = resolveRunPresetId();
+        if (runPreset) payload.preset_id = runPreset;
+    }
     window.parent.postMessage(payload, '*');
     setActionBusy(true, action);
     setStatus(action === 'blend' ? 'Archiving…' : (action === 'tag' ? 'Tagging…' : 'Running detailer…'));
 }
 
 blendBtn.addEventListener('click', () => sendBlendAction('blend'));
-maskTagBtn.addEventListener('click', () => sendBlendAction('tag', { tagMode: 'mask' }));
-coveredTagBtn.addEventListener('click', () => sendBlendAction('tag', { tagMode: 'covered' }));
-fullTagBtn.addEventListener('click', () => sendBlendAction('tag', { tagMode: 'full' }));
+tagBtn.addEventListener('click', () => openTagModal());
 runDetailerBtn.addEventListener('click', () => sendBlendAction('detailer'));
+runSettingsBtn.addEventListener('click', () => openRunSettingsModal());
 // Enter in the prompt box must not fall through to the canvas keyboard shortcuts.
 extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
 
@@ -3660,6 +3706,61 @@ try {
 function saveGenPrefs() {
     try { localStorage.setItem(GEN_PREFS_KEY, JSON.stringify(genPrefs)); } catch (e) { /* as above */ }
 }
+
+// ==================== Run 设置（Pipeline Preset） ====================
+const RUN_PREFS_KEY = 'blend.runPreset';
+let runPrefs = { preset_id: null };
+try {
+    const rawRun = localStorage.getItem(RUN_PREFS_KEY);
+    if (rawRun) {
+        const p = JSON.parse(rawRun);
+        if (p && typeof p === 'object') runPrefs.preset_id = typeof p.preset_id === 'string' ? p.preset_id : null;
+    }
+} catch (e) { /* storage unavailable: the active-tab default holds */ }
+const runSettingsModalEl = document.getElementById('runSettingsModal');
+const runPresetSelect = document.getElementById('runPresetSelect');
+
+function saveRunPrefs() {
+    try { localStorage.setItem(RUN_PREFS_KEY, JSON.stringify(runPrefs)); } catch (e) { /* as above */ }
+}
+function runSettingsModalOpen() { return runSettingsModalEl.classList.contains('open'); }
+
+// The id the Run button executes: the remembered pick while its tab still exists, then the
+// host's active tab, then the first preset — the same ladder the Generate dialog walks.
+function resolveRunPresetId() {
+    if (runPrefs.preset_id != null && genPresets.some(p => p.id === runPrefs.preset_id)) return runPrefs.preset_id;
+    if (genActivePresetId != null && genPresets.some(p => p.id === genActivePresetId)) return genActivePresetId;
+    return genPresets[0] ? genPresets[0].id : '';
+}
+function renderRunPresetOptions() {
+    runPresetSelect.innerHTML = '';
+    genPresets.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name || p.id;
+        runPresetSelect.appendChild(opt);
+    });
+}
+function openRunSettingsModal() {
+    renderRunPresetOptions();
+    runPresetSelect.value = resolveRunPresetId();
+    runSettingsModalEl.classList.add('open');
+    syncBrushCursor();
+}
+function closeRunSettingsModal() { runSettingsModalEl.classList.remove('open'); }
+function applyRunSettingsModal() {
+    runPrefs.preset_id = runPresetSelect.value || null;
+    saveRunPrefs();
+    closeRunSettingsModal();
+}
+runSettingsModalEl.addEventListener('mousedown', e => { if (e.target === runSettingsModalEl) closeRunSettingsModal(); });
+runPresetSelect.addEventListener('change', () => { runPrefs.preset_id = runPresetSelect.value || null; saveRunPrefs(); });
+document.getElementById('runSettingsCancelBtn').addEventListener('click', closeRunSettingsModal);
+document.getElementById('runSettingsApplyBtn').addEventListener('click', applyRunSettingsModal);
+runSettingsModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRunSettingsModal(); }
+    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); applyRunSettingsModal(); }
+});
 
 function layerMenuOpen() { return !!layerMenuEl && layerMenuEl.classList.contains('open'); }
 
@@ -3761,6 +3862,15 @@ function setGenPresets(presets, activeId) {
     if (genPrefs.preset_id !== (resolved || null)) {
         genPrefs.preset_id = resolved || null;
         saveGenPrefs();
+    }
+    // The Run dialog watches the same tab list: a deleted tab must not leave a dangling id
+    // behind, and a renamed or added tab becomes selectable without reopening the dialog.
+    renderRunPresetOptions();
+    const runResolved = resolveRunPresetId();
+    runPresetSelect.value = runResolved;
+    if (runPrefs.preset_id !== (runResolved || null)) {
+        runPrefs.preset_id = runResolved || null;
+        saveRunPrefs();
     }
 }
 
@@ -3896,6 +4006,134 @@ window.addEventListener('mousedown', e => {
 }, true);
 window.addEventListener('blur', () => closeLayerMenu());
 
+// ==================== Tag 弹窗（三种模式 + 各自的图） ====================
+// The three Tag buttons became one: the mode is a real choice, not three one-click
+// guesses, and each row shows WHAT it sends — the live composite masked / cropped / whole,
+// or a schematic while the canvas is still empty or the Mask has no ink.
+const tagModalEl = document.getElementById('tagModal');
+const tagModeList = document.getElementById('tagModeList');
+const TAG_MODES = [
+    { mode: 'mask', name: 'Mask Tag', desc: 'Only the Mask layer\u2019s region — cropped to it, everything else discarded.' },
+    { mode: 'covered', name: 'Covered Tag', desc: 'The whole composite, the masked region kept and the rest painted white.' },
+    { mode: 'full', name: 'Full Tag', desc: 'The whole composite as it is, ignoring the Mask layer entirely.' },
+];
+
+function tagModalOpen() { return tagModalEl.classList.contains('open'); }
+function closeTagModal() { tagModalEl.classList.remove('open'); }
+
+// The mask's bounding box in thumbnail coordinates (null when the mask is empty).
+function maskThumbBBox(w, h) {
+    const t = document.createElement('canvas');
+    t.width = w; t.height = h;
+    const tx = t.getContext('2d');
+    tx.drawImage(maskLayer.decal, 0, 0, w, h);
+    let data;
+    try { data = tx.getImageData(0, 0, w, h).data; } catch (e) { return null; }
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            if (data[(y * w + x) * 4 + 3] > 8) {
+                if (x < x0) x0 = x;
+                if (x > x1) x1 = x;
+                if (y < y0) y0 = y;
+                if (y > y1) y1 = y;
+            }
+        }
+    }
+    if (x1 < 0) return null;
+    return { x0, y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+function drawTagSchematic(ctx, w, h, mode) {
+    ctx.clearRect(0, 0, w, h);
+    const pad = 4;
+    if (mode === 'mask') {
+        ctx.fillStyle = 'rgba(175,82,222,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(w * 0.5, h * 0.5, w * 0.3, h * 0.32, 0, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+    }
+    if (mode === 'full') {
+        ctx.fillStyle = 'rgba(255,255,255,0.16)';
+        ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(pad, pad, w - pad * 2, h - pad * 2);
+        return;
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(pad, pad, w - pad * 2, h - pad * 2);
+    ctx.fillStyle = 'rgba(175,82,222,0.55)';
+    ctx.beginPath();
+    ctx.ellipse(w * 0.5, h * 0.5, w * 0.3, h * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawTagThumb(canvas, mode) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const usable = layers.length > 0 && canvasW > 0 && canvasH > 0 && maskLayer.decal && (mode === 'full' || maskHasInk());
+    if (!usable) { drawTagSchematic(ctx, w, h, mode); return; }
+    const scratch = document.createElement('canvas');
+    scratch.width = w; scratch.height = h;
+    const sctx = scratch.getContext('2d');
+    sctx.drawImage(blendCanvas, 0, 0, w, h);
+    if (mode !== 'full') {
+        sctx.globalCompositeOperation = 'destination-in';
+        sctx.drawImage(maskLayer.decal, 0, 0, w, h);
+        sctx.globalCompositeOperation = 'source-over';
+    }
+    if (mode === 'mask') {
+        const box = maskThumbBBox(w, h);
+        if (!box) { drawTagSchematic(ctx, w, h, mode); return; }
+        ctx.drawImage(scratch, box.x0, box.y0, box.w, box.h, 0, 0, w, h);
+        return;
+    }
+    if (mode === 'covered') {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+    }
+    ctx.drawImage(scratch, 0, 0);
+}
+
+function openTagModal() {
+    tagModeList.innerHTML = '';
+    TAG_MODES.forEach(m => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'tag-mode-item';
+        item.setAttribute('data-tag-mode', m.mode);
+        const thumb = document.createElement('canvas');
+        thumb.className = 'tag-mode-thumb';
+        thumb.width = 96; thumb.height = 64;
+        drawTagThumb(thumb, m.mode);
+        const text = document.createElement('div');
+        text.className = 'tag-mode-text';
+        const name = document.createElement('span');
+        name.className = 'tag-mode-name';
+        name.textContent = m.name;
+        const desc = document.createElement('span');
+        desc.className = 'tag-mode-desc';
+        desc.textContent = m.desc;
+        text.appendChild(name);
+        text.appendChild(desc);
+        item.appendChild(thumb);
+        item.appendChild(text);
+        item.addEventListener('click', () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); });
+        tagModeList.appendChild(item);
+    });
+    tagModalEl.classList.add('open');
+    syncBrushCursor();
+}
+
+tagModalEl.addEventListener('mousedown', e => { if (e.target === tagModalEl) closeTagModal(); });
+document.getElementById('tagCancelBtn').addEventListener('click', closeTagModal);
+tagModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTagModal(); }
+});
+
 // ==================== 画布尺寸弹窗 ====================
 let canvasLocked = true;
 let canvasRatio = 1;
@@ -3909,7 +4147,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen() || genModalOpen(); }
+function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen() || genModalOpen() || runSettingsModalOpen() || tagModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -4139,6 +4377,15 @@ window.addEventListener('keydown', e => {
     if (genModalOpen()) {
         if (e.key === 'Escape') { e.preventDefault(); closeGenModal(); }
         else if (e.key === 'Enter') { e.preventDefault(); confirmGenModal(); }
+        return;
+    }
+    if (runSettingsModalOpen()) {
+        if (e.key === 'Escape') { e.preventDefault(); closeRunSettingsModal(); }
+        else if (e.key === 'Enter') { e.preventDefault(); applyRunSettingsModal(); }
+        return;
+    }
+    if (tagModalOpen()) {
+        if (e.key === 'Escape') { e.preventDefault(); closeTagModal(); }
         return;
     }
     if (dynamicModalOpen()) {

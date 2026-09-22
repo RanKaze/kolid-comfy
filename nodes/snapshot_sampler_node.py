@@ -725,35 +725,16 @@ class SnapshotDetailerSamplerServer:
         return False
 
     def _delete_prompt_preset(self, preset_id):
-        """Delete a preset AND clear every prompt-block reference to it (the block falls
-        back to 'not configured' instead of a dangling id), covering blocks_sets + the
-        active-chain mirror."""
+        """Delete the preset only. Blocks keep the now-dangling id on purpose: the UI
+        renders it as `(missing)` so the reference stays visible and can be re-pointed,
+        and a run treats a missing preset as an empty selection (logged + skipped).
+        Nothing is rewritten behind the user's back."""
         presets = self._load_prompt_presets()
         kept = [p for p in presets if p.get('id') != preset_id]
         if len(kept) == len(presets):
             return False
         self._save_prompt_presets(kept)
-        dirty = False
-        for b in (self.blocks or []):
-            if self._clear_prompt_block_preset_ref(b, preset_id):
-                dirty = True
-        for s in (self.blocks_sets or []):
-            for b in (s.get('blocks') or []):
-                if self._clear_prompt_block_preset_ref(b, preset_id):
-                    dirty = True
-        if dirty:
-            self._save_blocks_sets_file()
         return True
-
-    @staticmethod
-    def _clear_prompt_block_preset_ref(block, preset_id):
-        if not (isinstance(block, dict) and block.get('type') == 'prompt'):
-            return False
-        bp = block.get('params')
-        if isinstance(bp, dict) and bp.get('preset_id') == preset_id:
-            bp['preset_id'] = None
-            return True
-        return False
 
     # -------------------------------------------------------------------------
     # HTTP 请求处理器
@@ -1344,6 +1325,13 @@ class SnapshotDetailerSamplerServer:
                     inst.blend_image = image
                     inst.blend_mask = mask
                     inst.blend_prompt = (body.get('extra_prompt') or '').strip()
+                    # The Run settings dialog's Pipeline Preset: which block set runs this pass.
+                    # Absent / invalid -> the runner's own chain (the active tab). Consumed once
+                    # by the main loop, so a later run is not stuck on a stale choice.
+                    run_preset = body.get('preset_id')
+                    if not isinstance(run_preset, str) or not run_preset:
+                        run_preset = None
+                    inst.pending_generate_preset = run_preset
                     inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
                     self._send_json({'success': True})
                 except LookupError as e:
