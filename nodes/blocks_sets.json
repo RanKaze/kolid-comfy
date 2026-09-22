@@ -2,7 +2,7 @@
   "blocks_sets": [
     {
       "id": "set-1",
-      "name": "Default",
+      "name": "Detailer",
       "blocks": [
         {
           "id": "block-1",
@@ -95,5 +95,5 @@
       ]
     }
   ],
-  "active_block_set": "set-4"
+  "active_block_set": "set-1"
 }
