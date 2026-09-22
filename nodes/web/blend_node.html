@@ -289,16 +289,14 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .modal-btn.danger:hover { filter: brightness(1.12); }
 .modal-btn:disabled { opacity: 0.4; cursor: default; }
 .modal-btn:disabled:hover { background: rgba(255,255,255,0.1); filter: none; }
-/* One override field per Detailer block. The label column takes the slack so a long block name
-   cannot push the number field out of the dialog. */
-.gen-steps { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
-.gen-step-row { display: flex; align-items: center; gap: 10px; }
-.gen-step-label { flex: 1 1 auto; min-width: 0; font-size: 12.5px; font-weight: 500; color: rgba(255,255,255,0.85);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gen-step-input { flex: 0 0 84px; width: 84px; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18);
+/* The Generate modal's Pipeline Preset enum: one entry per block-set tab (the tabs in the
+   host's settings panel). The select takes the slack so a long preset name cannot overflow. */
+.gen-preset-row { display: flex; align-items: center; gap: 10px; }
+.gen-preset-label { flex: 0 0 auto; font-size: 12.5px; font-weight: 500; color: rgba(255,255,255,0.85); }
+.gen-preset-row select { flex: 1 1 auto; min-width: 0; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18);
     border-radius: 8px; padding: 6px 8px; color: #fff; font-size: 12.5px; font-weight: 600; outline: none; }
-.gen-step-input:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
-.gen-empty { font-size: 12.5px; color: rgba(255,255,255,0.5); padding: 4px 0; }
+.gen-preset-row select:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
+.gen-preset-row select option { background: #1c1c1e; color: #fff; }
 /* The layer context menu. Fixed-positioned so it can be clamped into the window from JS. */
 .layer-menu { position: fixed; z-index: 300; display: none; flex-direction: column; gap: 2px; min-width: 168px;
     padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
@@ -531,12 +529,13 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div class="modal-sub" id="genModalSub">&#8212;</div>
         <label class="modal-check"><input type="checkbox" id="genLayerCtxToggle" checked><span>Layer Context &#8212; composite of all layers over this layer's region</span></label>
         <div class="modal-hint">Runs the Detailer on the context image (this layer's own when Layer Context is off, the layer-region composite when it is on) with <strong>this layer's own mask</strong>. The result replaces this layer's image in place &#8212; no new layer is added.</div>
-        <div class="gen-steps" id="genStepFields"></div>
-        <div class="modal-hint" id="genStepHint">&#8212;</div>
+        <div class="gen-preset-row">
+            <span class="gen-preset-label">Pipeline Preset</span>
+            <select id="genPresetSelect" title="Which pipeline preset (block-set tab) runs this Generate"></select>
+        </div>
         <div class="modal-actions">
             <button class="modal-btn ghost" id="genCancelBtn">Cancel</button>
             <div style="flex:1;"></div>
-            <button class="modal-btn ghost" id="genCopyBtn">Copy From Pipeline</button>
             <button class="modal-btn primary" id="genConfirmBtn">Confirm</button>
         </div>
     </div>
@@ -2708,20 +2707,22 @@ function updateTransformDrag(e, pos) {
 // Masks and decals are stored at the layer's native resolution and are cut out before the
 // transform, so scaling/rotating a layer moves them with it. A decal is a separate colour
 // surface painted on top of the image; the mask then cuts both.
-// NOTE: the mask starts EMPTY (fully transparent), exactly like a decal.
-// A mask is a coverage multiplier (backend does `image = image * mask`), so "all white"
-// and "no mask at all" mean the same thing — fully visible. Pre-filling white made that
-// state impossible to tell apart from a real edit: allocating a blank white canvas on the
-// first stroke left the mask 100% opaque with not a single pixel actually painted, which
-// then read as "this layer already has a mask" for the rest of the session.
-// An empty surface keeps the two honest: what the brush covers is what the mask covers.
+// The mask starts OPAQUE WHITE — a fresh layer's mask IS the full mask (coverage starts at 1
+// everywhere), so the first brush stroke adds to a full mask instead of replacing "implicitly
+// everything" with "just the stroke". Erasing carves it down; painting fills it back in.
+// (This reverses the earlier empty-canvas rule, which existed only because the old Generate
+// gate scanned pixels and read a white canvas as "already masked". The gate is
+// layerMaskIsMeaningful() now — it never looks at pixels, so the pre-fill is safe.)
 function ensureMask(l) {
     if (!l.mask) {
         const { w, h } = nativeSize(l.img);
         const c = document.createElement('canvas');
         c.width = w; c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
         l.mask = c;
-        l.maskCtx = c.getContext('2d');
+        l.maskCtx = ctx;
     }
     return l.mask;
 }
@@ -3629,18 +3630,36 @@ extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.pre
 // layer's own image becomes the context image and the layer's own mask becomes the context mask,
 // so a single image can be refined where it sits instead of adding another copy on top.
 //
-// The pipeline's `start_step_rate` is per Detailer block, so the modal offers one field per
-// Detailer block. They default to 0 rather than to the pipeline's value: "override" is the whole
-// point, and 0 means "denoise from the very first step". Copy From Pipeline fills in the real
-// values for the cases where that default is not what you want.
+// The pipeline's Detailer params live per preset (block-set tab), so the modal offers a Pipeline
+// Preset enum instead of per-run overrides: pick which preset runs this Generate, defaulting to
+// the tab that is active in the host's settings panel. The preset's own start steps apply.
 
 let layerMenuEl = null;
 let layerMenuLayerId = null;
 let genTargetLayerId = null;
 
-// One entry per Detailer block, in pipeline order, each remembering the value the pipeline holds so
-// Copy From Pipeline has something to copy.
-let genBlocks = [];
+// The presets the enum picks from, and which tab is active in the host right now.
+let genPresets = [];
+let genActivePresetId = null;
+
+// The Generate dialog's parameters persist across opens (and page reloads, via localStorage).
+// The saved preset id is only a preference: when it no longer exists (its tab was deleted or
+// renamed away), the dialog falls back to the currently ACTIVE tab and re-saves that.
+const GEN_PREFS_KEY = 'blend.genModal.prefs';
+let genPrefs = { preset_id: null, layer_ctx: true };
+try {
+    const rawPrefs = localStorage.getItem(GEN_PREFS_KEY);
+    if (rawPrefs) {
+        const p = JSON.parse(rawPrefs);
+        if (p && typeof p === 'object') {
+            genPrefs.preset_id = typeof p.preset_id === 'string' ? p.preset_id : null;
+            genPrefs.layer_ctx = !!p.layer_ctx;
+        }
+    }
+} catch (e) { /* storage unavailable (private mode etc.): the defaults hold */ }
+function saveGenPrefs() {
+    try { localStorage.setItem(GEN_PREFS_KEY, JSON.stringify(genPrefs)); } catch (e) { /* as above */ }
+}
 
 function layerMenuOpen() { return !!layerMenuEl && layerMenuEl.classList.contains('open'); }
 
@@ -3719,75 +3738,55 @@ const genModalSub = document.getElementById('genModalSub');
 // the context image instead of the layer's own pixels. Defaults to checked on every open (the
 // common img2img-with-surroundings case), and the subtitle describes whichever image will go.
 const genLayerCtxToggle = document.getElementById('genLayerCtxToggle');
-genLayerCtxToggle.addEventListener('change', updateGenModalSub);
-const genStepFields = document.getElementById('genStepFields');
-const genStepHint = document.getElementById('genStepHint');
+genLayerCtxToggle.addEventListener('change', () => {
+    updateGenModalSub();
+    genPrefs.layer_ctx = genLayerCtxToggle.checked;
+    saveGenPrefs();
+});
+const genPresetSelect = document.getElementById('genPresetSelect');
 
 function genModalOpen() { return genModalEl.classList.contains('open'); }
 
-// `blocks` arrives from the host with the pipeline: one row per Detailer block, carrying the block
-// name and the start step currently configured there.
-function setGenBlocks(blocks) {
-    genBlocks = Array.isArray(blocks) ? blocks : [];
-}
-
-function genFieldId(i) { return 'genStep' + i; }
-
-function renderGenFields() {
-    genStepFields.innerHTML = '';
-    if (!genBlocks.length) {
-        const empty = document.createElement('div');
-        empty.className = 'gen-empty';
-        empty.textContent = 'No Detailer blocks in the pipeline — nothing to override.';
-        genStepFields.appendChild(empty);
-        updateGenStepHint();
-        return;
+// The presets (block-set tabs) arrive from the host with which tab is active right now. The
+// select is (re)built here; openGenModal picks the default entry.
+function setGenPresets(presets, activeId) {
+    genPresets = Array.isArray(presets) ? presets : [];
+    genActivePresetId = typeof activeId === 'string' ? activeId : null;
+    renderGenPresetOptions();
+    // Re-resolve the selection LIVE: the user's persisted pick survives list changes, a pick
+    // whose tab was deleted falls back to the active tab, and a brand-new tab becomes selectable
+    // immediately — without waiting for the dialog to be reopened.
+    const resolved = resolveGenPresetId();
+    genPresetSelect.value = resolved;
+    if (genPrefs.preset_id !== (resolved || null)) {
+        genPrefs.preset_id = resolved || null;
+        saveGenPrefs();
     }
-    genBlocks.forEach((b, i) => {
-        const row = document.createElement('div');
-        row.className = 'gen-step-row';
-        const label = document.createElement('span');
-        label.className = 'gen-step-label';
-        label.textContent = b.name || `Detailer ${i + 1}`;
-        label.title = b.name || `Detailer ${i + 1}`;
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.id = genFieldId(i);
-        input.className = 'gen-step-input';
-        input.min = '0';
-        input.max = '1';
-        input.step = '0.01';
-        input.inputMode = 'decimal';
-        input.value = '0';                       // override means "not the pipeline value" by default
-        input.dataset.pipeline = String(b.start_step_rate);
-        input.dataset.default = '0';
-        input.addEventListener('input', updateGenStepHint);
-        row.appendChild(label);
-        row.appendChild(input);
-        genStepFields.appendChild(row);
-    });
-    updateGenStepHint();
 }
 
-function readGenSteps() {
-    return genBlocks.map((_, i) => {
-        const el = document.getElementById(genFieldId(i));
-        const v = parseFloat(el && el.value);
-        return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+// The id the enum should show: the user's persisted pick while it still exists, then the host's
+// active tab, then the first preset. Shared by openGenModal() and setGenPresets() so reopening
+// the dialog and live tab updates can never disagree.
+function resolveGenPresetId() {
+    if (genPrefs.preset_id != null && genPresets.some(p => p.id === genPrefs.preset_id)) return genPrefs.preset_id;
+    if (genActivePresetId != null && genPresets.some(p => p.id === genActivePresetId)) return genActivePresetId;
+    return genPresets[0] ? genPresets[0].id : '';
+}
+
+function renderGenPresetOptions() {
+    genPresetSelect.innerHTML = '';
+    genPresets.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name || p.id;
+        genPresetSelect.appendChild(opt);
     });
 }
 
-function updateGenStepHint() {
-    if (!genBlocks.length) { genStepHint.textContent = '—'; return; }
-    const applied = readGenSteps();
-    const parts = genBlocks.map((b, i) => {
-        const p = Number(b.start_step_rate);
-        const v = applied[i];
-        const copied = Number.isFinite(p) && Math.abs(p - v) < 1e-9;
-        return `${b.name || ('Detailer ' + (i + 1))} ${v}${copied ? ' (from pipeline)' : ''}`;
-    });
-    genStepHint.textContent = 'start step · ' + parts.join(' · ');
-}
+genPresetSelect.addEventListener('change', () => {
+    genPrefs.preset_id = genPresetSelect.value || null;
+    saveGenPrefs();
+});
 
 // The layer the modal was opened for, kept so Confirm still refers to the right one even if the
 // selection changed while the dialog was up.
@@ -3811,14 +3810,18 @@ function openGenModal(layerId) {
     if (!l) return;
     genTargetLayerId = layerId;
     genModalTitle.textContent = `Generate — ${l.name}`;
-    // Layer Context defaults to ON every time the modal opens.
-    genLayerCtxToggle.checked = true;
+    // Parameters persist: the dialog reopens exactly as it was last used. The saved preset is
+    // only a preference — when that preset is MISSING (its tab was deleted), fall back to the
+    // currently active tab and re-save it, so Confirm never sends a dangling id.
+    genLayerCtxToggle.checked = genPrefs.layer_ctx;
+    genPresetSelect.value = resolveGenPresetId();
+    if (genPrefs.preset_id !== (genPresetSelect.value || null)) {
+        genPrefs.preset_id = genPresetSelect.value || null;
+        saveGenPrefs();
+    }
     updateGenModalSub();
-    renderGenFields();
     genModalEl.classList.add('open');
     syncBrushCursor();
-    const first = document.getElementById(genFieldId(0));
-    if (first) { first.focus(); first.select(); }
 }
 
 function closeGenModal() {
@@ -3826,16 +3829,6 @@ function closeGenModal() {
     genTargetLayerId = null;
     syncBrushCursor();
     refreshCursor();
-}
-
-function copyGenStepsFromPipeline() {
-    genBlocks.forEach((b, i) => {
-        const el = document.getElementById(genFieldId(i));
-        if (!el) return;
-        const p = Number(b.start_step_rate);
-        el.value = String(Number.isFinite(p) ? p : 0);
-    });
-    updateGenStepHint();
 }
 
 function confirmGenModal() {
@@ -3852,7 +3845,7 @@ function confirmGenModal() {
     }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
     if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
-    const starts = readGenSteps();
+    const presetId = genPresetSelect.value || null;
     const targetId = l.id;
     const targetName = l.name;
     // Both images must be strings before they cross the window boundary.
@@ -3880,7 +3873,7 @@ function confirmGenModal() {
         mask,
         width: size.w,
         height: size.h,
-        start_steps: starts,
+        preset_id: presetId,
         extra_prompt: extraPromptInput.value.trim(),
     }, '*');
     setActionBusy(true, 'detailer');
@@ -3889,7 +3882,6 @@ function confirmGenModal() {
 
 genModalEl.addEventListener('mousedown', e => { if (e.target === genModalEl) closeGenModal(); });
 document.getElementById('genCancelBtn').addEventListener('click', closeGenModal);
-document.getElementById('genCopyBtn').addEventListener('click', copyGenStepsFromPipeline);
 document.getElementById('genConfirmBtn').addEventListener('click', confirmGenModal);
 genModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); closeGenModal(); }
@@ -4721,9 +4713,9 @@ window.addEventListener('message', event => {
         syncActionButtons();
         return;
     }
-    if (d.type === 'blend-pipeline-blocks') {
-        // One start-step override field per Detailer block, in pipeline order.
-        setGenBlocks(d.blocks);
+    if (d.type === 'blend-pipeline-presets') {
+        // The Generate dialog's Pipeline Preset enum: one entry per block-set tab.
+        setGenPresets(d.presets, d.active_id);
         return;
     }
     if (d.type === 'blend-preview-tint') {

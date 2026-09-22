@@ -50,7 +50,7 @@ const App: React.FC = () => {
   // A layer-initiated Generate writes its result back into that layer instead of adding a new one.
   // The poller cannot tell the two apart from the status alone, so the target is parked here while
   // the run is in flight and consumed once, in the `done` branch.
-  const layerGenerateRef = useRef<{ layerId: number; startSteps: number[] } | null>(null);
+  const layerGenerateRef = useRef<{ layerId: number } | null>(null);
 
   const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
@@ -425,7 +425,8 @@ const App: React.FC = () => {
    * the context image and *that layer's* own mask as the context mask. The result is written back
    * over that layer's image rather than added as a new layer.
    *
-   * `start_steps` overrides the pipeline's per-Detailer-block start step for this run only.
+   * `preset_id` names the pipeline preset (block set) that runs this Generate — the enum in the
+   * workbench's Generate dialog. The backend resolves it per run; the preset's own start steps apply.
    */
   const handleLayerGenerate = useCallback(async (body: Record<string, any>) => {
     setError(null);
@@ -447,7 +448,7 @@ const App: React.FC = () => {
           layer_mask: body.mask,
           width: body.width,
           height: body.height,
-          start_steps: Array.isArray(body.start_steps) ? body.start_steps : [],
+          preset_id: body.preset_id ?? null,
           extra_prompt: body.extra_prompt,
         }),
       });
@@ -459,10 +460,7 @@ const App: React.FC = () => {
       }
       // Park the target so the `done` branch knows to replace instead of inject. Set *before* the
       // first poll can see `done`, for the same reason injectedDetailKeyRef is.
-      layerGenerateRef.current = {
-        layerId,
-        startSteps: Array.isArray(body.start_steps) ? body.start_steps : [],
-      };
+      layerGenerateRef.current = { layerId };
       setDetailStatus('running');
       reply(true);
     } catch (e: any) {
@@ -501,24 +499,32 @@ const App: React.FC = () => {
         const iframe = blendIframeRef.current;
         if (!iframe?.contentWindow) return;
         iframe.contentWindow.postMessage({ type: 'blend-config', hasTagger: !!config?.has_tagger }, '*');
-        // The Generate dialog offers one start-step override per Detailer block, so the workbench
-        // needs the ACTIVE tab's blocks. Only Detailer blocks carry a start step.
+        // The Generate dialog's Pipeline Preset enum picks which block set runs the generate, so
+        // the workbench needs every set's id/name plus the tab that is active right now.
         iframe.contentWindow.postMessage({
-          type: 'blend-pipeline-blocks',
-          blocks: blocks
-            .filter((b: PipelineBlock) => b.type === 'detailer')
-            .map((b: PipelineBlock) => ({
-              id: b.id,
-              name: b.name,
-              start_step_rate: Number((b.params as any)?.start_step_rate ?? 0.8),
-            })),
+          type: 'blend-pipeline-presets',
+          presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name })),
+          active_id: activeBlockSetId,
         }, '*');
         seedBlendCanvas();
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blocks, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
+
+  // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
+  // init once, on load — without this effect a tab created / renamed / deleted / switched after
+  // that would never reach the Generate dialog's Pipeline Preset enum.
+  useEffect(() => {
+    const iframe = blendIframeRef.current;
+    if (!iframe?.contentWindow) return;
+    iframe.contentWindow.postMessage({
+      type: 'blend-pipeline-presets',
+      presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name })),
+      active_id: activeBlockSetId,
+    }, '*');
+  }, [blockSets, activeBlockSetId]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);

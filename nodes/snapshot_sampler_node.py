@@ -229,9 +229,9 @@ class SnapshotDetailerSamplerServer:
         self.blend_image = None
         self.blend_mask = None
         self.blend_prompt = ''
-        # 逐 run 的 start_step_rate 覆盖（按 detailer block 的位置索引）。
-        # 由「图层右键 → Generate」下发；主循环取用后立即清空，避免污染下一次普通 Run。
-        self.pending_start_steps = []
+        # 逐 run 的 pipeline preset 选择（blocks_sets 里某一 set 的 id）。
+        # 由「图层右键 → Generate」的 enum 下发；主循环取用后立即清空，避免污染下一次普通 Run。
+        self.pending_generate_preset = None
 
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
@@ -1153,15 +1153,17 @@ class SnapshotDetailerSamplerServer:
                             return
                         if layer_image.dim() == 3:
                             layer_image = layer_image.unsqueeze(0)
-                        start_steps = body.get('start_steps')
-                        if not isinstance(start_steps, list):
-                            start_steps = []
+                        # The Generate dialog's Pipeline Preset enum: which block set runs this
+                        # generate. Invalid/absent ids fall back to the server's runner chain.
+                        preset_id = body.get('preset_id')
+                        if not isinstance(preset_id, str) or not preset_id:
+                            preset_id = None
                         inst.blend_image = layer_image
                         inst.blend_mask = layer_mask.squeeze(-1)
                         inst.blend_prompt = (body.get('extra_prompt') or '').strip()
                         # Consumed once by the main loop, then cleared, so a later toolbar run is
-                        # not silently stuck on these overrides.
-                        inst.pending_start_steps = [float(v) for v in start_steps]
+                        # not silently stuck on this preset.
+                        inst.pending_generate_preset = preset_id
                         inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
                         self._send_json({'success': True})
                         return
@@ -1379,6 +1381,129 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Prompt 解析
     # -------------------------------------------------------------------------
+    def _expand_prefabs(self, prompt_server):
+        """Expand the prompt server's selected prefabs into (prompt_texts, loras).
+
+        A synced prefab entry carries only INSTANCE state — guid, active flag, per-tag-group
+        active flags, per-lora active flags (see the prompt iframe's sync-prompt payload). The
+        tag and lora CONTENT lives in the prefab library, looked up by guid. Without this
+        expansion a user whose prompt lives in a prefab — the common case, and the log proves
+        it: "/select_prompt received: prompts=0 ... loras=0, prefabs=1" — generated with an
+        EMPTY prompt, because _parse_prompt() used to read only selected_prompts /
+        custom_prompts / selected_loras and dropped prefabs entirely. The main graph run was
+        never affected (SnapshotPromptNode.snapshot_prompt expands prefabs there), which is
+        exactly why only the interactive Generate / Run-Detailer looked "not injected".
+        Mirrors snapshot_prompt()'s expansion: per-tag-group active state, [decoration]
+        nesting, (text:strength) wrapping, prefab custom_prompts, recursive children,
+        per-lora active state and lora_regex validity.
+        """
+        texts = []
+        loras = []
+        if prompt_server is None:
+            return texts, loras
+        selected = getattr(prompt_server, 'selected_prefabs', None) or []
+        if not selected:
+            return texts, loras
+        guid_to_prefab = {}
+        for lib_data in (getattr(prompt_server, 'libraries_data', None) or {}).values():
+            if isinstance(lib_data, dict):
+                for pf in (lib_data.get('prefabs') or []):
+                    guid = pf.get('guid') if isinstance(pf, dict) else None
+                    if guid:
+                        guid_to_prefab[guid] = pf
+        valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
+
+        def expand(node, visited):
+            if not isinstance(node, dict) or not node.get('active', True):
+                return
+            guid = node.get('guid')
+            if not guid or guid in visited:
+                return
+            visited.add(guid)
+            pf = guid_to_prefab.get(guid)
+            if not pf:
+                return
+            # Per-group active state lives on the INSTANCE under tag_groups (the sync payload's
+            # format: {guid, active, tag_groups: [{key, active}], loras, children}); the
+            # standalone graph flow stores the same states under `tags`. Read both.
+            tag_states = {
+                t.get('key'): t.get('active', True)
+                for t in (node.get('tag_groups') or node.get('tags') or [])
+                if isinstance(t, dict)
+            }
+            for tag_group in pf.get('tag_groups', pf.get('tags', [])):
+                # Group identity: the interactive library stores a group NAME under `key`; the
+                # standalone format identifies a group by its joined tag names. Try both.
+                def group_key(g):
+                    if isinstance(g, dict) and g.get('key'):
+                        return g.get('key')
+                    tags = g.get('tags') if isinstance(g, dict) else g
+                    return ' '.join(
+                        t.get('name') or t.get('prompt', '') for t in (tags or []) if isinstance(t, dict))
+                # New TagGroup format: { tags: [...], strength } — strength wraps the group.
+                if isinstance(tag_group, dict) and 'tags' in tag_group:
+                    group_tags = tag_group.get('tags', [])
+                    group_strength = tag_group.get('strength', 1.0)
+                    if not tag_states.get(group_key(tag_group), True):
+                        continue
+                    parts = []
+                    for i, tag in enumerate(group_tags):
+                        if isinstance(tag, dict):
+                            prompt_text = tag.get('prompt', '')
+                            deco_level = len(group_tags) - 1 - i  # last = 0 (base)
+                            text = ('[' * deco_level + prompt_text + ']' * deco_level) if deco_level > 0 else prompt_text
+                            parts.append(text)
+                    if parts:
+                        # Same cleaned form the detailer consumes: no [] decoration, (x:strength) kept.
+                        prompt_str = ' '.join(parts).replace('[', '').replace(']', '')
+                        if group_strength != 1.0:
+                            prompt_str = f"({prompt_str}:{group_strength})"
+                        if prompt_str not in texts:
+                            texts.append(prompt_str)
+                # Old format: Tag[] — per-tag decoration/strength.
+                elif isinstance(tag_group, list):
+                    if not tag_states.get(group_key(tag_group), True):
+                        continue
+                    parts = []
+                    for tag in tag_group:
+                        if isinstance(tag, dict):
+                            prompt_text = tag.get('prompt', '')
+                            deco = tag.get('decoration_num') or 0
+                            strength = tag.get('strength', 1.0)
+                            text = ('[' * deco + prompt_text + ']' * deco) if deco > 0 else prompt_text
+                            if strength != 1.0:
+                                text = f"({text}:{strength})"
+                            parts.append(text)
+                    if parts:
+                        prompt_str = ' '.join(parts).replace('[', '').replace(']', '')
+                        if prompt_str not in texts:
+                            texts.append(prompt_str)
+            cp = pf.get('custom_prompts', '')
+            if cp:
+                texts.append(cp)
+            # Collect loras (per-lora active state from the instance, lora_regex validity)
+            lora_states = {l.get('file_path'): l.get('active', True) for l in node.get('loras', [])}
+            for lora_item in pf.get('loras', []):
+                if not isinstance(lora_item, dict):
+                    continue
+                file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                if not file_path:
+                    continue
+                normalized_path = file_path.replace('\\', '/')
+                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                    continue
+                if not lora_states.get(file_path, True):
+                    continue
+                exists = any((l.get('file_path', '') or l.get('file_name', '')) == file_path for l in loras)
+                if not exists:
+                    loras.append(lora_item)
+            for child in node.get('children', []):
+                expand(child, visited)
+
+        for sp in selected:
+            expand(sp, set())
+        return texts, loras
+
     def _parse_prompt(self, prompt_server):
         user_positive = ''
         user_loras = ''
@@ -1396,7 +1521,12 @@ class SnapshotDetailerSamplerNode:
                 parts.append(custom)
             user_positive = ','.join(parts)
 
-            loras = prompt_server.selected_loras or []
+            loras = list(prompt_server.selected_loras or [])
+            # Prefab contents are part of the user's prompt: expand them (tags -> prompt text,
+            # prefab loras -> loadable loras) and merge. See _expand_prefabs() for why this
+            # cannot be skipped — a prefab-only selection otherwise generates with no prompt.
+            prefab_texts, prefab_loras = self._expand_prefabs(prompt_server)
+            loras.extend(prefab_loras)
             lora_str_parts = []
             trigger_words = []
             for lora_item in loras:
@@ -1415,6 +1545,8 @@ class SnapshotDetailerSamplerNode:
             if trigger_words:
                 trigger_str = ', '.join(trigger_words)
                 user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
+            for text in prefab_texts:
+                user_positive = f"{user_positive}, {text}" if user_positive else text
         return user_positive, user_loras
 
     # -------------------------------------------------------------------------
@@ -1425,12 +1557,6 @@ class SnapshotDetailerSamplerNode:
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
         context_regex = global_params['context_regex']
-        # Per-run start_step_rate overrides, indexed by the position of a detailer block in the
-        # pipeline. This is how the workbench's per-layer "Generate" dialog replaces the pipeline's
-        # start step for one run without editing the pipeline itself. An empty list (the normal
-        # case) leaves every block on its configured value.
-        start_step_overrides = global_params.get('start_step_overrides') or []
-
         next_pipeline = pipeline.copy()
         if next_pipeline.cache is None:
             raise ValueError('PipelineData cache is empty')
@@ -1530,10 +1656,6 @@ class SnapshotDetailerSamplerNode:
                 print("[Detailer] Flux2Klein edit patch applied to pipeline model")
 
         try:
-            # Position of the current block among the detailer blocks only. The workbench's
-            # start-step overrides are indexed that way, so interface blocks must not consume an
-            # index (see start_step_overrides above).
-            detailer_idx = -1
             for i, block in enumerate(blocks):
                 is_last = (i == len(blocks) - 1)
 
@@ -1617,14 +1739,6 @@ class SnapshotDetailerSamplerNode:
                 bp = block.get('params', block)
                 add_noise = bp.get('add_noise', 'enable')
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
-                # A per-run override, positional across detailer blocks. `None` is "no override",
-                # which is why this cannot be a plain falsy check: 0.0 is a legitimate value.
-                detailer_idx += 1
-                if detailer_idx < len(start_step_overrides):
-                    _ovr = start_step_overrides[detailer_idx]
-                    if _ovr is not None:
-                        start_step_rate = max(0.0, min(1.0, float(_ovr)))
-                        print(f"[PipelineBlock {i+1}] start_step_rate overridden to {start_step_rate} for this run")
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
                 enable_edit = bp.get('enable_edit', False)
                 edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
@@ -2197,6 +2311,10 @@ class SnapshotDetailerSamplerNode:
                     comfy.utils.set_progress_bar_global_hook(_progress_hook)
                     try:
                         user_positive, user_loras = self._parse_prompt(server.prompt_server)
+                        # 可观测性：Generate / Run Detailer 实际注入的 prompt tab 内容。
+                        # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
+                        # 「没注入」在日志里一眼可见。
+                        print(f"[run_detailer] prompt tab: positive='{user_positive[:200]}' ({len(user_positive)} chars), loras={user_loras}")
 
                         # Blend 工作台：输入图 = 画布合成图，遮罩 = 纯 Mask 层，两者随 action 送达。
                         # 走这条路时完全不动 _current_pipeline 的 image/mask，也就没有 context 切换。
@@ -2252,18 +2370,24 @@ class SnapshotDetailerSamplerNode:
                         print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
 
                         # Build global_params and blocks for pipeline execution
-                        # 逐 run 的 start step 覆盖：取用即清空，这样下一次普通 Run 一定回落到
-                        # pipeline 自己的值（否则上一轮 Generate 的覆盖会偷偷留下来）。
-                        start_step_overrides = list(server.pending_start_steps or [])
-                        server.pending_start_steps = []
+                        # 逐 run 的 preset 选择：取用即清空，下一次普通 Run 一定回落到当前
+                        # 激活 tab 的链（否则上一轮 Generate 选的 preset 会偷偷留下来）。
+                        preset_id = server.pending_generate_preset
+                        server.pending_generate_preset = None
+                        preset_set = next(
+                            (s for s in (server.blocks_sets or [])
+                             if s.get('id') == preset_id and s.get('blocks')),
+                            None,
+                        ) if preset_id else None
+                        if preset_set is not None:
+                            print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
                         global_params = {
                             'seed': seed,
                             'mask_grow': server.mask_grow,
                             'mask_blur': server.mask_blur,
                             'context_regex': context_regex,
-                            'start_step_overrides': start_step_overrides,
                         }
-                        blocks = server.blocks
+                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
