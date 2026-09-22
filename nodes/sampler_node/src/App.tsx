@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo, BlockSet } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -80,9 +80,19 @@ const App: React.FC = () => {
     context_mask_key: null,
     manual_values: {},
   };
-  const [blocks, setBlocks] = useState<PipelineBlock[]>([
-    { id: 'block-1', type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } },
+  // Multi-set Pipeline Blocks ("tabs" in the workbench). The ACTIVE set's blocks ARE the working
+  // chain — everything downstream (EditPhase's list, /api/update_config, the Blend workbench's
+  // block list) sees only that flat array; the sets are the storage layer wrapped around it.
+  const [blockSets, setBlockSets] = useState<BlockSet[]>([
+    { id: 'set-1', name: 'Default', blocks: [
+      { id: 'block-1', type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } },
+    ] },
   ]);
+  const [activeBlockSetId, setActiveBlockSetId] = useState<string>('set-1');
+  const blockSetIdCounter = useRef(2);
+  const blocks = useMemo(
+    () => blockSets.find(s => s.id === activeBlockSetId)?.blocks ?? blockSets[0]?.blocks ?? [],
+    [blockSets, activeBlockSetId]);
   const [architecture, setArchitecture] = useState<string | null>(null);
   const [maskGrow, setMaskGrow] = useState(32);
   const [maskBlur, setMaskBlur] = useState(32);
@@ -96,8 +106,16 @@ const App: React.FC = () => {
         setConfig(data);
         setMaskGrow(data.mask_grow);
         setMaskBlur(data.mask_blur);
-        if (data.blocks && data.blocks.length > 0) {
-          setBlocks(data.blocks);
+        if (Array.isArray(data.blocks_sets) && data.blocks_sets.length > 0) {
+          setBlockSets(data.blocks_sets);
+          setActiveBlockSetId(
+            data.active_block_set && data.blocks_sets.some((s: BlockSet) => s.id === data.active_block_set)
+              ? data.active_block_set
+              : data.blocks_sets[0].id);
+        } else if (data.blocks && data.blocks.length > 0) {
+          // Legacy config without sets: wrap the flat chain into a single Default tab.
+          setBlockSets([{ id: 'set-1', name: 'Default', blocks: data.blocks }]);
+          setActiveBlockSetId('set-1');
         }
         setDetailStatus(data.detail_status);
         setCurrentContextKey(data.current_context_key ?? null);
@@ -484,10 +502,10 @@ const App: React.FC = () => {
         if (!iframe?.contentWindow) return;
         iframe.contentWindow.postMessage({ type: 'blend-config', hasTagger: !!config?.has_tagger }, '*');
         // The Generate dialog offers one start-step override per Detailer block, so the workbench
-        // needs the current pipeline's blocks. Only Detailer blocks carry a start step.
+        // needs the ACTIVE tab's blocks. Only Detailer blocks carry a start step.
         iframe.contentWindow.postMessage({
           type: 'blend-pipeline-blocks',
-          blocks: (config?.blocks || [])
+          blocks: blocks
             .filter((b: PipelineBlock) => b.type === 'detailer')
             .map((b: PipelineBlock) => ({
               id: b.id,
@@ -500,7 +518,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
+  }, [config, blocks, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
@@ -581,14 +599,17 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // Single write path for every blocks mutation: the sets plus the active chain go out together
+  // (the server mirrors `blocks` as its runner chain AND derives it from the active set).
   const handleBlocksChange = useCallback((next: PipelineBlock[]) => {
-    setBlocks(next);
+    const nextSets = blockSets.map(s => s.id === activeBlockSetId ? { ...s, blocks: next } : s);
+    setBlockSets(nextSets);
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ blocks: next }),
+      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: activeBlockSetId, blocks: next }),
     }).catch(() => {});
-  }, []);
+  }, [blockSets, activeBlockSetId]);
 
   const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur', value: number) => {
     if (key === 'mask_grow') setMaskGrow(value);
@@ -605,43 +626,99 @@ const App: React.FC = () => {
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
       : { id, type: 'interface', name: 'Interface', params: { ...defaultInterfaceParams } };
-    setBlocks(prev => {
-      const next = [...prev, newBlock];
-      fetch('/api/update_config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ blocks: next }),
-      }).catch(() => {});
-      return next;
-    });
-  }, []);
+    handleBlocksChange([...blocks, newBlock]);
+  }, [blocks, handleBlocksChange]);
 
   const handleRemoveBlock = useCallback((blockId: string) => {
-    setBlocks(prev => {
-      if (prev.length <= 1) return prev;
-      const next = prev.filter(b => b.id !== blockId);
-      fetch('/api/update_config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ blocks: next }),
-      }).catch(() => {});
-      return next;
-    });
-  }, []);
+    if (blocks.length <= 1) return;
+    handleBlocksChange(blocks.filter(b => b.id !== blockId));
+  }, [blocks, handleBlocksChange]);
 
   const handleReorderBlocks = useCallback((fromIdx: number, toIdx: number) => {
-    setBlocks(prev => {
-      const next = [...prev];
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      fetch('/api/update_config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ blocks: next }),
-      }).catch(() => {});
-      return next;
-    });
+    const next = [...blocks];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    handleBlocksChange(next);
+  }, [blocks, handleBlocksChange]);
+
+  // ── Pipeline Blocks tabs（多套 blocks，每套独立持久化在后端 config）──
+  const persistSets = useCallback((nextSets: BlockSet[], nextActiveId: string) => {
+    setBlockSets(nextSets);
+    setActiveBlockSetId(nextActiveId);
+    const active = nextSets.find(s => s.id === nextActiveId) ?? nextSets[0];
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: nextActiveId, blocks: active?.blocks ?? [] }),
+    }).catch(() => {});
   }, []);
+
+  const handleAddBlockSet = useCallback(() => {
+    const id = 'set-' + blockSetIdCounter.current++;
+    const nextSets: BlockSet[] = [...blockSets, {
+      id,
+      name: `Set ${blockSets.length + 1}`,
+      blocks: [{ id: 'block-' + blockIdCounter.current++, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }],
+    }];
+    persistSets(nextSets, id);
+  }, [blockSets, persistSets]);
+
+  const handleRenameBlockSet = useCallback((id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    persistSets(blockSets.map(s => s.id === id ? { ...s, name: trimmed } : s), activeBlockSetId);
+  }, [blockSets, activeBlockSetId, persistSets]);
+
+  const handleDuplicateBlockSet = useCallback((id: string) => {
+    const src = blockSets.find(s => s.id === id);
+    if (!src) return;
+    const newId = 'set-' + blockSetIdCounter.current++;
+    // Deep-copy so editing the copy never aliases the source set's blocks.
+    const copy = JSON.parse(JSON.stringify(src.blocks)) as PipelineBlock[];
+    persistSets([...blockSets, { id: newId, name: `${src.name} copy`, blocks: copy }], newId);
+  }, [blockSets, persistSets]);
+
+  const handleRemoveBlockSet = useCallback((id: string) => {
+    if (blockSets.length <= 1) return;
+    const nextSets = blockSets.filter(s => s.id !== id);
+    const nextActive = activeBlockSetId === id ? nextSets[0].id : activeBlockSetId;
+    persistSets(nextSets, nextActive);
+  }, [blockSets, activeBlockSetId, persistSets]);
+
+  const handleSwitchBlockSet = useCallback((id: string) => {
+    if (id === activeBlockSetId) return;
+    persistSets(blockSets, id);
+  }, [blockSets, activeBlockSetId, persistSets]);
+
+  // One-time migration: interface blocks saved before name-binding only carry interface_idx.
+  // Once the interfaces list is known, resolve and write the name into every set's blocks so
+  // later reordering/removal of interface packages cannot silently rebind them.
+  const ifaceNameMigratedRef = useRef(false);
+  useEffect(() => {
+    if (ifaceNameMigratedRef.current || interfaces.length === 0 || blockSets.length === 0) return;
+    ifaceNameMigratedRef.current = true;
+    let changed = false;
+    const nextSets = blockSets.map(set => ({
+      ...set,
+      blocks: set.blocks.map(b => {
+        if (b.type !== 'interface') return b;
+        const ip = b.params as InterfaceBlockParams;
+        if (ip.interface_name) return b;
+        const itf = interfaces[ip.interface_idx];
+        if (!itf) return b;   // out of range: stays unnamed = Missing until the user re-picks
+        changed = true;
+        return { ...b, params: { ...ip, interface_name: itf.name } };
+      }),
+    }));
+    if (!changed) return;
+    const active = nextSets.find(s => s.id === activeBlockSetId) ?? nextSets[0];
+    setBlockSets(nextSets);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blocks_sets: nextSets, active_block_set: activeBlockSetId, blocks: active?.blocks ?? [] }),
+    }).catch(() => {});
+  }, [interfaces, blockSets, activeBlockSetId]);
 
   const handleFinishClick = useCallback(() => {
     setShowFinishDialog(true);
@@ -741,6 +818,13 @@ const App: React.FC = () => {
         onAddBlock={handleAddBlock}
         onRemoveBlock={handleRemoveBlock}
         onReorderBlocks={handleReorderBlocks}
+        blockSets={blockSets}
+        activeBlockSetId={activeBlockSetId}
+        onAddBlockSet={handleAddBlockSet}
+        onRenameBlockSet={handleRenameBlockSet}
+        onDuplicateBlockSet={handleDuplicateBlockSet}
+        onRemoveBlockSet={handleRemoveBlockSet}
+        onSwitchBlockSet={handleSwitchBlockSet}
         onSelectImage={handleSelectImage}
         onFinishClick={handleFinishClick}
         showFinishDialog={showFinishDialog}

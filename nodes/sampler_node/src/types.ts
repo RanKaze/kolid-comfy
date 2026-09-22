@@ -21,6 +21,16 @@ export interface ServerConfig {
   has_pipeline_package: boolean;
   pipeline_package_count: number;
   blocks: PipelineBlock[];
+  /** 多套 Pipeline Blocks（工作台里的 tabs）；`blocks` 始终是激活那一套的镜像 */
+  blocks_sets?: BlockSet[];
+  active_block_set?: string | null;
+}
+
+/** 一套 Pipeline Blocks = 一个 tab。id 稳定（重命名不改 id），blocks 与旧模型同构。 */
+export interface BlockSet {
+  id: string;
+  name: string;
+  blocks: PipelineBlock[];
 }
 
 export interface DetailerBlockParams {
@@ -51,8 +61,11 @@ export interface DetailerBlockParams {
 }
 
 export interface InterfaceBlockParams {
-  /** 选中的 interface 子图索引（对应后端 interface_packages） */
+  /** 选中的 interface 子图索引（对应后端 interface_packages）。仅作旧配置兼容/运行时镜像，
+   *  绑定以 interface_name 为准（重排/增删接口包不会错绑），运行时按名字解析。 */
   interface_idx: number;
+  /** 绑定的 interface 子图名字（稳定标识）。null = 旧配置尚未迁移 */
+  interface_name?: string | null;
   /** default = 直接执行; crop = 先 crop 再执行（带 crop_reserve 余量） */
   operation: 'default' | 'crop';
   crop_reserve: number;

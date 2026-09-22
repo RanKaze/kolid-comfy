@@ -1,5 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo } from '../types';
+import type { PipelineBlock, DetailerBlockParams, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet } from '../types';
+
+// Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
+const tabActionBtn: React.CSSProperties = {
+  background: 'none', border: 'none', cursor: 'pointer', fontSize: 13,
+  padding: '3px 6px', lineHeight: 1, color: 'rgba(255,255,255,0.45)', borderRadius: 6,
+};
+const tabInputStyle: React.CSSProperties = {
+  background: 'rgba(10,132,255,0.15)', border: '0.5px solid rgba(10,132,255,0.6)', borderRadius: 999,
+  color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
+};
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -102,6 +112,14 @@ interface EditPhaseProps {
   onAddBlock: (type: 'detailer' | 'interface') => void;
   onRemoveBlock: (blockId: string) => void;
   onReorderBlocks: (fromIdx: number, toIdx: number) => void;
+  /** 多套 Pipeline Blocks（tabs）；blocks = 激活那一套的镜像 */
+  blockSets: BlockSet[];
+  activeBlockSetId: string;
+  onAddBlockSet: () => void;
+  onRenameBlockSet: (id: string, name: string) => void;
+  onDuplicateBlockSet: (id: string) => void;
+  onRemoveBlockSet: (id: string) => void;
+  onSwitchBlockSet: (id: string) => void;
   onSelectImage: (key: string) => void;
   onFinishClick: () => void;
   showFinishDialog: boolean;
@@ -132,6 +150,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   promptReady, detailStatus,
   history, onRefreshHistory, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onSwitchBlockSet,
   onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   onAddContextImage, onLoadFromAssets, loadingAssets,
@@ -156,6 +175,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
   // one that only tints the canvas. The tinting itself happens in the iframe, so we forward it.
   const [previewTint, setPreviewTint] = useState(0.3);
+  // Inline rename of a Pipeline Blocks tab (set): which set is being renamed and the draft text.
+  const [renamingSetId, setRenamingSetId] = useState<string | null>(null);
+  const [renamingValue, setRenamingValue] = useState('');
 
   useEffect(() => { if (showBlendSelect) setBlendPicked([]); }, [showBlendSelect]);
 
@@ -229,6 +251,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
     onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
+  };
+
+  // An interface block is MISSING when its bound interface no longer exists (package removed or
+  // renamed). Blocks saved before name-binding only carry interface_idx — fall back to that.
+  // Judged only when the interfaces list is actually loaded, so a slow /api/package never
+  // flashes false Missing badges. Missing blocks are bypassed at run time by the backend.
+  const ifaceIsMissing = (block: PipelineBlock): boolean => {
+    if (block.type !== 'interface' || interfaces.length === 0) return false;
+    const ip = block.params as any;
+    if (ip.interface_name) return !interfaces.some(i => i.name === ip.interface_name);
+    return !(interfaces as InterfaceInfo[])[ip.interface_idx ?? -1];
   };
 
   // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
@@ -386,7 +419,59 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
                 </div>
               </div>
-              {/* Global params */}
+              {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
+                  config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
+                  Preprocess Settings 下方，随激活 tab 联动。 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+                {blockSets.map(set => {
+                  const missing = set.blocks.filter(b => ifaceIsMissing(b)).length;
+                  const isActive = set.id === activeBlockSetId;
+                  if (renamingSetId === set.id) {
+                    return (
+                      <input key={set.id} autoFocus value={renamingValue} style={tabInputStyle}
+                        onChange={e => setRenamingValue(e.target.value)}
+                        onBlur={() => { onRenameBlockSet(set.id, renamingValue); setRenamingSetId(null); }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { onRenameBlockSet(set.id, renamingValue); setRenamingSetId(null); }
+                          else if (e.key === 'Escape') setRenamingSetId(null);
+                        }}
+                      />
+                    );
+                  }
+                  return (
+                    <button key={set.id}
+                      title={missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time` : set.name}
+                      onClick={() => onSwitchBlockSet(set.id)}
+                      onDoubleClick={() => { setRenamingSetId(set.id); setRenamingValue(set.name); }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        padding: '4px 10px', borderRadius: 999, fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                        border: '0.5px solid ' + (isActive ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.1)'),
+                        background: isActive ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.04)',
+                        color: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
+                      }}>
+                      <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
+                      {missing > 0 && (
+                        <span style={{ background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700 }}>Missing ×{missing}</span>
+                      )}
+                    </button>
+                  );
+                })}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 'auto' }}>
+                  <button title="Rename this tab (or double-click the tab)"
+                    onClick={() => { const s = blockSets.find(x => x.id === activeBlockSetId); if (s) { setRenamingSetId(s.id); setRenamingValue(s.name); } }}
+                    style={tabActionBtn}>✎</button>
+                  <button title="Duplicate this tab" onClick={() => onDuplicateBlockSet(activeBlockSetId)} style={tabActionBtn}>⧉</button>
+                  <button title={blockSets.length > 1 ? 'Delete this tab' : 'The last tab cannot be deleted'}
+                    disabled={blockSets.length <= 1}
+                    onClick={() => onRemoveBlockSet(activeBlockSetId)}
+                    style={{ ...tabActionBtn, color: blockSets.length > 1 ? 'rgba(255,90,90,0.8)' : 'rgba(255,255,255,0.15)', cursor: blockSets.length > 1 ? 'pointer' : 'default' }}>✕</button>
+                  <button title="New tab" onClick={onAddBlockSet} style={{ ...tabActionBtn, color: '#0a84ff', fontWeight: 700 }}>＋</button>
+                </div>
+              </div>
+
+              {/* Global params — sits between the tab bar and the block list: pick the active
+                  set above, tune its first detailer's crop/pixels here, then see the blocks. */}
               <div style={styles.sectionTitle}>Preprocess Settings</div>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Grow</label>
@@ -444,7 +529,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
 
-              {/* Pipeline Blocks */}
               <div style={styles.sectionTitle}>Pipeline Blocks</div>
               {blocks.map((block, blockIdx) => (
                 <div key={block.id} style={{
@@ -479,6 +563,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
                       color: block.type === 'detailer' ? '#30d158' : '#bf5af2',
                     }}>{block.name}</span>
+                    {ifaceIsMissing(block) && (
+                      <span title="The bound interface no longer exists — this block will be bypassed at run time"
+                        style={{
+                          background: 'rgba(255,159,10,0.2)', color: '#ff9f0a', borderRadius: 999,
+                          fontSize: 9.5, fontWeight: 700, padding: '1px 7px', flexShrink: 0,
+                        }}>Missing</span>
+                    )}
                     {/* Action buttons */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: 28, flexShrink: 0, justifyContent: 'center' }}>
                       {blocks.length > 1 && (
@@ -613,18 +704,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       };
                       const selectableInterfaces = interfaces.filter(isChainable);
                       const safeInterfaces = selectableInterfaces.length > 0 ? selectableInterfaces : interfaces;
-                      // interface_idx 始终存完整 interfaces 列表中的真实下标（与后端 interface_packages 对齐）
-                      const toRealIdx = (listIdx: number) => interfaces.indexOf(safeInterfaces[listIdx]);
-                      // 若当前选中的真实下标对应 interface 不在可选列表（如旧配置/非 chainable），
-                      // 则纠正为当前 UI 选中的 chainable 项的真实下标，确保"显示=执行"，避免错乱。
-                      const uiIdx = safeInterfaces.findIndex(itf => itf === interfaces[ip.interface_idx]);
-                      const resolvedIdx = uiIdx >= 0 ? uiIdx : 0;
-                      const resolvedRealIdx = toRealIdx(resolvedIdx);
-                      if (resolvedRealIdx !== ip.interface_idx) {
-                        updateBlockParam(block.id, 'interface_idx', resolvedRealIdx);
-                      }
-                      const iface = safeInterfaces[resolvedIdx] || safeInterfaces[0];
                       const updateIfaceParam = (key: string, value: any) => updateBlockParam(block.id, key, value);
+                      // 绑定以名字为准（接口包重排/增删不会错绑到别的接口）；旧配置只有
+                      // interface_idx，尽量解析成名字；解析不出 = Missing（运行时自动 bypass）。
+                      const boundName: string | null = ip.interface_name ?? null;
+                      const boundMissing = !!boundName && interfaces.length > 0 && !interfaces.some(i => i.name === boundName);
+                      const resolvedIdx = boundName
+                        ? interfaces.findIndex(i => i.name === boundName)
+                        : (interfaces.length > 0 ? (ip.interface_idx ?? -1) : -1);
+                      const resolvedItf = resolvedIdx >= 0 ? interfaces[resolvedIdx] : undefined;
+                      const iface = resolvedItf ?? safeInterfaces[0];
                       const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
                       return (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 0' }}>
@@ -637,12 +726,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <div style={styles.paramRow}>
                             <span style={styles.paramLabel}>Interface</span>
                             <select
-                              style={styles.paramSelect}
-                              value={resolvedIdx}
-                              onChange={e => updateIfaceParam('interface_idx', toRealIdx(parseInt(e.target.value, 10)))}
+                              style={{ ...styles.paramSelect, ...(boundMissing ? { borderColor: 'rgba(255,159,10,0.6)' } : {}) }}
+                              value={boundMissing ? '__missing__' : (resolvedItf ? String(interfaces.indexOf(resolvedItf)) : '')}
+                              onChange={e => {
+                                const idx = parseInt(e.target.value, 10);
+                                const itf = interfaces[idx];
+                                if (!itf) return;
+                                updateIfaceParam('interface_name', itf.name);
+                                updateIfaceParam('interface_idx', idx);
+                              }}
                             >
+                              {boundMissing && <option value="__missing__" style={opt}>Missing: {boundName}</option>}
                               {safeInterfaces.map((itf, idx) => (
-                                <option key={idx} value={idx} style={opt}>{itf.name || `Interface ${idx + 1}`}</option>
+                                <option key={idx} value={String(interfaces.indexOf(itf))} style={opt}>{itf.name || `Interface ${idx + 1}`}</option>
                               ))}
                             </select>
                           </div>
