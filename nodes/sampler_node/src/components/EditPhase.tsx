@@ -421,7 +421,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </div>
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
-                  Preprocess Settings 下方，随激活 tab 联动。 */}
+                  Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
+                  也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
+              <div style={styles.sectionTitle}>Pipeline Presets</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
                 {blockSets.map(set => {
                   const missing = set.blocks.filter(b => ifaceIsMissing(b)).length;

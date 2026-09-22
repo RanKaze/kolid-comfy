@@ -16,7 +16,7 @@
             "align": "32",
             "crop_reserve": "32",
             "recover_crop": false,
-            "enable_edit": false,
+            "enable_edit": true,
             "edit_mode": "fit",
             "ref_boost": 4,
             "ref_boost_a": 1,
@@ -24,6 +24,35 @@
             "grounding_px": 768,
             "context_reference": false,
             "context_reference_key": null
+          }
+        }
+      ]
+    },
+    {
+      "id": "set-2",
+      "name": "Generate",
+      "blocks": [
+        {
+          "id": "block-2",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 1548576,
+            "align": 8,
+            "crop_reserve": 32,
+            "recover_crop": true,
+            "enable_edit": true,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": true,
+            "context_reference_key": null,
+            "context_regex": ".+"
           }
         }
       ]
