@@ -545,6 +545,59 @@ Qwen-Image-2.1 编辑参数配置。设置参考图缩放边长（`config["qwen_
 
 ---
 
+### Run Debug Trace（Draw tab 的 🐞 Debug 按钮）
+
+Draw tab 左侧 Context 标题右侧有一个 **🐞 Debug** 按钮，打开一个 Modal，展示**上一次
+Run / Generate 的全过程快照**：各阶段 prompt（含 Generate Text 前后）、每个 Block 调用
+后的数据、以及中间过程图 / 遮罩。只保留最近一次 run，每次 run 开始时重置。
+
+**收集器**：`libs/debug_trace.py`
+
+| API | 用途 |
+|-----|------|
+| `begin_trace(meta)` | 开一份新 trace，丢弃上一份 |
+| `record_stage(label, detail, block, **data)` | 一条文字说明 + 结构化字段 |
+| `record_prompt(label, text, block, **data)` | 某一阶段的提示词（自动算 `chars`） |
+| `record_image(label, tensor, ...)` / `record_mask(...)` | 过程图 / 遮罩（可传 tensor，序列化时才编码） |
+| `record_block(index, label, ...)` | 一个 block 的分节标题 |
+| `record_error(label, err, ...)` | 某步失败 |
+| `debug_trace_snapshot()` | 序列化成 `/api/debug_trace` 的响应 |
+
+**记录点（按执行顺序）**
+
+1. `1. Prompt tab` — `_parse_prompt` 解析结果
+2. `2. Extra Prompt 追加后` — Blend 工具栏输入的追加结果
+3. `3. Run 上下文` — image/mask 尺寸、mask 统计、model 类型、architecture
+4. `4. Pipeline 链` — block 列表 + preset 名 + global_params
+5. 链条开头：原始输入图 / 未扩张 mask / 扩张后 mask / 裁剪+缩放后工作图与 mask
+6. 每个 block：
+   - `a) context 解出` / `b) context + user_positive 拼接`
+   - `c) Generate Text 输入` / `d) Generate Text 输出`（启用时）
+   - `e) 最终 positive`（含 negative / loras / query 追加）
+   - 输入工作图与 mask、采样解码输出、复原到裁剪分辨率的图
+7. `Prompt 块生效后` / `Query 块回答后`（这两类 block）
+8. Interface block：输入图 / 输入 mask / 输出图 / 输出 mask
+9. `收尾 / 恢复` — 三路恢复路径的选择（Enable Mask 关 / Recover Crop 开 / 关）
+10. `最终产出（detailed image）` 与 `链条最终产出（recover 之后）`
+11. `Run 结束`（状态）/ `run_detailer 异常`
+
+**边界**：所有埋点 fail-open —— 任何一步炸掉只打印一行警告，绝不中断整条链。单份
+trace 的过程图上限 `MAX_IMAGES_PER_TRACE = 240`，单图超过 `MAX_IMAGE_PIXELS` 会等比缩小。
+
+> ⚠️ **扩展埋点时的硬性规则**：fail-open 只保护 `record_*` 的**内部**——传进去的**实参表达式
+> 在调用之前就已经求值**，写崩了照样炸整条链。所以实参必须是无副作用的取值，尤其是形状：
+>
+> - **`LATENT` 是 dict，不是 tensor**。`_ksampler` 返回 `{'samples': tensor, ...}`，
+>   对它取 `.shape` 会 `AttributeError`（真实翻车过一次）。取形状请走 `_latent_shape()` 这类
+>   安全 helper（兼容 dict → `['samples']`、`hasattr(shape)` 兜底、内部 try/except）。
+> - `libs/debug_trace.py` 的 `record_image/record_mask` 接受 tensor 或 numpy 数组；
+>   维度归一和缩放都在内部完成，不要在埋点处预处理。
+
+**前端**：`nodes/sampler_node/src/components/DebugModal.tsx`。按 block 折叠分组，支持
+筛选（全部 / Prompt 链路 / 过程图 / 只看 Block），缩略图点击放大（Esc 关闭）。
+
+---
+
 ### PipelineEnableQwenEditNode
 
 启用 QwenEdit 模式。设置 config["enable_qwen_edit"]。

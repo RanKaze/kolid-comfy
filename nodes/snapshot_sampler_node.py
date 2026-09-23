@@ -33,6 +33,7 @@ from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
 from ..libs.generate_text_utils import apply_generate_text_to_prompt
+from ..libs import debug_trace as dbg
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
 import uuid
@@ -884,6 +885,10 @@ class SnapshotDetailerSamplerServer:
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
                     'pending_query': inst._pending_query_view() if inst else None,
                 })
+                return
+
+            if self.path == '/api/debug_trace':
+                self._send_json(dbg.debug_trace_snapshot())
                 return
 
             if self.path == '/api/package':
@@ -1912,6 +1917,17 @@ class SnapshotDetailerSamplerNode:
         if original_image is None:
             raise ValueError("No image available for detailer")
 
+        dbg.record_block(0, f'链条开始（共 {len(blocks)} 个 block）',
+                         f'enable_mask={bool((blocks[0].get("params", blocks[0]) or {}).get("enable_mask", True))}')
+        dbg.record_stage('原始输入',
+                         f'image={tuple(original_image.shape)}',
+                         block=0,
+                         user_positive=user_positive,
+                         user_loras=list(user_loras or []))
+        dbg.record_image('裁剪前原图（original_image）', original_image, block=0)
+        if user_mask is not None:
+            dbg.record_mask('原始 mask（未扩张）', user_mask, block=0)
+
         if user_mask is not None:
             user_mask = user_mask.clone()
             user_mask = (user_mask > 0).float()
@@ -1927,6 +1943,8 @@ class SnapshotDetailerSamplerNode:
             mask_grow = 0
             mask_blur = 0
         expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
+        dbg.record_mask('扩张 / 羽化后 mask', expanded_mask, block=0,
+                        detail=f'grow={mask_grow}, blur={mask_blur}')
 
         # 整条链（含 interface block）都在 crop 工作区坐标系内运行；run 之前 crop，
         # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
@@ -1948,6 +1966,8 @@ class SnapshotDetailerSamplerNode:
             cropped_image, cropped_mask, crop_info = original_image, expanded_mask, None
             print(f"[Detailer] Enable Mask off — no grow/blur, no crop, no recover; "
                   f"workspace = the full image {tuple(original_image.shape)}")
+            dbg.record_stage('裁剪跳过（Enable Mask 关）',
+                             f'工作区 = 整幅图 {tuple(original_image.shape)}', block=0)
 
         # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
         # pixels / align 统一取自 first_bp（第一个 detailer block 的参数），取消每个
@@ -1981,6 +2001,14 @@ class SnapshotDetailerSamplerNode:
         current_image = resized_image
         current_mask = resized_mask
         last_resize_info = None
+        dbg.record_stage('裁剪 + 缩放后工作区',
+                         f'image={tuple(resized_image.shape)}, mask={tuple(resized_mask.shape)}',
+                         block=0,
+                         crop_info=({k: (list(v) if isinstance(v, tuple) else v)
+                                     for k, v in crop_info.items()} if isinstance(crop_info, dict) else crop_info),
+                         resize_info=(list(resize_info) if isinstance(resize_info, (list, tuple)) else resize_info))
+        dbg.record_image('裁剪 / 缩放后工作图', resized_image, block=0)
+        dbg.record_mask('裁剪 / 缩放后工作 mask', resized_mask, block=0)
         last_resized_mask = None
 
         # Save original pipeline state for restoration after each block
@@ -2087,6 +2115,15 @@ class SnapshotDetailerSamplerNode:
                             block_input_mask = sel_mask
                             print(f"[PipelineBlock {i+1}] Interface using context mask key={ctx_mask_key}")
 
+                    dbg.record_block(i + 1, f'Block {i+1} · Interface',
+                                     str(bp.get('interface_name') or f'idx={interface_idx}'),
+                                     operation=exec_options.get('operation'),
+                                     crop_reserve=exec_options.get('crop_reserve'),
+                                     image_keys=exec_options.get('image_keys') or {},
+                                     manual_values=manual_values)
+                    dbg.record_image(f'Block {i+1} · Interface 输入图', block_input_img, block=i + 1)
+                    dbg.record_mask(f'Block {i+1} · Interface 输入 mask', block_input_mask, block=i + 1)
+
                     result_img, result_mask = self._execute_interface(
                         server, interface_idx, manual_values,
                         exec_options=exec_options,
@@ -2106,6 +2143,8 @@ class SnapshotDetailerSamplerNode:
                     current_image = result_img
                     current_mask = result_mask
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
+                    dbg.record_image(f'Block {i+1} · Interface 输出图', result_img, block=i + 1)
+                    dbg.record_mask(f'Block {i+1} · Interface 输出 mask', result_mask, block=i + 1)
                     continue
 
                 if block.get('type') == 'query':
@@ -2120,6 +2159,8 @@ class SnapshotDetailerSamplerNode:
                         user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                     print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
                           f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
+                    dbg.record_prompt(f'Block {i+1} · Query 块回答后', user_positive,
+                                      block=i + 1, loras=list(user_loras or []))
                     continue
 
                 if block.get('type') == 'prompt':
@@ -2139,11 +2180,15 @@ class SnapshotDetailerSamplerNode:
                             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                         print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
                               f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
+                        dbg.record_prompt(f'Block {i+1} · Prompt 块生效后', user_positive,
+                                          block=i + 1, loras=list(user_loras or []))
                     except Exception as e:
                         # fail-open：程序执行失败保留之前的 prompt，不中断整条链
                         import traceback
                         traceback.print_exc()
                         print(f"[PipelineBlock {i+1}] WARNING: prompt block failed ({e}) — keeping previous prompt")
+                        dbg.record_error(f'Block {i+1} · Prompt 块失败', str(e),
+                                         block=i + 1, where='prompt_block')
                     continue
 
                 # Detailer block params (support both nested 'params' dict and flat)
@@ -2165,6 +2210,21 @@ class SnapshotDetailerSamplerNode:
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
 
                 print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                dbg.record_block(i + 1, f'Block {i+1} · Detailer',
+                                 f'{block.get("name", "")}',
+                                 add_noise=add_noise,
+                                 start_step_rate=start_step_rate,
+                                 end_step_rate=end_step_rate,
+                                 enable_edit=enable_edit,
+                                 edit_mode=edit_mode,
+                                 ref_boost=ref_boost,
+                                 ref_boost_a=ref_boost_a,
+                                 enable_ref_boost_mask=enable_ref_boost_mask,
+                                 grounding_px=grounding_px,
+                                 context_regex=block_context_regex,
+                                 is_last=is_last)
+                dbg.record_image(f'Block {i+1} · 输入工作图', resized_image, block=i + 1)
+                dbg.record_mask(f'Block {i+1} · 输入工作 mask', resized_mask, block=i + 1)
 
                 # 全局工作分辨率已在 crop 后一次性 limit 确定（见上方）。此处把当前 block
                 # 的实际输入（可能已被上游 interface 块替换）同步为处理图，不再重复 limit。
@@ -2188,11 +2248,22 @@ class SnapshotDetailerSamplerNode:
                 # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
                 context_positive, context_negative, context_loras = next_pipeline.context.get_context(block_context_regex)
                 current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+                dbg.record_prompt(f'Block {i+1} · a) context 解出（regex={block_context_regex}）',
+                                  context_positive, block=i + 1,
+                                  loras=list(context_loras or []))
+                dbg.record_prompt(f'Block {i+1} · b) context + user_positive 拼接', current_positive,
+                                  block=i + 1,
+                                  user_positive=user_positive)
                 # Generate Text（MARKER_GENERATE_TEXT_BLOCK）：上游 Pipeline 若启用了
                 # PipelineEnableGenerateTextNode，就把指令 prompt 与当前 positive 拼起来
                 # 交给文本生成 CLIP，用生成结果完全替换 current_positive。
                 # 只在 config 里开开关，参数与 clip 都来自上游节点，此处不做任何 UI。
                 if next_pipeline.config.get('enable_generate_text'):
+                    _gt_before = current_positive
+                    dbg.record_prompt(f'Block {i+1} · c) Generate Text 输入（指令 + positive）',
+                                      current_positive, block=i + 1,
+                                      instruction=next_pipeline.config.get('generate_text_prompt', ''),
+                                      params=next_pipeline.config.get('generate_text'))
                     try:
                         current_positive, _gt_used = apply_generate_text_to_prompt(
                             next_pipeline, current_positive,
@@ -2201,11 +2272,18 @@ class SnapshotDetailerSamplerNode:
                         if _gt_used:
                             print(f'[PipelineBlock {i + 1}/{len(blocks)}] Generate Text applied: '
                                   f"positive='{current_positive[:200]}' ({len(current_positive)} chars)")
+                        dbg.record_prompt(f'Block {i+1} · d) Generate Text 输出（new_positive）',
+                                          current_positive, block=i + 1,
+                                          applied=bool(_gt_used),
+                                          before=_gt_before)
                     except Exception as e:
                         # fail-open：生成失败保留原 prompt，不中断整条链
                         import traceback
                         traceback.print_exc()
                         print(f'[PipelineBlock {i + 1}] WARNING: Generate Text failed ({e}) — keeping previous prompt')
+                        dbg.record_error(f'Block {i+1} · Generate Text 失败', str(e),
+                                         block=i + 1, where='generate_text')
+                current_positive_before_query = current_positive
                 current_negative = context_negative
                 current_loras = context_loras.copy()
                 current_loras.extend(get_loras_from_string(user_loras))
@@ -2217,6 +2295,14 @@ class SnapshotDetailerSamplerNode:
                     current_negative += ',' + tmp_negative
                 if tmp_loras:
                     current_loras.extend(tmp_loras)
+
+                dbg.record_prompt(f'Block {i+1} · e) 最终 positive（送入 conditioning）',
+                                  current_positive, block=i + 1,
+                                  negative=current_negative,
+                                  loras=list(current_loras),
+                                  query_positive=tmp_positive or '',
+                                  query_negative=tmp_negative or '',
+                                  before_query=current_positive_before_query)
 
                 model_negative = next_pipeline.config.get("model_negative")
                 model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
@@ -2350,6 +2436,27 @@ class SnapshotDetailerSamplerNode:
                 last_resized_mask = resized_mask
 
                 print(f"[Block {i+1}] Done: decoded shape={decoded_image.shape}")
+                # _ksampler 返回的是 LATENT dict（{'samples': tensor}），不是 tensor ——
+                # 这里统一取形状，避免直接 .shape 炸掉（曾栽过一次）。
+                def _latent_shape(lat):
+                    try:
+                        if isinstance(lat, dict):
+                            lat = lat.get('samples')
+                        return list(lat.shape) if hasattr(lat, 'shape') else None
+                    except Exception:
+                        return None
+                dbg.record_image(f'Block {i+1} · 采样解码输出', decoded_image, block=i + 1,
+                                 detail=f'latent={_latent_shape(sampled_latent)}')
+                dbg.record_stage(f'Block {i+1} · 输出 / 传递给下一块',
+                                 f'current_image={tuple(current_image.shape)}',
+                                 block=i + 1,
+                                 is_last=is_last,
+                                 decoded_shape=list(decoded_image.shape),
+                                 latent_shape=_latent_shape(sampled_latent),
+                                 has_resize_info=resize_info is not None)
+                if not is_last:
+                    dbg.record_image(f'Block {i+1} · 复原到裁剪分辨率（传给下一块）', current_image,
+                                     block=i + 1)
         finally:
             # Restore pipeline state
             if next_pipeline.config is not None:
@@ -2412,6 +2519,14 @@ class SnapshotDetailerSamplerNode:
                   f"(patch scale sx={place['sx']:.4f} sy={place['sy']:.4f})")
 
         detailed_image = final_image
+        dbg.record_stage('收尾 / 恢复',
+                         ('Enable Mask 关 → 整幅就是产出' if not enable_mask
+                          else ('Recover Crop 开 → recover_size + recover_crop' if do_recover_crop
+                                else 'Recover Crop 关 → 保持工作分辨率，产出为 RGBA patch')),
+                         block=0,
+                         enable_mask=enable_mask,
+                         do_recover_crop=do_recover_crop)
+        dbg.record_image('链条最终产出（recover 之后）', final_image, block=0)
 
         # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
         # 只是画布上的一块 patch，更不能顶替整幅 context，故保持原合成图。
@@ -2751,6 +2866,12 @@ class SnapshotDetailerSamplerNode:
                     server.detail_progress = 0
                     server.detail_current_step = 0
                     server.detail_total_steps = 0
+                    # Debug：每一次 Run / Generate 开一份新 trace（丢弃上一份）。
+                    # Context 标题右侧的 Debug 按钮读的就是它。
+                    dbg.begin_trace({
+                        'from_blend': bool(action.get('from_blend')),
+                        'action': 'run_detailer',
+                    })
                     # Set up progress tracking via ComfyUI's global hook
                     import comfy.utils
                     orig_hook = comfy.utils.PROGRESS_BAR_HOOK
@@ -2766,6 +2887,8 @@ class SnapshotDetailerSamplerNode:
                         # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
                         # 「没注入」在日志里一眼可见。
                         print(f"[run_detailer] prompt tab: positive='{user_positive[:200]}' ({len(user_positive)} chars), loras={user_loras}")
+                        dbg.record_prompt('1. Prompt tab（_parse_prompt 解析结果）', user_positive,
+                                          loras=list(user_loras or []))
 
                         # Blend 工作台：输入图 = 画布合成图，遮罩 = 纯 Mask 层，两者随 action 送达。
                         # 走这条路时完全不动 _current_pipeline 的 image/mask，也就没有 context 切换。
@@ -2785,6 +2908,9 @@ class SnapshotDetailerSamplerNode:
                             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                         if extra_prompt:
                             print(f"[run_detailer] extra prompt appended: '{extra_prompt}'")
+                            dbg.record_prompt('2. Extra Prompt 追加后', user_positive,
+                                              extra_prompt=extra_prompt,
+                                              loras=list(user_loras or []))
 
                         # 遮罩必须存在，否则 detailer 无意义
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
@@ -2821,6 +2947,19 @@ class SnapshotDetailerSamplerNode:
                             diag_mask_sum = 0
                             diag_mask_max = 0
                         print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
+                        dbg.record_stage('3. Run 上下文',
+                                         f'image={diag_img_w}x{diag_img_h}, mask={diag_mask_shape}',
+                                         from_blend=bool(action.get('from_blend')),
+                                         image_size=f'{diag_img_w}x{diag_img_h}',
+                                         mask_shape=diag_mask_shape,
+                                         mask_sum=round(float(diag_mask_sum), 1),
+                                         mask_max=round(float(diag_mask_max), 3),
+                                         model=type(run_pipeline.model).__name__ if run_pipeline.model is not None else None,
+                                         architecture=(run_pipeline.config.get('architecture')
+                                                       if run_pipeline.config else None))
+                        dbg.record_image('输入图（Blend 画布合成图 / Context）', diag_img)
+                        dbg.record_mask('输入 Mask（Mask 层）', current_mask,
+                                        detail=f'sum={diag_mask_sum:.0f}')
 
                         # Build global_params and blocks for pipeline execution
                         # 逐 run 的 preset 选择：取用即清空，下一次普通 Run 一定回落到当前
@@ -2841,6 +2980,14 @@ class SnapshotDetailerSamplerNode:
                             'context_regex': context_regex,
                         }
                         blocks = preset_set['blocks'] if preset_set is not None else server.blocks
+                        dbg.record_stage(
+                            '4. Pipeline 链',
+                            f"{len(blocks)} 个 block"
+                            + (f"（preset「{preset_set.get('name')}」）" if preset_set is not None else '（当前激活 tab）'),
+                            blocks=[{'index': i + 1, 'type': b.get('type'),
+                                     'name': b.get('name')} for i, b in enumerate(blocks)],
+                            global_params=dict(global_params),
+                        )
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server,
@@ -2849,6 +2996,11 @@ class SnapshotDetailerSamplerNode:
 
                         server.original_image = original_image
                         server.detailed_image = detailed_image
+                        dbg.record_image('最终产出（detailed image）', detailed_image,
+                                         detail=f'detail_meta={"有 place 矩形" if detail_meta else "无"}')
+                        if detail_meta:
+                            dbg.record_stage('最终产出元数据', 'Recover Crop 关闭 — 产出是待贴回的 RGBA patch',
+                                             place=detail_meta.get('place'))
                         # Context 就是 Blend 画布本身，detailer 产出不再接管 context，
                         # 所以这里不记 context key（产出图由前端作为新图层叠加到画布上）。
                         server.original_key = None
@@ -2905,9 +3057,16 @@ class SnapshotDetailerSamplerNode:
                         traceback.print_exc()
                         server.detail_status = 'error'
                         server.detail_error = str(e)
+                        dbg.record_error('run_detailer 异常', str(e), where='run_detailer')
                     finally:
                         comfy.utils.set_progress_bar_global_hook(orig_hook)
                         server.detail_progress = 1.0 if server.detail_status == 'done' else server.detail_progress
+                        dbg.record_stage('Run 结束', f"status={server.detail_status}"
+                                         + (f", error={server.detail_error}" if server.detail_error else ''))
+                        _tr = dbg.current_trace()
+                        if _tr is not None:
+                            _tr.meta['status'] = server.detail_status
+                            _tr.meta['error'] = server.detail_error
                         # 本次 run 的 blend 输入已消费完，释放引用
                         server.blend_image = None
                         server.blend_mask = None
