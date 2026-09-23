@@ -2429,9 +2429,52 @@ function addLayer(item) {
     });
 }
 
-// Generate wrote a new image and it belongs to the layer it came from: swap it in rather than
-// stacking a second copy on top. The mask, the decal and the transform all stay, because the caller
-// asked for the layer to be refined in place, not replaced by a fresh layer.
+// A Generate on a layer that ALREADY has an image must not overwrite it: the result lands on a
+// NEW layer stacked on top — same native resolution (the backend runs at the layer's own size)
+// and the SAME transform, so it exactly covers where the source sits. The source layer keeps
+// its image, mask and decal; the fresh layer carries none of them (an unpainted mask IS the
+// full layer). One Generate = one undo step, same as the in-place refill.
+function spawnGeneratedLayer(id, item) {
+    const l = layers.find(x => x.id === id);
+    if (!l || !item || !item.src) {
+        setStatus('The Generate result could not be matched to its layer', 'error');
+        return;
+    }
+    loadImage(item.src, img => {
+        const t = l.transform || { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+        const copy = {
+            id: ++layerSeq,
+            key: item.key || null,
+            name: l.name + ' · gen',
+            src: item.src,
+            img,
+            visible: true,
+            transform: { ...t },
+            mask: null,
+            maskCtx: null,
+            maskThumbEl: null,
+            decal: null,
+            decalCtx: null,
+            decalThumbEl: null,
+            canvasThumbEl: null,
+            fragment: false,
+        };
+        if (copy.key) injectedKeys.add(copy.key);
+        layers.unshift(copy);       // the generated variant sits directly on top of its source
+        selectedId = copy.id;
+        applyCanvasSize();
+        layoutCanvas();
+        renderLayerList();
+        render();
+        setStatus(`Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
+        pushHistory();
+    }, () => setStatus('Could not load the Generate result', 'error'));
+}
+
+// Generate wrote a new image for an IMAGE-LESS (from-noise) target: fill the layer in place.
+// The mask, the decal and the transform all stay, because the caller asked for the layer to be
+// refined in place, not replaced by a fresh layer. A target that already has an image goes to
+// spawnGeneratedLayer() instead — its result never overwrites existing pixels.
 //
 // The new image can be a different size from the old one (the detailer works at its own resolution
 // and may hand back a crop), so the surfaces that are sized to the image are rescaled to match --
@@ -3933,8 +3976,12 @@ function updateGenModalSub() {
         : (hasLayerImage(l)
             ? `Context image: 「${l.name}」's own image. `
             : `Context image: fresh noise at ${n.w} × ${n.h} (this layer is still empty). `);
-    genModalSub.textContent = ctxPart
-        + `Context mask: its own mask. The result replaces this layer's image in place.`;
+    // The destination depends on the target: an image-full layer spawns a copy above, an
+    // empty one is filled in place. Say which, so Confirm never surprises.
+    const destPart = hasLayerImage(l)
+        ? `Context mask: its own mask. The result lands on a new layer above — same size and transform; the source stays untouched.`
+        : `Context mask: its own mask. The result fills this empty layer in place.`;
+    genModalSub.textContent = ctxPart + destPart;
 }
 
 function openGenModal(layerId) {
@@ -5024,10 +5071,16 @@ window.addEventListener('message', event => {
         return;
     }
     if (d.type === 'blend-replace-layer') {
-        // A layer-initiated Generate: the result overwrites the layer it came from. Deliberately
-        // NOT routed through addLayer — that would append a second copy and leave the original's
-        // (now stale) image on the canvas underneath.
-        replaceLayerImage(d.layer_id, d.items && d.items[0]);
+        // A layer-initiated Generate comes back here. An image-less (from-noise) target keeps
+        // the in-place refill — there was nothing to preserve. A target that already carries an
+        // image keeps it: the result lands on a NEW layer above, with the same native resolution
+        // (the backend runs at the layer's own size) and the SAME transform, so it covers
+        // exactly where the source sits. Still NOT addLayer: addLayer would fit-to-canvas and
+        // throw away the transform this result belongs at.
+        const srcLayer = layers.find(x => x.id === d.layer_id);
+        const item = d.items && d.items[0];
+        if (srcLayer && hasLayerImage(srcLayer)) spawnGeneratedLayer(d.layer_id, item);
+        else replaceLayerImage(d.layer_id, item);
         return;
     }
     if (d.type === 'blend-action-result') {
