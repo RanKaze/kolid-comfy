@@ -181,6 +181,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.icon-btn:disabled { opacity: 0.35; cursor: default; }
+.icon-btn:disabled:hover { background: transparent; color: rgba(255,255,255,0.45); }
 
 /* ---- Bottom action toolbar ----
    The composite IS the Context Image, so these buttons are the only exit points:
@@ -1991,6 +1993,11 @@ function eyeSvg(visible) {
     return base.replace('</svg>', '<path d="M2.4 2.4 13.6 13.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>');
 }
 
+// One-click Generate on a layer row — the play triangle mirrors the preset capsule's run half.
+function runSvg() {
+    return '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M5.4 3.2 12.8 8 5.4 12.8z" fill="currentColor"/></svg>';
+}
+
 function paintMaskThumb(el, l) {
     const w = el.width, h = el.height;
     const c = el.getContext('2d');
@@ -2149,7 +2156,7 @@ function renderLayerList() {
             thumb.appendChild(img);
         } else {
             thumb.classList.add('no-image');
-            thumb.title = '1 · No image yet — run Generate (right-click the row) or drop an image here';
+            thumb.title = '1 · No image yet — run Generate (the ▶ on the row, or right-click it) or drop an image here';
             thumb.appendChild(noImageGlyph());
         }
         thumb.addEventListener('click', ev => {
@@ -2215,6 +2222,20 @@ function renderLayerList() {
                 + 'duplicates were blocked. Delete this extra copy, or Blend keeps compositing it.';
         }
 
+        // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
+        // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
+        // renderMaskLayerRow() builds its own head.
+        const hasImg = hasLayerImage(l);
+        const canGen = layerMaskIsMeaningful(l);
+        const run = document.createElement('button');
+        run.className = 'icon-btn';
+        run.innerHTML = runSvg();
+        run.disabled = !canGen;
+        run.title = !canGen ? `「${l.name}」is the Mask layer itself — not a Generate target`
+            : (hasImg ? `Refine「${l.name}」from its own image and mask (nothing painted = the whole layer)`
+                : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
+        run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
+
         const eye = document.createElement('button');
         eye.className = 'icon-btn';
         eye.title = l.visible ? 'Hide layer' : 'Show layer';
@@ -2240,6 +2261,7 @@ function renderLayerList() {
         head.className = 'layer-row-main';
         head.appendChild(thumb);
         head.appendChild(name);
+        head.appendChild(run);
         head.appendChild(eye);
         head.appendChild(del);
 

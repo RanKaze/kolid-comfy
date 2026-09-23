@@ -1914,24 +1914,39 @@ class SnapshotDetailerSamplerNode:
         if user_mask is not None:
             user_mask = user_mask.clone()
             user_mask = (user_mask > 0).float()
+        # First detailer block: Preprocess Settings 就存在它的 params 上（crop_reserve /
+        # recover_crop / pixels / align / enable_mask / enable_limit），所以这两个总闸每个
+        # Pipeline Preset 各自一份。必须在这里先取 —— mask 扩张也要看 enable_mask。
+        first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
+        first_bp = first_detailer.get('params', first_detailer)
+        # Enable Mask 关 = 不做围绕 mask 的三步预处理：grow/blur 归零、不按 mask 裁剪、
+        # 不 recover crop。mask 本身仍然限制重绘区域 —— 关掉的只是它外面那几层。
+        enable_mask = bool(first_bp.get('enable_mask', True))
+        if not enable_mask:
+            mask_grow = 0
+            mask_blur = 0
         expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
 
-        # First detailer block: crop_mask (using its crop_reserve)
         # 整条链（含 interface block）都在 crop 工作区坐标系内运行；run 之前 crop，
         # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
         # 但其输出尺寸须与 crop 工作区连贯（由用户/子图保证，pipeline 内不做 resize）。
-        first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
-        first_bp = first_detailer.get('params', first_detailer)
         first_crop_reserve = int(first_bp.get('crop_reserve', 32))
         # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
         # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
         # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
         do_recover_crop = bool(first_bp.get('recover_crop', True))
-        cropped_image, cropped_mask, crop_info = crop_mask(
-            image=original_image,
-            mask=expanded_mask,
-            reserve=first_crop_reserve
-        )
+        if enable_mask:
+            cropped_image, cropped_mask, crop_info = crop_mask(
+                image=original_image,
+                mask=expanded_mask,
+                reserve=first_crop_reserve
+            )
+        else:
+            # Enable Mask 关：整幅图就是工作区。没有裁剪矩形（crop_info=None），收尾
+            # 也就不走 recover 与「patch 贴回」两条路 —— 产出本身就是整幅结果。
+            cropped_image, cropped_mask, crop_info = original_image, expanded_mask, None
+            print(f"[Detailer] Enable Mask off — no grow/blur, no crop, no recover; "
+                  f"workspace = the full image {tuple(original_image.shape)}")
 
         # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
         # pixels / align 统一取自 first_bp（第一个 detailer block 的参数），取消每个
@@ -1940,14 +1955,27 @@ class SnapshotDetailerSamplerNode:
         limit_pixels_val = int(first_bp.get('pixels', 1048576))
         limit_align = int(first_bp.get('align', 8))
         # QwenImage2.1: crop 尺寸需与 vision token / latent 共享的 32 像素格对齐
-        if arch_qwen_image21.matches(next_pipeline.config):
+        # 即使 Enable Limit 关掉也要保住 —— 它的 latent 网格不接受未对齐尺寸。
+        needs_grid_align = bool(arch_qwen_image21.matches(next_pipeline.config))
+        if needs_grid_align:
             limit_align = arch_qwen_image21.adjust_align(limit_align)
-        resized_image, resized_mask, resize_info = limit_pixels(
-            image=cropped_image,
-            pixels=limit_pixels_val,
-            mask=cropped_mask,
-            align=limit_align,
-        )
+        enable_limit = bool(first_bp.get('enable_limit', True))
+        if not enable_limit and not needs_grid_align:
+            # Enable Limit 关：不缩放也不对齐，工作分辨率 = 裁剪（或整幅）分辨率。
+            resized_image, resized_mask, resize_info = cropped_image, cropped_mask, None
+        else:
+            # 关掉像素预算但架构要求对齐时，把目标定成「当前像素 + 一格」：既不放大也
+            # 不缩小，只让 limit_pixels 把尺寸落到 align 的格子上。
+            budget = limit_pixels_val
+            if not enable_limit:
+                _b, _h, _w, _c = cropped_image.shape
+                budget = _h * _w + 4 * limit_align * limit_align
+            resized_image, resized_mask, resize_info = limit_pixels(
+                image=cropped_image,
+                pixels=budget,
+                mask=cropped_mask,
+                align=limit_align,
+            )
 
         current_image = resized_image
         current_mask = resized_mask
@@ -2276,12 +2304,16 @@ class SnapshotDetailerSamplerNode:
 
                 # Recover to pre-resize (cropped) resolution so next block starts at cropped size
                 if not is_last:
-                    recovered_decoded, _ = recover_size(
-                        image=decoded_image,
-                        resize_info=resize_info,
-                        mask=resized_mask
-                    )
-                    current_image = recovered_decoded
+                    if resize_info is not None:
+                        recovered_decoded, _ = recover_size(
+                            image=decoded_image,
+                            resize_info=resize_info,
+                            mask=resized_mask
+                        )
+                        current_image = recovered_decoded
+                    else:
+                        # Enable Limit 关：从没缩放过，工作区尺寸恒定，无需复原。
+                        current_image = decoded_image
                     current_mask = cropped_mask
                 else:
                     current_image = decoded_image
@@ -2316,7 +2348,10 @@ class SnapshotDetailerSamplerNode:
         # 连同裁剪矩形一起交给前端，由 Blend 画布作为新图层用 transform 贴回原位 ——
         # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
         detail_meta = None
-        if do_recover_crop:
+        if not enable_mask:
+            # Enable Mask 关：整幅工作区即产出，没有裁剪矩形可复原。
+            final_image, final_mask = current_image, current_mask
+        elif do_recover_crop:
             if last_resize_info is not None:
                 recovered_image, recovered_mask = recover_size(
                     image=current_image,
@@ -2353,7 +2388,7 @@ class SnapshotDetailerSamplerNode:
 
         # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
         # 只是画布上的一块 patch，更不能顶替整幅 context，故保持原合成图。
-        next_pipeline.image = final_image if do_recover_crop else original_image
+        next_pipeline.image = final_image if (enable_mask and do_recover_crop) else original_image
         next_pipeline.latent = None
         next_pipeline.mask = user_mask
 
