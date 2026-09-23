@@ -543,6 +543,138 @@ Qwen-Image-2.1 编辑参数配置。设置参考图缩放边长（`config["qwen_
 
 **输出:** `pipeline` (PIPELINE_DATA)
 
+#### 图像随 Enable Edit 一起送入（多模态）
+
+当某个 Detailer block 满足「`Enable Edit` 开着」时，会把图一并送进 Generate Text —— 文本编码器可以**看着图**改写提示词，而不再只依赖文字。
+
+**送图规则（按顺序）：**
+
+1. **第一张 = `pipeline.image`** —— 链上传递的那张工作图（pipeline 就是靠它在 block 间传图；interface 块会写回，detailer 块不改它）。
+2. **之后追加 Ref Image** —— 该 block 选中的 `context_reference_key`，**能传几张传几张**。
+3. **`Enable Edit` 关闭 → 完全不传图**（不做隐藏行为，与 Edit 语义一致）。
+4. **interface 路径不传图**：interface 块没有 Enable Edit / Ref Image 概念，始终纯文本。
+
+多图**不自己拼批次**，而是按 ComfyUI 原生约定交给编码器：`images=<list of [1,H,W,C]>`
+（详见下节）。尺寸与首图不一致的后续图会被**跳过**（绝不 resize，避免改变语义）。
+
+> ⚠️ `clip` 必须是**多模态**文本编码器（如 Gemma 3 vision、Qwen-VL）。纯文本编码器不接受图像，此时会**静默降级为纯文本**（日志出现 `images rejected ... retrying text-only`），不会中断采样链。
+
+##### ★★ 直接对齐 ComfyUI 原生 Generate Text 的送图设计
+
+送图这件事上，我们**不做自己的发明**，逐项对齐 ComfyUI 原生实现。关键事实（均来自本地
+ComfyUI 0.37.0 源码）：
+
+**① 原生的 `image=` 与「其他所有节点」的 `images=` 其实是同一条路。**
+
+```python
+# comfy_extras/nodes_textgen.py:49-56 —— 唯一用 image=（单数）的原生节点
+@classmethod
+def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False,
+            use_default_template=True, video=None, audio=None, mtp="auto", system_prompt=""):
+    tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template,
+                           min_length=1, thinking=thinking, video=video, audio=audio,
+                           system_prompt=system_prompt if use_default_template else "")
+
+# comfy/text_encoders/qwen3vl.py:162-165 —— image= 只是在内部拆成同一份 list
+def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[],
+                          prevent_empty_text=False, thinking=False, skip_template=False,
+                          system_prompt="", **kwargs):
+    image = kwargs.get("image", None)
+    if image is not None and len(images) == 0:
+        images = [image[i:i + 1] for i in range(image.shape[0])]   # ← 就是这一行
+```
+
+而**其他所有**把图交给文本编码器的原生节点，用的都是 `images=`（list of `[1,H,W,C]`）：
+
+| 文件 | 行 | 形态 |
+|------|----|------|
+| `nodes_qwen.py` | 43, 47 | `images = [image[:, :, :, :3]]` → `tokenize(prompt, images=images)` |
+| `nodes_joyimage.py` | 54, 55 | `[_resize_reference(i) for i in images]` → `tokenize(prompt, images=resized_images)` |
+| `nodes_minimax_h3.py` | 143–156 | `images.append(img)` → `tokenize(prompt, images=images)` |
+| `nodes_boogu.py` | 66, 78 | `images_vl.append(s.movedim(1, -1)[:, :, :, :3])` → `tokenize(prompt, images=images_vl)` |
+
+两条路在编码器里汇成**同一份** `images` list，所以**语义完全等价**；我们统一走 `images=`
+（原生规范入口、兼容面更宽），只有调原生 `TextGenerate.execute` 时才用它的 `image=`
+形参（把 list 拼回 `[B,H,W,C]`）。因此 `normalize_ref_images(..., single=True)` → list，
+`single=False` → 批次，两形态张数一致。
+
+**② 图像形状契约（别用错）**：`comfy/text_encoders/qwen_vl.py:process_qwen2vl_images`
+要求 **BHWC**（它第一件事就是 `batch_size, height, width, channels = images.shape`
+然后 `permute(0,3,1,2)`），且内部只用 `images[0]`。ComfyUI 的 IMAGE 本身就是
+`[B,H,W,C]` float，所以**原样透传即可，不要 movedim、不要归一化**。
+
+**③ `use_default_template` 是图能不能生效的总开关**（最容易误判的一种失败）：
+
+这是最容易误判的一种失败：日志里明明打出 `images attached … → batch=[…]`，也调到了
+`clip.tokenize(..., image=...)`，**但生成结果和图毫无关系**。根因在 ComfyUI 侧：
+
+```python
+# comfy_extras/nodes_textgen.py:53
+tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, ...)
+
+# comfy/text_encoders/qwen3vl.py:167-172
+skip_template = skip_template or text.startswith('<|im_start|>')
+if skip_template:
+    llama_text = text            # ← 直接吐原始文本：不套模板
+else:
+    template = self.llama_template_images      # ← 只有这条才带 <|vision_start|><|image_pad|><|vision_end|>
+    ...
+# 之后才按 151655（<|image_pad|>）把图塞成 {'type': 'image', 'data': …}
+```
+
+也就是说，**`use_default_template=False` ⇒ `skip_template=True` ⇒ 模板被绕过 ⇒ token 流里
+一个 `<|image_pad|>` 都没有 ⇒ 图被彻底丢弃，而表面上「成功传入」**。
+
+所以想让它生效，必须同时满足：
+
+1. Pipeline 里 `use_default_template = True`（默认就是 True，**别关**）；
+2. `clip` 是多模态编码器（Gemma 3/4 vision、Qwen3-VL 家族…）。
+
+**自动诊断**：`_preflight_generate_text_images()`（`nodes/snapshot_sampler_node.py`）会在真正
+生成之前**实测一次 `clip.tokenize`**，把 token 流里的 image embedding 数出来，三态结论：
+
+| 结论 | 含义 |
+|------|------|
+| `已确认生效 — N 个 image embedding 进入 token 流（M 张图）` | 图真的会参与生成 |
+| `★ 不会生效 — …`（绕过模板 / 非多模态 / 图不可用） | 传了也是白传，日志与 Debug 都会点明原因 |
+| `未验证（tokenize 探针失败: …）` | 探测本身失败（fail-open，不影响采样链） |
+
+该结论会写进 Run Debug 的 `c)` 条目（`image_status` 字段）并打到日志
+（`[GenerateText] [block N] image status: …`），所以**不用再靠感觉判断**。
+
+> **注意：`use_default_template=True` 并不保证图一定生效。** 编码器可能不是多模态、
+> 或视觉模板里没有可替换的 pad 槽。所以运行时还有一道**独立的实测闸门**（见下）。
+
+##### ★ 运行时硬闸门：图没变成 embedding 就绝不假装成功
+
+`run_generate_text()` 在生成前会**用同一个 clip 单独跑一次 `tokenize`** 并数 image
+embedding（`_tokens_contain_image_embedding`）：
+
+- **有 embedding** → 打印 `image embedding CONFIRMED: N embedded (the image WILL affect the result)`，正常生成；
+- **没有 embedding** → 打印 `★ image embedding MISSING …`，**闸掉原生路径**，并在回退路径里
+  主动抛错，由降级链**丢掉图重试纯文本**（日志 `images rejected … retrying text-only`）。
+
+也就是说「传了图但图没生效」**永远不会被当成成功**：要么图真的生效，要么明确降级为纯文本并留下日志。
+这道闸门不依赖 `use_default_template` 的取值推断，只看 token 流里实际有没有 image embedding。
+
+兼容性探测还有两个坑，都已在 `libs/generate_text_utils.py` 里处理：
+
+1. `CLIP.tokenize` 的真实签名是 `(text, return_word_ids=False, **kwargs)` —— 多模态关键字全藏在 `**kwargs` 里。因此**不能**用「`images`/`image` 不在形参列表」判定「不支持图像」，否则真机上会永久降级、功能静默失效。判定必须认 `VAR_KEYWORD`。
+2. `TextGenerate.execute` 若确实没有 `image` 形参（旧版本），则**明确抛错**触发降级，而不是把 `image` 悄悄丢掉后假装成功。
+
+**★ 探针必须和运行时走同一条入口**：`_preflight_generate_text_images()` 曾经写成
+`clip.tokenize(batch, skip_template=…, min_length=1)` —— 把**图当成 `text` 传**，于是
+`images` 永远为空、token 流里永远没有 image embedding，Debug 里长期**假报「图不会生效」**，
+和 `run_generate_text` 的实测结论自相矛盾。现在两处都是
+`clip.tokenize(<text>, images=<list of [1,H,W,C]>, skip_template=…, min_length=1, …)`，
+并且探针用了非空文本（`'x'` + `prevent_empty_text=True`）。
+
+> ⚠️ `_tokens_contain_image_embedding` 的下探层级必须与 ComfyUI 一致：
+> `tokens[key] = [batch]` → `batch = [token_entry]` → `token_entry = [(elem, weight), …]`，
+> image dict 在**第三层**。只扫两层会 100% 漏判，诊断会变成「永远说图没生效」的假报警。
+
+**Debug 可见性**：Debug Modal 里每个送图的 block 会有 `c1)` / `c2)` … 条目（`Generate Text 输入图 — pipeline.image（链上工作图）` / `… — Ref Image（<key>）`），点击放大即可看到**实际送进去的每一张图**；`c)` 条目标注送入张数，`d)` 标注意为 `images_sent`。
+
 ---
 
 ### Run Debug Trace（Draw tab 的 🐞 Debug 按钮）
@@ -572,7 +704,8 @@ Run / Generate 的全过程快照**：各阶段 prompt（含 Generate Text 前�
 5. 链条开头：原始输入图 / 未扩张 mask / 扩张后 mask / 裁剪+缩放后工作图与 mask
 6. 每个 block：
    - `a) context 解出` / `b) context + user_positive 拼接`
-   - `c) Generate Text 输入` / `d) Generate Text 输出`（启用时）
+   - `c) Generate Text 输入` / `c1) c2) … Generate Text 输入图` / `d) Generate Text 输出`（启用时）
+     —— 每张**真正送进 Generate Text 的图**单独一条，标注来源（`pipeline.image（链上工作图）` 或 `Ref Image（<key>）`）并可点击放大
    - `e) 最终 positive`（含 negative / loras / query 追加）
    - 输入工作图与 mask、采样解码输出、复原到裁剪分辨率的图
 7. `Prompt 块生效后` / `Query 块回答后`（这两类 block）
