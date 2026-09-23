@@ -43,6 +43,14 @@ export interface DetailerBlockParams {
   /** 关掉时不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，
    *  作为新图层由 Blend 画布用 transform 贴回原位；开 = 合成回整幅图（原行为）。 */
   recover_crop?: boolean;
+  /** Preprocess Settings 的 Enable Mask 总闸（默认开）。关 = 不做 mask 扩张/羽化
+   *  （grow/blur 归零）、不按 mask 裁剪（crop_reserve 无效）、不 recover crop；
+   *  产出直接落在整幅图坐标系。mask 本身仍然限制重绘区域。 */
+  enable_mask?: boolean;
+  /** Preprocess Settings 的 Enable Limit 总闸（默认开）。关 = 不做像素上限，
+   *  也不做 align 对齐（工作分辨率 = 裁剪/整幅分辨率）。Qwen 架构例外：仍会
+   *  强制 32 对齐，否则 latent / vision token 网格不接受。 */
+  enable_limit?: boolean;
   enable_edit: boolean;
   /** Krea2 source-patch 编辑模式: fit = 整图适配 + stride-1 位置（防模糊）; crop = center-crop 几何 */
   edit_mode?: 'fit' | 'crop';

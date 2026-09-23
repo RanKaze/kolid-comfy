@@ -85,13 +85,14 @@ const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   }
 };
 
-const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void }> = ({ checked, onChange }) => (
+const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }> = ({ checked, onChange, disabled }) => (
   <div
-    onClick={() => onChange(!checked)}
+    onClick={() => { if (!disabled) onChange(!checked); }}
     style={{
       width: 36, height: 22, borderRadius: 22,
       background: checked ? '#30d158' : '#39393d',
-      position: 'relative', transition: 'background 0.2s ease', flexShrink: 0, cursor: 'pointer',
+      position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
+      cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1,
     }}
   >
     <div style={{
@@ -373,6 +374,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
   const firstDetailer = blocks.find(b => b.type === 'detailer');
   const firstDp = firstDetailer ? (firstDetailer.params as DetailerBlockParams) : undefined;
+  // Preprocess Settings 的两个总闸也放在第一个 detailer block 上（与 crop_reserve / pixels
+  // / align 同源），所以每个 Pipeline Preset 各自一份，默认开。关掉不只是灰掉 UI —— 后端
+  // 会真的跳过对应步骤。
+  const enableMask = firstDp ? (firstDp.enable_mask ?? true) : true;
+  const enableLimit = firstDp ? (firstDp.enable_limit ?? true) : true;
 
   // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
@@ -598,6 +604,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               {/* Global params — sits between the tab bar and the block list: pick the active
                   set above, tune its first detailer's crop/pixels here, then see the blocks. */}
               <div style={styles.sectionTitle}>Preprocess Settings</div>
+              <div style={styles.paramRow}
+                title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
+                <label style={styles.paramLabel}>Enable Mask</label>
+                <IOSToggle
+                  checked={enableMask}
+                  disabled={!firstDp}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_mask', v)}
+                />
+              </div>
+              <div style={{ opacity: enableMask ? 1 : 0.4, pointerEvents: enableMask ? 'auto' : 'none' }}>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Grow</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
@@ -624,9 +640,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <label style={styles.paramLabel}>Recover Crop</label>
                 <IOSToggle
                   checked={firstDp ? (firstDp.recover_crop ?? true) : true}
+                  disabled={!enableMask}
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'recover_crop', v)}
                 />
               </div>
+              </div>
+              <div style={styles.paramRow}
+                title="开 = 按 Pixels / Align 限制工作分辨率。关 = 既不缩放也不对齐，工作分辨率就是裁剪（或整幅）分辨率；Qwen 架构仍会强制 32 对齐，否则 latent / vision token 网格不接受。">
+                <label style={styles.paramLabel}>Enable Limit</label>
+                <IOSToggle
+                  checked={enableLimit}
+                  disabled={!firstDp}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
+                />
+              </div>
+              <div style={{ opacity: enableLimit ? 1 : 0.4, pointerEvents: enableLimit ? 'auto' : 'none' }}>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Pixels</label>
                 <input
@@ -653,7 +681,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'align', parseInt(e.target.value))}
                 />
               </div>
-
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
                 <div style={styles.sectionTitle}>Pipeline Blocks</div>
                 <button
