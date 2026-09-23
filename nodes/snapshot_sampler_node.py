@@ -32,6 +32,7 @@ from ..libs.mask_utils import expand_mask
 from ..libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
 from .sampler_node import get_loras_from_string
+from ..libs.generate_text_utils import apply_generate_text_to_prompt
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
 import uuid
@@ -2187,6 +2188,24 @@ class SnapshotDetailerSamplerNode:
                 # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
                 context_positive, context_negative, context_loras = next_pipeline.context.get_context(block_context_regex)
                 current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+                # Generate Text（MARKER_GENERATE_TEXT_BLOCK）：上游 Pipeline 若启用了
+                # PipelineEnableGenerateTextNode，就把指令 prompt 与当前 positive 拼起来
+                # 交给文本生成 CLIP，用生成结果完全替换 current_positive。
+                # 只在 config 里开开关，参数与 clip 都来自上游节点，此处不做任何 UI。
+                if next_pipeline.config.get('enable_generate_text'):
+                    try:
+                        current_positive, _gt_used = apply_generate_text_to_prompt(
+                            next_pipeline, current_positive,
+                            next_pipeline.config.get('generate_text_prompt', ''),
+                            label=f' [block {i + 1}]')
+                        if _gt_used:
+                            print(f'[PipelineBlock {i + 1}/{len(blocks)}] Generate Text applied: '
+                                  f"positive='{current_positive[:200]}' ({len(current_positive)} chars)")
+                    except Exception as e:
+                        # fail-open：生成失败保留原 prompt，不中断整条链
+                        import traceback
+                        traceback.print_exc()
+                        print(f'[PipelineBlock {i + 1}] WARNING: Generate Text failed ({e}) — keeping previous prompt')
                 current_negative = context_negative
                 current_loras = context_loras.copy()
                 current_loras.extend(get_loras_from_string(user_loras))
@@ -2491,6 +2510,21 @@ class SnapshotDetailerSamplerNode:
         # pipeline 上下文；chain 模式完全通过 pipeline 传递，不在此解析 prompt/lora。
         if not chain_mode:
             user_positive, user_loras = self._parse_prompt(server.prompt_server)
+            # Generate Text（MARKER_GENERATE_TEXT_INTERFACE）：独立 interface tab 时，
+            # 上游 pipeline 若启用了 PipelineEnableGenerateTextNode，同样在 prompt
+            # 注入点替换 positive（与 Draw tab block 链的语义保持一致）。
+            if injected_pipeline and injected_pipeline.config.get('enable_generate_text'):
+                try:
+                    user_positive, _gt_used = apply_generate_text_to_prompt(
+                        injected_pipeline, user_positive,
+                        injected_pipeline.config.get('generate_text_prompt', ''),
+                        label=' [interface]')
+                    if _gt_used:
+                        print(f"[interface] Generate Text applied: positive='{user_positive[:200]}'")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f'[interface] WARNING: Generate Text failed ({e}) — keeping previous prompt')
             if injected_pipeline and (user_positive or user_loras):
                 from .sampler_node import SamplerContext
                 entry = SamplerContext()

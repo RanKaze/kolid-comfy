@@ -1,3 +1,0 @@
-﻿=== comfy_extras text_gen ===
-C:\Users\Klein_Blue\AppData\Local\Programs\ComfyUI\resources\ComfyUI\comfy_api_nodes\nodes_bytedance_llm.py
-C:\Users\Klein_Blue\AppData\Local\Programs\ComfyUI\resources\ComfyUI\comfy_api_nodes\apis\bytedance_llm.py

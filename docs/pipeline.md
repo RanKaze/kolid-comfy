@@ -514,6 +514,37 @@ Qwen-Image-2.1 编辑参数配置。设置参考图缩放边长（`config["qwen_
 
 ---
 
+### PipelineEnableGenerateTextNode
+
+启用 Generate Text。对齐 ComfyUI 的 `Generate Text`（`TextGenerate`）节点：开启后，把本节点的 `prompt`（指令）与 pipeline 中的 positive 提示词拼成 `prompt\n\npositive`，交给一个**文本生成** CLIP（Gemma / Qwen 等 LLM 编码器）生成新文本，然后用生成结果**完全替换** positive。
+
+> 注意：`clip` 必须是**能生成文本**的编码器（如 Gemma 3），普通 SD/SDXL/Flux 的文本编码器没有 `generate` 方法，会失败。
+
+设置写入 `config["enable_generate_text"] / ["generate_text_prompt"] / ["generate_text"]`，可选 `["generate_text_clip"]`；真正的生成发生在采样链的 prompt 注入点（`_run_pipeline_blocks` 的每个 Detailer block、以及照 `_parse_prompt` 之后的 interface 路径）。
+
+| 输入 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| pipeline | PIPELINE_DATA | ✅ | 管线数据 |
+| enable | BOOLEAN | ✅ | 是否启用（默认 True；prompt 为空时自动视为关闭） |
+| prompt | STRING | ✅ | 指令 prompt（多行）。与 positive 拼接后送入 Generate Text |
+| max_length | INT | ✅ | 最大生成 token 数 1-32768（默认 512） |
+| sampling_mode | COMBO | ✅ | on / off（默认 on）。off = 不采样（贪心解码） |
+| temperature | FLOAT | ✅ | 0.01-2.0（默认 0.7） |
+| top_k | INT | ✅ | 0-1000（默认 64，0 = 关闭该过滤） |
+| top_p | FLOAT | ✅ | 0.0-1.0（默认 0.95） |
+| min_p | FLOAT | ✅ | 0.0-1.0（默认 0.05） |
+| repetition_penalty | FLOAT | ✅ | 0.0-5.0（默认 1.05，1.0 = 无惩罚） |
+| presence_penalty | FLOAT | ✅ | 0.0-5.0（默认 0.0） |
+| thinking | BOOLEAN | ✅ | 模型支持时启用思考模式（默认 False） |
+| use_default_template | BOOLEAN | ✅ | 使用模型内置 system prompt/模板（默认 True） |
+| mtp | COMBO | ✅ | 投机解码：auto / off / 2 / 3 / 4 / 5（默认 auto）。无 MTP 权重时无效 |
+| seed | INT | ✅ | 随机种子，带 control_after_generate（默认 0） |
+| clip | CLIP | ❌ | 生成用 CLIP。未连接时回落 pipeline 自带 clip |
+
+**输出:** `pipeline` (PIPELINE_DATA)
+
+---
+
 ### PipelineEnableQwenEditNode
 
 启用 QwenEdit 模式。设置 config["enable_qwen_edit"]。
