@@ -1896,7 +1896,7 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None):
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt=''):
         seed = global_params['seed']
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
@@ -2113,6 +2113,10 @@ class SnapshotDetailerSamplerNode:
                     # 只影响其后的 detailer。取消/超时 = 中止整条链（用户明确要求）。
                     answer = self._await_query_answer(server, block, i)
                     user_positive, user_loras = self._resolve_prompt_selection(server, answer)
+                    # Extra Prompt has the final append: a Query block replaces the prompt-tab
+                    # content, but the extra typed in Blend right now must survive it.
+                    if extra_prompt:
+                        user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                     print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
                           f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                     continue
@@ -2128,6 +2132,10 @@ class SnapshotDetailerSamplerNode:
                         continue
                     try:
                         user_positive, user_loras = self._resolve_prompt_block(server, bp)
+                        # Extra Prompt has the final append: a prompt block replaces the prompt-tab
+                        # content, but the extra typed in Blend right now must survive it.
+                        if extra_prompt:
+                            user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                         print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
                               f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                     except Exception as e:
@@ -2741,6 +2749,8 @@ class SnapshotDetailerSamplerNode:
                         extra_prompt = (action.get('extra_prompt') or '').strip() if from_blend else ''
                         if extra_prompt:
                             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
+                        if extra_prompt:
+                            print(f"[run_detailer] extra prompt appended: '{extra_prompt}'")
 
                         # 遮罩必须存在，否则 detailer 无意义
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
@@ -2799,7 +2809,8 @@ class SnapshotDetailerSamplerNode:
                         blocks = preset_set['blocks'] if preset_set is not None else server.blocks
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
-                            run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server
+                            run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server,
+                            extra_prompt=extra_prompt
                         )
 
                         server.original_image = original_image
