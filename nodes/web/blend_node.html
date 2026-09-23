@@ -131,7 +131,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* A leftover duplicate: this history image already backs another row (see renderLayerList). */
 .layer-row.duplicate-layer { border-color: rgba(255,159,10,0.6); }
 .layer-row.duplicate-layer .layer-name { color: #ffb340; }
-.layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
 .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
 /* An image-less layer (Default / Dynamic Layer, before a Generate fills it in) has no `src`, so a
    real <img> would render the browser's broken-image glyph. Show a deliberate red X instead. */
@@ -148,7 +148,12 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
 .layer-thumb.decal-thumb canvas { width: 100%; height: 100%; display: block; }
 .layer-thumb.active { box-shadow: inset 0 0 0 2px #fff; }
-.layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.layer-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.layer-type-badge svg { width: 9px; height: 9px; display: block; }
+.layer-type-badge.smart { color: #9ecbff; }
+.layer-type-badge.raster { color: #ffcf6e; }
+.layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
 /* The pure Mask layer pins to the top of the list and lives outside `layers`: it is a data
    channel handed to the backend (alpha = coverage), never something that gets composited. */
 .layer-row.mask-layer-row { background: rgba(255,59,48,0.10); }
@@ -381,6 +386,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-head">
                     <div class="panel-label" id="canvasLabel" title="The canvas keeps its resolution while layers come and go. Until you set one by hand it grows to fit the largest layer at its native resolution, so placed images are never resampled.">Canvas</div>
                     <button class="mini-btn" id="canvasSizeBtn" title="Set a fixed canvas resolution. Until you set one the canvas follows the bottom layer; image files can also be dropped onto the canvas to become layers.">Canvas Size…</button>
+                    <button class="mini-btn" id="canvasModifyBtn" title="Modify — drag the canvas border to resize it. Smart layers keep their pixels (top-left anchored); raster layers resample to the new canvas. Enter applies, Esc cancels.">Modify</button>
                 </div>
                 <div class="panel-hint" id="canvasReadout" style="display:none;"></div>
             </div>
@@ -487,6 +493,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                                 title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
                             <span class="io-menu-title">Dynamic Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
+                        </button>
+                        <button class="io-menu-item" id="addRasterToggleBtn" role="menuitemcheckbox" aria-checked="false"
+                                title="When on, images added from here on — dropped files, Import picks and history injections — become raster layers: their buffer is the canvas, 1:1, and every transform resamples the pixels in place. One-way; rasterize a smart layer from its right-click menu instead.">
+                            <span class="io-menu-title"><span id="addRasterCheck" style="display:none;">&#10003;&nbsp;</span>Place images as raster</span>
+                            <span class="io-menu-sub" id="addRasterSub">Off — new image layers keep their original pixels (smart objects).</span>
                         </button>
                     </div>
                 </div>
@@ -640,7 +651,7 @@ viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, ri
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
 let layers = [];
 let selectedId = null;
-let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'none'
+let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'none'
 
 // The pure Mask layer. It deliberately does NOT live in `layers`: ordering, deletion,
 // transform, composition and thumbnails all stay untouched, and `render()` never draws it
@@ -731,6 +742,25 @@ let rectArmed = false;
 let cursorInside = false;
 let statusTimer = null;
 
+// Raster layers: the buffer IS the canvas — one image pixel per canvas pixel, transform locked
+// to the identity. A transform drag resamples the pixels in place (destructive, committed when
+// the drag ends); painting mask / decal lands 1:1 in canvas space with no layer-space mapping.
+let rasterDrop = false;        // Add ▸ "Place images as raster": new image layers become raster
+const RASTER_DROP_KEY = 'blend.rasterDrop';
+try { rasterDrop = localStorage.getItem(RASTER_DROP_KEY) === '1'; } catch (e) { /* private mode: default off */ }
+
+// Canvas Modify: the button arms a border-drag mode. While it is active the canvas globals hold
+// the TENTATIVE size (the whole scene re-renders through it); Esc rewinds from the snapshot,
+// Enter finalises it. `modSnapshot` shares image and paint-surface references with the live
+// layers — nothing is copied, so it costs nothing and cannot go stale mid-drag.
+let modDrag = null;            // {handle, anchor:{x,y}, baseW, baseH, startLayers:Map(id→transform), startCustom, moved}
+let modSnapshot = null;
+
+// Expand (smart object): border-drag that changes the layer's NATIVE resolution. Live preview
+// only moves the transform; Enter resamples the source image (and mask / decal) to the new box,
+// Esc restores the transform. Rotation stays whatever it was — resize only.
+let expandState = null;        // {layerId, startTransform}
+
 const HANDLE_UV = { nw: [-1, -1], n: [0, -1], ne: [1, -1], e: [1, 0], se: [1, 1], s: [0, 1], sw: [-1, 1], w: [-1, 0] };
 const HANDLE_CURSOR = { nw: 'nwse-resize', n: 'ns-resize', ne: 'nesw-resize', e: 'ew-resize', se: 'nwse-resize', s: 'ns-resize', sw: 'nesw-resize', w: 'ew-resize', rotate: 'grab' };
 
@@ -809,6 +839,86 @@ function sizeCanvasElement() {
     blendCanvas.height = canvasH;
     blendCanvas.style.width = canvasW + 'px';
     blendCanvas.style.height = canvasH + 'px';
+}
+
+// ==================== 光栅图层 ====================
+// A raster layer's pixel grid is welded to the canvas: buffer = canvas size, transform = the
+// identity, forever. Every geometry edit (transform drag, canvas resize, Expand-free by
+// definition) is a destructive resample of that buffer — the "smart object" layers keep their
+// original pixels and map them through `transform`, raster layers have nothing left to preserve.
+function isRasterLayer(l) { return !!l && !!l.raster && !l.isMaskLayer; }
+
+// Draws `source` through `tr` (canvas-relative transform) into a w×h canvas.
+function renderTransformedSurface(source, tr, w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    const ctx = c.getContext('2d');
+    ctx.save();
+    ctx.translate(tr.cx * canvasW, tr.cy * canvasH);
+    ctx.rotate(tr.rotation);
+    ctx.drawImage(source, -tr.w * canvasW / 2, -tr.h * canvasH / 2, tr.w * canvasW, tr.h * canvasH);
+    ctx.restore();
+    return c;
+}
+
+// Swaps a raster layer's buffer for a canvas-sized resample of its current pixels.
+function rasterResampleBuffer(l, w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    c.getContext('2d').drawImage(l.img, 0, 0, c.width, c.height);
+    l.img = c;
+    if (l.src) l.src = c.toDataURL('image/png');
+    // Mask and decal live in layer space; for a raster layer that space IS the canvas, so they
+    // stretch with it — exactly what the identity transform would do to them at composite time.
+    const stretch = s => {
+        if (!s) return null;
+        const nc = document.createElement('canvas');
+        nc.width = c.width; nc.height = c.height;
+        nc.getContext('2d').drawImage(s, 0, 0, nc.width, nc.height);
+        return nc;
+    };
+    if (l.mask) { l.mask = stretch(l.mask); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.decal) { l.decal = stretch(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+}
+
+// Smart object → raster: bakes the current transform into a canvas-sized buffer. One-way (PS
+// "Rasterize"): the original pixels and the history key are dropped, because the buffer from
+// here on is whatever the canvas resolution demands.
+function rasterizeLayer(l) {
+    if (!l || l.isMaskLayer || !l.img || !canvasW || !canvasH) return false;
+    if (isRasterLayer(l)) return false;
+    l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
+    l.raster = true;
+    if (l.key) { injectedKeys.delete(l.key); l.key = null; }
+    l.src = l.img.toDataURL('image/png');
+    // Paint surfaces resample into the layer's new (canvas) space so existing strokes keep
+    // their on-canvas position; painting from here on is 1:1.
+    const remap = s => {
+        if (!s) return null;
+        return renderTransformedSurface(s, l.transform, canvasW, canvasH);
+    };
+    if (l.mask) { l.mask = remap(l.mask); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.decal) { l.decal = remap(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+    l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    return true;
+}
+
+// Every raster layer resamples into the new canvas size. Used by every canvas-resize path —
+// the 1:1 invariant leaves no other choice; smart layers keep pixels or stretch per the caller.
+function resampleRasterLayers(w, h) {
+    for (const l of layers) if (isRasterLayer(l) && l.img) rasterResampleBuffer(l, w, h);
+}
+
+// A transform drag on a raster layer moved the (temporarily non-identity) transform: bake it.
+// The buffer was rendered through the dragged transform once — that IS the resample — and the
+// transform snaps back to the identity, restoring the 1:1 invariant.
+function commitRasterTransform(l) {
+    if (!isRasterLayer(l) || !l.img) return;
+    l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
+    if (l.src) l.src = l.img.toDataURL('image/png');
+    l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
 }
 
 // ==================== 纯 Mask 层 ====================
@@ -1058,8 +1168,8 @@ function renderLayerToScratch(l, w, h) {
 }
 
 // Auto canvas = the smallest box that fits every layer at its OWN native resolution (per axis).
-// Placing a bigger image therefore grows the canvas instead of shrinking the image: layer pixels
-// are never resampled on placement, they are only rasterised when the canvas is composited.
+// Only consulted for the FIRST layer on an empty canvas (see applyCanvasSize): afterwards the
+// size is the user's alone, so a later bigger image no longer grows the canvas.
 function autoCanvasSize() {
     let w = 0, h = 0;
     for (const l of layers) {
@@ -1083,6 +1193,9 @@ function autoCanvasSize() {
 function rescaleLayersForCanvas(oldW, oldH, newW, newH) {
     if (!(oldW > 0 && oldH > 0)) return;
     for (const l of layers) {
+        // Raster layers do not re-express: their transform is pinned to the identity and their
+        // buffer resamples to the new canvas instead (resampleRasterLayers, by the caller).
+        if (isRasterLayer(l)) continue;
         const tr = l.transform;
         tr.cx = (tr.cx * oldW - oldW / 2 + newW / 2) / newW;
         tr.cy = (tr.cy * oldH - oldH / 2 + newH / 2) / newH;
@@ -1091,7 +1204,10 @@ function rescaleLayersForCanvas(oldW, oldH, newW, newH) {
     }
 }
 
-// Derives the canvas from the layers — only until the size is set manually.
+// The canvas size belongs to TWO parties only: the first layer placed on an empty canvas
+// (which derives it via autoCanvasSize) and the user (Canvas Size modal / Canvas Modify).
+// Every later layer — dropped, generated, replaced — must live with the canvas as it is;
+// letting a bigger image grow the canvas would silently move every other layer's geometry.
 function applyCanvasSize() {
     if (!layers.length) {
         canvasCustom = false;
@@ -1101,7 +1217,7 @@ function applyCanvasSize() {
         updateCanvasReadout();
         return false;
     }
-    if (canvasCustom) { ensureMaskLayer(); updateCanvasReadout(); return false; }
+    if (canvasCustom || canvasW > 0) { ensureMaskLayer(); updateCanvasReadout(); return false; }
     const src = autoCanvasSize();
     if (src.w === canvasW && src.h === canvasH) { ensureMaskLayer(); updateCanvasReadout(); return false; }
     const oldW = canvasW, oldH = canvasH;
@@ -1110,6 +1226,7 @@ function applyCanvasSize() {
     rescaleLayersForCanvas(oldW, oldH, canvasW, canvasH);
     // The mask is canvas-space, so it shifts with the layers rather than stretching.
     ensureMaskLayer(true);
+    resampleRasterLayers(canvasW, canvasH);
     updateCanvasReadout();
     return true;
 }
@@ -1130,6 +1247,8 @@ function setCanvasSize(w, h, scaleLayers) {
     sizeCanvasElement();
     // Stretched layers ⇒ the mask stretches too; kept-pixel layers ⇒ the mask re-anchors with them.
     ensureMaskLayer(!scaleLayers);
+    // Raster layers are welded to the canvas either way: their buffer resamples to the new size.
+    resampleRasterLayers(canvasW, canvasH);
     if (oldW > 0 && oldH > 0 && !view.autoFit) {
         // Resize around the visible center instead of the (0,0) corner.
         const sp = docToScreen({ x: oldW / 2, y: oldH / 2 });
@@ -1157,6 +1276,8 @@ function updateCanvasReadout() {
         const text = canvasW && canvasH ? `${canvasW} × ${canvasH}` : 'Canvas Size…';
         if (btn.textContent !== text) btn.textContent = text;
     }
+    const modifyBtn = document.getElementById('canvasModifyBtn');
+    if (modifyBtn) modifyBtn.disabled = !canvasW;
     const el = document.getElementById('canvasReadout');
     if (el) setReadout(el, canvasW && canvasH ? (canvasCustom ? 'Fixed' : 'Follows the bottom layer') : '');
 }
@@ -1295,6 +1416,7 @@ function refreshCursor() {
     // even when the toolbar is on some other tool.
     if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
     if (mode === 'transform' && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
+    if (adjustModeActive() && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     setCursor('default');
 }
 
@@ -1382,6 +1504,17 @@ function updateHoverCursor(sp, docPos) {
     // Ctrl borrows the Mask tool's ring cursor even when another tool is active, so the shortcut
     // looks like what it does.
     if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
+    if (mode === 'canvasModify') {
+        const h = hitCanvasHandle(sp);
+        setCursor(h ? HANDLE_CURSOR[h] : 'default');
+        return;
+    }
+    if (mode === 'expand') {
+        const el = expandState ? getLayer(expandState.layerId) : null;
+        const h = el ? hitHandleScreen(sp, docPos, el) : null;
+        setCursor(h && h !== 'rotate' ? HANDLE_CURSOR[h] : 'default');
+        return;
+    }
     if (mode !== 'transform') { setCursor('default'); return; }
     const l = getSelected();
     let cursor = 'default';
@@ -1414,7 +1547,10 @@ function layerSource(l) {
 
 function drawLayer(l) {
     if (!l.visible || !l.img) return;
-    const tr = l.transform;
+    // While Expand is armed, the live transform belongs to the dragged border, not the image:
+    // Expand only re-resolves the layer's own resolution, so the pixels must stay exactly where
+    // they are while the box grows — committing bakes that same geometry into the new buffer.
+    const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
     blendCtx.save();
     blendCtx.translate(tr.cx * canvasW, tr.cy * canvasH);
@@ -1442,7 +1578,8 @@ function paintCanvasThumb(el, l) {
         thumbCtx.beginPath();
         thumbCtx.rect(0, 0, dw, dh);
         thumbCtx.clip();
-        const tr = l.transform;
+        // Same rule as drawLayer: while Expand is armed the image does not follow the dragged box.
+        const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
         const tw = tr.w * dw, th = tr.h * dh;
         thumbCtx.translate(tr.cx * dw, tr.cy * dh);
         thumbCtx.rotate(tr.rotation);
@@ -1584,6 +1721,7 @@ function rectBoxUsable(b) { return b.w >= 2 && b.h >= 2; }
 
 // Arms the mode without starting a drag: the rectangle begins when the button actually goes down.
 function armRectDrag() {
+    if (guardAdjustMode()) return false;
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before drawing a dynamic layer', 'error');
         return false;
@@ -1659,10 +1797,48 @@ function drawOverlay() {
     overlayCtx.clearRect(0, 0, w, h);
     drawMaskTint();
     drawRectPreview();
-    if (mode !== 'transform' || !canvasW) return;
+    if (mode === 'canvasModify') {
+        if (canvasW) drawAdjustBox(canvasHandlePoints(), false);
+        return;
+    }
+    if (mode === 'expand') {
+        const el = expandState ? getLayer(expandState.layerId) : null;
+        if (el && el.img) drawAdjustBox(handleScreenPoints(el), false);
+        return;
+    }
+    if (mode !== 'transform' || !canvasW) {
+        // Outside the transform tool there is no adjustment box — but a selected layer's bounds
+        // would otherwise be invisible, so hint the footprint with a faint dashed outline.
+        const sel = canvasW ? getSelected() : null;
+        if (sel && sel.visible && !sel.isMaskLayer && sel.img) drawFaintBox(handleScreenPoints(sel));
+        return;
+    }
     const l = getSelected();
     if (!l || !l.visible || l.isMaskLayer) return;
-    const pts = handleScreenPoints(l);
+    drawAdjustBox(handleScreenPoints(l), true);
+}
+
+// The selected layer's footprint in every non-transform mode: a quiet dashed rectangle, no
+// handles — it says "this is the layer's extent" without competing with painting or view work.
+function drawFaintBox(pts) {
+    const ctx = overlayCtx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts.nw.x, pts.nw.y);
+    ctx.lineTo(pts.ne.x, pts.ne.y);
+    ctx.lineTo(pts.se.x, pts.se.y);
+    ctx.lineTo(pts.sw.x, pts.sw.y);
+    ctx.closePath();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(0,122,255,0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+}
+
+// The blue adjustment box: border, handle squares and (optionally) the rotate stem. Shared by
+// the transform tool, Expand and Canvas Modify — all three are the same visual contract.
+function drawAdjustBox(pts, showRotate) {
     const ctx = overlayCtx;
     ctx.lineJoin = 'round';
     ctx.beginPath();
@@ -1677,16 +1853,18 @@ function drawOverlay() {
     ctx.strokeStyle = 'rgba(0,122,255,0.95)';
     ctx.lineWidth = 1;
     ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(pts.n.x, pts.n.y);
-    ctx.lineTo(pts.rotate.x, pts.rotate.y);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(pts.rotate.x, pts.rotate.y, 5.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
-    ctx.stroke();
+    if (showRotate) {
+        ctx.beginPath();
+        ctx.moveTo(pts.n.x, pts.n.y);
+        ctx.lineTo(pts.rotate.x, pts.rotate.y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(pts.rotate.x, pts.rotate.y, 5.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.stroke();
+    }
     for (const key in HANDLE_UV) {
         const p = pts[key];
         ctx.beginPath();
@@ -1840,6 +2018,7 @@ function snapshotState() {
             id: l.id, key: l.key, name: l.name, src: l.src, img: l.img,
             visible: l.visible,
             fragment: !!l.fragment,
+            raster: !!l.raster,
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
         })),
@@ -1859,6 +2038,7 @@ function restoreState(s) {
         id: ls.id, key: ls.key, name: ls.name, src: ls.src, img: ls.img,
         visible: ls.visible,
         fragment: !!ls.fragment,
+        raster: !!ls.raster,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -1996,6 +2176,57 @@ function eyeSvg(visible) {
 // One-click Generate on a layer row — the play triangle mirrors the preset capsule's run half.
 function runSvg() {
     return '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M5.4 3.2 12.8 8 5.4 12.8z" fill="currentColor"/></svg>';
+}
+
+// Type badge for the row's image thumb: smart = non-destructive transform box with corner
+// handles, raster = a 2×2 pixel checker (the layer's pixels are baked 1:1 to the canvas).
+function layerTypeBadgeSvg(l) {
+    if (isRasterLayer(l)) {
+        return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
+            + '<rect x="5.6" y="1" width="3.4" height="3.4" fill="currentColor" opacity="0.5"/>'
+            + '<rect x="1" y="5.6" width="3.4" height="3.4" fill="currentColor" opacity="0.5"/>'
+            + '<rect x="5.6" y="5.6" width="3.4" height="3.4" fill="currentColor"/></svg>';
+    }
+    return '<svg viewBox="0 0 10 10"><rect x="1.8" y="1.8" width="6.4" height="6.4" fill="none" stroke="currentColor" stroke-width="1.2"/>'
+        + '<rect x="0.4" y="0.4" width="2.4" height="2.4" fill="currentColor"/>'
+        + '<rect x="7.2" y="0.4" width="2.4" height="2.4" fill="currentColor"/>'
+        + '<rect x="0.4" y="7.2" width="2.4" height="2.4" fill="currentColor"/>'
+        + '<rect x="7.2" y="7.2" width="2.4" height="2.4" fill="currentColor"/></svg>';
+}
+
+// Double-click a layer name to rename inline. Enter or blur commits, Esc rewinds. The suffixes
+// renderLayerList adds (· duplicate / · raster) are rebuilt by the re-render, so the input only
+// ever shows the raw name.
+function startRenameLayer(l, nameEl) {
+    if (nameEl.querySelector('input')) return;
+    const input = document.createElement('input');
+    input.className = 'layer-rename';
+    input.value = l.name;
+    nameEl.textContent = '';
+    nameEl.appendChild(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = commit => {
+        if (done) return;
+        done = true;
+        if (commit) {
+            const v = input.value.trim();
+            if (v && v !== l.name) {
+                l.name = v;
+                pushHistory();
+            }
+        }
+        renderLayerList();
+    };
+    input.addEventListener('keydown', ev => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('click', ev => ev.stopPropagation());
+    input.addEventListener('dblclick', ev => ev.stopPropagation());
 }
 
 function paintMaskThumb(el, l) {
@@ -2163,6 +2394,13 @@ function renderLayerList() {
             ev.stopPropagation();
             selectLayer(l.id, 'transform');
         });
+        const badge = document.createElement('span');
+        badge.className = 'layer-type-badge ' + (isRasterLayer(l) ? 'raster' : 'smart');
+        badge.innerHTML = layerTypeBadgeSvg(l);
+        badge.title = isRasterLayer(l)
+            ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
+            : 'Smart layer — transform is non-destructive and keeps the native image';
+        thumb.appendChild(badge);
 
         const maskThumb = document.createElement('div');
         maskThumb.className = 'layer-thumb mask-thumb';
@@ -2216,7 +2454,12 @@ function renderLayerList() {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = duplicate ? l.name + ' · duplicate' : l.name;
+        name.textContent = (duplicate ? l.name + ' · duplicate' : l.name) + (isRasterLayer(l) ? ' · raster' : '');
+        name.title = 'Double-click to rename';
+        name.addEventListener('dblclick', ev => {
+            ev.stopPropagation();
+            startRenameLayer(l, name);
+        });
         if (duplicate) {
             row.title = 'This history image already backs another layer — a leftover from before '
                 + 'duplicates were blocked. Delete this extra copy, or Blend keeps compositing it.';
@@ -2314,6 +2557,9 @@ function renderLayerList() {
 }
 
 function selectLayer(id, nextMode) {
+    // An armed border-drag keeps its mode; the selection may still move, but a thumb click must
+    // not silently drop the Canvas Modify / Expand preview.
+    if (nextMode && adjustModeActive() && nextMode !== mode) nextMode = mode;
     const changed = selectedId !== id || (nextMode && mode !== nextMode);
     selectedId = id;
     if (nextMode) mode = nextMode;
@@ -2415,6 +2661,9 @@ function addLayer(item) {
         applyCanvasSize();
         const placed = placeTransform(item.place);
         if (placed) l.transform = placed; else fitLayerToCanvas(l);
+        // "Place images as raster": the drop becomes a canvas-sized buffer right away. Detailer
+        // fragments are exempt — their crop-rect placement is the whole point of keeping them smart.
+        if (rasterDrop && !l.fragment && !placed) rasterizeLayer(l);
         layoutCanvas();
         renderLayerList();
         render();
@@ -2450,6 +2699,7 @@ function spawnGeneratedLayer(id, item) {
             img,
             visible: true,
             transform: { ...t },
+            raster: isRasterLayer(l),
             mask: null,
             maskCtx: null,
             maskThumbEl: null,
@@ -2460,6 +2710,14 @@ function spawnGeneratedLayer(id, item) {
             fragment: false,
         };
         if (copy.key) injectedKeys.add(copy.key);
+        // A raster source generates a raster result: the buffer must stay canvas-sized, so the
+        // fresh image resamples into it immediately (the backend ran at the layer's own
+        // resolution — for a raster layer that IS the canvas size). The result's own history
+        // key is dropped with it: the buffer no longer matches that history image.
+        if (copy.raster && canvasW && canvasH) {
+            rasterResampleBuffer(copy, canvasW, canvasH);
+            if (copy.key) { injectedKeys.delete(copy.key); copy.key = null; }
+        }
         layers.unshift(copy);       // the generated variant sits directly on top of its source
         selectedId = copy.id;
         applyCanvasSize();
@@ -2499,13 +2757,26 @@ function replaceLayerImage(id, item) {
             c.getContext('2d').drawImage(surface, 0, 0, next.w, next.h);
             return c;
         };
-        l.img = img;
-        l.src = item.src;
+        if (isRasterLayer(l)) {
+            // A raster target refills in place too: the result becomes the canvas-sized buffer
+            // (stretched if the run returned a different size), while the paint surfaces stay
+            // exactly where they were — they are canvas-space and do not follow the image swap.
+            l.img = document.createElement('canvas');
+            l.img.width = Math.max(1, Math.round(canvasW));
+            l.img.height = Math.max(1, Math.round(canvasH));
+            l.img.getContext('2d').drawImage(img, 0, 0, l.img.width, l.img.height);
+            l.src = l.img.toDataURL('image/png');
+        } else {
+            l.img = img;
+            l.src = item.src;
+        }
         // The layer no longer refers to the image it was created from, so drop the history key:
         // keeping it would make `injectedKeys` claim an image this layer no longer shows.
         if (l.key) { injectedKeys.delete(l.key); l.key = null; }
-        if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
-        if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+        if (!isRasterLayer(l)) {
+            if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
+            if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+        }
         layoutCanvas();
         renderLayerList();
         render();
@@ -2548,6 +2819,10 @@ function moveLayer(fromId, toId, above) {
 // ==================== 模式 ====================
 function setMode(m) {
     if (m === 'mask' && !getSelected()) { setStatus('Select a layer to paint its mask', 'error'); return; }
+    // An armed border-drag (Canvas Modify / Expand) owns the mode slot until Enter or Esc: any
+    // other tool switch would strand a half-applied preview with no way back to its snapshot.
+    // Exiting to 'none' stays legal — that is exactly what apply / cancel do on the way out.
+    if (adjustModeActive() && m !== mode && m !== 'none') { guardAdjustMode(); return; }
     mode = m;
     syncModeUI();
     renderLayerList();
@@ -2560,6 +2835,7 @@ function activateMode(m) { if (mode !== m) setMode(m); }
 
 function syncModeUI() {
     document.getElementById('transformAdjustBtn').classList.toggle('active', mode === 'transform');
+    document.getElementById('canvasModifyBtn').classList.toggle('active', mode === 'canvasModify');
     document.getElementById('zoomToolBtn').classList.toggle('active', mode === 'zoom');
     document.getElementById('panToolBtn').classList.toggle('active', mode === 'pan');
     document.getElementById('rotateToolBtn').classList.toggle('active', mode === 'rotate');
@@ -2807,6 +3083,244 @@ function updateTransformDrag(e, pos) {
         l.transform.cy = cyp / canvasH;
     }
     render();
+}
+
+// ==================== 边框调整模式（Canvas Modify / Expand） ====================
+// One interaction, two destinations: the canvas gets border-drag resizing (Enter applies the
+// new resolution, Esc rewinds from the snapshot) and smart objects get Expand (Enter resamples
+// the layer's own image to the dragged box, Esc restores the transform). Both live on the same
+// screen-space overlay the transform box uses, both end with Enter / Esc, and while either is
+// active every other mode switch is refused — a half-dragged preview must not be abandoned.
+function adjustModeActive() { return mode === 'canvasModify' || mode === 'expand'; }
+
+function guardAdjustMode() {
+    if (!adjustModeActive()) return false;
+    setStatus('Press Enter to apply or Esc to cancel first', 'error');
+    return true;
+}
+
+// ---- Canvas Modify ----
+function startCanvasModify() {
+    if (!canvasW || !canvasH) { setStatus('Nothing to modify — the canvas does not exist yet', 'error'); return; }
+    if (guardAdjustMode()) return;
+    // The snapshot shares image / paint-surface references with the live layers (no copies),
+    // and the preview below never mutates buffers — so Esc can rewind from it verbatim.
+    modSnapshot = snapshotState();
+    modDrag = null;
+    setMode('canvasModify');
+    setStatus('Drag the canvas border — Enter applies, Esc cancels');
+}
+
+// Screen-space handle points for the (tentative) canvas rect. Same geometry as the transform
+// box minus the rotate stem: the canvas has no rotation.
+function canvasHandlePoints() {
+    const pts = {};
+    for (const key in HANDLE_UV) {
+        const [u, v] = HANDLE_UV[key];
+        pts[key] = docToScreen({ x: (u + 1) / 2 * canvasW, y: (v + 1) / 2 * canvasH });
+    }
+    return pts;
+}
+
+function hitCanvasHandle(sp) {
+    const pts = canvasHandlePoints();
+    for (const key in HANDLE_UV) {
+        if (Math.hypot(sp.x - pts[key].x, sp.y - pts[key].y) <= 9) return key;
+    }
+    return null;
+}
+
+function beginCanvasDrag(key) {
+    const startLayers = new Map();
+    for (const l of layers) startLayers.set(l.id, cloneTransform(l.transform));
+    modDrag = {
+        handle: key,
+        // Anchor = the opposite handle's position in doc space: it stays put while the grabbed
+        // side follows the pointer.
+        anchor: { x: (1 - HANDLE_UV[key][0]) / 2 * canvasW, y: (1 - HANDLE_UV[key][1]) / 2 * canvasH },
+        baseW: canvasW, baseH: canvasH,
+        startLayers,
+        moved: false,
+    };
+    setCursor(HANDLE_CURSOR[key]);
+}
+
+// Rewrites the live globals to the tentative rectangle: canvas size, canvas-relative transforms
+// of the smart layers (pure re-normalisation — the pixels do not move in doc space) and raster
+// layers left at their identity transform, which makes render() stretch their buffer to the
+// tentative size for free. Called again on every event, always recomputed from the ORIGINAL
+// state, so the math never drifts.
+function updateCanvasModify(pos) {
+    const d = modDrag;
+    const [hu, hv] = HANDLE_UV[d.handle];
+    let left, right, top, bottom;
+    if (hu === 0) { left = 0; right = d.baseW; }
+    else if (hu > 0) { left = d.anchor.x; right = pos.x; }
+    else { left = pos.x; right = d.anchor.x; }
+    if (hv === 0) { top = 0; bottom = d.baseH; }
+    else if (hv > 0) { top = d.anchor.y; bottom = pos.y; }
+    else { top = pos.y; bottom = d.anchor.y; }
+    let w = Math.max(1, Math.round(right - left));
+    let h = Math.max(1, Math.round(bottom - top));
+    if (w > MAX_CANVAS_SIDE) w = MAX_CANVAS_SIDE;
+    if (h > MAX_CANVAS_SIDE) h = MAX_CANVAS_SIDE;
+    if (w * h > MAX_CANVAS_PIXELS) {
+        const s = Math.sqrt(MAX_CANVAS_PIXELS / (w * h));
+        w = Math.max(1, Math.floor(w * s));
+        h = Math.max(1, Math.floor(h * s));
+    }
+    if (w === canvasW && h === canvasH) return;
+    canvasW = w; canvasH = h;
+    for (const l of layers) {
+        if (isRasterLayer(l)) continue;             // identity transform stretches with the canvas
+        const st = d.startLayers.get(l.id);
+        l.transform.cx = st.cx * d.baseW / w;
+        l.transform.cy = st.cy * d.baseH / h;
+        l.transform.w = st.w * d.baseW / w;
+        l.transform.h = st.h * d.baseH / h;
+    }
+    sizeCanvasElement();
+    d.moved = true;
+    setStatus(`${w} × ${h} — Enter applies, Esc cancels`);
+    render();
+}
+
+function applyCanvasModify() {
+    const d = modDrag;
+    modDrag = null;
+    modSnapshot = null;
+    if (!d) { setMode('none'); return; }
+    if (!d.moved) { setStatus('Canvas unchanged'); setMode('none'); return; }
+    canvasCustom = true;
+    // Smart layers keep their pixels, top-left anchored (the drag metaphor: the sides you did
+    // not grab stay put). Raster layers resample into the new canvas — their 1:1 invariant.
+    resampleRasterLayers(canvasW, canvasH);
+    // The Mask layer is doc-space coverage: it keeps its pixels anchored at the origin too.
+    const w = Math.round(canvasW), h = Math.round(canvasH);
+    if (!maskLayer.img || maskLayer.img.width !== w || maskLayer.img.height !== h) {
+        const old = maskLayer.decal;
+        const img = document.createElement('canvas');
+        img.width = w; img.height = h;
+        const surface = document.createElement('canvas');
+        surface.width = w; surface.height = h;
+        if (old && old.width && old.height) {
+            surface.getContext('2d').drawImage(old, 0, 0);   // top-left anchored, unscaled
+        }
+        maskLayer.img = img;
+        maskLayer.decal = surface;
+        maskLayer.decalCtx = surface.getContext('2d');
+    }
+    maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    // No view work: the preview already kept doc origin (and therefore every layer's on-screen
+    // position) fixed — the view transform never moved, so neither should it now.
+    layoutCanvas();
+    updateCanvasReadout();
+    setStatus(`Canvas ${w} × ${h} — smart layers kept their pixels, raster layers resampled`, 'success');
+    pushHistory();
+    setMode('none');
+}
+
+function cancelCanvasModify() {
+    const wasMoved = modDrag && modDrag.moved;
+    modDrag = null;
+    if (modSnapshot) restoreState(modSnapshot);
+    modSnapshot = null;
+    setMode('none');
+    setStatus(wasMoved ? 'Canvas Modify cancelled' : 'Canvas Modify closed');
+}
+
+// ---- Expand (smart object) ----
+function startExpand(l) {
+    if (!l || l.isMaskLayer || isRasterLayer(l)) return;
+    if (guardAdjustMode()) return;
+    selectedId = l.id;
+    expandState = { layerId: l.id, startTransform: cloneTransform(l.transform) };
+    setMode('expand');
+    const n = nativeSize(l.img);
+    setStatus(`Expand「${l.name}」(${n.w} × ${n.h}) — drag the border to change the layer's resolution (pixels stay put), Enter applies, Esc cancels`);
+}
+
+function endExpandCommit() {
+    const l = getLayer(expandState.layerId);
+    const start = expandState.startTransform;
+    expandState = null;
+    if (!l) { setMode('none'); return; }
+    // A click on the menu without dragging must not resample the image into its own box.
+    if (!transformChangedSince(start, l)) { setMode('none'); return; }
+    const tr = l.transform;
+    const tw = Math.max(1, Math.round(tr.w * canvasW));
+    const th = Math.max(1, Math.round(tr.h * canvasH));
+    if (tw > MAX_CANVAS_SIDE || th > MAX_CANVAS_SIDE || tw * th > MAX_CANVAS_PIXELS) {
+        // The drag clamps proactively, so this only fires through an unexpected path — treat it
+        // as a cancelled expand rather than committing an oversized resample.
+        setStatus('Expand result too large — cancelled', 'error');
+        setMode('none');
+        return;
+    }
+    // Expand is a RESOLUTION change only: pixels already on canvas stay exactly where they are,
+    // they do NOT stretch with the dragged box. The new native buffer is the dragged box at
+    // canvas scale, and the old native surfaces are mapped into it through A = inv(T_new)∘T_old —
+    // the affine that carries every old pixel to the new-native position that renders at its
+    // previous canvas spot. Whatever A leaves uncovered is new space: image alpha 0, decal
+    // untouched (alpha 0), mask coverage 1 (the whole box is the layer now).
+    const ow = l.img.width, oh = l.img.height;
+    const cosO = Math.cos(start.rotation), sinO = Math.sin(start.rotation);
+    const cosN = Math.cos(tr.rotation), sinN = Math.sin(tr.rotation);
+    const sxo = start.w * canvasW / ow, syo = start.h * canvasH / oh;
+    const sxn = tr.w * canvasW / tw, syn = tr.h * canvasH / th;
+    // T_old: canvas = Ao·p + bo ; inv(T_new): p' = An·canvas + bn
+    const Ao11 = cosO * sxo, Ao12 = -sinO * syo, Ao21 = sinO * sxo, Ao22 = cosO * syo;
+    const An11 = cosN / sxn, An12 = sinN / sxn, An21 = -sinN / syn, An22 = cosN / syn;
+    const box = start.cx * canvasW - (Ao11 * ow + Ao12 * oh) / 2;
+    const boy = start.cy * canvasH - (Ao21 * ow + Ao22 * oh) / 2;
+    const bnx = tw / 2 - (An11 * tr.cx * canvasW + An12 * tr.cy * canvasH);
+    const bny = th / 2 - (An21 * tr.cx * canvasW + An22 * tr.cy * canvasH);
+    const a11 = An11 * Ao11 + An12 * Ao21, a12 = An11 * Ao12 + An12 * Ao22;
+    const a21 = An21 * Ao11 + An22 * Ao21, a22 = An21 * Ao12 + An22 * Ao22;
+    const bx = An11 * box + An12 * boy + bnx;
+    const by = An21 * box + An22 * boy + bny;
+    const bake = fillWhite => {
+        const nc = document.createElement('canvas');
+        nc.width = tw; nc.height = th;
+        const ctx = nc.getContext('2d');
+        if (fillWhite) {
+            // New space starts at coverage 1, then the old surface's frame is carved out and its
+            // own coverage (stored in alpha — eraser is destination-out) drawn back in.
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, tw, th);
+        }
+        ctx.setTransform(a11, a21, a12, a22, bx, by);
+        if (fillWhite) ctx.clearRect(0, 0, ow, oh);
+        ctx.drawImage(fillWhite ? l.mask : l.img, 0, 0);
+        return nc;
+    };
+    l.img = bake(false);
+    l.src = l.img.toDataURL('image/png');
+    if (l.mask) { l.mask = bake(true); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.decal) {
+        const dc = document.createElement('canvas');
+        dc.width = tw; dc.height = th;
+        const dctx = dc.getContext('2d');
+        dctx.setTransform(a11, a21, a12, a22, bx, by);
+        dctx.drawImage(l.decal, 0, 0);
+        l.decal = dc; l.decalCtx = dctx;
+    }
+    // The layer's pixels no longer match its history image, so the key must not keep claiming it.
+    if (l.key) { injectedKeys.delete(l.key); l.key = null; }
+    renderLayerList();
+    render();
+    pushHistory();
+    setStatus(`「${l.name}」expanded to ${tw} × ${th}`, 'success');
+    setMode('none');
+}
+
+function cancelExpand() {
+    const l = expandState ? getLayer(expandState.layerId) : null;
+    if (l && expandState) l.transform = cloneTransform(expandState.startTransform);
+    expandState = null;
+    setMode('none');
+    render();
+    setStatus('Expand cancelled');
 }
 
 // ==================== 蒙版 / Decal ====================
@@ -3188,6 +3702,27 @@ viewport.addEventListener('mousedown', e => {
         if (e.button === 0) beginRectDrag(pos); else cancelRectDrag();
         return;
     }
+    // Border-drag modes consume every press: handles start a resize, anything else is a no-op —
+    // a stray click must not pick layers or paint while a preview is pending.
+    if (mode === 'canvasModify') {
+        e.preventDefault();
+        if (e.button === 0) {
+            const h = hitCanvasHandle(sp);
+            if (h) beginCanvasDrag(h);
+        }
+        return;
+    }
+    if (mode === 'expand') {
+        e.preventDefault();
+        if (e.button === 0 && expandState) {
+            const el = getLayer(expandState.layerId);
+            const h = el ? hitHandleScreen(sp, pos, el) : null;
+            // Resize only — no rotate, no inside-move: Expand changes the layer's own
+            // resolution, everything else stays a job for the transform tool.
+            if (h && h !== 'rotate') beginScaleDrag(h, pos, el);
+        }
+        return;
+    }
     // View gestures win over the tools.
     if (e.button === 1 || (keySpace && e.button === 0)) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
@@ -3253,6 +3788,7 @@ window.addEventListener('mousemove', e => {
     if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
     if (rectDrag) { updateRectDrag(screenToDoc(toScreenCoords(e))); return; }
+    if (modDrag) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
@@ -3273,6 +3809,8 @@ window.addEventListener('mouseup', e => {
     if (picking) endPick(e);
     if (sizeDrag) endSizeDrag(e);
     if (rectDrag) endRectDrag();
+    // modDrag deliberately survives the release: the tentative canvas stays armed until Enter
+    // applies it or Esc rewinds it (the button's drag can also be resumed with a new press).
     if (viewDrag) endViewDrag(e);
     if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
     if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
@@ -3280,6 +3818,12 @@ window.addEventListener('mouseup', e => {
         const target = getLayer(drag.layerId);
         const moved = !!target && transformChangedSince(drag.startTransform, target);
         drag = null;
+        // A raster layer's transform is only ever a preview: the moment the drag ends, the
+        // pixels resample through it and the transform snaps back to the identity.
+        if (moved && target && isRasterLayer(target)) {
+            commitRasterTransform(target);
+            renderLayerList();
+        }
         render();
         if (moved) pushHistory();
         const sp = toScreenCoords(e);
@@ -3456,6 +4000,28 @@ document.addEventListener('mousedown', e => {
 
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(); });
+
+// "Place images as raster" — a persisted preference, not a one-shot: it decides how every
+// future image arrives (drop, Import, history injection) until flipped back.
+const addRasterToggleBtn = document.getElementById('addRasterToggleBtn');
+function syncRasterToggleUI() {
+    addRasterToggleBtn.setAttribute('aria-checked', rasterDrop ? 'true' : 'false');
+    document.getElementById('addRasterCheck').style.display = rasterDrop ? '' : 'none';
+    document.getElementById('addRasterSub').textContent = rasterDrop
+        ? 'On — new image layers become canvas-sized raster buffers (transforms resample).'
+        : 'Off — new image layers keep their original pixels (smart objects).';
+    try { localStorage.setItem(RASTER_DROP_KEY, rasterDrop ? '1' : '0'); } catch (e) { /* private mode */ }
+}
+addRasterToggleBtn.addEventListener('click', () => {
+    rasterDrop = !rasterDrop;
+    syncRasterToggleUI();
+    setStatus(rasterDrop ? 'Images will be placed as raster layers (1:1 with the canvas)'
+                         : 'Images will be placed as smart-object layers (original pixels kept)');
+});
+
+// Canvas Modify — border-drag canvas resizing, Enter applies, Esc cancels.
+document.getElementById('canvasModifyBtn').addEventListener('click', startCanvasModify);
+syncRasterToggleUI();
 
 // A blank layer whose image element is a canvas, so `nativeSize()` reports the pixel box we
 // asked for and every downstream path (composite, mask, decal, thumbs, .cud export) treats it
@@ -3869,6 +4435,49 @@ function openLayerMenu(l, clientX, clientY) {
     });
     menu.appendChild(item);
 
+    // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
+    // canvas stay put — the new box only decides how many pixels the layer gets. Raster layers
+    // have no native resolution left to change — their buffer is the canvas — so no entry.
+    if (!l.isMaskLayer && !isRasterLayer(l)) {
+        const expand = document.createElement('button');
+        expand.className = 'layer-menu-item';
+        expand.type = 'button';
+        expand.setAttribute('role', 'menuitem');
+        expand.textContent = 'Expand';
+        const n = nativeSize(l.img);
+        expand.title = `Change「${l.name}」's own resolution (${n.w} × ${n.h}) — drag its border to a new box; the image stays 1:1 and the new space is transparent. Esc cancels.`;
+        expand.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            startExpand(l);
+        });
+        menu.appendChild(expand);
+    }
+
+    // Rasterize (one-way): bake the transform into a canvas-sized buffer. The Mask layer is not
+    // a layer at all, and a raster layer is already raster.
+    if (!l.isMaskLayer && !isRasterLayer(l)) {
+        const rast = document.createElement('button');
+        rast.className = 'layer-menu-item';
+        rast.type = 'button';
+        rast.setAttribute('role', 'menuitem');
+        rast.textContent = 'Rasterize';
+        rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`;
+        rast.disabled = !canvasW || !l.img;
+        rast.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            if (rasterizeLayer(l)) {
+                layoutCanvas();
+                renderLayerList();
+                render();
+                setStatus(`「${l.name}」rasterized — the buffer is now the canvas, 1:1`, 'success');
+                pushHistory();
+            }
+        });
+        menu.appendChild(rast);
+    }
+
     menu.classList.add('open');
     // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
     const r = menu.getBoundingClientRect();
@@ -4243,6 +4852,7 @@ function syncLockedField(source) {
 }
 
 function openCanvasModal() {
+    if (guardAdjustMode()) return;
     const w = canvasW || 1024, h = canvasH || 1024;
     canvasWInput.value = String(w);
     canvasHInput.value = String(h);
@@ -4460,6 +5070,15 @@ window.addEventListener('keydown', e => {
     if (dynamicModalOpen()) {
         if (e.key === 'Escape') { e.preventDefault(); closeDynamicModal(); }
         else if (e.key === 'Enter') { e.preventDefault(); applyDynamicModal(); }
+        return;
+    }
+    // Enter / Esc on a border-drag mode: apply or rewind. These outrank the generic tool-exit
+    // handling below because both modes strand a live preview that generic setMode('none')
+    // would neither commit nor roll back.
+    if (adjustModeActive() && (e.key === 'Enter' || e.key === 'Escape')) {
+        e.preventDefault();
+        if (e.key === 'Enter') { if (mode === 'canvasModify') applyCanvasModify(); else endExpandCommit(); }
+        else { if (mode === 'canvasModify') cancelCanvasModify(); else cancelExpand(); }
         return;
     }
     // Esc closes the Export menu first; otherwise it drops the active tool AND straightens the
@@ -4681,6 +5300,7 @@ async function exportCud() {
             const n = nativeSize(l.img);
             records.push({
                 id: l.id, key: l.key, name: l.name, visible: l.visible, fragment: !!l.fragment,
+                raster: !!l.raster,
                 transform: cloneTransform(l.transform),
                 image: await addAsset('image', l.img, n.w, n.h),
                 mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
@@ -4902,6 +5522,7 @@ async function importCud(file) {
                 img,
                 visible: rec.visible !== false,
                 fragment: !!rec.fragment,
+                raster: !!rec.raster,
                 transform: {
                     cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
                     cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
