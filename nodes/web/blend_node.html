@@ -912,13 +912,77 @@ function resampleRasterLayers(w, h) {
 }
 
 // A transform drag on a raster layer moved the (temporarily non-identity) transform: bake it.
-// The buffer was rendered through the dragged transform once — that IS the resample — and the
-// transform snaps back to the identity, restoring the 1:1 invariant.
-function commitRasterTransform(l) {
+// The drag starts from the CONTENT box (rasterContentTransform), so `from` is that box and the
+// bake must carry every canvas point through A = T_to ∘ T_from⁻¹ — rotation AND the box's scale
+// change — not just the raw transform. Afterwards the buffer is again canvas-sized pixels shown
+// 1:1 and the transform snaps back to the identity.
+function commitRasterTransform(l, fromTr) {
     if (!isRasterLayer(l) || !l.img) return;
-    l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
+    const from = fromTr || rasterContentTransform(l);
+    const to = l.transform;
+    const sx = (to.w * canvasW) / (from.w * canvasW);
+    const sy = (to.h * canvasH) / (from.h * canvasH);
+    const dR = to.rotation - from.rotation;
+    const cos = Math.cos(dR), sin = Math.sin(dR);
+    const ox = from.cx * canvasW, oy = from.cy * canvasH;
+    const nx = to.cx * canvasW, ny = to.cy * canvasH;
+    const a = cos * sx, b = sin * sx, c = -sin * sy, d = cos * sy;
+    const c2 = document.createElement('canvas');
+    c2.width = Math.max(1, Math.round(canvasW));
+    c2.height = Math.max(1, Math.round(canvasH));
+    const ctx = c2.getContext('2d');
+    ctx.setTransform(a, b, c, d, nx - (a * ox + c * oy), ny - (b * ox + d * oy));
+    ctx.drawImage(l.img, 0, 0);
+    l.img = c2;
     if (l.src) l.src = l.img.toDataURL('image/png');
     l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+}
+
+// A raster layer's interaction box encloses its CONTENT — every pixel with alpha > 0 — not the
+// whole canvas-sized buffer. Expressed as a transform so the existing box/handle machinery can
+// use it directly. Cached against the buffer reference: every bake/resample swaps in a fresh
+// canvas, which invalidates the cache for free. No opaque pixels → fall back to the full canvas.
+function rasterContentTransform(l) {
+    if (l.rasterTr && l.rasterTr.img === l.img) return l.rasterTr.tr;
+    let tr = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    if (l.img && l.img.width && l.img.height) {
+        const g = l.img.getContext('2d');
+        if (g) {
+            const d = g.getImageData(0, 0, l.img.width, l.img.height).data;
+            let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
+            for (let y = 0; y < l.img.height; y++) {
+                const row = y * l.img.width;
+                for (let x = 0; x < l.img.width; x++) {
+                    if (d[(row + x) * 4 + 3] > 0) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            if (maxX >= minX) {
+                tr = {
+                    cx: (minX + maxX + 1) / 2 / canvasW,
+                    cy: (minY + maxY + 1) / 2 / canvasH,
+                    w: (maxX - minX + 1) / canvasW,
+                    h: (maxY - minY + 1) / canvasH,
+                    rotation: 0,
+                };
+            }
+        }
+    }
+    l.rasterTr = { img: l.img, tr };
+    return tr;
+}
+
+// The transform that boxes/handles/readouts should show. For a raster layer at rest that is the
+// content bbox (the stored transform stays the identity — it IS the display transform); while
+// one of its drags is live, l.transform itself holds the dragged content box.
+function effectiveTransform(l) {
+    if (!isRasterLayer(l)) return l.transform;
+    if (drag && drag.layerId === l.id) return l.transform;
+    return rasterContentTransform(l);
 }
 
 // ==================== 纯 Mask 层 ====================
@@ -1547,6 +1611,12 @@ function layerSource(l) {
 
 function drawLayer(l) {
     if (!l.visible || !l.img) return;
+    if (isRasterLayer(l)) {
+        // Raster pixels ARE canvas pixels — always drawn 1:1. l.transform is transient drag
+        // state (the content box), never a display transform.
+        blendCtx.drawImage(layerSource(l), 0, 0);
+        return;
+    }
     // While Expand is armed, the live transform belongs to the dragged border, not the image:
     // Expand only re-resolves the layer's own resolution, so the pixels must stay exactly where
     // they are while the box grows — committing bakes that same geometry into the new buffer.
@@ -1578,8 +1648,10 @@ function paintCanvasThumb(el, l) {
         thumbCtx.beginPath();
         thumbCtx.rect(0, 0, dw, dh);
         thumbCtx.clip();
-        // Same rule as drawLayer: while Expand is armed the image does not follow the dragged box.
-        const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
+        // Raster: the buffer IS the canvas, drawn 1:1. Smart: while Expand is armed the image
+        // does not follow the dragged box.
+        const tr = isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+            : (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
         const tw = tr.w * dw, th = tr.h * dh;
         thumbCtx.translate(tr.cx * dw, tr.cy * dh);
         thumbCtx.rotate(tr.rotation);
@@ -1613,7 +1685,7 @@ function refreshCanvasThumbs() {
 }
 
 function localToCanvas(l, u, v) {
-    const tr = l.transform;
+    const tr = effectiveTransform(l);
     const dx = u * tr.w * canvasW / 2, dy = v * tr.h * canvasH / 2;
     const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
     return { x: tr.cx * canvasW + dx * cos - dy * sin, y: tr.cy * canvasH + dx * sin + dy * cos };
@@ -1631,7 +1703,8 @@ function handleScreenPoints(l) {
         const [u, v] = HANDLE_UV[key];
         pts[key] = docToScreen(localToCanvas(l, u, v));
     }
-    const c = docToScreen({ x: l.transform.cx * canvasW, y: l.transform.cy * canvasH });
+    const tr = effectiveTransform(l);
+    const c = docToScreen({ x: tr.cx * canvasW, y: tr.cy * canvasH });
     const top = pts.n;
     const dx = top.x - c.x, dy = top.y - c.y;
     const len = Math.hypot(dx, dy) || 1;
@@ -1978,7 +2051,7 @@ function updateTransformReadout() {
     const el = document.getElementById('transformReadout');
     const l = getSelected();
     if (!l || !canvasW) { setReadout(el, ''); return; }
-    const tr = l.transform;
+    const tr = effectiveTransform(l);
     setReadout(el, `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`);
 }
 
@@ -2991,7 +3064,7 @@ function moveCursor(e) { brushCursor.style.left = e.clientX + 'px'; brushCursor.
 
 // ==================== 选层 / 命中检测 ====================
 function pointInBox(pos, l) {
-    const tr = l.transform;
+    const tr = effectiveTransform(l);
     const dx = pos.x - tr.cx * canvasW, dy = pos.y - tr.cy * canvasH;
     const c = Math.cos(tr.rotation), s = Math.sin(tr.rotation);
     const lx = dx * c + dy * s, ly = -dx * s + dy * c;
@@ -3762,10 +3835,17 @@ viewport.addEventListener('mousedown', e => {
         const l = getSelected();
         // The Mask layer is canvas-locked: its transform must stay the identity.
         if (l && l.visible && !l.isMaskLayer) {
+            // A raster layer's drag works on its CONTENT box: promote the cached bbox into
+            // l.transform so the drag machinery moves/resizes the box the user sees. If the
+            // press grabs nothing, undo the promotion — at rest the stored transform must stay
+            // the identity.
+            const rasterGrab = isRasterLayer(l);
+            if (rasterGrab) l.transform = cloneTransform(effectiveTransform(l));
             const h = hitHandleScreen(sp, pos, l);
             if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
             if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
             if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
+            if (rasterGrab) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
         }
     }
     const picked = pickLayer(pos);
@@ -3816,13 +3896,18 @@ window.addEventListener('mouseup', e => {
     if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
     if (drag) {
         const target = getLayer(drag.layerId);
+        const startTr = drag.startTransform;
         const moved = !!target && transformChangedSince(drag.startTransform, target);
         drag = null;
-        // A raster layer's transform is only ever a preview: the moment the drag ends, the
-        // pixels resample through it and the transform snaps back to the identity.
-        if (moved && target && isRasterLayer(target)) {
-            commitRasterTransform(target);
-            renderLayerList();
+        if (target && isRasterLayer(target)) {
+            // The transform was only ever a preview of the content-box drag: bake it into the
+            // buffer (moved), or snap the stored transform back to the identity (a plain click).
+            if (moved) {
+                commitRasterTransform(target, startTr);
+                renderLayerList();
+            } else {
+                target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            }
         }
         render();
         if (moved) pushHistory();
@@ -4220,11 +4305,15 @@ function layerSpecs() {
     return layers.slice().reverse().map(l => ({
         key: l.key || null,
         src: l.key ? null : l.src,
-        transform: {
-            cx: l.transform.cx, cy: l.transform.cy,
-            w: l.transform.w, h: l.transform.h,
-            rotation: l.transform.rotation,
-        },
+        transform: isRasterLayer(l)
+            // A raster layer's stored transform is transient drag state — the backend always
+            // sees canvas-sized pixels at the identity.
+            ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+            : {
+                cx: l.transform.cx, cy: l.transform.cy,
+                w: l.transform.w, h: l.transform.h,
+                rotation: l.transform.rotation,
+            },
         visible: !!l.visible,
         mask: l.mask ? l.mask.toDataURL('image/png') : null,
         decal: l.decal ? l.decal.toDataURL('image/png') : null,
@@ -5131,14 +5220,28 @@ window.addEventListener('keydown', e => {
     if (!l || l.isMaskLayer || mode !== 'transform') return;
     const step = (e.shiftKey ? 10 : 1) / (canvasW || 1);
     const stepY = (e.shiftKey ? 10 : 1) / (canvasH || 1);
-    if (e.key === 'ArrowLeft') { l.transform.cx -= step; }
-    else if (e.key === 'ArrowRight') { l.transform.cx += step; }
-    else if (e.key === 'ArrowUp') { l.transform.cy -= stepY; }
-    else if (e.key === 'ArrowDown') { l.transform.cy += stepY; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (isRasterLayer(l)) {
+            // Raster nudge is destructive like every other raster move: shift the content box,
+            // bake the buffer translation, restore the identity.
+            const from = rasterContentTransform(l);
+            l.transform = cloneTransform(from);
+            if (e.key === 'ArrowLeft') l.transform.cx -= step;
+            else if (e.key === 'ArrowRight') l.transform.cx += step;
+            else if (e.key === 'ArrowUp') l.transform.cy -= stepY;
+            else l.transform.cy += stepY;
+            commitRasterTransform(l, from);
+        } else {
+            if (e.key === 'ArrowLeft') l.transform.cx -= step;
+            else if (e.key === 'ArrowRight') l.transform.cx += step;
+            else if (e.key === 'ArrowUp') l.transform.cy -= stepY;
+            else l.transform.cy += stepY;
+        }
+        render();
+        pushHistory('nudge:' + l.id);    // a run of nudges on one layer collapses to one step
+    }
     else return;
-    e.preventDefault();
-    render();
-    pushHistory('nudge:' + l.id);    // a run of nudges on one layer collapses to one step
 });
 
 window.addEventListener('keyup', e => {
@@ -5301,7 +5404,9 @@ async function exportCud() {
             records.push({
                 id: l.id, key: l.key, name: l.name, visible: l.visible, fragment: !!l.fragment,
                 raster: !!l.raster,
-                transform: cloneTransform(l.transform),
+                // Raster layers always travel at the identity — their stored transform is
+                // transient drag state, and their buffer is already canvas-sized.
+                transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
                 image: await addAsset('image', l.img, n.w, n.h),
                 mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
                 decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
@@ -5523,13 +5628,16 @@ async function importCud(file) {
                 visible: rec.visible !== false,
                 fragment: !!rec.fragment,
                 raster: !!rec.raster,
-                transform: {
-                    cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
-                    cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
-                    w: Number.isFinite(tr.w) ? tr.w : 1,
-                    h: Number.isFinite(tr.h) ? tr.h : 1,
-                    rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
-                },
+                transform: rec.raster
+                    // Old files could carry a non-identity raster transform; the invariant is identity.
+                    ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+                    : {
+                        cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
+                        cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
+                        w: Number.isFinite(tr.w) ? tr.w : 1,
+                        h: Number.isFinite(tr.h) ? tr.h : 1,
+                        rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
+                    },
                 mask, maskCtx: mask ? mask.getContext('2d') : null, maskThumbEl: null,
                 decal, decalCtx: decal ? decal.getContext('2d') : null, decalThumbEl: null,
                 canvasThumbEl: null,
