@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
+import DebugModal from './DebugModal';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
 const tabActionBtn: React.CSSProperties = {
@@ -189,6 +190,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [resizeModal, setResizeModal] = useState<{ item: HistoryItem } | null>(null);
   // Blend layer picker (the workbench iframe asks the host for images to add as layers)
   const [blendPicked, setBlendPicked] = useState<string[]>([]);
+  // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
+  const [showDebug, setShowDebug] = useState(false);
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
   const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
   // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
@@ -508,9 +511,18 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             <div style={styles.drawSettingsPanel}>
               {/* Live preview of the workbench composite. The composite IS the Context Image,
                   so this is what Run Detailer feeds on (tinted where the Mask layer is painted). */}
-              <div style={styles.contextPreviewBox}>
-                <div style={styles.sectionTitle}>Context</div>
-                <div style={styles.contextPreviewWrap}>
+                <div style={styles.contextPreviewBox}>
+                  <div style={styles.contextTitleRow}>
+                    <div style={styles.sectionTitle}>Context</div>
+                    {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
+                        各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
+                    <button
+                      style={styles.debugBtn}
+                      title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
+                      onClick={() => setShowDebug(true)}
+                    >🐞 Debug</button>
+                  </div>
+                  <div style={styles.contextPreviewWrap}>
                   {blendPreview ? (
                     <>
                       <img src={blendPreview.image} alt="Context preview" style={styles.blendPreviewImg} />
@@ -1425,6 +1437,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         />
       )}
 
+      {/* Debug — 上一次 Run / Generate 的全过程快照 */}
+      {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
+
       {/* Blend layer picker — the workbench asks for images, each picked one becomes a layer */}
       {showBlendSelect && (
         <div style={styles.overlay}>
@@ -2121,6 +2136,14 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
+  // Context 标题 + 右侧 Debug 按钮同行
+  contextTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
+  debugBtn: {
+    display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+    fontSize: 10.5, fontWeight: 600, padding: '2px 9px', borderRadius: 999, cursor: 'pointer',
+    background: 'rgba(255,159,10,0.14)', border: '0.5px solid rgba(255,159,10,0.42)',
+    color: '#ff9f0a', lineHeight: 1.5,
+  },
   contextPreviewBox: { marginBottom: 12 },
   previewTintRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 },
   previewTintLabel: { fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 58 },

@@ -182,6 +182,47 @@ export interface DebugRecoverData {
   reference_images: DebugReferenceImage[];
 }
 
+/**
+ * 上一次 Run / Generate 的调试快照（/api/debug_trace）。
+ * `steps` 是按执行顺序排列的记录：stage = 文字说明，prompt = 某一阶段的提示词，
+ * image / mask 带 `items` 缩略图，block = 一个 block 的分节标题，error = 某步失败。
+ */
+export interface DebugTraceItem {
+  label: string;
+  dataUrl: string;
+  width: number;
+  height: number;
+  note?: string;
+}
+
+export interface DebugTraceStep {
+  kind: 'stage' | 'prompt' | 'image' | 'mask' | 'block' | 'error';
+  label: string;
+  detail?: string;
+  /** 属于哪个 block；0 = 链外 / 全局，null = 未标注 */
+  block?: number | null;
+  data?: Record<string, any>;
+  items?: DebugTraceItem[];
+}
+
+export interface DebugTraceMeta {
+  generated_at?: string | null;
+  from_blend?: boolean;
+  action?: string;
+  status?: 'idle' | 'running' | 'done' | 'error';
+  error?: string | null;
+  [k: string]: any;
+}
+
+export interface DebugTraceResponse {
+  available: boolean;
+  generated_at?: string | null;
+  meta?: DebugTraceMeta | null;
+  steps: DebugTraceStep[];
+  image_count: number;
+  truncated: boolean;
+}
+
 export interface HistoryItem {
   key: string;
   name: string;

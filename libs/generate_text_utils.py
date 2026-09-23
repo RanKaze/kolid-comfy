@@ -86,6 +86,41 @@ def combine_prompt(instruction, positive):
     return f"{instruction}\n\n{positive}"
 
 
+def normalize_ref_image(image):
+    """把 ref image 规整成 ComfyUI 的 IMAGE 批次 [B,H,W,C]；不可用返回 None。
+
+    Enable Edit 时会把 Context Ref 选中的那张图送进 Generate Text（多模态 CLIP
+    能「看着图」改写提示词）。这里只做最小归一：tensor 原样透传（ComfyUI IMAGE
+    本来就是 [B,H,W,C]），numpy 转 tensor，其余一律 None —— 绝不抛异常，
+    因为调用方是 fail-open 的采样链路。
+    """
+    if image is None:
+        return None
+    try:
+        import torch
+    except Exception:
+        return None
+    try:
+        if isinstance(image, dict):
+            # 防御：万一传进来的是 LATENT 这类 dict，取 samples 再判断
+            image = image.get("samples", image)
+        if isinstance(image, torch.Tensor):
+            t = image
+        else:
+            t = torch.as_tensor(image)
+        if t.dim() == 3:
+            t = t.unsqueeze(0)          # [H,W,C] → [1,H,W,C]
+        elif t.dim() == 2:
+            t = t.unsqueeze(0).unsqueeze(-1)   # [H,W] → [1,H,W,1]
+        if t.dim() != 4:
+            return None
+        if not t.is_floating_point():
+            t = t.float()
+        return t
+    except Exception:
+        return None
+
+
 def _resolve_textgen_class():
     """拿到 ComfyUI 的 TextGenerate 类；拿不到返回 None。"""
     try:
