@@ -138,6 +138,7 @@ interface EditPhaseProps {
   onRenameBlockSet: (id: string, name: string) => void;
   onDuplicateBlockSet: (id: string) => void;
   onRemoveBlockSet: (id: string) => void;
+  onReorderBlockSets: (from: number, to: number) => void;
   onSwitchBlockSet: (id: string) => void;
   onSelectImage: (key: string) => void;
   onFinishClick: () => void;
@@ -169,7 +170,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   promptReady, detailStatus,
   history, onRefreshHistory, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
-  blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onSwitchBlockSet,
+  blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
@@ -549,7 +550,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
               <div style={styles.sectionTitle}>Pipeline Presets</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
-                {blockSets.map(set => {
+                {blockSets.map((set, setIdx) => {
                   const missing = set.blocks.filter(b => ifaceIsMissing(b)).length;
                   const isActive = set.id === activeBlockSetId;
                   if (renamingSetId === set.id) {
@@ -565,14 +566,18 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     );
                   }
                   // A capsule: the left half IS the tab (click to switch, double-click to
-                  // rename) and the right half runs this preset right now — one click
-                  // instead of "switch the tab, then go and press Run".
+                  // rename, drag to reorder) and the right half runs this preset right now.
                   return (
                     <div key={set.id} style={{
                       display: 'flex', alignItems: 'stretch', borderRadius: 999, overflow: 'hidden',
                       border: '0.5px solid ' + (isActive ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.1)'),
                       background: isActive ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.04)',
-                    }}>
+                    }}
+                      draggable
+                      onDragStart={e => { e.dataTransfer.setData('application/x-blockset', String(setIdx)); e.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                      onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('application/x-blockset')); if (!isNaN(from)) onReorderBlockSets(from, setIdx); }}
+                    >
                       <button
                         title={missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time` : set.name}
                         onClick={() => onSwitchBlockSet(set.id)}
@@ -601,14 +606,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   );
                 })}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 'auto' }}>
-                  <button title="Rename this tab (or double-click the tab)"
+                  <button title="Rename this tab (or double-click the tab)" disabled={!activeBlockSetId}
                     onClick={() => { const s = blockSets.find(x => x.id === activeBlockSetId); if (s) { setRenamingSetId(s.id); setRenamingValue(s.name); } }}
-                    style={tabActionBtn}>✎</button>
-                  <button title="Duplicate this tab" onClick={() => onDuplicateBlockSet(activeBlockSetId)} style={tabActionBtn}>⧉</button>
-                  <button title={blockSets.length > 1 ? 'Delete this tab' : 'The last tab cannot be deleted'}
-                    disabled={blockSets.length <= 1}
+                    style={{ ...tabActionBtn, color: activeBlockSetId ? undefined : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>✎</button>
+                  <button title={activeBlockSetId ? 'Duplicate this tab' : 'Select or create a tab first'} disabled={!activeBlockSetId}
+                    onClick={() => onDuplicateBlockSet(activeBlockSetId)}
+                    style={{ ...tabActionBtn, color: activeBlockSetId ? undefined : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>⧉</button>
+                  <button title={activeBlockSetId ? 'Delete this tab' : 'No tab to delete'}
+                    disabled={!activeBlockSetId}
                     onClick={() => onRemoveBlockSet(activeBlockSetId)}
-                    style={{ ...tabActionBtn, color: blockSets.length > 1 ? 'rgba(255,90,90,0.8)' : 'rgba(255,255,255,0.15)', cursor: blockSets.length > 1 ? 'pointer' : 'default' }}>✕</button>
+                    style={{ ...tabActionBtn, color: activeBlockSetId ? 'rgba(255,90,90,0.8)' : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>✕</button>
                   <button title="New tab" onClick={onAddBlockSet} style={{ ...tabActionBtn, color: '#0a84ff', fontWeight: 700 }}>＋</button>
                 </div>
               </div>

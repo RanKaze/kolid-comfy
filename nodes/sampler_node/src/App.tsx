@@ -108,17 +108,26 @@ const App: React.FC = () => {
         setConfig(data);
         setMaskGrow(data.mask_grow);
         setMaskBlur(data.mask_blur);
-        if (Array.isArray(data.blocks_sets) && data.blocks_sets.length > 0) {
+        if (Array.isArray(data.blocks_sets)) {
           setBlockSets(data.blocks_sets);
           setActiveBlockSetId(
             data.active_block_set && data.blocks_sets.some((s: BlockSet) => s.id === data.active_block_set)
               ? data.active_block_set
-              : data.blocks_sets[0].id);
+              : (data.blocks_sets[0]?.id ?? ''));
         } else if (data.blocks && data.blocks.length > 0) {
           // Legacy config without sets: wrap the flat chain into a single Default tab.
           setBlockSets([{ id: 'set-1', name: 'Default', blocks: data.blocks }]);
           setActiveBlockSetId('set-1');
         }
+        // Counters restart at 2 each load; skip past ids already persisted on the server,
+        // otherwise "New tab" after a refresh mints an id that collides with an existing set.
+        const maxIdSuffix = (ids: string[], prefix: string) =>
+          ids.reduce((m, id) => { const n = parseInt(id.slice(prefix.length), 10); return Number.isFinite(n) ? Math.max(m, n) : m; }, 1);
+        const allSets: BlockSet[] = Array.isArray(data.blocks_sets)
+          ? data.blocks_sets
+          : [{ id: 'set-1', name: 'Default', blocks: data.blocks ?? [] }];
+        blockSetIdCounter.current = Math.max(2, maxIdSuffix(allSets.map(s => s.id), 'set-') + 1);
+        blockIdCounter.current = Math.max(2, maxIdSuffix(allSets.flatMap(s => (s.blocks ?? []).map(b => b.id)), 'block-') + 1);
         setDetailStatus(data.detail_status);
         setCurrentContextKey(data.current_context_key ?? null);
         setArchitecture(data.architecture ?? null);
@@ -728,10 +737,17 @@ const App: React.FC = () => {
   }, [blockSets, persistSets]);
 
   const handleRemoveBlockSet = useCallback((id: string) => {
-    if (blockSets.length <= 1) return;
     const nextSets = blockSets.filter(s => s.id !== id);
-    const nextActive = activeBlockSetId === id ? nextSets[0].id : activeBlockSetId;
+    const nextActive = nextSets.some(s => s.id === activeBlockSetId) ? activeBlockSetId : (nextSets[0]?.id ?? '');
     persistSets(nextSets, nextActive);
+  }, [blockSets, activeBlockSetId, persistSets]);
+
+  const handleReorderBlockSets = useCallback((from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= blockSets.length || to >= blockSets.length) return;
+    const nextSets = [...blockSets];
+    const [moved] = nextSets.splice(from, 1);
+    nextSets.splice(to, 0, moved);
+    persistSets(nextSets, activeBlockSetId);
   }, [blockSets, activeBlockSetId, persistSets]);
 
   const handleSwitchBlockSet = useCallback((id: string) => {
@@ -877,6 +893,7 @@ const App: React.FC = () => {
         onRenameBlockSet={handleRenameBlockSet}
         onDuplicateBlockSet={handleDuplicateBlockSet}
         onRemoveBlockSet={handleRemoveBlockSet}
+        onReorderBlockSets={handleReorderBlockSets}
         onSwitchBlockSet={handleSwitchBlockSet}
         onSelectImage={handleSelectImage}
         onFinishClick={handleFinishClick}

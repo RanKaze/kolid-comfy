@@ -184,23 +184,30 @@ class SnapshotDetailerSamplerServer:
         # flat chain always agree. `self.blocks` keeps mirroring the ACTIVE set: the runner and
         # the Blend workbench only ever see one chain, the sets are a UI/存储 layer on top.
         self.blocks_sets = cfg.get('blocks_sets')
-        if not (isinstance(self.blocks_sets, list) and self.blocks_sets):
+        if not isinstance(self.blocks_sets, list):
             self.blocks_sets = [{'id': 'set-1', 'name': 'Default', 'blocks': self.blocks}]
         self.active_block_set = cfg.get('active_block_set')
-        if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
-            self.active_block_set = self.blocks_sets[0].get('id')
+        if self.blocks_sets:
+            if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+                self.active_block_set = self.blocks_sets[0].get('id')
+        else:
+            self.active_block_set = None
         active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
         if active_set and active_set.get('blocks'):
             self.blocks = active_set['blocks']
         # Disk persistence: the tab sets survive ComfyUI restarts (the in-memory chain only lives
         # as long as the session). The file wins over the migrated config when it exists.
         f_sets, f_active = self._load_blocks_sets_file()
-        if f_sets:
+        if f_sets is not None:
             self.blocks_sets = f_sets
-            self.active_block_set = f_active if any(s.get('id') == f_active for s in f_sets) else f_sets[0].get('id')
-            active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
-            if active_set and active_set.get('blocks'):
-                self.blocks = active_set['blocks']
+            if f_sets:
+                self.active_block_set = f_active if any(s.get('id') == f_active for s in f_sets) else f_sets[0].get('id')
+                active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+                if active_set and active_set.get('blocks'):
+                    self.blocks = active_set['blocks']
+            else:
+                self.active_block_set = None
+                self.blocks = []
         self.detail_status = 'idle'
         self.detail_error = None
         self.detail_progress = 0       # 0..1
@@ -564,7 +571,7 @@ class SnapshotDetailerSamplerServer:
             with open(self._blocks_sets_file(), 'r', encoding='utf-8') as f:
                 data = json.load(f)
             sets = data.get('blocks_sets') if isinstance(data, dict) else None
-            if isinstance(sets, list) and sets:
+            if isinstance(sets, list):
                 return sets, data.get('active_block_set')
         except Exception:
             pass
@@ -618,17 +625,21 @@ class SnapshotDetailerSamplerServer:
         # only ever sees its flat chain.
         if 'blocks_sets' in data:
             sets = data['blocks_sets']
-            if isinstance(sets, list) and sets:
+            if isinstance(sets, list):
                 self.blocks_sets = sets
         if 'active_block_set' in data and data['active_block_set']:
             self.active_block_set = data['active_block_set']
         if 'blocks_sets' in data or 'active_block_set' in data:
-            if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
-                self.active_block_set = self.blocks_sets[0].get('id')
-            active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
-            if active_set is not None:
-                self._set_blocks(active_set.get('blocks') or [])
-                dirty = True
+            if self.blocks_sets:
+                if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+                    self.active_block_set = self.blocks_sets[0].get('id')
+                active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+                if active_set is not None:
+                    self._set_blocks(active_set.get('blocks') or [])
+            else:
+                self.active_block_set = None
+                self._set_blocks([])
+            dirty = True
             self._save_blocks_sets_file()
         if 'blocks' in data:
             self._set_blocks(data['blocks'])
@@ -1899,6 +1910,100 @@ class SnapshotDetailerSamplerNode:
             raise RuntimeError('Query answered with nothing — the chain was aborted')
         return query['answer']
 
+    def _resolve_ref_image_for_generate_text(self, server, key):
+        """取 Enable Edit 的 Ref Image（Context Ref 选中的那张），供 Generate Text 使用。
+
+        语义（用户确认）：只有 `enable_edit` 开着、且该 block 真的选了 Ref Image 时才送图；
+        取不到就返回 None（调用方静默降级为纯文本）。整体 fail-open —— 这里绝不抛异常，
+        否则会顺着生成链路把整条采样链带崩。返回 [B,H,W,C] float tensor 或 None。
+
+        ★ 类归属：必须留在 SnapshotDetailerSamplerNode（run 链路 `self.` 调用），
+        不能搬到 Server —— 跨顶层类会退化成只在实机 run 时才炸的 AttributeError。
+        """
+        if server is None or not key:
+            return None
+        try:
+            img = server.get_history_image(key)
+            if img is None:
+                print(f"[GenerateText] ref image key '{key}' not found — text-only")
+                return None
+            from ..libs.generate_text_utils import normalize_ref_image
+            return normalize_ref_image(img)
+        except Exception as e:
+            print(f"[GenerateText] ref image lookup failed ({e}) — text-only")
+            return None
+
+    def _preflight_generate_text_images(self, images, clip, params):
+        """把「这批图到底能不能变成 embedding」实测一遍，供 Debug 显示。
+
+        用户反馈「感觉传进去的 image 并没有正确影响 text generate」—— 光看
+        `describe_image_support` 的名字推断不够，这里**真的跑一次 tokenize**，
+        数 token 流里有没有 `{'type': 'image'}` 元素：
+          · (True,  '已确认 N 个 image embedding 进入 token 流')
+          · (False, '★ 图不会生效 — use_default_template=False 绕过了视觉模板 …')
+          · (None,  '未验证（tokenize 探针不可用: …)）
+        全程 fail-open，绝不抛进采样链（探测用的 tokenize 不产生任何副作用：
+        不采样、不解码、不碰 model）。
+        """
+        if not images or clip is None:
+            return None, ''
+        # ★ 探测 helper 一律用「模块级 import」拿，别在函数里 `from ..libs import`：
+        #   相对导入会解析成 `kolid_comfy.libs.generate_text_utils`，一旦换了加载方式
+        #   （装包 / spec_from_file_location / 测试 exec）就会 ImportError，外部表现
+        #   是「静默不验证」—— 也就是说这个诊断自己会静默失效。
+        try:
+            from libs.generate_text_utils import (
+                normalize_ref_images, describe_image_support,
+                _tokens_contain_image_embedding, text_defeats_vision_template,
+                strip_leading_chat_template)
+        except Exception:
+            try:
+                from ..libs.generate_text_utils import (
+                    normalize_ref_images, describe_image_support,
+                    _tokens_contain_image_embedding, text_defeats_vision_template,
+                    strip_leading_chat_template)
+            except Exception as e:
+                return None, f'未验证（helper 不可用: {e}）'
+        try:
+            # ★★ 探针必须走与运行时**同一条入口**：`images=`（list of [1,H,W,C]），
+            #   而不是 `image=`；两者在 qwen3vl 里等价（内部会拆成同一个 list），
+            #   但统一入口能保证 Debug 结论与 run_generate_text 的实测结论一致。
+            #   踩过的坑：这里曾写成 `clip.tokenize(batch, ...)` —— 把整张图当 text 传，
+            #   于是永远数不到 image embedding，Debug 里长期假报「图不会生效」，
+            #   与 run_generate_text 的实测结论自相矛盾。
+            img_list, kept = normalize_ref_images(images, single=True)
+            if img_list is None:
+                return False, '★ 图不会生效 — 没有可用图（尺寸不一致 / 归一失败）'
+            ok, why = describe_image_support(clip, bool((params or {}).get(
+                'use_default_template', True)))
+            if not ok:
+                return False, f'★ 图不会生效 — {why}'
+            use_tpl = bool((params or {}).get('use_default_template', True))
+            # ★★ 还有一个更隐蔽的坑：文本若以 `<|im_start|>` 之类的 chat 模板标记开头，
+            #   编码器 qwen3vl.py:167 的 `skip_template = skip_template or
+            #   text.startswith('<|im_start|>')` 会直接绕掉视觉模板 → 图静默失效。
+            #   ★ 探针文本必须与运行时一致地做 strip（指令为空时文本就是 chat 模板本身，
+            #   运行时已经 strip 掉了，探针不 strip 就会得出相反的结论）。
+            instr = str((params or {}).get('_instruction') or '').strip()
+            probe_text = instr if instr else 'x'
+            try:
+                probe_text, _ = strip_leading_chat_template(probe_text)
+            except Exception:
+                pass
+            if not probe_text.strip():
+                probe_text = 'x'  # 编码器对空文本会走 prevent_empty_text 分支
+            tokens = clip.tokenize(
+                probe_text, images=img_list, skip_template=not use_tpl,
+                min_length=1, prevent_empty_text=True)
+            found, count = _tokens_contain_image_embedding(tokens)
+            if found:
+                return True, (f'已确认生效 — {count} 个 image embedding 进入 token 流'
+                              f'（{len(kept)} 张图）')
+            return False, ('★ 图不会生效 — clip.tokenize 收到了图，但 token 流里'
+                           '没有任何 image embedding（视觉模板被绕过 / 编码器非多模态）')
+        except Exception as e:
+            return None, f'未验证（tokenize 探针失败: {type(e).__name__}: {e}）'
+
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
@@ -2260,21 +2365,81 @@ class SnapshotDetailerSamplerNode:
                 # 只在 config 里开开关，参数与 clip 都来自上游节点，此处不做任何 UI。
                 if next_pipeline.config.get('enable_generate_text'):
                     _gt_before = current_positive
+                    # Enable Edit 开 → 送图（多模态 CLIP 看图改写）：
+                    #   第一张 = next_pipeline.image（链上传递的那张，pipeline 就是靠它
+                    #            在 block 间传图的；interface 块会写回，detailer 不改它）
+                    #   第二张 = 本块选的 Ref Image（能传就传，能几张传几张）
+                    # Edit 关 → 完全不传图（不做隐藏行为）。
+                    _gt_images = []
+                    _gt_ref_key = None
+                    _gt_img_status = 'n/a（未送图）'
+                    if enable_edit:
+                        _chain_img = next_pipeline.get_image()
+                        if _chain_img is not None:
+                            _gt_images.append(_chain_img)
+                        if context_reference_key:
+                            _ref_img = self._resolve_ref_image_for_generate_text(
+                                server, context_reference_key)
+                            if _ref_img is not None:
+                                _gt_images.append(_ref_img)
+                                _gt_ref_key = context_reference_key
+                        # 明确告诉 Debug：这些图**会不会真的影响**生成。
+                        # 先按名字/模板做静态判断，再**实测一次 tokenize**（数 image
+                        # embedding）—— 后者才是「图真的进了 token 流」的唯一证据。
+                        if _gt_images:
+                            _gt_clip = (next_pipeline.config.get('generate_text_clip')
+                                        or next_pipeline.clip)
+                            _gt_params = next_pipeline.config.get('generate_text') or {}
+                            _gt_img_status = '未知'
+                            try:
+                                from ..libs.generate_text_utils import describe_image_support
+                                _ok, _why = describe_image_support(
+                                    _gt_clip,
+                                    bool(_gt_params.get('use_default_template', True)))
+                                _gt_img_status = ('会生效 — ' if _ok else '★ 不会生效 — ') + _why
+                            except Exception as _e:
+                                _gt_img_status = f'unknown ({_e})'
+                            try:
+                                _p_ok, _p_why = self._preflight_generate_text_images(
+                                    _gt_images, _gt_clip,
+                                    {**_gt_params,
+                                     '_instruction': next_pipeline.config.get(
+                                         'generate_text_prompt', '')})
+                                if _p_why:
+                                    _gt_img_status = _p_why
+                                elif _p_ok is not None:
+                                    _gt_img_status = ('已确认生效 — ' if _p_ok
+                                                      else '★ 不会生效 — ') + _gt_img_status
+                            except Exception as _e:
+                                print(f'[GenerateText] preflight probe failed ({_e})')
+                            print(f'[GenerateText] [block {i + 1}] image status: {_gt_img_status}')
                     dbg.record_prompt(f'Block {i+1} · c) Generate Text 输入（指令 + positive）',
                                       current_positive, block=i + 1,
                                       instruction=next_pipeline.config.get('generate_text_prompt', ''),
-                                      params=next_pipeline.config.get('generate_text'))
+                                      params=next_pipeline.config.get('generate_text'),
+                                      image_count=len(_gt_images),
+                                      ref_image_key=_gt_ref_key,
+                                      image_status=_gt_img_status)
+                    # Debug：把每一张真正送进 Generate Text 的图单独画出来，标注来源
+                    for _gi, _gimg in enumerate(_gt_images):
+                        _gsrc = ('pipeline.image（链上工作图）' if _gi == 0
+                                 else f'Ref Image（{_gt_ref_key}）')
+                        dbg.record_image(f'Block {i+1} · c{_gi + 1}) Generate Text 输入图 — {_gsrc}',
+                                         _gimg, block=i + 1,
+                                         detail=f'第 {_gi + 1} 张 / 共 {len(_gt_images)} 张')
                     try:
                         current_positive, _gt_used = apply_generate_text_to_prompt(
                             next_pipeline, current_positive,
                             next_pipeline.config.get('generate_text_prompt', ''),
-                            label=f' [block {i + 1}]')
+                            label=f' [block {i + 1}]',
+                            images=_gt_images or None)
                         if _gt_used:
                             print(f'[PipelineBlock {i + 1}/{len(blocks)}] Generate Text applied: '
                                   f"positive='{current_positive[:200]}' ({len(current_positive)} chars)")
                         dbg.record_prompt(f'Block {i+1} · d) Generate Text 输出（new_positive）',
                                           current_positive, block=i + 1,
                                           applied=bool(_gt_used),
+                                          images_sent=len(_gt_images),
                                           before=_gt_before)
                     except Exception as e:
                         # fail-open：生成失败保留原 prompt，不中断整条链
@@ -2630,6 +2795,8 @@ class SnapshotDetailerSamplerNode:
             # 注入点替换 positive（与 Draw tab block 链的语义保持一致）。
             if injected_pipeline and injected_pipeline.config.get('enable_generate_text'):
                 try:
+                    # interface 块没有 Enable Edit / Ref Image 概念 → 始终纯文本
+                    # （image 省略即 None），与 block 链里未选 Ref Image 时一致。
                     user_positive, _gt_used = apply_generate_text_to_prompt(
                         injected_pipeline, user_positive,
                         injected_pipeline.config.get('generate_text_prompt', ''),

@@ -1,96 +1,22 @@
 {
   "blocks_sets": [
     {
-      "id": "set-1",
-      "name": "Detailer",
+      "id": "set-12",
+      "name": "细化",
       "blocks": [
         {
-          "id": "block-1",
+          "id": "block-13",
           "type": "detailer",
           "name": "Detailer",
           "params": {
             "add_noise": "enable",
-            "start_step_rate": 0.4,
-            "end_step_rate": "1.0",
-            "pixels": "1548576",
-            "align": "32",
-            "crop_reserve": "32",
-            "recover_crop": false,
-            "enable_edit": true,
-            "edit_mode": "fit",
-            "ref_boost": 4,
-            "ref_boost_a": 1,
-            "enable_ref_boost_mask": false,
-            "grounding_px": 768,
-            "context_reference": false,
-            "context_reference_key": null,
-            "enable_mask": true
-          }
-        }
-      ]
-    },
-    {
-      "id": "set-3",
-      "name": "Generate",
-      "blocks": [
-        {
-          "id": "block-2",
-          "type": "query",
-          "name": "Query",
-          "params": {}
-        },
-        {
-          "id": "block-3",
-          "type": "detailer",
-          "name": "Detailer",
-          "params": {
-            "add_noise": "enable",
-            "start_step_rate": 0,
-            "end_step_rate": 1,
-            "pixels": 1048576,
-            "align": 8,
-            "crop_reserve": 32,
-            "recover_crop": true,
-            "enable_edit": true,
-            "edit_mode": "fit",
-            "ref_boost": 4,
-            "ref_boost_a": 1,
-            "enable_ref_boost_mask": false,
-            "grounding_px": 768,
-            "context_reference": true,
-            "context_reference_key": null,
-            "context_regex": ".+",
-            "enable_mask": false,
-            "enable_limit": false
-          }
-        }
-      ]
-    },
-    {
-      "id": "set-4",
-      "name": "Matting",
-      "blocks": [
-        {
-          "id": "block-5",
-          "type": "prompt",
-          "name": "Prompt",
-          "params": {
-            "preset_id": "preset-30377841a62f"
-          }
-        },
-        {
-          "id": "block-4",
-          "type": "detailer",
-          "name": "Detailer",
-          "params": {
-            "add_noise": "enable",
-            "start_step_rate": 0,
+            "start_step_rate": 0.6,
             "end_step_rate": 1,
             "pixels": 1548576,
-            "align": 32,
+            "align": 16,
             "crop_reserve": 32,
-            "recover_crop": true,
-            "enable_edit": true,
+            "recover_crop": false,
+            "enable_edit": false,
             "edit_mode": "fit",
             "ref_boost": 4,
             "ref_boost_a": 1,
@@ -98,19 +24,17 @@
             "grounding_px": 768,
             "context_reference": true,
             "context_reference_key": null,
-            "context_regex": ".+",
-            "enable_mask": false,
-            "enable_limit": false
+            "context_regex": ".+"
           }
         }
       ]
     },
     {
-      "id": "set-2",
-      "name": "Alpha Edit",
+      "id": "set-17",
+      "name": "编辑",
       "blocks": [
         {
-          "id": "block-3",
+          "id": "block-22",
           "type": "prompt",
           "name": "Prompt",
           "params": {
@@ -118,7 +42,7 @@
           }
         },
         {
-          "id": "block-2",
+          "id": "block-18",
           "type": "detailer",
           "name": "Detailer",
           "params": {
@@ -128,7 +52,83 @@
             "pixels": 1048576,
             "align": 8,
             "crop_reserve": 32,
-            "recover_crop": true,
+            "recover_crop": false,
+            "enable_edit": true,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": true,
+            "context_reference_key": null,
+            "context_regex": ".+",
+            "enable_limit": false,
+            "enable_mask": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "set-18",
+      "name": "请求生成",
+      "blocks": [
+        {
+          "id": "block-21",
+          "type": "query",
+          "name": "Query",
+          "params": {}
+        },
+        {
+          "id": "block-20",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 1048576,
+            "align": 8,
+            "crop_reserve": 32,
+            "recover_crop": false,
+            "enable_edit": false,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": true,
+            "context_reference_key": null,
+            "context_regex": ".+",
+            "enable_limit": false,
+            "enable_mask": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "set-19",
+      "name": "扣出角色",
+      "blocks": [
+        {
+          "id": "block-25",
+          "type": "prompt",
+          "name": "Prompt",
+          "params": {
+            "preset_id": "preset-30377841a62f"
+          }
+        },
+        {
+          "id": "block-23",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 1048576,
+            "align": 8,
+            "crop_reserve": 32,
+            "recover_crop": false,
             "enable_edit": true,
             "edit_mode": "fit",
             "ref_boost": 4,
@@ -145,5 +145,5 @@
       ]
     }
   ],
-  "active_block_set": "set-2"
+  "active_block_set": "set-17"
 }
