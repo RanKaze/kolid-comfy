@@ -226,6 +226,7 @@ NODE_CONFIG = {
     "PipelineToggleMaskInpaintNode": {"class": PipelineToggleMaskInpaintNode, "name": "PipelineToggleMaskInpaintNode"},
     "PipelineEnableEditNode": {"class": PipelineEnableEditNode, "name": "PipelineEnableEditNode"},
     "PipelineEnableQwenEditNode": {"class": PipelineEnableQwenEditNode, "name": "PipelineEnableQwenEditNode"},
+    "PipelineEnableGenerateTextNode": {"class": PipelineEnableGenerateTextNode, "name": "PipelineEnableGenerateTextNode"},
     "PipelineDetailerAdvancedNode": {"class": PipelineDetailerAdvancedNode, "name": "PipelineDetailerAdvancedNode"},
     "PipelineDetectNode": {"class": PipelineDetectNode, "name": "PipelineDetectNode"},
     "PipelineTagNode": {"class": PipelineTagNode, "name": "PipelineTagNode"},

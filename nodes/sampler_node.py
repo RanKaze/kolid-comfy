@@ -16,6 +16,13 @@ from ..libs.image_utils import limit_pixels, recover_size, crop_mask, recover_cr
 from ..libs.detect_utils import detect_mask
 from ..libs.mask_utils import combine_masks, create_empty_mask, expand_mask, invert_mask
 from ..libs.caption_utils import get_tag, get_similarity
+from ..libs.generate_text_utils import (
+    DEFAULT_GENERATE_TEXT_PARAMS,
+    MTP_CHOICES,
+    SAMPLING_MODES,
+    apply_generate_text_to_prompt,
+    run_generate_text,
+)
 from decord import VideoReader, cpu
 from ..libs.image_utils import draw_mask_on_image, draw_mask, batch_images
 import comfy.sampler_helpers
@@ -2320,6 +2327,93 @@ class PipelineEnableQwenEditNode:
 
         if enable:
             print("[EnableQwenEdit] QwenImageEditPlus conditioning enabled")
+
+        return (next_pipeline,)
+
+
+# ====================== PipelineEnableGenerateTextNode ======================
+class PipelineEnableGenerateTextNode:
+    """启用 Generate Text（对齐 ComfyUI 的 "Generate Text" / TextGenerate 节点）。
+
+    启用后，把本节点的 `prompt`（指令）与 pipeline 中的 positive 提示词拼起来
+    （prompt\n\npositive）交给文本生成 CLIP，用生成结果「完全替换」positive。
+    没接 clip 时回落到 pipeline 自带的 clip。
+
+    与 PipelineEnableEditNode 一样，本节点只写 config 开关与参数，真正的生成
+    发生在采样链的 prompt 注入点（sampler / snapshot Detailer / Interface）。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "enable": ("BOOLEAN", {"default": True}),
+                "prompt": ("STRING", {"default": "", "multiline": True}),
+                "max_length": ("INT", {"default": 512, "min": 1, "max": 32768}),
+                "sampling_mode": (list(SAMPLING_MODES), {"default": "on"}),
+                "temperature": ("FLOAT", {"default": 0.7, "min": 0.01, "max": 2.0, "step": 0.000001}),
+                "top_k": ("INT", {"default": 64, "min": 0, "max": 1000}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "min_p": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "repetition_penalty": ("FLOAT", {"default": 1.05, "min": 0.0, "max": 5.0, "step": 0.01}),
+                "presence_penalty": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 5.0, "step": 0.01}),
+                "thinking": ("BOOLEAN", {"default": False}),
+                "use_default_template": ("BOOLEAN", {"default": True}),
+                "mtp": (list(MTP_CHOICES), {"default": "auto"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                                 "control_after_generate": True}),
+            },
+            "optional": {
+                "clip": ("CLIP",),
+            },
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "enable_generate_text"
+    CATEGORY = "sampling/custom"
+
+    def enable_generate_text(self, pipeline, enable, prompt, max_length, sampling_mode,
+                             temperature, top_k, top_p, min_p, repetition_penalty,
+                             presence_penalty, thinking, use_default_template, mtp,
+                             seed, clip=None):
+        next_pipeline = pipeline.copy()
+
+        params = {
+            "max_length": int(max_length),
+            "sampling_mode": sampling_mode,
+            "temperature": float(temperature),
+            "top_k": int(top_k),
+            "top_p": float(top_p),
+            "min_p": float(min_p),
+            "repetition_penalty": float(repetition_penalty),
+            "presence_penalty": float(presence_penalty),
+            "thinking": bool(thinking),
+            "use_default_template": bool(use_default_template),
+            "mtp": mtp,
+            "seed": int(seed),
+        }
+
+        # clip 是节点级输入，必须随 config 传递（pipeline.clip 可能不是生成型编码器）。
+        # 未接时留空，运行时回落到 pipeline.clip。
+        next_pipeline.config["enable_generate_text"] = bool(enable) and bool((prompt or "").strip())
+        next_pipeline.config["generate_text_prompt"] = prompt or ""
+        next_pipeline.config["generate_text"] = params
+        if clip is not None:
+            next_pipeline.config["generate_text_clip"] = clip
+        else:
+            next_pipeline.config.pop("generate_text_clip", None)
+
+        if enable:
+            if not (prompt or "").strip():
+                print("[EnableGenerateText] WARNING: enable=True but prompt is empty — passthrough")
+            elif clip is None and next_pipeline.clip is None:
+                print("[EnableGenerateText] WARNING: no clip connected and pipeline.clip is empty — will passthrough")
+            else:
+                source = "node clip" if clip is not None else "pipeline clip"
+                print(f"[EnableGenerateText] enabled ({source}, sampling_mode={sampling_mode}, "
+                      f"max_length={max_length}, mtp={mtp}, thinking={thinking})")
 
         return (next_pipeline,)
 
