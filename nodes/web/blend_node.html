@@ -2647,8 +2647,13 @@ function renderLayerList() {
             ev.dataTransfer.setData('text/plain', String(l.id));
         });
         row.addEventListener('dragend', () => { row.classList.remove('dragging'); dragRowId = null; });
+        // 行拖拽（图层重排序）只在真的是「拖动图层」时接管 —— 拖外部文件 / 拖工作区缩略图
+        // 经过这里时因为 dragRowId 为 null 而原样放行，让 window 的全局拖入去处理
+        // （否则会亮起插入线误导，也看不见画布的全屏 drop 提示）。
         row.addEventListener('dragover', ev => {
+            if (dragRowId === null) return;
             ev.preventDefault();
+            ev.stopPropagation();
             ev.dataTransfer.dropEffect = 'move';
             const r = row.getBoundingClientRect();
             const above = (ev.clientY - r.top) < r.height / 2;
@@ -2657,7 +2662,9 @@ function renderLayerList() {
         });
         row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
         row.addEventListener('drop', ev => {
+            if (dragRowId === null) return;      // 不是图层重排序 → 不吞事件
             ev.preventDefault();
+            ev.stopPropagation();
             const above = row.classList.contains('drop-above');
             row.classList.remove('drop-above', 'drop-below');
             if (dragRowId !== null) moveLayer(dragRowId, l.id, above);
@@ -5887,6 +5894,7 @@ function makeContextCard() {
     const img = document.createElement('img');
     img.className = 'context-preview';
     img.alt = 'Context image preview';
+    img.draggable = false;      // 缩略图不是拖拽源：拖它经过图层列表不该触发排序线
     img.style.display = 'none';
     item.appendChild(img);
     const label = document.createElement('span');
@@ -5919,6 +5927,9 @@ function renderStaging() {
         const img = document.createElement('img');
         img.src = s.src;
         img.alt = s.name;
+        // 工作区条目只响应「点击插入 token」；把它当成 HTML5 拖拽源会和图层列表的
+        // 排序拖拽撞车（浏览器默认 <img> 可拖），所以显式关掉。
+        img.draggable = false;
         item.appendChild(img);
         const rm = document.createElement('button');
         rm.className = 'staging-remove';
@@ -5958,20 +5969,35 @@ function stageFiles(files) {
 }
 
 const stagingStripEl = document.getElementById('stagingStrip');
+// 从画布一路拖到工作区条上时，画布的全屏 drop 提示必须让位给工作区自己的高亮 ——
+// 两者同时显示 = 用户不知道松手会发生什么。
+function hideGlobalDropOverlay() {
+    try {
+        const el = (typeof dropOverlay !== 'undefined' && dropOverlay)
+            || document.getElementById('dropOverlay');
+        if (el) el.style.display = 'none';
+    } catch (e) { /* 预览/测试宿主里没有这块遮罩 */ }
+}
 if (stagingStripEl) {
     stagingStripEl.addEventListener('dragover', e => {
         if (!Array.from(e.dataTransfer.types).includes('Files')) return;
         e.preventDefault();
+        e.stopPropagation();       // ★ 独占：window 的全局拖入不得再弹全屏 overlay
         e.dataTransfer.dropEffect = 'copy';
+        hideGlobalDropOverlay();
         stagingStripEl.classList.add('drag-over');
     });
     stagingStripEl.addEventListener('dragleave', e => {
+        e.stopPropagation();       // ★ 同理：别让 window 的 leave 逻辑碰这段区域
         if (e.currentTarget.contains(e.relatedTarget)) return;
         stagingStripEl.classList.remove('drag-over');
     });
     stagingStripEl.addEventListener('drop', e => {
+        // 图层排序的拖拽也可能在这上面松手（types 里没有 Files）—— 那不是我们的事，
+        // 不要拦也不要处理，让事件照常走完。
+        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
         e.preventDefault();
-        e.stopPropagation();          // 不让文件再落进画布变图层 —— 它们进图池
+        e.stopPropagation();       // 不让文件再落进画布变图层 —— 它们进图池
         stagingStripEl.classList.remove('drag-over');
         stageFiles(e.dataTransfer.files);
     });
