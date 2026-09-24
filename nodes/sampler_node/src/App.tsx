@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, HistoryItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -26,7 +26,7 @@ const App: React.FC = () => {
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [interfaceStatusByIdx, setInterfaceStatusByIdx] = useState<Record<number, 'idle' | 'running' | 'done' | 'error'>>({});
   const [interfaceProgressByIdx, setInterfaceProgressByIdx] = useState<Record<number, { progress: number; current: number; total: number }>>({});
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [staging, setStaging] = useState<StagingItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
   const [loadingAssets, setLoadingAssets] = useState(false);
@@ -35,24 +35,19 @@ const App: React.FC = () => {
   useEffect(() => { syncingTabRef.current = syncingTab; }, [syncingTab]);
   // Track whether the latest prompt-confirmed was consumed by handleTabChange sync
   const consumedPromptConfirmedRef = useRef(false);
-  const [currentContextKey, setCurrentContextKey] = useState<string | null>(null);
-  const [blendSelect, setBlendSelect] = useState<{ role: 'layer' } | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
   const [currentPipelineKey, setCurrentPipelineKey] = useState<string | null>(null);
   const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
-  const [interfaceResults, setInterfaceResults] = useState<Record<number, HistoryItem[]>>({});
+  const [interfaceResults, setInterfaceResults] = useState<Record<number, StagingItem[]>>({});
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
   // Mask layer, which would be lost if React unmounted it on every tab switch.
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
-  // Stable mirrors so the window message listener never reads a stale closure.
-  const currentContextKeyRef = useRef<string | null>(null);
-  useEffect(() => { currentContextKeyRef.current = currentContextKey; }, [currentContextKey]);
-  const historyRef = useRef<HistoryItem[]>([]);
-  useEffect(() => { historyRef.current = history; }, [history]);
+  const stagingRef = useRef<StagingItem[]>([]);
+  useEffect(() => { stagingRef.current = staging; }, [staging]);
   // Which detailer result has already been handed to the workbench. The done branch below is
   // reached from a 500 ms poll and runs three requests (the history payload is big), so a second
   // tick can arrive before React has torn the interval down — and injecting one key twice put two
@@ -146,7 +141,6 @@ const App: React.FC = () => {
         blockSetIdCounter.current = Math.max(2, maxIdSuffix(allSets.map(s => s.id), 'set-') + 1);
         blockIdCounter.current = Math.max(2, maxIdSuffix(allSets.flatMap(s => (s.blocks ?? []).map(b => b.id)), 'block-') + 1);
         setDetailStatus(data.detail_status);
-        setCurrentContextKey(data.current_context_key ?? null);
         setArchitecture(data.architecture ?? null);
         if (data.has_package) {
           fetch('/api/package')
@@ -168,17 +162,25 @@ const App: React.FC = () => {
       .catch(e => setError('Failed to load config: ' + e.message));
   }, []);
 
-  // Fetch history on mount and when entering context tab
-  const refreshHistory = useCallback((): Promise<void> => {
-    return fetch('/api/history')
+  // Fetch the staging pool on mount (the workbench strip + every picker read it)
+  const refreshStaging = useCallback((): Promise<void> => {
+    return fetch('/api/staging')
       .then(r => r.json())
       .then(data => {
-        if (data.history) setHistory(data.history);
+        if (data.staging) setStaging(data.staging);
       })
       .catch(() => {});
   }, []);
 
-  useEffect(() => { refreshHistory(); }, [refreshHistory]);
+  useEffect(() => { refreshStaging(); }, [refreshStaging]);
+
+  // Push staging list changes into the Blend workbench (its strip renders from this mirror).
+  useEffect(() => {
+    blendIframeRef.current?.contentWindow?.postMessage({
+      type: 'blend-staging',
+      items: staging,
+    }, '*');
+  }, [staging]);
 
   // Leaving the prompt tab flushes the prompt editor into prompt_server first.
   const handleTabChange = useCallback((newTab: Tab) => {
@@ -271,19 +273,19 @@ const App: React.FC = () => {
           setError(data.error || 'Detailer failed');
         } else if (st === 'done') {
           post({ status: 'done' });
-          // The result never becomes the Context (the composite already is the Context): it is
-          // archived into history and then either written back over the layer it came from
-          // (a layer-initiated Generate) or dropped on as a new layer (the toolbar's Run Detailer).
+          // The result never becomes the pipeline image by itself: it lands in the staging pool
+          // and then either is written back over the layer it came from (a layer-initiated
+          // Generate) or dropped on as a new layer (the toolbar's Run Detailer).
           const generateTarget = layerGenerateRef.current;
           layerGenerateRef.current = null;
-          await refreshHistory();
+          await refreshStaging();
           try {
             const result = await fetch('/api/result').then(r => r.json());
-            const key = result?.detailed_key;
-            if (!key || injectedDetailKeyRef.current === key) return;
-            injectedDetailKeyRef.current = key;      // claimed before the awaits below, not after
-            const list = await fetch('/api/history').then(r => r.json());
-            const item = (list?.history || []).find((h: HistoryItem) => h.key === key);
+            const sid = result?.detailed_key;
+            if (!sid || injectedDetailKeyRef.current === sid) return;
+            injectedDetailKeyRef.current = sid;      // claimed before the awaits below, not after
+            const list = await fetch('/api/staging').then(r => r.json());
+            const item = (list?.staging || []).find((s: StagingItem) => s.id === sid);
             if (!item) return;
             if (generateTarget) {
               // Replace in place. The workbench keeps the layer's mask / decal / transform and
@@ -300,7 +302,7 @@ const App: React.FC = () => {
     poll();
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [detailStatus, refreshHistory]);
+  }, [detailStatus, refreshStaging]);
 
   // Poll status when interface is running (mutual exclusion: only one runs at a time)
   useEffect(() => {
@@ -323,13 +325,13 @@ const App: React.FC = () => {
           },
         }));
         if (st === 'done') {
-          const resultKeys = data.interface_result_keys || [];
-          refreshHistory().then(() => {
-            if (resultKeys.length > 0) {
-              setHistory(prev => {
-                const results = resultKeys
-                  .map(k => prev.find(h => h.key === k))
-                  .filter((h): h is HistoryItem => !!h);
+          const resultIds = data.interface_result_keys || [];
+          refreshStaging().then(() => {
+            if (resultIds.length > 0) {
+              setStaging(prev => {
+                const results = (resultIds as string[])
+                  .map((id: string) => prev.find((s: StagingItem) => s.id === id))
+                  .filter((s): s is StagingItem => !!s);
                 setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: results }));
                 return prev;
               });
@@ -337,9 +339,6 @@ const App: React.FC = () => {
               setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
             }
           });
-          fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
-            if (!cancelled) setCurrentContextKey(cfg.current_context_key ?? null);
-          }).catch(() => {});
         } else if (st === 'error') {
           setError(data.interface_error || 'Interface execution failed');
         }
@@ -347,7 +346,7 @@ const App: React.FC = () => {
     };
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshHistory]);
+  }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshStaging]);
 
   // Flush the prompt editor into prompt_server. The detailer reads the prompt from there, so a
   // Run Detailer must not start while the editor still holds unsaved edits.
@@ -374,24 +373,24 @@ const App: React.FC = () => {
     });
   }, []);
 
-  // The Blend workbench asks for the current context image so its canvas is never empty.
+  // The Blend workbench asks for its seed image so the canvas is never empty. The run's
+  // initial image lands in the staging pool as 'Original' — prefer it, else the newest item.
   const seedBlendCanvas = useCallback(async () => {
     const iframe = blendIframeRef.current;
     if (!iframe?.contentWindow) return;
-    const key = currentContextKeyRef.current;
-    let item = key ? historyRef.current.find(h => h.key === key) : undefined;
-    if (!item) {
+    let list = stagingRef.current;
+    if (!list.length) {
       try {
-        const r = await fetch('/api/history').then(r => r.json());
-        const list: HistoryItem[] = r?.history || [];
-        setHistory(list);
-        item = key ? list.find(h => h.key === key) : list[list.length - 1];
+        const r = await fetch('/api/staging').then(r => r.json());
+        list = (r?.staging || []) as StagingItem[];
+        setStaging(list);
       } catch { /* nothing to seed with */ }
     }
+    const item = list.find(s => s.name === 'Original') ?? list[list.length - 1];
     if (!item) return;
     iframe.contentWindow.postMessage({
       type: 'blend-init-layer',
-      items: [{ key: item.key, name: item.name, src: item.src }],
+      items: [{ name: item.name, src: item.src, place: item.place }],
     }, '*');
   }, []);
 
@@ -432,20 +431,15 @@ const App: React.FC = () => {
         return;
       }
       if (body.action === 'blend') {
-        refreshHistory();
-        reply(true, { key: data.key });
-        // Blend 不再只是归档：把合成结果作为一个新的智能对象图层放回画布顶层
-        // （图层带历史 key，非破坏、可继续改 transform / 画 mask）。画布原有图层
-        // 与 Mask 层一律不动；图层注入失败不影响归档本身。
-        try {
-          const list = await fetch('/api/history').then(r => r.json());
-          const item = (list?.history || []).find((h: HistoryItem) => h.key === data.key);
-          if (item) {
-            blendIframeRef.current?.contentWindow?.postMessage(
-              { type: 'blend-add-layer', items: [item], smart: true,
-                note: 'Blend result added as a new smart layer (also archived to history)' }, '*');
-          }
-        } catch { /* 图层是便利性，不是硬性要求 */ }
+        refreshStaging();
+        reply(true, { id: data.id });
+        // Blend 不只是归档进工作区：合成结果同时作为一个新的智能对象图层放回画布
+        // 顶层（图层自带像素 dataURL，非破坏、可继续改 transform / 画 mask）。
+        // 画布原有图层与 Mask 层一律不动；图层注入失败不影响归档本身。
+        blendIframeRef.current?.contentWindow?.postMessage(
+          { type: 'blend-add-layer', smart: true,
+            items: [{ id: data.id, name: data.name || 'Blend', src: data.image }],
+            note: 'Blend result added as a new smart layer (also archived to staging)' }, '*');
       } else if (body.action === 'tag') {
         reply(true, { tag: data.tag });
         setPromptReady(true);
@@ -467,7 +461,7 @@ const App: React.FC = () => {
       setError('Blend action error: ' + e.message);
       reply(false, { error: e.message });
     }
-  }, [refreshHistory, syncPrompt]);
+  }, [refreshStaging, syncPrompt]);
 
   /**
    * Generate on a single layer, driven from the layer row's context menu.
@@ -536,9 +530,9 @@ const App: React.FC = () => {
         if (tabRef.current === 'prompt' && !syncingTabRef.current) {
           setTab('draw');
         }
-      } else if (event.data?.type === 'blend-select') {
-        // Blend workbench asks for history images (its Add / layer picker)
-        setBlendSelect({ role: event.data.role });
+      } else if (event.data?.type === 'blend-staging-changed') {
+        // 工作区条目变了（工作台上传/删除）：重拉列表，effect 会自动镜像回工作台。
+        refreshStaging();
       } else if (event.data?.type === 'blend-action') {
         // Blend workbench action: blend (archive) / tag / detailer
         handleBlendAction(event.data);
@@ -551,8 +545,8 @@ const App: React.FC = () => {
         // InterruptProcessingException，run 循环转成 detail_status='cancelled'）。
         fetch('/api/cancel_run', { method: 'POST' }).catch(() => {});
       } else if (event.data?.type === 'blend-request-init') {
-        // Seed the canvas with the current context image and report the tagger availability
-        // (the Tag buttons disable themselves without one).
+        // Seed the canvas with the current pipeline image, report the tagger availability,
+        // and hand over the staging pool (its strip renders from this mirror).
         const iframe = blendIframeRef.current;
         if (!iframe?.contentWindow) return;
         iframe.contentWindow.postMessage({
@@ -560,6 +554,7 @@ const App: React.FC = () => {
           hasTagger: !!config?.has_tagger,
           // 激活 tab 的 Enable Mask 总闸：关 = 整幅是工作区，Run 不要求先画 Mask 层。
           mask_required: firstDetailerEnableMask(blockSets, activeBlockSetId),
+          staging: stagingRef.current,
         }, '*');
         // The Generate dialog's Pipeline Preset enum picks which block set runs the generate, so
         // the workbench needs every set's id/name plus the tab that is active right now.
@@ -569,11 +564,29 @@ const App: React.FC = () => {
           active_id: activeBlockSetId,
         }, '*');
         seedBlendCanvas();
+      } else if (event.data?.type === 'blend-staging-upload') {
+        // 工作台拖文件/CUD 导入恢复：批量进图池（后端建 tensor 引用），随后镜像回工作台。
+        const images: string[] = Array.isArray(event.data.images) ? event.data.images : [];
+        const names: string[] = Array.isArray(event.data.names) ? event.data.names : [];
+        if (!images.length) return;
+        fetch('/api/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images, names, name: 'Loaded' }),
+        }).then(() => refreshStaging()).catch(() => {});
+      } else if (event.data?.type === 'blend-staging-remove') {
+        const sid = typeof event.data.id === 'string' ? event.data.id : '';
+        if (!sid) return;
+        fetch('/api/staging_remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sid }),
+        }).then(() => refreshStaging()).catch(() => {});
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas, refreshStaging]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
@@ -637,33 +650,19 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleSelectImage = useCallback(async (key: string) => {
+  // 把工作区某张图设为 pipeline 当前图（下一次 run 从它继续）。
+  const handleSelectImage = useCallback(async (id: string) => {
     try {
       await fetch('/api/select_image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
+        body: JSON.stringify({ key: id }),
       });
       // Reset state for next iteration
       setPromptReady(false);
       setDetailStatus('idle');
-      setCurrentContextKey(key);
     } catch (e: any) {
       setError('Failed to select image: ' + e.message);
-    }
-  }, []);
-
-  // Set the context image without leaving the current tab
-  const handleSetContext = useCallback(async (key: string) => {
-    setCurrentContextKey(key);  // Immediate UI feedback
-    try {
-      await fetch('/api/select_image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key }),
-      });
-    } catch (e: any) {
-      setError('Failed to set context: ' + e.message);
     }
   }, []);
 
@@ -852,22 +851,22 @@ const App: React.FC = () => {
     window.close();
   }, []);
 
-  // 返回新加入历史的那张图的 key —— 拖到 Ref Image 上时要立刻把它设成参考图。
-  const handleAddContextImage = useCallback(async (base64: string): Promise<string | null> => {
+  // 上传到工作区，返回新条目的 id —— 拖到 Ref Image 上时要立刻把它设成参考图。
+  const handleAddStagingImage = useCallback(async (base64: string): Promise<string | null> => {
     try {
-      const res = await fetch('/api/add_context_image', {
+      const res = await fetch('/api/staging', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: base64 }),
+        body: JSON.stringify({ images: [base64], name: 'Loaded' }),
       });
       const data = await res.json().catch(() => ({}));
-      refreshHistory();
-      return (data && data.key) ? data.key : null;
+      refreshStaging();
+      return (data && data.success && Array.isArray(data.added) && data.added[0]?.id) || null;
     } catch (e: any) {
       setError('Failed to add image: ' + e.message);
       return null;
     }
-  }, [refreshHistory]);
+  }, [refreshStaging]);
 
   const handleLoadFromAssets = useCallback(async () => {
     setLoadingAssets(true);
@@ -878,13 +877,13 @@ const App: React.FC = () => {
       if (!data.success) {
         setError(data.error || 'Failed to load from assets');
       }
-      refreshHistory();
+      refreshStaging();
     } catch (e: any) {
       setError('Failed to load from assets: ' + e.message);
     } finally {
       setLoadingAssets(false);
     }
-  }, [refreshHistory]);
+  }, [refreshStaging]);
 
   if (!config) {
     return (
@@ -922,8 +921,8 @@ const App: React.FC = () => {
         promptUrl={config.prompt_url}
         promptReady={promptReady}
         detailStatus={detailStatus}
-        history={history}
-        onRefreshHistory={refreshHistory}
+        staging={staging}
+        onRefreshStaging={refreshStaging}
         promptIframeRef={promptIframeRef}
         blocks={blocks}
         architecture={architecture}
@@ -954,19 +953,10 @@ const App: React.FC = () => {
         showFinishDialog={showFinishDialog}
         onFinish={handleFinish}
         onCloseFinishDialog={() => setShowFinishDialog(false)}
-        onAddContextImage={handleAddContextImage}
+        onAddStagingImage={handleAddStagingImage}
         onLoadFromAssets={handleLoadFromAssets}
         loadingAssets={loadingAssets}
-        currentContextKey={currentContextKey}
-        onSetContext={handleSetContext}
         blendIframeRef={blendIframeRef}
-        showBlendSelect={blendSelect}
-        onBlendSelectImages={(items) => {
-          const iframe = blendIframeRef.current;
-          iframe?.contentWindow?.postMessage({ type: 'blend-image-selected', items }, '*');
-          setBlendSelect(null);
-        }}
-        onCloseBlendSelect={() => setBlendSelect(null)}
         interfaces={interfaces}
         onExecuteInterface={handleExecuteInterface}
         interfaceResults={interfaceResults}

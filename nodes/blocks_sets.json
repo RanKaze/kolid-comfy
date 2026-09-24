@@ -212,7 +212,8 @@
             "context_regex": ".+",
             "enable_limit": true,
             "enable_mask": false,
-            "enable_text_generate": true
+            "enable_text_generate": true,
+            "context_reference_keys": []
           }
         }
       ]
