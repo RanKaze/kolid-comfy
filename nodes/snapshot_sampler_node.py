@@ -92,6 +92,46 @@ def detail_place_rect(crop_info, patch=None):
 
 
 # =============================================================================
+# Extra Prompt 里的嵌图标记（<image_id:...>）解析
+# =============================================================================
+# Blend 工作台的工作区条目点击后会把 <image_id:staging_N> 嵌进 Extra Prompt 文本
+# （光标处）。Run 时在这里统一解析：引用图按**首次出现顺序**去重编号 —— context
+# 工作图恒为 <image 1>，引用图依次为 <image 2>、<image 3>……（重复引用同一张复用
+# 同一号）。解码后的文本（标记重写成 <image N>）才会被追加进 positive；解不出的
+# id（图已从工作区移除）跳过并从解码文本中移除该标记，留下警告。
+IMAGE_ID_TOKEN_RE = re.compile(r'<image_id:([^<>\s]+)>')
+
+
+def parse_prompt_image_refs(text, resolve):
+    """解析 text 里的 <image_id:xxx> 标记。
+
+    resolve(id) → bool：该 id 是否能解出一张图（由调用方提供，通常包着
+    server.get_staging_image）。纯字符串处理、不依赖 torch，方便单测。
+
+    返回 (ref_ids, decoded_text, missing)：
+      ref_ids      引用图 id 列表（首次出现顺序、去重）
+      decoded_text 标记重写成 <image N>（N 从 2 起）后的文本；失效标记被移除
+      missing      解不出的 id 列表（按出现顺序，不去重）
+    """
+    ref_ids = []
+    index_by_id = {}
+    missing = []
+
+    def _sub(m):
+        mid = m.group(1)
+        if not resolve(mid):
+            missing.append(mid)
+            return ''          # 失效引用：从解码文本中移除
+        if mid not in index_by_id:
+            index_by_id[mid] = len(ref_ids) + 2   # <image 1> 留给 context 图
+            ref_ids.append(mid)
+        return '<image %d>' % index_by_id[mid]
+
+    decoded = IMAGE_ID_TOKEN_RE.sub(_sub, text or '')
+    return ref_ids, decoded, missing
+
+
+# =============================================================================
 # SnapshotDetailerSamplerServer：前后端交互服务器
 # =============================================================================
 class SnapshotDetailerSamplerServer:
@@ -148,8 +188,6 @@ class SnapshotDetailerSamplerServer:
         self.ref_boost_a = cfg.get('ref_boost_a', 1.0)
         self.enable_ref_boost_mask = cfg.get('enable_ref_boost_mask', False)
         self.grounding_px = cfg.get('grounding_px', 768)
-        self.context_reference = cfg.get('context_reference', False)
-        self.context_reference_key = cfg.get('context_reference_key', None)
 
         # Pipeline Block chain (default: single Detailer block from INPUT_TYPES defaults)
         self.blocks = cfg.get('blocks')
@@ -172,8 +210,6 @@ class SnapshotDetailerSamplerServer:
                     'ref_boost_a': self.ref_boost_a,
                     'enable_ref_boost_mask': self.enable_ref_boost_mask,
                     'grounding_px': self.grounding_px,
-                    'context_reference': self.context_reference,
-                    'context_reference_key': self.context_reference_key,
                 },
             }]
 
@@ -641,11 +677,6 @@ class SnapshotDetailerSamplerServer:
         if 'enable_edit' in data:
             self.enable_edit = bool(data['enable_edit'])
             dirty = True
-        if 'context_reference' in data:
-            self.context_reference = bool(data['context_reference'])
-            dirty = True
-        if 'context_reference_key' in data:
-            self.context_reference_key = data['context_reference_key']
         # Multi-set Pipeline Blocks (the workbench's tabs). Sets/active arrive together with the
         # active set's blocks mirrored in `blocks`; either way the active set wins and the runner
         # only ever sees its flat chain.
@@ -694,8 +725,6 @@ class SnapshotDetailerSamplerServer:
             self.ref_boost_a = float(bp.get('ref_boost_a', self.ref_boost_a))
             self.enable_ref_boost_mask = bool(bp.get('enable_ref_boost_mask', self.enable_ref_boost_mask))
             self.grounding_px = int(bp.get('grounding_px', self.grounding_px))
-            self.context_reference = bool(bp.get('context_reference', self.context_reference))
-            self.context_reference_key = bp.get('context_reference_key', self.context_reference_key)
 
     # ------------------------------------------------------------------
     # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
@@ -891,8 +920,6 @@ class SnapshotDetailerSamplerServer:
                     'mask_grow': inst.mask_grow if inst else 32,
                     'mask_blur': inst.mask_blur if inst else 32,
                     'enable_edit': inst.enable_edit if inst else False,
-                    'context_reference': inst.context_reference if inst else False,
-                    'context_reference_key': inst.context_reference_key if inst else None,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
@@ -2086,7 +2113,7 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # Detailer
     # -------------------------------------------------------------------------
-    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt=''):
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None):
         seed = global_params['seed']
         mask_grow = int(global_params.get('mask_grow', 32))
         mask_blur = int(global_params.get('mask_blur', 32))
@@ -2399,18 +2426,12 @@ class SnapshotDetailerSamplerNode:
                 ref_boost_a = float(bp.get('ref_boost_a', 1.0))
                 enable_ref_boost_mask = bp.get('enable_ref_boost_mask', False)
                 grounding_px = int(bp.get('grounding_px', 768))
-                # Context Ref 没有开关：选了参考图就走该通道。
-                # 'context_reference' 只是旧配置里的遗留字段，不再参与判定。
-                # v2 多参考：context_reference_keys（list）是权威来源，顺序 = 注入顺序；
-                # 旧配置的单 key 兜底并入列表尾（UI 会把它镜像成列表最后一项）。
-                context_reference_keys = bp.get('context_reference_keys')
-                if not isinstance(context_reference_keys, list):
-                    context_reference_keys = []
-                context_reference_keys = [k for k in context_reference_keys
-                                          if isinstance(k, str) and k]
-                context_reference_key = bp.get('context_reference_key')
-                if context_reference_key and context_reference_key not in context_reference_keys:
-                    context_reference_keys.append(context_reference_key)
+                # Context Ref 没有开关：Ref 图不再逐块手选 —— Blend 工作台 Extra
+                # Prompt 文本里的 <image_id:...> 标记在 run 入口统一解析（见
+                # parse_prompt_image_refs），所有 detailer block 共用同一组引用图
+                # （context 工作图 = <image 1>，引用图 = <image 2>+）。旧配置里的
+                # per-block context_reference_keys / context_reference_key 已废弃。
+                context_reference_keys = list(prompt_ref_ids or [])
                 # 每个 detailer block 自带 context_regex（默认 ".+"），覆盖全局值，
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
@@ -2614,8 +2635,8 @@ class SnapshotDetailerSamplerNode:
                         resized_mask if (enable_edit and enable_ref_boost_mask) else None
                     )
 
-                # Context Reference injection (per-block) — v2 多参考：逐张编码并 append，
-                # 顺序 = context_reference_keys（旧单 key 已并入列表尾）。
+                # Context Reference injection (per-block) — Ref 图来自 Extra Prompt 文本
+                # 解析出的全局 refs（prompt_ref_ids，首次出现顺序 = 注入顺序）。
                 if enable_edit and context_reference_keys and server is not None:
                     for _ref_key in context_reference_keys:
                         ref_img = server.get_staging_image(_ref_key)
@@ -3184,13 +3205,26 @@ class SnapshotDetailerSamplerNode:
 
                         # 追加 prompt：只拼在 _parse_prompt 的结果之后，不写回 prompt 阶段状态，
                         # 所以语义上是「追加描述」而不是「替换 prompt」。
+                        # <image_id:...> 嵌图标记在追加前统一解析：引用图 = 全局 refs
+                        # （所有 detailer block 共用），标记解码成 <image N> 后才进 positive。
                         extra_prompt = (action.get('extra_prompt') or '').strip() if from_blend else ''
+                        prompt_ref_ids = []
+                        missing_ref_ids = []
+                        if extra_prompt:
+                            prompt_ref_ids, extra_prompt, missing_ref_ids = parse_prompt_image_refs(
+                                extra_prompt, lambda k: server.get_staging_image(k) is not None)
+                        if missing_ref_ids:
+                            print(f"[run_detailer] WARNING: extra prompt references missing staging ids "
+                                  f"(tokens removed from prompt): {missing_ref_ids}")
                         if extra_prompt:
                             user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
                         if extra_prompt:
-                            print(f"[run_detailer] extra prompt appended: '{extra_prompt}'")
+                            print(f"[run_detailer] extra prompt appended: '{extra_prompt}' "
+                                  f"(prompt refs: {prompt_ref_ids})")
                             dbg.record_prompt('2. Extra Prompt 追加后', user_positive,
                                               extra_prompt=extra_prompt,
+                                              ref_ids=list(prompt_ref_ids),
+                                              missing_ref_ids=list(missing_ref_ids),
                                               loras=list(user_loras or []))
 
                         # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
@@ -3280,7 +3314,7 @@ class SnapshotDetailerSamplerNode:
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
                             run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server,
-                            extra_prompt=extra_prompt
+                            extra_prompt=extra_prompt, prompt_ref_ids=prompt_ref_ids
                         )
 
                         server.original_image = original_image

@@ -72,10 +72,8 @@ const App: React.FC = () => {
     ref_boost_a: 1.0,
     enable_ref_boost_mask: false,
     grounding_px: 768,
-    // Context Ref 不再有开关（是否启用只看有没有选参考图）；此处仅保留字段以兼容旧配置。
-    context_reference: true,
-    context_reference_key: null,
-    context_reference_keys: [],
+    // Ref 图不再逐块配置：Blend 工作台 Extra Prompt 文本里的 <image_id:...> 标记
+    // 在 Run 时统一解析，所有 detailer block 共用。
     context_regex: '.+',
   };
   const defaultInterfaceParams: InterfaceBlockParams = {
@@ -851,7 +849,7 @@ const App: React.FC = () => {
     window.close();
   }, []);
 
-  // 上传到工作区，返回新条目的 id —— 拖到 Ref Image 上时要立刻把它设成参考图。
+  // 上传到工作区，返回新条目的 id —— Context tab / 端口图选择都用它。
   const handleAddStagingImage = useCallback(async (base64: string): Promise<string | null> => {
     try {
       const res = await fetch('/api/staging', {

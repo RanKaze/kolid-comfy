@@ -10,7 +10,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #mainArea { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 #canvasArea { flex: 1; min-height: 0; position: relative; margin: 16px; overflow: hidden; }
 /* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
-#viewport { position: absolute; inset: 0 0 62px 0; overflow: hidden; touch-action: none; cursor: default; }
+#viewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; cursor: default; }
 #blendCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45);
     /* The transparency checkerboard: two 45deg gradients with hard 25%/75% stops tile a 16px box
        into an 8px alternate of #1a1a1a / #242424. The host preview reproduces this in canvas 2D
@@ -189,9 +189,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* ---- Bottom action toolbar ----
    The composite IS the Context Image, so these buttons are the only exit points:
    Blend archives it, the Tag button reads it, Run generates from it. */
-#toolbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 60; display: flex; align-items: center; gap: 8px;
+#toolbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 60; display: flex; flex-direction: column; align-items: stretch; gap: 6px;
     padding: 8px 10px; border-radius: 14px; background: rgba(28,28,30,0.75); border: 0.5px solid rgba(255,255,255,0.1);
     box-shadow: 0 6px 24px rgba(0,0,0,0.42); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
+#toolbarRow { display: flex; align-items: center; gap: 8px; }
 #toolbar input[type="text"] { flex: 1; min-width: 60px; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12);
     border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none; color-scheme: dark; }
 #toolbar input[type="text"]:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
@@ -332,13 +333,14 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .layer-menu-item:disabled:hover { background: transparent; }
 </style>
 <style>
-/* 工作区（staging）条：Extra Prompt / 工具栏下方 */
+/* 工作区（staging）条：toolbar 第二行，Extra Prompt 下方 — 固定高度、顶满宽度。
+   点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>（无焦点则追加末尾）。 */
 #stagingStrip {
     display: flex; align-items: center; gap: 6px;
-    padding: 6px 10px 8px;
+    width: 100%; height: 68px; box-sizing: border-box;
+    padding: 6px 10px;
     overflow-x: auto; overflow-y: hidden;
-    min-height: 62px;
-    border-top: 0.5px solid rgba(255,255,255,0.06);
+    border-top: 0.5px solid rgba(255,255,255,0.08);
 }
 #stagingStrip.drag-over { outline: 1.5px dashed #0a84ff; outline-offset: -3px; background: rgba(10,132,255,0.08); }
 .staging-item {
@@ -374,19 +376,22 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
         <div id="toolbar">
-            <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
-                   placeholder="Extra prompt — appended after the prompt stage (Run only)">
-            <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The composite is also archived into the staging pool.">Blend</button>
-            <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
-            <div class="tb-pill">
-                <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
-                <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
+            <div id="toolbarRow">
+                <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
+                       placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert <image_id:...> at the cursor.">
+                <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The composite is also archived into the staging pool.">Blend</button>
+                <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
+                <div class="tb-pill">
+                    <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
+                    <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
+                </div>
             </div>
+            <!-- 工作区（staging）：唯一的图池，toolbar 第二行（固定高度、顶满宽度）。
+                 拖文件进来上传；点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>；✕ 移除。
+                 列表由宿主同步（后端 staging_tensors 支撑），引用图在 Run 时从文本解析得出。 -->
+            <div id="stagingStrip"></div>
         </div>
         <div id="toolbarProgress"><i></i></div>
-        <!-- 工作区（staging）：唯一的图池。拖文件进来上传，点击条目加为图层，✕ 移除。
-             列表由宿主同步（后端 staging_tensors 支撑），Ref Image / 接口端口图都引用它。 -->
-        <div id="stagingStrip"></div>
     </div>
     <div id="sidePanel">
         <!-- Document I/O, above the Canvas section. Export unfolds into a menu: the whole
@@ -5776,7 +5781,42 @@ function incomingItems(d) {
 
 // ==================== 工作区（staging） ====================
 // 列表由宿主同步（'blend-staging'）；上传/移除通过宿主走后端，保持单一写入口。
+// 点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>（无焦点则追加末尾）。
 let stagingItems = [];
+
+// 记住 Extra Prompt 最近的光标位置：点击工作区条目会把输入框焦点抢走，
+// 所以必须在 blur 前把 selection 存下来，插入时恢复。
+let extraPromptCaret = null;
+function trackExtraPromptCaret() {
+    if (document.activeElement === extraPromptInput) {
+        extraPromptCaret = { start: extraPromptInput.selectionStart, end: extraPromptInput.selectionEnd };
+    }
+}
+for (const ev of ['keyup', 'click', 'select', 'focus', 'input']) {
+    extraPromptInput.addEventListener(ev, trackExtraPromptCaret);
+}
+extraPromptInput.addEventListener('blur', trackExtraPromptCaret);
+
+function insertImageIdToken(id) {
+    const token = `<image_id:${id}>`;
+    // 优先用当前光标；输入框失焦时用记忆中的光标；都没有 = 追加到末尾。
+    let pos = extraPromptInput.value.length;
+    let selEnd = pos;
+    if (document.activeElement === extraPromptInput && extraPromptInput.selectionStart != null) {
+        pos = extraPromptInput.selectionStart;
+        selEnd = extraPromptInput.selectionEnd;
+    } else if (extraPromptCaret && extraPromptCaret.start != null) {
+        pos = Math.min(extraPromptCaret.start, extraPromptInput.value.length);
+        selEnd = Math.min(extraPromptCaret.end ?? pos, extraPromptInput.value.length);
+    }
+    const value = extraPromptInput.value;
+    extraPromptInput.value = value.slice(0, pos) + token + value.slice(selEnd);
+    const caret = pos + token.length;
+    extraPromptCaret = { start: caret, end: caret };
+    extraPromptInput.focus();
+    extraPromptInput.setSelectionRange(caret, caret);
+}
+
 function renderStaging() {
     const strip = document.getElementById('stagingStrip');
     if (!strip) return;
@@ -5784,14 +5824,14 @@ function renderStaging() {
     if (!stagingItems.length) {
         const hint = document.createElement('span');
         hint.className = 'staging-empty';
-        hint.textContent = 'Staging — drop image files here to build the pool';
+        hint.textContent = 'Staging — drop image files here, then click an item to insert <image_id:...> into the extra prompt';
         strip.appendChild(hint);
         return;
     }
     for (const s of stagingItems) {
         const item = document.createElement('div');
         item.className = 'staging-item';
-        item.title = `${s.name} — click to add as a layer`;
+        item.title = `${s.name} — click to insert <image_id:${s.id}> into the extra prompt at the cursor`;
         const img = document.createElement('img');
         img.src = s.src;
         img.alt = s.name;
@@ -5806,8 +5846,8 @@ function renderStaging() {
         });
         item.appendChild(rm);
         item.addEventListener('click', () => {
-            // 点击 = 加为图层（图层自带像素，不绑池 id）
-            addLayer({ name: s.name, src: s.src });
+            // 点击 = 把该图引用嵌入 Extra Prompt（光标处），不再加图层
+            insertImageIdToken(s.id);
         });
         strip.appendChild(item);
     }
