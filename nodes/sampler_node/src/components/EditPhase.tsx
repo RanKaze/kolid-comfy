@@ -897,6 +897,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <label style={styles.paramLabel}>Enable Text Generate</label>
                           <IOSToggle checked={dp.enable_text_generate ?? false} onChange={v => updateBlockParam(block.id, 'enable_text_generate', v)} />
                         </div>
+                        {(dp.enable_text_generate ?? false) && (
+                          <>
+                            <div style={styles.paramRow} title="开启后本块 Generate Text 的指令用下方输入框的内容临时替代 PipelineEnableGenerateTextNode 的 prompt 参与运算（留空 = 空指令，positive 原样进 CLIP）；仅在本块 Enable Text Generate 生效时有意义。">
+                              <label style={styles.paramLabel}>Override Prompt</label>
+                              <IOSToggle checked={dp.enable_override_prompt ?? false} onChange={v => updateBlockParam(block.id, 'enable_override_prompt', v)} />
+                            </div>
+                            {(dp.enable_override_prompt ?? false) && (
+                              <div style={styles.paramRow} title="重载的 Generate Text 指令：临时替代 PipelineEnableGenerateTextNode 中的 prompt 参数。留空 = 空指令。">
+                                <textarea
+                                  style={{ ...styles.paramInput, resize: 'vertical', minHeight: 56, fontFamily: 'inherit' }}
+                                  rows={3}
+                                  placeholder="Override instruction (empty = no instruction)"
+                                  value={dp.override_prompt ?? ''}
+                                  onChange={e => updateBlockParam(block.id, 'override_prompt', e.target.value)}
+                                />
+                              </div>
+                            )}
+                          </>
+                        )}
                         {dp.enable_edit && (
                           <div style={styles.editSubSection}>
                             {isKrea2 && (
