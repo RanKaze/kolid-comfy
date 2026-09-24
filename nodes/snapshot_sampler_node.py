@@ -1226,6 +1226,20 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
+            if self.path == '/api/cancel_run':
+                # 前端 Run 按钮在运行中变成 Cancel。点击 = 走 ComfyUI 的原生打断：
+                # 全局 interrupt 标志让 KSampler 在下一个采样步抛
+                # InterruptProcessingException；块循环里的检查点会在 block / Generate
+                # Text 边界抛同一个异常。run_detailer 的 except 把它转成
+                # status='cancelled'（不炸节点、不停 server）。
+                try:
+                    mm.interrupt_current_processing(True)
+                    print("[SnapshotDetailerSampler] Cancel requested — interrupt flag set")
+                    self._send_json({'success': True})
+                except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
             if self.path == '/api/add_context_image':
                 try:
                     length = int(self.headers.get('Content-Length', 0))
@@ -2466,6 +2480,10 @@ class SnapshotDetailerSamplerNode:
                         print(f'[PipelineBlock {i + 1}] WARNING: Generate Text failed ({e}) — keeping previous prompt')
                         dbg.record_error(f'Block {i+1} · Generate Text 失败', str(e),
                                          block=i + 1, where='generate_text')
+                # Cancel 检查点：Generate Text 的 LLM 调用是同步长任务，块首的检查点
+                # 够不着它内部——这里在生成结束/conditioning 之前再吃一次 interrupt，
+                # 让「在 text generate 里点 Cancel」的请求在当前块内就生效。
+                mm.throw_exception_if_processing_interrupted()
                 current_positive_before_query = current_positive
                 current_negative = context_negative
                 current_loras = context_loras.copy()
@@ -3233,6 +3251,14 @@ class SnapshotDetailerSamplerNode:
                             server.prompt_server.last_selected_prefabs = full_prefabs
                             server.prompt_server.custom_prompts = ''
 
+                    except mm.InterruptProcessingException:
+                        # Cancel 按钮（/api/cancel_run）触发的打断。InterruptProcessingException
+                        # 继承 BaseException，下面的 except Exception 接不住——不接的话它会
+                        # 炸穿整个节点（server 一起被停掉）。这里转成干净的「已取消」。
+                        print("[SnapshotDetailerSampler] Run cancelled by user")
+                        server.detail_status = 'cancelled'
+                        server.detail_error = None
+                        dbg.record_stage('Run 已取消', 'cancelled by user (interrupt)')
                     except Exception as e:
                         # Check if this is a ComfyUI interrupt
                         if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
@@ -3280,6 +3306,12 @@ class SnapshotDetailerSamplerNode:
                         self._execute_interface(server, interface_idx, manual_values, exec_options)
                         server.interface_status = 'done'
                         server.interface_progress = 1.0
+                    except mm.InterruptProcessingException:
+                        # Cancel 打断（同 run_detailer 的处理）：转成干净的取消，
+                        # 不让异常炸穿节点。回 idle 让 Execute 按钮恢复可点。
+                        print("[SnapshotDetailerSampler] Interface run cancelled by user")
+                        server.interface_status = 'idle'
+                        server.interface_error = None
                     except Exception as e:
                         if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
                             print("[SnapshotDetailerSampler] Interrupted during interface execution")

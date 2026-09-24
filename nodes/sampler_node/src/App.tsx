@@ -225,6 +225,12 @@ const App: React.FC = () => {
         // let the same field going back to null close it (answered / cancelled / aborted).
         setPendingQuery(data.pending_query || null);
         const st = data.detail_status;
+        if (st === 'cancelled') {
+          // Run 按钮的 Cancel 打断了本次运行：通知工作台复位按钮，本页状态回 idle。
+          post({ status: 'cancelled' });
+          setDetailStatus('idle');
+          return;
+        }
         if (st === 'idle') {
           // The backend has not picked the action up yet. Keep waiting, but do not hang forever
           // if the main loop is stuck on something else (e.g. an interface run).
@@ -507,6 +513,11 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-layer-generate') {
         // Generate from the layer row's context menu: that layer in, that layer out.
         handleLayerGenerate(event.data);
+      } else if (event.data?.type === 'blend-cancel-run') {
+        // Blend 工具栏的 Run 按钮在运行中变成了 Cancel —— 打断当前 run
+        // （后端用 ComfyUI 原生 interrupt：采样步 / block 边界 / Generate Text 后抛
+        // InterruptProcessingException，run 循环转成 detail_status='cancelled'）。
+        fetch('/api/cancel_run', { method: 'POST' }).catch(() => {});
       } else if (event.data?.type === 'blend-request-init') {
         // Seed the canvas with the current context image and report the tagger availability
         // (the Tag buttons disable themselves without one).
