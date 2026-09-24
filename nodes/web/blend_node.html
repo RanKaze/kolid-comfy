@@ -209,6 +209,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .tb-btn.tag:hover:not(:disabled) { background: rgba(175,82,222,1); }
 .tb-btn.run { background: rgba(10,132,255,0.92); box-shadow: 0 2px 10px rgba(10,132,255,0.25); }
 .tb-btn.run:hover:not(:disabled) { background: rgba(10,132,255,1); transform: translateY(-1px); }
+.tb-btn.run.cancel { background: rgba(255,69,58,0.92); box-shadow: 0 2px 10px rgba(255,69,58,0.25); }
+.tb-btn.run.cancel:hover:not(:disabled) { background: rgba(255,69,58,1); transform: translateY(-1px); }
 /* Run is one pill with two halves: the left half runs, the right opens its settings. */
 .tb-pill { display: flex; align-items: stretch; }
 .tb-pill .pill-main { border-radius: 9px 0 0 9px; }
@@ -678,6 +680,7 @@ let maskLayer = {
 // History keys already turned into layers, so a freshly generated image is injected once.
 const injectedKeys = new Set();
 let actionBusy = false;
+let actionBusyLabel = '';
 let hasTagger = true;
 // Strength of the red Mask tint. One single value now feeds two places: the host's Context
 // preview (below the preview image) and the on-canvas overlay that only appears while Ctrl is
@@ -4323,21 +4326,37 @@ function layerSpecs() {
 function syncActionButtons() {
     for (const b of ACTION_BTNS) b.disabled = actionBusy;
     for (const b of TAG_ACTION_BTNS) b.disabled = actionBusy || !hasTagger;
+    // Run 按钮在 detailer 运行中是 Cancel：必须保持可点，点击 = 打断本次运行。
+    if (actionBusy && actionBusyLabel === 'detailer') runDetailerBtn.disabled = false;
 }
 
 function setActionBusy(busy, label) {
     actionBusy = busy;
+    actionBusyLabel = busy ? (label || '') : '';
     if (!busy) {
         toolbarProgress.classList.remove('on');
         toolbarProgressFill.style.width = '0';
         blendBtn.textContent = 'Blend';
         runDetailerBtn.textContent = 'Run';
+        runDetailerBtn.classList.remove('cancel');
+        runDetailerBtn.title = 'Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.';
     } else {
         toolbarProgress.classList.add('on');
         if (label === 'blend') blendBtn.textContent = 'Blending…';
-        if (label === 'detailer') runDetailerBtn.textContent = 'Running…';
+        if (label === 'detailer') {
+            // 运行中不再显示 "Running…"——按钮直接变成 Cancel，点了就打断。
+            runDetailerBtn.textContent = 'Cancel';
+            runDetailerBtn.classList.add('cancel');
+            runDetailerBtn.title = 'Cancel — interrupt the current run (works mid-block, mid-sampling or during Generate Text)';
+        }
     }
     syncActionButtons();
+}
+
+function sendCancelRun() {
+    // 只发消息、不等结果：打断由后端 status 轮询（detail_status='cancelled'）收尾。
+    window.parent.postMessage({ type: 'blend-cancel-run' }, '*');
+    setStatus('Cancelling…');
 }
 
 function sendBlendAction(action, opts) {
@@ -4385,7 +4404,14 @@ function sendBlendAction(action, opts) {
 
 blendBtn.addEventListener('click', () => sendBlendAction('blend'));
 tagBtn.addEventListener('click', () => openTagModal());
-runDetailerBtn.addEventListener('click', () => sendBlendAction('detailer'));
+runDetailerBtn.addEventListener('click', () => {
+    // 运行中这个按钮是 Cancel —— 打断当前 run，而不是再排一个 detailer。
+    if (actionBusy) {
+        if (actionBusyLabel === 'detailer') sendCancelRun();
+        return;
+    }
+    sendBlendAction('detailer');
+});
 runSettingsBtn.addEventListener('click', () => openRunSettingsModal());
 // Enter in the prompt box must not fall through to the canvas keyboard shortcuts.
 extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
@@ -5826,6 +5852,9 @@ window.addEventListener('message', event => {
             const total = Number(d.total) || 0, cur = Number(d.current) || 0;
             toolbarProgressFill.style.width = total ? `${Math.round((cur / total) * 100)}%` : '30%';
             setStatus(total ? `Running detailer — step ${cur} / ${total}` : 'Running detailer…');
+        } else if (st === 'cancelled') {
+            setActionBusy(false);
+            setStatus('Run cancelled', 'success');
         } else if (st === 'error') {
             setActionBusy(false);
             setStatus('Detailer failed: ' + (d.error || 'unknown error'), 'error');

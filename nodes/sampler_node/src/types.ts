@@ -150,7 +150,8 @@ export interface PendingQuery {
 }
 
 export interface StatusResponse {
-  detail_status: 'idle' | 'running' | 'done' | 'error';
+  /** cancelled = Run 按钮的 Cancel 打断了本次运行（/api/cancel_run） */
+  detail_status: 'idle' | 'running' | 'done' | 'error' | 'cancelled';
   error?: string;
   progress?: number;
   current_step?: number;
