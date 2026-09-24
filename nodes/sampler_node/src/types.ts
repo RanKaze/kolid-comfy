@@ -54,6 +54,10 @@ export interface DetailerBlockParams {
   enable_edit: boolean;
   /** 块级 Generate Text 开关（默认关）：仅当 pipeline 也启用了 Generate Text 时才生效 */
   enable_text_generate?: boolean;
+  /** Override Prompt（默认关）：开着时本块 Generate Text 指令用 override_prompt 替代 pipeline 的 prompt（空 = 空指令） */
+  enable_override_prompt?: boolean;
+  /** Override Prompt 的指令文本（仅 enable_override_prompt 开且有 generate text 时参与运算） */
+  override_prompt?: string;
   /** Krea2 source-patch 编辑模式: fit = 整图适配 + stride-1 位置（防模糊）; crop = center-crop 几何 */
   edit_mode?: 'fit' | 'crop';
   /** Krea2: 最后一个参考（源图）的 target->ref 注意力乘数, >1 拉向参考外观 */

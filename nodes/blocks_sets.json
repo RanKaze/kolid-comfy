@@ -63,7 +63,8 @@
             "context_reference_key": null,
             "context_regex": ".+",
             "enable_limit": false,
-            "enable_mask": false
+            "enable_mask": false,
+            "enable_text_generate": true
           }
         }
       ]
@@ -157,7 +158,7 @@
             "start_step_rate": 0,
             "end_step_rate": 1,
             "pixels": 2048576,
-            "align": 16,
+            "align": 32,
             "crop_reserve": 32,
             "recover_crop": true,
             "enable_edit": true,
@@ -170,7 +171,8 @@
             "context_reference_key": null,
             "context_regex": ".+",
             "enable_mask": false,
-            "enable_limit": true
+            "enable_limit": true,
+            "enable_text_generate": true
           }
         }
       ]

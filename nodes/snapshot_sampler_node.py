@@ -2305,6 +2305,12 @@ class SnapshotDetailerSamplerNode:
                 # 块级 Generate Text 开关（默认关）：只有 pipeline config 的
                 # enable_generate_text 也开着时才真正生效（二级门控）。
                 enable_text_generate = bool(bp.get('enable_text_generate', False))
+                # Override Prompt（默认关）：开着时本块 Generate Text 的指令用块里的
+                # override_prompt 原样替代 pipeline 的 generate_text_prompt
+                # （留空 = 空指令，positive 原样进 CLIP）。只在 enable_text_generate
+                # 生效时有意义。
+                enable_override_prompt = bool(bp.get('enable_override_prompt', False))
+                override_prompt = str(bp.get('override_prompt', '') or '')
                 edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
                 ref_boost = float(bp.get('ref_boost', 4.0))
                 ref_boost_a = float(bp.get('ref_boost_a', 1.0))
@@ -2325,6 +2331,8 @@ class SnapshotDetailerSamplerNode:
                                  end_step_rate=end_step_rate,
                                  enable_edit=enable_edit,
                                  enable_text_generate=enable_text_generate,
+                                 enable_override_prompt=enable_override_prompt,
+                                 override_prompt_used=(override_prompt if (enable_text_generate and enable_override_prompt) else None),
                                  edit_mode=edit_mode,
                                  ref_boost=ref_boost,
                                  ref_boost_a=ref_boost_a,
@@ -2370,6 +2378,10 @@ class SnapshotDetailerSamplerNode:
                 # 节点。产物只作用于当前块（current_positive 每块都从 context 重新解出，
                 # 不跨块传递）。pipeline 没开 enable_generate_text 时块开关无效。
                 if next_pipeline.config.get('enable_generate_text') and enable_text_generate:
+                    # Override Prompt 生效时用块级指令替代 pipeline 的 generate_text_prompt
+                    # （空字符串就是空指令：positive 原样进 CLIP，不套指令拼接）。
+                    _gt_instruction = (override_prompt if enable_override_prompt
+                                       else next_pipeline.config.get('generate_text_prompt', ''))
                     _gt_before = current_positive
                     # Enable Edit 开 → 送图（多模态 CLIP 看图改写）：
                     #   第一张 = next_pipeline.image（链上传递的那张，pipeline 就是靠它
@@ -2409,8 +2421,7 @@ class SnapshotDetailerSamplerNode:
                                 _p_ok, _p_why = self._preflight_generate_text_images(
                                     _gt_images, _gt_clip,
                                     {**_gt_params,
-                                     '_instruction': next_pipeline.config.get(
-                                         'generate_text_prompt', '')})
+                                     '_instruction': _gt_instruction})
                                 if _p_why:
                                     _gt_img_status = _p_why
                                 elif _p_ok is not None:
@@ -2421,7 +2432,8 @@ class SnapshotDetailerSamplerNode:
                             print(f'[GenerateText] [block {i + 1}] image status: {_gt_img_status}')
                     dbg.record_prompt(f'Block {i+1} · c) Generate Text 输入（指令 + positive）',
                                       current_positive, block=i + 1,
-                                      instruction=next_pipeline.config.get('generate_text_prompt', ''),
+                                      instruction=_gt_instruction,
+                                      override_prompt=enable_override_prompt,
                                       params=next_pipeline.config.get('generate_text'),
                                       image_count=len(_gt_images),
                                       ref_image_key=_gt_ref_key,
@@ -2436,7 +2448,7 @@ class SnapshotDetailerSamplerNode:
                     try:
                         current_positive, _gt_used = apply_generate_text_to_prompt(
                             next_pipeline, current_positive,
-                            next_pipeline.config.get('generate_text_prompt', ''),
+                            _gt_instruction,
                             label=f' [block {i + 1}]',
                             images=_gt_images or None)
                         if _gt_used:
