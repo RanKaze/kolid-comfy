@@ -350,6 +350,24 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     padding: 0; cursor: pointer;
 }
 .staging-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 固定的 Context 卡片：工作区最左侧，代表当前 context image（<image 1>）。
+   Enable Edit 下它永远作为 image 1 存在（无论是否插进文本），卡片只是把
+   <image 1> 写进 Extra Prompt 的手段 —— 不可移除（没有 ✕）。 */
+.staging-item.staging-context {
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(10,132,255,0.14); border: 0.5px dashed rgba(10,132,255,0.6);
+    color: rgba(255,255,255,0.9); font-size: 10px; font-weight: 700;
+    letter-spacing: 0.2px; text-align: center; line-height: 1.2; padding: 2px;
+}
+.staging-item.staging-context:hover { background: rgba(10,132,255,0.24); }
+/* Context 卡片的实时预览：盖满卡片，标签悬浮在底部半透明条上。
+   没有画布内容时 img 无 src（display:none），退回纯 "Context 1" 文字态。 */
+.staging-context .context-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.staging-context .context-label {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 1px 0 2px; background: rgba(0,0,0,0.58);
+    font-size: 9px; font-weight: 700; letter-spacing: 0.2px; text-align: center; line-height: 1.2;
+}
 .staging-item .staging-remove {
     position: absolute; top: 0; right: 0; width: 16px; height: 16px;
     padding: 0; border: none; border-radius: 0 0 0 6px; cursor: pointer;
@@ -2079,6 +2097,7 @@ function render() {
     refreshCanvasThumbs();
     drawOverlay();
     schedulePreview();
+    scheduleContextCardPreview();
 }
 
 function updateTransformReadout() {
@@ -5797,9 +5816,9 @@ for (const ev of ['keyup', 'click', 'select', 'focus', 'input']) {
 }
 extraPromptInput.addEventListener('blur', trackExtraPromptCaret);
 
-function insertImageIdToken(id) {
-    const token = `<image_id:${id}>`;
+function insertTextAtCaret(text) {
     // 优先用当前光标；输入框失焦时用记忆中的光标；都没有 = 追加到末尾。
+    const token = text;
     let pos = extraPromptInput.value.length;
     let selEnd = pos;
     if (document.activeElement === extraPromptInput && extraPromptInput.selectionStart != null) {
@@ -5817,10 +5836,75 @@ function insertImageIdToken(id) {
     extraPromptInput.setSelectionRange(caret, caret);
 }
 
+function insertImageIdToken(id) {
+    insertTextAtCaret(`<image_id:${id}>`);
+}
+
+// 固定卡片：Context Image（<image 1>）。Enable Edit 下 context 图永远作为 image 1
+// 存在（即使不插进文本 —— 编号 <image 2>+ 不受影响），点击只是把 <image 1> 写进
+// Extra Prompt 的手段。不可移除：没有 ✕，也不绑任何 staging 条目。
+// 卡片同时是该 context image 的**实时预览**：画布合成（blendCanvas）本身就是
+// context image，所以缩略图 = 棋盘格底衬 + blendCanvas（与宿主预览同一套规矩，
+// JPEG 必须有不透明底衬，且必须是棋盘格以保持「透明区域可读」）。
+let contextCardImg = null;
+const CONTEXT_CARD_PREVIEW_MS = 150;        // throttle — render() 在笔画期间每帧都跑
+let contextCardTimer = null;
+
+function scheduleContextCardPreview() {
+    if (contextCardTimer) return;
+    contextCardTimer = setTimeout(() => { contextCardTimer = null; updateContextCardPreview(); }, CONTEXT_CARD_PREVIEW_MS);
+}
+
+function updateContextCardPreview() {
+    const img = contextCardImg;
+    if (!img) return;
+    if (!canvasW || !canvasH) {
+        // 空画布：退回纯文字态。
+        if (img.getAttribute('src')) img.removeAttribute('src');
+        img.style.display = 'none';
+        return;
+    }
+    const s = Math.min(1, 108 / Math.max(canvasW, canvasH));   // 2x of the 54px card
+    const w = Math.max(1, Math.round(canvasW * s)), h = Math.max(1, Math.round(canvasH * s));
+    if (!updateContextCardPreview.buf) updateContextCardPreview.buf = document.createElement('canvas');
+    const buf = updateContextCardPreview.buf;
+    if (buf.width !== w || buf.height !== h) { buf.width = w; buf.height = h; }
+    const bctx = buf.getContext('2d');
+    resetCtx(bctx);
+    bctx.clearRect(0, 0, w, h);
+    paintCheckerboard(bctx, w, h);
+    bctx.drawImage(blendCanvas, 0, 0, w, h);
+    try {
+        img.src = buf.toDataURL('image/jpeg', 0.8);
+        img.style.display = '';
+    } catch (e) { /* taint 等异常：保持文字态 */ }
+}
+
+function makeContextCard() {
+    const item = document.createElement('div');
+    item.className = 'staging-item staging-context';
+    item.title = 'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image 1> at the cursor.';
+    const img = document.createElement('img');
+    img.className = 'context-preview';
+    img.alt = 'Context image preview';
+    img.style.display = 'none';
+    item.appendChild(img);
+    const label = document.createElement('span');
+    label.className = 'context-label';
+    label.textContent = 'Context 1';
+    item.appendChild(label);
+    contextCardImg = img;
+    item.addEventListener('click', () => insertTextAtCaret('<image 1>'));
+    return item;
+}
+
 function renderStaging() {
     const strip = document.getElementById('stagingStrip');
     if (!strip) return;
     strip.textContent = '';
+    // Context 卡片恒在最左侧（空池时也在）。
+    strip.appendChild(makeContextCard());
+    scheduleContextCardPreview();
     if (!stagingItems.length) {
         const hint = document.createElement('span');
         hint.className = 'staging-empty';
