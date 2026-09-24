@@ -148,7 +148,7 @@ interface EditPhaseProps {
   showFinishDialog: boolean;
   onFinish: (selectedKeys?: string[]) => void;
   onCloseFinishDialog: () => void;
-  /** 上传到工作区，返回新条目 id（拖到 Ref Image 上时要立刻选中它） */
+  /** 上传到工作区，返回新条目 id（Context tab 拖文件上传用） */
   onAddStagingImage: (base64: string) => Promise<string | null>;
   onLoadFromAssets: () => void;
   loadingAssets: boolean;
@@ -179,7 +179,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
   const [contextDragOver, setContextDragOver] = useState(false);
   // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
   const [showDebug, setShowDebug] = useState(false);
@@ -312,22 +311,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
   };
 
-  // Detailer block 的 Ref Image 多选（v2）：params.context_reference_keys 是权威列表；
-  // 旧配置的单 key context_reference_key 兜底并入尾部。setRefKeys 会把单 key 镜像成
-  // 列表最后一项，老后端 / 旧面板仍能读到单个值。
-  const getRefKeys = (dp: DetailerBlockParams): string[] => {
-    const arr = Array.isArray(dp.context_reference_keys) ? dp.context_reference_keys : [];
-    const legacy = dp.context_reference_key;
-    return legacy && !arr.includes(legacy) ? [...arr, legacy] : arr;
-  };
-  // 一次 read-modify-write 写两个 key（不能连调两次 updateBlockParam —— 那是基于同一
-  // 份 blocks 快照的 map，第二次会覆盖第一次）。
-  const setRefKeys = (blockId: string, keys: string[]) => {
-    onBlocksChange(blocks.map(b => b.id === blockId
-      ? { ...b, params: { ...b.params, context_reference_keys: keys, context_reference_key: keys.length ? keys[keys.length - 1] : null } as any }
-      : b));
-  };
-
   // An interface block is MISSING when its bound interface no longer exists (package removed or
   // renamed). Blocks saved before name-binding only carry interface_idx — fall back to that.
   // Judged only when the interfaces list is actually loaded, so a slow /api/package never
@@ -392,37 +375,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     e.preventDefault();
     setContextDragOver(false);
     if (e.dataTransfer.files?.length) void uploadFilesToStaging(e.dataTransfer.files);
-  };
-
-  // Ref Image 可以直接把文件拖上来：上传即追加为该块的参考图（v2 支持多张、一次可拖
-  // 多个文件），不必先拖进 context 再回来选。整批串行上传后**一次性**合并写入 ——
-  // 否则多个异步 onload 各自基于同一份 blocks 快照 setRefKeys，会互相覆盖只剩最后一张。
-  const [refDragOver, setRefDragOver] = React.useState<string | null>(null);
-
-  const addRefImagesFromFiles = (blockId: string, files: FileList | File[] | null) => {
-    const imgs = Array.from(files || []).filter(f => f.type.startsWith('image/'));
-    if (!imgs.length) return;
-    void (async () => {
-      const newKeys: string[] = [];
-      for (const file of imgs) {
-        const dataUrl = await new Promise<string | null>(res => {
-          const reader = new FileReader();
-          reader.onload = () => res(reader.result as string);
-          reader.onerror = () => res(null);
-          reader.readAsDataURL(file);
-        });
-        if (!dataUrl) continue;
-        try {
-          const key = await onAddStagingImage(dataUrl);
-          if (key) newKeys.push(key);
-        } catch { /* 单张失败不拖累整批 */ }
-      }
-      if (!newKeys.length) return;
-      const blk = blocks.find(b => b.id === blockId);
-      const merged = blk ? getRefKeys(blk.params as DetailerBlockParams) : [];
-      for (const k of newKeys) if (!merged.includes(k)) merged.push(k);
-      setRefKeys(blockId, merged);
-    })();
   };
 
   const toggleFinishSelection = (key: string) => {
@@ -820,7 +772,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     )}
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
-                      const refKeys = getRefKeys(dp);
                       return (<>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Add Noise</label>
@@ -921,69 +872,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 </div>
                               </>
                             )}
-                            {/* Context Ref 没有开关：选了参考图本身就是启用。v2 支持多张：
-                                按钮继续追加（点击从历史挑 / 拖文件上传），下方缩略图逐张预览，
-                                右上角 ✕ 移除该张。 */}
-                            <div style={styles.paramRow}>
-                              <label style={styles.paramLabel}>Ref Image</label>
-                              <button
-                                style={refDragOver === block.id
-                                  ? { ...styles.contextLoadBtn, borderColor: '#0a84ff', background: 'rgba(10,132,255,0.20)' }
-                                  : styles.contextLoadBtn}
-                                title="Click to pick from staging, or drop image files here to append references (any resolution, multiple allowed)"
-                                onClick={() => setShowRefSelect(block.id)}
-                                onDragOver={e => {
-                                  if (!Array.from(e.dataTransfer.types).includes('Files')) return;
-                                  e.preventDefault();
-                                  e.dataTransfer.dropEffect = 'copy';
-                                  if (refDragOver !== block.id) setRefDragOver(block.id);
-                                }}
-                                onDragLeave={e => {
-                                  if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-                                  setRefDragOver(null);
-                                }}
-                                onDrop={e => {
-                                  e.preventDefault();
-                                  setRefDragOver(null);
-                                  addRefImagesFromFiles(block.id, e.dataTransfer.files);
-                                }}
-                              >
-                                {refDragOver === block.id ? 'Drop to upload' : `Add (${refKeys.length})`}
-                              </button>
+                            {/* Ref Image 不再逐块手选：Blend 工作台 Extra Prompt 文本里的
+                                <image_id:...> 标记在 Run 时统一解析（context 图恒为
+                                <image 1>，引用图按出现顺序 = <image 2>+），所有 detailer
+                                block 共用这一组参考图。 */}
+                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', lineHeight: 1.6 }}>
+                              Ref images come from the Extra Prompt text (<code>{'<image_id:...>'}</code> tokens
+                              inserted from the Blend workbench staging strip). Context image is always{' '}
+                              <code>{'<image 1>'}</code>.
                             </div>
-                            {refKeys.length > 0 && (
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                                {refKeys.map(rk => {
-                                  const rh = staging.find(s => s.id === rk);
-                                  return (
-                                    <div key={rk} title={rh?.name ?? rk}
-                                      style={{
-                                        position: 'relative', width: 54, height: 54, flexShrink: 0,
-                                        borderRadius: 6, overflow: 'hidden', background: '#1c1c1e',
-                                        border: '0.5px solid rgba(255,255,255,0.18)',
-                                      }}>
-                                      {rh?.src ? (
-                                        <img src={rh.src} alt={rh.name}
-                                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                                      ) : (
-                                        <div style={{
-                                          width: '100%', height: '100%', display: 'flex', alignItems: 'center',
-                                          justifyContent: 'center', fontSize: 9, color: '#ff9f0a', textAlign: 'center',
-                                        }}>missing</div>
-                                      )}
-                                      <button title="Remove this reference"
-                                        onClick={() => setRefKeys(block.id, refKeys.filter(k => k !== rk))}
-                                        style={{
-                                          position: 'absolute', top: 0, right: 0, width: 16, height: 16,
-                                          padding: 0, border: 'none', borderRadius: '0 0 0 6px', cursor: 'pointer',
-                                          background: 'rgba(0,0,0,0.62)', color: 'rgba(255,255,255,0.85)',
-                                          fontSize: 10, lineHeight: '16px', textAlign: 'center',
-                                        }}>✕</button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
                           </div>
                         )}
                       </>);
@@ -1218,60 +1115,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           </div>
         )}
       </div>
-
-      {/* Reference image select modal — v2: 点选即**追加**到该块的参考列表（可多张） */}
-      {showRefSelect && (() => {
-        // 工作区里的任何图都可作参考图（id 引用，图层/画布与图池解耦）。
-        const eligible = staging;
-        const selBlock = blocks.find(b => b.id === showRefSelect);
-        const selKeys = selBlock ? getRefKeys(selBlock.params as DetailerBlockParams) : [];
-        return (
-          <div style={styles.overlay}>
-            <div
-              style={styles.dialog}
-              onDragOver={e => {
-                if (!Array.from(e.dataTransfer.types).includes('Files')) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'copy';
-              }}
-              onDrop={e => {
-                e.preventDefault();
-                addRefImagesFromFiles(showRefSelect, e.dataTransfer.files);
-                setShowRefSelect(null);
-              }}
-            >
-              <div style={styles.dialogTitle}>Select Reference Images</div>
-              <div style={styles.dialogSubtitle}>Click to append (multiple allowed) — or drop image files here</div>
-              {eligible.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No staging items yet — drop images here to add.</div>
-              ) : (
-                <div style={styles.dialogHistoryGrid}>
-                  {eligible.map(s => {
-                    const already = selKeys.includes(s.id);
-                    return (
-                      <button key={s.id} style={{
-                        ...styles.historyCard,
-                        ...(already ? { outline: '1.5px solid rgba(10,132,255,0.8)', outlineOffset: -1.5 } : {}),
-                      }} onClick={() => {
-                        if (!already) setRefKeys(showRefSelect, [...selKeys, s.id]);
-                        setShowRefSelect(null);
-                      }}>
-                        <div style={styles.historyImgWrap}>
-                          <img src={s.src} alt={s.name} style={styles.historyImg} />
-                        </div>
-                        <div style={styles.historyName}>{s.name}{already ? ' ✓' : ''}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              <div style={styles.dialogActions}>
-                <button style={styles.cancelBtn} onClick={() => setShowRefSelect(null)}>Cancel</button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Prompt preset editor — the FULL prompt_node UI in preset scope. Its selection is
           saved to the SHARED preset (persisted server-side); every block referencing that

@@ -10,8 +10,6 @@ export interface ServerConfig {
   mask_grow: number;
   mask_blur: number;
   enable_edit: boolean;
-  context_reference: boolean;
-  context_reference_key: string | null;
   /** 当前 pipeline 的模型架构（按架构渲染 DetailerBlock 的 edit 设置） */
   architecture?: string | null;
   has_tagger: boolean;
@@ -67,11 +65,6 @@ export interface DetailerBlockParams {
   enable_ref_boost_mask?: boolean;
   /** Krea2: grounded encode 的 VLM 看图分辨率上限（正/负条件共用）, 默认 768 */
   grounding_px?: number;
-  context_reference: boolean;
-  context_reference_key: string | null;
-  /** v2 多参考：本块参考图 key 列表（顺序 = run 时注入顺序）。旧单 key
-   *  context_reference_key 仍由 UI 镜像为列表最后一项以兼容旧后端；运行时以列表为准。 */
-  context_reference_keys?: string[];
   /** 该 detailer block 解出 pipeline.context 的 lora/prompt 时使用的正则（默认 ".+"） */
   context_regex?: string;
 }
@@ -140,8 +133,6 @@ export interface DetailerParams {
   mask_grow: number;
   mask_blur: number;
   enable_edit: boolean;
-  context_reference: boolean;
-  context_reference_key: string | null;
 }
 
 /** 一个正停在链条里等用户回答的 Query 块（/api/status 下发；null = 没有块在等）。 */
@@ -233,7 +224,7 @@ export interface DebugTraceResponse {
 }
 
 export interface StagingItem {
-  /** 工作区条目 id（'staging_N'）。Ref Image / 端口图 / Finish 都引用它。 */
+  /** 工作区条目 id（'staging_N'）。Extra Prompt 的 <image_id:...> / 端口图 / Finish 都引用它。 */
   id: string;
   name: string;
   src: string;
