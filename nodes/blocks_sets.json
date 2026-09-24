@@ -31,7 +31,7 @@
     },
     {
       "id": "set-17",
-      "name": "编辑",
+      "name": "Alpha编辑",
       "blocks": [
         {
           "id": "block-22",
@@ -143,7 +143,38 @@
           }
         }
       ]
+    },
+    {
+      "id": "set-20",
+      "name": "编辑",
+      "blocks": [
+        {
+          "id": "block-26",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 2048576,
+            "align": 16,
+            "crop_reserve": 32,
+            "recover_crop": true,
+            "enable_edit": true,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": true,
+            "context_reference_key": null,
+            "context_regex": ".+",
+            "enable_mask": false,
+            "enable_limit": true
+          }
+        }
+      ]
     }
   ],
-  "active_block_set": "set-17"
+  "active_block_set": "set-20"
 }

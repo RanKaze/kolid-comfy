@@ -52,6 +52,8 @@ export interface DetailerBlockParams {
    *  强制 32 对齐，否则 latent / vision token 网格不接受。 */
   enable_limit?: boolean;
   enable_edit: boolean;
+  /** 块级 Generate Text 开关（默认关）：仅当 pipeline 也启用了 Generate Text 时才生效 */
+  enable_text_generate?: boolean;
   /** Krea2 source-patch 编辑模式: fit = 整图适配 + stride-1 位置（防模糊）; crop = center-crop 几何 */
   edit_mode?: 'fit' | 'crop';
   /** Krea2: 最后一个参考（源图）的 target->ref 注意力乘数, >1 拉向参考外观 */

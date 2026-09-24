@@ -893,6 +893,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <label style={styles.paramLabel}>Enable Edit</label>
                           <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
                         </div>
+                        <div style={styles.paramRow} title="块级 Generate Text 开关（默认关）：仅当上游 pipeline 也启用了 Generate Text（PipelineEnableGenerateTextNode）时才生效；生成结果只作用于当前块，不向后续块传递。">
+                          <label style={styles.paramLabel}>Enable Text Generate</label>
+                          <IOSToggle checked={dp.enable_text_generate ?? false} onChange={v => updateBlockParam(block.id, 'enable_text_generate', v)} />
+                        </div>
                         {dp.enable_edit && (
                           <div style={styles.editSubSection}>
                             {isKrea2 && (
