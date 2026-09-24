@@ -350,7 +350,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="toolbar">
             <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
                    placeholder="Extra prompt — appended after the prompt stage (Run only)">
-            <button class="tb-btn archive" id="blendBtn" title="Composite the layers and archive the result into the history gallery">Blend</button>
+            <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (backed by its history entry — non-destructive). The composite is also archived into the history gallery.">Blend</button>
             <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
             <div class="tb-pill">
                 <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.">Run</button>
@@ -4364,7 +4364,10 @@ function sendBlendAction(action, opts) {
     if (!layers.length) { setStatus('Add at least one layer first', 'error'); return; }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
     const mask = maskPayload();
-    const needsMask = action === 'detailer' || (action === 'tag' && opts && opts.tagMode !== 'full');
+    // Run 的遮罩要求随生效 preset 的 Enable Mask 总闸走（关 = 整幅就是工作区，没画
+    // Mask 层也能跑）；Tag 除了 full 模式外始终要遮罩。
+    const needsMask = action === 'detailer' ? maskRequiredForRun()
+        : (action === 'tag' && opts && opts.tagMode !== 'full');
     if (needsMask && !mask) {
         setStatus(maskLayer.visible ? 'Paint the Mask layer first' : 'The Mask layer is hidden — show it (eye icon) to send it', 'error');
         return;
@@ -4454,6 +4457,17 @@ function saveGenPrefs() {
 }
 
 // ==================== Run 设置（Pipeline Preset） ====================
+// Enable Mask 总闸（生效链第一个 detailer 的 params.enable_mask），随 blend-config 从宿主
+// 同步（默认开 = 保守：宿主没说就当作要遮罩）。Run 的遮罩预检用它放行「Enable Mask 关 +
+// 没画 Mask 层」的组合 —— 后端闸门用同一套解析，两边永远不会打架。
+let maskRequired = true;
+function maskRequiredForRun() {
+    const id = resolveRunPresetId();
+    const p = genPresets.find(x => x.id === id);
+    if (p && typeof p.enable_mask === 'boolean') return p.enable_mask;
+    return maskRequired;
+}
+
 const RUN_PREFS_KEY = 'blend.runPreset';
 let runPrefs = { preset_id: null };
 try {
@@ -5647,7 +5661,13 @@ async function importCud(file) {
             const tr = rec.transform || {};
             next.push({
                 id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
-                key: rec.key || null,
+                // The .cud carries its own pixels, so the history keys it recorded belong to the
+                // session that exported it. Restored as-is they either dangle (Run dies with
+                // "Image not found: history_N") or — worse — silently rebind to a DIFFERENT
+                // image that happens to hold the same per-session key in this session. The
+                // pixels travel in the file, so drop the foreign key: the layer keeps its own
+                // data URL and travels with the Blend payload like any local drop.
+                key: null,
                 name: rec.name || 'Layer',
                 src: url,
                 img,
@@ -5690,7 +5710,10 @@ async function importCud(file) {
         paintTarget = sel.paintTarget === 'decal' ? 'decal' : 'mask';
         mode = ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].includes(sel.mode) ? sel.mode : 'transform';
         injectedKeys.clear();
-        for (const k of (Array.isArray(header.injectedKeys) ? header.injectedKeys : [])) if (typeof k === 'string') injectedKeys.add(k);
+        // Deliberately NOT restoring header.injectedKeys: those are the exporting session's
+        // history keys. In this session fresh history images get the same history_N names, so a
+        // restored claim would silently block re-adding them (incomingItems drops them as
+        // "already a layer"). After an import every key is free.
         const ml = header.maskLayer || {};
         maskLayer.visible = ml.visible !== false;
         maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
@@ -5780,6 +5803,8 @@ window.addEventListener('message', event => {
     const d = event.data || {};
     if (d.type === 'blend-config') {
         hasTagger = d.hasTagger !== false;
+        // 激活 tab 的 Enable Mask 总闸（宿主从第一个 detailer block 读出）。
+        maskRequired = d.mask_required !== false;
         if (d.tagDisabledHint) extraPromptInput.placeholder = d.tagDisabledHint;
         syncActionButtons();
         return;
@@ -5821,8 +5846,13 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-add-layer') {
         const valid = incomingItems(d);
         if (!valid.length) return;
+        // smart = 结果必须落在智能对象图层上（历史 key 支撑、非破坏）：暂时关掉
+        // "Place images as raster"，否则该偏好会把刚合成的结果就地栅格化。
+        const prevRaster = rasterDrop;
+        if (d.smart) rasterDrop = false;
         for (const it of valid) addLayer(it);
-        setStatus('Detailer result added as a new layer below the Mask', 'success');
+        rasterDrop = prevRaster;
+        setStatus(d.note || 'Detailer result added as a new layer below the Mask', 'success');
         return;
     }
     if (d.type === 'blend-replace-layer') {
@@ -5841,7 +5871,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
         if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
-        else if (d.action === 'blend') setStatus('Archived to the history gallery', 'success');
+        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer (also archived to history)', 'success');
         else if (d.action === 'tag') setStatus(`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success');
         return;
     }
