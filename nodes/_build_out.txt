@@ -17,8 +17,8 @@ transforming...
 rendering chunks...
 [plugin vite:singlefile] 
 
-[plugin vite:singlefile] Inlining: index-D068p1NC.js
+[plugin vite:singlefile] Inlining: index-CrimhaFI.js
 [plugin vite:singlefile] Inlining: style-DMLqlsYz.css
 computing gzip size...
-[2m../web/[22m[32mindex.html  [39m[1m[2m247.95 kB[22m[1m[22m[2m 鈹?gzip: 73.74 kB[22m
-[32m鉁?built in 512ms[39m
+[2m../web/[22m[32mindex.html  [39m[1m[2m239.37 kB[22m[1m[22m[2m 鈹?gzip: 71.89 kB[22m
+[32m鉁?built in 453ms[39m

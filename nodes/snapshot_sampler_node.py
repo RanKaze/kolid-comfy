@@ -223,17 +223,18 @@ class SnapshotDetailerSamplerServer:
         self.finish_selected_keys = None  # 多选 keys 列表
         self.window_closed = False
 
-        # 历史图片画廊
-        self.selected_history = []
-        self._history_tensors = {}  # key → tensor (原始引用，避免 base64 往返)
-        self._history_counter = 0
-        self.current_context_key = None  # 当前作为 context 的 history key
+        # 工作区（staging）：唯一的图池。拖进来的文件、run 初始图、接口/Blend/Run 结果
+        # 都落在这里；detailer 的 Ref Image、接口端口图/掩码都引用这里的条目。
+        # 图层不再绑定条目 id —— 图层自带像素（见 blend_node.html），这里只存「可复用的图」。
+        self.staging_items = []
+        self._staging_tensors = {}  # id → tensor (原始引用，避免 base64 往返)
+        self._staging_counter = 0
 
         # 最新结果
         self.original_image = None
         self.detailed_image = None
-        self.original_key = None   # history key of the original image
-        self.detailed_key = None   # history key of the detailed image
+        self.original_key = None   # staging id of the original image
+        self.detailed_key = None   # staging id of the detailed image
 
         # Blend 工作台（Draw tab）：画布合成图就是 Context Image，
         # 合成结果 + 纯 Mask 层随 blend_action 一次性送达，不再走 history key 切换。
@@ -378,17 +379,17 @@ class SnapshotDetailerSamplerServer:
     # -------------------------------------------------------------------------
     # 历史画廊
     # -------------------------------------------------------------------------
-    def add_history(self, image, name=None, place=None):
-        """添加一张图片到历史画廊。保留 tensor 引用以避免 base64 往返。
+    def add_staging(self, image, name=None, place=None):
+        """添加一张图到工作区。保留 tensor 引用以避免 base64 往返。
 
         place 只有「Recover Crop 关闭」的 detailer run 会提供：归一化的放置矩形
         (x, y, w, h, ow, oh)。此时 image 是 RGBA —— alpha 就是 crop 工作区的 mask，
-        图层自带的 alpha 承担裁剪，所以 history 项不再需要额外的 mask 字段。前端
-        据此把它作为一个新图层贴回原位，而不是由后端合成。
+        图层自带的 alpha 承担裁剪，所以条目不需要额外的 mask 字段。前端据此把
+        它作为一个新图层贴回原位，而不是由后端合成。
         """
-        self._history_counter += 1
-        key = f'history_{self._history_counter}'
-        # 记录尺寸供前端过滤同尺寸图片
+        self._staging_counter += 1
+        sid = f'staging_{self._staging_counter}'
+        # 记录尺寸供前端展示
         h, w = 0, 0
         if image is not None and hasattr(image, 'shape'):
             shp = image.shape
@@ -397,25 +398,26 @@ class SnapshotDetailerSamplerServer:
             elif len(shp) == 3:
                 h, w = shp[0], shp[1]
         # 保留 tensor 引用
-        self._history_tensors[key] = image
-        self.selected_history.append({
-            'key': key,
+        self._staging_tensors[sid] = image
+        self.staging_items.append({
+            'id': sid,
             'src': tensor_to_base64(image),
-            'name': name or f'#{self._history_counter}',
+            'name': name or f'#{self._staging_counter}',
             'width': w,
             'height': h,
             'place': place,
         })
-        if len(self.selected_history) > 20:
-            old = self.selected_history.pop(0)
-            self._history_tensors.pop(old['key'], None)
+        if len(self.staging_items) > 40:
+            old = self.staging_items.pop(0)
+            self._staging_tensors.pop(old['id'], None)
+        return sid
 
-    def get_history_list(self):
-        """返回历史画廊列表（base64 缩略图）。"""
-        return [{'key': h['key'], 'name': h['name'], 'src': h['src'],
-                 'width': h.get('width', 0), 'height': h.get('height', 0),
-                 'place': h.get('place')}
-                for h in self.selected_history]
+    def get_staging_list(self):
+        """返回工作区条目列表（base64 图，宿主直接可渲染）。"""
+        return [{'id': s['id'], 'name': s['name'], 'src': s['src'],
+                 'width': s.get('width', 0), 'height': s.get('height', 0),
+                 'place': s.get('place')}
+                for s in self.staging_items]
 
     def _first_detailer_enable_mask(self, preset_id=None):
         """生效链第一个 detailer 的 Enable Mask 总闸（默认开）。
@@ -440,16 +442,20 @@ class SnapshotDetailerSamplerServer:
                    if isinstance(b, dict) and b.get('type') == 'detailer'), None)
         return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
 
-    def get_history_image(self, key):
-        """根据 key 获取历史图片 tensor。优先返回 tensor 引用，避免 base64 decode。"""
-        tensor = self._history_tensors.get(key)
+    def get_staging_image(self, sid):
+        """根据 id 获取工作区图片 tensor。优先返回 tensor 引用，避免 base64 decode。
+
+        兼容：旧配置里的 'history_N' 引用解析不到（工作区 id 一律 'staging_N'），
+        返回 None，由调用方按「引用缺失」容错处理。
+        """
+        tensor = self._staging_tensors.get(sid)
         if tensor is not None:
             return tensor
-        # Fallback: 从 base64 decode（兼容旧数据）
-        for h in self.selected_history:
-            if h['key'] == key:
+        # Fallback: 从 base64 decode（张量被上限淘汰后仍可从自带 src 恢复）
+        for s in self.staging_items:
+            if s['id'] == sid:
                 try:
-                    src = h['src']
+                    src = s['src']
                     if ',' in src:
                         b64_data = src.split(',', 1)[1]
                     else:
@@ -464,16 +470,16 @@ class SnapshotDetailerSamplerServer:
                     arr = np.array(img).astype(np.float32) / 255.0
                     return torch.from_numpy(arr).unsqueeze(0)
                 except Exception as e:
-                    print(f"[SnapshotDetailerSampler] Failed to load history image: {e}")
+                    print(f"[SnapshotDetailerSampler] Failed to load staging image: {e}")
                     return None
         return None
 
     def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None):
-        """把图层栈合成成一张图（不写历史），返回 (image, mask)。
+        """把图层栈合成成一张图（不写工作区），返回 (image, mask)。
 
-        layer_specs: [{'key'|'src', 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
-        列表自下而上（[0] 是最底层）。图层像素优先用 history key；拖入的本地图片没有 key，
-        改用它自己的 data URL（'src'）。画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
+        layer_specs: [{'src': dataURL, 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
+        列表自下而上（[0] 是最底层）。图层自带像素（data URL），不绑定任何图池 id。
+        画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
 
         mask_data_url 是画布顶层的「纯 Mask 层」（alpha = 覆盖率，按画布尺寸栅格化），
         与图层自身的 coverage mask 无关 —— 返回的 mask 为 [1,H,W] float 或 None（无遮罩）。
@@ -482,12 +488,9 @@ class SnapshotDetailerSamplerServer:
             raise ValueError('Missing layers')
         resolved = []
         for spec in layer_specs:
-            key = spec.get('key') or ''
-            tensor = self.get_history_image(key) if key else None
+            tensor = decode_image_dataurl(spec.get('src'))
             if tensor is None:
-                tensor = decode_image_dataurl(spec.get('src'))
-            if tensor is None:
-                raise LookupError(f'Image not found: {key or "dropped image"}')
+                raise LookupError('Image not found: a layer image failed to decode — re-drop it onto the canvas')
             if tensor.dim() == 4:
                 tensor = tensor[0]
             resolved.append({
@@ -891,7 +894,6 @@ class SnapshotDetailerSamplerServer:
                     'context_reference': inst.context_reference if inst else False,
                     'context_reference_key': inst.context_reference_key if inst else None,
                     'has_tagger': inst.tagger is not None if inst else False,
-                    'current_context_key': getattr(inst, 'current_context_key', None),
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
                     'package_count': len(inst.interface_packages) if inst else 0,
@@ -1055,7 +1057,6 @@ class SnapshotDetailerSamplerServer:
                             'detailed_image': tensor_to_base64(inst.detailed_image),
                             'original_key': getattr(inst, 'original_key', None),
                             'detailed_key': getattr(inst, 'detailed_key', None),
-                            'current_context_key': getattr(inst, 'current_context_key', None),
                         })
                     except Exception as e:
                         self._send_json({'error': str(e)}, 500)
@@ -1063,8 +1064,8 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'error': 'Result not ready'}, 404)
                 return
 
-            if self.path == '/api/history':
-                self._send_json({'history': inst.get_history_list() if inst else []})
+            if self.path == '/api/staging':
+                self._send_json({'staging': inst.get_staging_list() if inst else []})
                 return
 
             if self.path == '/api/prompt_presets':
@@ -1180,7 +1181,7 @@ class SnapshotDetailerSamplerServer:
                     inst.node_instance._current_pipeline = new_pipeline.copy()
                     inst.node_instance._base_pipeline = inst.node_instance._current_pipeline
                     new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
-                    inst.node_instance._switch_image(inst, new_image, context_key=inst.current_context_key)
+                    inst.node_instance._switch_image(inst, new_image)
                     # Update lora_regex from new pipeline's architecture
                     new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
                     old_arch = current_pipeline.config.get("architecture") if current_pipeline and current_pipeline.config else None
@@ -1262,50 +1263,85 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
-            if self.path == '/api/add_context_image':
+            if self.path == '/api/staging':
+                # 工作区批量上传：{images: [dataURL, ...], name?} → 逐张解码存 tensor。
+                # 返回新条目（含 id），调用方立刻能把 id 设成 Ref Image / 加为图层。
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    image_b64 = body.get('image', '')
-                    if not image_b64:
+                    images = body.get('images')
+                    if not isinstance(images, list) or not images:
+                        images = [body.get('image', '')]
+                    images = [u for u in images if isinstance(u, str) and u]
+                    if not images:
                         self._send_json({'success': False, 'error': 'No image data'}, 400)
                         return
-                    # 解码 base64 → tensor
-                    if ',' in image_b64:
-                        b64_data = image_b64.split(',', 1)[1]
-                    else:
-                        b64_data = image_b64
-                    img_bytes = base64.b64decode(b64_data)
-                    img = Image.open(io.BytesIO(img_bytes))
-                    # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
-                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                        img = img.convert('RGBA')
-                    elif img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    arr = np.array(img).astype(np.float32) / 255.0
-                    tensor = torch.from_numpy(arr).unsqueeze(0)
-                    inst.add_history(tensor, name=f'Loaded #{len(inst.selected_history) + 1}')
-                    # 拖上来的图要立刻能被设成「参考图」，所以把新 key 回给调用方
-                    new_key = inst.selected_history[-1]['key'] if inst.selected_history else None
-                    self._send_json({'success': True, 'key': new_key})
+
+                    def _decode_dataurl(image_b64):
+                        if ',' in image_b64:
+                            b64_data = image_b64.split(',', 1)[1]
+                        else:
+                            b64_data = image_b64
+                        img_bytes = base64.b64decode(b64_data)
+                        img = Image.open(io.BytesIO(img_bytes))
+                        # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+                        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                            img = img.convert('RGBA')
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        arr = np.array(img).astype(np.float32) / 255.0
+                        return torch.from_numpy(arr).unsqueeze(0)
+
+                    added = []
+                    names = body.get('names') if isinstance(body.get('names'), list) else None
+                    for idx, dataurl in enumerate(images):
+                        try:
+                            tensor = _decode_dataurl(dataurl)
+                        except Exception as dec_err:
+                            print(f"[Staging] skipped image #{idx + 1}: {dec_err}")
+                            continue
+                        chosen = names[idx] if (names and idx < len(names) and names[idx]) else None
+                        base_name = chosen or body.get('name') or 'Loaded'
+                        name = base_name if len(images) == 1 else f"{base_name} #{len(inst.staging_items) + 1}"
+                        sid = inst.add_staging(tensor, name=name)
+                        added.append({'id': sid, 'name': name, 'src': dataurl})
+                    if not added:
+                        self._send_json({'success': False, 'error': 'All images failed to decode'}, 400)
+                        return
+                    self._send_json({'success': True, 'added': added})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
-            if self.path == '/api/resize_image':
+            if self.path == '/api/staging_remove':
+                # 从工作区移除一个条目（张量引用一并释放）。
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
-                    key = body.get('key', '')
+                    sid = body.get('id', '')
+                    before = len(inst.staging_items)
+                    inst.staging_items = [s for s in inst.staging_items if s['id'] != sid]
+                    inst._staging_tensors.pop(sid, None)
+                    self._send_json({'success': True, 'removed': before - len(inst.staging_items)})
+                except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/resize_image':
+                # 工作区条目缩放变体：源条目不动，产物作为新条目进工作区。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    sid = body.get('id', '')
                     width = int(body.get('width', 0))
                     height = int(body.get('height', 0))
-                    if not key or width <= 0 or height <= 0:
-                        self._send_json({'success': False, 'error': 'Invalid key, width or height'}, 400)
+                    if not sid or width <= 0 or height <= 0:
+                        self._send_json({'success': False, 'error': 'Invalid id, width or height'}, 400)
                         return
-                    # 获取历史图片 tensor
-                    tensor = inst.get_history_image(key)
+                    # 获取工作区图片 tensor
+                    tensor = inst.get_staging_image(sid)
                     if tensor is None:
                         self._send_json({'success': False, 'error': 'Image not found'}, 404)
                         return
@@ -1327,15 +1363,16 @@ class SnapshotDetailerSamplerServer:
                     resized_tensor = torch.from_numpy(arr2)
                     if tensor.dim() == 4:
                         resized_tensor = resized_tensor.unsqueeze(0)
-                    # 添加到历史
+                    # 添加到工作区
                     name = None
-                    for h in inst.selected_history:
-                        if h['key'] == key:
-                            name = f"{h['name']} ({width}x{height})"
+                    for s in inst.staging_items:
+                        if s['id'] == sid:
+                            name = f"{s['name']} ({width}x{height})"
                             break
-                    inst.add_history(resized_tensor, name=name)
-                    new_key = inst.selected_history[-1]['key']
-                    self._send_json({'success': True, 'key': new_key})
+                    new_id = inst.add_staging(resized_tensor, name=name)
+                    new_item = next((s for s in inst.staging_items if s['id'] == new_id), None)
+                    self._send_json({'success': True, 'id': new_id,
+                                     'item': new_item if new_item is not None else {'id': new_id, 'name': name}})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -1411,9 +1448,11 @@ class SnapshotDetailerSamplerServer:
                     )
 
                     if action == 'blend':
-                        # 归档：合成图进历史画廊，不动 Context（Context 就是画布本身）
-                        inst.add_history(image, name=f'Blend #{len(inst.selected_history) + 1}')
-                        self._send_json({'success': True, 'key': inst.selected_history[-1]['key']})
+                        # 合成图进工作区（可复用为 Ref / 再加层），并以 dataURL 返回 ——
+                        # 前端把它作为新的智能图层加到画布顶层（图层自带像素，不绑 id）。
+                        blend_id = inst.add_staging(image, name=f'Blend #{len(inst.staging_items) + 1}')
+                        self._send_json({'success': True, 'id': blend_id,
+                                         'image': tensor_to_base64(image)})
                         return
 
                     if action == 'tag':
@@ -1619,10 +1658,10 @@ class SnapshotDetailerSamplerNode:
                 if not image_url:
                     continue
                 tensor = SnapshotAssetsNode._decode_image_data(image_url)
-                server.add_history(tensor, name=f'Asset #{len(server.selected_history) + 1}')
+                server.add_staging(tensor, name=f'Asset #{len(server.staging_items) + 1}')
                 count += 1
 
-        print(f"[load_from_assets] Added {count} images to history")
+        print(f"[load_from_assets] Added {count} images to staging")
         return count
 
     # -------------------------------------------------------------------------
@@ -1951,7 +1990,7 @@ class SnapshotDetailerSamplerNode:
         return query['answer']
 
     def _resolve_ref_image_for_generate_text(self, server, key):
-        """取 Enable Edit 的 Ref Image（Context Ref 选中的那张），供 Generate Text 使用。
+        """取 Enable Edit 的 Ref Image（工作区条目 id），供 Generate Text 使用。
 
         语义（用户确认）：只有 `enable_edit` 开着、且该 block 真的选了 Ref Image 时才送图；
         取不到就返回 None（调用方静默降级为纯文本）。整体 fail-open —— 这里绝不抛异常，
@@ -1963,9 +2002,9 @@ class SnapshotDetailerSamplerNode:
         if server is None or not key:
             return None
         try:
-            img = server.get_history_image(key)
+            img = server.get_staging_image(key)
             if img is None:
-                print(f"[GenerateText] ref image key '{key}' not found — text-only")
+                print(f"[GenerateText] ref image id '{key}' not found in staging — text-only")
                 return None
             from ..libs.generate_text_utils import normalize_ref_image
             return normalize_ref_image(img)
@@ -2251,15 +2290,15 @@ class SnapshotDetailerSamplerNode:
                     block_input_mask = current_mask.clone() if current_mask is not None else None
                     ctx_img_key = bp.get('context_image_key')
                     if ctx_img_key and server is not None:
-                        sel_img = server.get_history_image(ctx_img_key)
+                        sel_img = server.get_staging_image(ctx_img_key)
                         if sel_img is not None:
                             block_input_img = sel_img
-                            print(f"[PipelineBlock {i+1}] Interface using context image key={ctx_img_key}")
+                            print(f"[PipelineBlock {i+1}] Interface using staging image id={ctx_img_key}")
                         else:
-                            print(f"[PipelineBlock {i+1}] WARNING: context image key '{ctx_img_key}' not found, using pipeline image")
+                            print(f"[PipelineBlock {i+1}] WARNING: staging image id '{ctx_img_key}' not found, using pipeline image")
                     ctx_mask_key = bp.get('context_mask_key')
                     if ctx_mask_key and server is not None:
-                        sel_mask = server.get_history_image(ctx_mask_key)
+                        sel_mask = server.get_staging_image(ctx_mask_key)
                         if sel_mask is not None:
                             block_input_mask = sel_mask
                             print(f"[PipelineBlock {i+1}] Interface using context mask key={ctx_mask_key}")
@@ -2579,13 +2618,13 @@ class SnapshotDetailerSamplerNode:
                 # 顺序 = context_reference_keys（旧单 key 已并入列表尾）。
                 if enable_edit and context_reference_keys and server is not None:
                     for _ref_key in context_reference_keys:
-                        ref_img = server.get_history_image(_ref_key)
+                        ref_img = server.get_staging_image(_ref_key)
                         if ref_img is not None:
                             ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
                             next_pipeline.reference.reference_latents.append(ref_latent)
-                            print(f"[Block {i+1}] Context reference injected: key={_ref_key}")
+                            print(f"[Block {i+1}] Context reference injected: id={_ref_key}")
                         else:
-                            print(f"[Block {i+1}] WARNING: context reference key '{_ref_key}' not found")
+                            print(f"[Block {i+1}] WARNING: context reference id '{_ref_key}' not found in staging")
 
                 print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
 
@@ -2785,14 +2824,13 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
     # -------------------------------------------------------------------------
-    def _switch_image(self, server, new_image, context_key=None):
+    def _switch_image(self, server, new_image):
         """切换 pipeline 的图片并更新 mask server。尺寸相同则保留 mask。"""
         old_image = self._current_pipeline.image
         old_h, old_w = (old_image.shape[1], old_image.shape[2]) if old_image is not None and hasattr(old_image, 'shape') and old_image.dim() >= 3 else (0, 0)
         new_h, new_w = (new_image.shape[1], new_image.shape[2]) if new_image is not None and hasattr(new_image, 'shape') and new_image.dim() >= 3 else (0, 0)
 
         self._current_pipeline.image = new_image
-        server.current_context_key = context_key
 
 
         # 关键：切换 context 时同步 _base_pipeline 的 image/mask。
@@ -2913,10 +2951,10 @@ class SnapshotDetailerSamplerNode:
         port_overrides = {}
         for port_num_str, key in image_keys.items():
             if key:
-                img = server.get_history_image(key)
+                img = server.get_staging_image(key)
                 if img is not None:
                     port_overrides[int(port_num_str)] = img
-                    print(f"[InterfaceExec] Port {port_num_str} image override: key={key}")
+                    print(f"[InterfaceExec] Port {port_num_str} image override: id={key}")
 
         injected_img = base_img
         injected_mask = base_mask
@@ -3006,20 +3044,19 @@ class SnapshotDetailerSamplerNode:
                 print(f"[InterfaceExec] chain: synced interface pipeline updates (model/clip/context/loras) back to upstream pipeline")
             return result_img, result_mask
 
-        # 以最终（可能已 uncrop）图加入 history，并记录 keys
+        # 以最终（可能已 uncrop）图加入工作区，并记录条目 id（前端据此展示接口结果）
         for ptype, img, name in results:
             if ptype == 'IMAGE':
-                server.add_history(img, name=name)
-                if server.selected_history:
-                    server.interface_result_keys.append(server.selected_history[-1]['key'])
+                server.interface_result_keys.append(
+                    server.add_staging(img, name=name))
 
-        # Auto-select last added image as context
+        # 接口结果图同时接管 pipeline image（后续 block / 下一次 run 从它继续）
         if results:
-            new_key = server.selected_history[-1]['key']
-            last_image = server.get_history_image(new_key)
+            new_key = server.interface_result_keys[-1]
+            last_image = server.get_staging_image(new_key)
             if last_image is not None:
-                self._switch_image(server, last_image, context_key=new_key)
-                print(f"[InterfaceExec] Auto-set context to {new_key}")
+                self._switch_image(server, last_image)
+                print(f"[InterfaceExec] Pipeline image updated from staging {new_key}")
 
     # -------------------------------------------------------------------------
     # 主入口
@@ -3073,10 +3110,9 @@ class SnapshotDetailerSamplerNode:
                 raise RuntimeError("[SnapshotDetailerSampler] Server startup timeout")
             time.sleep(0.01)
 
-        # 添加初始图片到历史画廊
+        # 初始图进工作区（前端种子画布从这里取）
         if self._current_pipeline and self._current_pipeline.image is not None:
-            server.add_history(self._current_pipeline.image, name='Original')
-            server.current_context_key = server.selected_history[-1]['key']
+            server.original_key = server.add_staging(self._current_pipeline.image, name='Original')
 
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
@@ -3259,16 +3295,15 @@ class SnapshotDetailerSamplerNode:
                         server.original_key = None
                         server.detail_status = 'done'
 
-                        # 添加到历史画廊。Recover Crop 关闭时带放置矩形 —— 产出图本身已是
+                        # 产出图进工作区（前端作为新图层叠加到画布上，图层自带像素）。
+                        # Recover Crop 关闭时带放置矩形 —— 产出图本身已是
                         # RGBA（alpha = 工作区 mask），Blend 工作台据此把它作为新图层
                         # transform 贴回原位。
-                        server.add_history(
+                        server.detailed_key = server.add_staging(
                             detailed_image,
-                            name=f'Detail #{len(server.selected_history)}',
+                            name=f'Detail #{len(server.staging_items)}',
                             place=(detail_meta or {}).get('place'),
                         )
-                        new_key = server.selected_history[-1]['key']
-                        server.detailed_key = new_key
 
                         # 更新 pipeline（保留 model/vae/latent 等流转状态）
                         self._current_pipeline = next_pipeline
@@ -3337,11 +3372,12 @@ class SnapshotDetailerSamplerNode:
                     mm.soft_empty_cache()
 
                 if act == 'select_image':
+                    # 设为 pipeline 当前图（工作台右键/宿主入口均可触发）
                     key = action.get('key', '')
-                    img = server.get_history_image(key)
+                    img = server.get_staging_image(key)
                     if img is not None:
-                        self._switch_image(server, img, context_key=key)
-                        print(f"[SnapshotDetailerSampler] Selected history image: {key}")
+                        self._switch_image(server, img)
+                        print(f"[SnapshotDetailerSampler] Pipeline image set from staging: {key}")
 
                 if act == 'execute_interface':
                     interface_idx = action.get('interface_index', 0)
@@ -3386,12 +3422,12 @@ class SnapshotDetailerSamplerNode:
         if server.window_closed and not server.finished:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
 
-        # 如果用户在 finish 时选了历史图片，用它作为最终输出
+        # 如果用户在 finish 时选了工作区图片，用它作为最终输出
         # 先清空已有的 image 和 latent，再追加选中的图片
         if server.finish_selected_keys and len(server.finish_selected_keys) > 0:
             selected_images = []
             for key in server.finish_selected_keys:
-                img = server.get_history_image(key)
+                img = server.get_staging_image(key)
                 if img is not None:
                     selected_images.append(img)
             if selected_images:

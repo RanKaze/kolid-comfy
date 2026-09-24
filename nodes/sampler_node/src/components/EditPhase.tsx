@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, HistoryItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
+import React, { useState, useCallback, useEffect } from 'react';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
 import DebugModal from './DebugModal';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
@@ -110,8 +110,8 @@ interface EditPhaseProps {
   promptUrl: string;
   promptReady: boolean;
   detailStatus: 'idle' | 'running' | 'done' | 'error';
-  history: HistoryItem[];
-  onRefreshHistory: () => void;
+  staging: StagingItem[];
+  onRefreshStaging: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   blocks: PipelineBlock[];
   /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
@@ -148,19 +148,14 @@ interface EditPhaseProps {
   showFinishDialog: boolean;
   onFinish: (selectedKeys?: string[]) => void;
   onCloseFinishDialog: () => void;
-  /** 返回新加入历史的那张图的 key（拖到 Ref Image 上时要立刻选中它） */
-  onAddContextImage: (base64: string) => Promise<string | null>;
+  /** 上传到工作区，返回新条目 id（拖到 Ref Image 上时要立刻选中它） */
+  onAddStagingImage: (base64: string) => Promise<string | null>;
   onLoadFromAssets: () => void;
   loadingAssets: boolean;
-  currentContextKey: string | null;
-  onSetContext: (key: string) => void;
   blendIframeRef: React.RefObject<HTMLIFrameElement>;
-  showBlendSelect: { role: 'layer' } | null;
-  onBlendSelectImages: (items: { key: string; name: string; src: string }[]) => void;
-  onCloseBlendSelect: () => void;
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: Record<number, HistoryItem[]>;
+  interfaceResults: Record<number, StagingItem[]>;
   interfaceStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
   interfaceProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   pipelinePackages: PipelinePackageInfo[];
@@ -171,29 +166,21 @@ interface EditPhaseProps {
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
-  history, onRefreshHistory, promptIframeRef,
+  staging, onRefreshStaging, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
-  onAddContextImage, onLoadFromAssets, loadingAssets,
-  currentContextKey, onSetContext,
-  blendIframeRef, showBlendSelect, onBlendSelectImages, onCloseBlendSelect,
+  onAddStagingImage, onLoadFromAssets, loadingAssets,
+  blendIframeRef,
   interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
   pipelinePackages, onSwitchPipeline, currentPipelineKey,
 }) => {
-  const [hoveredHistory, setHoveredHistory] = useState<HistoryItem | null>(null);
-  const [hoveredFinish, setHoveredFinish] = useState<HistoryItem | null>(null);
+  const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [showRefSelect, setShowRefSelect] = useState<string | null>(null);
   const [contextDragOver, setContextDragOver] = useState(false);
-  // 右键菜单
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: HistoryItem } | null>(null);
-  // Resize Modal
-  const [resizeModal, setResizeModal] = useState<{ item: HistoryItem } | null>(null);
-  // Blend layer picker (the workbench iframe asks the host for images to add as layers)
-  const [blendPicked, setBlendPicked] = useState<string[]>([]);
   // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
   const [showDebug, setShowDebug] = useState(false);
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
@@ -216,8 +203,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
-
-  useEffect(() => { if (showBlendSelect) setBlendPicked([]); }, [showBlendSelect]);
 
   // Shared prompt presets: loaded once, re-fetched after the preset editor saves so card
   // summaries reflect the new content without a full config refetch.
@@ -312,46 +297,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-preview-tint', value: v }, '*');
   }, [blendIframeRef]);
 
-  // 关闭右键菜单（点击任意处）
-  React.useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener('click', close);
-    window.addEventListener('scroll', close, true);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('scroll', close, true);
-    };
-  }, [contextMenu]);
-
-  // 右键菜单处理
-  const handleContextAction = useCallback((action: string, item: HistoryItem) => {
-    setContextMenu(null);
-    if (action === 'resize') {
-      setResizeModal({ item });
-    } else if (action === 'select') {
-      onSelectImage(item.key);
-    }
-  }, [onSelectImage]);
-
-  // Resize 提交
-  const handleResizeSubmit = useCallback(async (key: string, width: number, height: number) => {
-    try {
-      const res = await fetch('/api/resize_image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key, width, height }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        onRefreshHistory();
-      }
-    } catch (e) {
-      // ignore
-    }
-    setResizeModal(null);
-  }, [onRefreshHistory]);
-
   // `draw` is the Blend workbench: the canvas composite is the Context Image and the pure Mask
   // layer is the mask, so the old mask / blend / tag tabs are gone (the Tag buttons live in the
   // workbench toolbar).
@@ -408,24 +353,26 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      onAddContextImage(reader.result as string);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+  const uploadFilesToStaging = async (files: FileList | File[] | null) => {
+    const imgs = Array.from(files || []).filter(f => f.type.startsWith('image/'));
+    if (!imgs.length) return;
+    for (const file of imgs) {
+      const dataUrl = await new Promise<string | null>(res => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result as string);
+        reader.onerror = () => res(null);
+        reader.readAsDataURL(file);
+      });
+      if (!dataUrl) continue;
+      try { await onAddStagingImage(dataUrl); } catch { /* 单张失败不拖累整批 */ }
+    }
   };
 
-  const readFileAsContextImage = (file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      onAddContextImage(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    void uploadFilesToStaging(files);
+    e.target.value = '';
   };
 
   const handleContextDragOver = (e: React.DragEvent) => {
@@ -444,8 +391,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const handleContextDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setContextDragOver(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) readFileAsContextImage(file);
+    if (e.dataTransfer.files?.length) void uploadFilesToStaging(e.dataTransfer.files);
   };
 
   // Ref Image 可以直接把文件拖上来：上传即追加为该块的参考图（v2 支持多张、一次可拖
@@ -467,7 +413,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         });
         if (!dataUrl) continue;
         try {
-          const key = await onAddContextImage(dataUrl);
+          const key = await onAddStagingImage(dataUrl);
           if (key) newKeys.push(key);
         } catch { /* 单张失败不拖累整批 */ }
       }
@@ -515,7 +461,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 borderLeft: tab === t.id ? `2px solid ${t.color}` : '2px solid transparent',
               }}
               onClick={() => {
-                if (t.id === 'context') onRefreshHistory();
+                if (t.id === 'context') onRefreshStaging();
                 onTabChange(t.id);
               }}
             >
@@ -984,7 +930,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 style={refDragOver === block.id
                                   ? { ...styles.contextLoadBtn, borderColor: '#0a84ff', background: 'rgba(10,132,255,0.20)' }
                                   : styles.contextLoadBtn}
-                                title="Click to pick from history, or drop image files here to append references (any resolution, multiple allowed)"
+                                title="Click to pick from staging, or drop image files here to append references (any resolution, multiple allowed)"
                                 onClick={() => setShowRefSelect(block.id)}
                                 onDragOver={e => {
                                   if (!Array.from(e.dataTransfer.types).includes('Files')) return;
@@ -1008,7 +954,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                             {refKeys.length > 0 && (
                               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                                 {refKeys.map(rk => {
-                                  const rh = history.find(h => h.key === rk);
+                                  const rh = staging.find(s => s.id === rk);
                                   return (
                                     <div key={rk} title={rh?.name ?? rk}
                                       style={{
@@ -1112,7 +1058,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               />
                             )}
                           </div>
-                          {/* Per-port image selection from history (exclude auto-injected PIPELINE_DATA input) */}
+                          {/* Per-port image selection from staging (exclude auto-injected PIPELINE_DATA input) */}
                           {iface?.start_ports?.filter((p: any) => p.category === 'inject' && p.type !== 'PIPELINE_DATA').map((port: any) => (
                             <div style={styles.paramRow} key={port.num}>
                               <span style={styles.paramLabel}>{port.name || `Port ${port.num}`}</span>
@@ -1127,8 +1073,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 }}
                               >
                                 <option value="" style={opt}>(none)</option>
-                                {history.map((h, hi) => (
-                                  <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                                {staging.map((s, hi) => (
+                                  <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
                                 ))}
                               </select>
                             </div>
@@ -1142,13 +1088,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               onChange={e => updateIfaceParam('context_image_key', e.target.value || null)}
                             >
                               <option value="" style={opt}>(use pipeline)</option>
-                              {history.map((h, hi) => (
-                                <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                              {staging.map((s, hi) => (
+                                <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
                               ))}
                             </select>
                           </div>
                           {ip.context_image_key && (() => {
-                            const img = history.find((h) => h.key === ip.context_image_key);
+                            const img = staging.find((s) => s.id === ip.context_image_key);
                             return img ? (
                               <div style={{ padding: '0 0 4px 88px' }}>
                                 <img src={img.src} alt={img.name}
@@ -1164,13 +1110,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                               onChange={e => updateIfaceParam('context_mask_key', e.target.value || null)}
                             >
                               <option value="" style={opt}>(use pipeline)</option>
-                              {history.map((h, hi) => (
-                                <option key={hi} value={h.key} style={opt}>{h.name} ({h.key})</option>
+                              {staging.map((s, hi) => (
+                                <option key={hi} value={s.id} style={opt}>{s.name} ({s.id})</option>
                               ))}
                             </select>
                           </div>
                           {ip.context_mask_key && (() => {
-                            const img = history.find((h) => h.key === ip.context_mask_key);
+                            const img = staging.find((s) => s.id === ip.context_mask_key);
                             return img ? (
                               <div style={{ padding: '0 0 4px 88px' }}>
                                 <img src={img.src} alt={img.name}
@@ -1211,7 +1157,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} currentContextKey={currentContextKey} onSetContext={onSetContext} history={history} />
+          <InterfaceTab interfaces={interfaces} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} staging={staging} />
         )}
 
         {/* Pipeline — dynamic pipeline switching */}
@@ -1219,7 +1165,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <PipelineTab pipelinePackages={pipelinePackages} onSwitchPipeline={onSwitchPipeline} currentPipelineKey={currentPipelineKey} />
         )}
 
-        {/* Context — left/right split layout */}
+        {/* Context — 精简后的工作区条：拖文件/按钮上传进图池，点缩略图设为 pipeline 当前图。
+            完整的图层工作在 Blend 工作台（工作区就在它的 Extra Prompt 下方）。 */}
         {tab === 'context' && (
           <div
             style={{ ...styles.contextLayout, position: 'relative' }}
@@ -1227,65 +1174,45 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             onDragLeave={handleContextDragLeave}
             onDrop={handleContextDrop}
           >
-            {/* Left: large preview */}
-            <div style={styles.contextPreview}>
-              {hoveredHistory ? (
-                <>
-                  <img src={hoveredHistory.src} alt={hoveredHistory.name} style={styles.contextPreviewImg} />
-                  <div style={styles.contextPreviewLabel}>{hoveredHistory.name}</div>
-                  <button style={styles.contextSelectBtn} onClick={() => onSelectImage(hoveredHistory.key)}>
-                    Select This Image
-                  </button>
-                </>
-              ) : (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>Hover over a thumbnail to preview</div>
-              )}
+            <div style={styles.contextLoadBtns}>
+              <button style={styles.contextLoadBtn} onClick={() => fileInputRef.current?.click()}>
+                Load From Image
+              </button>
+              <button
+                style={{ ...styles.contextLoadBtn, opacity: loadingAssets ? 0.5 : 1, cursor: loadingAssets ? 'wait' : 'pointer' }}
+                onClick={onLoadFromAssets}
+                disabled={loadingAssets}
+              >
+                {loadingAssets ? 'Loading…' : 'Load From Assets'}
+              </button>
+              <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
+              <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 12, alignSelf: 'center' }}>
+                Click a thumbnail to set it as the pipeline image · drag files here to add
+              </span>
             </div>
-            {/* Right: thumbnail list + load buttons */}
-            <div style={styles.contextThumbList}>
-              <div style={styles.contextLoadBtns}>
-                <button style={styles.contextLoadBtn} onClick={() => fileInputRef.current?.click()}>
-                  Load From Image
-                </button>
+            <div style={{ ...styles.contextThumbList, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+              {staging.map(s => (
                 <button
-                  style={{ ...styles.contextLoadBtn, opacity: loadingAssets ? 0.5 : 1, cursor: loadingAssets ? 'wait' : 'pointer' }}
-                  onClick={onLoadFromAssets}
-                  disabled={loadingAssets}
-                >
-                  {loadingAssets ? 'Loading…' : 'Load From Assets'}
-                </button>
-                <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFileSelect} />
-              </div>
-              {history.map(h => (
-                <button
-                  key={h.key}
+                  key={s.id}
+                  title={`${s.name} — click to set as the pipeline image`}
                   style={{
                     ...styles.contextThumb,
-                    borderColor: currentContextKey === h.key ? '#0a84ff'
-                      : (hoveredHistory?.key === h.key ? '#0a84ff' : 'rgba(255,255,255,0.08)'),
-                    boxShadow: currentContextKey === h.key ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                    width: 84,
                   }}
-                  onMouseEnter={() => setHoveredHistory(h)}
-                  onClick={() => onSelectImage(h.key)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setContextMenu({ x: e.clientX, y: e.clientY, item: h });
-                  }}
+                  onClick={() => onSelectImage(s.id)}
                 >
-                  <img src={h.src} alt={h.name} style={styles.contextThumbImg} />
-                  <div style={styles.contextThumbName}>{h.name}</div>
-                  {currentContextKey === h.key && <div style={styles.contextActiveDot} />}
+                  <img src={s.src} alt={s.name} style={styles.contextThumbImg} />
+                  <div style={styles.contextThumbName}>{s.name}</div>
                 </button>
               ))}
-              {history.length === 0 && (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No history yet.</div>
+              {staging.length === 0 && (
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No staging items yet — drop images here.</div>
               )}
             </div>
             {/* Drag-to-add overlay */}
             {contextDragOver && (
               <div style={styles.contextDropOverlay}>
-                <div style={styles.contextDropInner}>Drop image to add to context</div>
+                <div style={styles.contextDropInner}>Drop images to add to staging</div>
               </div>
             )}
           </div>
@@ -1294,9 +1221,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
       {/* Reference image select modal — v2: 点选即**追加**到该块的参考列表（可多张） */}
       {showRefSelect && (() => {
-        // 任何分辨率都可以作参考图 —— 以前要求与当前 context 同尺寸，
-        // 结果大部分历史图根本选不到。现在只排除当前这张（自己参考自己没有意义）。
-        const eligible = history.filter(h => h.key !== currentContextKey);
+        // 工作区里的任何图都可作参考图（id 引用，图层/画布与图池解耦）。
+        const eligible = staging;
         const selBlock = blocks.find(b => b.id === showRefSelect);
         const selKeys = selBlock ? getRefKeys(selBlock.params as DetailerBlockParams) : [];
         return (
@@ -1317,23 +1243,23 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <div style={styles.dialogTitle}>Select Reference Images</div>
               <div style={styles.dialogSubtitle}>Click to append (multiple allowed) — or drop image files here</div>
               {eligible.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No eligible images available.</div>
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No staging items yet — drop images here to add.</div>
               ) : (
                 <div style={styles.dialogHistoryGrid}>
-                  {eligible.map(h => {
-                    const already = selKeys.includes(h.key);
+                  {eligible.map(s => {
+                    const already = selKeys.includes(s.id);
                     return (
-                      <button key={h.key} style={{
+                      <button key={s.id} style={{
                         ...styles.historyCard,
                         ...(already ? { outline: '1.5px solid rgba(10,132,255,0.8)', outlineOffset: -1.5 } : {}),
                       }} onClick={() => {
-                        if (!already) setRefKeys(showRefSelect, [...selKeys, h.key]);
+                        if (!already) setRefKeys(showRefSelect, [...selKeys, s.id]);
                         setShowRefSelect(null);
                       }}>
                         <div style={styles.historyImgWrap}>
-                          <img src={h.src} alt={h.name} style={styles.historyImg} />
+                          <img src={s.src} alt={s.name} style={styles.historyImg} />
                         </div>
-                        <div style={styles.historyName}>{h.name}{already ? ' ✓' : ''}</div>
+                        <div style={styles.historyName}>{s.name}{already ? ' ✓' : ''}</div>
                       </button>
                     );
                   })}
@@ -1448,10 +1374,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', gap: 0 }}>
               {/* Left: large preview */}
               <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8, background: '#0d0d0d', borderRadius: '12px 0 0 0' }}>
-                {(hoveredFinish || history.find(h => selectedKeys.has(h.key))) ? (
+                {(hoveredFinish || staging.find(s => selectedKeys.has(s.id))) ? (
                   <>
-                    <img src={(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.src} alt={(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.name} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 40px)', objectFit: 'contain', borderRadius: 12 }} />
-                    <div style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{(hoveredFinish || history.find(h => selectedKeys.has(h.key)))!.name}</div>
+                    <img src={(hoveredFinish || staging.find(s => selectedKeys.has(s.id)))!.src} alt={(hoveredFinish || staging.find(s => selectedKeys.has(s.id)))!.name} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 40px)', objectFit: 'contain', borderRadius: 12 }} />
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.7)' }}>{(hoveredFinish || staging.find(s => selectedKeys.has(s.id)))!.name}</div>
                   </>
                 ) : (
                   <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>Hover over a card to preview</div>
@@ -1460,21 +1386,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               {/* Right: card grid */}
               <div style={{ width: 420, flexShrink: 0, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignContent: 'flex-start' }}>
-                  {history.map(h => (
+                  {staging.map(s => (
                     <button
-                      key={h.key}
+                      key={s.id}
                       style={{
                         ...styles.historyCard,
-                        borderColor: selectedKeys.has(h.key) ? '#0a84ff'
-                          : (hoveredFinish?.key === h.key ? 'rgba(10,132,255,0.4)' : 'rgba(255,255,255,0.08)'),
-                        boxShadow: selectedKeys.has(h.key) ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
+                        borderColor: selectedKeys.has(s.id) ? '#0a84ff'
+                          : (hoveredFinish?.id === s.id ? 'rgba(10,132,255,0.4)' : 'rgba(255,255,255,0.08)'),
+                        boxShadow: selectedKeys.has(s.id) ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
                       }}
-                      onMouseEnter={() => setHoveredFinish(h)}
-                      onClick={() => toggleFinishSelection(h.key)}
+                      onMouseEnter={() => setHoveredFinish(s)}
+                      onClick={() => toggleFinishSelection(s.id)}
                     >
                       <div style={styles.historyImgWrap}>
-                        <img src={h.src} alt={h.name} style={styles.historyImg} />
-                        {selectedKeys.has(h.key) && (
+                        <img src={s.src} alt={s.name} style={styles.historyImg} />
+                        {selectedKeys.has(s.id) && (
                           <div style={styles.historyCheck}>
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M5 13l4 4L19 7" />
@@ -1482,12 +1408,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           </div>
                         )}
                       </div>
-                      <div style={styles.historyName}>{h.name}</div>
+                      <div style={styles.historyName}>{s.name}</div>
                     </button>
                   ))}
                 </div>
-                {history.length === 0 && (
-                  <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No history yet.</div>
+                {staging.length === 0 && (
+                  <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No staging items yet.</div>
                 )}
               </div>
             </div>
@@ -1499,78 +1425,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         </div>
       )}
 
-      {/* 右键菜单 */}
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          item={contextMenu.item}
-          onAction={handleContextAction}
-        />
-      )}
-
-      {/* Resize Modal */}
-      {resizeModal && (
-        <ResizeModal
-          item={resizeModal.item}
-          onSubmit={handleResizeSubmit}
-          onCancel={() => setResizeModal(null)}
-        />
-      )}
-
       {/* Debug — 上一次 Run / Generate 的全过程快照 */}
       {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
-
-      {/* Blend layer picker — the workbench asks for images, each picked one becomes a layer */}
-      {showBlendSelect && (
-        <div style={styles.overlay}>
-          <div style={styles.dialog}>
-            <div style={styles.dialogTitle}>Add Layers</div>
-            <div style={styles.dialogSubtitle}>Pick one or more images. Each becomes a layer — the top of the list draws on top.</div>
-            <div style={styles.dialogHistoryGrid}>
-              {history.map(h => {
-                const on = blendPicked.includes(h.key);
-                return (
-                  <button
-                    key={h.key}
-                    style={{
-                      ...styles.historyCard,
-                      borderColor: on ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                      boxShadow: on ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                    }}
-                    onClick={() => setBlendPicked(p => (on ? p.filter(k => k !== h.key) : [...p, h.key]))}
-                  >
-                    <div style={styles.historyImgWrap}>
-                      <img src={h.src} alt={h.name} style={styles.historyImg} />
-                      {on && (
-                        <div style={styles.historyCheck}>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M5 13l4 4L19 7" />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
-                    <div style={styles.historyName}>{h.name}</div>
-                  </button>
-                );
-              })}
-            </div>
-            {history.length === 0 && (
-              <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: '12px 0' }}>No history yet.</div>
-            )}
-            <div style={styles.dialogActions}>
-              <button style={styles.cancelBtn} onClick={onCloseBlendSelect}>Cancel</button>
-              <button
-                style={{ ...styles.confirmBtn, opacity: blendPicked.length ? 1 : 0.45, cursor: blendPicked.length ? 'pointer' : 'default' }}
-                disabled={!blendPicked.length}
-                onClick={() => onBlendSelectImages(history.filter(h => blendPicked.includes(h.key)).map(h => ({ key: h.key, name: h.name, src: h.src })))}
-              >
-                {blendPicked.length ? `Add ${blendPicked.length} layer${blendPicked.length > 1 ? 's' : ''}` : 'Add'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
@@ -1581,11 +1437,9 @@ const InterfaceTab: React.FC<{
   detailStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
   detailProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: Record<number, HistoryItem[]>;
-  currentContextKey: string | null;
-  onSetContext: (key: string) => void;
-  history: HistoryItem[];
-}> = ({ interfaces, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, currentContextKey, onSetContext, history }) => {
+  interfaceResults: Record<number, StagingItem[]>;
+  staging: StagingItem[];
+}> = ({ interfaces, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, staging }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
   // 每个 interface 的执行选项: operation 和 crop_reserve 是卡片级, image_keys 是端口级
   const [execOptions, setExecOptions] = useState<Record<number, { operation: 'default' | 'crop'; crop_reserve: number; image_keys: Record<number, string | null> }>>({});
@@ -1692,10 +1546,9 @@ const InterfaceTab: React.FC<{
         {/* IMAGE port: per-port image selector with preview */}
         {isStart && cat === 'inject' && port.type === 'IMAGE' && (() => {
           const selectedKey = execOptions[idx]?.image_keys?.[port.num] ?? null;
-          const ctxItem = history.find(h => h.key === currentContextKey);
-          const selItem = selectedKey ? history.find(h => h.key === selectedKey) : null;
-          const previewSrc = selItem?.src ?? ctxItem?.src ?? null;
-          const previewLabel = selItem ? selItem.name : 'Context Image';
+          const selItem = selectedKey ? staging.find(s => s.id === selectedKey) : null;
+          const previewSrc = selItem?.src ?? null;
+          const previewLabel = selItem ? selItem.name : 'Pipeline image';
           return (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
               <div
@@ -1802,18 +1655,14 @@ const InterfaceTab: React.FC<{
                 <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Results</div>
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                   {ifaceResults.map(r => {
-                    const active = r.key === currentContextKey;
                     return (
                       <div
-                        key={r.key}
+                        key={r.id}
                         style={{
                           ...styles.resultCard,
                           width: '100%', flex: '1 1 100%',
-                          borderColor: active ? '#0a84ff' : 'rgba(255,255,255,0.08)',
-                          boxShadow: active ? '0 0 0 2px rgba(10,132,255,0.3)' : 'none',
-                          cursor: active ? 'default' : 'pointer',
+                          borderColor: 'rgba(255,255,255,0.08)',
                         }}
-                        onClick={() => !active && onSetContext(r.key)}
                       >
                         <div style={styles.resultLabel}>{r.name}</div>
                         <img src={r.src} alt={r.name} style={{ width: '100%', height: 'auto', maxHeight: 200, objectFit: 'contain', borderRadius: 8 }} />
@@ -1821,7 +1670,7 @@ const InterfaceTab: React.FC<{
                     );
                   })}
                 </div>
-                <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Click a card to set as context</div>
+                <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Results also land in the staging pool (Blend workbench) and can be used as references</div>
               </div>
             );
           })()}
@@ -1840,34 +1689,31 @@ const InterfaceTab: React.FC<{
         </div>
       ))}
 
-      {/* 从 Context 选择图片 modal — per-port image selection */}
+      {/* 从工作区选择图片 modal — per-port image selection */}
       {showImageSelect !== null && (() => {
         const { ifaceIdx, portNum } = showImageSelect;
-        const cur = history.find(h => h.key === currentContextKey);
-        const cw = cur?.width, ch = cur?.height;
         const currentSel = execOptions[ifaceIdx]?.image_keys?.[portNum] ?? null;
-        const eligible = history.filter(h => h.key !== currentContextKey && h.key !== currentSel &&
-          (!cw || !ch || (h.width === cw && h.height === ch)));
+        const eligible = staging.filter(s => s.id !== currentSel);
         return (
           <div style={styles.overlay}>
             <div style={styles.dialog}>
-              <div style={styles.dialogTitle}>Select Image for Port {portNum}{cw && ch ? ' (' + cw + 'x' + ch + ')' : ''}</div>
+              <div style={styles.dialogTitle}>Select Image for Port {portNum}</div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 12 }}>
-                Select an image to inject into this IMAGE port. Close to use context image.
+                Select a staging image to inject into this IMAGE port. Close to use the pipeline image.
               </div>
               {eligible.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No same-size images available.</div>
+                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No staging items available.</div>
               ) : (
                 <div style={styles.dialogHistoryGrid}>
-                  {eligible.map(h => (
-                    <button key={h.key} style={styles.historyCard} onClick={() => {
-                      setImageKey(ifaceIdx, portNum, h.key);
+                  {eligible.map(s => (
+                    <button key={s.id} style={styles.historyCard} onClick={() => {
+                      setImageKey(ifaceIdx, portNum, s.id);
                       setShowImageSelect(null);
                     }}>
                       <div style={styles.historyImgWrap}>
-                        <img src={h.src} alt={h.name} style={styles.historyImg} />
+                        <img src={s.src} alt={s.name} style={styles.historyImg} />
                       </div>
-                      <div style={styles.historyName}>{h.name}</div>
+                      <div style={styles.historyName}>{s.name}</div>
                     </button>
                   ))}
                 </div>
@@ -1937,241 +1783,6 @@ const PipelineTab: React.FC<{
   );
 };
 
-// ── 右键菜单 ──
-const ContextMenu: React.FC<{
-  x: number;
-  y: number;
-  item: HistoryItem;
-  onAction: (action: string, item: HistoryItem) => void;
-}> = ({ x, y, item, onAction }) => {
-  // 防止菜单超出视口
-  const menuWidth = 160;
-  const menuHeight = 100;
-  const adjX = Math.min(x, window.innerWidth - menuWidth - 8);
-  const adjY = Math.min(y, window.innerHeight - menuHeight - 8);
-
-  const items: { action: string; label: string; icon?: string }[] = [
-    { action: 'select', label: 'Select as Context', icon: '◉' },
-    { action: 'resize', label: 'Resize…', icon: '⤢' },
-  ];
-
-  return (
-    <div style={{
-      position: 'fixed',
-      left: adjX,
-      top: adjY,
-      zIndex: 200,
-      minWidth: menuWidth,
-      background: 'rgba(28,28,30,0.95)',
-      backdropFilter: 'blur(20px)',
-      WebkitBackdropFilter: 'blur(20px)',
-      borderRadius: 10,
-      border: '0.5px solid rgba(255,255,255,0.12)',
-      boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-      padding: 5,
-      overflow: 'hidden',
-    }}>
-      {items.map((mi) => (
-        <button
-          key={mi.action}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            width: '100%',
-            padding: '8px 12px',
-            background: 'transparent',
-            border: 'none',
-            borderRadius: 6,
-            color: 'rgba(255,255,255,0.85)',
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: 'pointer',
-            textAlign: 'left' as const,
-            transition: 'background 0.15s',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAction(mi.action, item);
-          }}
-        >
-          <span style={{ fontSize: 14, opacity: 0.7, width: 18, textAlign: 'center' as const }}>{mi.icon}</span>
-          <span>{mi.label}</span>
-        </button>
-      ))}
-      <div style={{ padding: '2px 12px', fontSize: 10, color: 'rgba(255,255,255,0.3)' }}>
-        {item.width && item.height ? `${item.width}×${item.height}` : ''}
-      </div>
-    </div>
-  );
-};
-
-// ── Resize Modal ──
-const ResizeModal: React.FC<{
-  item: HistoryItem;
-  onSubmit: (key: string, width: number, height: number) => void;
-  onCancel: () => void;
-}> = ({ item, onSubmit, onCancel }) => {
-  const origW = item.width || 0;
-  const origH = item.height || 0;
-  const [width, setWidth] = useState(origW);
-  const [height, setHeight] = useState(origH);
-  const [lockRatio, setLockRatio] = useState(true);
-  // 比例 = width / height
-  const ratioRef = useRef(origH > 0 ? origW / origH : 1);
-  // width 比例 和 height 比例 (相对原图)
-  const wPct = origW > 0 ? (width / origW * 100) : 100;
-  const hPct = origH > 0 ? (height / origH * 100) : 100;
-
-  const handleWidthChange = (val: number) => {
-    const clamped = Math.max(1, Math.round(val));
-    setWidth(clamped);
-    if (lockRatio && origH > 0) {
-      setHeight(Math.max(1, Math.round(clamped / ratioRef.current)));
-    }
-  };
-
-  const handleHeightChange = (val: number) => {
-    const clamped = Math.max(1, Math.round(val));
-    setHeight(clamped);
-    if (lockRatio && origW > 0) {
-      setWidth(Math.max(1, Math.round(clamped * ratioRef.current)));
-    }
-  };
-
-  const handleSubmit = () => {
-    const w = Math.max(1, Math.round(width));
-    const h = Math.max(1, Math.round(height));
-    onSubmit(item.key, w, h);
-  };
-
-  return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={{ ...styles.dialog, width: 380, padding: 0, overflow: 'hidden' }} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div style={{ padding: '20px 24px 12px' }}>
-          <div style={styles.dialogTitle}>Resize Image</div>
-          <div style={styles.dialogSubtitle}>
-            {item.name}
-            {origW && origH ? `  ·  Original: ${origW}×${origH}` : ''}
-          </div>
-        </div>
-
-        {/* Preview */}
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '0 24px 16px' }}>
-          <div style={{
-            width: 120, height: 120, borderRadius: 10, overflow: 'hidden',
-            background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            border: '0.5px solid rgba(255,255,255,0.08)',
-          }}>
-            <img src={item.src} alt={item.name} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-          </div>
-        </div>
-
-        {/* Inputs */}
-        <div style={{ padding: '0 24px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* Width row */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.7)', width: 50 }}>Width</label>
-            <input
-              type="number"
-              min={1}
-              value={width}
-              onChange={(e) => handleWidthChange(Number(e.target.value))}
-              style={resizeStyles.input}
-              onFocus={(e) => e.target.select()}
-            />
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', width: 48 }}>
-              {wPct.toFixed(1)}%
-            </span>
-          </div>
-
-          {/* Height row */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <label style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.7)', width: 50 }}>Height</label>
-            <input
-              type="number"
-              min={1}
-              value={height}
-              onChange={(e) => handleHeightChange(Number(e.target.value))}
-              style={resizeStyles.input}
-              onFocus={(e) => e.target.select()}
-            />
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', width: 48 }}>
-              {hPct.toFixed(1)}%
-            </span>
-          </div>
-
-          {/* Lock ratio toggle */}
-          <div
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 12px', borderRadius: 8,
-              background: 'rgba(255,255,255,0.04)',
-              border: '0.5px solid rgba(255,255,255,0.06)',
-              cursor: 'pointer',
-            }}
-            onClick={() => {
-              if (!lockRatio) {
-                // 重新锁定时以当前 width 为基准计算比例
-                if (height > 0) ratioRef.current = width / height;
-              }
-              setLockRatio(!lockRatio);
-            }}
-          >
-            <div style={{
-              width: 18, height: 18, borderRadius: '50%',
-              border: lockRatio ? 'none' : '1.5px solid rgba(255,255,255,0.3)',
-              background: lockRatio ? '#0a84ff' : 'transparent',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'all 0.2s',
-            }}>
-              {lockRatio && (
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9 6L3 12l6 6" />
-                  <path d="M15 6l6 6-6 6" />
-                </svg>
-              )}
-            </div>
-            <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)' }}>
-              Lock Aspect Ratio
-            </span>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div style={{
-          ...styles.dialogActions,
-          padding: '12px 24px 20px',
-          marginTop: 0,
-          borderTop: '0.5px solid rgba(255,255,255,0.06)',
-        }}>
-          <button style={styles.cancelBtn} onClick={onCancel}>Cancel</button>
-          <button style={styles.confirmBtn} onClick={handleSubmit}>
-            Resize
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const resizeStyles: Record<string, React.CSSProperties> = {
-  input: {
-    flex: 1,
-    padding: '8px 12px',
-    fontSize: 14,
-    fontWeight: 500,
-    color: '#fff',
-    background: 'rgba(0,0,0,0.3)',
-    border: '0.5px solid rgba(255,255,255,0.1)',
-    borderRadius: 8,
-    outline: 'none',
-    minWidth: 0,
-  },
-};
 
 const styles: Record<string, React.CSSProperties> = {
   container: { display: 'flex', flexDirection: 'row', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },

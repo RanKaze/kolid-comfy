@@ -128,9 +128,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
 .layer-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
 .layer-row.hidden-layer .layer-thumb, .layer-row.hidden-layer .layer-name { opacity: 0.35; }
-/* A leftover duplicate: this history image already backs another row (see renderLayerList). */
-.layer-row.duplicate-layer { border-color: rgba(255,159,10,0.6); }
-.layer-row.duplicate-layer .layer-name { color: #ffb340; }
 .layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
 .layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
 /* An image-less layer (Default / Dynamic Layer, before a Generate fills it in) has no `src`, so a
@@ -334,6 +331,35 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .layer-menu-item:disabled { opacity: 0.4; cursor: default; }
 .layer-menu-item:disabled:hover { background: transparent; }
 </style>
+<style>
+/* 工作区（staging）条：Extra Prompt / 工具栏下方 */
+#stagingStrip {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px 8px;
+    overflow-x: auto; overflow-y: hidden;
+    min-height: 62px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+}
+#stagingStrip.drag-over { outline: 1.5px dashed #0a84ff; outline-offset: -3px; background: rgba(10,132,255,0.08); }
+.staging-item {
+    position: relative; flex: 0 0 auto;
+    width: 54px; height: 54px; border-radius: 8px; overflow: hidden;
+    background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.16);
+    padding: 0; cursor: pointer;
+}
+.staging-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.staging-item .staging-remove {
+    position: absolute; top: 0; right: 0; width: 16px; height: 16px;
+    padding: 0; border: none; border-radius: 0 0 0 6px; cursor: pointer;
+    background: rgba(0,0,0,0.62); color: rgba(255,255,255,0.85);
+    font-size: 10px; line-height: 16px; text-align: center;
+}
+.staging-item .staging-remove:hover { background: rgba(255,69,58,0.85); color: #fff; }
+.staging-empty {
+    color: rgba(255,255,255,0.28); font-size: 11px; white-space: nowrap;
+    align-self: center; padding-left: 2px; pointer-events: none;
+}
+</style>
 </head>
 <body>
 <div id="mainArea">
@@ -350,14 +376,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="toolbar">
             <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
                    placeholder="Extra prompt — appended after the prompt stage (Run only)">
-            <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (backed by its history entry — non-destructive). The composite is also archived into the history gallery.">Blend</button>
+            <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The composite is also archived into the staging pool.">Blend</button>
             <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
             <div class="tb-pill">
-                <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.">Run</button>
+                <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
                 <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
             </div>
         </div>
         <div id="toolbarProgress"><i></i></div>
+        <!-- 工作区（staging）：唯一的图池。拖文件进来上传，点击条目加为图层，✕ 移除。
+             列表由宿主同步（后端 staging_tensors 支撑），Ref Image / 接口端口图都引用它。 -->
+        <div id="stagingStrip"></div>
     </div>
     <div id="sidePanel">
         <!-- Document I/O, above the Canvas section. Export unfolds into a menu: the whole
@@ -664,7 +693,7 @@ let maskLayer = {
     isMaskLayer: true,
     name: 'Mask',
     note: 'output',
-    key: null,
+
     src: '',
     img: null,                 // scratch canvas at canvasW × canvasH (keeps the paint engine happy)
     visible: true,
@@ -677,8 +706,6 @@ let maskLayer = {
     decalThumbEl: null,
     canvasThumbEl: null,
 };
-// History keys already turned into layers, so a freshly generated image is injected once.
-const injectedKeys = new Set();
 let actionBusy = false;
 let actionBusyLabel = '';
 let hasTagger = true;
@@ -894,7 +921,6 @@ function rasterizeLayer(l) {
     if (isRasterLayer(l)) return false;
     l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
     l.raster = true;
-    if (l.key) { injectedKeys.delete(l.key); l.key = null; }
     l.src = l.img.toDataURL('image/png');
     // Paint surfaces resample into the layer's new (canvas) space so existing strokes keep
     // their on-canvas position; painting from here on is 1:1.
@@ -2089,9 +2115,8 @@ function snapshotState() {
         canvasW, canvasH, canvasCustom,
         selectedId,
         maskVisible: maskLayer.visible,
-        injected: Array.from(injectedKeys),
         layers: layers.map(l => ({
-            id: l.id, key: l.key, name: l.name, src: l.src, img: l.img,
+            id: l.id, name: l.name, src: l.src, img: l.img,
             visible: l.visible,
             fragment: !!l.fragment,
             raster: !!l.raster,
@@ -2111,7 +2136,7 @@ function restoreState(s) {
     canvasCustom = s.canvasCustom;
     sizeCanvasElement();
     layers = s.layers.map(ls => ({
-        id: ls.id, key: ls.key, name: ls.name, src: ls.src, img: ls.img,
+        id: ls.id, name: ls.name, src: ls.src, img: ls.img,
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
@@ -2124,8 +2149,6 @@ function restoreState(s) {
         decalThumbEl: null,
         canvasThumbEl: null,
     }));
-    injectedKeys.clear();
-    for (const k of s.injected) injectedKeys.add(k);
     const keep = s.selectedId === MASK_LAYER_ID
         || (s.selectedId !== null && layers.some(l => l.id === s.selectedId));
     selectedId = keep ? s.selectedId : (layers.length ? layers[0].id : null);
@@ -2432,17 +2455,10 @@ function renderLayerList() {
         layerListEl.appendChild(empty);
         return;
     }
-    // A history key can only ever back one layer now (see incomingItems), but a session that
-    // started before that fix may still hold a duplicate — and a duplicate is invisible: it looks
-    // exactly like the layer you just deleted and keeps being composited. Flag it on the row so it
-    // can be found and removed instead of quietly riding along in every Blend.
-    const keyUse = {};
-    for (const l of layers) if (l.key) keyUse[l.key] = (keyUse[l.key] || 0) + 1;
+    // 图层不再绑图池 id，"同 key 两个图层"的幽灵层从根上不存在了。
     for (const l of layers) {
         const row = document.createElement('div');
         row.className = 'layer-row';
-        const duplicate = !!l.key && keyUse[l.key] > 1;
-        if (duplicate) row.classList.add('duplicate-layer');
         row.draggable = true;
         row.dataset.id = String(l.id);
         if (l.id === selectedId) row.classList.add('selected');
@@ -2530,16 +2546,12 @@ function renderLayerList() {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = (duplicate ? l.name + ' · duplicate' : l.name) + (isRasterLayer(l) ? ' · raster' : '');
+        name.textContent = l.name + (isRasterLayer(l) ? ' · raster' : '');
         name.title = 'Double-click to rename';
         name.addEventListener('dblclick', ev => {
             ev.stopPropagation();
             startRenameLayer(l, name);
         });
-        if (duplicate) {
-            row.title = 'This history image already backs another layer — a leftover from before '
-                + 'duplicates were blocked. Delete this extra copy, or Blend keeps compositing it.';
-        }
 
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
         // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
@@ -2706,15 +2718,9 @@ function placeTransform(place) {
 }
 
 function addLayer(item) {
-    // Second line of defence behind the claim in incomingItems(): whatever routed this item here,
-    // a history key that is already a layer never becomes a second one. Two layers sharing a key
-    // are indistinguishable in the panel and in the composite, and deleting one of them leaves
-    // the other behind — exactly the "I deleted it but Blend still paints it" ghost.
-    if (item.key && layers.some(l => l.key === item.key)) return;
     loadImage(item.src, img => {
         const l = {
             id: ++layerSeq,
-            key: item.key,
             name: item.name || 'Layer',
             src: item.src,
             img,
@@ -2731,7 +2737,6 @@ function addLayer(item) {
             // another document dropped onto it, so it must never drive the canvas size.
             fragment: !!item.place,
         };
-        if (l.key) injectedKeys.add(l.key);
         layers.unshift(l);          // new images land on top
         selectedId = l.id;
         applyCanvasSize();
@@ -2749,7 +2754,6 @@ function addLayer(item) {
     }, () => {
         // Decoding failed, so no layer was created: give the key back instead of keeping it
         // claimed forever by an image that never arrived.
-        if (item.key) injectedKeys.delete(item.key);
         setStatus('Could not load that image', 'error');
     });
 }
@@ -2769,7 +2773,6 @@ function spawnGeneratedLayer(id, item) {
         const t = l.transform || { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
         const copy = {
             id: ++layerSeq,
-            key: item.key || null,
             name: l.name + ' · gen',
             src: item.src,
             img,
@@ -2785,14 +2788,12 @@ function spawnGeneratedLayer(id, item) {
             canvasThumbEl: null,
             fragment: false,
         };
-        if (copy.key) injectedKeys.add(copy.key);
         // A raster source generates a raster result: the buffer must stay canvas-sized, so the
         // fresh image resamples into it immediately (the backend ran at the layer's own
         // resolution — for a raster layer that IS the canvas size). The result's own history
         // key is dropped with it: the buffer no longer matches that history image.
         if (copy.raster && canvasW && canvasH) {
             rasterResampleBuffer(copy, canvasW, canvasH);
-            if (copy.key) { injectedKeys.delete(copy.key); copy.key = null; }
         }
         layers.unshift(copy);       // the generated variant sits directly on top of its source
         selectedId = copy.id;
@@ -2846,9 +2847,6 @@ function replaceLayerImage(id, item) {
             l.img = img;
             l.src = item.src;
         }
-        // The layer no longer refers to the image it was created from, so drop the history key:
-        // keeping it would make `injectedKeys` claim an image this layer no longer shows.
-        if (l.key) { injectedKeys.delete(l.key); l.key = null; }
         if (!isRasterLayer(l)) {
             if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
             if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
@@ -2866,7 +2864,6 @@ function replaceLayerImage(id, item) {
 function removeLayer(id) {
     const i = layers.findIndex(l => l.id === id);
     if (i < 0) return;              // the Mask layer is not in `layers`, so it can never be removed here
-    if (layers[i].key) injectedKeys.delete(layers[i].key);   // freeing the key lets it be added again
     layers.splice(i, 1);
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
     applyCanvasSize();
@@ -3381,8 +3378,6 @@ function endExpandCommit() {
         dctx.drawImage(l.decal, 0, 0);
         l.decal = dc; l.decalCtx = dctx;
     }
-    // The layer's pixels no longer match its history image, so the key must not keep claiming it.
-    if (l.key) { injectedKeys.delete(l.key); l.key = null; }
     renderLayerList();
     render();
     pushHistory();
@@ -4132,7 +4127,6 @@ function addSurfaceLayer(opts) {
     }
     const l = {
         id: ++layerSeq,
-        key: null,
         name: name || 'Layer',
         src: '',
         img: makeBlankCanvas(pw, ph),
@@ -4284,7 +4278,6 @@ document.getElementById('clearBtn').addEventListener('click', () => {
     if (!layers.length) return;
     if (!window.confirm('Remove all layers? The Mask layer is cleared too.')) return;
     layers = [];
-    injectedKeys.clear();       // keys are free again, so any history image can be re-added
     selectedId = null;
     applyCanvasSize();
     layoutCanvas();
@@ -4303,11 +4296,9 @@ document.getElementById('redoBtn').addEventListener('click', redoAction);
 // backend: the layer stack (bottom → top, the Mask layer excluded — it travels separately as
 // its own alpha channel), the canvas size, and the Mask layer's rasterised coverage.
 function layerSpecs() {
-    // Layers that came from history are referenced by key; dropped local files travel as their
-    // own data URL instead.
+    // 图层自带像素（dataURL）直达后端，不引用任何图池 id。
     return layers.slice().reverse().map(l => ({
-        key: l.key || null,
-        src: l.key ? null : l.src,
+        src: l.src,
         transform: isRasterLayer(l)
             // A raster layer's stored transform is transient drag state — the backend always
             // sees canvas-sized pixels at the identity.
@@ -4339,7 +4330,7 @@ function setActionBusy(busy, label) {
         blendBtn.textContent = 'Blend';
         runDetailerBtn.textContent = 'Run';
         runDetailerBtn.classList.remove('cancel');
-        runDetailerBtn.title = 'Run the detailer on the composite, masked by the Mask layer. The result lands in the history gallery and as a new layer below the Mask.';
+        runDetailerBtn.title = 'Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.';
     } else {
         toolbarProgress.classList.add('on');
         if (label === 'blend') blendBtn.textContent = 'Blending…';
@@ -5442,7 +5433,7 @@ async function exportCud() {
         for (const l of layers) {
             const n = nativeSize(l.img);
             records.push({
-                id: l.id, key: l.key, name: l.name, visible: l.visible, fragment: !!l.fragment,
+                id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
                 raster: !!l.raster,
                 // Raster layers always travel at the identity — their stored transform is
                 // transient drag state, and their buffer is already canvas-sized.
@@ -5469,9 +5460,9 @@ async function exportCud() {
                 brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor },
                 eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
             },
-            injectedKeys: Array.from(injectedKeys),
             maskLayer: { visible: maskLayer.visible, surface: maskSurface },
             layers: records,
+            staging: stagingItems,     // 图池随文档走：导入时原样恢复到宿主工作区
             assets,
         };
         const headerBytes = new TextEncoder().encode(JSON.stringify(header));
@@ -5584,7 +5575,7 @@ function projectHasContent() {
 function addImageFiles(files) {
     for (const f of files) {
         const reader = new FileReader();
-        reader.onload = () => addLayer({ key: null, name: baseName(f.name), src: String(reader.result) });
+        reader.onload = () => addLayer({ name: baseName(f.name), src: String(reader.result) });
         reader.onerror = () => setStatus(`Could not read ${f.name}`, 'error');
         reader.readAsDataURL(f);
     }
@@ -5661,13 +5652,7 @@ async function importCud(file) {
             const tr = rec.transform || {};
             next.push({
                 id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
-                // The .cud carries its own pixels, so the history keys it recorded belong to the
-                // session that exported it. Restored as-is they either dangle (Run dies with
-                // "Image not found: history_N") or — worse — silently rebind to a DIFFERENT
-                // image that happens to hold the same per-session key in this session. The
-                // pixels travel in the file, so drop the foreign key: the layer keeps its own
-                // data URL and travels with the Blend payload like any local drop.
-                key: null,
+                // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
                 name: rec.name || 'Layer',
                 src: url,
                 img,
@@ -5709,11 +5694,6 @@ async function importCud(file) {
         selectedId = keep ? sel.selectedId : layers[0].id;
         paintTarget = sel.paintTarget === 'decal' ? 'decal' : 'mask';
         mode = ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].includes(sel.mode) ? sel.mode : 'transform';
-        injectedKeys.clear();
-        // Deliberately NOT restoring header.injectedKeys: those are the exporting session's
-        // history keys. In this session fresh history images get the same history_N names, so a
-        // restored claim would silently block re-adding them (incomingItems drops them as
-        // "already a layer"). After an import every key is free.
         const ml = header.maskLayer || {};
         maskLayer.visible = ml.visible !== false;
         maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
@@ -5722,6 +5702,16 @@ async function importCud(file) {
         const msBlob = ml.surface !== null && ml.surface !== undefined ? blobs.get(ml.surface) : null;
         adoptMaskSurface(msBlob ? await blobToCanvas(msBlob) : null);
         applyCudTools(header.tools);
+        // 工作区恢复：条目直接同步到宿主（后端张量由宿主重新上传建立）。
+        if (Array.isArray(header.staging)) {
+            stagingItems = header.staging.filter(s => s && s.src);
+            renderStaging();
+            window.parent.postMessage({
+                type: 'blend-staging-upload',
+                images: stagingItems.map(s => s.src),
+                names: stagingItems.map(s => s.name),
+            }, '*');
+        }
         const v = header.view || {};
         if (Number.isFinite(v.zoom)) view.zoom = clampZoom(v.zoom);
         if (Number.isFinite(v.rotation)) view.rotation = v.rotation;
@@ -5777,27 +5767,92 @@ cudReplaceSaveBtn.addEventListener('click', exportCurrentThenImport);
 syncIoUI();
 
 // ==================== 父窗口通信 ====================
-// A history key can only ever become one layer: this is what stops a freshly generated image
-// from being injected twice when history refreshes or when two injections overlap.
-//
-// The claim happens HERE, synchronously, and NOT inside addLayer's image callback. The callback
-// only runs once the image has decoded, so a check made at that point lets two copies that arrive
-// back to back both through — and a key with two layers behind it is a ghost: the panel shows two
-// identical rows, deleting one leaves the other, and Blend/the detailer keep painting it. That is
-// the "I deleted that layer but the composite still has it" bug.
+// 图层不再绑图池 id：每条消息里的图层自带像素（dataURL），没有"同一张图只能加一次"
+// 的去重问题 —— 去重只对自动注入路径有意义，而那由宿主侧的 id 防重放（injectedDetailKeyRef）负责。
 function incomingItems(d) {
-    const items = Array.isArray(d.items) ? d.items : (d.key ? [d] : []);
-    const accepted = [];
-    for (const it of items) {
-        if (!it || !it.src) continue;
-        if (it.key) {
-            if (injectedKeys.has(it.key)) continue;
-            injectedKeys.add(it.key);          // taken before anything async can look at it again
-        }
-        accepted.push(it);
-    }
-    return accepted;
+    const items = Array.isArray(d.items) ? d.items : (d.src ? [d] : []);
+    return items.filter(it => it && it.src);
 }
+
+// ==================== 工作区（staging） ====================
+// 列表由宿主同步（'blend-staging'）；上传/移除通过宿主走后端，保持单一写入口。
+let stagingItems = [];
+function renderStaging() {
+    const strip = document.getElementById('stagingStrip');
+    if (!strip) return;
+    strip.textContent = '';
+    if (!stagingItems.length) {
+        const hint = document.createElement('span');
+        hint.className = 'staging-empty';
+        hint.textContent = 'Staging — drop image files here to build the pool';
+        strip.appendChild(hint);
+        return;
+    }
+    for (const s of stagingItems) {
+        const item = document.createElement('div');
+        item.className = 'staging-item';
+        item.title = `${s.name} — click to add as a layer`;
+        const img = document.createElement('img');
+        img.src = s.src;
+        img.alt = s.name;
+        item.appendChild(img);
+        const rm = document.createElement('button');
+        rm.className = 'staging-remove';
+        rm.textContent = '✕';
+        rm.title = 'Remove from staging';
+        rm.addEventListener('click', ev => {
+            ev.stopPropagation();
+            window.parent.postMessage({ type: 'blend-staging-remove', id: s.id }, '*');
+        });
+        item.appendChild(rm);
+        item.addEventListener('click', () => {
+            // 点击 = 加为图层（图层自带像素，不绑池 id）
+            addLayer({ name: s.name, src: s.src });
+        });
+        strip.appendChild(item);
+    }
+}
+
+function stageFiles(files) {
+    const imgs = Array.from(files || []).filter(f => f.type && f.type.startsWith('image/'));
+    if (!imgs.length) return;
+    void (async () => {
+        const images = [];
+        for (const f of imgs) {
+            const dataUrl = await new Promise(res => {
+                const r = new FileReader();
+                r.onload = () => res(r.result);
+                r.onerror = () => res(null);
+                r.readAsDataURL(f);
+            });
+            if (dataUrl) images.push(dataUrl);
+        }
+        if (images.length) {
+            window.parent.postMessage({ type: 'blend-staging-upload', images, name: 'Loaded' }, '*');
+        }
+    })();
+}
+
+const stagingStripEl = document.getElementById('stagingStrip');
+if (stagingStripEl) {
+    stagingStripEl.addEventListener('dragover', e => {
+        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        stagingStripEl.classList.add('drag-over');
+    });
+    stagingStripEl.addEventListener('dragleave', e => {
+        if (e.currentTarget.contains(e.relatedTarget)) return;
+        stagingStripEl.classList.remove('drag-over');
+    });
+    stagingStripEl.addEventListener('drop', e => {
+        e.preventDefault();
+        e.stopPropagation();          // 不让文件再落进画布变图层 —— 它们进图池
+        stagingStripEl.classList.remove('drag-over');
+        stageFiles(e.dataTransfer.files);
+    });
+}
+renderStaging();
 
 window.addEventListener('message', event => {
     const d = event.data || {};
@@ -5806,7 +5861,14 @@ window.addEventListener('message', event => {
         // 激活 tab 的 Enable Mask 总闸（宿主从第一个 detailer block 读出）。
         maskRequired = d.mask_required !== false;
         if (d.tagDisabledHint) extraPromptInput.placeholder = d.tagDisabledHint;
+        // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
+        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); }
         syncActionButtons();
+        return;
+    }
+    if (d.type === 'blend-staging') {
+        stagingItems = Array.isArray(d.items) ? d.items : [];
+        renderStaging();
         return;
     }
     if (d.type === 'blend-pipeline-presets') {
@@ -5835,18 +5897,17 @@ window.addEventListener('message', event => {
         previewNow();
         return;
     }
-    if (d.type === 'blend-image-selected' || d.type === 'blend-init-layer') {
+    if (d.type === 'blend-init-layer') {
         const valid = incomingItems(d);
         if (!valid.length) return;
         for (const it of valid) addLayer(it);
-        if (d.type === 'blend-init-layer') setStatus('Canvas seeded with the current context image');
-        else if (valid.length > 1) setStatus(`${valid.length} layers added`);
+        setStatus('Canvas seeded with the current pipeline image');
         return;
     }
     if (d.type === 'blend-add-layer') {
         const valid = incomingItems(d);
         if (!valid.length) return;
-        // smart = 结果必须落在智能对象图层上（历史 key 支撑、非破坏）：暂时关掉
+        // smart = 结果必须落在智能对象图层上（自带像素、非破坏）：暂时关掉
         // "Place images as raster"，否则该偏好会把刚合成的结果就地栅格化。
         const prevRaster = rasterDrop;
         if (d.smart) rasterDrop = false;
@@ -5871,7 +5932,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
         if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
-        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer (also archived to history)', 'success');
+        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer (also archived to staging)', 'success');
         else if (d.action === 'tag') setStatus(`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success');
         return;
     }

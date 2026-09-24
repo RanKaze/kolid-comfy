@@ -15,7 +15,6 @@ export interface ServerConfig {
   /** 当前 pipeline 的模型架构（按架构渲染 DetailerBlock 的 edit 设置） */
   architecture?: string | null;
   has_tagger: boolean;
-  current_context_key: string | null;
   has_package: boolean;
   package_count: number;
   has_pipeline_package: boolean;
@@ -233,8 +232,9 @@ export interface DebugTraceResponse {
   truncated: boolean;
 }
 
-export interface HistoryItem {
-  key: string;
+export interface StagingItem {
+  /** 工作区条目 id（'staging_N'）。Ref Image / 端口图 / Finish 都引用它。 */
+  id: string;
   name: string;
   src: string;
   width?: number;
