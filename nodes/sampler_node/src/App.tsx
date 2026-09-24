@@ -71,6 +71,7 @@ const App: React.FC = () => {
     // Context Ref 不再有开关（是否启用只看有没有选参考图）；此处仅保留字段以兼容旧配置。
     context_reference: true,
     context_reference_key: null,
+    context_reference_keys: [],
     context_regex: '.+',
   };
   const defaultInterfaceParams: InterfaceBlockParams = {
@@ -98,6 +99,10 @@ const App: React.FC = () => {
   const [architecture, setArchitecture] = useState<string | null>(null);
   const [maskGrow, setMaskGrow] = useState(32);
   const [maskBlur, setMaskBlur] = useState(32);
+  // GLOBAL SETTINGS：所有 preset 共享（server config 持久化）
+  const [cropReserve, setCropReserve] = useState(32);
+  const [pixelsVal, setPixelsVal] = useState(1048576);
+  const [alignVal, setAlignVal] = useState(8);
   const blockIdCounter = useRef(2);
 
   // Fetch config on mount
@@ -108,6 +113,9 @@ const App: React.FC = () => {
         setConfig(data);
         setMaskGrow(data.mask_grow);
         setMaskBlur(data.mask_blur);
+        setCropReserve(data.crop_reserve);
+        setPixelsVal(data.pixels);
+        setAlignVal(data.align);
         if (Array.isArray(data.blocks_sets)) {
           setBlockSets(data.blocks_sets);
           setActiveBlockSetId(
@@ -642,9 +650,12 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, [blockSets, activeBlockSetId]);
 
-  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur', value: number) => {
+  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align', value: number) => {
     if (key === 'mask_grow') setMaskGrow(value);
     if (key === 'mask_blur') setMaskBlur(value);
+    if (key === 'crop_reserve') setCropReserve(value);
+    if (key === 'pixels') setPixelsVal(value);
+    if (key === 'align') setAlignVal(value);
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -889,6 +900,9 @@ const App: React.FC = () => {
         architecture={architecture}
         maskGrow={maskGrow}
         maskBlur={maskBlur}
+        cropReserve={cropReserve}
+        pixelsVal={pixelsVal}
+        alignVal={alignVal}
         onBlocksChange={handleBlocksChange}
         onGlobalParamChange={handleGlobalParamChange}
         onAddBlock={handleAddBlock}

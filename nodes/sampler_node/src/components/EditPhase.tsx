@@ -118,8 +118,11 @@ interface EditPhaseProps {
   architecture: string | null;
   maskGrow: number;
   maskBlur: number;
+  cropReserve: number;
+  pixelsVal: number;
+  alignVal: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
-  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur', value: number) => void;
+  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align', value: number) => void;
   onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query') => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
@@ -169,7 +172,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
   history, onRefreshHistory, promptIframeRef,
-  blocks, architecture, maskGrow, maskBlur, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onSelectImage,
@@ -364,6 +367,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     onBlocksChange(blocks.map(b => b.id === blockId ? { ...b, params: { ...b.params, [key]: value } as any } : b));
   };
 
+  // Detailer block 的 Ref Image 多选（v2）：params.context_reference_keys 是权威列表；
+  // 旧配置的单 key context_reference_key 兜底并入尾部。setRefKeys 会把单 key 镜像成
+  // 列表最后一项，老后端 / 旧面板仍能读到单个值。
+  const getRefKeys = (dp: DetailerBlockParams): string[] => {
+    const arr = Array.isArray(dp.context_reference_keys) ? dp.context_reference_keys : [];
+    const legacy = dp.context_reference_key;
+    return legacy && !arr.includes(legacy) ? [...arr, legacy] : arr;
+  };
+  // 一次 read-modify-write 写两个 key（不能连调两次 updateBlockParam —— 那是基于同一
+  // 份 blocks 快照的 map，第二次会覆盖第一次）。
+  const setRefKeys = (blockId: string, keys: string[]) => {
+    onBlocksChange(blocks.map(b => b.id === blockId
+      ? { ...b, params: { ...b.params, context_reference_keys: keys, context_reference_key: keys.length ? keys[keys.length - 1] : null } as any }
+      : b));
+  };
+
   // An interface block is MISSING when its bound interface no longer exists (package removed or
   // renamed). Blocks saved before name-binding only carry interface_idx — fall back to that.
   // Judged only when the interfaces list is actually loaded, so a slow /api/package never
@@ -429,18 +448,35 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     if (file) readFileAsContextImage(file);
   };
 
-  // Ref Image 可以直接把文件拖上来：上传即选中，不必先拖进 context 再回来选。
+  // Ref Image 可以直接把文件拖上来：上传即追加为该块的参考图（v2 支持多张、一次可拖
+  // 多个文件），不必先拖进 context 再回来选。整批串行上传后**一次性**合并写入 ——
+  // 否则多个异步 onload 各自基于同一份 blocks 快照 setRefKeys，会互相覆盖只剩最后一张。
   const [refDragOver, setRefDragOver] = React.useState<string | null>(null);
 
-  const addRefImageFromFile = (blockId: string, file: File) => {
-    if (!file || !file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      void onAddContextImage(reader.result as string).then(key => {
-        if (key) updateBlockParam(blockId, 'context_reference_key', key);
-      });
-    };
-    reader.readAsDataURL(file);
+  const addRefImagesFromFiles = (blockId: string, files: FileList | File[] | null) => {
+    const imgs = Array.from(files || []).filter(f => f.type.startsWith('image/'));
+    if (!imgs.length) return;
+    void (async () => {
+      const newKeys: string[] = [];
+      for (const file of imgs) {
+        const dataUrl = await new Promise<string | null>(res => {
+          const reader = new FileReader();
+          reader.onload = () => res(reader.result as string);
+          reader.onerror = () => res(null);
+          reader.readAsDataURL(file);
+        });
+        if (!dataUrl) continue;
+        try {
+          const key = await onAddContextImage(dataUrl);
+          if (key) newKeys.push(key);
+        } catch { /* 单张失败不拖累整批 */ }
+      }
+      if (!newKeys.length) return;
+      const blk = blocks.find(b => b.id === blockId);
+      const merged = blk ? getRefKeys(blk.params as DetailerBlockParams) : [];
+      for (const k of newKeys) if (!merged.includes(k)) merged.push(k);
+      setRefKeys(blockId, merged);
+    })();
   };
 
   const toggleFinishSelection = (key: string) => {
@@ -544,6 +580,29 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
                 </div>
               </div>
+              {/* GLOBAL SETTINGS — 所有 Pipeline Preset 共享的数值参数（server config 持久化）。
+                  与 preset 相关的开关在下方 Preprocess Settings。 */}
+              <div style={styles.sectionTitle}>Global Settings</div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Mask Grow</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Mask Blur</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskBlur} onChange={e => onGlobalParamChange('mask_blur', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Crop Reserve</label>
+                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={cropReserve} onChange={e => onGlobalParamChange('crop_reserve', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Pixels</label>
+                <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={pixelsVal} onChange={e => onGlobalParamChange('pixels', parseInt(e.target.value))} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Align</label>
+                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={alignVal} onChange={e => onGlobalParamChange('align', parseInt(e.target.value))} />
+              </div>
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
                   Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
@@ -620,8 +679,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </div>
 
-              {/* Global params — sits between the tab bar and the block list: pick the active
-                  set above, tune its first detailer's crop/pixels here, then see the blocks. */}
+              {/* Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
+                  block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）已上移
+                  到上方 GLOBAL SETTINGS，不按 preset 区分。 */}
               <div style={styles.sectionTitle}>Preprocess Settings</div>
               <div style={styles.paramRow}
                 title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
@@ -633,27 +693,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
               <div style={{ opacity: enableMask ? 1 : 0.4, pointerEvents: enableMask ? 'auto' : 'none' }}>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Mask Grow</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Mask Blur</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskBlur} onChange={e => onGlobalParamChange('mask_blur', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Crop Reserve</label>
-                <input
-                  style={styles.paramInput}
-                  type="number"
-                  min={0}
-                  max={256}
-                  step={1}
-                  disabled={!firstDp}
-                  value={firstDp ? (firstDp.crop_reserve ?? 32) : 32}
-                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'crop_reserve', parseInt(e.target.value))}
-                />
-              </div>
               <div style={styles.paramRow}
                 title="开 = 按 crop 几何把产出合成回整幅图（原行为）。关 = 不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，作为新图层由画布用 transform 贴回原来的位置，可继续微调。">
                 <label style={styles.paramLabel}>Recover Crop</label>
@@ -672,34 +711,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   disabled={!firstDp}
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
                 />
-              </div>
-              <div style={{ opacity: enableLimit ? 1 : 0.4, pointerEvents: enableLimit ? 'auto' : 'none' }}>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Pixels</label>
-                <input
-                  style={styles.paramInput}
-                  type="number"
-                  min={65536}
-                  max={16777216}
-                  step={65536}
-                  disabled={!firstDp}
-                  value={firstDp ? (firstDp.pixels ?? 1048576) : 1048576}
-                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'pixels', parseInt(e.target.value))}
-                />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Align</label>
-                <input
-                  style={styles.paramInput}
-                  type="number"
-                  min={1}
-                  max={64}
-                  step={1}
-                  disabled={!firstDp}
-                  value={firstDp ? (firstDp.align ?? 8) : 8}
-                  onChange={e => firstDetailer && updateBlockParam(firstDetailer.id, 'align', parseInt(e.target.value))}
-                />
-              </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
                 <div style={styles.sectionTitle}>Pipeline Blocks</div>
@@ -863,6 +874,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     )}
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
+                      const refKeys = getRefKeys(dp);
                       return (<>
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Add Noise</label>
@@ -889,13 +901,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <label style={styles.paramLabel}>End Step</label>
                           <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
                         </div>
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Enable Edit</label>
-                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
-                        </div>
                         <div style={styles.paramRow} title="块级 Generate Text 开关（默认关）：仅当上游 pipeline 也启用了 Generate Text（PipelineEnableGenerateTextNode）时才生效；生成结果只作用于当前块，不向后续块传递。">
                           <label style={styles.paramLabel}>Enable Text Generate</label>
                           <IOSToggle checked={dp.enable_text_generate ?? false} onChange={v => updateBlockParam(block.id, 'enable_text_generate', v)} />
+                        </div>
+                        {/* Enable Edit 紧跟在 Enable Text Generate 后面（用户指定顺序） */}
+                        <div style={styles.paramRow}>
+                          <label style={styles.paramLabel}>Enable Edit</label>
+                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
                         </div>
                         {(dp.enable_text_generate ?? false) && (
                           <>
@@ -962,14 +975,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 </div>
                               </>
                             )}
-                            {/* Context Ref 没有开关：选中一张 Ref Image 本身就是启用。 */}
+                            {/* Context Ref 没有开关：选了参考图本身就是启用。v2 支持多张：
+                                按钮继续追加（点击从历史挑 / 拖文件上传），下方缩略图逐张预览，
+                                右上角 ✕ 移除该张。 */}
                             <div style={styles.paramRow}>
                               <label style={styles.paramLabel}>Ref Image</label>
                               <button
                                 style={refDragOver === block.id
                                   ? { ...styles.contextLoadBtn, borderColor: '#0a84ff', background: 'rgba(10,132,255,0.20)' }
                                   : styles.contextLoadBtn}
-                                title="Click to pick one from history, or drop an image file here to upload and use it as the reference (any resolution)"
+                                title="Click to pick from history, or drop image files here to append references (any resolution, multiple allowed)"
                                 onClick={() => setShowRefSelect(block.id)}
                                 onDragOver={e => {
                                   if (!Array.from(e.dataTransfer.types).includes('Files')) return;
@@ -984,15 +999,45 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                                 onDrop={e => {
                                   e.preventDefault();
                                   setRefDragOver(null);
-                                  const file = e.dataTransfer.files?.[0];
-                                  if (file) addRefImageFromFile(block.id, file);
+                                  addRefImagesFromFiles(block.id, e.dataTransfer.files);
                                 }}
                               >
-                                {dp.context_reference_key
-                                  ? (history.find(h => h.key === dp.context_reference_key)?.name ?? 'Selected')
-                                  : (refDragOver === block.id ? 'Drop to upload' : 'Drop or select')}
+                                {refDragOver === block.id ? 'Drop to upload' : `Add (${refKeys.length})`}
                               </button>
                             </div>
+                            {refKeys.length > 0 && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                                {refKeys.map(rk => {
+                                  const rh = history.find(h => h.key === rk);
+                                  return (
+                                    <div key={rk} title={rh?.name ?? rk}
+                                      style={{
+                                        position: 'relative', width: 54, height: 54, flexShrink: 0,
+                                        borderRadius: 6, overflow: 'hidden', background: '#1c1c1e',
+                                        border: '0.5px solid rgba(255,255,255,0.18)',
+                                      }}>
+                                      {rh?.src ? (
+                                        <img src={rh.src} alt={rh.name}
+                                          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                                      ) : (
+                                        <div style={{
+                                          width: '100%', height: '100%', display: 'flex', alignItems: 'center',
+                                          justifyContent: 'center', fontSize: 9, color: '#ff9f0a', textAlign: 'center',
+                                        }}>missing</div>
+                                      )}
+                                      <button title="Remove this reference"
+                                        onClick={() => setRefKeys(block.id, refKeys.filter(k => k !== rk))}
+                                        style={{
+                                          position: 'absolute', top: 0, right: 0, width: 16, height: 16,
+                                          padding: 0, border: 'none', borderRadius: '0 0 0 6px', cursor: 'pointer',
+                                          background: 'rgba(0,0,0,0.62)', color: 'rgba(255,255,255,0.85)',
+                                          fontSize: 10, lineHeight: '16px', textAlign: 'center',
+                                        }}>✕</button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         )}
                       </>);
@@ -1247,11 +1292,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         )}
       </div>
 
-      {/* Reference image select modal */}
+      {/* Reference image select modal — v2: 点选即**追加**到该块的参考列表（可多张） */}
       {showRefSelect && (() => {
         // 任何分辨率都可以作参考图 —— 以前要求与当前 context 同尺寸，
         // 结果大部分历史图根本选不到。现在只排除当前这张（自己参考自己没有意义）。
         const eligible = history.filter(h => h.key !== currentContextKey);
+        const selBlock = blocks.find(b => b.id === showRefSelect);
+        const selKeys = selBlock ? getRefKeys(selBlock.params as DetailerBlockParams) : [];
         return (
           <div style={styles.overlay}>
             <div
@@ -1263,29 +1310,33 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               }}
               onDrop={e => {
                 e.preventDefault();
-                const file = e.dataTransfer.files?.[0];
-                if (!file) return;
-                addRefImageFromFile(showRefSelect, file);
+                addRefImagesFromFiles(showRefSelect, e.dataTransfer.files);
                 setShowRefSelect(null);
               }}
             >
-              <div style={styles.dialogTitle}>Select Reference Image</div>
-              <div style={styles.dialogSubtitle}>Any resolution — click to use it, or drop an image file here</div>
+              <div style={styles.dialogTitle}>Select Reference Images</div>
+              <div style={styles.dialogSubtitle}>Click to append (multiple allowed) — or drop image files here</div>
               {eligible.length === 0 ? (
                 <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No eligible images available.</div>
               ) : (
                 <div style={styles.dialogHistoryGrid}>
-                  {eligible.map(h => (
-                    <button key={h.key} style={styles.historyCard} onClick={() => {
-                      updateBlockParam(showRefSelect, 'context_reference_key', h.key);
-                      setShowRefSelect(null);
-                    }}>
-                      <div style={styles.historyImgWrap}>
-                        <img src={h.src} alt={h.name} style={styles.historyImg} />
-                      </div>
-                      <div style={styles.historyName}>{h.name}</div>
-                    </button>
-                  ))}
+                  {eligible.map(h => {
+                    const already = selKeys.includes(h.key);
+                    return (
+                      <button key={h.key} style={{
+                        ...styles.historyCard,
+                        ...(already ? { outline: '1.5px solid rgba(10,132,255,0.8)', outlineOffset: -1.5 } : {}),
+                      }} onClick={() => {
+                        if (!already) setRefKeys(showRefSelect, [...selKeys, h.key]);
+                        setShowRefSelect(null);
+                      }}>
+                        <div style={styles.historyImgWrap}>
+                          <img src={h.src} alt={h.name} style={styles.historyImg} />
+                        </div>
+                        <div style={styles.historyName}>{h.name}{already ? ' ✓' : ''}</div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
               <div style={styles.dialogActions}>

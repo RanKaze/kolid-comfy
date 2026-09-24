@@ -70,6 +70,9 @@ export interface DetailerBlockParams {
   grounding_px?: number;
   context_reference: boolean;
   context_reference_key: string | null;
+  /** v2 多参考：本块参考图 key 列表（顺序 = run 时注入顺序）。旧单 key
+   *  context_reference_key 仍由 UI 镜像为列表最后一项以兼容旧后端；运行时以列表为准。 */
+  context_reference_keys?: string[];
   /** 该 detailer block 解出 pipeline.context 的 lora/prompt 时使用的正则（默认 ".+"） */
   context_regex?: string;
 }
