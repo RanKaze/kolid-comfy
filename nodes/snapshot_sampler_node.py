@@ -660,9 +660,8 @@ class SnapshotDetailerSamplerServer:
             self.add_noise = bp.get('add_noise', self.add_noise)
             self.start_step_rate = float(bp.get('start_step_rate', self.start_step_rate))
             self.end_step_rate = float(bp.get('end_step_rate', self.end_step_rate))
-            self.pixels = int(bp.get('pixels', self.pixels))
-            self.align = int(bp.get('align', self.align))
-            self.crop_reserve = int(bp.get('crop_reserve', self.crop_reserve))
+            # pixels / align / crop_reserve 不再从块参数同步 —— 它们是 GLOBAL SETTINGS
+            # （server config），不按 preset 区分；块里遗留的旧值一律忽略。
             self.enable_edit = bool(bp.get('enable_edit', self.enable_edit))
             self.edit_mode = bp.get('edit_mode', self.edit_mode)
             self.ref_boost = float(bp.get('ref_boost', self.ref_boost))
@@ -2050,9 +2049,10 @@ class SnapshotDetailerSamplerNode:
         if user_mask is not None:
             user_mask = user_mask.clone()
             user_mask = (user_mask > 0).float()
-        # First detailer block: Preprocess Settings 就存在它的 params 上（crop_reserve /
-        # recover_crop / pixels / align / enable_mask / enable_limit），所以这两个总闸每个
-        # Pipeline Preset 各自一份。必须在这里先取 —— mask 扩张也要看 enable_mask。
+        # First detailer block: Preprocess Settings 的开关存在它的 params 上（recover_crop /
+        # enable_mask / enable_limit），所以这些开关每个 Pipeline Preset 各自一份。
+        # crop_reserve / pixels / align 是 GLOBAL SETTINGS（server config → global_params），
+        # 不再按 preset 区分。必须在这里先取 —— mask 扩张也要看 enable_mask。
         first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
         first_bp = first_detailer.get('params', first_detailer)
         # Enable Mask 关 = 不做围绕 mask 的三步预处理：grow/blur 归零、不按 mask 裁剪、
@@ -2068,7 +2068,7 @@ class SnapshotDetailerSamplerNode:
         # 整条链（含 interface block）都在 crop 工作区坐标系内运行；run 之前 crop，
         # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
         # 但其输出尺寸须与 crop 工作区连贯（由用户/子图保证，pipeline 内不做 resize）。
-        first_crop_reserve = int(first_bp.get('crop_reserve', 32))
+        first_crop_reserve = int(global_params.get('crop_reserve', 32))
         # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
         # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
         # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
@@ -2089,11 +2089,10 @@ class SnapshotDetailerSamplerNode:
                              f'工作区 = 整幅图 {tuple(original_image.shape)}', block=0)
 
         # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
-        # pixels / align 统一取自 first_bp（第一个 detailer block 的参数），取消每个
-        # block 各自的 pixels/align。interface 之后的 block 不再单独 limit，pipeline
-        # 内不做额外 resize。
-        limit_pixels_val = int(first_bp.get('pixels', 1048576))
-        limit_align = int(first_bp.get('align', 8))
+        # pixels / align 取自 GLOBAL SETTINGS（global_params ← server config），不再按
+        # preset 区分。interface 之后的 block 不再单独 limit，pipeline 内不做额外 resize。
+        limit_pixels_val = int(global_params.get('pixels', 1048576))
+        limit_align = int(global_params.get('align', 8))
         # QwenImage2.1: crop 尺寸需与 vision token / latent 共享的 32 像素格对齐
         # 即使 Enable Limit 关掉也要保住 —— 它的 latent 网格不接受未对齐尺寸。
         needs_grid_align = bool(arch_qwen_image21.matches(next_pipeline.config))
@@ -2332,7 +2331,16 @@ class SnapshotDetailerSamplerNode:
                 grounding_px = int(bp.get('grounding_px', 768))
                 # Context Ref 没有开关：选了参考图就走该通道。
                 # 'context_reference' 只是旧配置里的遗留字段，不再参与判定。
+                # v2 多参考：context_reference_keys（list）是权威来源，顺序 = 注入顺序；
+                # 旧配置的单 key 兜底并入列表尾（UI 会把它镜像成列表最后一项）。
+                context_reference_keys = bp.get('context_reference_keys')
+                if not isinstance(context_reference_keys, list):
+                    context_reference_keys = []
+                context_reference_keys = [k for k in context_reference_keys
+                                          if isinstance(k, str) and k]
                 context_reference_key = bp.get('context_reference_key')
+                if context_reference_key and context_reference_key not in context_reference_keys:
+                    context_reference_keys.append(context_reference_key)
                 # 每个 detailer block 自带 context_regex（默认 ".+"），覆盖全局值，
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
@@ -2400,21 +2408,23 @@ class SnapshotDetailerSamplerNode:
                     # Enable Edit 开 → 送图（多模态 CLIP 看图改写）：
                     #   第一张 = next_pipeline.image（链上传递的那张，pipeline 就是靠它
                     #            在 block 间传图的；interface 块会写回，detailer 不改它）
-                    #   第二张 = 本块选的 Ref Image（能传就传，能几张传几张）
+                    #   随后 = 本块选的所有 Ref Image（v2 多参考，按列表顺序能传几张传几张）
                     # Edit 关 → 完全不传图（不做隐藏行为）。
                     _gt_images = []
-                    _gt_ref_key = None
+                    _gt_sources = []
+                    _gt_ref_keys = []
                     _gt_img_status = 'n/a（未送图）'
                     if enable_edit:
                         _chain_img = next_pipeline.get_image()
                         if _chain_img is not None:
                             _gt_images.append(_chain_img)
-                        if context_reference_key:
-                            _ref_img = self._resolve_ref_image_for_generate_text(
-                                server, context_reference_key)
+                            _gt_sources.append('pipeline.image（链上工作图）')
+                        for _ref_key in context_reference_keys:
+                            _ref_img = self._resolve_ref_image_for_generate_text(server, _ref_key)
                             if _ref_img is not None:
                                 _gt_images.append(_ref_img)
-                                _gt_ref_key = context_reference_key
+                                _gt_sources.append(f'Ref Image（{_ref_key}）')
+                                _gt_ref_keys.append(_ref_key)
                         # 明确告诉 Debug：这些图**会不会真的影响**生成。
                         # 先按名字/模板做静态判断，再**实测一次 tokenize**（数 image
                         # embedding）—— 后者才是「图真的进了 token 流」的唯一证据。
@@ -2450,12 +2460,11 @@ class SnapshotDetailerSamplerNode:
                                       override_prompt=enable_override_prompt,
                                       params=next_pipeline.config.get('generate_text'),
                                       image_count=len(_gt_images),
-                                      ref_image_key=_gt_ref_key,
+                                      ref_image_keys=_gt_ref_keys,
                                       image_status=_gt_img_status)
                     # Debug：把每一张真正送进 Generate Text 的图单独画出来，标注来源
                     for _gi, _gimg in enumerate(_gt_images):
-                        _gsrc = ('pipeline.image（链上工作图）' if _gi == 0
-                                 else f'Ref Image（{_gt_ref_key}）')
+                        _gsrc = _gt_sources[_gi] if _gi < len(_gt_sources) else f'第 {_gi + 1} 张'
                         dbg.record_image(f'Block {i+1} · c{_gi + 1}) Generate Text 输入图 — {_gsrc}',
                                          _gimg, block=i + 1,
                                          detail=f'第 {_gi + 1} 张 / 共 {len(_gt_images)} 张')
@@ -2535,15 +2544,17 @@ class SnapshotDetailerSamplerNode:
                         resized_mask if (enable_edit and enable_ref_boost_mask) else None
                     )
 
-                # Context Reference injection (per-block)
-                if enable_edit and context_reference_key and server is not None:
-                    ref_img = server.get_history_image(context_reference_key)
-                    if ref_img is not None:
-                        ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
-                        next_pipeline.reference.reference_latents.append(ref_latent)
-                        print(f"[Block {i+1}] Context reference injected: key={context_reference_key}")
-                    else:
-                        print(f"[Block {i+1}] WARNING: context reference key '{context_reference_key}' not found")
+                # Context Reference injection (per-block) — v2 多参考：逐张编码并 append，
+                # 顺序 = context_reference_keys（旧单 key 已并入列表尾）。
+                if enable_edit and context_reference_keys and server is not None:
+                    for _ref_key in context_reference_keys:
+                        ref_img = server.get_history_image(_ref_key)
+                        if ref_img is not None:
+                            ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
+                            next_pipeline.reference.reference_latents.append(ref_latent)
+                            print(f"[Block {i+1}] Context reference injected: key={_ref_key}")
+                        else:
+                            print(f"[Block {i+1}] WARNING: context reference key '{_ref_key}' not found")
 
                 print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
 
@@ -3180,6 +3191,10 @@ class SnapshotDetailerSamplerNode:
                             'seed': seed,
                             'mask_grow': server.mask_grow,
                             'mask_blur': server.mask_blur,
+                            # GLOBAL SETTINGS：所有 preset 共享同一份（server config）
+                            'crop_reserve': server.crop_reserve,
+                            'pixels': server.pixels,
+                            'align': server.align,
                             'context_regex': context_regex,
                         }
                         blocks = preset_set['blocks'] if preset_set is not None else server.blocks
