@@ -417,6 +417,29 @@ class SnapshotDetailerSamplerServer:
                  'place': h.get('place')}
                 for h in self.selected_history]
 
+    def _first_detailer_enable_mask(self, preset_id=None):
+        """生效链第一个 detailer 的 Enable Mask 总闸（默认开）。
+
+        preset_id 能解出 block set 时看那套链，否则看激活 tab 的镜像（self.blocks）——
+        与 run_detailer 主循环选链的优先级一致。Enable Mask 关 = 不做围绕 mask 的
+        grow/blur/crop 预处理，整幅图就是工作区：Mask 层没画也允许跑（run 的
+        「Mask is required」闸门据此放行，mask 变成可选的重绘限制）。
+
+        ★ 类归属：Server（HTTP handler 用 inst.、主循环用 server. 都拿得到 blocks 镜像）。
+        """
+        blocks = self.blocks or []
+        if preset_id:
+            preset_set = next(
+                (s for s in (self.blocks_sets or [])
+                 if isinstance(s, dict) and s.get('id') == preset_id and s.get('blocks')),
+                None,
+            )
+            if preset_set is not None:
+                blocks = preset_set['blocks']
+        bp = next((b.get('params', b) for b in blocks
+                   if isinstance(b, dict) and b.get('type') == 'detailer'), None)
+        return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
+
     def get_history_image(self, key):
         """根据 key 获取历史图片 tensor。优先返回 tensor 引用，避免 base64 decode。"""
         tensor = self._history_tensors.get(key)
@@ -1408,7 +1431,11 @@ class SnapshotDetailerSamplerServer:
                         return
 
                     # action == 'detailer'：合成结果交给主循环执行（主循环在另一个线程）
-                    if mask is None or float(mask.sum()) == 0:
+                    # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
+                    # （生效链第一个 detailer 的 params.enable_mask，随 Run 设置里的
+                    # preset 解析）时整幅都是工作区，Mask 层没画也允许跑。
+                    if (inst._first_detailer_enable_mask(body.get('preset_id'))
+                            and (mask is None or float(mask.sum()) == 0)):
                         self._send_json({'success': False, 'error': 'Mask is required — paint the mask layer before running the detailer'}, 400)
                         return
                     inst.blend_image = image
@@ -2061,7 +2088,10 @@ class SnapshotDetailerSamplerNode:
         if not enable_mask:
             mask_grow = 0
             mask_blur = 0
-        expanded_mask = expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
+        # mask 可能整体缺席（Enable Mask 关 + 没画 Mask 层）：expand_mask 不接受 None，
+        # 没有 mask 就没有可扩张的东西，直接置 None（下游全部对 None 容错）。
+        expanded_mask = (expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
+                         if user_mask is not None else None)
         dbg.record_mask('扩张 / 羽化后 mask', expanded_mask, block=0,
                         detail=f'grow={mask_grow}, blur={mask_blur}')
 
@@ -2120,7 +2150,8 @@ class SnapshotDetailerSamplerNode:
         current_mask = resized_mask
         last_resize_info = None
         dbg.record_stage('裁剪 + 缩放后工作区',
-                         f'image={tuple(resized_image.shape)}, mask={tuple(resized_mask.shape)}',
+                         f'image={tuple(resized_image.shape)}'
+                         + (f', mask={tuple(resized_mask.shape)}' if resized_mask is not None else ', mask=None'),
                          block=0,
                          crop_info=({k: (list(v) if isinstance(v, tuple) else v)
                                      for k, v in crop_info.items()} if isinstance(crop_info, dict) else crop_info),
@@ -3126,11 +3157,15 @@ class SnapshotDetailerSamplerNode:
                                               extra_prompt=extra_prompt,
                                               loras=list(user_loras or []))
 
-                        # 遮罩必须存在，否则 detailer 无意义
+                        # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
+                        # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
+                        # Mask 层没画也允许跑。这里只是读 pending preset 不清空（取用即清
+                        # 仍在下方 blocks 解析处），两条路的选链优先级保持一致。
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
-                            server.detail_status = 'error'
-                            server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
-                            continue
+                            if server._first_detailer_enable_mask(server.pending_generate_preset):
+                                server.detail_status = 'error'
+                                server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
+                                continue
 
                         # 每次 Run 都基于"原始 pipeline"的副本执行——run 之间不共享、
                         # 不累积上一轮对 pipeline 的修改。用户当前绘制的 mask 属于交互

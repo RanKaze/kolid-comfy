@@ -5,6 +5,15 @@ import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockPar
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
 
+/** 第一个 detailer block 的 Enable Mask 总闸（默认开）。Blend 工作台的 Run 预检与后端
+ *  闸门共用同一语义：关 = 不做围绕 mask 的预处理、整幅就是工作区，Mask 层没画也能跑。 */
+function firstDetailerEnableMask(blockSets: BlockSet[], setId: string | null): boolean {
+  const set = blockSets.find(s => s.id === setId) || blockSets[0];
+  const fd = set?.blocks.find(b => b.type === 'detailer');
+  const dp = fd ? (fd.params as DetailerBlockParams) : undefined;
+  return dp ? (dp.enable_mask ?? true) : true;
+}
+
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('draw');
   const tabRef = useRef<Tab>('draw');
@@ -411,6 +420,9 @@ const App: React.FC = () => {
           height: body.height,
           mask: body.mask,
           extra_prompt: body.extra_prompt,
+          // Run 设置（以及 ▶ 预设胶囊）选的 preset：决定后端跑哪条 block 链，
+          // Enable Mask 总闸也随这条链解析。之前漏转发 —— 对话框的选择被静默丢弃。
+          preset_id: body.preset_id ?? null,
         }),
       });
       const data = await res.json();
@@ -422,6 +434,18 @@ const App: React.FC = () => {
       if (body.action === 'blend') {
         refreshHistory();
         reply(true, { key: data.key });
+        // Blend 不再只是归档：把合成结果作为一个新的智能对象图层放回画布顶层
+        // （图层带历史 key，非破坏、可继续改 transform / 画 mask）。画布原有图层
+        // 与 Mask 层一律不动；图层注入失败不影响归档本身。
+        try {
+          const list = await fetch('/api/history').then(r => r.json());
+          const item = (list?.history || []).find((h: HistoryItem) => h.key === data.key);
+          if (item) {
+            blendIframeRef.current?.contentWindow?.postMessage(
+              { type: 'blend-add-layer', items: [item], smart: true,
+                note: 'Blend result added as a new smart layer (also archived to history)' }, '*');
+          }
+        } catch { /* 图层是便利性，不是硬性要求 */ }
       } else if (body.action === 'tag') {
         reply(true, { tag: data.tag });
         setPromptReady(true);
@@ -531,12 +555,17 @@ const App: React.FC = () => {
         // (the Tag buttons disable themselves without one).
         const iframe = blendIframeRef.current;
         if (!iframe?.contentWindow) return;
-        iframe.contentWindow.postMessage({ type: 'blend-config', hasTagger: !!config?.has_tagger }, '*');
+        iframe.contentWindow.postMessage({
+          type: 'blend-config',
+          hasTagger: !!config?.has_tagger,
+          // 激活 tab 的 Enable Mask 总闸：关 = 整幅是工作区，Run 不要求先画 Mask 层。
+          mask_required: firstDetailerEnableMask(blockSets, activeBlockSetId),
+        }, '*');
         // The Generate dialog's Pipeline Preset enum picks which block set runs the generate, so
         // the workbench needs every set's id/name plus the tab that is active right now.
         iframe.contentWindow.postMessage({
           type: 'blend-pipeline-presets',
-          presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name })),
+          presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name, enable_mask: firstDetailerEnableMask(blockSets, s.id) })),
           active_id: activeBlockSetId,
         }, '*');
         seedBlendCanvas();
@@ -554,7 +583,7 @@ const App: React.FC = () => {
     if (!iframe?.contentWindow) return;
     iframe.contentWindow.postMessage({
       type: 'blend-pipeline-presets',
-      presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name })),
+      presets: blockSets.map((s: BlockSet) => ({ id: s.id, name: s.name, enable_mask: firstDetailerEnableMask(blockSets, s.id) })),
       active_id: activeBlockSetId,
     }, '*');
   }, [blockSets, activeBlockSetId]);
