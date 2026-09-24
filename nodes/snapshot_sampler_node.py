@@ -2302,6 +2302,9 @@ class SnapshotDetailerSamplerNode:
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
                 enable_edit = bp.get('enable_edit', False)
+                # 块级 Generate Text 开关（默认关）：只有 pipeline config 的
+                # enable_generate_text 也开着时才真正生效（二级门控）。
+                enable_text_generate = bool(bp.get('enable_text_generate', False))
                 edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
                 ref_boost = float(bp.get('ref_boost', 4.0))
                 ref_boost_a = float(bp.get('ref_boost_a', 1.0))
@@ -2314,13 +2317,14 @@ class SnapshotDetailerSamplerNode:
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
 
-                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
                 dbg.record_block(i + 1, f'Block {i+1} · Detailer',
                                  f'{block.get("name", "")}',
                                  add_noise=add_noise,
                                  start_step_rate=start_step_rate,
                                  end_step_rate=end_step_rate,
                                  enable_edit=enable_edit,
+                                 enable_text_generate=enable_text_generate,
                                  edit_mode=edit_mode,
                                  ref_boost=ref_boost,
                                  ref_boost_a=ref_boost_a,
@@ -2360,10 +2364,12 @@ class SnapshotDetailerSamplerNode:
                                   block=i + 1,
                                   user_positive=user_positive)
                 # Generate Text（MARKER_GENERATE_TEXT_BLOCK）：上游 Pipeline 若启用了
-                # PipelineEnableGenerateTextNode，就把指令 prompt 与当前 positive 拼起来
-                # 交给文本生成 CLIP，用生成结果完全替换 current_positive。
-                # 只在 config 里开开关，参数与 clip 都来自上游节点，此处不做任何 UI。
-                if next_pipeline.config.get('enable_generate_text'):
+                # PipelineEnableGenerateTextNode，且本块 params 的 enable_text_generate
+                # 开着（默认关），就把指令 prompt 与当前 positive 拼起来交给文本生成
+                # CLIP，用生成结果完全替换 current_positive。参数与 clip 都来自上游
+                # 节点。产物只作用于当前块（current_positive 每块都从 context 重新解出，
+                # 不跨块传递）。pipeline 没开 enable_generate_text 时块开关无效。
+                if next_pipeline.config.get('enable_generate_text') and enable_text_generate:
                     _gt_before = current_positive
                     # Enable Edit 开 → 送图（多模态 CLIP 看图改写）：
                     #   第一张 = next_pipeline.image（链上传递的那张，pipeline 就是靠它
