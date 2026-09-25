@@ -13,12 +13,76 @@ import type { DebugTraceResponse, DebugTraceStep } from '../types';
  */
 
 const KIND_META: Record<DebugTraceStep['kind'], { label: string; color: string; icon: string }> = {
-  stage: { label: 'Stage', color: '#8e8e93', icon: '◆' },
-  prompt: { label: 'Prompt', color: '#0a84ff', icon: '¶' },
-  image: { label: 'Image', color: '#30d158', icon: '▣' },
-  mask: { label: 'Mask', color: '#ff9f0a', icon: '◧' },
-  block: { label: 'Block', color: '#bf5af2', icon: '▤' },
-  error: { label: 'Error', color: '#ff453a', icon: '⚠' },
+  stage: { label: 'Stage', color: '#8e8e93', icon: 'stage' },
+  prompt: { label: 'Prompt', color: '#0a84ff', icon: 'prompt' },
+  image: { label: 'Image', color: '#30d158', icon: 'image' },
+  mask: { label: 'Mask', color: '#ff9f0a', icon: 'mask' },
+  block: { label: 'Block', color: '#bf5af2', icon: 'block' },
+  error: { label: 'Error', color: '#ff453a', icon: 'error' },
+};
+
+// SF Symbol style stroke icons（与 EditPhase 的 TabIcon 同风格），
+// 用 currentColor 跟随周围文字颜色。
+export const DbgIcon: React.FC<{ name: string; size?: number }> = ({ name, size = 12 }) => {
+  const sw = 1.8;
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: sw, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, style: { display: 'block', flexShrink: 0 } };
+  switch (name) {
+    case 'bug': return (
+      <svg {...p}>
+        <circle cx="12" cy="13.5" r="4.5" />
+        <path d="M10.5 5.5h3M12 9V5.5M9.5 4l1.6 2.4M14.5 4l-1.6 2.4" />
+        <path d="M7.8 11.5L4 9.8M7.3 14H3.5M8.2 16.5l-3.5 2.5" strokeWidth={1.5} />
+        <path d="M16.2 11.5L20 9.8M16.7 14H20.5M15.8 16.5l3.5 2.5" strokeWidth={1.5} />
+      </svg>
+    );
+    case 'reload': return (
+      <svg {...p}>
+        <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1" />
+        <path d="M20.5 3.5V8H16" />
+      </svg>
+    );
+    case 'close': return (
+      <svg {...p}><path d="M6 6l12 12M18 6L6 18" /></svg>
+    );
+    case 'chevronRight': return (
+      <svg {...p}><path d="M9 5l7 7-7 7" /></svg>
+    );
+    case 'chevronDown': return (
+      <svg {...p}><path d="M5 9l7 7 7-7" /></svg>
+    );
+    case 'stage': return (
+      <svg {...p}><path d="M5 21V4M5 4.5h13L15.5 9 18 13.5H5" /></svg>
+    );
+    case 'prompt': return (
+      <svg {...p}><path d="M4 6.5h16M4 11.5h12M4 16.5h9" strokeWidth={1.6} /></svg>
+    );
+    case 'image': return (
+      <svg {...p}>
+        <rect x="3" y="5" width="18" height="14" rx="2.5" />
+        <circle cx="8.5" cy="10" r="1.3" fill="currentColor" stroke="none" />
+        <path d="M3.5 17l5-4.5 4 3.5 4-4 4 4" strokeWidth={1.5} />
+      </svg>
+    );
+    case 'mask': return (
+      <svg {...p}>
+        <rect x="4" y="4" width="16" height="16" rx="3.5" />
+        <path d="M12 4H7.5A3.5 3.5 0 0 0 4 7.5v9A3.5 3.5 0 0 0 7.5 20H12z" fill="currentColor" stroke="none" opacity="0.45" />
+      </svg>
+    );
+    case 'block': return (
+      <svg {...p}>
+        <rect x="4" y="4" width="16" height="6.5" rx="2" />
+        <rect x="4" y="13.5" width="16" height="6.5" rx="2" />
+      </svg>
+    );
+    case 'error': return (
+      <svg {...p}>
+        <path d="M12 3.8L21.3 20H2.7z" />
+        <path d="M12 9.5v4.2M12 17v.01" />
+      </svg>
+    );
+    default: return <svg {...p}><circle cx="12" cy="12" r="9" /></svg>;
+  }
 };
 
 type Filter = 'all' | 'prompt' | 'image' | 'block';
@@ -100,7 +164,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         {/* ── 头部 ── */}
         <div style={S.head}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <span style={{ fontSize: 16 }}>🐞</span>
+            <span style={{ color: 'rgba(255,255,255,0.8)', display: 'flex' }}><DbgIcon name="bug" size={17} /></span>
             <div style={{ minWidth: 0 }}>
               <div style={S.headTitle}>Run Debug</div>
               <div style={S.headSub}>
@@ -109,8 +173,8 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            <button style={S.iconBtn} title="重新读取快照" onClick={() => void load()}>↻</button>
-            <button style={S.iconBtn} title="关闭 (Esc)" onClick={onClose}>✕</button>
+            <button style={S.iconBtn} title="重新读取快照" onClick={() => void load()}><DbgIcon name="reload" size={13} /></button>
+            <button style={S.iconBtn} title="关闭 (Esc)" onClick={onClose}><DbgIcon name="close" size={12} /></button>
           </div>
         </div>
 
@@ -176,7 +240,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                     return next;
                   })}
                 >
-                  <span style={{ color: meta.color, fontSize: 11 }}>{isCollapsed ? '▶' : '▼'}</span>
+                  <span style={{ color: meta.color, display: 'flex' }}><DbgIcon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size={11} /></span>
                   <span style={{ color: meta.color, fontWeight: 700, fontSize: 12.5 }}>{k.label}</span>
                   {k.detail ? <span style={S.groupDetail}>{k.detail}</span> : null}
                   <div style={{ flex: 1 }} />
@@ -209,7 +273,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           <div style={S.zoomBar}>
             <span style={{ fontSize: 12.5, fontWeight: 600 }}>{zoom.label}</span>
             <span style={{ fontSize: 11, opacity: 0.6 }}>{zoom.w}×{zoom.h}</span>
-            <button style={S.iconBtn} onClick={e => { e.stopPropagation(); setZoom(null); }}>✕</button>
+            <button style={S.iconBtn} onClick={e => { e.stopPropagation(); setZoom(null); }}><DbgIcon name="close" size={12} /></button>
           </div>
           <img src={zoom.src} alt={zoom.label} style={S.zoomImg} onClick={e => e.stopPropagation()} />
         </div>
@@ -231,7 +295,7 @@ const StepView: React.FC<{
   return (
     <div style={{ ...S.step, borderLeftColor: meta.color + '66' }}>
       <div style={S.stepHead}>
-        <span style={{ color: meta.color, fontSize: 11, flexShrink: 0 }}>{meta.icon}</span>
+        <span style={{ color: meta.color, display: 'flex', flexShrink: 0 }}><DbgIcon name={meta.icon} size={12} /></span>
         <span style={S.stepLabel}>{step.label}</span>
         {step.detail ? <span style={S.stepDetail}>{step.detail}</span> : null}
         {typeof step.data?.chars === 'number' && (

@@ -823,6 +823,11 @@ try { rasterDrop = localStorage.getItem(RASTER_DROP_KEY) === '1'; } catch (e) { 
 // Enter finalises it. `modSnapshot` shares image and paint-surface references with the live
 // layers — nothing is copied, so it costs nothing and cannot go stale mid-drag.
 let modDrag = null;            // {handle, anchor:{x,y}, baseW, baseH, startLayers:Map(id→transform), startCustom, moved}
+let modDragging = false;       // 左键按住期间才为 true:松开后预览保持待定,但不再跟随指针
+// Canvas Modify 预览期的画布 doc 原点偏移：左/上边拖拽时新矩形的左上角不在 (0,0)，
+// canvas 元素与 overlay 都按它平移（applyView / canvasHandlePoints / drawMaskTint 消费）。
+// 右/下拖拽恒为 {0,0}；apply 时折进视图 pan，cancel/重新进入时归零。
+let modOrigin = { x: 0, y: 0 };
 let modSnapshot = null;
 
 // Expand (smart object): border-drag that changes the layer's NATIVE resolution. Live preview
@@ -1440,7 +1445,9 @@ function centerView() { anchorView(vpCenter(), { x: canvasW / 2, y: canvasH / 2 
 
 function applyView() {
     // translate · rotate · scale, applied to a 1:1 (doc px = CSS px) canvas element.
-    blendCanvas.style.transform = `translate(${view.panX}px, ${view.panY}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
+    // modOrigin 是 Canvas Modify 预览期的 doc 原点偏移（左/上边拖拽），随视图一起旋转/缩放。
+    const mo = linMap(modOrigin);
+    blendCanvas.style.transform = `translate(${view.panX + mo.x}px, ${view.panY + mo.y}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
     // Keep the transparency checkerboard at a constant size on screen.
     const cb = 16 / view.zoom;
     if (blendCanvas._cb !== cb) {
@@ -1804,14 +1811,17 @@ function drawMaskTint() {
     // to paint, and that has to keep working while the layer is hidden (hiding it is exactly how
     // people compose without the mask in the way).
     if (!maskLayer.decal || previewMaskOpacity <= 0) return;
-    const tl = docToScreen({ x: 0, y: 0 });
-    const br = docToScreen({ x: canvasW, y: canvasH });
+    const tl = docToScreen({ x: modOrigin.x, y: modOrigin.y });
+    const br = docToScreen({ x: modOrigin.x + canvasW, y: modOrigin.y + canvasH });
     if (!(Math.hypot(br.x - tl.x, br.y - tl.y) > 2)) return;
     const w = Math.round(canvasW), h = Math.round(canvasH);
     if (maskTintCanvas.width !== w || maskTintCanvas.height !== h) { maskTintCanvas.width = w; maskTintCanvas.height = h; }
     resetCtx(maskTintCtx);
     maskTintCtx.clearRect(0, 0, w, h);
-    maskTintCtx.drawImage(maskLayer.decal, 0, 0, w, h);
+    // Mask decal is doc-anchored 1:1 pixels: during a Canvas Modify preview the tentative rect's
+    // origin sits at modOrigin, so the decal goes in unscaled at (-ox, -oy) — cropping, not
+    // stretching (the old drawImage(0,0,w,h) resize distorted the tint mid-drag).
+    maskTintCtx.drawImage(maskLayer.decal, -Math.round(modOrigin.x), -Math.round(modOrigin.y));
     // Recolour in place so only painted pixels get tinted.
     maskTintCtx.globalCompositeOperation = 'source-in';
     maskTintCtx.fillStyle = maskTintRGBA(previewMaskOpacity);
@@ -1819,9 +1829,10 @@ function drawMaskTint() {
     maskTintCtx.globalCompositeOperation = 'source-over';
     const cos = Math.cos(view.rotation), sin = Math.sin(view.rotation);
     const zx = view.zoom * view.flipX, zy = view.zoom;
+    const mo = linMap(modOrigin);   // Canvas Modify 预览期画布原点偏移，tint 跟着画布走
     overlayCtx.save();
     // Same doc→screen affine the canvas element uses: scale, then rotate, then pan.
-    overlayCtx.transform(cos * zx, sin * zx, -sin * zy, cos * zy, view.panX, view.panY);
+    overlayCtx.transform(cos * zx, sin * zx, -sin * zy, cos * zy, view.panX + mo.x, view.panY + mo.y);
     overlayCtx.drawImage(maskTintCanvas, 0, 0);
     overlayCtx.restore();
 }
@@ -3227,6 +3238,7 @@ function startCanvasModify() {
     // and the preview below never mutates buffers — so Esc can rewind from it verbatim.
     modSnapshot = snapshotState();
     modDrag = null;
+    modOrigin = { x: 0, y: 0 };
     setMode('canvasModify');
     setStatus('Drag the canvas border — Enter applies, Esc cancels');
 }
@@ -3237,7 +3249,7 @@ function canvasHandlePoints() {
     const pts = {};
     for (const key in HANDLE_UV) {
         const [u, v] = HANDLE_UV[key];
-        pts[key] = docToScreen({ x: (u + 1) / 2 * canvasW, y: (v + 1) / 2 * canvasH });
+        pts[key] = docToScreen({ x: modOrigin.x + (u + 1) / 2 * canvasW, y: modOrigin.y + (v + 1) / 2 * canvasH });
     }
     return pts;
 }
@@ -3262,6 +3274,7 @@ function beginCanvasDrag(key) {
         startLayers,
         moved: false,
     };
+    modDragging = true;
     setCursor(HANDLE_CURSOR[key]);
 }
 
@@ -3289,13 +3302,18 @@ function updateCanvasModify(pos) {
         w = Math.max(1, Math.floor(w * s));
         h = Math.max(1, Math.floor(h * s));
     }
-    if (w === canvasW && h === canvasH) return;
+    if (w === canvasW && h === canvasH && modOrigin.x === left && modOrigin.y === top) return;
+    // 左/上拖拽时新矩形左上角不在 (0,0)：canvas 元素平移到 (left, top)，让「没被抓的边」
+    // 真正留在原地（右/下拖拽 left/top 恒为 0，行为与原来完全一致）。
+    modOrigin = { x: left, y: top };
     canvasW = w; canvasH = h;
     for (const l of layers) {
         if (isRasterLayer(l)) continue;             // identity transform stretches with the canvas
         const st = d.startLayers.get(l.id);
-        l.transform.cx = st.cx * d.baseW / w;
-        l.transform.cy = st.cy * d.baseH / h;
+        // 画布原点移到 (left, top)：图层的 doc 位置 = 原点 + transform*尺寸，
+        // 保持像素不动 → cx' = (st.cx*baseW - left) / w（cy 同理）。
+        l.transform.cx = (st.cx * d.baseW - left) / w;
+        l.transform.cy = (st.cy * d.baseH - top) / h;
         l.transform.w = st.w * d.baseW / w;
         l.transform.h = st.h * d.baseH / h;
     }
@@ -3303,37 +3321,46 @@ function updateCanvasModify(pos) {
     d.moved = true;
     setStatus(`${w} × ${h} — Enter applies, Esc cancels`);
     render();
+    applyView();        // canvas 元素的 transform 要吃到新的原点偏移
 }
 
 function applyCanvasModify() {
     const d = modDrag;
     modDrag = null;
+    modDragging = false;
     modSnapshot = null;
-    if (!d) { setMode('none'); return; }
-    if (!d.moved) { setStatus('Canvas unchanged'); setMode('none'); return; }
+    if (!d) { modOrigin = { x: 0, y: 0 }; applyView(); setMode('none'); return; }
+    if (!d.moved) { modOrigin = { x: 0, y: 0 }; applyView(); setStatus('Canvas unchanged'); setMode('none'); return; }
+    // 记录预览期的原点偏移：mask 裁剪与视图收锚都要用，然后立刻归零
+    // （后续 layoutCanvas / anchorView 都按新画布原点 (0,0) 计算）。
+    const ox = modOrigin.x, oy = modOrigin.y;
+    const sp = docToScreen({ x: ox, y: oy });
+    modOrigin = { x: 0, y: 0 };
     canvasCustom = true;
     // Smart layers keep their pixels, top-left anchored (the drag metaphor: the sides you did
     // not grab stay put). Raster layers resample into the new canvas — their 1:1 invariant.
     resampleRasterLayers(canvasW, canvasH);
     // The Mask layer is doc-space coverage: it keeps its pixels anchored at the origin too.
+    // 左/上拖拽时原点移到 (ox, oy)，mask 像素是 doc 锚定的 → 向反方向平移裁剪。
     const w = Math.round(canvasW), h = Math.round(canvasH);
-    if (!maskLayer.img || maskLayer.img.width !== w || maskLayer.img.height !== h) {
+    if (!maskLayer.img || maskLayer.img.width !== w || maskLayer.img.height !== h || ox || oy) {
         const old = maskLayer.decal;
         const img = document.createElement('canvas');
         img.width = w; img.height = h;
         const surface = document.createElement('canvas');
         surface.width = w; surface.height = h;
         if (old && old.width && old.height) {
-            surface.getContext('2d').drawImage(old, 0, 0);   // top-left anchored, unscaled
+            surface.getContext('2d').drawImage(old, -ox, -oy);   // doc-anchored, unscaled
         }
         maskLayer.img = img;
         maskLayer.decal = surface;
         maskLayer.decalCtx = surface.getContext('2d');
     }
     maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-    // No view work: the preview already kept doc origin (and therefore every layer's on-screen
-    // position) fixed — the view transform never moved, so neither should it now.
+    // 预览期 doc 原点被平移了 (ox, oy)；提交后画布原点回到 (0,0)，把新原点钉在
+    // 预览中临时矩形左上角出现的屏幕位置 —— 用户看到的画面在 Enter 前后不跳动。
     layoutCanvas();
+    if (!view.autoFit) { anchorView(sp, { x: 0, y: 0 }); applyView(); }
     updateCanvasReadout();
     setStatus(`Canvas ${w} × ${h} — smart layers kept their pixels, raster layers resampled`, 'success');
     pushHistory();
@@ -3343,8 +3370,11 @@ function applyCanvasModify() {
 function cancelCanvasModify() {
     const wasMoved = modDrag && modDrag.moved;
     modDrag = null;
+    modDragging = false;
+    modOrigin = { x: 0, y: 0 };   // 先归零，restoreState 的重渲染才是未偏移的原始状态
     if (modSnapshot) restoreState(modSnapshot);
     modSnapshot = null;
+    applyView();
     setMode('none');
     setStatus(wasMoved ? 'Canvas Modify cancelled' : 'Canvas Modify closed');
 }
@@ -3913,7 +3943,7 @@ window.addEventListener('mousemove', e => {
     if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
     if (rectDrag) { updateRectDrag(screenToDoc(toScreenCoords(e))); return; }
-    if (modDrag) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
+    if (modDrag && modDragging) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
     const sp = toScreenCoords(e);
@@ -3935,7 +3965,9 @@ window.addEventListener('mouseup', e => {
     if (sizeDrag) endSizeDrag(e);
     if (rectDrag) endRectDrag();
     // modDrag deliberately survives the release: the tentative canvas stays armed until Enter
-    // applies it or Esc rewinds it (the button's drag can also be resumed with a new press).
+    // applies it or Esc rewinds it — but modDragging ends, so the rect stops following the
+    // pointer (a fresh press on a handle starts a new drag from the tentative geometry).
+    if (modDragging) modDragging = false;
     if (viewDrag) endViewDrag(e);
     if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
     if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
@@ -3970,6 +4002,7 @@ window.addEventListener('blur', () => {
     rectArmed = false;
     rectDrag = null;
     sizeDrag = null;
+    modDragging = false;        // 拖拽中切走:预览保持待定,指针不再驱动矩形
     sizeHud.style.display = 'none';
     keySpace = keyAlt = false;
     setKeyCtrl(false);          // a tab switch swallows the keyup, so the tint would stay stuck on
