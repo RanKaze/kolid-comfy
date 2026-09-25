@@ -1567,6 +1567,15 @@ const ROTATE_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 // solid white-filled bucket badge tucked to the bottom-right. The badge is the tool identity;
 // the crosshair is what you aim with.
 const BUCKET_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' stroke-linecap='round' stroke-linejoin='round' fill='none'%3E%3Cg transform='translate(12 11) scale(0.68)' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg fill='%23000' stroke='%23000' stroke-width='6'%3E%3Cpath d='M7.2 18.2 14 11.4l6.6 6.6-6.8 6.8z'/%3E%3Cpath d='M16.8 8.6l2.4-2.4a2.2 2.2 0 0 1 3.1 3.1l-2.4 2.4' fill='none' stroke-width='5.6'/%3E%3Cpath d='M23.6 18.4c1.3 1.9 2.2 3 2.2 4a1.8 1.8 0 0 1-3.6 0c0-1 .9-2.1 1.4-4z' stroke-width='5'/%3E%3C/g%3E%3Cg fill='%23fff' stroke='%23fff' stroke-width='2.8'%3E%3Cpath d='M7.2 18.2 14 11.4l6.6 6.6-6.8 6.8z'/%3E%3Cpath d='M16.8 8.6l2.4-2.4a2.2 2.2 0 0 1 3.1 3.1l-2.4 2.4' fill='none'/%3E%3Cpath d='M23.6 18.4c1.3 1.9 2.2 3 2.2 4a1.8 1.8 0 0 1-3.6 0c0-1 .9-2.1 1.4-4z' stroke-width='2'/%3E%3C/g%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
+// The Dynamic Layer armed pointer: the same precise crosshair as the bucket (its hotspot is the
+// rectangle's origin corner), with a dashed box badge to the bottom-right saying "this drag lays
+// out a new layer".
+const DYNAMIC_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' fill='none'%3E%3Cg stroke='%23000' stroke-width='4.6'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cg stroke='%23fff' stroke-width='1.8'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
+
+// True while the Dynamic Layer rectangle owns the pointer — armed or mid-sweep. Every cursor
+// site asks this FIRST so the brush ring / bucket crosshair / transform arrows can never leak
+// into the placement drag.
+function dynaPointerActive() { return rectArmed || !!rectDrag; }
 
 function setCursor(c) { viewport.style.cursor = c; }
 
@@ -1579,6 +1588,8 @@ const bucketPointerActive = () => mode === 'mask' && maskTool === 'bucket' && !c
 // Restores the cursor implied by the current tool / held view keys.
 function refreshCursor() {
     if (viewDrag || drag || isDrawing || sizeDrag) return;
+    // Same rank as the mousedown priority: an armed/sweeping rectangle outranks every tool.
+    if (dynaPointerActive()) { setCursor(DYNAMIC_CURSOR); return; }
     if (keySpace) { setCursor('grab'); return; }
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
@@ -1674,6 +1685,7 @@ function endViewDrag(e) {
 }
 
 function updateHoverCursor(sp, docPos) {
+    if (dynaPointerActive()) { setCursor(DYNAMIC_CURSOR); return; }
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
@@ -1920,7 +1932,7 @@ function armRectDrag() {
         return false;
     }
     rectArmed = true;
-    setCursor('crosshair');
+    setCursor(DYNAMIC_CURSOR);
     setStatus('Drag a rectangle on the canvas to place the new layer');
     return true;
 }
@@ -1928,7 +1940,7 @@ function armRectDrag() {
 function beginRectDrag(pos) {
     rectArmed = false;
     rectDrag = { x0: pos.x, y0: pos.y, x1: pos.x, y1: pos.y };
-    setCursor('crosshair');
+    setCursor(DYNAMIC_CURSOR);
 }
 
 function updateRectDrag(pos) {
@@ -3031,7 +3043,7 @@ function ctrlMaskMode() { return keyCtrl && !modalOpen() && !!canvasW; }
 // so canvas edges can be painted without the cursor snapping back to an arrow.
 function syncBrushCursor() {
     const show = (mode === 'mask' || ctrlMaskMode()) && !altPickActive() && !keySpace && !modalOpen()
-        && !bucketPointerActive()
+        && !bucketPointerActive() && !dynaPointerActive()
         && (cursorInside || isDrawing || !!sizeDrag);
     brushCursor.style.display = show ? 'block' : 'none';
 }
