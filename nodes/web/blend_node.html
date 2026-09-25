@@ -775,7 +775,7 @@ const MIN_ROTATE_RADIUS = 12;  // px from the view centre where the pointer angl
 const view = { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true };
 let overlayDpr = 1;
 let viewDrag = null;           // {kind:'zoom'|'rotate'|'pan', sign, startX, startY, startView, anchorDoc, centerDoc, moved}
-let keySpace = false, keyAlt = false, keyCtrl = false;
+let keySpace = false, keyAlt = false, keyCtrl = false, keyShift = false;
 // While Ctrl is held the canvas is in Mask-shortcut mode: the *button* decides the tool, so the
 // cursor has to follow the last button the user pressed. Left = brush, right = eraser, and the
 // right-press is live (see the mousedown handler) rather than only known at paint time.
@@ -791,6 +791,8 @@ let picking = null;            // {doc:{x,y}, clientX, clientY, rgb:[r,g,b]|null
 let sizeDrag = null;           // {tool:'brush'|'eraser', startX, startY, startSize, moved}
 let brushSize = 40;
 let lastX = 0, lastY = 0;
+let strokeStart = null;        // Shift 直线约束的锚点（按下时的落点, canvas 空间）
+let shiftAxisLock = null;      // 'h' | 'v' — 每次按下只判定一次主轴
 let brushMode = 'exponential';
 let brushStrength = 1.0;
 let brushCenter = 1.0;
@@ -3097,8 +3099,8 @@ function syncPaintUI() {
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
-    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release). Click the header to fold the settings.`;
-    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size. Click the header to fold the settings.`;
+    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift holds the stroke to a straight horizontal/vertical line as seen in the view. Click the header to fold the settings.`;
+    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift holds the stroke to a straight horizontal/vertical line as seen in the view. Click the header to fold the settings.`;
     updateMaskTargetLabel();
     updateCursorMode();
 }
@@ -3668,6 +3670,26 @@ function drawStroke(x, y) {
     }
 }
 
+// Shift snaps a live stroke to a straight horizontal/vertical line AS SEEN IN THE VIEWPORT —
+// the user's sense of upright is the screen, so with a rotated view the line is a rotated
+// direction in image space. The delta is judged and clamped in screen space, then mapped back
+// into doc space; the axis is decided once per press from the dominant screen delta, so
+// wobble can never flip a finished run onto the other axis.
+function shiftConstrain(pos) {
+    const c = Math.cos(view.rotation), s = Math.sin(view.rotation);
+    const zx = view.zoom * view.flipX, zy = view.zoom;
+    const ddx = pos.x - strokeStart.x, ddy = pos.y - strokeStart.y;
+    const sx = (ddx * zx) * c - (ddy * zy) * s, sy = (ddx * zx) * s + (ddy * zy) * c;
+    if (!shiftAxisLock && (Math.abs(sx) > 1 || Math.abs(sy) > 1))
+        shiftAxisLock = Math.abs(sx) >= Math.abs(sy) ? 'h' : 'v';
+    if (!shiftAxisLock) return { x: strokeStart.x, y: strokeStart.y };
+    const kx = shiftAxisLock === 'h' ? sx : 0, ky = shiftAxisLock === 'h' ? 0 : sy;
+    return {
+        x: strokeStart.x + (kx * c + ky * s) / zx,
+        y: strokeStart.y + (-kx * s + ky * c) / zy
+    };
+}
+
 function beginStroke() {
     const l = getSelected();
     if (!l) return false;
@@ -3715,6 +3737,7 @@ function beginMaskStroke(pos, erase, label) {
     if (!beginStroke()) { endMaskShortcut(); return false; }
     isDrawing = true;
     lastX = pos.x; lastY = pos.y;
+    strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
     drawDot(pos.x, pos.y);
     livePreviewStroke();
     syncBrushCursor();
@@ -4043,6 +4066,7 @@ viewport.addEventListener('mousedown', e => {
         if (!beginStroke()) return;
         isDrawing = true;
         lastX = pos.x; lastY = pos.y;
+        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
         drawDot(pos.x, pos.y);
         livePreviewStroke();
         syncBrushCursor();
@@ -4094,9 +4118,22 @@ window.addEventListener('mousemove', e => {
     const pos = screenToDoc(sp);
     lastScreen = sp; lastDoc = pos;
     if (isDrawing) {
-        drawStroke(pos.x, pos.y);
+        let dp = pos;
+        if (keyShift && strokeStart) {
+            dp = shiftConstrain(pos);
+            // The ring IS the crosshair while painting (the native cursor is hidden), so it has
+            // to sit on the SNAPPED point — otherwise the line would run somewhere other than
+            // where the user is aiming.
+            const scr = docToScreen(dp);
+            const vr = viewport.getBoundingClientRect();
+            brushCursor.style.left = (vr.left + scr.x) + 'px';
+            brushCursor.style.top = (vr.top + scr.y) + 'px';
+        } else {
+            shiftAxisLock = null;
+        }
+        drawStroke(dp.x, dp.y);
         livePreviewStroke();
-        lastX = pos.x; lastY = pos.y;
+        lastX = dp.x; lastY = dp.y;
         return;
     }
     if (viewDrag) { updateViewDrag(e, sp); return; }
@@ -4148,7 +4185,7 @@ window.addEventListener('blur', () => {
     sizeDrag = null;
     modDragging = false;        // 拖拽中切走:预览保持待定,指针不再驱动矩形
     sizeHud.style.display = 'none';
-    keySpace = keyAlt = false;
+    keySpace = keyAlt = keyShift = false;
     setKeyCtrl(false);          // a tab switch swallows the keyup, so the tint would stay stuck on
     syncBrushCursor();
     refreshCursor();
@@ -4182,6 +4219,7 @@ viewport.addEventListener('touchstart', e => {
         if (!beginStroke()) return;
         isDrawing = true;
         lastX = pos.x; lastY = pos.y;
+        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
         drawDot(pos.x, pos.y);
         livePreviewStroke();
     } else {
@@ -5482,6 +5520,7 @@ window.addEventListener('keydown', e => {
     const l = getSelected();
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
+    if (e.key === 'Shift') { keyShift = true; return; }
     if (e.key === 'Control' || e.metaKey) { setKeyCtrl(true); return; }
     if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('zoom'); return; }
     if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('pan'); return; }
@@ -5527,6 +5566,7 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
     if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
     if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
+    if (e.key === 'Shift') { keyShift = false; return; }
     if (e.key === 'Control' || e.key === 'Meta') { setKeyCtrl(false); return; }
 });
 
