@@ -271,6 +271,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .fold-caret::before { content: '\25B8'; font-size: 9px; }
 .tool-section.foldable:not(.collapsed) .fold-caret { transform: rotate(90deg); }
 .tool-section.foldable.collapsed .tool-body { display: none; }
+/* The brush colour picker docks into the header, right after the Brush label:
+   margin-right:auto absorbs the free space so the ring swatch stays right-aligned. */
+#brushColorRow { flex: 0 0 auto; gap: 4px; margin-right: auto; }
+#brushColorRow label { min-width: 0; }
+#brushColorRow span { min-width: 0; }
+#brushColorRow input[type="color"] { width: 26px; height: 18px; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
@@ -488,6 +494,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div class="panel-section tool-section foldable collapsed" id="brushSection">
                 <div class="panel-head">
                     <div class="panel-label" id="brushLabel"><span class="fold-caret"></span>Brush <span class="tool-key">B</span></div>
+                    <div class="control-row" id="brushColorRow"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
                     <span class="ring-swatch" id="brushRingSwatch" title="Paints the decal colour / brightens the mask"></span>
                 </div>
                 <div class="tool-body">
@@ -496,7 +503,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                         <button class="mini-btn brush-mode-btn" id="brushLinear" title="Linear falloff from Center to Edge">Linear</button>
                         <button class="mini-btn brush-mode-btn active" id="brushExpo" title="Exponential falloff shaped by Center, Edge and Gamma">Exponential</button>
                     </div>
-                    <div class="control-row" id="brushColorRow" style="display:none;"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
                     <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0" title="Opacity of a single pass (0 = nothing, 1 = full)"><span id="brushStrengthValue">1.00</span></div>
                     <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0" title="Inner share of the radius that stays at full strength (Linear / Exponential)"><span id="brushCenterValue">1.00</span></div>
                     <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="brushEdgeValue">0.00</span></div>
@@ -3059,7 +3065,6 @@ function syncPaintUI() {
     document.getElementById('maskResetBtn').title = decal
         ? 'Clear this layer\'s decal (the painted colour)'
         : 'Reset this layer\'s mask to fully visible';
-    document.getElementById('brushColorRow').style.display = decal ? 'flex' : 'none';
     maskDecalLabel.textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
     maskDecalLabel.title = maskLayerSel
@@ -4387,6 +4392,8 @@ for (const id of ['brushSection', 'eraserSection']) {
     const section = document.getElementById(id);
     section.querySelector('.panel-head').addEventListener('click', () => section.classList.toggle('collapsed'));
 }
+// The colour picker lives in the Brush header now — opening it must not fold the section.
+document.getElementById('brushColorRow').addEventListener('click', e => e.stopPropagation());
 
 document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
 document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
