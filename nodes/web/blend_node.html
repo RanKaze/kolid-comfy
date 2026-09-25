@@ -824,6 +824,7 @@ try { rasterDrop = localStorage.getItem(RASTER_DROP_KEY) === '1'; } catch (e) { 
 // layers — nothing is copied, so it costs nothing and cannot go stale mid-drag.
 let modDrag = null;            // {handle, anchor:{x,y}, baseW, baseH, startLayers:Map(id→transform), startCustom, moved}
 let modDragging = false;       // 左键按住期间才为 true:松开后预览保持待定,但不再跟随指针
+let modWasAutoFit = false;     // 进入 canvasModify 前的 autoFit 值(Esc/空提交时还原;提交后保持手动视图)
 // Canvas Modify 预览期的画布 doc 原点偏移：左/上边拖拽时新矩形的左上角不在 (0,0)，
 // canvas 元素与 overlay 都按它平移（applyView / canvasHandlePoints / drawMaskTint 消费）。
 // 右/下拖拽恒为 {0,0}；apply 时折进视图 pan，cancel/重新进入时归零。
@@ -3239,6 +3240,11 @@ function startCanvasModify() {
     modSnapshot = snapshotState();
     modDrag = null;
     modOrigin = { x: 0, y: 0 };
+    // autoFit 在拖拽/提交期间必须关掉：拖拽中虽然没人 refit，但 Enter 走 layoutCanvas()
+    // 会触发 fitView 把新画布重新缩放居中 —— 每次确认视图都跳一下。取消时由
+    // modWasAutoFit 还原；提交后保留手动视图（画布已随拖拽定型，不该再被 fit 打断）。
+    modWasAutoFit = view.autoFit;
+    view.autoFit = false;
     setMode('canvasModify');
     setStatus('Drag the canvas border — Enter applies, Esc cancels');
 }
@@ -3329,8 +3335,8 @@ function applyCanvasModify() {
     modDrag = null;
     modDragging = false;
     modSnapshot = null;
-    if (!d) { modOrigin = { x: 0, y: 0 }; applyView(); setMode('none'); return; }
-    if (!d.moved) { modOrigin = { x: 0, y: 0 }; applyView(); setStatus('Canvas unchanged'); setMode('none'); return; }
+    if (!d) { modOrigin = { x: 0, y: 0 }; view.autoFit = modWasAutoFit; applyView(); setMode('none'); return; }
+    if (!d.moved) { modOrigin = { x: 0, y: 0 }; view.autoFit = modWasAutoFit; applyView(); setStatus('Canvas unchanged'); setMode('none'); return; }
     // 记录预览期的原点偏移：mask 裁剪与视图收锚都要用，然后立刻归零
     // （后续 layoutCanvas / anchorView 都按新画布原点 (0,0) 计算）。
     const ox = modOrigin.x, oy = modOrigin.y;
@@ -3374,6 +3380,7 @@ function cancelCanvasModify() {
     modOrigin = { x: 0, y: 0 };   // 先归零，restoreState 的重渲染才是未偏移的原始状态
     if (modSnapshot) restoreState(modSnapshot);
     modSnapshot = null;
+    view.autoFit = modWasAutoFit; // restoreState 不含视图:autoFit 在 restoreState 之后还原,避免里面 layoutCanvas 触发 fitView
     applyView();
     setMode('none');
     setStatus(wasMoved ? 'Canvas Modify cancelled' : 'Canvas Modify closed');
