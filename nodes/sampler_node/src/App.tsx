@@ -416,6 +416,9 @@ const App: React.FC = () => {
           width: body.width,
           height: body.height,
           mask: body.mask,
+          // detailer：blendCanvas 已合成好的 PNG dataURL（与预览同源、直通 alpha）。
+          // 后端直接拿它当管线输入，跳过按 layers 的二次合成。漏转发 = 静默回退。
+          composite: body.composite ?? null,
           extra_prompt: body.extra_prompt,
           // Run 设置（以及 ▶ 预设胶囊）选的 preset：决定后端跑哪条 block 链，
           // Enable Mask 总闸也随这条链解析。之前漏转发 —— 对话框的选择被静默丢弃。

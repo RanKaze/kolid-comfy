@@ -220,8 +220,10 @@ def composite_layers(layers, canvas_w, canvas_h):
     结果全部不透明时返回 3 通道，否则返回 4 通道。
 
     ⚠️ 返回值是**预乘 alpha**（`rgb` 已经乘过自己的 `alpha`），不是直通 alpha —— 
-    这是刻意的：整个栈都在预乘空间里做 source-over，而下游消费方（pipeline 的
-    `image`、把 alpha 乘回去的绘制方）都按预乘语义读它。
+    这是刻意的：整个栈都在预乘空间里做 source-over，插值/叠加在预乘空间才无黑边。
+    注意：管线侧（VAE、打标、vision 塔等）约定的是**直通 alpha**，所以
+    `compose_blend` 在把结果交给它们之前会做一次 premul→straight 逆转；
+    直接调用本函数的消费方必须自己按预乘语义读。
     只有「全部不透明」（`alpha == 1`）时两者等价，此时直接返回 3 通道 RGB。
 
     **不要**在这里除以 alpha 得到「直通 RGBA」。那是以前的写法，也是「蒙版覆盖率
