@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
-import DebugModal from './DebugModal';
+import DebugModal, { DbgIcon } from './DebugModal';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
 const tabActionBtn: React.CSSProperties = {
@@ -455,7 +455,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       style={styles.debugBtn}
                       title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
                       onClick={() => setShowDebug(true)}
-                    >🐞 Debug</button>
+                    ><DbgIcon name="bug" size={15} /> Debug</button>
                   </div>
                   <div style={styles.contextPreviewWrap}>
                   {blendPreview ? (
