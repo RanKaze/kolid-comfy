@@ -793,6 +793,8 @@ let brushSize = 40;
 let lastX = 0, lastY = 0;
 let strokeStart = null;        // Shift 直线约束的锚点（按下时的落点, canvas 空间）
 let shiftAxisLock = null;      // 'h' | 'v' — 每次按下只判定一次主轴
+let strokeMoved = false;       // 本次按下是否真的运过笔（区分 Shift 短按=连线点击）
+let shiftAnchor = null;        // 上一个落笔终点 {x,y,layerId,target} — Shift+点击从它连线
 let brushMode = 'exponential';
 let brushStrength = 1.0;
 let brushCenter = 1.0;
@@ -2288,6 +2290,10 @@ function adoptMaskSurface(decal) {
 // arriving, the top entry is overwritten instead of pushed, so holding an arrow key is one
 // undo step rather than sixty.
 function pushHistory(key) {
+    // ANY committed action kills a pending Shift-connect chain: an anchor is only ever valid
+    // for the immediately previous painting gesture (bucket fills, transform drags, generated
+    // write-backs ... all land here), and commitStroke re-arms its own anchor AFTER this call.
+    shiftAnchor = null;
     if (historyReplaying) return;
     const coalesce = key && key === lastActionKey && undoStack.length > 1;
     if (coalesce) undoStack[undoStack.length - 1] = snapshotState();
@@ -2336,6 +2342,7 @@ function syncHistoryUI() {
 function undoAction() {
     if (modalOpen() || drag || isDrawing || viewDrag) return;        // never rewind mid-gesture
     if (undoStack.length <= 1) { setStatus('Nothing to undo'); return; }
+    shiftAnchor = null;                                              // rewinding is an interruption too
     lastActionKey = null;
     redoStack.push(undoStack.pop());
     const s = undoStack[undoStack.length - 1];
@@ -2347,6 +2354,7 @@ function undoAction() {
 function redoAction() {
     if (modalOpen() || drag || isDrawing || viewDrag) return;
     if (!redoStack.length) { setStatus('Nothing to redo'); return; }
+    shiftAnchor = null;
     lastActionKey = null;
     const s = redoStack.pop();
     undoStack.push(s);
@@ -3099,8 +3107,8 @@ function syncPaintUI() {
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
-    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift holds the stroke to a straight horizontal/vertical line as seen in the view. Click the header to fold the settings.`;
-    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift holds the stroke to a straight horizontal/vertical line as seen in the view. Click the header to fold the settings.`;
+    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to fold the settings.`;
+    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to fold the settings.`;
     updateMaskTargetLabel();
     updateCursorMode();
 }
@@ -3737,7 +3745,7 @@ function beginMaskStroke(pos, erase, label) {
     if (!beginStroke()) { endMaskShortcut(); return false; }
     isDrawing = true;
     lastX = pos.x; lastY = pos.y;
-    strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
+    strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null; strokeMoved = false;
     drawDot(pos.x, pos.y);
     livePreviewStroke();
     syncBrushCursor();
@@ -3794,7 +3802,10 @@ function commitStroke() {
     if (l) { refreshMaskThumb(l); refreshDecalThumb(l); }
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
-    pushHistory();               // one stroke = one undo step
+    pushHistory();               // one stroke = one undo step (also clears any old anchor)
+    // Only a Shift TAP may (re-)arm the connect chain — a plain or Shift DRAG in between, a
+    // bucket fill or an undo are all interruptions just the same.
+    if (keyShift && !strokeMoved && l) shiftAnchor = { x: lastX, y: lastY, layerId: l.id, target: paintTarget };
 }
 
 // ==================== Bucket（油漆桶,只绘 decal） ====================
@@ -4066,7 +4077,7 @@ viewport.addEventListener('mousedown', e => {
         if (!beginStroke()) return;
         isDrawing = true;
         lastX = pos.x; lastY = pos.y;
-        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
+        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null; strokeMoved = false;
         drawDot(pos.x, pos.y);
         livePreviewStroke();
         syncBrushCursor();
@@ -4134,6 +4145,7 @@ window.addEventListener('mousemove', e => {
         drawStroke(dp.x, dp.y);
         livePreviewStroke();
         lastX = dp.x; lastY = dp.y;
+        if (Math.hypot(dp.x - strokeStart.x, dp.y - strokeStart.y) > 1.5) strokeMoved = true;
         return;
     }
     if (viewDrag) { updateViewDrag(e, sp); return; }
@@ -4150,7 +4162,24 @@ window.addEventListener('mouseup', e => {
     // pointer (a fresh press on a handle starts a new drag from the tentative geometry).
     if (modDragging) modDragging = false;
     if (viewDrag) endViewDrag(e);
-    if (isDrawing) { commitStroke(); isDrawing = false; syncBrushCursor(); }
+    if (isDrawing) {
+        // Shift + a press that never moved = a connect tap: lay a straight segment from the
+        // last committed end point into this tap (PS semantics), inside the SAME stroke so the
+        // whole click-to-click chain stays one undo step per link. The anchor only counts for
+        // the layer+surface it was painted on — switching either starts a fresh chain.
+        if (keyShift && !strokeMoved && shiftAnchor && getSelected()
+            && shiftAnchor.layerId === selectedId && shiftAnchor.target === paintTarget) {
+            const a = shiftAnchor;
+            drawDot(a.x, a.y);
+            lastX = a.x; lastY = a.y;
+            drawStroke(strokeStart.x, strokeStart.y);
+            livePreviewStroke();
+            lastX = strokeStart.x; lastY = strokeStart.y;
+        }
+        commitStroke();
+        isDrawing = false;
+        syncBrushCursor();
+    }
     if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
     if (drag) {
         const target = getLayer(drag.layerId);
@@ -4219,7 +4248,7 @@ viewport.addEventListener('touchstart', e => {
         if (!beginStroke()) return;
         isDrawing = true;
         lastX = pos.x; lastY = pos.y;
-        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null;
+        strokeStart = { x: pos.x, y: pos.y }; shiftAxisLock = null; strokeMoved = false;
         drawDot(pos.x, pos.y);
         livePreviewStroke();
     } else {
