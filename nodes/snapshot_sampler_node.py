@@ -532,11 +532,14 @@ class SnapshotDetailerSamplerServer:
         resolved = []
         for spec in layer_specs:
             src = spec.get('src')
-            # src 为空 = 前端的空白图层（刻意设计），等价于一张全透明图，不报错；
-            # 只有「有数据但解码失败」才算引用损坏。
+            # src 为空 = 前端的空白图层（刻意设计），等价于一张全透明图，不报错。
+            # 前端已保证只发送可解码的 data URL（不可信的 src 会先用图层像素重编码
+            # 成 PNG）；这里再兜底：万一仍解码失败，按空白图层继续合成并打日志，
+            # 绝不让整个 Blend/Run 动作因单张图层报错中断。
             tensor = decode_image_dataurl(src) if src else None
             if src and tensor is None:
-                raise LookupError('Image not found: a layer image failed to decode — re-drop it onto the canvas')
+                print(f"[SnapshotDetailerSampler] layer image failed to decode "
+                      f"({len(src)} chars, head={src[:48]!r}) — treating as a transparent blank layer")
             if tensor is not None and tensor.dim() == 4:
                 tensor = tensor[0]
             resolved.append({
