@@ -4392,8 +4392,20 @@ function layerSpecs() {
     // 图层自带像素（dataURL）直达后端，不引用任何图池 id。
     // 空白图层刻意没有 src —— 发送时把它的透明画布编码成 PNG（体积极小），
     // 后端才能拿到图层自身的像素框，mask/decal 在图层空间里解码才不会错位。
+    // 只有 PNG/JPEG/WebP data URL 被原样转发（后端 PIL 必定可解）；其余任何 src
+    // （AVIF/HEIC/SVG、blob:/http URL、残缺的 'data:,'）一律用图层 <img> 重编码成
+    // PNG —— 前端显示得出来就送得出去，后端不会再收到解不开的图。
+    const TRUSTED_SRC = s => typeof s === 'string'
+        && (s.startsWith('data:image/png') || s.startsWith('data:image/jpeg') || s.startsWith('data:image/webp'));
+    const toPng = img => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth || img.width;
+        c.height = img.naturalHeight || img.height;
+        c.getContext('2d').drawImage(img, 0, 0);
+        return c.toDataURL('image/png');
+    };
     return layers.slice().reverse().map(l => {
-        const src = l.src || (l.img ? l.img.toDataURL('image/png') : '');
+        const src = TRUSTED_SRC(l.src) ? l.src : (l.img ? toPng(l.img) : '');
         return {
             src,
         transform: isRasterLayer(l)
