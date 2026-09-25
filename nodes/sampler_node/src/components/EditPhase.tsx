@@ -798,14 +798,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <label style={styles.paramLabel}>End Step</label>
                           <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.end_step_rate} onChange={e => updateBlockParam(block.id, 'end_step_rate', parseFloat(e.target.value))} />
                         </div>
+                        {/* Enable Edit 放在 Enable Text Generate 前面（用户指定顺序） */}
+                        <div style={styles.paramRow} title="Ref images come from the Extra Prompt text (<image_id:...> tokens inserted from the Blend workbench staging strip). Context image is always <image 1>.">
+                          <label style={styles.paramLabel}>Enable Edit</label>
+                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
+                        </div>
                         <div style={styles.paramRow} title="块级 Generate Text 开关（默认关）：仅当上游 pipeline 也启用了 Generate Text（PipelineEnableGenerateTextNode）时才生效；生成结果只作用于当前块，不向后续块传递。">
                           <label style={styles.paramLabel}>Enable Text Generate</label>
                           <IOSToggle checked={dp.enable_text_generate ?? false} onChange={v => updateBlockParam(block.id, 'enable_text_generate', v)} />
-                        </div>
-                        {/* Enable Edit 紧跟在 Enable Text Generate 后面（用户指定顺序） */}
-                        <div style={styles.paramRow}>
-                          <label style={styles.paramLabel}>Enable Edit</label>
-                          <IOSToggle checked={dp.enable_edit} onChange={v => updateBlockParam(block.id, 'enable_edit', v)} />
                         </div>
                         {(dp.enable_text_generate ?? false) && (
                           <>
@@ -875,12 +875,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                             {/* Ref Image 不再逐块手选：Blend 工作台 Extra Prompt 文本里的
                                 <image_id:...> 标记在 Run 时统一解析（context 图恒为
                                 <image 1>，引用图按出现顺序 = <image 2>+），所有 detailer
-                                block 共用这一组参考图。 */}
-                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', lineHeight: 1.6 }}>
-                              Ref images come from the Extra Prompt text (<code>{'<image_id:...>'}</code> tokens
-                              inserted from the Blend workbench staging strip). Context image is always{' '}
-                              <code>{'<image 1>'}</code>.
-                            </div>
+                                block 共用这一组参考图。说明在 Enable Edit 的 tooltip 里。 */}
                           </div>
                         )}
                       </>);

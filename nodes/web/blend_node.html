@@ -200,15 +200,15 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Extra Prompt（contenteditable）：文字与图片 chip 混排，样式贴齐上面的 input。 */
 #extraPrompt { flex: 1; min-width: 60px; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12);
     border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none;
-    max-height: 78px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+    max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
 #extraPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 #extraPrompt.is-empty::before { content: attr(data-placeholder); color: rgba(255,255,255,0.32); pointer-events: none; }
 /* chip = 一张被引用图片的缩略图。contenteditable=false 让它在编辑时是**原子**的：
    光标不能进入内部，退格整块删除（见 keydown 处理）。 */
-#extraPrompt .prompt-chip { display: inline-flex; align-items: center; vertical-align: -4px; height: 20px; max-width: 132px;
-    padding: 0 3px; margin: 0 2px; border-radius: 5px; background: rgba(10,132,255,0.22);
+#extraPrompt .prompt-chip { display: inline-flex; align-items: center; vertical-align: -14px; height: 44px; max-width: 264px;
+    padding: 0 3px; margin: 0 2px; border-radius: 8px; background: rgba(10,132,255,0.22);
     border: 0.5px solid rgba(10,132,255,0.65); overflow: hidden; user-select: none; cursor: default; }
-#extraPrompt .prompt-chip img { height: 16px; width: auto; display: block; border-radius: 3px; }
+#extraPrompt .prompt-chip img { height: 36px; width: auto; display: block; border-radius: 5px; }
 /* 引用失效（图已从工作区移除）→ 退回可读文本，而不是一个空洞的方块。 */
 #extraPrompt .prompt-chip.chip-broken { font-size: 10px; color: #ff9f0a; padding: 0 5px; }
 .tb-btn { border: none; border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; color: #fff;
@@ -4344,8 +4344,12 @@ document.getElementById('redoBtn').addEventListener('click', redoAction);
 // its own alpha channel), the canvas size, and the Mask layer's rasterised coverage.
 function layerSpecs() {
     // 图层自带像素（dataURL）直达后端，不引用任何图池 id。
-    return layers.slice().reverse().map(l => ({
-        src: l.src,
+    // 空白图层刻意没有 src —— 发送时把它的透明画布编码成 PNG（体积极小），
+    // 后端才能拿到图层自身的像素框，mask/decal 在图层空间里解码才不会错位。
+    return layers.slice().reverse().map(l => {
+        const src = l.src || (l.img ? l.img.toDataURL('image/png') : '');
+        return {
+            src,
         transform: isRasterLayer(l)
             // A raster layer's stored transform is transient drag state — the backend always
             // sees canvas-sized pixels at the identity.
@@ -4358,7 +4362,8 @@ function layerSpecs() {
         visible: !!l.visible,
         mask: l.mask ? l.mask.toDataURL('image/png') : null,
         decal: l.decal ? l.decal.toDataURL('image/png') : null,
-    }));
+        };
+    });
 }
 
 function syncActionButtons() {
@@ -6012,7 +6017,11 @@ extraPromptInput.addEventListener('keydown', e => {
     const sel = window.getSelection && window.getSelection();
     if (sel) {
         const r = document.createRange();
-        if (prev && prev.parentNode) r.setStartAfter(prev);
+        // 光标落在删除点（prev 与 next 之间）。相邻 chip 时中间的零宽锚点会被
+        // 一并吃掉，prev 可能已不在 DOM —— 此时必须挂在 next 上，否则会退到
+        // selectNodeContents 的 collapse(start)，光标跳到整个文本最开头。
+        if (next && next.parentNode) r.setStartBefore(next);
+        else if (prev && prev.parentNode) r.setStartAfter(prev);
         else { r.selectNodeContents(extraPromptInput); r.collapse(true); }
         r.collapse(true);
         sel.removeAllRanges();
