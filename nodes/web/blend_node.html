@@ -197,6 +197,20 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none; color-scheme: dark; }
 #toolbar input[type="text"]:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 #toolbar input[type="text"]::placeholder { color: rgba(255,255,255,0.32); }
+/* Extra Prompt（contenteditable）：文字与图片 chip 混排，样式贴齐上面的 input。 */
+#extraPrompt { flex: 1; min-width: 60px; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12);
+    border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none;
+    max-height: 78px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+#extraPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
+#extraPrompt.is-empty::before { content: attr(data-placeholder); color: rgba(255,255,255,0.32); pointer-events: none; }
+/* chip = 一张被引用图片的缩略图。contenteditable=false 让它在编辑时是**原子**的：
+   光标不能进入内部，退格整块删除（见 keydown 处理）。 */
+#extraPrompt .prompt-chip { display: inline-flex; align-items: center; vertical-align: -4px; height: 20px; max-width: 132px;
+    padding: 0 3px; margin: 0 2px; border-radius: 5px; background: rgba(10,132,255,0.22);
+    border: 0.5px solid rgba(10,132,255,0.65); overflow: hidden; user-select: none; cursor: default; }
+#extraPrompt .prompt-chip img { height: 16px; width: auto; display: block; border-radius: 3px; }
+/* 引用失效（图已从工作区移除）→ 退回可读文本，而不是一个空洞的方块。 */
+#extraPrompt .prompt-chip.chip-broken { font-size: 10px; color: #ff9f0a; padding: 0 5px; }
 .tb-btn { border: none; border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; color: #fff;
     background: rgba(255,255,255,0.12); transition: background 0.15s ease, transform 0.15s ease; white-space: nowrap; }
 .tb-btn:hover:not(:disabled) { background: rgba(255,255,255,0.2); }
@@ -395,8 +409,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
         <div id="toolbar">
             <div id="toolbarRow">
-                <input type="text" id="extraPrompt" autocomplete="off" spellcheck="false"
-                       placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert <image_id:...> at the cursor.">
+                <!-- Extra Prompt 是 contenteditable：文字与 <image_id:xxx> 的**图片 chip** 混排。
+                     读回文本时 chip 序列化成 <image_id:xxx>；后端再解码成 <image N>。 -->
+                <div id="extraPrompt" class="is-empty" contenteditable="true" role="textbox" spellcheck="false"
+                     data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
                 <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The composite is also archived into the staging pool.">Blend</button>
                 <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
                 <div class="tb-pill">
@@ -5247,9 +5263,12 @@ window.addEventListener('keydown', e => {
     }
     const tag = (e.target && e.target.tagName || '').toLowerCase();
     const type = (e.target && e.target.type) || '';
-    if (tag === 'textarea' || tag === 'select' || (tag === 'input' && type !== 'range' && type !== 'checkbox')) return;
+    // Extra Prompt 是 contenteditable（不是 <input>）：同样要当文本框放行，否则在
+    // 里面打字会触发视图快捷键。
+    const editable = !!(e.target && e.target.isContentEditable);
+    if (tag === 'textarea' || tag === 'select' || editable || (tag === 'input' && type !== 'range' && type !== 'checkbox')) return;
     // Sliders and checkboxes keep their own key handling (arrows, space, enter).
-    if ((tag === 'input' || tag === 'button') && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    if ((tag === 'input' || tag === 'button' || editable) && [' ', 'Spacebar', 'Enter', 'Delete', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     // Undo / redo — Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z too, the other common redo binding).
     // Text fields returned above, so their native undo keeps working.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'z' || e.key === 'Z' || e.key === 'y' || e.key === 'Y')) {
@@ -5810,46 +5829,212 @@ function incomingItems(d) {
 // 点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>（无焦点则追加末尾）。
 let stagingItems = [];
 
-// 记住 Extra Prompt 最近的光标位置：点击工作区条目会把输入框焦点抢走，
-// 所以必须在 blur 前把 selection 存下来，插入时恢复。
-let extraPromptCaret = null;
-function trackExtraPromptCaret() {
-    if (document.activeElement === extraPromptInput) {
-        extraPromptCaret = { start: extraPromptInput.selectionStart, end: extraPromptInput.selectionEnd };
+// ==================== Extra Prompt：文字与图片 chip 混排 ====================
+// 输入框是 contenteditable：<image_id:xxx> 显示成一张**不可编辑**的缩略图 chip，
+// 读回文本时再序列化成 <image_id:xxx>。外部读写仍一律走 .value —— 下面用
+// defineProperty 把 .value 桥到 DOM 上，run payload / .cud 存取一行都不用改。
+const IMAGE_ID_TOKEN = /<image_id:([^>\s]+)>/g;
+const IMAGE_ID_ONE = /^<image_id:([^>\s]+)>$/;
+const ZWSP = '\u200B';      // chip 后的零宽锚点：让光标能停在图片后面继续打字
+let contextChipSrc = '';    // context 图最近一次缩略图（Context 卡片预览的产物）
+
+function chipSrcForId(id) {
+    if (id === 'context') return contextChipSrc;
+    const s = stagingItems.find(it => it.id === id);
+    return s ? s.src : '';
+}
+
+function makeImageChip(id, src) {
+    const chip = document.createElement('span');
+    chip.className = 'prompt-chip';
+    chip.contentEditable = 'false';     // 原子：退格整块删，光标进不去内部
+    chip.dataset.imageId = id;
+    chip.title = `<image_id:${id}>`;
+    if (src) {
+        const im = document.createElement('img');
+        im.src = src;
+        im.alt = id;
+        im.draggable = false;
+        chip.appendChild(im);
+    } else {
+        // 引用失效（图已不在工作区）→ 退回可读文本，而不是一个空洞的方块。
+        chip.classList.add('chip-broken');
+        chip.textContent = `<image_id:${id}>`;
     }
+    return chip;
+}
+
+// 文本 → DOM（.value 的 setter）
+function renderExtraPrompt(text) {
+    const host = extraPromptInput;
+    host.textContent = '';
+    IMAGE_ID_TOKEN.lastIndex = 0;
+    let last = 0, m;
+    while ((m = IMAGE_ID_TOKEN.exec(text || ''))) {
+        if (m.index > last) host.appendChild(document.createTextNode(text.slice(last, m.index)));
+        host.appendChild(makeImageChip(m[1], chipSrcForId(m[1])));
+        last = IMAGE_ID_TOKEN.lastIndex;
+    }
+    if (last < (text || '').length) host.appendChild(document.createTextNode(text.slice(last)));
+    syncExtraPromptEmpty();
+}
+
+// DOM → 文本（.value 的 getter）。零宽锚点不算内容。
+function serializeExtraPrompt() {
+    let out = '';
+    for (const node of extraPromptInput.childNodes) {
+        if (node.nodeType === 3) { out += node.nodeValue.replace(/\u200B/g, ''); continue; }
+        if (node.nodeType !== 1) continue;
+        const id = node.dataset && node.dataset.imageId;
+        if (id) { out += `<image_id:${id}>`; continue; }
+        if (node.tagName === 'BR') { out += '\n'; continue; }
+        out += (node.textContent || '').replace(/\u200B/g, '');
+    }
+    return out;
+}
+
+function syncExtraPromptEmpty() {
+    extraPromptInput.classList.toggle('is-empty', serializeExtraPrompt().trim() === '');
+}
+
+// 工作区条目变化后刷新已有 chip 的缩略图（失效引用退回文字态）。只换 chip 内部
+// 内容、不重建节点 —— 光标停在正文里时不会被打断。
+function refreshPromptChips() {
+    for (const chip of extraPromptInput.querySelectorAll('.prompt-chip')) {
+        const id = chip.dataset.imageId;
+        if (!id) continue;
+        const src = chipSrcForId(id);
+        const im = chip.querySelector('img');
+        if (src) {
+            chip.classList.remove('chip-broken');
+            if (im) { if (im.src !== src) im.src = src; }
+            else {
+                chip.textContent = '';
+                const n = document.createElement('img');
+                n.src = src; n.alt = id; n.draggable = false;
+                chip.appendChild(n);
+            }
+        } else if (im || !chip.classList.contains('chip-broken')) {
+            chip.classList.add('chip-broken');
+            chip.textContent = `<image_id:${id}>`;
+        }
+    }
+}
+
+// .value 仍是唯一读写口：读 = 序列化，写 = 重新渲染。
+Object.defineProperty(extraPromptInput, 'value', {
+    get: serializeExtraPrompt,
+    set: renderExtraPrompt,
+    configurable: true,
+});
+
+// 记住最近的光标（Range）：点击工作区条目会抢焦点，必须在 blur 前存下来。
+let extraPromptRange = null;
+function trackExtraPromptCaret() {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const r = sel.getRangeAt(0);
+    if (extraPromptInput.contains(r.startContainer)) extraPromptRange = r.cloneRange();
 }
 for (const ev of ['keyup', 'click', 'select', 'focus', 'input']) {
     extraPromptInput.addEventListener(ev, trackExtraPromptCaret);
 }
 extraPromptInput.addEventListener('blur', trackExtraPromptCaret);
+extraPromptInput.addEventListener('input', syncExtraPromptEmpty);
+
+function currentExtraPromptRange() {
+    const sel = window.getSelection && window.getSelection();
+    if (document.activeElement === extraPromptInput && sel && sel.rangeCount
+        && extraPromptInput.contains(sel.anchorNode)) return sel.getRangeAt(0);
+    return extraPromptRange;
+}
+
+function insertNodeAtCaret(node) {
+    const sel = window.getSelection && window.getSelection();
+    let range = currentExtraPromptRange();
+    extraPromptInput.focus();
+    if (!range || !extraPromptInput.contains(range.startContainer)) {
+        range = document.createRange();
+        range.selectNodeContents(extraPromptInput);
+        range.collapse(false);          // 没有记忆光标 = 追加到末尾
+    }
+    range.deleteContents();
+    range.insertNode(node);
+    // chip 后面补一个零宽锚点，否则光标没法停在图后面继续打字。
+    const anchor = document.createTextNode(ZWSP);
+    node.parentNode.insertBefore(anchor, node.nextSibling);
+    const after = document.createRange();
+    after.setStart(anchor, 1);
+    after.collapse(true);
+    if (sel) { sel.removeAllRanges(); sel.addRange(after); }
+    extraPromptRange = after.cloneRange();
+    syncExtraPromptEmpty();
+}
 
 function insertTextAtCaret(text) {
-    // 优先用当前光标；输入框失焦时用记忆中的光标；都没有 = 追加到末尾。
-    const token = text;
-    let pos = extraPromptInput.value.length;
-    let selEnd = pos;
-    if (document.activeElement === extraPromptInput && extraPromptInput.selectionStart != null) {
-        pos = extraPromptInput.selectionStart;
-        selEnd = extraPromptInput.selectionEnd;
-    } else if (extraPromptCaret && extraPromptCaret.start != null) {
-        pos = Math.min(extraPromptCaret.start, extraPromptInput.value.length);
-        selEnd = Math.min(extraPromptCaret.end ?? pos, extraPromptInput.value.length);
-    }
-    const value = extraPromptInput.value;
-    extraPromptInput.value = value.slice(0, pos) + token + value.slice(selEnd);
-    const caret = pos + token.length;
-    extraPromptCaret = { start: caret, end: caret };
-    extraPromptInput.focus();
-    extraPromptInput.setSelectionRange(caret, caret);
+    const one = IMAGE_ID_ONE.exec(text);
+    insertNodeAtCaret(one ? makeImageChip(one[1], chipSrcForId(one[1])) : document.createTextNode(text));
 }
 
 function insertImageIdToken(id) {
     insertTextAtCaret(`<image_id:${id}>`);
 }
 
-// 固定卡片：Context Image（<image 1>）。Enable Edit 下 context 图永远作为 image 1
-// 存在（即使不插进文本 —— 编号 <image 2>+ 不受影响），点击只是把 <image 1> 写进
-// Extra Prompt 的手段。不可移除：没有 ✕，也不绑任何 staging 条目。
+// 退格 / Delete 落在 chip 旁边时整块删掉它 —— 否则只会吃掉零宽锚点，留下一个
+// 看不见却仍在文本里的标记（或光标钻进 chip 内部）。
+function chipBesideCaret(back) {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0);
+    const c = r.startContainer;
+    let node = null;
+    if (c.nodeType === 3) {
+        const before = c.nodeValue.slice(0, r.startOffset).replace(/\u200B/g, '');
+        const after = c.nodeValue.slice(r.startOffset).replace(/\u200B/g, '');
+        if (back && before === '') node = c.previousSibling;
+        else if (!back && after === '') node = c.nextSibling;
+    } else if (c === extraPromptInput) {
+        node = back ? c.childNodes[r.startOffset - 1] : c.childNodes[r.startOffset];
+    }
+    return (node && node.nodeType === 1 && node.dataset && node.dataset.imageId) ? node : null;
+}
+
+extraPromptInput.addEventListener('keydown', e => {
+    if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+    const chip = chipBesideCaret(e.key === 'Backspace');
+    if (!chip) return;                  // 普通字符交给浏览器
+    e.preventDefault();
+    const prev = chip.previousSibling, next = chip.nextSibling;
+    chip.remove();
+    // 顺手吃掉紧邻的零宽锚点，否则留下一个看不见的空文本节点。
+    const anchor = e.key === 'Backspace' ? prev : next;
+    if (anchor && anchor.nodeType === 3 && anchor.nodeValue.replace(/\u200B/g, '') === '') anchor.remove();
+    const sel = window.getSelection && window.getSelection();
+    if (sel) {
+        const r = document.createRange();
+        if (prev && prev.parentNode) r.setStartAfter(prev);
+        else { r.selectNodeContents(extraPromptInput); r.collapse(true); }
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+        extraPromptRange = r.cloneRange();
+    }
+    syncExtraPromptEmpty();
+});
+
+// 粘贴只吃纯文本：否则一段 HTML 会把别人的 <img> 与样式带进来，chip 语义就乱了。
+extraPromptInput.addEventListener('paste', e => {
+    e.preventDefault();
+    const cb = e.clipboardData || window.clipboardData;
+    const text = cb ? cb.getData('text') : '';
+    if (text) insertTextAtCaret(text);
+});
+
+// 固定卡片：Context Image。Enable Edit 下 context 图永远作为 image 1 存在（即使
+// 不插进文本 —— 编号 <image 2>+ 不受影响），点击插入的是 **<image_id:context>**：
+// 一个和别的引用图同构的标记，由后端解析时才解码成 <image 1>。这样「context 图」
+// 在工作区里也是一个可预览、可整块删除的普通条目。
+// 不可移除：没有 ✕，也不绑任何 staging 条目。
 // 卡片同时是该 context image 的**实时预览**：画布合成（blendCanvas）本身就是
 // context image，所以缩略图 = 棋盘格底衬 + blendCanvas（与宿主预览同一套规矩，
 // JPEG 必须有不透明底衬，且必须是棋盘格以保持「透明区域可读」）。
@@ -5884,13 +6069,17 @@ function updateContextCardPreview() {
     try {
         img.src = buf.toDataURL('image/jpeg', 0.8);
         img.style.display = '';
-    } catch (e) { /* taint 等异常：保持文字态 */ }
+    } catch (e) { /* taint 等异常：保持文字态 */ return; }
+    // 同一张缩略图也是 <image_id:context> chip 的预览源：画布一变，已经插进
+    // Extra Prompt 的 context chip 也跟着变。
+    contextChipSrc = img.src;
+    refreshPromptChips();
 }
 
 function makeContextCard() {
     const item = document.createElement('div');
     item.className = 'staging-item staging-context';
-    item.title = 'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image 1> at the cursor.';
+    item.title = 'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.';
     const img = document.createElement('img');
     img.className = 'context-preview';
     img.alt = 'Context image preview';
@@ -5902,7 +6091,7 @@ function makeContextCard() {
     label.textContent = 'Context 1';
     item.appendChild(label);
     contextCardImg = img;
-    item.addEventListener('click', () => insertTextAtCaret('<image 1>'));
+    item.addEventListener('click', () => insertImageIdToken('context'));
     return item;
 }
 
@@ -5913,6 +6102,8 @@ function renderStaging() {
     // Context 卡片恒在最左侧（空池时也在）。
     strip.appendChild(makeContextCard());
     scheduleContextCardPreview();
+    // 图池变了：已经插进 Extra Prompt 的 chip 要跟着换图（或退回失效文字态）。
+    refreshPromptChips();
     if (!stagingItems.length) {
         const hint = document.createElement('span');
         hint.className = 'staging-empty';
@@ -6010,7 +6201,8 @@ window.addEventListener('message', event => {
         hasTagger = d.hasTagger !== false;
         // 激活 tab 的 Enable Mask 总闸（宿主从第一个 detailer block 读出）。
         maskRequired = d.mask_required !== false;
-        if (d.tagDisabledHint) extraPromptInput.placeholder = d.tagDisabledHint;
+        // contenteditable 没有 placeholder 属性 —— 占位文本走 CSS 的 ::before。
+        if (d.tagDisabledHint) extraPromptInput.dataset.placeholder = d.tagDisabledHint;
         // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
         if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); }
         syncActionButtons();

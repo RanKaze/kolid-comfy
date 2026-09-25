@@ -100,6 +100,9 @@ def detail_place_rect(crop_info, patch=None):
 # 同一号）。解码后的文本（标记重写成 <image N>）才会被追加进 positive；解不出的
 # id（图已从工作区移除）跳过并从解码文本中移除该标记，留下警告。
 IMAGE_ID_TOKEN_RE = re.compile(r'<image_id:([^<>\s]+)>')
+# 保留 id：Context Image（工作区最左侧那张固定卡片）。它不指向任何 staging 条目，
+# 而是在解码时直接展开成 <image 1> —— context 图在 Enable Edit 下恒为 image 1。
+CONTEXT_IMAGE_ID = 'context'
 
 
 def parse_prompt_image_refs(text, resolve):
@@ -109,7 +112,7 @@ def parse_prompt_image_refs(text, resolve):
     server.get_staging_image）。纯字符串处理、不依赖 torch，方便单测。
 
     返回 (ref_ids, decoded_text, missing)：
-      ref_ids      引用图 id 列表（首次出现顺序、去重）
+      ref_ids      引用图 id 列表（首次出现顺序、去重；'context' 不在其中）
       decoded_text 标记重写成 <image N>（N 从 2 起）后的文本；失效标记被移除
       missing      解不出的 id 列表（按出现顺序，不去重）
     """
@@ -119,6 +122,10 @@ def parse_prompt_image_refs(text, resolve):
 
     def _sub(m):
         mid = m.group(1)
+        if mid == CONTEXT_IMAGE_ID:
+            # context 图恒为 <image 1>（Enable Edit 下它本来就是第一张参考图），
+            # 插不插进文本都在 refs 里 —— 所以这里只解码，**不占引用编号**。
+            return '<image 1>'
         if not resolve(mid):
             missing.append(mid)
             return ''          # 失效引用：从解码文本中移除
