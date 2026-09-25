@@ -259,7 +259,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 /* Ring swatch mirrors the on-canvas brush ring, so the active tool's colour is visible in the UI too */
 .ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
 .ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
-.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.target-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
 /* Key-only tool buttons: the badge is the whole label, the name and usage live in the tooltip. */
 .mini-btn.key-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 4px 8px; }
 .mini-btn.key-btn .tool-key { margin-left: 0; min-width: 18px; height: 18px; font-size: 11px; font-weight: 700; }
@@ -271,12 +271,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .fold-caret::before { content: '\25B8'; font-size: 9px; }
 .tool-section.foldable:not(.collapsed) .fold-caret { transform: rotate(90deg); }
 .tool-section.foldable.collapsed .tool-body { display: none; }
-/* The brush colour picker docks into the header, right after the Brush label:
-   margin-right:auto absorbs the free space so the ring swatch stays right-aligned. */
-#brushColorRow { flex: 0 0 auto; gap: 4px; margin-right: auto; }
-#brushColorRow label { min-width: 0; }
-#brushColorRow span { min-width: 0; }
-#brushColorRow input[type="color"] { width: 26px; height: 18px; }
+.control-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
@@ -485,16 +480,14 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                         <button class="mini-btn" id="maskResetBtn" title="Reset the mask to fully visible">Reset</button>
                     </div>
                 </div>
-                <div class="mini-group" id="paintTargetRow">
-                    <button class="mini-btn target-btn active" id="paintMaskBtn" title="Mask (M) — paint this layer's mask (coverage): white shows the image, black hides it."><span class="tool-key">M</span></button>
-                    <button class="mini-btn target-btn" id="paintDecalBtn" title="Decal (D) — paint colour on top of this layer's image, under the mask."><span class="tool-key">D</span></button>
-                </div>
                 <div class="panel-hint" id="maskTargetLabel" title="Paint target and the layer being painted" style="display:none; color:rgba(255,255,255,0.72); font-weight:600;"></div>
+            </div>
+            <div class="panel-section">
+                <div class="control-row" id="brushColorRow"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="brushSection">
                 <div class="panel-head">
                     <div class="panel-label" id="brushLabel"><span class="fold-caret"></span>Brush <span class="tool-key">B</span></div>
-                    <div class="control-row" id="brushColorRow"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
                     <span class="ring-swatch" id="brushRingSwatch" title="Paints the decal colour / brightens the mask"></span>
                 </div>
                 <div class="tool-body">
@@ -508,6 +501,16 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="brushEdgeValue">0.00</span></div>
                     <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0" title="Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in"><span id="brushGammaValue">2.0</span></div>
                     <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40" title="Brush size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="brushSizeValue">40</span></div>
+                </div>
+            </div>
+            <div class="panel-section tool-section foldable collapsed" id="bucketSection">
+                <div class="panel-head">
+                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto this layer's decal. Alt+click picks the Color from the canvas, like the brush. Click the header to fold the settings."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
+                </div>
+                <div class="tool-body">
+                    <div class="control-row"><label>Tolerance</label><input type="range" id="bucketTolerance" min="0" max="1" step="0.01" value="0.2" title="How far a pixel may sit from the clicked colour and still be filled (0 = exact match, 1 = everything)"><span id="bucketToleranceValue">0.20</span></div>
+                    <div class="control-row"><label>Continuous</label><input type="checkbox" id="bucketContinuous" checked title="Only fill pixels connected to the clicked point. Off fills every matching pixel on the layer, however far away."><span></span></div>
+                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the whole-canvas composite (what you see). Off matches against this layer's own image + decal. The fill always lands on this layer's decal."><span></span></div>
                 </div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="eraserSection">
@@ -793,9 +796,12 @@ let brushStrength = 1.0;
 let brushCenter = 1.0;
 let brushEdge = 0.0;
 let brushGamma = 2.0;
+let bucketTolerance = 0.2;
+let bucketContinuous = true;
+let bucketAllLayers = false;
 
 // Eraser state (independent from brush, including its own size)
-let maskTool = 'brush';        // 'brush' | 'eraser' — what the left mouse button paints with
+let maskTool = 'brush';        // 'brush' | 'eraser' | 'bucket' — what the left mouse button paints with
 let eraserMode = 'exponential';
 let eraserSize = 60;
 let eraserStrength = 1.0;
@@ -1552,8 +1558,19 @@ function sizeOverlay() {
 const EYEDROPPER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M17.67 3c-.26 0-.51.1-.71.29l-3.12 3.12-1.93-1.91-1.41 1.41 1.42 1.42L3 16.25V21h4.75l8.92-8.92 1.42 1.42 1.41-1.41-1.92-1.92 3.12-3.12c.4-.4.4-1.03.01-1.42l-2.34-2.34c-.2-.19-.45-.29-.7-.29z' fill='%23fff' stroke='%23000' stroke-width='1' stroke-linejoin='round'/%3E%3C/svg%3E") 3 21, crosshair`;
 // Circular-arrow pointer for the rotate tool; the hotspot sits at the arc centre.
 const ROTATE_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg stroke='%23000' stroke-width='4.6'%3E%3Cpath d='M19.6 12a7.6 7.6 0 1 1-2.3-5.4'/%3E%3Cpath d='M17.3 2.6v3.9h3.9'/%3E%3C/g%3E%3Cg stroke='%23fff' stroke-width='2.2'%3E%3Cpath d='M19.6 12a7.6 7.6 0 1 1-2.3-5.4'/%3E%3Cpath d='M17.3 2.6v3.9h3.9'/%3E%3C/g%3E%3C/svg%3E") 12 12, crosshair`;
+// PS-style bucket pointer: a precise crosshair whose INTERSECTION is the click point (the CSS
+// hotspot sits exactly on it at 8,8 — the same centre-precision the brush ring gives), with a
+// solid white-filled bucket badge tucked to the bottom-right. The badge is the tool identity;
+// the crosshair is what you aim with.
+const BUCKET_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' stroke-linecap='round' stroke-linejoin='round' fill='none'%3E%3Cg transform='translate(12 11) scale(0.68)' stroke-linecap='round' stroke-linejoin='round'%3E%3Cg fill='%23000' stroke='%23000' stroke-width='6'%3E%3Cpath d='M7.2 18.2 14 11.4l6.6 6.6-6.8 6.8z'/%3E%3Cpath d='M16.8 8.6l2.4-2.4a2.2 2.2 0 0 1 3.1 3.1l-2.4 2.4' fill='none' stroke-width='5.6'/%3E%3Cpath d='M23.6 18.4c1.3 1.9 2.2 3 2.2 4a1.8 1.8 0 0 1-3.6 0c0-1 .9-2.1 1.4-4z' stroke-width='5'/%3E%3C/g%3E%3Cg fill='%23fff' stroke='%23fff' stroke-width='2.8'%3E%3Cpath d='M7.2 18.2 14 11.4l6.6 6.6-6.8 6.8z'/%3E%3Cpath d='M16.8 8.6l2.4-2.4a2.2 2.2 0 0 1 3.1 3.1l-2.4 2.4' fill='none'/%3E%3Cpath d='M23.6 18.4c1.3 1.9 2.2 3 2.2 4a1.8 1.8 0 0 1-3.6 0c0-1 .9-2.1 1.4-4z' stroke-width='2'/%3E%3C/g%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
 
 function setCursor(c) { viewport.style.cursor = c; }
+
+// The bucket is a click tool: it shows the native bucket pointer instead of the managed brush
+// ring. Ctrl keeps the ring (it paints the Mask layer with the brush no matter what is selected),
+// so every cursor site asks this one predicate — refreshCursor alone was not enough, the
+// per-mousemove updateHoverCursor kept overwriting the pointer with 'none' mid-gesture.
+const bucketPointerActive = () => mode === 'mask' && maskTool === 'bucket' && !ctrlMaskMode();
 
 // Restores the cursor implied by the current tool / held view keys.
 function refreshCursor() {
@@ -1563,8 +1580,13 @@ function refreshCursor() {
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
     // The managed brush ring replaces the native cursor; Ctrl's shortcut mode shows the same ring
-    // even when the toolbar is on some other tool.
-    if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
+    // even when the toolbar is on some other tool. The bucket opts out of the ring: it is a click
+    // tool, so the pointer is the bucket itself (Ctrl still means "paint with the brush ring").
+    if (mode === 'mask' || ctrlMaskMode()) {
+        if (altPickActive()) { setCursor(EYEDROPPER_CURSOR); return; }
+        if (bucketPointerActive()) { setCursor(BUCKET_CURSOR); return; }
+        setCursor('none'); return;
+    }
     if (mode === 'transform' && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     if (adjustModeActive() && lastScreen) { updateHoverCursor(lastScreen, lastDoc); return; }
     setCursor('default');
@@ -1653,7 +1675,11 @@ function updateHoverCursor(sp, docPos) {
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
     // Ctrl borrows the Mask tool's ring cursor even when another tool is active, so the shortcut
     // looks like what it does.
-    if (mode === 'mask' || ctrlMaskMode()) { setCursor(altPickActive() ? EYEDROPPER_CURSOR : 'none'); return; }
+    if (mode === 'mask' || ctrlMaskMode()) {
+        if (altPickActive()) { setCursor(EYEDROPPER_CURSOR); return; }
+        if (bucketPointerActive()) { setCursor(BUCKET_CURSOR); return; }
+        setCursor('none'); return;
+    }
     if (mode === 'canvasModify') {
         const h = hitCanvasHandle(sp);
         setCursor(h ? HANDLE_CURSOR[h] : 'default');
@@ -2995,6 +3021,7 @@ function ctrlMaskMode() { return keyCtrl && !modalOpen() && !!canvasW; }
 // so canvas edges can be painted without the cursor snapping back to an arrow.
 function syncBrushCursor() {
     const show = (mode === 'mask' || ctrlMaskMode()) && !altPickActive() && !keySpace && !modalOpen()
+        && !bucketPointerActive()
         && (cursorInside || isDrawing || !!sizeDrag);
     brushCursor.style.display = show ? 'block' : 'none';
 }
@@ -3038,6 +3065,7 @@ function syncToolUI() {
     const active = mode === 'mask';
     document.getElementById('brushSection').classList.toggle('active-tool', active && maskTool === 'brush');
     document.getElementById('eraserSection').classList.toggle('active-tool', active && maskTool === 'eraser');
+    document.getElementById('bucketSection').classList.toggle('active-tool', active && maskTool === 'bucket');
     document.getElementById('maskSection').classList.toggle('active-tool', active);
     syncPaintUI();
     updateBrushCursorSize();
@@ -3049,9 +3077,6 @@ function syncToolUI() {
 function syncPaintUI() {
     const maskLayerSel = isMaskLayerTarget();
     const decal = isDecalTarget() && !maskLayerSel;
-    document.getElementById('paintTargetRow').style.display = maskLayerSel ? 'none' : '';
-    document.getElementById('paintMaskBtn').classList.toggle('active', !decal);
-    document.getElementById('paintDecalBtn').classList.toggle('active', decal);
     // Two buttons on this line, and the third slot changes with the target: a layer's own mask
     // gets Reset-to-fully-visible, a decal gets Clear, the Mask layer gets Clear-only — its
     // whole-layer actions moved onto the Mask row in the Layers list, where they act on the
@@ -3070,26 +3095,12 @@ function syncPaintUI() {
     maskDecalLabel.title = maskLayerSel
         ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer.'
         : decal
-        ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.'
-        : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. M / D switch target.';
+        ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
+        : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
     brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release). Click the header to fold the settings.`;
     eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size. Click the header to fold the settings.`;
     updateMaskTargetLabel();
     updateCursorMode();
-}
-
-function selectPaintTarget(target) {
-    if (isMaskLayerTarget()) { setStatus('The Mask layer has a single surface — Mask / Decal does not apply'); return; }
-    paintTarget = target === 'decal' ? 'decal' : 'mask';
-    if (!getSelected()) {
-        syncPaintUI();
-        setStatus('Select a layer first', 'error');
-        return;
-    }
-    setMode('mask');
-    setStatus(paintTarget === 'decal'
-        ? 'Painting the decal (colour on top of the image)'
-        : 'Painting the mask (coverage)');
 }
 
 function setPaintColor(hex) {
@@ -3107,7 +3118,9 @@ function selectTool(tool) {
     if (mode !== 'mask') setMode('mask');
     else { syncToolUI(); syncBrushCursor(); refreshCursor(); }
     const target = isDecalTarget() ? 'the decal' : 'the mask';
-    setStatus(tool === 'brush' ? `Brush — left-drag paints ${target}` : `Eraser — left-drag erases ${target}`);
+    setStatus(tool === 'brush' ? `Brush — left-drag paints ${target}`
+        : tool === 'bucket' ? 'Bucket — click flood-fills matching pixels with the Color onto the decal; Alt+click picks the Color'
+        : `Eraser — left-drag erases ${target}`);
 }
 
 function updateBrushCursorSize() {
@@ -3761,11 +3774,98 @@ function commitStroke() {
     pushHistory();               // one stroke = one undo step
 }
 
+// ==================== Bucket（油漆桶,只绘 decal） ====================
+// One click = one flat fill of every pixel within tolerance of the sampled colour, written
+// straight onto the selected layer's decal at its native resolution. The sample source is the
+// All Layers switch: off reads this layer's own composite (image + decal); on reads the
+// whole-canvas blend rasterised through the layer's transform — so on a transformed layer the
+// two answers really can differ, and the fill region follows whichever one you sampled.
+function bucketFillAt(pos) {
+    const l = getSelected();
+    if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (isMaskLayerTarget()) { setStatus('Bucket paints a layer\'s decal — the Mask layer has none', 'error'); return; }
+    const { w, h } = nativeSize(l.img);
+    // Click → layer native pixel grid: the exact inverse of setBrushCtxTransform.
+    const tr = l.transform;
+    const sx = Math.max(tr.w * canvasW / w, 1e-6), sy = Math.max(tr.h * canvasH / h, 1e-6);
+    const dx = pos.x - tr.cx * canvasW, dy = pos.y - tr.cy * canvasH;
+    const c = Math.cos(tr.rotation), s = Math.sin(tr.rotation);
+    const seedX = Math.floor((dx * c + dy * s) / sx + w / 2);
+    const seedY = Math.floor((-dx * s + dy * c) / sy + h / 2);
+    if (seedX < 0 || seedY < 0 || seedX >= w || seedY >= h) { setStatus('Bucket — clicked outside this layer', 'error'); return; }
+
+    const sample = document.createElement('canvas');
+    sample.width = w; sample.height = h;
+    const sctx = sample.getContext('2d', { willReadFrequently: true });
+    if (bucketAllLayers && canvasW && canvasH) {
+        setBrushCtxTransform(sctx, l);
+        sctx.drawImage(blendCanvas, 0, 0);
+    } else {
+        if (l.img) sctx.drawImage(l.img, 0, 0, w, h);
+        if (l.decal) sctx.drawImage(l.decal, 0, 0, w, h);
+    }
+    const src = sctx.getImageData(0, 0, w, h).data;
+    const si = (seedY * w + seedX) * 4;
+    const sr = src[si], sg = src[si + 1], sb = src[si + 2], sa = src[si + 3];
+    const tol = bucketTolerance * 255;
+    const match = p => {
+        p *= 4;
+        return Math.abs(src[p] - sr) <= tol && Math.abs(src[p + 1] - sg) <= tol
+            && Math.abs(src[p + 2] - sb) <= tol && Math.abs(src[p + 3] - sa) <= tol;
+    };
+
+    const region = new Uint8Array(w * h);
+    let count = 0;
+    if (bucketContinuous) {
+        const visited = new Uint8Array(w * h);
+        const stack = [seedY * w + seedX];
+        visited[stack[0]] = 1;
+        while (stack.length) {
+            const p = stack.pop();
+            if (region[p]) continue;          // the seed may be pushed by several neighbours
+            region[p] = 1; count++;
+            const px = p % w, py = (p - px) / w;
+            for (let ny = Math.max(0, py - 1), ye = Math.min(h - 1, py + 1); ny <= ye; ny++) {
+                for (let nx = Math.max(0, px - 1), xe = Math.min(w - 1, px + 1); nx <= xe; nx++) {
+                    const q = ny * w + nx;
+                    if (visited[q]) continue;
+                    visited[q] = 1;
+                    if (match(q)) stack.push(q);
+                }
+            }
+        }
+    } else {
+        for (let p = 0; p < w * h; p++) if (match(p)) { region[p] = 1; count++; }
+    }
+    if (!count) { setStatus('Bucket — nothing within tolerance of the clicked colour', 'error'); return; }
+
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(brushColor).trim());
+    const fr = m ? parseInt(m[1], 16) : 255, fg = m ? parseInt(m[2], 16) : 255, fb = m ? parseInt(m[3], 16) : 255;
+    paintTarget = 'decal';          // the Bucket is decal-only, whatever the target switch says
+    ensureDecal(l);
+    detachPaintSurface(l);
+    const surf = l.decalCtx.getImageData(0, 0, w, h);
+    const od = surf.data;
+    for (let p = 0; p < w * h; p++) {
+        if (!region[p]) continue;
+        const j = p * 4;
+        od[j] = fr; od[j + 1] = fg; od[j + 2] = fb; od[j + 3] = 255;
+    }
+    l.decalCtx.putImageData(surf, 0, 0);
+    pushHistory();
+    refreshDecalThumb(l);
+    syncPaintUI();
+    render();
+    setStatus(`Bucket — filled ${count} px of ${l.name}'s decal`);
+}
+
 // ==================== 吸色（画笔模式下按住 Alt + 左键） ====================
 // Samples the composited canvas, not the layer source: what you see is what you pick.
 // The colour is applied on release, so the button can be held to preview swatch + exact values.
 // The eraser never picks: with it active Alt is inert on the left button and Alt+right scrubs.
-function altPickActive() { return mode === 'mask' && maskTool === 'brush' && !sizeDrag && (keyAlt || !!picking); }
+// The bucket picks too — it shares the Color with the brush, so "grab the colour then pour it"
+// is one Alt+click away.
+function altPickActive() { return mode === 'mask' && (maskTool === 'brush' || maskTool === 'bucket') && !sizeDrag && (keyAlt || !!picking); }
 
 function pickColorAt(docPos) {
     const x = Math.round(docPos.x), y = Math.round(docPos.y);
@@ -3933,10 +4033,11 @@ viewport.addEventListener('mousedown', e => {
         return;
     }
     if (mode === 'mask' && e.altKey && e.button === 2) { beginSizeDrag(e); e.preventDefault(); return; }
-    if (mode === 'mask' && e.altKey && e.button === 0 && maskTool === 'brush') { beginPick(e, pos); e.preventDefault(); return; }
+    if (mode === 'mask' && e.altKey && e.button === 0 && (maskTool === 'brush' || maskTool === 'bucket')) { beginPick(e, pos); e.preventDefault(); return; }
     if (mode === 'mask') {
         if (e.button !== 0) return;   // only the left button paints — the right one does nothing
         if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
+        if (maskTool === 'bucket') { bucketFillAt(pos); e.preventDefault(); return; }
         isErasing = maskTool === 'eraser';
         updateCursorMode();
         if (!beginStroke()) return;
@@ -4143,6 +4244,9 @@ bindRange('eraserStrength', 'eraserStrengthValue', v => eraserStrength = v);
 bindRange('eraserCenter', 'eraserCenterValue', v => eraserCenter = v);
 bindRange('eraserEdge', 'eraserEdgeValue', v => eraserEdge = v);
 bindRange('eraserGamma', 'eraserGammaValue', v => eraserGamma = v);
+bindRange('bucketTolerance', 'bucketToleranceValue', v => bucketTolerance = v);
+document.getElementById('bucketContinuous').addEventListener('change', e => { bucketContinuous = e.target.checked; });
+document.getElementById('bucketAllLayers').addEventListener('change', e => { bucketAllLayers = e.target.checked; });
 document.getElementById('brushSize').addEventListener('input', e => {
     brushSize = parseInt(e.target.value);
     document.getElementById('brushSizeValue').textContent = brushSize;
@@ -4358,8 +4462,6 @@ document.getElementById('maskResetBtn').addEventListener('click', () => {
 });
 
 
-document.getElementById('paintMaskBtn').addEventListener('click', () => selectPaintTarget('mask'));
-document.getElementById('paintDecalBtn').addEventListener('click', () => selectPaintTarget('decal'));
 document.getElementById('brushColor').addEventListener('input', e => setPaintColor(e.target.value));
 
 document.getElementById('transformAdjustBtn').addEventListener('click', () => {
@@ -4387,13 +4489,11 @@ document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rota
 document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
 
 // ---- Folding tool sections ----
-// Brush and Eraser start folded; clicking their header row shows or hides the settings.
-for (const id of ['brushSection', 'eraserSection']) {
+// Brush, Bucket and Eraser start folded; clicking their header row shows or hides the settings.
+for (const id of ['brushSection', 'bucketSection', 'eraserSection']) {
     const section = document.getElementById(id);
     section.querySelector('.panel-head').addEventListener('click', () => section.classList.toggle('collapsed'));
 }
-// The colour picker lives in the Brush header now — opening it must not fold the section.
-document.getElementById('brushColorRow').addEventListener('click', e => e.stopPropagation());
 
 document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
 document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
@@ -5388,14 +5488,13 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rotate'); return; }
     if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
+    if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey || !e.altKey)) {
         e.preventDefault();
         if (l) activateMode('transform');
         return;
     }
-    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('mask'); return; }
-    if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) { if (l) selectPaintTarget('decal'); return; }
     if (e.key === 'Enter') { if (mode !== 'none') { e.preventDefault(); setMode('none'); } return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || l.isMaskLayer || mode !== 'transform') return;
@@ -5609,6 +5708,7 @@ async function exportCud() {
                 extraPrompt: extraPromptInput.value,
                 brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor },
                 eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
+                bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
             },
             maskLayer: { visible: maskLayer.visible, surface: maskSurface },
             layers: records,
@@ -5706,7 +5806,16 @@ function applyCudTools(t) {
         setNumberControl('eraserEdge', 'eraserEdgeValue', eraserEdge);
         setNumberControl('eraserGamma', 'eraserGammaValue', eraserGamma);
     }
-    maskTool = t.maskTool === 'eraser' ? 'eraser' : 'brush';
+    if (t.bucket && typeof t.bucket === 'object') {
+        const bk = t.bucket;
+        if (Number.isFinite(bk.tolerance)) bucketTolerance = clamp(bk.tolerance, 0, 1);
+        if (typeof bk.continuous === 'boolean') bucketContinuous = bk.continuous;
+        if (typeof bk.allLayers === 'boolean') bucketAllLayers = bk.allLayers;
+        setNumberControl('bucketTolerance', 'bucketToleranceValue', bucketTolerance);
+        document.getElementById('bucketContinuous').checked = bucketContinuous;
+        document.getElementById('bucketAllLayers').checked = bucketAllLayers;
+    }
+    maskTool = (t.maskTool === 'eraser' || t.maskTool === 'bucket') ? t.maskTool : 'brush';
     if (Number.isFinite(t.previewMaskOpacity)) previewMaskOpacity = clamp(t.previewMaskOpacity, 0, 1);
     // Legacy documents carried a second, canvas-only tint. There is one tint now, so it is still
     // read (never written back) to keep old .cud files looking the way they were saved.
