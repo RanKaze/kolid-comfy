@@ -3273,9 +3273,12 @@ function beginCanvasDrag(key) {
     for (const l of layers) startLayers.set(l.id, cloneTransform(l.transform));
     modDrag = {
         handle: key,
-        // Anchor = the opposite handle's position in doc space: it stays put while the grabbed
-        // side follows the pointer.
-        anchor: { x: (1 - HANDLE_UV[key][0]) / 2 * canvasW, y: (1 - HANDLE_UV[key][1]) / 2 * canvasH },
+        // Absolute doc-space geometry: origin0 is the tentative canvas' current origin (left/top
+        // drags shift it between drags) and the anchor is the opposite handle's absolute position.
+        // Everything in updateCanvasModify is computed in this space — mixing in canvas-relative
+        // zeros here is what made a vertical drag snap the origin back after a left/top drag.
+        origin0: { x: modOrigin.x, y: modOrigin.y },
+        anchor: { x: modOrigin.x + (1 - HANDLE_UV[key][0]) / 2 * canvasW, y: modOrigin.y + (1 - HANDLE_UV[key][1]) / 2 * canvasH },
         baseW: canvasW, baseH: canvasH,
         startLayers,
         moved: false,
@@ -3292,11 +3295,14 @@ function beginCanvasDrag(key) {
 function updateCanvasModify(pos) {
     const d = modDrag;
     const [hu, hv] = HANDLE_UV[d.handle];
+    // All in absolute doc space: the untouched sides extend from the tentative canvas' current
+    // origin (origin0), NOT from (0,0) — resetting them there snapped the canvas back whenever
+    // a horizontal drag followed a left/top drag (or vice versa).
     let left, right, top, bottom;
-    if (hu === 0) { left = 0; right = d.baseW; }
+    if (hu === 0) { left = d.origin0.x; right = d.origin0.x + d.baseW; }
     else if (hu > 0) { left = d.anchor.x; right = pos.x; }
     else { left = pos.x; right = d.anchor.x; }
-    if (hv === 0) { top = 0; bottom = d.baseH; }
+    if (hv === 0) { top = d.origin0.y; bottom = d.origin0.y + d.baseH; }
     else if (hv > 0) { top = d.anchor.y; bottom = pos.y; }
     else { top = pos.y; bottom = d.anchor.y; }
     let w = Math.max(1, Math.round(right - left));
@@ -3310,16 +3316,16 @@ function updateCanvasModify(pos) {
     }
     if (w === canvasW && h === canvasH && modOrigin.x === left && modOrigin.y === top) return;
     // 左/上拖拽时新矩形左上角不在 (0,0)：canvas 元素平移到 (left, top)，让「没被抓的边」
-    // 真正留在原地（右/下拖拽 left/top 恒为 0，行为与原来完全一致）。
+    // 真正留在原地（右/下拖拽 left/top 不变，行为与原来完全一致）。
     modOrigin = { x: left, y: top };
     canvasW = w; canvasH = h;
     for (const l of layers) {
         if (isRasterLayer(l)) continue;             // identity transform stretches with the canvas
         const st = d.startLayers.get(l.id);
         // 画布原点移到 (left, top)：图层的 doc 位置 = 原点 + transform*尺寸，
-        // 保持像素不动 → cx' = (st.cx*baseW - left) / w（cy 同理）。
-        l.transform.cx = (st.cx * d.baseW - left) / w;
-        l.transform.cy = (st.cy * d.baseH - top) / h;
+        // 保持像素不动 → cx' = (origin0.x + st.cx*baseW - left) / w（cy 同理）。
+        l.transform.cx = (d.origin0.x + st.cx * d.baseW - left) / w;
+        l.transform.cy = (d.origin0.y + st.cy * d.baseH - top) / h;
         l.transform.w = st.w * d.baseW / w;
         l.transform.h = st.h * d.baseH / h;
     }
