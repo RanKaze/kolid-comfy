@@ -842,6 +842,10 @@ const HANDLE_CURSOR = { nw: 'nwse-resize', n: 'ns-resize', ne: 'nesw-resize', e:
 // Offscreen canvases (masks are painted in layer space at the layer's native size)
 const strokeCanvas = document.createElement('canvas');
 const strokeCtx = strokeCanvas.getContext('2d');
+// Scratch for recoloring the accumulated (alpha-only, white) stroke before it lands on a
+// decal layer. See livePreviewStroke's source-in tinting.
+const strokeTintCanvas = document.createElement('canvas');
+const strokeTintCtx = strokeTintCanvas.getContext('2d');
 const snapshotCanvas = document.createElement('canvas');
 const snapshotCtx = snapshotCanvas.getContext('2d');
 const tmpCanvas = document.createElement('canvas');
@@ -3581,10 +3585,12 @@ function makeBrushGradient(ctx, cx, cy, r) {
     const center = isErasing ? eraserCenter : brushCenter;
     const edge = isErasing ? eraserEdge : brushEdge;
     const gamma = isErasing ? eraserGamma : brushGamma;
-    // Masks only care about alpha (coverage), so they always paint white; decals paint the
-    // chosen colour. The Mask layer is a mask, so it paints white too.
-    const [cr, cg, cb] = (isDecalTarget() && !isMaskLayerTarget() && !isErasing)
-        ? hexToRgbTriplet(brushColor) : [255, 255, 255];
+    // Stamps always paint white: strokeCanvas accumulates ALPHA ONLY ('lighter' in
+    // drawDot/drawStroke saturates it to exactly 1, killing the stamp lattice). 'lighter' adds
+    // premultiplied RGB too, so a coloured stamp would wash toward white wherever strokes
+    // overlap — the decal colour is applied later, in one pass, via source-in tinting in
+    // livePreviewStroke.
+    const [cr, cg, cb] = [255, 255, 255];
     const rgba = a => `rgba(${cr}, ${cg}, ${cb}, ${a})`;
     if (bm === 'binary') {
         grad.addColorStop(0, rgba(strength));
@@ -3603,17 +3609,15 @@ function makeBrushGradient(ctx, cx, cy, r) {
     return grad;
 }
 
-function hexToRgbTriplet(hex) {
-    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex || '').trim());
-    if (!m) return [255, 255, 255];
-    return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
-}
-
 function drawDot(x, y) {
     const l = getSelected();
     if (!l) return;
     const r = activeSizeValue() / 2;
     resetCtx(strokeCtx);
+    // 'lighter'（加法累积）:重叠 stamp 的 alpha 直接相加并截到 1。source-over 的
+    // 累积 1-∏(1-ai) 永远到不了 1（实测核心 251~254,Strength 低时还带 stamp
+    // 点阵的周期条纹 —— 画在半透明/深色内容上就是那层「细小栅格」）。
+    strokeCtx.globalCompositeOperation = 'lighter';
     setBrushCtxTransform(strokeCtx, l);
     strokeCtx.fillStyle = makeBrushGradient(strokeCtx, x, y, r);
     strokeCtx.beginPath();
@@ -3626,6 +3630,7 @@ function drawStroke(x, y) {
     if (!l) return;
     const r = activeSizeValue() / 2;
     resetCtx(strokeCtx);
+    strokeCtx.globalCompositeOperation = 'lighter';
     setBrushCtxTransform(strokeCtx, l);
     // 按「距离」补点,而不是按鼠标事件采样:每个事件线段内以 ≤r/5 的间隔连续盖
     // 渐变 stamp。只 stamp 事件点时,快速运笔（事件间隔 > 笔刷半径）会让覆盖沿
@@ -3720,7 +3725,23 @@ function livePreviewStroke() {
     c.clearRect(0, 0, w, h);
     c.drawImage(snapshotCanvas, 0, 0, w, h);
     c.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
-    c.drawImage(strokeCanvas, 0, 0, w, h);
+    // strokeCanvas holds a white, alpha-only accumulation. A decal (not a mask) gets its
+    // colour applied here, uniformly, so overlapping 'lighter' stamps cannot shift the hue.
+    let ink = strokeCanvas;
+    if (!isErasing && isDecalTarget() && !isMaskLayerTarget()) {
+        if (strokeTintCanvas.width !== w || strokeTintCanvas.height !== h) {
+            strokeTintCanvas.width = w; strokeTintCanvas.height = h;
+        }
+        resetCtx(strokeTintCtx);
+        strokeTintCtx.clearRect(0, 0, w, h);
+        strokeTintCtx.drawImage(strokeCanvas, 0, 0, w, h);
+        strokeTintCtx.globalCompositeOperation = 'source-in';
+        strokeTintCtx.fillStyle = brushColor;
+        strokeTintCtx.fillRect(0, 0, w, h);
+        strokeTintCtx.globalCompositeOperation = 'source-over';
+        ink = strokeTintCanvas;
+    }
+    c.drawImage(ink, 0, 0, w, h);
     c.globalCompositeOperation = 'source-over';
     if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
     render();
