@@ -244,11 +244,17 @@ def composite_layers(layers, canvas_w, canvas_h):
             image = image.unsqueeze(0)
         decal = layer.get('decal')
         if decal is not None:
+            # 直通 alpha 的 source-over。旧公式 rgb' = d_rgb*d_a + dst_rgb*(1-d_a)
+            # 只在 dst 不透明时等价；dst 透明（空白图层/透明 PNG 区域）时 decal
+            # 颜色会被按 d_a 再压暗一次（软边发暗）。out_rgb 分母是 out_a，
+            # 两者都透明时分子为 0，clamp 后安全。
             d_a = decal[..., 3:4]
-            image = torch.cat([
-                decal[..., :3] * d_a + image[..., :3] * (1.0 - d_a),
-                d_a + image[..., 3:4] * (1.0 - d_a),
-            ], dim=-1)
+            dst_a = image[..., 3:4]
+            # 注意别叫 out_a —— 那是下面的画布 alpha 累加器，遮蔽会把 decal alpha
+            # 错当成已合成结果参与 source-over。
+            blend_a = d_a + dst_a * (1.0 - d_a)
+            blend_rgb = (decal[..., :3] * d_a + image[..., :3] * dst_a * (1.0 - d_a)) / blend_a.clamp_min(1e-6)
+            image = torch.cat([blend_rgb, blend_a], dim=-1)
         mask = layer.get('mask')
         if mask is not None:
             image = image * mask

@@ -531,13 +531,16 @@ class SnapshotDetailerSamplerServer:
             raise ValueError('Missing layers')
         resolved = []
         for spec in layer_specs:
-            tensor = decode_image_dataurl(spec.get('src'))
-            if tensor is None:
+            src = spec.get('src')
+            # src 为空 = 前端的空白图层（刻意设计），等价于一张全透明图，不报错；
+            # 只有「有数据但解码失败」才算引用损坏。
+            tensor = decode_image_dataurl(src) if src else None
+            if src and tensor is None:
                 raise LookupError('Image not found: a layer image failed to decode — re-drop it onto the canvas')
-            if tensor.dim() == 4:
+            if tensor is not None and tensor.dim() == 4:
                 tensor = tensor[0]
             resolved.append({
-                'image': tensor,
+                'image': tensor,        # None = 空白图层，画布尺寸确定后补全透明
                 'transform': spec.get('transform'),
                 'mask': spec.get('mask'),
                 'decal': spec.get('decal'),
@@ -546,7 +549,13 @@ class SnapshotDetailerSamplerServer:
         canvas_w = int(width or 0)
         canvas_h = int(height or 0)
         if canvas_w <= 0 or canvas_h <= 0:
-            canvas_h, canvas_w = resolved[0]['image'].shape[0], resolved[0]['image'].shape[1]
+            first = next((l['image'] for l in resolved if l['image'] is not None), None)
+            if first is None:
+                raise ValueError('Missing layers')
+            canvas_h, canvas_w = first.shape[0], first.shape[1]
+        for layer in resolved:
+            if layer['image'] is None:
+                layer['image'] = torch.zeros((canvas_h, canvas_w, 4), dtype=torch.float32)
         for layer in resolved:
             # 蒙版与 decal 都在图层自身尺寸下生效，随图层一起被 transform（缩放/旋转）
             layer_h, layer_w = layer['image'].shape[0], layer['image'].shape[1]
@@ -2651,8 +2660,17 @@ class SnapshotDetailerSamplerNode:
                             ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
                             next_pipeline.reference.reference_latents.append(ref_latent)
                             print(f"[Block {i+1}] Context reference injected: id={_ref_key}")
+                            # Debug 可视化：这条路径与 Generate Text 无关（只看
+                            # enable_edit），但之前只有控制台日志，Debug 面板上看不到图。
+                            dbg.record_image(
+                                f'Block {i+1} · Ref Image 注入 — {_ref_key}', ref_img,
+                                block=i + 1,
+                                detail=f'第 {len(context_reference_keys)} 张中的 {context_reference_keys.index(_ref_key) + 1} 张（Extra Prompt 嵌图 → reference_latents）')
                         else:
                             print(f"[Block {i+1}] WARNING: context reference id '{_ref_key}' not found in staging")
+                            dbg.record_error(
+                                f'Block {i+1} · Ref Image 缺失', f"staging id '{_ref_key}' 不存在",
+                                block=i + 1, where='context_reference')
 
                 print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
 
