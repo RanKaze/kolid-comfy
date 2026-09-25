@@ -3627,18 +3627,22 @@ function drawStroke(x, y) {
     const r = activeSizeValue() / 2;
     resetCtx(strokeCtx);
     setBrushCtxTransform(strokeCtx, l);
-    strokeCtx.strokeStyle = makeBrushGradient(strokeCtx, x, y, r);
-    strokeCtx.fillStyle = strokeCtx.strokeStyle;
-    strokeCtx.lineCap = 'round';
-    strokeCtx.lineJoin = 'round';
-    strokeCtx.lineWidth = activeSizeValue();
-    strokeCtx.beginPath();
-    strokeCtx.moveTo(lastX, lastY);
-    strokeCtx.lineTo(x, y);
-    strokeCtx.stroke();
-    strokeCtx.beginPath();
-    strokeCtx.arc(x, y, r, 0, Math.PI * 2);
-    strokeCtx.fill();
+    // 按「距离」补点,而不是按鼠标事件采样:每个事件线段内以 ≤r/5 的间隔连续盖
+    // 渐变 stamp。只 stamp 事件点时,快速运笔（事件间隔 > 笔刷半径）会让覆盖沿
+    // 路径周期性塌陷 —— 笔刷的栅格/条纹纹理就是这么来的（实测 30px 间隔、r=20
+    // 时中心 alpha 在 60↔250 之间锯齿）。线段的 stroke 渐变以终点为圆心,远处
+    // 事件之间本来贡献≈0,补点之后直接不再需要。
+    const dx = x - lastX, dy = y - lastY;
+    const spacing = Math.max(1, r / 5);
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / spacing));
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const px = lastX + dx * t, py = lastY + dy * t;
+        strokeCtx.fillStyle = makeBrushGradient(strokeCtx, px, py, r);
+        strokeCtx.beginPath();
+        strokeCtx.arc(px, py, r, 0, Math.PI * 2);
+        strokeCtx.fill();
+    }
 }
 
 function beginStroke() {
