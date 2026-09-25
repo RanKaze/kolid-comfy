@@ -565,6 +565,17 @@ class SnapshotDetailerSamplerServer:
             layer['mask'] = decode_mask_alpha(layer['mask'], layer_w, layer_h)
             layer['decal'] = decode_decal_rgba(layer['decal'], layer_w, layer_h)
         blended = composite_layers(resolved, canvas_w, canvas_h)
+        # composite_layers 刻意返回**预乘 alpha**（整栈 source-over 在预乘空间做），
+        # 但这一层往后的一切图像空间消费方都是**直通 alpha** 语义：staging/预览 PNG、
+        # 打标的白底合成、vision 塔预处理、alpha VAE、recover_crop 的背景混合
+        # （都做 rgb*alpha + white*(1-alpha)）。预乘缓冲喂进去会在蒙版边缘再乘一次
+        # alpha → 灰色条带。在这里做一次标准的 premul→straight 逆转（a≈0 处颜色无
+        # 定义，取黑）。a 为 0/1 的像素两种表示相同，不受影响。
+        if blended.shape[-1] == 4:
+            _a = blended[..., 3:4]
+            _rgb = torch.where(_a > 1e-4, blended[..., :3] / _a.clamp_min(1e-4),
+                               torch.zeros_like(blended[..., :3]))
+            blended = torch.cat([_rgb.clamp(0.0, 1.0), _a], dim=-1)
         # 纯 Mask 层整体按画布尺寸栅格化，squeeze 成 [1,H,W] 与 pipeline.mask 同构。
         # collapse_opaque=False：这一层「全白」= 整块画布都被覆盖，绝不能当成「没有蒙版」
         # （那样 Full / 涂满画布都会被误判成没画，弹出 "Mask is required"）。
@@ -1487,11 +1498,26 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'success': True})
                         return
 
-                    image, mask = inst.compose_blend(
-                        body.get('layers') or [],
-                        width=body.get('width'), height=body.get('height'),
-                        mask_data_url=body.get('mask'),
-                    )
+                    # detailer：前端 blendCanvas 已经把图层栈合成好了 —— 预览里看到
+                    # 的就是这张图（浏览器原生 source-over，直通 alpha PNG）。直接把它
+                    # 送进管线，不再让后端按 layers 重合成一遍，消除两套合成语义漂移在
+                    # 蒙版边缘产生的灰色条带。解不出图（旧前端 / 画布被污染）时回落到
+                    # 后端合成。
+                    comp = decode_image_dataurl(body.get('composite')) if action == 'detailer' else None
+                    if comp is not None:
+                        if comp.dim() == 3:
+                            comp = comp.unsqueeze(0)
+                        _ch, _cw = int(comp.shape[1]), int(comp.shape[2])
+                        image = comp
+                        mask = decode_mask_alpha(body.get('mask'), _cw, _ch, collapse_opaque=False)
+                        if mask is not None:
+                            mask = mask.squeeze(-1)
+                    else:
+                        image, mask = inst.compose_blend(
+                            body.get('layers') or [],
+                            width=body.get('width'), height=body.get('height'),
+                            mask_data_url=body.get('mask'),
+                        )
 
                     if action == 'blend':
                         # 合成图进工作区（可复用为 Ref / 再加层），并以 dataURL 返回 ——
