@@ -305,6 +305,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .modal-hint { font-size: 11px; color: rgba(255,255,255,0.35); line-height: 1.45; }
 .modal-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500; color: rgba(255,255,255,0.85); cursor: pointer; user-select: none; }
 .modal-check input { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
+.dyn-limit { flex: 0 0 auto; margin-bottom: 10px; }
+.canvas-field input:disabled { opacity: 0.45; cursor: not-allowed; }
 .modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
 .modal-btn { border: none; border-radius: 10px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; transition: filter 0.15s ease, background 0.15s ease; }
 .modal-btn.primary { background: #0a84ff; color: #fff; }
@@ -622,6 +624,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
         <div class="canvas-fields">
             <div class="canvas-field"><span>RESOLUTION RATE</span><input type="number" id="dynRateInput" min="0.05" max="16" step="0.05" inputmode="decimal"></div>
+            <label class="modal-check dyn-limit" title="Limit — the Resolution Rate is derived from the Pixels budget in GLOBAL SETTINGS instead: the layer bakes at most that many pixels spread over the rectangle you dragged (rate = √(Pixels ÷ rectangle)). Uncheck to set the rate by hand.">
+                <input type="checkbox" id="dynLimitChk"><span>Limit</span>
+            </label>
         </div>
         <div class="modal-hint" id="dynRatioHint">&#8212;</div>
         <div class="modal-actions">
@@ -5372,6 +5377,11 @@ const MAX_RATE = 16;
 let dynBox = null;             // the swept rect in canvas pixels, kept while the modal is up
 let dynLocked = true;
 let dynRatio = 1;
+// Limit: when on, the rate is not the user's — it is whatever the GLOBAL SETTINGS Pixels budget
+// (server config, read live from /api/config) allows over the swept rectangle. The fetched value
+// is cached per modal session; the standalone file:// rig has no server, so it falls back.
+let dynaLimitOn = false;
+let dynaPixels = 1048576;
 
 const dynamicModalEl = document.getElementById('dynamicModal');
 const dynWInput = document.getElementById('dynWInput');
@@ -5379,6 +5389,7 @@ const dynHInput = document.getElementById('dynHInput');
 const dynRateInput = document.getElementById('dynRateInput');
 const dynLockBtn = document.getElementById('dynLockBtn');
 const dynRatioHint = document.getElementById('dynRatioHint');
+const dynLimitChk = document.getElementById('dynLimitChk');
 
 function dynamicModalOpen() { return dynamicModalEl.classList.contains('open'); }
 
@@ -5393,7 +5404,35 @@ function updateDynRatioHint() {
     const w = Number(dynWInput.value), h = Number(dynHInput.value);
     const rate = Number(dynRateInput.value);
     const base = dynBox ? `${dynBox.w} × ${dynBox.h}` : '—';
-    dynRatioHint.textContent = `${canvasRatioText(w, h)} · rate ${Number.isFinite(rate) ? rate : '—'} ⇒ ${rateText(rate)} · rectangle ${base}`;
+    dynRatioHint.textContent = `${canvasRatioText(w, h)} · rate ${Number.isFinite(rate) ? rate : '—'} ⇒ ${rateText(rate)} · rectangle ${base}`
+        + (dynaLimitOn ? ` · limited to ${dynaPixels.toLocaleString()} global Pixels` : '');
+}
+
+// rate² · boxW · boxH = the Pixels budget, solved back for the linear rate.
+function dynaLimitRate() {
+    if (!dynBox || dynBox.w < 1 || dynBox.h < 1) return 1;
+    return Math.max(0.05, Math.min(MAX_RATE, Math.sqrt(dynaPixels / (dynBox.w * dynBox.h))));
+}
+
+function applyDynaLimit() {
+    if (!dynBox) return;
+    const rate = dynaLimitRate();
+    dynRateInput.value = String(+rate.toFixed(3));
+    dynWInput.value = String(Math.max(1, Math.round(dynBox.w * rate)));
+    dynHInput.value = String(Math.max(1, Math.round(dynBox.h * rate)));
+    dynRatio = Number(dynWInput.value) / Number(dynHInput.value);
+    updateDynRatioHint();
+}
+
+// Pull the live Pixels value out of GLOBAL SETTINGS (same server config the detailer reads).
+// Async by nature: if it lands while the modal is still up under Limit, the fields re-derive.
+function refreshDynaPixels() {
+    fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
+        const p = cfg && Number(cfg.pixels);
+        if (!Number.isFinite(p) || p <= 0) return;
+        dynaPixels = p;
+        if (dynaLimitOn && dynamicModalOpen()) applyDynaLimit();
+    }).catch(() => {});
 }
 
 function syncDynLockedField(source) {
@@ -5414,11 +5453,16 @@ function openDynamicModal(box) {
     dynRatio = box.w / box.h;
     dynLocked = true;
     dynLockBtn.classList.add('locked');
+    dynLimitChk.checked = dynaLimitOn;
+    dynRateInput.disabled = dynaLimitOn;
+    if (dynaLimitOn) { refreshDynaPixels(); applyDynaLimit(); }
     updateDynRatioHint();
     dynamicModalEl.classList.add('open');
     syncBrushCursor();
-    dynRateInput.focus();
-    dynRateInput.select();
+    // The rate field takes focus only while it is editable; under Limit it is read-only.
+    const focusEl = dynaLimitOn ? dynWInput : dynRateInput;
+    focusEl.focus();
+    focusEl.select();
 }
 
 function closeDynamicModal() {
@@ -5466,13 +5510,19 @@ dynLockBtn.addEventListener('click', () => {
 });
 // Changing the rate rescales the pixel fields from the rectangle, keeping the lock honest.
 dynRateInput.addEventListener('input', () => {
-    if (!dynBox) return;
+    if (!dynBox || dynaLimitOn) return;
     const rate = Number(dynRateInput.value);
     if (!Number.isFinite(rate) || rate <= 0) { updateDynRatioHint(); return; }
     dynWInput.value = String(Math.max(1, Math.round(dynBox.w * rate)));
     dynHInput.value = String(Math.max(1, Math.round(dynBox.h * rate)));
     dynRatio = Number(dynWInput.value) / Number(dynHInput.value);
     updateDynRatioHint();
+});
+dynLimitChk.addEventListener('change', () => {
+    dynaLimitOn = dynLimitChk.checked;
+    dynRateInput.disabled = dynaLimitOn;
+    if (dynaLimitOn) { refreshDynaPixels(); applyDynaLimit(); }
+    else updateDynRatioHint();
 });
 dynWInput.addEventListener('input', () => { syncDynLockedField('w'); updateDynRatioHint(); });
 dynHInput.addEventListener('input', () => { syncDynLockedField('h'); updateDynRatioHint(); });

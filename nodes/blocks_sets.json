@@ -106,39 +106,6 @@
       ]
     },
     {
-      "id": "set-20",
-      "name": "增强编辑",
-      "blocks": [
-        {
-          "id": "block-26",
-          "type": "detailer",
-          "name": "Detailer",
-          "params": {
-            "add_noise": "enable",
-            "start_step_rate": 0,
-            "end_step_rate": 1,
-            "pixels": 2048576,
-            "align": 32,
-            "crop_reserve": 32,
-            "recover_crop": true,
-            "enable_edit": true,
-            "edit_mode": "fit",
-            "ref_boost": 4,
-            "ref_boost_a": 1,
-            "enable_ref_boost_mask": false,
-            "grounding_px": 768,
-            "context_reference": true,
-            "context_reference_key": null,
-            "context_regex": ".+",
-            "enable_mask": false,
-            "enable_limit": true,
-            "enable_text_generate": true,
-            "context_reference_keys": []
-          }
-        }
-      ]
-    },
-    {
       "id": "set-21",
       "name": "Alpha简单编辑",
       "blocks": [
@@ -217,7 +184,68 @@
           }
         }
       ]
+    },
+    {
+      "id": "set-22",
+      "name": "简单编辑",
+      "blocks": [
+        {
+          "id": "block-29",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 1048576,
+            "align": 8,
+            "crop_reserve": 32,
+            "recover_crop": true,
+            "enable_edit": true,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_regex": ".+",
+            "enable_mask": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "set-20",
+      "name": "增强编辑",
+      "blocks": [
+        {
+          "id": "block-26",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 2048576,
+            "align": 32,
+            "crop_reserve": 32,
+            "recover_crop": true,
+            "enable_edit": true,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_reference": true,
+            "context_reference_key": null,
+            "context_regex": ".+",
+            "enable_mask": false,
+            "enable_limit": true,
+            "enable_text_generate": true,
+            "context_reference_keys": []
+          }
+        }
+      ]
     }
   ],
-  "active_block_set": "set-20"
+  "active_block_set": "set-22"
 }
