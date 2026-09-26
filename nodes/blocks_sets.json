@@ -24,7 +24,9 @@
             "grounding_px": 768,
             "context_reference": true,
             "context_reference_key": null,
-            "context_regex": ".+"
+            "context_regex": ".+",
+            "enable_mask": false,
+            "enable_text_generate": false
           }
         }
       ]
@@ -247,5 +249,5 @@
       ]
     }
   ],
-  "active_block_set": "set-22"
+  "active_block_set": "set-12"
 }

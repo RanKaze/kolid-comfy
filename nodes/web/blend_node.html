@@ -417,7 +417,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div id="extraPrompt" class="is-empty" contenteditable="true" role="textbox" spellcheck="false"
                      data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
                 <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself.">Blend</button>
-                <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
+                <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads. With an image layer selected you also get Layer tags (the composite over that layer, cut by its own mask), plus Clear Tag to wipe the tags from the prompt stage.">Tag</button>
                 <div class="tb-pill">
                     <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
                     <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
@@ -4680,11 +4680,19 @@ function sendBlendAction(action, opts) {
     if (actionBusy) return;
     if (!layers.length) { setStatus('Add at least one layer first', 'error'); return; }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
-    const mask = maskPayload();
+    const tm = opts && opts.tagMode;
+    const layerTag = action === 'tag' && typeof tm === 'string' && tm.indexOf('layer_') === 0;
+    let tagLayer = null;
+    if (layerTag) {
+        tagLayer = tagLayerTarget();
+        if (!tagLayer) { setStatus('Select an image layer first — Layer tags read the composite over that layer', 'error'); return; }
+    }
+    const mask = layerTag ? null : maskPayload();
     // Run 的遮罩要求随生效 preset 的 Enable Mask 总闸走（关 = 整幅就是工作区，没画
-    // Mask 层也能跑）；Tag 除了 full 模式外始终要遮罩。
+    // Mask 层也能跑）；Tag 除 full 外要遮罩 —— 但 Layer 变体用图层自带蒙版、与全局
+    // Mask 层无关，所以不触发全局遮罩闸门。
     const needsMask = action === 'detailer' ? maskRequiredForRun()
-        : (action === 'tag' && opts && opts.tagMode !== 'full');
+        : (action === 'tag' && !layerTag && tm !== 'full');
     if (needsMask && !mask) {
         setStatus(maskLayer.visible ? 'Paint the Mask layer first' : 'The Mask layer is hidden — show it (eye icon) to send it', 'error');
         return;
@@ -4709,7 +4717,15 @@ function sendBlendAction(action, opts) {
         height: canvasH,
         mask,
     };
-    if (opts && opts.tagMode) payload.tag_mode = opts.tagMode;
+    if (layerTag) {
+        // 预制作:把整幅合成按该 Layer 的原生网格抠好 + 该 Layer 自带蒙版,后端复用现成的
+        // mask/covered/full 三套语义(直接拿这张预制图喂 tagger)。
+        payload.composite = layerCompositeForGenerate(tagLayer);
+        payload.mask = generateMaskDataUrl(tagLayer);
+        payload.tag_mode = tm === 'layer_full' ? 'full' : (tm === 'layer_covered' ? 'covered' : 'mask');
+    } else if (tm) {
+        payload.tag_mode = tm;
+    }
     if (action === 'detailer') {
         // 复用预览的那张合成图：blendCanvas 的像素就是画布合成本身（浏览器原生
         // source-over，toDataURL 出来是标准直通 alpha PNG）。管线约定全部按直通
@@ -4725,6 +4741,16 @@ function sendBlendAction(action, opts) {
     window.parent.postMessage(payload, '*');
     setActionBusy(true, action);
     setStatus(action === 'blend' ? 'Archiving…' : (action === 'tag' ? 'Tagging…' : 'Running detailer…'));
+}
+
+// Clear Tag touches only the prompt stage — no canvas, no layers, no composite — so it skips
+// sendBlendAction's guards entirely and posts the bare action. The backend runs the same
+// _apply_tag_result('') the tag flow uses, which drops the parsing-source tags and returns an
+// empty tag the host pushes back into the prompt editor.
+function sendClearTag() {
+    if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
+    window.parent.postMessage({ type: 'blend-action', action: 'clear_tag' }, '*');
+    setStatus('Clearing tags…');
 }
 
 blendBtn.addEventListener('click', () => sendBlendAction('blend'));
@@ -5146,6 +5172,15 @@ const TAG_MODES = [
     { mode: 'covered', name: 'Covered Tag', desc: 'The whole composite, the masked region kept and the rest painted white.' },
     { mode: 'full', name: 'Full Tag', desc: 'The whole composite as it is, ignoring the Mask layer entirely.' },
 ];
+// Layer-scoped variants — mirror the three above but read the COMPOSITE over the selected
+// layer's own region and the LAYER's OWN mask (not the singleton Mask layer). Only offered
+// when a real image layer is selected; the actual crop back to the layer grid happens in
+// sendBlendAction via layerCompositeForGenerate + generateMaskDataUrl.
+const LAYER_TAG_MODES = [
+    { mode: 'layer_mask', kind: 'mask', name: 'Layer Mask Tag', desc: 'Only this layer\u2019s region, cut by the layer\u2019s own mask — everything else discarded.' },
+    { mode: 'layer_covered', kind: 'covered', name: 'Layer Covered Mask Tag', desc: 'The composite over this layer\u2019s region, masked kept and the rest painted white.' },
+    { mode: 'layer_full', kind: 'full', name: 'Layer Full Tag', desc: 'The composite over this layer\u2019s region as it is, ignoring the layer\u2019s mask.' },
+];
 
 function tagModalOpen() { return tagModalEl.classList.contains('open'); }
 function closeTagModal() { tagModalEl.classList.remove('open'); }
@@ -5227,32 +5262,137 @@ function drawTagThumb(canvas, mode) {
     ctx.drawImage(scratch, 0, 0);
 }
 
+// The layer a Layer Tag would run on: the selected row, but only if it is a real image layer
+// (not the singleton Mask row, not a still-loading surface). null = no Layer options.
+function tagLayerTarget() {
+    const l = getSelected();
+    if (!l || l.isMaskLayer || !l.img) return null;
+    return l;
+}
+
+// Axis-aligned bounding box, in canvas pixels, of a layer's placement transform — the four
+// rotated corners of its box on the canvas. Thumbnails crop to this; the real payload uses the
+// exact inverse transform in layerCompositeForGenerate.
+function layerCanvasBBox(l) {
+    const tr = l.transform;
+    const cx = tr.cx * canvasW, cy = tr.cy * canvasH;
+    const tw = tr.w * canvasW, th = tr.h * canvasH;
+    const co = Math.cos(tr.rotation), si = Math.sin(tr.rotation);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [px, py] of [[-tw / 2, -th / 2], [tw / 2, -th / 2], [tw / 2, th / 2], [-tw / 2, th / 2]]) {
+        const x = cx + px * co - py * si, y = cy + px * si + py * co;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    return { x0: Math.max(0, x0), y0: Math.max(0, y0), w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
+
+// A Layer-tag thumbnail: the composite cropped to the layer's bbox, then read exactly like the
+// global thumbnails (mask/keep+white/whole) but against the LAYER's own mask instead of the
+// singleton Mask layer. Schematic when there is no live layer/canvas to sample.
+function drawLayerTagThumb(canvas, kind) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const l = tagLayerTarget();
+    if (!l || !blendCanvas.width) { drawTagSchematic(ctx, w, h, kind); return; }
+    const box = layerCanvasBBox(l);
+    const scratch = document.createElement('canvas');
+    scratch.width = w; scratch.height = h;
+    const sctx = scratch.getContext('2d');
+    sctx.drawImage(blendCanvas, box.x0, box.y0, box.w, box.h, 0, 0, w, h);
+    if (kind !== 'full' && l.mask) {
+        sctx.globalCompositeOperation = 'destination-in';
+        sctx.drawImage(l.mask, 0, 0, w, h);
+        sctx.globalCompositeOperation = 'source-over';
+    }
+    if (kind === 'full') { ctx.drawImage(scratch, 0, 0); return; }
+    if (kind === 'covered') {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(scratch, 0, 0);
+        return;
+    }
+    // 'mask': crop to the layer mask's own ink box so it reads as "just the masked part".
+    const t = document.createElement('canvas');
+    t.width = w; t.height = h;
+    const tx = t.getContext('2d');
+    if (l.mask) tx.drawImage(l.mask, 0, 0, w, h);
+    else { tx.fillStyle = '#fff'; tx.fillRect(0, 0, w, h); }
+    let data;
+    try { data = tx.getImageData(0, 0, w, h).data; } catch (e) { ctx.drawImage(scratch, 0, 0); return; }
+    let ax = w, ay = h, bx = -1, by = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        if (data[(y * w + x) * 4 + 3] > 8) { if (x < ax) ax = x; if (x > bx) bx = x; if (y < ay) ay = y; if (y > by) by = y; }
+    }
+    if (bx < 0) { ctx.drawImage(scratch, 0, 0); return; }
+    ctx.drawImage(scratch, ax, ay, bx - ax + 1, by - ay + 1, 0, 0, w, h);
+}
+
+function tagResultLine(d) {
+    if (d.action === 'blend') return ['Blend result added as a new smart layer', 'success'];
+    if (d.action === 'clear_tag') return ['Tags cleared from the prompt stage', 'success'];
+    return [`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success'];
+}
+
+function makeTagItem(name, desc, onPick, thumbPainter) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'tag-mode-item';
+    const thumb = document.createElement('canvas');
+    thumb.className = 'tag-mode-thumb';
+    thumb.width = 96; thumb.height = 64;
+    thumbPainter(thumb);
+    const text = document.createElement('div');
+    text.className = 'tag-mode-text';
+    const nm = document.createElement('span');
+    nm.className = 'tag-mode-name';
+    nm.textContent = name;
+    const descEl = document.createElement('span');
+    descEl.className = 'tag-mode-desc';
+    descEl.textContent = desc;
+    text.appendChild(nm);
+    text.appendChild(descEl);
+    item.appendChild(thumb);
+    item.appendChild(text);
+    item.addEventListener('click', onPick);
+    return item;
+}
+
 function openTagModal() {
     tagModeList.innerHTML = '';
+    // Clear Tag sits on top and is always available — it touches only the prompt stage.
+    tagModeList.appendChild(makeTagItem(
+        'Clear Tag',
+        'Remove the tags Tag wrote into the prompt stage. Nothing new is tagged.',
+        () => { closeTagModal(); sendClearTag(); },
+        (c) => {
+            const x = c.getContext('2d');
+            x.clearRect(0, 0, c.width, c.height);
+            x.strokeStyle = 'rgba(255,255,255,0.4)';
+            x.lineWidth = 2;
+            x.strokeRect(6, 6, c.width - 12, c.height - 12);
+            x.strokeStyle = 'rgba(248,81,73,0.9)';
+            x.beginPath();
+            x.moveTo(c.width * 0.36, c.height * 0.34); x.lineTo(c.width * 0.64, c.height * 0.66);
+            x.moveTo(c.width * 0.64, c.height * 0.34); x.lineTo(c.width * 0.36, c.height * 0.66);
+            x.stroke();
+        },
+    ));
     TAG_MODES.forEach(m => {
-        const item = document.createElement('button');
-        item.type = 'button';
-        item.className = 'tag-mode-item';
-        item.setAttribute('data-tag-mode', m.mode);
-        const thumb = document.createElement('canvas');
-        thumb.className = 'tag-mode-thumb';
-        thumb.width = 96; thumb.height = 64;
-        drawTagThumb(thumb, m.mode);
-        const text = document.createElement('div');
-        text.className = 'tag-mode-text';
-        const name = document.createElement('span');
-        name.className = 'tag-mode-name';
-        name.textContent = m.name;
-        const desc = document.createElement('span');
-        desc.className = 'tag-mode-desc';
-        desc.textContent = m.desc;
-        text.appendChild(name);
-        text.appendChild(desc);
-        item.appendChild(thumb);
-        item.appendChild(text);
-        item.addEventListener('click', () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); });
-        tagModeList.appendChild(item);
+        tagModeList.appendChild(makeTagItem(m.name, m.desc,
+            () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); },
+            (c) => drawTagThumb(c, m.mode)));
     });
+    // Layer variants — only while a real image layer is selected.
+    const tl = tagLayerTarget();
+    if (tl) {
+        LAYER_TAG_MODES.forEach(m => {
+            tagModeList.appendChild(makeTagItem(m.name, m.desc,
+                () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); },
+                (c) => drawLayerTagThumb(c, m.kind)));
+        });
+    }
     tagModalEl.classList.add('open');
     syncBrushCursor();
 }
@@ -6618,8 +6758,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
         if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
-        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer', 'success');
-        else if (d.action === 'tag') setStatus(`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success');
+        else { const [msg, kind] = tagResultLine(d); setStatus(msg, kind); }
         return;
     }
     if (d.type === 'blend-run-status') {
