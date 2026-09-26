@@ -28,9 +28,12 @@ export interface PromptPresetSelectionPayload {
  *  answer), so the prompt node's own global selection must NOT be restored into it. */
 export const SCOPED_SELECTION = PRESET_SCOPE || QUERY_SCOPE;
 
-/** Fetch the referenced preset's saved selection from the sampler server (null = not configured). */
+/** Fetch the referenced preset's saved selection from the sampler server (null = not configured).
+ *  Both scoped consumers seed from it: the preset editor obviously, and a Query block that
+ *  binds a preset — its dialog opens pre-ticked with that selection. An unbound Query has no
+ *  PRESET_ID, so this returns null and the dialog starts empty, exactly as before. */
 export async function fetchPromptPresetSelection(): Promise<any | null> {
-  if (!PRESET_SCOPE || !PRESET_ID || !SAMPLER_BASE) return null;
+  if (!SCOPED_SELECTION || !PRESET_ID || !SAMPLER_BASE) return null;
   try {
     const res = await fetch(`${SAMPLER_BASE}/api/prompt_presets`);
     if (!res.ok) return null;
@@ -43,8 +46,8 @@ export async function fetchPromptPresetSelection(): Promise<any | null> {
 }
 
 /** Hand a Query answer back to the host (the sampler): it forwards the RAW selection to
- *  the parked run, which merges it and runs its programs. Nothing is persisted here —
- *  a Query is a one-off answer, not a preset. */
+ *  the parked run, which merges it and runs its programs. This window never writes to the
+ *  preset — a Persistent Query's write-back is the backend's call at submit time. */
 export function answerQuerySelection(selection: PromptPresetSelectionPayload): boolean {
   if (!QUERY_SCOPE || window.parent === window) return false;
   window.parent.postMessage({ type: 'prompt-query-answered', selection }, '*');

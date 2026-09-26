@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 
 // Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
@@ -128,8 +128,9 @@ interface EditPhaseProps {
   pendingQuery: PendingQuery | null;
   /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
   onRunPreset: (presetId: string) => void;
-  /** 把用户在弹窗里挑好的 prompt 交给后端，唤醒停在 Query 块上的 run */
-  onQueryAnswer: (selection: Record<string, any>) => void;
+  /** 把用户在弹窗里挑好的 prompt 交给后端，唤醒停在 Query 块上的 run。
+   *  返回 Promise 是为了让 Persistent 的写回落地后再刷新 preset 摘要。 */
+  onQueryAnswer: (selection: Record<string, any>) => void | Promise<void>;
   /** 关掉 Query 弹窗 = 中止整条链 */
   onQueryCancel: () => void;
   onRemoveBlock: (blockId: string) => void;
@@ -257,15 +258,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, []);
 
   // A Query-scope prompt iframe hands the picked selection straight back to the host; the
-  // backend (not this UI) merges it, so all we do is forward it and close the dialog.
+  // backend (not this UI) merges it, so all we do is forward it and close the dialog. When the
+  // block was Persistent the answer also overwrote its preset server-side, so re-fetch the
+  // presets once that POST has returned — the card summaries must show the new content.
   useEffect(() => {
     const onAnswered = (event: MessageEvent) => {
       if (event.data?.type !== 'prompt-query-answered') return;
-      onQueryAnswer(event.data.selection || {});
+      const bound = pendingQuery?.preset_id && pendingQuery.persistent;
+      void Promise.resolve(onQueryAnswer(event.data.selection || {})).finally(() => {
+        if (bound) void refreshPromptPresets();
+      });
     };
     window.addEventListener('message', onAnswered);
     return () => window.removeEventListener('message', onAnswered);
-  }, [onQueryAnswer]);
+  }, [onQueryAnswer, pendingQuery, refreshPromptPresets]);
 
   // The preset-scope prompt iframe saves to the shared preset through the backend AND
   // notifies us — refresh the list (new content) and close the editor.
@@ -320,6 +326,80 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     const ip = block.params as any;
     if (ip.interface_name) return !interfaces.some(i => i.name === ip.interface_name);
     return !(interfaces as InterfaceInfo[])[ip.interface_idx ?? -1];
+  };
+
+  // Prompt blocks INJECT the bound preset's selection at run time; Query blocks SEED their
+  // dialog with it. Same shared preset, same row — only the tooltip says which.
+  const renderPresetBinding = (block: PipelineBlock, bindingTitle: string) => {
+    const pp = block.params as PromptBlockParams;
+    const preset = pp.preset_id ? promptPresets.find(p => p.id === pp.preset_id) : null;
+    const sel = preset?.selection;
+    const nTags = (sel?.tags || []).length;
+    const nLoras = (sel?.loras || []).length;
+    const nPrefabs = (sel?.prefabs || []).length;
+    const nPrograms = (sel?.programs || []).length;
+    const presetMissing = !!pp.preset_id && presetsLoaded && !preset;
+    const summary = presetMissing
+      ? '⚠ preset 已被删除 (missing) — 请重新选择或新建'
+      : !preset
+        ? '未选择 preset — 从下拉选择或新建一个'
+        : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
+    const startRename = () => {
+      setRenamingPresetId(preset?.id || null);
+      setRenamingPresetValue(preset?.name || '');
+    };
+    const commitRename = () => {
+      if (renamingPresetId && renamingPresetValue.trim()) {
+        void renamePromptPreset(renamingPresetId, renamingPresetValue.trim());
+      }
+      setRenamingPresetId(null);
+    };
+    const iconBtnStyle = (enabled: boolean): React.CSSProperties => ({
+      background: 'none', border: 'none', color: enabled ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)',
+      cursor: enabled ? 'pointer' : 'default', fontSize: 12, padding: '2px 4px', lineHeight: 1, flexShrink: 0,
+    });
+    return (<>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%' }}>
+        {renamingPresetId && preset ? (
+          <input
+            autoFocus
+            value={renamingPresetValue}
+            onChange={e => setRenamingPresetValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingPresetId(null); }}
+            onBlur={commitRename}
+            style={{ flex: 1, minWidth: 0, padding: '4px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(100,210,255,0.4)', color: '#fff', fontSize: 11.5, outline: 'none' }}
+          />
+        ) : (
+          <select
+            value={pp.preset_id || ''}
+            onChange={e => updateBlockParam(block.id, 'preset_id', e.target.value || null)}
+            title={bindingTitle}
+            style={{ flex: 1, minWidth: 0, padding: '4px 6px', borderRadius: 6, background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: 11.5 }}
+          >
+            <option value="" style={{ background: '#1c1c1e' }}>— 选择 preset —</option>
+            {pp.preset_id && presetsLoaded && !promptPresets.some(p => p.id === pp.preset_id) && (
+              <option value={pp.preset_id} style={{ background: '#1c1c1e' }}>(missing)</option>
+            )}
+            {promptPresets.map(p => <option key={p.id} value={p.id} style={{ background: '#1c1c1e' }}>{p.name}</option>)}
+          </select>
+        )}
+        <button title="New preset and use it on this block" style={iconBtnStyle(true)}
+          onClick={async () => { const p = await createPromptPreset(); if (p) updateBlockParam(block.id, 'preset_id', p.id); }}>＋</button>
+        <button title="Rename this preset" disabled={!preset} style={iconBtnStyle(!!preset)} onClick={startRename}>✎</button>
+        <button title={preset ? 'Open the prompt editor for this preset' : presetMissing ? 'This preset was deleted — pick another one' : 'Select or create a preset first'}
+          disabled={!preset} style={iconBtnStyle(!!preset)}
+          onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}>⚙</button>
+        <button title="Delete this preset (referencing blocks will show (missing))" disabled={!preset} style={iconBtnStyle(!!preset)}
+          onClick={() => {
+            if (!preset) return;
+            if (window.confirm(`删除 preset「${preset.name}」？引用它的块会保留引用并显示 (missing)，run 时按空处理。`)) void deletePromptPreset(preset.id);
+          }}>🗑</button>
+      </div>
+      <div style={{
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        fontSize: 11, color: presetMissing ? '#ff9f0a' : 'rgba(255,255,255,0.45)',
+      }}>{summary}</div>
+    </>);
   };
 
   // limit_pixels 的 pixels/align 为全局参数，取自第一个 detailer block（与后端 first_bp 一致）。
@@ -694,82 +774,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                   {/* Block params */}
                   <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {block.type === 'prompt' && (() => {
-                      const pp = block.params as PromptBlockParams;
-                      const preset = pp.preset_id ? promptPresets.find(p => p.id === pp.preset_id) : null;
-                      const sel = preset?.selection;
-                      const nTags = (sel?.tags || []).length;
-                      const nLoras = (sel?.loras || []).length;
-                      const nPrefabs = (sel?.prefabs || []).length;
-                      const nPrograms = (sel?.programs || []).length;
-                      const presetMissing = !!pp.preset_id && presetsLoaded && !preset;
-                      const summary = presetMissing
-                        ? '⚠ preset 已被删除 (missing) — 请重新选择或新建'
-                        : !preset
-                          ? '未选择 preset — 从下拉选择或新建一个'
-                          : `${nTags} tags · ${nLoras} loras · ${nPrefabs} prefabs · ${nPrograms} programs`;
-                      const startRename = () => {
-                        setRenamingPresetId(preset?.id || null);
-                        setRenamingPresetValue(preset?.name || '');
-                      };
-                      const commitRename = () => {
-                        if (renamingPresetId && renamingPresetValue.trim()) {
-                          void renamePromptPreset(renamingPresetId, renamingPresetValue.trim());
-                        }
-                        setRenamingPresetId(null);
-                      };
-                      const iconBtnStyle = (enabled: boolean): React.CSSProperties => ({
-                        background: 'none', border: 'none', color: enabled ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.2)',
-                        cursor: enabled ? 'pointer' : 'default', fontSize: 12, padding: '2px 4px', lineHeight: 1, flexShrink: 0,
-                      });
+                    {block.type === 'prompt' && renderPresetBinding(block, 'Which shared prompt preset this block injects')}
+                    {block.type === 'query' && (() => {
+                      const qp = block.params as QueryBlockParams;
+                      const bound = !!qp.preset_id;
                       return (<>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 2, width: '100%' }}>
-                          {renamingPresetId && preset ? (
-                            <input
-                              autoFocus
-                              value={renamingPresetValue}
-                              onChange={e => setRenamingPresetValue(e.target.value)}
-                              onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenamingPresetId(null); }}
-                              onBlur={commitRename}
-                              style={{ flex: 1, minWidth: 0, padding: '4px 8px', borderRadius: 6, background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(100,210,255,0.4)', color: '#fff', fontSize: 11.5, outline: 'none' }}
-                            />
-                          ) : (
-                            <select
-                              value={pp.preset_id || ''}
-                              onChange={e => updateBlockParam(block.id, 'preset_id', e.target.value || null)}
-                              title="Which shared prompt preset this block injects"
-                              style={{ flex: 1, minWidth: 0, padding: '4px 6px', borderRadius: 6, background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.15)', color: '#fff', fontSize: 11.5 }}
-                            >
-                              <option value="" style={{ background: '#1c1c1e' }}>— 选择 preset —</option>
-                              {pp.preset_id && presetsLoaded && !promptPresets.some(p => p.id === pp.preset_id) && (
-                                <option value={pp.preset_id} style={{ background: '#1c1c1e' }}>(missing)</option>
-                              )}
-                              {promptPresets.map(p => <option key={p.id} value={p.id} style={{ background: '#1c1c1e' }}>{p.name}</option>)}
-                            </select>
-                          )}
-                          <button title="New preset and use it on this block" style={iconBtnStyle(true)}
-                            onClick={async () => { const p = await createPromptPreset(); if (p) updateBlockParam(block.id, 'preset_id', p.id); }}>＋</button>
-                          <button title="Rename this preset" disabled={!preset} style={iconBtnStyle(!!preset)} onClick={startRename}>✎</button>
-                          <button title={preset ? 'Open the prompt editor for this preset' : presetMissing ? 'This preset was deleted — pick another one' : 'Select or create a preset first'}
-                            disabled={!preset} style={iconBtnStyle(!!preset)}
-                            onClick={() => { if (preset) setEditingPromptBlockId(block.id); }}>⚙</button>
-                          <button title="Delete this preset (referencing blocks will show (missing))" disabled={!preset} style={iconBtnStyle(!!preset)}
-                            onClick={() => {
-                              if (!preset) return;
-                              if (window.confirm(`删除 preset「${preset.name}」？引用它的块会保留引用并显示 (missing)，run 时按空处理。`)) void deletePromptPreset(preset.id);
-                            }}>🗑</button>
+                        {renderPresetBinding(block, 'Query 弹窗的初始勾选来自这个 preset（与 prompt 块共用同一份）')}
+                        <div style={styles.paramRow}
+                          title={bound
+                            ? '开：Confirm 时把弹窗里的最终选择整体写回绑定的 preset，下次 run / 下次打开弹窗就是它。关：本次修改只活在当前 run 里。'
+                            : '先绑定 preset 才能持久化 —— 没有 preset 就没有可写回的地方。'}>
+                          <label style={styles.paramLabel}>Persistent</label>
+                          <IOSToggle checked={bound && !!qp.persistent} disabled={!bound}
+                            onChange={v => updateBlockParam(block.id, 'persistent', v)} />
                         </div>
-                        <div style={{
-                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                          fontSize: 11, color: presetMissing ? '#ff9f0a' : 'rgba(255,255,255,0.45)',
-                        }}>{summary}</div>
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
+                          执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。
+                        </div>
                       </>);
                     })()}
-                    {block.type === 'query' && (
-                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
-                        执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。
-                      </div>
-                    )}
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
                       return (<>
@@ -1159,11 +1182,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       })()}
 
       {/* Query dialog — a run is parked on a Query block and waits for this answer. The
-          prompt UI opens in query scope: it starts EMPTY and hands the RAW selection to the
-          host, which forwards it to the backend (the merge and the programs happen there).
-          Closing it cancels, and cancelling aborts the whole chain. */}
+          prompt UI opens in query scope: bound to a preset it starts from that preset's
+          selection (the iframe fetches it like the preset editor does), unbound it starts
+          EMPTY. Either way it hands the RAW selection to the host, which forwards it to the
+          backend (the merge and the programs happen there). Closing it cancels, and
+          cancelling aborts the whole chain. */}
       {pendingQuery && (() => {
-        const qParams = 'sampler_base=' + encodeURIComponent(window.location.origin) + '&scope=query';
+        const qPresetId = pendingQuery.preset_id || '';
+        const qPreset = qPresetId ? promptPresets.find(p => p.id === qPresetId) : null;
+        const qParams = 'sampler_base=' + encodeURIComponent(window.location.origin) + '&scope=query'
+          + (qPresetId ? '&preset_id=' + encodeURIComponent(qPresetId) : '');
         const qSrc = (promptUrl || '/prompt_node.html') + (promptUrl.includes('?') ? '&' : '?') + qParams;
         return (
           <div style={{
@@ -1182,6 +1210,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={{ fontSize: 13, fontWeight: 600, color: '#ffd60a' }}>
                   Query — {pendingQuery.name}
                   <span style={{ fontWeight: 400, color: 'rgba(255,255,255,0.45)', marginLeft: 8 }}>
+                    {qPreset ? `preset「${qPreset.name}」${pendingQuery.persistent ? ' · Persistent：Confirm 后写回' : ' · 仅本次'} · ` : ''}
                     挑好 prompt 后 Confirm 继续；关闭 = 中止整条链
                   </span>
                 </div>

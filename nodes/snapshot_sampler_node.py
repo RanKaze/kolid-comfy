@@ -1002,12 +1002,15 @@ class SnapshotDetailerSamplerServer:
 
         The run loop owns the wait (it blocks on the event); this is only the read-only
         projection the sampler polls to know it must open the prompt dialog. The event
-        itself never crosses the wire.
+        itself never crosses the wire. `preset_id` rides along so the dialog can seed
+        itself from the bound preset (same scope the preset editor uses); `persistent`
+        tells the sampler UI whether the answer will be written back.
         """
         q = self.pending_query
         if not q:
             return None
-        return {'id': q.get('id'), 'name': q.get('name'), 'index': q.get('index')}
+        return {'id': q.get('id'), 'name': q.get('name'), 'index': q.get('index'),
+                'preset_id': q.get('preset_id'), 'persistent': bool(q.get('persistent'))}
 
     def _answer_pending_query(self, selection=None, cancelled=False):
         """Release a parked Query block with the user's choice (or their cancellation).
@@ -1015,6 +1018,11 @@ class SnapshotDetailerSamplerServer:
         `selection` is the RAW prompt-node selection — the run loop merges it and runs its
         programs exactly like a prompt block's preset. `cancelled` (closing the dialog,
         not answering) aborts the whole chain. False = nothing was waiting.
+
+        A Persistent Query overwrites its bound preset with this final selection, here and
+        not in the run loop: the write has to be on disk before this request answers, so the
+        sampler can refresh the preset summaries without racing the parked thread. Fail-open
+        — persistence is for NEXT run, it must never break THIS one.
         """
         q = self.pending_query
         if not q:
@@ -1023,6 +1031,15 @@ class SnapshotDetailerSamplerServer:
             q['cancelled'] = True
         else:
             q['answer'] = selection if isinstance(selection, dict) else {}
+            if q.get('persistent'):
+                preset_id = q.get('preset_id')
+                try:
+                    if self._save_prompt_preset_selection(preset_id, q['answer']):
+                        print(f"[Query] answer persisted into preset '{preset_id}'")
+                    else:
+                        print(f"[Query] WARNING: preset '{preset_id}' is gone — answer not persisted")
+                except Exception as e:
+                    print(f"[Query] WARNING: could not persist the answer ({e})")
         self.pending_query = None
         evt = q.get('event')
         if evt is not None:
@@ -2243,20 +2260,30 @@ class SnapshotDetailerSamplerNode:
         /api/query_answer releases it. ComfyUI's interrupt still reaches a parked chain.
         Cancelling the dialog (or never answering) ABORTS the whole chain — the user asked
         for the run to stop rather than continue with a prompt they never chose.
+
+        A Query may bind the same shared preset a prompt block uses: the wait publishes it so
+        the dialog opens pre-ticked from it, and `persistent` rides along so the answer
+        handler can write the final selection back into that preset (see
+        `_answer_pending_query`). Without persistence the answer lives only in this run.
         """
         import threading as _threading
         import time as _time
         evt = _threading.Event()
+        bp = block.get('params', block) if isinstance(block, dict) else None
+        preset_id = bp.get('preset_id') if isinstance(bp, dict) else None
         query = {
             'id': 'query-%d-%d' % (index, int(_time.time() * 1000)),
             'name': (block.get('name') if isinstance(block, dict) else None) or 'Query',
             'index': index,
+            'preset_id': preset_id,
+            'persistent': bool(isinstance(bp, dict) and bp.get('persistent')) and bool(preset_id),
             'event': evt,
             'answer': None,
             'cancelled': False,
         }
         server.pending_query = query
-        print(f"[PipelineBlock {index + 1}] Query block '{query['name']}' — waiting for the user's prompt choice")
+        print(f"[PipelineBlock {index + 1}] Query block '{query['name']}' — waiting for the user's prompt choice"
+              + (f" (preset '{preset_id}'" + (', persistent)' if query['persistent'] else ')') if preset_id else ''))
         timeout = float(getattr(server, 'query_timeout', 600) or 600)
         deadline = _time.time() + timeout
         try:
@@ -2620,6 +2647,8 @@ class SnapshotDetailerSamplerNode:
                     # Query 块：链条停在这里，前端弹 prompt UI 让用户现场挑；回答按 prompt 块
                     # 的语义合并注入（全局在前 + 本次选择在后 + programs 在合并结果上执行），
                     # 只影响其后的 detailer。取消/超时 = 中止整条链（用户明确要求）。
+                    # 绑定了 preset 的 Query 以 preset 为弹窗初始勾选；Persistent 的写回发生在
+                    # /api/query_answer 里（见 _answer_pending_query），这里只消费回答本身。
                     answer = self._await_query_answer(server, block, i)
                     user_positive, user_loras = self._resolve_prompt_selection(server, answer)
                     # Extra Prompt has the final append: a Query block replaces the prompt-tab
