@@ -416,7 +416,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                      读回文本时 chip 序列化成 <image_id:xxx>；后端再解码成 <image N>。 -->
                 <div id="extraPrompt" class="is-empty" contenteditable="true" role="textbox" spellcheck="false"
                      data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
-                <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The composite is also archived into the staging pool.">Blend</button>
+                <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself.">Blend</button>
                 <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads">Tag</button>
                 <div class="tb-pill">
                     <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
@@ -6618,7 +6618,7 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
         if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
-        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer (also archived to staging)', 'success');
+        else if (d.action === 'blend') setStatus('Blend result added as a new smart layer', 'success');
         else if (d.action === 'tag') setStatus(`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success');
         return;
     }

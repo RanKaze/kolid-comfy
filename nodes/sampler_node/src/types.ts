@@ -224,12 +224,15 @@ export interface DebugTraceResponse {
 }
 
 export interface StagingItem {
-  /** 工作区条目 id（'staging_N'）。Extra Prompt 的 <image_id:...> / 端口图 / Finish 都引用它。 */
+  /** 内部图池条目 id（'staging_N'）。Extra Prompt 的 <image_id:...> / 端口图 / Finish 都引用它。 */
   id: string;
   name: string;
   src: string;
   width?: number;
   height?: number;
+  /** hidden = 生成侧自动登记的条目（Original 种子 / run、接口产出）：不进工作区条带，
+   *  条带只展示用户主动拖入/导入的图。宿主镜像按此字段过滤。 */
+  hidden?: boolean;
   /** Recover Crop 关闭时：产出 patch 要贴回哪块画布区域。此模式下 src 是 RGBA —— alpha
    *  就是 crop 工作区的 mask，图层自带裁剪。
    *  x/y/w/h 是 crop 矩形，单位 = 本次 run 的原始图像素（ow x oh）；
