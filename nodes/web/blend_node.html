@@ -486,11 +486,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-section">
                 <div class="control-row" id="brushColorRow"><label>Color</label><input type="color" id="brushColor" value="#ff3b30"><span id="brushColorValue">#FF3B30</span></div>
+                <div class="control-row" id="brushAlphaRow"><label>Alpha</label><input type="range" id="brushAlphaRange" min="0" max="1" step="0.01" value="1" title="Transparency of the Color, shared by Brush and Bucket. On a decal it paints translucent strokes; on a mask this same value IS the coverage you pour (0 = nothing, 1 = full). Alt+click picks it too."><span id="brushAlphaValue">1.00</span></div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="brushSection">
                 <div class="panel-head">
                     <div class="panel-label" id="brushLabel"><span class="fold-caret"></span>Brush <span class="tool-key">B</span></div>
-                    <span class="ring-swatch" id="brushRingSwatch" title="Paints the decal colour / brightens the mask"></span>
+                    <span class="ring-swatch" id="brushRingSwatch" title="Paints the decal colour (at its Alpha) / pours that Alpha into the mask"></span>
                 </div>
                 <div class="tool-body">
                     <div class="mini-group">
@@ -507,12 +508,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-section tool-section foldable collapsed" id="bucketSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto this layer's decal. Alt+click picks the Color from the canvas, like the brush. Click the header to fold the settings."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
+                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto the surface the Mask / Decal switch picks: a decal gets the colour (Alpha included), a mask gets the Color's Alpha poured in as coverage. Alt+click picks the Color from the canvas, like the brush. Click the header to fold the settings."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
                 </div>
                 <div class="tool-body">
                     <div class="control-row"><label>Tolerance</label><input type="range" id="bucketTolerance" min="0" max="1" step="0.01" value="0.2" title="How far a pixel may sit from the clicked colour and still be filled (0 = exact match, 1 = everything)"><span id="bucketToleranceValue">0.20</span></div>
                     <div class="control-row"><label>Continuous</label><input type="checkbox" id="bucketContinuous" checked title="Only fill pixels connected to the clicked point. Off fills every matching pixel on the layer, however far away."><span></span></div>
-                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the whole-canvas composite (what you see). Off matches against this layer's own image + decal. The fill always lands on this layer's decal."><span></span></div>
+                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the whole-canvas composite (what you see). Off matches against this layer's own image + decal. The fill always lands on the surface the Mask / Decal switch picks."><span></span></div>
                 </div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="eraserSection">
@@ -821,6 +822,7 @@ let eraserGamma = 2.0;
 // Both tools paint onto the same surface, chosen here: the layer's mask (coverage) or its decal (colour).
 let paintTarget = 'mask';      // 'mask' | 'decal'
 let brushColor = '#ff3b30';
+let brushAlpha = 1;            // 0..1 — decal strokes paint translucent; on a mask this IS the coverage
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
 let dragRowId = null;
@@ -2488,7 +2490,7 @@ function renderMaskLayerRow() {
 
     const thumb = document.createElement('div');
     thumb.className = 'layer-thumb masklayer-thumb';
-    thumb.title = 'Alpha = coverage. Brush covers, eraser uncovers.';
+    thumb.title = 'Alpha = coverage. Brush and Bucket cover, eraser uncovers.';
     const c = document.createElement('canvas');
     c.width = 84;
     c.height = 56;
@@ -3123,7 +3125,7 @@ function syncPaintUI() {
         ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer.'
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
-        : 'Paint the mask (coverage): white shows the image, black hides it. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
+        : 'Paint the mask (coverage): white shows the image, black hides it. The Color\u2019s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
     brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to fold the settings.`;
     eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to fold the settings.`;
     updateMaskTargetLabel();
@@ -3139,6 +3141,26 @@ function setPaintColor(hex) {
     updateCursorMode();
 }
 
+function setPaintAlpha(a) {
+    brushAlpha = Math.max(0, Math.min(1, Number.isFinite(a) ? a : 1));
+    const el = document.getElementById('brushAlphaRange');
+    el.value = String(brushAlpha);
+    document.getElementById('brushAlphaValue').textContent = brushAlpha.toFixed(2);
+    updateCursorMode();
+}
+
+function paintColorRGB() {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(brushColor).trim());
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 255, 255];
+}
+
+// The paint colour as an rgba() string at the current Alpha — everything that consumes the
+// Color (decal tint, brush ring) reads it through here so Alpha can never be forgotten.
+function paintRGBA() {
+    const [r, g, b] = paintColorRGB();
+    return `rgba(${r}, ${g}, ${b}, ${brushAlpha})`;
+}
+
 function selectTool(tool) {
     if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
     maskTool = tool;
@@ -3146,7 +3168,9 @@ function selectTool(tool) {
     else { syncToolUI(); syncBrushCursor(); refreshCursor(); }
     const target = isDecalTarget() ? 'the decal' : 'the mask';
     setStatus(tool === 'brush' ? `Brush — left-drag paints ${target}`
-        : tool === 'bucket' ? 'Bucket — click flood-fills matching pixels with the Color onto the decal; Alt+click picks the Color'
+        : tool === 'bucket' ? (isDecalTarget() && !isMaskLayerTarget()
+            ? 'Bucket — click flood-fills matching pixels with the Color onto the decal; Alt+click picks the Color'
+            : 'Bucket — click flood-fills matching pixels on the mask with the Color\u2019s Alpha as coverage; Alt+click picks the Color')
         : `Eraser — left-drag erases ${target}`);
 }
 
@@ -3160,9 +3184,9 @@ function updateCursorMode() {
     const erasing = erasingNow();
     brushCursor.classList.toggle('erase', erasing);
     // Tint the ring (and its sidebar twin) with the paint colour, so the decal colour is visible while painting.
-    const tint = (!erasing && isDecalTarget()) ? brushColor : '';
+    const tint = (!erasing && isDecalTarget()) ? paintRGBA() : '';
     brushCursor.style.borderColor = tint;
-    document.getElementById('brushRingSwatch').style.borderColor = isDecalTarget() ? brushColor : '';
+    document.getElementById('brushRingSwatch').style.borderColor = isDecalTarget() ? paintRGBA() : '';
     // The brush and the eraser keep separate sizes, so switching tool by button has to resize the
     // ring too — otherwise the cursor would promise the brush's diameter and erase with another.
     updateBrushCursorSize();
@@ -3793,7 +3817,10 @@ function livePreviewStroke() {
     c.globalCompositeOperation = isErasing ? 'destination-out' : 'source-over';
     // strokeCanvas holds a white, alpha-only accumulation. A decal (not a mask) gets its
     // colour applied here, uniformly, so overlapping 'lighter' stamps cannot shift the hue.
+    // The Color's Alpha rides along with it: source-in multiplies it into the ink (a
+    // translucent decal), and on a mask surface it caps the coverage the stroke can pour.
     let ink = strokeCanvas;
+    const maskInk = !isErasing && (isMaskLayerTarget() || !isDecalTarget());
     if (!isErasing && isDecalTarget() && !isMaskLayerTarget()) {
         if (strokeTintCanvas.width !== w || strokeTintCanvas.height !== h) {
             strokeTintCanvas.width = w; strokeTintCanvas.height = h;
@@ -3802,12 +3829,14 @@ function livePreviewStroke() {
         strokeTintCtx.clearRect(0, 0, w, h);
         strokeTintCtx.drawImage(strokeCanvas, 0, 0, w, h);
         strokeTintCtx.globalCompositeOperation = 'source-in';
-        strokeTintCtx.fillStyle = brushColor;
+        strokeTintCtx.fillStyle = paintRGBA();
         strokeTintCtx.fillRect(0, 0, w, h);
         strokeTintCtx.globalCompositeOperation = 'source-over';
         ink = strokeTintCanvas;
     }
+    if (maskInk) c.globalAlpha = brushAlpha;
     c.drawImage(ink, 0, 0, w, h);
+    if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
     if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
     render();
@@ -3825,16 +3854,22 @@ function commitStroke() {
     if (keyShift && !strokeMoved && l) shiftAnchor = { x: lastX, y: lastY, layerId: l.id, target: paintTarget };
 }
 
-// ==================== Bucket（油漆桶,只绘 decal） ====================
+// ==================== Bucket（油漆桶,跟随 Mask/Decal 目标） ====================
 // One click = one flat fill of every pixel within tolerance of the sampled colour, written
-// straight onto the selected layer's decal at its native resolution. The sample source is the
-// All Layers switch: off reads this layer's own composite (image + decal); on reads the
-// whole-canvas blend rasterised through the layer's transform — so on a transformed layer the
-// two answers really can differ, and the fill region follows whichever one you sampled.
+// straight onto the layer's paint surface (the Mask / Decal switch picks it) at its native
+// resolution. Decal target pours the Color (Alpha included); mask target pours the Color's
+// Alpha itself as coverage — same flood logic, same sample source, only the ink differs.
+// The sample source is the All Layers switch: off reads this layer's own composite (image +
+// decal); on reads the whole-canvas blend rasterised through the layer's transform — so on a
+// transformed layer the two answers really can differ, and the fill region follows whichever
+// one you sampled.
 function bucketFillAt(pos) {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (isMaskLayerTarget()) { setStatus('Bucket paints a layer\'s decal — the Mask layer has none', 'error'); return; }
+    const toMask = isMaskLayerTarget() || !isDecalTarget();
+    if (isMaskLayerTarget() && !ensureMaskLayer()) {
+        setStatus('Add an image (or set a canvas size) before painting the mask', 'error'); return;
+    }
     const { w, h } = nativeSize(l.img);
     // Click → layer native pixel grid: the exact inverse of setBrushCtxTransform.
     const tr = l.transform;
@@ -3890,24 +3925,29 @@ function bucketFillAt(pos) {
     }
     if (!count) { setStatus('Bucket — nothing within tolerance of the clicked colour', 'error'); return; }
 
-    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(brushColor).trim());
-    const fr = m ? parseInt(m[1], 16) : 255, fg = m ? parseInt(m[2], 16) : 255, fb = m ? parseInt(m[3], 16) : 255;
-    paintTarget = 'decal';          // the Bucket is decal-only, whatever the target switch says
-    ensureDecal(l);
+    const [fr, fg, fb] = paintColorRGB();
+    const fa = Math.round(brushAlpha * 255);
+    // Mask ink is white with the coverage in its alpha channel — exactly what the brush
+    // stamps leave behind. So the Color's Alpha poured here reads back as mask coverage.
+    const ir = toMask ? 255 : fr, ig = toMask ? 255 : fg, ib = toMask ? 255 : fb;
+    if (!ensurePaintSurface(l)) { setStatus('Bucket — could not open the paint surface', 'error'); return; }
     detachPaintSurface(l);
-    const surf = l.decalCtx.getImageData(0, 0, w, h);
+    const pctx = paintSurfaceCtx(l);
+    const surf = pctx.getImageData(0, 0, w, h);
     const od = surf.data;
     for (let p = 0; p < w * h; p++) {
         if (!region[p]) continue;
         const j = p * 4;
-        od[j] = fr; od[j + 1] = fg; od[j + 2] = fb; od[j + 3] = 255;
+        od[j] = ir; od[j + 1] = ig; od[j + 2] = ib; od[j + 3] = fa;
     }
-    l.decalCtx.putImageData(surf, 0, 0);
+    pctx.putImageData(surf, 0, 0);
     pushHistory();
-    refreshDecalThumb(l);
+    if (isMaskLayerTarget()) refreshMaskLayerThumb();
+    else if (toMask) refreshMaskThumb(l);
+    else refreshDecalThumb(l);
     syncPaintUI();
     render();
-    setStatus(`Bucket — filled ${count} px of ${l.name}'s decal`);
+    setStatus(`Bucket — filled ${count} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`);
 }
 
 // ==================== 吸色（画笔模式下按住 Alt + 左键） ====================
@@ -3922,7 +3962,7 @@ function pickColorAt(docPos) {
     const x = Math.round(docPos.x), y = Math.round(docPos.y);
     if (x < 0 || y < 0 || x >= canvasW || y >= canvasH) return null;
     const d = blendCtx.getImageData(x, y, 1, 1).data;
-    return d[3] < 8 ? null : [d[0], d[1], d[2]];
+    return d[3] < 8 ? null : [d[0], d[1], d[2], d[3]];
 }
 
 function rgbToHex(rgb) {
@@ -3935,9 +3975,11 @@ function syncPickHud() {
     pickHud.style.display = 'flex';
     pickHud.style.left = picking.clientX + 'px';
     pickHud.style.top = picking.clientY + 'px';
-    pickSwatch.style.background = rgb ? rgbToHex(rgb) : 'transparent';
-    pickHex.textContent = rgb ? rgbToHex(rgb).toUpperCase() : '—';
-    pickRgb.textContent = rgb ? `${rgb[0]}, ${rgb[1]}, ${rgb[2]}` : 'transparent';
+    const hex = rgb ? rgbToHex(rgb.slice(0, 3)) : '';
+    pickSwatch.style.background = hex || 'transparent';
+    pickSwatch.style.opacity = rgb ? (rgb[3] / 255) : 1;
+    pickHex.textContent = hex ? hex.toUpperCase() : '—';
+    pickRgb.textContent = rgb ? `${rgb[0]}, ${rgb[1]}, ${rgb[2]} · α ${(rgb[3] / 255).toFixed(2)}` : 'transparent';
 }
 
 function beginPick(e, pos) {
@@ -3956,12 +3998,13 @@ function updatePick(e) {
 }
 
 function endPick(e) {
-    const rgb = picking && picking.rgb;
+    const rgba = picking && picking.rgb;   // [r,g,b,a] — the pick grabs the Alpha too
     cancelPick();
-    if (rgb) {
-        const hex = rgbToHex(rgb);
+    if (rgba) {
+        const hex = rgbToHex(rgba.slice(0, 3));
         setPaintColor(hex);
-        setStatus(`Picked ${hex.toUpperCase()} (${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
+        setPaintAlpha(rgba[3] / 255);
+        setStatus(`Picked ${hex.toUpperCase()} (${rgba[0]}, ${rgba[1]}, ${rgba[2]}) · α ${(rgba[3] / 255).toFixed(2)}`);
     } else {
         setStatus('Nothing to pick there', 'error');
     }
@@ -4324,6 +4367,7 @@ bindRange('brushStrength', 'brushStrengthValue', v => brushStrength = v);
 bindRange('brushCenter', 'brushCenterValue', v => brushCenter = v);
 bindRange('brushEdge', 'brushEdgeValue', v => brushEdge = v);
 bindRange('brushGamma', 'brushGammaValue', v => brushGamma = v);
+bindRange('brushAlphaRange', 'brushAlphaValue', v => { brushAlpha = Math.max(0, Math.min(1, v)); updateCursorMode(); });
 bindRange('eraserStrength', 'eraserStrengthValue', v => eraserStrength = v);
 bindRange('eraserCenter', 'eraserCenterValue', v => eraserCenter = v);
 bindRange('eraserEdge', 'eraserEdgeValue', v => eraserEdge = v);
@@ -5977,7 +6021,7 @@ async function exportCud() {
             tools: {
                 maskTool, previewMaskOpacity,
                 extraPrompt: extraPromptInput.value,
-                brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor },
+                brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
                 eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
                 bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
             },
@@ -6063,6 +6107,7 @@ function applyCudTools(t) {
         setNumberControl('brushEdge', 'brushEdgeValue', brushEdge);
         setNumberControl('brushGamma', 'brushGammaValue', brushGamma);
         if (typeof b.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(b.color)) setPaintColor(b.color);
+        if (Number.isFinite(b.alpha)) setPaintAlpha(b.alpha);
     }
     if (t.eraser && typeof t.eraser === 'object') {
         const e = t.eraser;
