@@ -100,7 +100,7 @@ def _shrink(image_tensor, max_pixels=MAX_IMAGE_PIXELS):
             src = t.permute(0, 3, 1, 2)
             t = F.interpolate(src.float(), size=(nh, nw), mode='bilinear', align_corners=False)
             t = t.permute(0, 2, 3, 1)
-            note = f'{w}x{h} 缩放到 {nw}x{nh}'
+            note = f'仅 Debug 预览图被缩放：{w}x{h} → {nw}x{nh}（管线里的实际尺寸未变）'
     except Exception:
         pass
     return t.float().clamp(0, 1), note
