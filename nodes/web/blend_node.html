@@ -2998,6 +2998,49 @@ function removeLayer(id) {
     pushHistory();
 }
 
+// Right-click "Duplicate": a copy stacked directly above its source, same placement. The paint
+// surfaces are CLONED — two layers sharing one mask canvas would make every later stroke land on
+// both, and detachPaintSurface only ever detaches the layer being painted. A smart layer's `img`
+// is a decoded image nobody mutates, so it (and its src) is shared as-is; a raster buffer is a
+// canvas the layer repaints, so it must be copied.
+function duplicateLayer(l) {
+    const i = layers.findIndex(x => x.id === l.id);
+    if (i < 0) return;
+    const cloneSurface = surface => {
+        if (!surface) return null;
+        const c = document.createElement('canvas');
+        c.width = surface.width; c.height = surface.height;
+        c.getContext('2d').drawImage(surface, 0, 0);
+        return c;
+    };
+    const copy = {
+        id: ++layerSeq,
+        name: `${l.name} copy`,
+        src: l.src,
+        img: l.img && l.img.getContext ? cloneSurface(l.img) : l.img,
+        visible: l.visible,
+        transform: cloneTransform(l.transform),
+        raster: !!l.raster,
+        mask: cloneSurface(l.mask),
+        maskCtx: null,
+        maskThumbEl: null,
+        decal: cloneSurface(l.decal),
+        decalCtx: null,
+        decalThumbEl: null,
+        canvasThumbEl: null,
+        fragment: !!l.fragment,
+    };
+    if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
+    if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
+    layers.splice(i, 0, copy);       // index 0 is the top, so this sits above the source
+    selectedId = copy.id;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    setStatus(`Duplicated 「${l.name}」— same size and position`, 'success');
+    pushHistory();
+}
+
 function moveLayer(fromId, toId, above) {
     if (fromId === toId) return;
     const from = layers.findIndex(l => l.id === fromId);
@@ -4998,6 +5041,21 @@ function openLayerMenu(l, clientX, clientY) {
         });
         menu.appendChild(rast);
     }
+
+    // Duplicate: a copy of this layer directly above it — image, mask, decal, placement and
+    // visibility all carried over, so the two can be edited apart from here on.
+    const dup = document.createElement('button');
+    dup.className = 'layer-menu-item';
+    dup.type = 'button';
+    dup.setAttribute('role', 'menuitem');
+    dup.textContent = 'Duplicate';
+    dup.title = `Copy「${l.name}」— image, mask, decal and placement all come along, on a new layer right above it.`;
+    dup.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeLayerMenu();
+        duplicateLayer(l);
+    });
+    menu.appendChild(dup);
 
     menu.classList.add('open');
     // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
