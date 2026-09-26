@@ -3041,6 +3041,38 @@ function duplicateLayer(l) {
     pushHistory();
 }
 
+// Right-click "Apply Mask": the mask stops being a selection and becomes pixels. Its coverage is
+// stored in its ALPHA channel (the eraser is destination-out), so `destination-in` is the exact
+// inverse of what layerSource() does for display: whatever the mask hid turns into real
+// transparency in the layer's own image, and the mask resets to full white (= whole layer).
+// One-way, like Rasterize. Both surfaces are NEW canvases, never repainted in place: the snapshot
+// on top of the undo stack holds the old img/mask BY REFERENCE (see detachPaintSurface), so
+// mutating them would rewrite history as well as the present.
+function applyMaskToLayer(l) {
+    if (!l || !l.mask || !l.img) return;
+    const { w, h } = nativeSize(l.img);
+    const img = document.createElement('canvas');
+    img.width = w; img.height = h;
+    const g = img.getContext('2d');
+    g.drawImage(l.img, 0, 0, w, h);
+    g.globalCompositeOperation = 'destination-in';
+    g.drawImage(l.mask, 0, 0, w, h);
+    const mask = document.createElement('canvas');
+    mask.width = w; mask.height = h;
+    const mctx = mask.getContext('2d');
+    mctx.fillStyle = '#fff';
+    mctx.fillRect(0, 0, w, h);
+    l.img = img;
+    l.src = img.toDataURL('image/png');
+    l.mask = mask;
+    l.maskCtx = mctx;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    setStatus(`「${l.name}」mask applied — the hidden area is transparent now, the mask is clear again`, 'success');
+    pushHistory();
+}
+
 function moveLayer(fromId, toId, above) {
     if (fromId === toId) return;
     const from = layers.findIndex(l => l.id === fromId);
@@ -5056,6 +5088,23 @@ function openLayerMenu(l, clientX, clientY) {
         duplicateLayer(l);
     });
     menu.appendChild(dup);
+
+    // Apply Mask: bake this layer's own mask into its pixels, then clear the mask. One-way — the
+    // mask surface cannot tell you afterwards what it hid.
+    const applyMask = document.createElement('button');
+    applyMask.className = 'layer-menu-item';
+    applyMask.type = 'button';
+    applyMask.setAttribute('role', 'menuitem');
+    applyMask.textContent = 'Apply Mask';
+    applyMask.disabled = !l.mask;
+    applyMask.title = !l.mask ? `「${l.name}」has no mask yet — the whole layer is already covered, nothing to apply`
+        : `Bake「${l.name}」's mask into its own pixels: what it hides becomes real transparency, then the mask resets to pure white (whole layer). One-way.`;
+    applyMask.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeLayerMenu();
+        applyMaskToLayer(l);
+    });
+    menu.appendChild(applyMask);
 
     menu.classList.add('open');
     // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
