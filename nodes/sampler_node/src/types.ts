@@ -1,15 +1,12 @@
 export interface ServerConfig {
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
-  add_noise: string;
-  start_step_rate: number;
-  end_step_rate: number;
+  /** 五个 GLOBAL SETTINGS —— 节点端口已全部取消，这里就是前端唯一读写的地方 */
   pixels: number;
   align: number;
   crop_reserve: number;
   mask_grow: number;
   mask_blur: number;
-  enable_edit: boolean;
   /** 当前 pipeline 的模型架构（按架构渲染 DetailerBlock 的 edit 设置） */
   architecture?: string | null;
   has_tagger: boolean;

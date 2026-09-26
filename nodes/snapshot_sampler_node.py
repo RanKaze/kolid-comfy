@@ -148,8 +148,8 @@ class SnapshotDetailerSamplerServer:
     """
 
     # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
-    # → 落盘 blocks_sets.json 的 global_params。每次执行都现读它；节点 widget /
-    # INPUT_TYPES 里的同名字段只是被单向刷新的显示镜像，不参与取值。
+    # → 落盘 blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
+    # 所以除了这份文件不存在第二个来源，不会出现互相覆盖。
     GLOBAL_PARAM_DEFAULTS = {'pixels': 1048576, 'align': 8, 'crop_reserve': 32,
                              'mask_grow': 32, 'mask_blur': 32}
 
@@ -187,29 +187,19 @@ class SnapshotDetailerSamplerServer:
                   f"total={len(self.packages)}, interface={len(self.interface_packages)}, pipeline={len(self.pipeline_packages)}")
 
         cfg = config or {}
-        self.add_noise = cfg.get('add_noise', 'enable')
-        self.start_step_rate = cfg.get('start_step_rate', 0.8)
-        self.end_step_rate = cfg.get('end_step_rate', 1.0)
         # 五个 GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
         # （改动即 POST → _apply_params → _save_global_params_file）。server 是在 sample()
-        # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。widget 传进来的
-        # cfg 值**不参与取值**，只被 _sync_widgets 当镜像刷新 —— 两处各存一份必然不同步。
+        # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。节点上不再有这些端口 ——
+        # 两处各存一份必然不同步。
         _persisted = self._load_global_params_file()
         for _k, _d in self.GLOBAL_PARAM_DEFAULTS.items():
             try:
                 setattr(self, _k, int(_persisted.get(_k, _d)))
             except (TypeError, ValueError):
                 setattr(self, _k, _d)
-        self.enable_edit = cfg.get('enable_edit', False)
-        self.edit_mode = cfg.get('edit_mode', 'fit')
-        self.ref_boost = cfg.get('ref_boost', 4.0)
-        self.ref_boost_a = cfg.get('ref_boost_a', 1.0)
-        self.enable_ref_boost_mask = cfg.get('enable_ref_boost_mask', False)
-        self.grounding_px = cfg.get('grounding_px', 768)
-        # 单向镜像：权威值推回节点 widget，图上的读数永远等于前端 Global Settings。
-        self._sync_widgets()
 
-        # Pipeline Block chain (default: single Detailer block from INPUT_TYPES defaults)
+        # Pipeline Block chain (default: single Detailer block with the workbench defaults).
+        # 采样参数属于每个 detailer block（工作台 Edit 页），这里只是新建链时的初值。
         self.blocks = cfg.get('blocks')
         if not self.blocks:
             self.blocks = [{
@@ -217,19 +207,19 @@ class SnapshotDetailerSamplerServer:
                 'type': 'detailer',
                 'name': 'Detailer',
                 'params': {
-                    'add_noise': self.add_noise,
-                    'start_step_rate': self.start_step_rate,
-                    'end_step_rate': self.end_step_rate,
+                    'add_noise': 'enable',
+                    'start_step_rate': 0.8,
+                    'end_step_rate': 1.0,
                     'pixels': self.pixels,
                     'align': self.align,
                     'crop_reserve': self.crop_reserve,
                     'recover_crop': True,
-                    'enable_edit': self.enable_edit,
-                    'edit_mode': self.edit_mode,
-                    'ref_boost': self.ref_boost,
-                    'ref_boost_a': self.ref_boost_a,
-                    'enable_ref_boost_mask': self.enable_ref_boost_mask,
-                    'grounding_px': self.grounding_px,
+                    'enable_edit': False,
+                    'edit_mode': 'fit',
+                    'ref_boost': 4.0,
+                    'ref_boost_a': 1.0,
+                    'enable_ref_boost_mask': False,
+                    'grounding_px': 768,
                 },
             }]
 
@@ -622,55 +612,8 @@ class SnapshotDetailerSamplerServer:
         return parsed_selected, parsed_custom
 
     # -------------------------------------------------------------------------
-    # 参数同步
+    # 全局参数 / block 链持久化
     # -------------------------------------------------------------------------
-    def _sync_widgets(self):
-        if self.unique_id is None:
-            return
-        try:
-            from server import PromptServer
-            ps = PromptServer.instance
-            if ps is None:
-                return
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "add_noise", "type": "STRING", "value": self.add_noise,
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "start_step_rate", "type": "FLOAT", "value": str(self.start_step_rate),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "end_step_rate", "type": "FLOAT", "value": str(self.end_step_rate),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "pixels", "type": "INT", "value": str(self.pixels),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "align", "type": "INT", "value": str(self.align),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "crop_reserve", "type": "INT", "value": str(self.crop_reserve),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "mask_grow", "type": "INT", "value": str(self.mask_grow),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "mask_blur", "type": "INT", "value": str(self.mask_blur),
-            })
-            ps.send_sync("kolid-comfy-widget-set", {
-                "node_id": self.unique_id,
-                "widget_name": "enable_edit", "type": "STRING", "value": "enable" if self.enable_edit else "disable",
-            })
-        except Exception as e:
-            print(f"[SnapshotDetailerSampler] Widget sync failed: {e}")
-
     def _blocks_sets_file(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blocks_sets.json')
 
@@ -720,36 +663,11 @@ class SnapshotDetailerSamplerServer:
             print(f"[SnapshotDetailerSampler] Failed to save blocks_sets: {e}")
 
     def _apply_params(self, data):
-        dirty = False
-        if 'add_noise' in data:
-            self.add_noise = data['add_noise']
-            dirty = True
-        if 'start_step_rate' in data:
-            self.start_step_rate = float(data['start_step_rate'])
-            dirty = True
-        if 'end_step_rate' in data:
-            self.end_step_rate = float(data['end_step_rate'])
-            dirty = True
-        if 'pixels' in data:
-            self.pixels = int(data['pixels'])
-            dirty = True
-        if 'align' in data:
-            self.align = int(data['align'])
-            dirty = True
-        if 'crop_reserve' in data:
-            self.crop_reserve = int(data['crop_reserve'])
-            dirty = True
-        if 'mask_grow' in data:
-            self.mask_grow = int(data['mask_grow'])
-            dirty = True
-        if 'mask_blur' in data:
-            self.mask_blur = int(data['mask_blur'])
-            dirty = True
+        for _k in self.GLOBAL_PARAM_DEFAULTS:
+            if _k in data:
+                setattr(self, _k, int(data[_k]))
         if any(k in data for k in self.GLOBAL_PARAM_DEFAULTS):
             self._save_global_params_file()
-        if 'enable_edit' in data:
-            self.enable_edit = bool(data['enable_edit'])
-            dirty = True
         # Multi-set Pipeline Blocks (the workbench's tabs). Sets/active arrive together with the
         # active set's blocks mirrored in `blocks`; either way the active set wins and the runner
         # only ever sees its flat chain.
@@ -769,35 +687,17 @@ class SnapshotDetailerSamplerServer:
             else:
                 self.active_block_set = None
                 self._set_blocks([])
-            dirty = True
             self._save_blocks_sets_file()
         if 'blocks' in data:
             self._set_blocks(data['blocks'])
-            dirty = True
-        if dirty:
-            self._sync_widgets()
 
     def _set_blocks(self, blocks):
-        """Adopt a flat block chain as the active one and sync widget-visible params.
+        """Adopt a flat block chain as the active one.
 
-        Used by both the legacy `blocks` key and the multi-set tabs path — whichever way the
-        chain arrives, the first detailer's params still drive the ComfyUI widget display."""
+        Used by both the legacy `blocks` key and the multi-set tabs path. The chain itself is the
+        only state here — per-block sampling params are read straight from each block at run time,
+        they are never mirrored onto the server."""
         self.blocks = blocks or []
-        # Sync individual params from first detailer block for ComfyUI widget display
-        first_detailer = next((b for b in self.blocks if isinstance(b, dict) and b.get('type') == 'detailer'), None)
-        if first_detailer:
-            bp = first_detailer.get('params', first_detailer)
-            self.add_noise = bp.get('add_noise', self.add_noise)
-            self.start_step_rate = float(bp.get('start_step_rate', self.start_step_rate))
-            self.end_step_rate = float(bp.get('end_step_rate', self.end_step_rate))
-            # pixels / align / crop_reserve 不再从块参数同步 —— 它们是 GLOBAL SETTINGS
-            # （server config），不按 preset 区分；块里遗留的旧值一律忽略。
-            self.enable_edit = bool(bp.get('enable_edit', self.enable_edit))
-            self.edit_mode = bp.get('edit_mode', self.edit_mode)
-            self.ref_boost = float(bp.get('ref_boost', self.ref_boost))
-            self.ref_boost_a = float(bp.get('ref_boost_a', self.ref_boost_a))
-            self.enable_ref_boost_mask = bool(bp.get('enable_ref_boost_mask', self.enable_ref_boost_mask))
-            self.grounding_px = int(bp.get('grounding_px', self.grounding_px))
 
     # ------------------------------------------------------------------
     # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
@@ -984,15 +884,12 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',
                     'detail_status': inst.detail_status if inst else 'idle',
-                    'add_noise': inst.add_noise if inst else 'enable',
-                    'start_step_rate': inst.start_step_rate if inst else 0.8,
-                    'end_step_rate': inst.end_step_rate if inst else 1.0,
+                    # 五个 GLOBAL SETTINGS（前端 Global Settings 的唯一真源）
                     'pixels': inst.pixels if inst else 1048576,
                     'align': inst.align if inst else 8,
                     'crop_reserve': inst.crop_reserve if inst else 32,
                     'mask_grow': inst.mask_grow if inst else 32,
                     'mask_blur': inst.mask_blur if inst else 32,
-                    'enable_edit': inst.enable_edit if inst else False,
                     'has_tagger': inst.tagger is not None if inst else False,
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
@@ -1644,21 +1541,15 @@ class SnapshotDetailerSamplerNode:
 
     @classmethod
     def INPUT_TYPES(s):
+        # 采样参数不在节点上：add_noise / start_step_rate / end_step_rate / enable_edit /
+        # context_regex 属于每个 detailer block（工作台 Edit 页），pixels / align /
+        # crop_reserve / mask_grow / mask_blur 属于 GLOBAL SETTINGS（落盘）。节点端口
+        # 留着只会和前端各存一份、Run 时互相覆盖，所以全部取消。
         return {
             "required": {
                 "pipeline": ("PIPELINE_DATA",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "lora_regex": ("STRING", {"default": "", "multiline": False}),
-                "context_regex": ("STRING", {"default": ".+", "multiline": False}),
-                "add_noise": (["enable", "disable"], {"default": "enable"}),
-                "start_step_rate": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "end_step_rate": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "pixels": ("INT", {"default": 1048576, "min": 65536, "max": 16777216, "step": 65536}),
-                "align": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1}),
-                "crop_reserve": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
-                "mask_grow": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
-                "mask_blur": ("INT", {"default": 32, "min": 0, "max": 256, "step": 1}),
-                "enable_edit": (["disable", "enable"], {"default": "disable"}),
             },
             "optional": {
                 "detector": ("*",),
@@ -3197,10 +3088,8 @@ class SnapshotDetailerSamplerNode:
     # -------------------------------------------------------------------------
     # 主入口
     # -------------------------------------------------------------------------
-    def sample(self, pipeline, seed, lora_regex="", context_regex=".+", add_noise="enable",
-               start_step_rate=0.8, end_step_rate=1.0, pixels=1048576,
-               align=8, crop_reserve=32, mask_grow=32, mask_blur=32, enable_edit="disable", detector=None, tagger=None, asset="", package=None,
-               extra_pnginfo=None, unique_id=None):
+    def sample(self, pipeline, seed, lora_regex="", detector=None, tagger=None, asset="",
+               package=None, extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
 
         self._current_pipeline = pipeline.copy() if pipeline else None
@@ -3223,16 +3112,6 @@ class SnapshotDetailerSamplerNode:
             node_instance=self,
             unique_id=unique_id,
             extra_pnginfo=extra_pnginfo,
-            # 五个 GLOBAL SETTINGS（pixels/align/crop_reserve/mask_grow/mask_blur）
-            # 故意不从 widget 传：它们只认前端 Global Settings 落盘的那份，server 自己
-            # 现读。widget 值是上一次镜像的残留，传进来就是不同步的源头。
-            config={
-                'add_noise': add_noise,
-                'start_step_rate': start_step_rate,
-                'end_step_rate': end_step_rate,
-                'enable_edit': enable_edit == "enable",
-                'context_regex': context_regex,
-            }
         )
         server.start(initial_image=self._current_pipeline.image if self._current_pipeline else None)
 
@@ -3406,6 +3285,7 @@ class SnapshotDetailerSamplerNode:
                         ) if preset_id else None
                         if preset_set is not None:
                             print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
+                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
                         global_params = {
                             'seed': seed,
                             'mask_grow': server.mask_grow,
@@ -3414,9 +3294,10 @@ class SnapshotDetailerSamplerNode:
                             'crop_reserve': server.crop_reserve,
                             'pixels': server.pixels,
                             'align': server.align,
-                            'context_regex': context_regex,
+                            # 兜底值：每个 detailer block 自带 context_regex（Edit 页），
+                            # 只有没写这个键的遗留块才回落到 ".+"（全量 context）。
+                            'context_regex': '.+',
                         }
-                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
                         dbg.record_stage(
                             '4. Pipeline 链',
                             f"{len(blocks)} 个 block"
