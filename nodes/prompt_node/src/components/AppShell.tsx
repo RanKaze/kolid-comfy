@@ -2506,7 +2506,8 @@ export function AppShell() {
       return;
     }
     // Query scope: a run is parked on this block. Hand the answer to the host and let it
-    // close the dialog — nothing is written to the prompt node or to a preset.
+    // close the dialog — nothing is written to the prompt node. A Persistent Query's preset
+    // write-back is the backend's decision, on this same selection, when the host POSTs it.
     if (QUERY_SCOPE) {
       if (!answerQuerySelection(rawSelection)) console.error('[QueryScope] no host to answer');
       return;

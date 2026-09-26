@@ -105,10 +105,18 @@ export interface PromptBlockParams {
   preset_id?: string | null;
 }
 
-/** Query 块没有可调参数：run 到它时链条暂停并弹出 prompt UI，用户挑完 Confirm 才继续。
+/** Query 块：run 到它时链条暂停并弹出 prompt UI，用户挑完 Confirm 才继续。
  *  回答按 prompt 块同样的语义合并（全局在前 + 本次选择在后 + programs 跑在合并结果上），
- *  只影响其后的 detailer；关掉弹窗 = 中止整条链。 */
-export type QueryBlockParams = Record<string, never>;
+ *  只影响其后的 detailer；关掉弹窗 = 中止整条链。
+ *
+ *  `preset_id` = 与 prompt 块共用的那个 preset：弹窗以它的 selection 为初始勾选。
+ *  null = 未绑定，弹窗从空白开始（旧的 Query 行为）。
+ *  `persistent` = 只在与 preset 绑定时有用：Confirm 那一刻把弹窗的最终完整 selection
+ *  整体写回 preset（下次 run/下次打开弹窗即看到），关着则本次修改只活在当前 run 里。 */
+export interface QueryBlockParams {
+  preset_id?: string | null;
+  persistent?: boolean;
+}
 
 export interface PipelineBlock {
   id: string;
@@ -137,6 +145,10 @@ export interface PendingQuery {
   id: string;
   name: string;
   index: number;
+  /** 该 Query 块绑定的 preset（弹窗以此为初始勾选；null/缺省 = 从空白开始） */
+  preset_id?: string | null;
+  /** Confirm 时后端会把最终 selection 写回该 preset */
+  persistent?: boolean;
 }
 
 export interface StatusResponse {

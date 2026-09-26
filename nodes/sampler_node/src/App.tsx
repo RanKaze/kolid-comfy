@@ -738,7 +738,9 @@ const App: React.FC = () => {
   }, []);
 
   /** Answer a parked Query block. The selection is the prompt UI's RAW choice — the run
-   *  merges it and runs its programs, exactly like a prompt block's preset. */
+   *  merges it and runs its programs, exactly like a prompt block's preset. A Persistent
+   *  Query overwrites its bound preset with this same selection, server-side, inside the
+   *  POST — that's why the caller awaits us before refreshing the preset summaries. */
   const handleQueryAnswer = useCallback(async (selection: Record<string, any>) => {
     setPendingQuery(null);
     try {

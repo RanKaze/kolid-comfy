@@ -37,8 +37,9 @@ export function useApi() {
     setAllLibraries(data.libraries || {});
     setCategoryDisplayModes(data.category_display_modes || {});
     setCategorySizeModes(data.category_size_modes || {});
-    // A Query starts EMPTY on purpose: the user picks this pass's prompt from scratch.
-    setLastSelected(SCOPED_SELECTION ? [] : (data.last_selected || []));
+    // An unbound Query starts EMPTY on purpose: the user picks this pass's prompt from
+    // scratch. A Query that binds a preset is seeded from it like the preset editor is.
+    setLastSelected((presetSelection?.tags as string[]) || (SCOPED_SELECTION ? [] : (data.last_selected || [])));
     setLastSelectedLoras((presetSelection?.loras as LoraSelectionData[]) || (SCOPED_SELECTION ? [] : (data.last_selected_loras || [])));
     setLastSelectedPrefabs((presetSelection?.prefabs as { guid: string; active?: boolean }[]) || (SCOPED_SELECTION ? [] : (data.last_selected_prefabs || [])));
     setCustomPrompts(SCOPED_SELECTION ? (presetSelection?.custom_prompts ?? '') : (data.custom_prompts || ''));
