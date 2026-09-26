@@ -8,6 +8,33 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; }
 #mainArea { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+#canvasColumn { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* ---- the open .cud documents, in the strip above the canvas ----
+   One tab per project the workbench holds in memory: click it to switch, × to close (a project with
+   unsaved changes asks first), + for a blank one. A tab is the file name it came from or Untitled,
+   and the dot is the unsaved mark — no labels, the explanation lives in the title, and the active
+   tab's title carries the full path a bound document writes back to. */
+#docTabs { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 4px; padding: 8px 16px 0;
+    overflow-x: auto; scrollbar-width: thin; }
+#docTabs::-webkit-scrollbar { height: 4px; }
+.doc-tab { flex: 0 1 168px; min-width: 76px; display: flex; align-items: center; gap: 6px;
+    padding: 5px 6px 5px 10px; border-radius: 8px 8px 0 0; cursor: pointer; white-space: nowrap;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-bottom: none;
+    color: rgba(255,255,255,0.62); font-size: 11.5px; font-weight: 600; transition: background 0.15s ease; }
+.doc-tab:hover { background: rgba(255,255,255,0.11); }
+.doc-tab.active { background: rgba(10,132,255,0.28); border-color: rgba(10,132,255,0.55); color: #fff; }
+.doc-tab .dt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.doc-tab .dt-dirty { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
+    background: #ffd60a; display: none; }
+.doc-tab.dirty .dt-dirty { display: block; }
+.doc-tab .dt-close { flex: 0 0 auto; width: 16px; height: 16px; display: inline-flex; align-items: center;
+    justify-content: center; padding: 0; border: none; border-radius: 4px; cursor: pointer;
+    background: transparent; color: rgba(255,255,255,0.6); }
+.doc-tab .dt-close:hover { background: rgba(255,69,58,0.8); color: #fff; }
+#docNewBtn { flex: 0 0 auto; align-self: center; width: 22px; height: 22px; display: inline-flex;
+    align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px; background: rgba(255,255,255,0.08); color: #fff; cursor: pointer; }
+#docNewBtn:hover { background: rgba(255,255,255,0.16); }
 #canvasArea { flex: 1; min-height: 0; position: relative; margin: 16px; overflow: hidden; }
 /* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
 #viewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; cursor: default; }
@@ -404,7 +431,15 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 </head>
 <body>
 <div id="mainArea">
-    <div id="canvasArea">
+    <div id="canvasColumn">
+        <!-- 打开中的 .cud 文档：一条 tab 一个项目，切换不写盘、不重新编码，全部活在内存里。
+             内容由 renderDocTabs() 生成，这里只留容器和 + 新建入口。 -->
+        <div id="docTabs">
+            <button id="docNewBtn" title="New project — a blank document in its own tab" aria-label="New project">
+                <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11"/></svg>
+            </button>
+        </div>
+        <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
@@ -433,6 +468,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div id="stagingStrip"></div>
         </div>
         <div id="toolbarProgress"><i></i></div>
+        </div>
     </div>
     <div id="sidePanel">
         <!-- Document I/O, above the Canvas section. Top row is the .cud document itself:
@@ -441,7 +477,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="ioBar">
             <div class="io-row">
                 <button class="io-btn" id="loadBtn"
-                        title="Load a .cud document. It replaces the current project — you are asked first.">Load</button>
+                        title="Load a .cud document. It opens as a new project tab beside the one you are editing.">Load</button>
                 <button class="io-btn" id="saveBtn"
                         title="Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.">Save</button>
                 <button class="io-btn" id="saveAsBtn"
@@ -688,16 +724,16 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     </div>
 </div>
 <div class="layer-menu" id="layerMenu" role="menu"></div>
-<div class="modal-overlay" id="cudReplaceModal">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="Replace the current project">
-        <div class="modal-title">Replace the current project?</div>
-        <div class="modal-sub" id="cudReplaceSub">&#8212;</div>
-        <div class="modal-hint">A .cud restores a whole context, so opening one replaces every layer, the Mask layer, the canvas size and the view. Save the current project first if you want to come back to it. The import is a single undo step either way.</div>
+<div class="modal-overlay" id="docCloseModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Close the project">
+        <div class="modal-title">Close this project?</div>
+        <div class="modal-sub" id="docCloseSub">&#8212;</div>
+        <div class="modal-hint">Its changes are not in the file yet. Save writes to the document this tab is bound to; an unbound project asks where to put it first, and backing out of that leaves the tab open.</div>
         <div class="modal-actions">
-            <button class="modal-btn ghost" id="cudReplaceCancelBtn">Cancel</button>
+            <button class="modal-btn ghost" id="docCloseCancelBtn">Cancel</button>
             <div style="flex:1;"></div>
-            <button class="modal-btn danger" id="cudReplaceDiscardBtn">Replace</button>
-            <button class="modal-btn primary" id="cudReplaceSaveBtn">Save current, then open</button>
+            <button class="modal-btn danger" id="docCloseDiscardBtn">Don't save</button>
+            <button class="modal-btn primary" id="docCloseSaveBtn">Save and close</button>
         </div>
     </div>
 </div>
@@ -2343,7 +2379,16 @@ function snapshotState() {
 // Rebuilds the live state from a snapshot. Image elements and paint surfaces are shared, so
 // no pixel data is copied; only the mutable structure is written back. `layerSeq` is
 // deliberately NOT rewound — layer ids must stay unique for the rest of the session.
-function restoreState(s) {
+//
+// `opts.document` widens the same replay to a whole tab context, which is a history snapshot plus
+// the Mask layer object, the mode/paint target, the view framing and the tool settings: a document
+// carries more than an undo step, and both replays must share one implementation of the layer and
+// canvas core.
+function restoreState(s, opts) {
+    const asDocument = !!(opts && opts.document);
+    // The Mask layer is a live object the paint engine mutates in place, so it travels with the
+    // document and is adopted before anything below writes through it.
+    if (asDocument && s.maskLayer) maskLayer = s.maskLayer;
     canvasW = s.canvasW;
     canvasH = s.canvasH;
     canvasCustom = s.canvasCustom;
@@ -2375,9 +2420,21 @@ function restoreState(s) {
     maskLayer.canvasThumbEl = null;
     adoptMaskSurface(s.maskDecal);
     dragRowId = null;
+    if (asDocument) {
+        mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
+        paintTarget = s.paintTarget === 'decal' ? 'decal' : 'mask';
+        const v = s.view || {};
+        if (Number.isFinite(v.zoom)) view.zoom = clampZoom(v.zoom);
+        if (Number.isFinite(v.rotation)) view.rotation = v.rotation;
+        view.flipX = Number.isFinite(v.flipX) && v.flipX < 0 ? -1 : 1;
+        if (Number.isFinite(v.panX)) view.panX = v.panX;
+        if (Number.isFinite(v.panY)) view.panY = v.panY;
+        view.autoFit = v.autoFit !== false;
+    }
     layoutCanvas();
     updateCanvasReadout();
     renderLayerList();
+    if (asDocument) syncModeUI();
     syncPaintUI();
     syncActionButtons();
     render();
@@ -2421,6 +2478,7 @@ function pushHistory(key) {
     // write-backs ... all land here), and commitStroke re-arms its own anchor AFTER this call.
     shiftAnchor = null;
     if (historyReplaying) return;
+    markDocumentDirty();
     const coalesce = key && key === lastActionKey && undoStack.length > 1;
     if (coalesce) undoStack[undoStack.length - 1] = snapshotState();
     else undoStack.push(snapshotState());
@@ -5861,7 +5919,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || cudReplaceModalOpen() || dynamicModalOpen() || genModalOpen() || runSettingsModalOpen() || tagModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || runSettingsModalOpen() || tagModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -6124,10 +6182,10 @@ function onViewKeyChange() {
 
 window.addEventListener('keydown', e => {
     if (modalOpen()) {
-        // The replace prompt answers to Esc only: Enter is left to the focused button, so the
-        // primary action can never fire twice off one keypress.
-        if (cudReplaceModalOpen()) {
-            if (e.key === 'Escape') { e.preventDefault(); closeCudReplaceModal(); }
+        // The close prompt answers to Esc only: Enter is left to the focused button, so the primary
+        // action can never fire twice off one keypress.
+        if (docCloseModalOpen()) {
+            if (e.key === 'Escape') { e.preventDefault(); closeDocCloseModal(); }
             return;
         }
         if (e.key === 'Escape') { e.preventDefault(); closeCanvasModal(); }
@@ -6273,8 +6331,6 @@ window.addEventListener('keyup', e => {
 const CUD_MAGIC = 'CUD1';
 const CUD_VERSION = 1;
 let cudBusy = false;
-let pendingCudFile = null;      // the .cud waiting behind the replace prompt
-let pendingCudHandle = null;    // the document it came from, when a picker gave us one
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
 // which covers a brand new project and one that came in through the fallback <input type=file>.
@@ -6290,9 +6346,11 @@ const importBtn = document.getElementById('importBtn');
 const importFileInput = document.getElementById('importFile');
 const cudFileInput = document.getElementById('cudFile');
 const docNameEl = document.getElementById('docName');
-const cudReplaceModalEl = document.getElementById('cudReplaceModal');
-const cudReplaceSub = document.getElementById('cudReplaceSub');
-const cudReplaceSaveBtn = document.getElementById('cudReplaceSaveBtn');
+const docTabsEl = document.getElementById('docTabs');
+const docNewBtn = document.getElementById('docNewBtn');
+const docCloseModalEl = document.getElementById('docCloseModal');
+const docCloseSub = document.getElementById('docCloseSub');
+const docCloseSaveBtn = document.getElementById('docCloseSaveBtn');
 
 function syncIoUI() {
     for (const b of [loadBtn, saveBtn, saveAsBtn, exportBtn, importBtn]) b.disabled = cudBusy;
@@ -6310,6 +6368,235 @@ function setCurrentDocument(handle, name) {
     docNameEl.title = !currentCudName ? ''
         : currentCudHandle ? `${where} · Ctrl+S overwrites this file`
         : `${currentCudName} · opened without a handle, so Ctrl+S asks for a location`;
+    // The tab is the same project, so it carries the same binding and shows the same name. An empty
+    // name here means "this project has no file", not "rename it to nothing" — a tab keeps the name
+    // it was opened with.
+    if (activeDoc) {
+        activeDoc.doc = currentCudHandle;
+        if (currentCudName) activeDoc.name = currentCudName;
+        renderDocTabs();
+    }
+}
+
+// ---- the open documents (the strip above the canvas) ----
+// One tab is one whole workbench context kept in memory: the live layer objects with their paint
+// surfaces, the Mask layer, the canvas size, the selection, the view framing and the tool settings —
+// plus its own undo branches, so Ctrl+Z in one project can never reach into another. Switching tabs
+// copies no pixels and encodes nothing; only Save touches the disk.
+//
+// The staging pool does NOT travel with a tab on purpose. It is the host's workspace — swapping it
+// would re-upload every image on every click — so it stays workbench-wide, while a .cud still stores
+// and restores it because the file has to stand on its own.
+let documents = [];
+let docSeq = 0;
+let activeDoc = null;         // the entry whose state the globals currently hold
+let pendingCloseUid = null;   // the tab waiting behind the unsaved-changes prompt
+// Restoring a project re-applies its tool settings, and some of those controls report back through
+// the same paths a real edit uses (the Extra Prompt box rebuilds its DOM, say). That must not be
+// mistaken for the user changing the new tab, so a swap mutes the dirty mark.
+let docSwapping = false;
+
+function blankMaskLayer() {
+    return {
+        id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output', src: '', img: null,
+        visible: true, transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        mask: null, maskCtx: null, maskThumbEl: null,
+        decal: null, decalCtx: null, decalThumbEl: null, canvasThumbEl: null,
+    };
+}
+
+// A tab context is a history snapshot widened with everything else a document owns.
+function captureContext() {
+    return Object.assign(snapshotState(), {
+        maskLayer, mode, paintTarget,
+        view: Object.assign({}, view),
+        tools: captureCudTools(),
+    });
+}
+
+function blankContext() {
+    const tools = captureCudTools();
+    tools.extraPrompt = '';
+    return {
+        canvasW: 0, canvasH: 0, canvasCustom: false,
+        selectedId: null, group: [], maskVisible: true, layers: [], maskDecal: null,
+        maskLayer: blankMaskLayer(), mode: 'transform', paintTarget: 'mask',
+        view: { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true },
+        tools,
+    };
+}
+
+function renderDocTabs() {
+    if (!docTabsEl) return;
+    docTabsEl.innerHTML = '';
+    for (const entry of documents) {
+        const tab = document.createElement('div');
+        tab.className = 'doc-tab' + (entry === activeDoc ? ' active' : '') + (entry.dirty ? ' dirty' : '');
+        tab.setAttribute('data-uid', String(entry.uid));
+        const where = entry.doc && entry.doc.path ? entry.doc.path : entry.name;
+        tab.title = (entry.doc ? `${where} · Ctrl+S overwrites this file` : `${entry.name} · not saved to a file yet`)
+            + (entry.dirty ? ' · unsaved changes' : '');
+        const name = document.createElement('span');
+        name.className = 'dt-name'; name.textContent = entry.name;
+        const dot = document.createElement('span');
+        dot.className = 'dt-dirty'; dot.title = 'Unsaved changes';
+        const close = document.createElement('button');
+        close.className = 'dt-close'; close.title = 'Close this project';
+        close.innerHTML = '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>';
+        tab.appendChild(name); tab.appendChild(dot); tab.appendChild(close);
+        tab.addEventListener('click', () => switchDocument(entry.uid));
+        close.addEventListener('click', e => { if (e && e.stopPropagation) e.stopPropagation(); closeDocument(entry.uid); });
+        docTabsEl.appendChild(tab);
+    }
+    docTabsEl.appendChild(docNewBtn);
+}
+
+function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || modalOpen(); }
+
+// A gesture mid-flight owns the globals it is working on; swapping the document under it would
+// hand its result to the wrong project.
+function guardSwitch(label) {
+    if (!busyGestures()) return true;
+    setStatus(`Finish ${label} first`);
+    return false;
+}
+
+function stashHistory(entry) {
+    if (!entry) return;
+    entry.undo = undoStack; entry.redo = redoStack; entry.lastActionKey = lastActionKey;
+}
+
+function switchDocument(uid) {
+    const entry = documents.find(d => d.uid === uid);
+    if (!entry || entry === activeDoc) return false;
+    if (!guardSwitch('what you are doing')) return false;
+    activateDocument(entry);
+    setStatus(`Switched to ${entry.name}`);
+    return true;
+}
+
+// The swap itself, with no guard: an IO action already holds cudBusy around it, and a promise made
+// to the user mid-Load must not be refused by the very lock that Load takes.
+function activateDocument(entry) {
+    if (!entry || entry === activeDoc) return false;
+    if (activeDoc) { activeDoc.ctx = captureContext(); stashHistory(activeDoc); }
+    activeDoc = entry;
+    undoStack = entry.undo || []; redoStack = entry.redo || []; lastActionKey = entry.lastActionKey || null;
+    setCurrentDocument(entry.doc, entry.doc ? entry.name : '');
+    docSwapping = true;
+    try {
+        restoreState(entry.ctx, { document: true });
+        applyCudTools(entry.ctx.tools);
+    } finally {
+        docSwapping = false;
+    }
+    renderDocTabs();
+    return true;
+}
+
+function createDocument(name, doc, ctx, activate) {
+    const entry = { uid: ++docSeq, name: name || 'Untitled', doc: doc || null, ctx: ctx || blankContext(),
+        undo: [], redo: [], lastActionKey: null, dirty: false };
+    documents.push(entry);
+    if (activate) activateDocument(entry);
+    else renderDocTabs();
+    return entry;
+}
+
+// The boot document takes over without a replay: its context is exactly what the globals already
+// hold (so no control is re-applied under the host), and its undo branch is simply the live stack
+// resetHistory just filled with the empty canvas as step 0.
+function adoptDocument(entry) {
+    activeDoc = entry;
+    stashHistory(entry);       // the live stacks become this project's — Ctrl+Z is already wired to them
+    renderDocTabs();
+    return entry;
+}
+
+// Closing never drops work on the floor: an untouched project goes straight away, a dirty one is
+// prompted for, and a background project is shown first so the user sees what they are discarding.
+function closeDocument(uid) {
+    const entry = documents.find(d => d.uid === uid);
+    if (!entry) return false;
+    if (!guardSwitch('what you are doing')) return false;
+    if (entry !== activeDoc && !switchDocument(uid)) return false;
+    if (!entry.dirty) { dropDocument(entry); return true; }
+    openDocCloseModal(entry);
+    return false;
+}
+
+function dropDocument(entry) {
+    const at = documents.findIndex(d => d === entry);
+    if (at < 0) return;
+    const wasActive = entry === activeDoc;
+    documents.splice(at, 1);
+    if (wasActive) activeDoc = null;
+    else { renderDocTabs(); setStatus(`Closed ${entry.name}`); return; }
+    // The workbench never runs out of somewhere to draw: the neighbour takes over, and closing the
+    // last tab leaves a blank project standing.
+    const next = documents[Math.min(at, documents.length - 1)];
+    if (next) switchDocument(next.uid);
+    else createDocument('Untitled', null, blankContext(), true);
+    setStatus(`Closed ${entry.name}`);
+}
+
+function createBlankProject() {
+    if (!guardSwitch('what you are doing')) return null;
+    const entry = createDocument('Untitled', null, blankContext(), true);
+    setStatus('New project — add a layer to start');
+    return entry;
+}
+
+function openDocCloseModal(entry) {
+    pendingCloseUid = entry.uid;
+    const where = entry.doc ? (entry.doc.path || entry.doc.name) : 'a file';
+    docCloseSub.textContent = `${entry.name} has changes that are not in ${where}.`;
+    docCloseModalEl.classList.add('open');
+    docCloseSaveBtn.focus();
+}
+function closeDocCloseModal() {
+    docCloseModalEl.classList.remove('open');
+    pendingCloseUid = null;
+}
+function docCloseModalOpen() { return docCloseModalEl.classList.contains('open'); }
+function pendingCloseEntry() { return documents.find(d => d.uid === pendingCloseUid) || null; }
+
+// "Save and close" is the ordinary Ctrl+S of the document being closed — the binding, the dialog and
+// the failure wording all come from saveCud, so nothing here repeats them.
+async function saveThenClose() {
+    const entry = pendingCloseEntry();
+    if (!entry) { closeDocCloseModal(); return; }
+    if (docCloseSaveBtn.disabled) return;
+    docCloseSaveBtn.disabled = true;
+    const saved = await saveCud();
+    docCloseSaveBtn.disabled = false;
+    if (!saved) {
+        if (!/cancelled/.test(status.textContent)) setStatus('Nothing was closed — the save did not go through', 'error');
+        return;
+    }
+    closeDocCloseModal();
+    dropDocument(entry);
+}
+
+function discardAndClose() {
+    const entry = pendingCloseEntry();
+    closeDocCloseModal();
+    if (entry) dropDocument(entry);
+}
+
+// Anything the file would miss. Every paint, structure and canvas edit funnels through pushHistory,
+// so that is the choke point; the Extra Prompt is plain text and marks itself. Panning or zooming is
+// deliberately NOT dirty — the view is saved with the file, but prompting over a look around only
+// trains the user to click "Don't save".
+function markDocumentDirty() {
+    if (docSwapping || !activeDoc || activeDoc.dirty) return;
+    activeDoc.dirty = true;
+    renderDocTabs();
+}
+function markDocumentClean() {
+    if (!activeDoc || !activeDoc.dirty) return;
+    activeDoc.dirty = false;
+    renderDocTabs();
 }
 
 // ---- where a file dialog comes from ----
@@ -6524,13 +6811,7 @@ async function buildCudBlob() {
         canvas: { w: Math.round(canvasW), h: Math.round(canvasH), custom: canvasCustom },
         view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
         selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
-        tools: {
-            maskTool, previewMaskOpacity,
-            extraPrompt: extraPromptInput.value,
-            brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
-            eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
-            bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
-        },
+        tools: captureCudTools(),
         maskLayer: { visible: maskLayer.visible, surface: maskSurface },
         layers: records,
         staging: stagingItems,     // 图池随文档走：导入时原样恢复到宿主工作区
@@ -6585,6 +6866,7 @@ async function saveCudAs() {
             downloadBlob(blob, name);
             setCurrentDocument(null, name);
         }
+        markDocumentClean();      // whatever the sink, the work is on disk from here
         setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB`, 'success');
         return true;
     } catch (err) {
@@ -6609,6 +6891,7 @@ async function saveCud() {
     try {
         const { blob, count } = await buildCudBlob();
         await writeDocTo(currentCudHandle, blob);
+        markDocumentClean();
         setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB`, 'success');
         return true;
     } catch (err) {
@@ -6685,6 +6968,18 @@ function pressFalloffButton(prefix, falloff) {
     if (btn) btn.click();
 }
 
+// The tool settings a document carries. One shape serves both writers: the .cud header and an
+// in-memory tab context, so a project cannot be saved with more of itself than a switch keeps.
+function captureCudTools() {
+    return {
+        maskTool, previewMaskOpacity,
+        extraPrompt: extraPromptInput.value,
+        brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
+        eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
+        bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
+    };
+}
+
 function applyCudTools(t) {
     if (!t || typeof t !== 'object') return;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -6735,12 +7030,6 @@ function applyCudTools(t) {
 }
 
 // ---- import routing: one entry point for the file picker and for a drop ----
-// "Has content" is judged from the layers and the Mask layer, not from the undo stack: a project
-// that was emptied is still empty, even though its history could bring it back.
-function projectHasContent() {
-    return layers.length > 0 || !!(maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height);
-}
-
 function addImageFiles(files) {
     for (const f of files) {
         const reader = new FileReader();
@@ -6770,9 +7059,9 @@ async function importImages() {
     return true;
 }
 
-// Images become layers; a .cud replaces the document — and replacing asks first whenever there is
-// something on the canvas, so a mis-click can never throw away a project that was never saved.
-// Only a drop can still bring a .cud through here: the Import picker no longer offers one.
+// Images become layers; a .cud opens as a project of its own and is never dropped on top of the one
+// being edited. Only a drop can still bring a .cud through here: the Import picker no longer offers
+// one.
 function routeImportFiles(files) {
     const list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
@@ -6787,53 +7076,46 @@ function routeImportFiles(files) {
     addImageFiles(images);
 }
 
-// The handle is what makes Ctrl+S write back to this file instead of asking where to put it.
-function requestImportCud(file, handle) {
-    if (!projectHasContent()) { importCud(file, handle); return; }
-    pendingCudFile = file;
-    pendingCudHandle = handle || null;
-    openCudReplaceModal(file);
+// A .cud opens as a tab of its own; nothing is replaced any more, so opening one can never throw a
+// project away and the old "replace the current project?" prompt has no reason to exist.
+function cudContext(header, records, maskSurface) {
+    const c = header.canvas || {}, sel = header.selection || {}, ml = header.maskLayer || {}, v = header.view || {};
+    const cw = Math.round(Number(c.w) || 0), ch = Math.round(Number(c.h) || 0);
+    const surface = blankMaskLayer();
+    surface.visible = ml.visible !== false;
+    const ids = records.map(r => r.id);
+    const keep = sel.selectedId === MASK_LAYER_ID || ids.indexOf(sel.selectedId) >= 0;
+    return {
+        // The file records an exact canvas with transforms expressed against it, so it is adopted
+        // as-is rather than re-derived (which would rescale every layer).
+        canvasW: cw > 0 ? Math.min(cw, MAX_CANVAS_SIDE) : 0,
+        canvasH: ch > 0 ? Math.min(ch, MAX_CANVAS_SIDE) : 0,
+        canvasCustom: !!c.custom,
+        selectedId: keep ? sel.selectedId : (ids.length ? ids[0] : null),
+        group: (sel.selectedIds || []).filter(id => ids.indexOf(id) >= 0),
+        maskVisible: surface.visible,
+        layers: records,
+        maskDecal: maskSurface || null,
+        maskLayer: surface,
+        mode: ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].indexOf(sel.mode) >= 0 ? sel.mode : 'transform',
+        paintTarget: sel.paintTarget === 'decal' ? 'decal' : 'mask',
+        view: { zoom: Number.isFinite(v.zoom) ? v.zoom : 1, rotation: Number.isFinite(v.rotation) ? v.rotation : 0,
+            flipX: Number.isFinite(v.flipX) && v.flipX < 0 ? -1 : 1,
+            panX: Number.isFinite(v.panX) ? v.panX : 0, panY: Number.isFinite(v.panY) ? v.panY : 0,
+            autoFit: !!v.autoFit },
+        tools: header.tools || {},
+    };
 }
 
-function openCudReplaceModal(file) {
-    const bits = [];
-    if (layers.length) bits.push(`${layers.length} layer${layers.length === 1 ? '' : 's'}`);
-    if (maskLayer.decal && maskLayer.decal.width) bits.push('the Mask layer');
-    cudReplaceSub.textContent = `${file.name} replaces ${bits.join(' and ') || 'the current project'}.`;
-    cudReplaceModalEl.classList.add('open');
-    cudReplaceSaveBtn.focus();
-}
-function closeCudReplaceModal() {
-    cudReplaceModalEl.classList.remove('open');
-    pendingCudFile = null;
-    pendingCudHandle = null;
-}
-function cudReplaceModalOpen() { return cudReplaceModalEl.classList.contains('open'); }
-
-// "Save current, then open": keep the outgoing project on disk before the incoming one takes
-// over. If the save fails — or its Save As picker is dismissed — nothing is replaced, which is the
-// whole point of the button.
-async function saveCurrentThenImport() {
-    const file = pendingCudFile, handle = pendingCudHandle;
-    if (!file) { closeCudReplaceModal(); return; }
-    if (cudReplaceSaveBtn.disabled) return;
-    cudReplaceSaveBtn.disabled = true;
-    const saved = await saveCud();
-    cudReplaceSaveBtn.disabled = false;
-    if (!saved) { setStatus('Nothing was replaced — the save did not go through', 'error'); return; }
-    closeCudReplaceModal();
-    importCud(file, handle);
-}
-
-// Replaces the document wholesale. Everything that can fail (parsing, decoding) happens before a
-// single field is touched, so a bad file leaves the open project exactly as it was.
-async function importCud(file, handle) {
+// Opens the file in a NEW tab and switches to it. Everything that can fail (parsing, decoding)
+// happens before a tab exists, so a bad file leaves every open project exactly as it was.
+async function openCudDocument(file, doc) {
     if (cudBusy) return false;
     cudBusy = true; syncIoUI();
     setStatus(`Opening ${file.name}…`);
     try {
         const { header, blobs } = decodeCud(await file.arrayBuffer());
-        const next = [];
+        const records = [];
         let skipped = 0;
         for (const rec of header.layers) {
             const imgBlob = rec && rec.image !== null && rec.image !== undefined ? blobs.get(rec.image) : null;
@@ -6842,12 +7124,10 @@ async function importCud(file, handle) {
             const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
             const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
             const tr = rec.transform || {};
-            next.push({
+            records.push({
                 id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
                 // 图层自带像素，不绑任何图池 id —— 跨会话导入天然无悬空引用。
-                name: rec.name || 'Layer',
-                src: url,
-                img,
+                name: rec.name || 'Layer', src: url, img,
                 visible: rec.visible !== false,
                 fragment: !!rec.fragment,
                 raster: !!rec.raster,
@@ -6861,41 +7141,17 @@ async function importCud(file, handle) {
                         h: Number.isFinite(tr.h) ? tr.h : 1,
                         rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
                     },
-                mask, maskCtx: mask ? mask.getContext('2d') : null, maskThumbEl: null,
-                decal, decalCtx: decal ? decal.getContext('2d') : null, decalThumbEl: null,
-                canvasThumbEl: null,
+                mask, decal,
             });
         }
-        if (!next.length) throw new Error('the .cud holds no readable layers');
-
-        // ---- commit: the document is replaced wholesale ----
-        layers = next;
-        // Layer ids must stay unique for the rest of the session, so the counter only ever grows.
-        layerSeq = layers.reduce((m, l) => Math.max(m, l.id), layerSeq);
-        const c = header.canvas || {};
-        const cw = Math.round(Number(c.w) || 0), ch = Math.round(Number(c.h) || 0);
-        // The file records an exact canvas together with transforms expressed against it, so it is
-        // adopted as-is rather than re-derived (which would rescale every layer).
-        canvasW = cw > 0 ? Math.min(cw, MAX_CANVAS_SIDE) : 0;
-        canvasH = ch > 0 ? Math.min(ch, MAX_CANVAS_SIDE) : 0;
-        canvasCustom = !!c.custom;
-        sizeCanvasElement();
-        if (!canvasW || !canvasH) applyCanvasSize();   // no usable size in the file — derive it
-        const sel = header.selection || {};
-        const keep = sel.selectedId === MASK_LAYER_ID || layers.some(l => l.id === sel.selectedId);
-        selectedId = keep ? sel.selectedId : layers[0].id;
-        groupIds = new Set((sel.selectedIds || []).filter(id => layers.some(l => l.id === id)));
-        if (!groupIds.has(selectedId)) groupIds = new Set([selectedId]);
-        paintTarget = sel.paintTarget === 'decal' ? 'decal' : 'mask';
-        mode = ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].includes(sel.mode) ? sel.mode : 'transform';
+        if (!records.length) throw new Error('the .cud holds no readable layers');
         const ml = header.maskLayer || {};
-        maskLayer.visible = ml.visible !== false;
-        maskLayer.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-        maskLayer.decalThumbEl = null;
-        maskLayer.canvasThumbEl = null;
         const msBlob = ml.surface !== null && ml.surface !== undefined ? blobs.get(ml.surface) : null;
-        adoptMaskSurface(msBlob ? await blobToCanvas(msBlob) : null);
-        applyCudTools(header.tools);
+        const maskSurface = msBlob ? await blobToCanvas(msBlob) : null;
+        // Layer ids must stay unique for the rest of the session, so the counter only ever grows.
+        layerSeq = records.reduce((m, r) => Math.max(m, r.id), layerSeq);
+        const ctx = cudContext(header, records, maskSurface);
+
         // 工作区恢复：条目直接同步到宿主（后端张量由宿主重新上传建立）。
         if (Array.isArray(header.staging)) {
             stagingItems = header.staging.filter(s => s && s.src);
@@ -6906,31 +7162,31 @@ async function importCud(file, handle) {
                 names: stagingItems.map(s => s.name),
             }, '*');
         }
-        const v = header.view || {};
-        if (Number.isFinite(v.zoom)) view.zoom = clampZoom(v.zoom);
-        if (Number.isFinite(v.rotation)) view.rotation = v.rotation;
-        view.flipX = Number.isFinite(v.flipX) && v.flipX < 0 ? -1 : 1;
-        if (Number.isFinite(v.panX)) view.panX = v.panX;
-        if (Number.isFinite(v.panY)) view.panY = v.panY;
-        view.autoFit = !!v.autoFit;
-        dragRowId = null;
-        layoutCanvas();
-        updateCanvasReadout();
-        renderLayerList();
-        syncModeUI();
-        syncActionButtons();
-        render();
-        pushHistory();   // an import is one undoable step: Ctrl+Z brings the previous context back
-        // From here on Ctrl+S writes back into this very file — that is the whole point of Load.
-        setCurrentDocument(handle || null, (handle && handle.name) || file.name);
-        setStatus(`Loaded ${layers.length} layer${layers.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
+        const entry = createDocument((doc && doc.name) || file.name, doc || null, ctx, false);
+        activateDocument(entry);
+        if (!ctx.canvasW || !ctx.canvasH) applyCanvasSize();   // no usable size in the file — derive it
+        setStatus(`Opened ${entry.name} · ${records.length} layer${records.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
         return true;
     } catch (err) {
-        setStatus('Import failed: ' + ((err && err.message) || err), 'error');
+        setStatus('Load failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
         cudBusy = false; syncIoUI();
     }
+}
+
+// The same file opened twice is the same project: a backend document matches on its path (every
+// dialog hands out a fresh token for it), a browser handle on its own identity.
+function findOpenDocument(doc) {
+    if (!doc) return null;
+    if (doc.path) return documents.find(d => d.doc && d.doc.path === doc.path) || null;
+    return documents.find(d => d.doc === doc) || null;
+}
+
+function requestImportCud(file, doc) {
+    const already = findOpenDocument(doc);
+    if (already) { switchDocument(already.uid); setStatus(`${already.name} is already open`, 'success'); return true; }
+    return openCudDocument(file, doc);
 }
 
 // ---- wiring ----
@@ -6953,14 +7209,11 @@ cudFileInput.addEventListener('change', () => {
     const doc = files.find(f => /\.cud$/i.test(f.name || '')) || files[0];
     if (doc) requestImportCud(doc);
 });
-cudReplaceModalEl.addEventListener('mousedown', e => { if (e.target === cudReplaceModalEl) closeCudReplaceModal(); });
-document.getElementById('cudReplaceCancelBtn').addEventListener('click', closeCudReplaceModal);
-document.getElementById('cudReplaceDiscardBtn').addEventListener('click', () => {
-    const file = pendingCudFile, handle = pendingCudHandle;
-    closeCudReplaceModal();
-    if (file) importCud(file, handle);
-});
-cudReplaceSaveBtn.addEventListener('click', saveCurrentThenImport);
+docCloseModalEl.addEventListener('mousedown', e => { if (e.target === docCloseModalEl) closeDocCloseModal(); });
+document.getElementById('docCloseCancelBtn').addEventListener('click', closeDocCloseModal);
+document.getElementById('docCloseDiscardBtn').addEventListener('click', discardAndClose);
+docCloseSaveBtn.addEventListener('click', saveThenClose);
+docNewBtn.addEventListener('click', createBlankProject);
 
 syncIoUI();
 
@@ -7043,6 +7296,8 @@ function serializeExtraPrompt() {
 
 function syncExtraPromptEmpty() {
     extraPromptInput.classList.toggle('is-empty', serializeExtraPrompt().trim() === '');
+    // The prompt is saved with the document but is not an undoable action, so it marks the tab here.
+    markDocumentDirty();
 }
 
 // 工作区条目变化后刷新已有 chip 的缩略图（失效引用退回文字态）。只换 chip 内部
@@ -7469,6 +7724,9 @@ updateCanvasReadout();
 render();
 syncActionButtons();
 resetHistory();          // the empty canvas is step 0; everything from here on is undoable
+// The page opens on exactly one project: what the globals already hold becomes the first tab, so the
+// workbench is never in the state of "drawing with nowhere to put it".
+adoptDocument(createDocument('Untitled', null, captureContext(), false));
 
 // Ask the parent for the current context image so the canvas is never empty on first open.
 // The parent only answers when it can resolve one, and the dedupe set keeps this idempotent.
