@@ -6274,10 +6274,11 @@ const CUD_MAGIC = 'CUD1';
 const CUD_VERSION = 1;
 let cudBusy = false;
 let pendingCudFile = null;      // the .cud waiting behind the replace prompt
-let pendingCudHandle = null;    // its handle, when the picker gave us one
+let pendingCudHandle = null;    // the document it came from, when a picker gave us one
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
 // which covers a brand new project and one that came in through the fallback <input type=file>.
+// A bound document is either a backend token (see pickDocuments) or a FileSystemFileHandle.
 let currentCudHandle = null;
 let currentCudName = '';
 
@@ -6304,10 +6305,29 @@ function setCurrentDocument(handle, name) {
     currentCudName = name || '';
     docNameEl.hidden = !currentCudName;
     docNameEl.textContent = currentCudName;
+    // A server document knows its full path; a browser handle only ever reveals the name.
+    const where = currentCudHandle && currentCudHandle.path ? currentCudHandle.path : currentCudName;
     docNameEl.title = !currentCudName ? ''
-        : currentCudHandle ? `${currentCudName} · Ctrl+S overwrites this file`
+        : currentCudHandle ? `${where} · Ctrl+S overwrites this file`
         : `${currentCudName} · opened without a handle, so Ctrl+S asks for a location`;
 }
+
+// ---- where a file dialog comes from ----
+// The page and its backend are the same machine (the node opens http://localhost:<port> itself),
+// so the picker can be the SERVER's: one real Windows dialog, and — unlike the browser's own — one
+// that never stacks a "将所作更改保存至…" sheet of its own on top. A bound document then writes
+// through /api/io_write with no dialog anywhere, which is the whole point.
+//
+// A token doc is the stand-in for a FileSystemFileHandle: same role (where the bytes go), addressed
+// by an opaque token instead of by a path, because this handler answers any origin and a path handed
+// in from the page would make /api/io_read an arbitrary file read. The browser's own picker stays
+// for a page opened without the node backend, or a venv built without tkinter.
+let ioServer = false;     // /api/io_caps decides; until it answers the browser path is used
+let ioPicking = false;    // one dialog is already up — a second would only stack behind it
+
+fetch('/api/io_caps').then(r => (r.ok ? r.json() : {})).then(c => {
+    ioServer = !!(c && c.pick);
+}).catch(() => { ioServer = false; });
 
 // The File System Access API is what lets a button write back to the file it came from: the handle
 // outlives the picker. It needs a secure context (http://127.0.0.1, localhost, https) plus
@@ -6316,7 +6336,64 @@ function canPickFiles() {
     return typeof window.showOpenFilePicker === 'function' && typeof window.showSaveFilePicker === 'function';
 }
 const CUD_PICK_TYPES = [{ description: 'Context document', accept: { 'application/octet-stream': ['.cud'] } }];
+const PICK_TYPES = {
+    cud: CUD_PICK_TYPES,
+    png: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }],
+    image: [{ description: 'Image', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.avif', '.svg'] } }],
+};
 function pickerCancelled(err) { return !!err && err.name === 'AbortError'; }
+
+// One place decides which dialog to show. Resolves to exactly one of:
+//   {docs}          the choice — token documents, or FileSystemFileHandles from the browser
+//   {cancelled}     the user backed out; never report that as an error
+//   {unsupported}   no picker here at all: the caller downloads, or clicks its <input type=file>
+//   {busy}          a dialog is already open; the status line says so
+//   {error}         something broke; the caller phrases it with its own prefix
+async function pickDocuments(mode, kind, suggested, multiple) {
+    if (ioPicking) { setStatus('Still working on the last one…'); return { busy: true }; }
+    if (ioServer) {
+        ioPicking = true;
+        try {
+            const res = await fetch('/api/io_pick', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode, kind, suggested: suggested || '', multiple: !!multiple }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) return { error: (data && data.error) || 'the file dialog request failed' };
+            if (data.unavailable) ioServer = false;        // the backend changed its mind: fall back
+            else return (Array.isArray(data.picks) && data.picks.length) ? { docs: data.picks } : { cancelled: true };
+        } catch (err) {
+            return { error: (err && err.message) || String(err) };
+        } finally {
+            ioPicking = false;
+        }
+    }
+    if (!canPickFiles()) return { unsupported: true };
+    try {
+        if (mode === 'save') {
+            const handle = await window.showSaveFilePicker({ suggestedName: suggested || cudFileName(), types: PICK_TYPES[kind] });
+            return handle ? { docs: [handle] } : { cancelled: true };
+        }
+        const handles = await window.showOpenFilePicker({ multiple: !!multiple, types: PICK_TYPES[kind] });
+        return (handles && handles.length) ? { docs: Array.prototype.slice.call(handles) } : { cancelled: true };
+    } catch (err) {
+        if (pickerCancelled(err)) return { cancelled: true };
+        return { error: (err && err.message) || String(err) };
+    }
+}
+
+// Reading a chosen document back as a File: a handle knows how, a token has to be fetched.
+async function docToFile(doc) {
+    if (!doc.token) return await doc.getFile();
+    const res = await fetch('/api/io_read?token=' + encodeURIComponent(doc.token));
+    if (!res.ok) {
+        let msg = 'the server could not read ' + doc.name;
+        try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) { /* the body was the error page */ }
+        throw new Error(msg);
+    }
+    return new File([await res.blob()], doc.name, { type: doc.mime || 'application/octet-stream' });
+}
 
 function fileStamp() {
     const d = new Date(), p = n => String(n).padStart(2, '0');
@@ -6380,6 +6457,14 @@ async function blobToCanvas(blob) {
 async function exportPng() {
     if (cudBusy) return false;
     if (!canvasW || !canvasH) { setStatus('Nothing to export — the canvas is empty', 'error'); return false; }
+    // The dialog comes first: encoding a full-resolution composite takes long enough that a picker
+    // opened afterwards would lose the click it belongs to (and on the server path, nothing about
+    // the order matters — but one code path serves both).
+    const pick = await pickDocuments('save', 'png', pngFileName(), false);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Export failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Export cancelled'); return false; }
+    const target = pick.docs ? pick.docs[0] : null;      // null = no picker: the file downloads
     cudBusy = true; syncIoUI();
     setStatus('Exporting the composite…');
     try {
@@ -6387,8 +6472,10 @@ async function exportPng() {
         const blob = await new Promise((resolve, reject) => {
             blendCanvas.toBlob(b => b ? resolve(b) : reject(new Error('could not encode PNG')), 'image/png');
         });
-        downloadBlob(blob, pngFileName());
-        setStatus(`Exported PNG · ${Math.round(canvasW)}×${Math.round(canvasH)} · ${(blob.size / 1048576).toFixed(2)} MB`, 'success');
+        const where = target ? (target.name || pngFileName()) : pngFileName();
+        if (target) await writeDocTo(target, blob);
+        else downloadBlob(blob, where);
+        setStatus(`Exported PNG · ${Math.round(canvasW)}×${Math.round(canvasH)} · ${(blob.size / 1048576).toFixed(2)} MB · ${where}`, 'success');
         return true;
     } catch (err) {
         setStatus('Export failed: ' + ((err && err.message) || err), 'error');
@@ -6456,42 +6543,44 @@ async function buildCudBlob() {
     return { blob, count: records.length };
 }
 
-async function writeCudTo(handle, blob) {
-    const writable = await handle.createWritable();
+// The one way bytes reach a chosen document: POSTed to the backend by token, or written through
+// the handle the browser's picker handed out. Both overwrite in place, which is what lets Ctrl+S
+// stay silent once a file is bound.
+async function writeDocTo(doc, blob) {
+    if (doc.token) {
+        const res = await fetch('/api/io_write?token=' + encodeURIComponent(doc.token), { method: 'POST', body: blob });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) throw new Error((data && data.error) || 'the server could not write ' + doc.name);
+        doc.size = data.size;
+        return;
+    }
+    const writable = await doc.createWritable();
     await writable.write(blob);
     await writable.close();
 }
 
-// Save As: ask for the destination first — the picker needs the click that opened it, and
+// Save As: ask for the destination first — the browser's picker needs the click that opened it, and
 // encoding every layer can take long enough to lose that activation — then bind the project to
 // whatever was chosen, so the next Ctrl+S lands on it without asking again.
 async function saveCudAs() {
     if (cudBusy) return false;
     if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
-    let handle = null;
-    if (canPickFiles()) {
-        try {
-            handle = await window.showSaveFilePicker({
-                suggestedName: currentCudName || cudFileName(),
-                types: CUD_PICK_TYPES,
-            });
-        } catch (err) {
-            if (pickerCancelled(err)) { setStatus('Save As cancelled'); return false; }
-            setStatus('Save failed: ' + ((err && err.message) || err), 'error');
-            return false;
-        }
-    }
+    const pick = await pickDocuments('save', 'cud', currentCudName || cudFileName(), false);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Save failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Save As cancelled'); return false; }
+    const target = pick.docs ? pick.docs[0] : null;      // null = no picker: the file downloads
     cudBusy = true; syncIoUI();
     setStatus('Writing the context…');
     try {
         const { blob, count } = await buildCudBlob();
         const mb = (blob.size / 1048576).toFixed(1);
-        if (handle) {
-            await writeCudTo(handle, blob);
-            setCurrentDocument(handle, handle.name || cudFileName());
+        if (target) {
+            await writeDocTo(target, blob);
+            setCurrentDocument(target, target.name || cudFileName());
         } else {
-            // No handle API in this browser: a download is the only way out, and nothing can be
-            // written back to it, so the project keeps the name but not the binding.
+            // No picker of any kind in this browser: a download is the only way out, and nothing can
+            // be written back to it, so the project keeps the name but not the binding.
             const name = currentCudName || cudFileName();
             downloadBlob(blob, name);
             setCurrentDocument(null, name);
@@ -6507,7 +6596,8 @@ async function saveCudAs() {
 }
 
 // Ctrl+S / the Save button: overwrite the file this document came from, and fall through to
-// Save As when there is none — which is exactly how Photoshop behaves.
+// Save As when there is none — which is exactly how Photoshop behaves. With a server document there
+// is no dialog at all on this path, which was the point of moving the picker behind /api/io_*.
 async function saveCud() {
     // The buttons go disabled while a read or write is in flight, but the keyboard has no such
     // tell, so a Ctrl+S landing mid-export would otherwise vanish without a trace.
@@ -6518,11 +6608,11 @@ async function saveCud() {
     setStatus(`Saving ${currentCudName}…`);
     try {
         const { blob, count } = await buildCudBlob();
-        await writeCudTo(currentCudHandle, blob);
+        await writeDocTo(currentCudHandle, blob);
         setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB`, 'success');
         return true;
     } catch (err) {
-        // The handle can go stale (the file was moved, deleted, or is held open elsewhere).
+        // The document can go stale (the file was moved, deleted, or is held open elsewhere).
         setStatus('Save failed: ' + ((err && err.message) || err) + ' — use Save As', 'error');
         return false;
     } finally {
@@ -6530,21 +6620,21 @@ async function saveCud() {
     }
 }
 
-// Load: the document a project came from is remembered by its handle, which is what lets Save
-// write to the same path. Where the picker is missing, <input type=file> reads it and Save As
+// Load: the document a project came from is remembered by its token (or handle), which is what lets
+// Save write to the same path. Where no picker exists at all, <input type=file> reads it and Save As
 // becomes the only way to write.
 async function loadCud() {
     if (cudBusy) return false;
-    if (!canPickFiles()) { cudFileInput.click(); return true; }
-    let handle = null;
+    const pick = await pickDocuments('open', 'cud', '', false);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Load failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Load cancelled'); return false; }
+    if (pick.unsupported) { cudFileInput.click(); return true; }
+    const doc = pick.docs[0];
     try {
-        const picked = await window.showOpenFilePicker({ multiple: false, types: CUD_PICK_TYPES });
-        handle = picked && picked[0];
-        if (!handle) { setStatus('Load cancelled'); return false; }
-        requestImportCud(await handle.getFile(), handle);
+        requestImportCud(await docToFile(doc), doc);
         return true;
     } catch (err) {
-        if (pickerCancelled(err)) { setStatus('Load cancelled'); return false; }
         setStatus('Load failed: ' + ((err && err.message) || err), 'error');
         return false;
     }
@@ -6659,6 +6749,25 @@ function addImageFiles(files) {
         reader.readAsDataURL(f);
     }
     setStatus(files.length === 1 ? `Adding ${baseName(files[0].name)}` : `Adding ${files.length} images…`);
+}
+
+// Import takes images only — a .cud belongs to Load, which is the path that binds the document so
+// Ctrl+S can write back to it. With the backend's dialog the picker is multi-select and the bytes
+// come back through /api/io_read; with none, the <input type=file> still does both.
+async function importImages() {
+    if (cudBusy) return false;
+    const pick = await pickDocuments('open', 'image', '', true);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Import failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Import cancelled'); return false; }
+    if (pick.unsupported) { importFileInput.click(); return true; }
+    const files = [];
+    for (const doc of pick.docs) {
+        try { files.push(await docToFile(doc)); }
+        catch (err) { setStatus(`Could not read ${doc.name}`, 'error'); }
+    }
+    if (files.length) addImageFiles(files);
+    return true;
 }
 
 // Images become layers; a .cud replaces the document — and replacing asks first whenever there is
@@ -6829,7 +6938,7 @@ loadBtn.addEventListener('click', () => loadCud());
 saveBtn.addEventListener('click', () => saveCud());
 saveAsBtn.addEventListener('click', () => saveCudAs());
 exportBtn.addEventListener('click', () => exportPng());
-importBtn.addEventListener('click', () => importFileInput.click());
+importBtn.addEventListener('click', () => importImages());
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
     const files = Array.prototype.slice.call(importFileInput.files || []);
