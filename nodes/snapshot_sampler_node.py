@@ -422,8 +422,11 @@ class SnapshotDetailerSamplerServer:
     # -------------------------------------------------------------------------
     # 历史画廊
     # -------------------------------------------------------------------------
-    def add_staging(self, image, name=None, place=None):
+    def add_staging(self, image, name=None, place=None, hidden=False):
         """添加一张图到工作区。保留 tensor 引用以避免 base64 往返。
+
+        hidden=True 的条目只作内部引用（seed 画布的 Original、run/接口的产出图），
+        不进工作区条带 —— 条带只展示用户主动拖入/导入的图。宿主按此字段过滤镜像。
 
         place 只有「Recover Crop 关闭」的 detailer run 会提供：归一化的放置矩形
         (x, y, w, h, ow, oh)。此时 image 是 RGBA —— alpha 就是 crop 工作区的 mask，
@@ -449,6 +452,7 @@ class SnapshotDetailerSamplerServer:
             'width': w,
             'height': h,
             'place': place,
+            'hidden': bool(hidden),
         })
         if len(self.staging_items) > 40:
             old = self.staging_items.pop(0)
@@ -459,7 +463,7 @@ class SnapshotDetailerSamplerServer:
         """返回工作区条目列表（base64 图，宿主直接可渲染）。"""
         return [{'id': s['id'], 'name': s['name'], 'src': s['src'],
                  'width': s.get('width', 0), 'height': s.get('height', 0),
-                 'place': s.get('place')}
+                 'hidden': bool(s.get('hidden')), 'place': s.get('place')}
                 for s in self.staging_items]
 
     def _first_detailer_enable_mask(self, preset_id=None):
@@ -1520,10 +1524,10 @@ class SnapshotDetailerSamplerServer:
                         )
 
                     if action == 'blend':
-                        # 合成图进工作区（可复用为 Ref / 再加层），并以 dataURL 返回 ——
-                        # 前端把它作为新的智能图层加到画布顶层（图层自带像素，不绑 id）。
-                        blend_id = inst.add_staging(image, name=f'Blend #{len(inst.staging_items) + 1}')
-                        self._send_json({'success': True, 'id': blend_id,
+                        # 合成图不再进工作区（工作区只收用户主动拖入的图）—— 以 dataURL
+                        # 返回，前端把它作为新的智能图层加到画布顶层（图层自带像素，
+                        # 不绑 id）。想让它进工作区的用户会自己拖进来。
+                        self._send_json({'success': True, 'id': None,
                                          'image': tensor_to_base64(image)})
                         return
 
@@ -3119,11 +3123,12 @@ class SnapshotDetailerSamplerNode:
                 print(f"[InterfaceExec] chain: synced interface pipeline updates (model/clip/context/loras) back to upstream pipeline")
             return result_img, result_mask
 
-        # 以最终（可能已 uncrop）图加入工作区，并记录条目 id（前端据此展示接口结果）
+        # 以最终（可能已 uncrop）图加入内部图池（hidden：前端据条目 id 展示接口结果，
+        # 但接口产出不进工作区条带），并记录条目 id
         for ptype, img, name in results:
             if ptype == 'IMAGE':
                 server.interface_result_keys.append(
-                    server.add_staging(img, name=name))
+                    server.add_staging(img, name=name, hidden=True))
 
         # 接口结果图同时接管 pipeline image（后续 block / 下一次 run 从它继续）
         if results:
@@ -3185,9 +3190,10 @@ class SnapshotDetailerSamplerNode:
                 raise RuntimeError("[SnapshotDetailerSampler] Server startup timeout")
             time.sleep(0.01)
 
-        # 初始图进工作区（前端种子画布从这里取）
+        # 初始图进内部图池（hidden：前端种子画布从这里取，但不占工作区条带 ——
+        # 工作区只收用户主动拖入的图）。
         if self._current_pipeline and self._current_pipeline.image is not None:
-            server.original_key = server.add_staging(self._current_pipeline.image, name='Original')
+            server.original_key = server.add_staging(self._current_pipeline.image, name='Original', hidden=True)
 
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
@@ -3383,7 +3389,9 @@ class SnapshotDetailerSamplerNode:
                         server.original_key = None
                         server.detail_status = 'done'
 
-                        # 产出图进工作区（前端作为新图层叠加到画布上，图层自带像素）。
+                        # 产出图进内部图池（hidden：不进工作区条带 —— 生成结果只有
+                        # 用户主动拖入才会出现在工作区；前端仍按 detailed_key 从
+                        # /api/staging 取到条目，作为新图层叠加到画布上，图层自带像素）。
                         # Recover Crop 关闭时带放置矩形 —— 产出图本身已是
                         # RGBA（alpha = 工作区 mask），Blend 工作台据此把它作为新图层
                         # transform 贴回原位。
@@ -3391,6 +3399,7 @@ class SnapshotDetailerSamplerNode:
                             detailed_image,
                             name=f'Detail #{len(server.staging_items)}',
                             place=(detail_meta or {}).get('place'),
+                            hidden=True,
                         )
 
                         # 更新 pipeline（保留 model/vae/latent 等流转状态）

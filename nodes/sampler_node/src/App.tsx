@@ -160,12 +160,14 @@ const App: React.FC = () => {
       .catch(e => setError('Failed to load config: ' + e.message));
   }, []);
 
-  // Fetch the staging pool on mount (the workbench strip + every picker read it)
+  // Fetch the staging pool on mount (the workbench strip + every picker read it).
+  // hidden 条目（run/接口的生成产出、Original 种子）只供内部按 id 取图 —— 工作区
+  // 镜像（本条带 + Blend 工作台 + 所有选择器）只展示用户主动拖入/导入的图。
   const refreshStaging = useCallback((): Promise<void> => {
     return fetch('/api/staging')
       .then(r => r.json())
       .then(data => {
-        if (data.staging) setStaging(data.staging);
+        if (data.staging) setStaging(data.staging.filter((s: StagingItem) => !s.hidden));
       })
       .catch(() => {});
   }, []);
@@ -323,20 +325,25 @@ const App: React.FC = () => {
           },
         }));
         if (st === 'done') {
-          const resultIds = data.interface_result_keys || [];
-          refreshStaging().then(() => {
-            if (resultIds.length > 0) {
-              setStaging(prev => {
-                const results = (resultIds as string[])
-                  .map((id: string) => prev.find((s: StagingItem) => s.id === id))
+          const resultIds = (data.interface_result_keys || []) as string[];
+          refreshStaging();
+          if (resultIds.length > 0) {
+            // 接口产出条目是 hidden 的（不进工作区镜像）—— 从全量列表按 id 取。
+            void (async () => {
+              try {
+                const r = await fetch('/api/staging').then(rr => rr.json());
+                const full = (r?.staging || []) as StagingItem[];
+                const results = resultIds
+                  .map((id: string) => full.find((s: StagingItem) => s.id === id))
                   .filter((s): s is StagingItem => !!s);
                 setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: results }));
-                return prev;
-              });
-            } else {
-              setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
-            }
-          });
+              } catch {
+                setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
+              }
+            })();
+          } else {
+            setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
+          }
         } else if (st === 'error') {
           setError(data.interface_error || 'Interface execution failed');
         }
@@ -372,19 +379,21 @@ const App: React.FC = () => {
   }, []);
 
   // The Blend workbench asks for its seed image so the canvas is never empty. The run's
-  // initial image lands in the staging pool as 'Original' — prefer it, else the newest item.
+  // initial image lands in the pool as a HIDDEN 'Original' entry — hidden entries never
+  // reach the workbench strip, so the seed must read the full /api/staging list, falling
+  // back to the newest user item.
   const seedBlendCanvas = useCallback(async () => {
     const iframe = blendIframeRef.current;
     if (!iframe?.contentWindow) return;
-    let list = stagingRef.current;
-    if (!list.length) {
-      try {
-        const r = await fetch('/api/staging').then(r => r.json());
-        list = (r?.staging || []) as StagingItem[];
-        setStaging(list);
-      } catch { /* nothing to seed with */ }
-    }
-    const item = list.find(s => s.name === 'Original') ?? list[list.length - 1];
+    let full: StagingItem[] = [];
+    try {
+      const r = await fetch('/api/staging').then(r => r.json());
+      full = (r?.staging || []) as StagingItem[];
+    } catch { /* nothing to seed with */ }
+    if (!full.length) return;
+    const item = full.find(s => s.name === 'Original')
+      ?? stagingRef.current[stagingRef.current.length - 1]
+      ?? full[full.length - 1];
     if (!item) return;
     iframe.contentWindow.postMessage({
       type: 'blend-init-layer',
@@ -432,15 +441,14 @@ const App: React.FC = () => {
         return;
       }
       if (body.action === 'blend') {
-        refreshStaging();
-        reply(true, { id: data.id });
-        // Blend 不只是归档进工作区：合成结果同时作为一个新的智能对象图层放回画布
-        // 顶层（图层自带像素 dataURL，非破坏、可继续改 transform / 画 mask）。
-        // 画布原有图层与 Mask 层一律不动；图层注入失败不影响归档本身。
+        reply(true, {});
+        // 合成结果只作为新的智能对象图层放回画布顶层（图层自带像素 dataURL，
+        // 非破坏、可继续改 transform / 画 mask）；不再自动归档进工作区 ——
+        // 工作区只收用户主动拖入的图。画布原有图层与 Mask 层一律不动。
         blendIframeRef.current?.contentWindow?.postMessage(
           { type: 'blend-add-layer', smart: true,
-            items: [{ id: data.id, name: data.name || 'Blend', src: data.image }],
-            note: 'Blend result added as a new smart layer (also archived to staging)' }, '*');
+            items: [{ name: data.name || 'Blend', src: data.image }],
+            note: 'Blend result added as a new smart layer' }, '*');
       } else if (body.action === 'tag') {
         reply(true, { tag: data.tag });
         setPromptReady(true);
