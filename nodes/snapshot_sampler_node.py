@@ -147,6 +147,12 @@ class SnapshotDetailerSamplerServer:
     后端通过 action queue 接收前端指令（run_detailer / select_image / finish）。
     """
 
+    # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
+    # → 落盘 blocks_sets.json 的 global_params。每次执行都现读它；节点 widget /
+    # INPUT_TYPES 里的同名字段只是被单向刷新的显示镜像，不参与取值。
+    GLOBAL_PARAM_DEFAULTS = {'pixels': 1048576, 'align': 8, 'crop_reserve': 32,
+                             'mask_grow': 32, 'mask_blur': 32}
+
     def __init__(self, detector, tagger, lora_regex, asset=None, package=None,
                  node_instance=None, unique_id=None, config=None, extra_pnginfo=None, prompt=None):
         self.detector = detector
@@ -184,26 +190,24 @@ class SnapshotDetailerSamplerServer:
         self.add_noise = cfg.get('add_noise', 'enable')
         self.start_step_rate = cfg.get('start_step_rate', 0.8)
         self.end_step_rate = cfg.get('end_step_rate', 1.0)
-        self.pixels = cfg.get('pixels', 1048576)
-        self.align = cfg.get('align', 8)
-        self.crop_reserve = cfg.get('crop_reserve', 32)
-        self.mask_grow = cfg.get('mask_grow', 32)
-        self.mask_blur = cfg.get('mask_blur', 32)
-        # GLOBAL SETTINGS 落盘优先：workbench 的编辑会写进 blocks_sets.json 的
-        # global_params。重新 queue 节点会用图上的 widget 值重建 server，widget 同步
-        # 没赶到的话全局值就丢了 —— 磁盘这份才是权威。
-        for _k, _v in (self._load_global_params_file() or {}).items():
-            if _k in ('pixels', 'align', 'crop_reserve', 'mask_grow', 'mask_blur'):
-                try:
-                    setattr(self, _k, int(_v))
-                except (TypeError, ValueError):
-                    pass
+        # 五个 GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
+        # （改动即 POST → _apply_params → _save_global_params_file）。server 是在 sample()
+        # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。widget 传进来的
+        # cfg 值**不参与取值**，只被 _sync_widgets 当镜像刷新 —— 两处各存一份必然不同步。
+        _persisted = self._load_global_params_file()
+        for _k, _d in self.GLOBAL_PARAM_DEFAULTS.items():
+            try:
+                setattr(self, _k, int(_persisted.get(_k, _d)))
+            except (TypeError, ValueError):
+                setattr(self, _k, _d)
         self.enable_edit = cfg.get('enable_edit', False)
         self.edit_mode = cfg.get('edit_mode', 'fit')
         self.ref_boost = cfg.get('ref_boost', 4.0)
         self.ref_boost_a = cfg.get('ref_boost_a', 1.0)
         self.enable_ref_boost_mask = cfg.get('enable_ref_boost_mask', False)
         self.grounding_px = cfg.get('grounding_px', 768)
+        # 单向镜像：权威值推回节点 widget，图上的读数永远等于前端 Global Settings。
+        self._sync_widgets()
 
         # Pipeline Block chain (default: single Detailer block from INPUT_TYPES defaults)
         self.blocks = cfg.get('blocks')
@@ -699,13 +703,7 @@ class SnapshotDetailerSamplerServer:
     def _save_global_params_file(self):
         try:
             data = self._read_sets_file()
-            data['global_params'] = {
-                'pixels': self.pixels,
-                'align': self.align,
-                'crop_reserve': self.crop_reserve,
-                'mask_grow': self.mask_grow,
-                'mask_blur': self.mask_blur,
-            }
+            data['global_params'] = {k: getattr(self, k) for k in self.GLOBAL_PARAM_DEFAULTS}
             with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -747,7 +745,7 @@ class SnapshotDetailerSamplerServer:
         if 'mask_blur' in data:
             self.mask_blur = int(data['mask_blur'])
             dirty = True
-        if any(k in data for k in ('pixels', 'align', 'crop_reserve', 'mask_grow', 'mask_blur')):
+        if any(k in data for k in self.GLOBAL_PARAM_DEFAULTS):
             self._save_global_params_file()
         if 'enable_edit' in data:
             self.enable_edit = bool(data['enable_edit'])
@@ -3225,15 +3223,13 @@ class SnapshotDetailerSamplerNode:
             node_instance=self,
             unique_id=unique_id,
             extra_pnginfo=extra_pnginfo,
+            # 五个 GLOBAL SETTINGS（pixels/align/crop_reserve/mask_grow/mask_blur）
+            # 故意不从 widget 传：它们只认前端 Global Settings 落盘的那份，server 自己
+            # 现读。widget 值是上一次镜像的残留，传进来就是不同步的源头。
             config={
                 'add_noise': add_noise,
                 'start_step_rate': start_step_rate,
                 'end_step_rate': end_step_rate,
-                'pixels': pixels,
-                'align': align,
-                'crop_reserve': crop_reserve,
-                'mask_grow': mask_grow,
-                'mask_blur': mask_blur,
                 'enable_edit': enable_edit == "enable",
                 'context_regex': context_regex,
             }
