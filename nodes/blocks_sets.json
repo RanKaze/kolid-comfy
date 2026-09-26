@@ -294,5 +294,12 @@
       ]
     }
   ],
-  "active_block_set": "set-20"
+  "active_block_set": "set-20",
+  "global_params": {
+    "pixels": 2048576,
+    "align": 16,
+    "crop_reserve": 32,
+    "mask_grow": 32,
+    "mask_blur": 32
+  }
 }
