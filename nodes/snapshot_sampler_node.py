@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import mimetypes
 import threading
 import queue
 import http.server
@@ -8,6 +9,7 @@ import socketserver
 import webbrowser
 import time
 import base64
+from urllib.parse import parse_qs, urlparse
 import io
 import copy
 import numpy as np
@@ -136,6 +138,217 @@ def parse_prompt_image_refs(text, resolve):
 
     decoded = IMAGE_ID_TOKEN_RE.sub(_sub, text or '')
     return ref_ids, decoded, missing
+
+
+# =============================================================================
+# 文档 IO：原生文件对话框 + 令牌登记表
+# =============================================================================
+# Blend 工作台的 Load / Save / Save As / Export / Import 全部走这里选文件。
+#
+# 为什么在后端弹：页面原先用 File System Access 的 showSaveFilePicker，浏览器会在每次 Ctrl+S
+# 前插一条自己的"将所作更改保存至…"提示，用户要求把它绕开。本服务器和浏览器在同一台机器上
+# （browser_url 是 localhost，节点用 webbrowser.open 打开页面），所以 tkinter 的原生对话框出现
+# 在同一块桌面上，而**已绑定文档的回写一个弹窗都不需要**。
+#
+# 为什么只认 token 不认路径：MainHandler 对任意 Origin 应答（CORS *）。若读写端点接受前端传来
+# 的路径，/api/io_read 立刻就是一个任意文件读取口。对话框返回路径 → 服务端存进登记表 → 前端拿
+# 到不透明 token，之后所有读写只能用 token，路径从不出服务端。
+#
+# 为什么单独一个常驻线程：Tk 不是线程安全的，而 HTTP handler 每个请求一个线程。所有对话框排进
+# 一条队列，由唯一那根线程上唯一的 root 执行；对话框本身是原生模态的，只挡住那根线程。
+IO_FILE_KINDS = {
+    'cud': {
+        'label': 'Context document',
+        'patterns': ['*.cud'],
+        'extension': '.cud',
+        'mime': 'application/octet-stream',
+    },
+    'png': {
+        'label': 'PNG image',
+        'patterns': ['*.png'],
+        'extension': '.png',
+        'mime': 'image/png',
+    },
+    'image': {
+        'label': 'Image',
+        'patterns': ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.bmp',
+                     '*.tif', '*.tiff', '*.avif', '*.svg'],
+        'extension': '.png',
+        'mime': 'image/*',
+    },
+}
+
+
+class DocumentIo:
+    """原生对话框 + token→绝对路径 登记表，供 MainHandler 的 /api/io_* 四条路由使用。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tokens = {}            # token -> {'path', 'mime'}
+        self._jobs = None            # queue.Queue，常驻线程的任务口
+        self._thread = None
+        self._tk_checked = False
+        self._tk_ok = False
+
+    # ---- 能力 ----
+    def available(self):
+        """tkinter 是否可用（venv 可能是无 Tk 的精简构建）。只探测一次。"""
+        if not self._tk_checked:
+            self._tk_checked = True
+            try:
+                import tkinter                       # noqa: F401
+                from tkinter import filedialog       # noqa: F401
+                self._tk_ok = True
+            except Exception:
+                self._tk_ok = False
+        return self._tk_ok
+
+    def _ensure_thread(self):
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        q = queue.Queue()
+        t = threading.Thread(target=self._worker, args=(q,), daemon=True, name='blend-file-dialog')
+        self._jobs = q
+        self._thread = t
+        t.start()
+        return True
+
+    def _worker(self, jobs):
+        """唯一持有 Tk root 的线程：逐个取出请求，弹原生对话框，回传结果。"""
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()                          # 只要对话框，不要一块空白窗体
+            try:
+                root.attributes('-topmost', True)    # 别让它跑到 ComfyUI 窗口后面
+            except Exception:
+                pass
+        except Exception as e:
+            while True:
+                job = jobs.get()
+                if job is None:
+                    return
+                _, reply = job
+                reply.put(('err', 'tkinter root could not be created: %s' % e))
+        while True:
+            job = jobs.get()
+            if job is None:
+                break
+            spec, reply = job
+            try:
+                reply.put(('ok', self._ask(root, **spec)))
+            except Exception as e:
+                reply.put(('err', str(e)))
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _ask(root, mode, kind, suggested, multiple):
+        from tkinter import filedialog
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        filetypes = [(spec['label'], ' '.join(spec['patterns'])), ('All files', '*.*')]
+        if mode == 'save':
+            path = filedialog.asksaveasfilename(
+                parent=root, title='Save as', filetypes=filetypes,
+                defaultextension=spec['extension'], initialfile=suggested or '')
+            return [path] if path else []
+        paths = filedialog.askopenfilename(
+            parent=root, title='Open', filetypes=filetypes, multiple=bool(multiple))
+        if isinstance(paths, str):
+            paths = [paths] if paths else []
+        return [p for p in (paths or []) if p]
+
+    # ---- 登记表 ----
+    def _document(self, path, kind):
+        """把一条真实路径收进登记表，返回前端使用的文档描述。
+
+        mime 由扩展名推断，推断不出（.cud）退回该类别的默认值 —— 前端拿它造 File。
+        """
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        mime = mimetypes.guess_type(path)[0] or spec['mime']
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        abspath = os.path.abspath(path)
+        token = uuid.uuid4().hex
+        with self._lock:
+            self._tokens[token] = {'path': abspath, 'mime': mime, 'size': size}
+        return {'token': token, 'name': os.path.basename(abspath), 'path': abspath,
+                'size': size, 'mime': mime}
+
+    def resolve(self, token):
+        with self._lock:
+            entry = self._tokens.get(token or '')
+        return entry['path'] if entry else None
+
+    def entry(self, token):
+        with self._lock:
+            entry = self._tokens.get(token or '')
+        return dict(entry) if entry else None
+
+    def forget(self, token):
+        with self._lock:
+            self._tokens.pop(token or '', None)
+
+    # ---- 对外三条 ----
+    def pick(self, mode, kind, suggested='', multiple=False):
+        """弹出原生对话框，返回选中的文档描述列表（用户取消则为空表）。
+
+        每项 {token, name, path, size, mime}：token 之后独占寻址，path/name 只是给读数看的。
+        """
+        if not self.available():
+            return None
+        self._ensure_thread()
+        reply = queue.Queue()
+        self._jobs.put(({'mode': mode, 'kind': kind, 'suggested': suggested or '',
+                         'multiple': multiple}, reply))
+        status, result = reply.get()
+        if status == 'err':
+            raise RuntimeError(result)
+        return [self._document(p, kind) for p in (result or [])]
+
+    def write(self, token, data):
+        """覆盖写回这份文档：先落 .tmp 再 os.replace，中途失败不会把原文练废。"""
+        path = self.resolve(token)
+        if not path:
+            return False, 'unknown document token'
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'wb') as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except PermissionError:
+            # 最常见的一种失败：文档正被别的程序占着。措辞与前端 stale handle 分支一致。
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, 'the file is open elsewhere or is read-only'
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, str(e)
+        with self._lock:
+            self._tokens[token]['size'] = len(data)
+        return True, None
+
+    def read(self, token):
+        path = self.resolve(token)
+        if not path:
+            return None, 'unknown document token'
+        try:
+            with open(path, 'rb') as f:
+                return f.read(), None
+        except Exception as e:
+            return None, str(e)
+
+
+doc_io = DocumentIo()
 
 
 # =============================================================================
@@ -1069,6 +1282,27 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'presets': inst._load_prompt_presets() if inst else []})
                 return
 
+            # ---- 文档 IO：前端问一次能力，之后就只按 token 读文件 ----
+            if self.path == '/api/io_caps':
+                self._send_json({'pick': doc_io.available()})
+                return
+
+            if self.path.startswith('/api/io_read'):
+                token = (parse_qs(urlparse(self.path).query).get('token') or [''])[0]
+                data, err = doc_io.read(token)
+                if err:
+                    self._send_json({'success': False, 'error': err}, 404)
+                    return
+                entry = doc_io.entry(token) or {}
+                self.send_response(200)
+                self.send_header('Content-type', entry.get('mime') or 'application/octet-stream')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
             self.send_error(404)
 
         def do_POST(self):
@@ -1518,6 +1752,40 @@ class SnapshotDetailerSamplerServer:
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            # ---- 文档 IO：对话框由后端弹，路径只在服务端流转 ----
+            if self.path == '/api/io_pick':
+                # {mode: 'open'|'save', kind: 'cud'|'png'|'image', suggested, multiple}
+                # → {cancelled, picks:[{token,name,path,size,mime}]}
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    mode = 'save' if body.get('mode') == 'save' else 'open'
+                    kind = body.get('kind') if body.get('kind') in IO_FILE_KINDS else 'cud'
+                    picks = doc_io.pick(mode, kind,
+                                        suggested=str(body.get('suggested') or ''),
+                                        multiple=bool(body.get('multiple')))
+                    if picks is None:
+                        self._send_json({'cancelled': True, 'picks': [], 'unavailable': True})
+                    else:
+                        self._send_json({'cancelled': not picks, 'picks': picks})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'cancelled': True, 'picks': [], 'error': str(e)}, 500)
+                return
+
+            if self.path.startswith('/api/io_write'):
+                # 原始字节直接进 body（不是 dataURL：几百 MB 的上下文经不起再一次三分之一膨胀）
+                try:
+                    token = (parse_qs(urlparse(self.path).query).get('token') or [''])[0]
+                    length = int(self.headers.get('Content-Length', 0))
+                    data = self.rfile.read(length) if length else b''
+                    ok, err = doc_io.write(token, data)
+                    self._send_json({'success': ok, 'error': err, 'size': len(data)})
+                except Exception as e:
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
