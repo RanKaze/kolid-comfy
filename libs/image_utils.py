@@ -843,66 +843,86 @@ def _interpolate_chunked(src, dst, new_h, new_w, antialias, device):
         _collect(b)
 
 
-def limit_pixels(image, pixels, mask=None, align=1):
+def limit_pixels(image, pixels=None, mask=None, align=1):
     """
     Limit image pixel count by resizing if needed, with optional dimension alignment.
+
+    pixels=None：不设定像素目标，仅把尺寸就近落 align 格（Qwen2.1 预处理在
+    Enable Limit 关时走这条）；无需变化时原样返回且 resize_info=None。
     """
     try:
         B, H, W, C = image.shape
         current_pixels = H * W
 
         # ==================== 仅保留这一行 print ====================
-        print(f"[limit_pixels] {W}x{H} ({current_pixels:,} px) → target {pixels:,} px | align={align}")
+        print(f"[limit_pixels] {W}x{H} ({current_pixels:,} px) → target "
+              + (f"{pixels:,} px" if pixels else "none (align-snap only)")
+              + f" | align={align}")
 
-        # 如果当前像素数已经接近目标（允许少量误差），直接返回
-        if abs(current_pixels - pixels) < 100:
-            resize_info = {
-                "original_width": W,
-                "original_height": H,
-                "resized_width": W,
-                "resized_height": H,
-                "aspect_ratio": W / H if H != 0 else 1.0,
-                "scale_factor": 1.0,
-                "align": align,
-                "was_upscaled": False
-            }
-            return (image, mask, resize_info)
-
-        aspect_ratio = W / H if H != 0 else 1.0
-
-        if current_pixels < pixels:
-            # ==================== 需要放大 ====================
-            ideal_width = (pixels * aspect_ratio) ** 0.5
-            ideal_height = ideal_width / aspect_ratio
-
-            new_width = max(align, round(ideal_width / align) * align)
-            new_height = max(align, round(ideal_height / align) * align)
-
-            while new_width * new_height > pixels + 100:
-                new_width = max(align, new_width - align)
-                new_height = max(align, new_height - align)
-
-            new_width = max(64, new_width)
-            new_height = max(64, new_height)
-
+        # 仅落格模式：像素数不设目标，只把宽高就近吸附到 align 格。
+        if pixels is None:
+            step = align if align and align > 1 else 1
+            new_width = max(step, round(W / step) * step)
+            new_height = max(step, round(H / step) * step)
+            if new_width == W and new_height == H:
+                print(f"[limit_pixels] {W}x{H} already on the {align}-grid — untouched")
+                return (image, mask, None)
+            ideal_width, ideal_height = float(new_width), float(new_height)
+            aspect_ratio = W / H if H != 0 else 1.0
+            was_upscaled = new_width * new_height > current_pixels
+            need_antialias = new_height < H
         else:
-            # ==================== 需要缩小 ====================
-            ideal_width = (pixels * aspect_ratio) ** 0.5
-            ideal_height = ideal_width / aspect_ratio
+            # 如果当前像素数已经接近目标（允许少量误差），直接返回
+            if abs(current_pixels - pixels) < 100:
+                resize_info = {
+                    "original_width": W,
+                    "original_height": H,
+                    "resized_width": W,
+                    "resized_height": H,
+                    "aspect_ratio": W / H if H != 0 else 1.0,
+                    "scale_factor": 1.0,
+                    "align": align,
+                    "was_upscaled": False
+                }
+                return (image, mask, resize_info)
 
-            new_width = max(align, round(ideal_width / align) * align)
-            new_height = max(align, round(ideal_height / align) * align)
+            aspect_ratio = W / H if H != 0 else 1.0
 
-            while new_width * new_height > pixels:
-                new_width = max(align, new_width - align)
-                new_height = max(align, new_height - align)
+            if current_pixels < pixels:
+                # ==================== 需要放大 ====================
+                ideal_width = (pixels * aspect_ratio) ** 0.5
+                ideal_height = ideal_width / aspect_ratio
 
-            new_width = max(16, new_width)
-            new_height = max(16, new_height)
+                new_width = max(align, round(ideal_width / align) * align)
+                new_height = max(align, round(ideal_height / align) * align)
 
-        # ---------- 分块缩放（自动上 GPU + 双缓冲流水线，antialias 仅缩小时启用） ----------
-        # antialias bicubic 在 CPU 上极慢；放大时 antialias 无意义，直接跳过
-        need_antialias = current_pixels > pixels
+                while new_width * new_height > pixels + 100:
+                    new_width = max(align, new_width - align)
+                    new_height = max(align, new_height - align)
+
+                new_width = max(64, new_width)
+                new_height = max(64, new_height)
+
+            else:
+                # ==================== 需要缩小 ====================
+                ideal_width = (pixels * aspect_ratio) ** 0.5
+                ideal_height = ideal_width / aspect_ratio
+
+                new_width = max(align, round(ideal_width / align) * align)
+                new_height = max(align, round(ideal_height / align) * align)
+
+                while new_width * new_height > pixels:
+                    new_width = max(align, new_width - align)
+                    new_height = max(align, new_height - align)
+
+                new_width = max(16, new_width)
+                new_height = max(16, new_height)
+
+            ideal_width, ideal_height = float(new_width), float(new_height)
+            was_upscaled = current_pixels < pixels
+            # ---------- antialias 仅缩小时启用 ----------
+            # antialias bicubic 在 CPU 上极慢；放大时 antialias 无意义，直接跳过
+            need_antialias = current_pixels > pixels
 
         device = image.device
         try:
@@ -940,7 +960,7 @@ def limit_pixels(image, pixels, mask=None, align=1):
             "aspect_ratio": aspect_ratio,
             "scale_factor": new_width / W,
             "align": align,
-            "was_upscaled": current_pixels < pixels
+            "was_upscaled": was_upscaled
         }
 
         _lp_sum = f"{resized_mask.sum().item():.1f}" if resized_mask is not None else "N/A"

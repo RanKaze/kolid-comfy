@@ -189,6 +189,15 @@ class SnapshotDetailerSamplerServer:
         self.crop_reserve = cfg.get('crop_reserve', 32)
         self.mask_grow = cfg.get('mask_grow', 32)
         self.mask_blur = cfg.get('mask_blur', 32)
+        # GLOBAL SETTINGS 落盘优先：workbench 的编辑会写进 blocks_sets.json 的
+        # global_params。重新 queue 节点会用图上的 widget 值重建 server，widget 同步
+        # 没赶到的话全局值就丢了 —— 磁盘这份才是权威。
+        for _k, _v in (self._load_global_params_file() or {}).items():
+            if _k in ('pixels', 'align', 'crop_reserve', 'mask_grow', 'mask_blur'):
+                try:
+                    setattr(self, _k, int(_v))
+                except (TypeError, ValueError):
+                    pass
         self.enable_edit = cfg.get('enable_edit', False)
         self.edit_mode = cfg.get('edit_mode', 'fit')
         self.ref_boost = cfg.get('ref_boost', 4.0)
@@ -673,12 +682,42 @@ class SnapshotDetailerSamplerServer:
             pass
         return None, None
 
+    def _read_sets_file(self):
+        """Whole persisted JSON (possibly {}), shared by the two save paths so neither
+        ever clobbers the other's keys."""
+        try:
+            with open(self._blocks_sets_file(), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _load_global_params_file(self):
+        gp = self._read_sets_file().get('global_params')
+        return gp if isinstance(gp, dict) else {}
+
+    def _save_global_params_file(self):
+        try:
+            data = self._read_sets_file()
+            data['global_params'] = {
+                'pixels': self.pixels,
+                'align': self.align,
+                'crop_reserve': self.crop_reserve,
+                'mask_grow': self.mask_grow,
+                'mask_blur': self.mask_blur,
+            }
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save global params: {e}")
+
     def _save_blocks_sets_file(self):
         try:
+            data = self._read_sets_file()
+            data['blocks_sets'] = self.blocks_sets
+            data['active_block_set'] = self.active_block_set
             with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
-                json.dump({'blocks_sets': self.blocks_sets,
-                           'active_block_set': self.active_block_set},
-                          f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Failed to save blocks_sets: {e}")
 
@@ -708,6 +747,8 @@ class SnapshotDetailerSamplerServer:
         if 'mask_blur' in data:
             self.mask_blur = int(data['mask_blur'])
             dirty = True
+        if any(k in data for k in ('pixels', 'align', 'crop_reserve', 'mask_grow', 'mask_blur')):
+            self._save_global_params_file()
         if 'enable_edit' in data:
             self.enable_edit = bool(data['enable_edit'])
             dirty = True
@@ -2257,19 +2298,16 @@ class SnapshotDetailerSamplerNode:
         if not enable_limit and not needs_grid_align:
             # Enable Limit 关：不缩放也不对齐，工作分辨率 = 裁剪（或整幅）分辨率。
             resized_image, resized_mask, resize_info = cropped_image, cropped_mask, None
-        else:
-            # 关掉像素预算但架构要求对齐时，把目标定成「当前像素 + 一格」：既不放大也
-            # 不缩小，只让 limit_pixels 把尺寸落到 align 的格子上。
-            budget = limit_pixels_val
-            if not enable_limit:
-                _b, _h, _w, _c = cropped_image.shape
-                budget = _h * _w + 4 * limit_align * limit_align
+        elif enable_limit:
+            # Pixels 是"目标"（limit_pixels 语义）：大图缩小、小图放大补足到预算。
             resized_image, resized_mask, resize_info = limit_pixels(
-                image=cropped_image,
-                pixels=budget,
-                mask=cropped_mask,
-                align=limit_align,
-            )
+                cropped_image, limit_pixels_val, cropped_mask, limit_align)
+        else:
+            # Limit 关但架构要求格子对齐（QwenImage2.1 的 latent/vision 网格）：
+            # 同一次 limit_pixels 调用里只落格不缩放 —— pixels 传 None 即
+            # "不设像素目标"，仅就近吸附到 align 格，尺寸变动至多半格。
+            resized_image, resized_mask, resize_info = limit_pixels(
+                cropped_image, None, cropped_mask, limit_align)
 
         current_image = resized_image
         current_mask = resized_mask
@@ -2854,8 +2892,18 @@ class SnapshotDetailerSamplerNode:
         # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
         detail_meta = None
         if not enable_mask:
-            # Enable Mask 关：整幅工作区即产出，没有裁剪矩形可复原。
-            final_image, final_mask = current_image, current_mask
+            # Enable Mask 关：整幅工作区即产出，没有裁剪矩形可复原。但 align 落格
+            # （Qwen2.1 + Limit 关）仍动过尺寸 —— resize_info 非 None 时必须按它把
+            # 工作分辨率还原回裁剪/整幅尺寸，产出尺寸才和输入一致。
+            if last_resize_info is not None:
+                recovered_image, recovered_mask = recover_size(
+                    image=current_image,
+                    resize_info=last_resize_info,
+                    mask=last_resized_mask
+                )
+                final_image, final_mask = recovered_image, recovered_mask
+            else:
+                final_image, final_mask = current_image, current_mask
         elif do_recover_crop:
             if last_resize_info is not None:
                 recovered_image, recovered_mask = recover_size(
