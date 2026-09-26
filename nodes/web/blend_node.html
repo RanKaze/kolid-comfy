@@ -729,13 +729,19 @@ const maskDecalLabel = document.getElementById('maskDecalLabel');
 const brushLabel = document.getElementById('brushLabel');
 const eraserLabel = document.getElementById('eraserLabel');
 const viewLabel = document.getElementById('viewLabel');
-layersLabel.title = 'Top of list draws on top · drag rows to reorder. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage).';
-transformLabel.title = 'T / Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps.';
+layersLabel.title = 'Top of list draws on top · drag rows to reorder. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
+transformLabel.title = 'T / Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
 viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
 let layers = [];
 let selectedId = null;
+// Shift+click builds a GROUP beside the anchor instead of replacing it: `selectedId` stays what the
+// panel, the readout and every paint path resolve through getSelected(), while `groupIds` is the set
+// a transform gesture moves. Exactly one writer (the Shift toggle), and the collapse test lives in
+// activeGroup() — a plain `selectedId = …` anywhere else points the anchor at a layer the group does
+// not contain, which dissolves the group by construction instead of by remembering 14 call sites.
+let groupIds = new Set();
 let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'none'
 
 // The pure Mask layer. It deliberately does NOT live in `layers`: ordering, deletion,
@@ -891,6 +897,65 @@ function getLayer(id) { return layers.find(l => l.id === id) || null; }
 // text) through the same code path as a normal layer, so there is no parallel brush engine.
 function getSelected() { return selectedId === MASK_LAYER_ID ? maskLayer : getLayer(selectedId); }
 function bottomLayer() { return layers.length ? layers[layers.length - 1] : null; }
+
+// ==================== 多选 ====================
+// Reading the group is what keeps it honest: a selection that moved the anchor off the set
+// collapses to that one layer, deleted layers drop out, and the Mask layer — canvas-locked, and a
+// paint target rather than a stack member — is never part of a group.
+function activeGroup() {
+    if (selectedId === null || isMaskLayerTarget()) groupIds = new Set();
+    else if (!groupIds.has(selectedId)) groupIds = new Set([selectedId]);
+    if (groupIds.size > 1) {
+        for (const id of [...groupIds]) if (!getLayer(id)) groupIds.delete(id);
+    }
+    return groupIds;
+}
+
+// Members in stack order (index 0 = top), or null when fewer than two layers are held — so every
+// single-selection path can keep asking getSelected() and see nothing.
+function selectedGroup() {
+    const ids = activeGroup();
+    if (ids.size < 2) return null;
+    const members = layers.filter(l => ids.has(l.id));
+    return members.length > 1 ? members : null;
+}
+
+function topOfIds(ids) {
+    for (const l of layers) if (ids.has(l.id)) return l;
+    return null;
+}
+
+// Shift+click: add or remove one layer. When the anchor itself is dropped, the topmost remaining
+// member becomes the anchor, so the panel always describes a layer that is really selected.
+function toggleGroupMember(id) {
+    const ids = activeGroup();
+    const added = !ids.has(id);
+    if (added) ids.add(id);
+    else ids.delete(id);
+    if (!ids.has(selectedId)) {
+        const next = topOfIds(ids);
+        selectedId = next ? next.id : null;
+        if (!next) groupIds = new Set();
+    }
+    return added;
+}
+
+// Painting needs exactly one target: a stroke writes into one layer's own surface at that layer's
+// own resolution, so a group has no meaning there. Refused at the engine door — every paint entry
+// point funnels through beginStroke / bucketFillAt — which is why the brush can still be armed
+// while a group is held: it simply cannot land a stroke.
+function groupPaintBlocked() {
+    const g = selectedGroup();
+    if (!g) return false;
+    setStatus(`${g.length} layers selected — mask and decal paint one layer at a time. Click a single row to paint it.`, 'error');
+    return true;
+}
+
+function groupStatusText(n) {
+    return n > 1
+        ? `${n} layers selected — move, scale and rotate them together. Click one row alone to paint its mask or decal.`
+        : 'Single layer selected';
+}
 
 function setStatus(text, kind) {
     status.textContent = text;
@@ -1082,7 +1147,9 @@ function rasterContentTransform(l) {
 // one of its drags is live, l.transform itself holds the dragged content box.
 function effectiveTransform(l) {
     if (!isRasterLayer(l)) return l.transform;
-    if (drag && drag.layerId === l.id) return l.transform;
+    // A promoted raster is only ever a live drag state: single-layer drags carry `layerId`, a group
+    // drag carries the whole `layerIds` set.
+    if (drag && (drag.layerId === l.id || (drag.layerIds && drag.layerIds.has(l.id)))) return l.transform;
     return rasterContentTransform(l);
 }
 
@@ -1715,6 +1782,13 @@ function updateHoverCursor(sp, docPos) {
         return;
     }
     if (mode !== 'transform') { setCursor('default'); return; }
+    const held = dragGroupMembers();
+    if (held) {
+        const box = groupBox(held);
+        const gh = box ? hitHandleScreen(sp, docPos, box) : null;
+        setCursor(gh ? HANDLE_CURSOR[gh] : (box && pointInBox(docPos, box) ? 'move' : 'default'));
+        return;
+    }
     const l = getSelected();
     let cursor = 'default';
     // The Mask layer is canvas-locked, so it has no adjustment box to hover.
@@ -2021,8 +2095,18 @@ function drawOverlay() {
     if (mode !== 'transform' || !canvasW) {
         // Outside the transform tool there is no adjustment box — but a selected layer's bounds
         // would otherwise be invisible, so hint the footprint with a faint dashed outline.
-        const sel = canvasW ? getSelected() : null;
-        if (sel && sel.visible && !sel.isMaskLayer && sel.img) drawFaintBox(handleScreenPoints(sel));
+        for (const sel of (selectedGroup() || [getSelected()])) {
+            if (sel && sel.visible && !sel.isMaskLayer && sel.img) drawFaintBox(handleScreenPoints(sel));
+        }
+        return;
+    }
+    const held = dragGroupMembers();
+    if (held) {
+        // A group keeps every member's own outline, and the union box carries the handles — the
+        // gesture drives the box, so the two must be readable at the same time.
+        const box = groupBox(held);
+        for (const m of held) drawFaintBox(handleScreenPoints(m));
+        if (box) drawAdjustBox(handleScreenPoints(box), true);
         return;
     }
     const l = getSelected();
@@ -2189,6 +2273,16 @@ function render() {
 
 function updateTransformReadout() {
     const el = document.getElementById('transformReadout');
+    const held = dragGroupMembers();
+    if (held) {
+        // A group has no single rotation, so the readout reports the union box it scales and moves
+        // by — the members' own angles are what they are.
+        const box = groupBox(held);
+        if (!box) { setReadout(el, ''); return; }
+        const tr = box.transform;
+        setReadout(el, `${held.length} layers  X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%`);
+        return;
+    }
     const l = getSelected();
     if (!l || !canvasW) { setReadout(el, ''); return; }
     const tr = effectiveTransform(l);
@@ -2225,6 +2319,7 @@ function snapshotState() {
     return {
         canvasW, canvasH, canvasCustom,
         selectedId,
+        group: [...activeGroup()],
         maskVisible: maskLayer.visible,
         layers: layers.map(l => ({
             id: l.id, name: l.name, src: l.src, img: l.img,
@@ -2263,6 +2358,11 @@ function restoreState(s) {
     const keep = s.selectedId === MASK_LAYER_ID
         || (s.selectedId !== null && layers.some(l => l.id === s.selectedId));
     selectedId = keep ? s.selectedId : (layers.length ? layers[0].id : null);
+    // The group comes back under the same validity rule as the anchor: only layers that still
+    // exist can be held, and an anchor outside its set means there is no set.
+    groupIds = new Set((s.group || []).filter(id => getLayer(id)));
+    if (selectedId === MASK_LAYER_ID) groupIds = new Set();
+    else if (selectedId !== null && !groupIds.has(selectedId)) groupIds = new Set([selectedId]);
     maskLayer.visible = s.maskVisible;
     maskLayer.decalThumbEl = null;
     maskLayer.canvasThumbEl = null;
@@ -2578,7 +2678,7 @@ function renderLayerList() {
         row.className = 'layer-row';
         row.draggable = true;
         row.dataset.id = String(l.id);
-        if (l.id === selectedId) row.classList.add('selected');
+        if (l.id === selectedId || activeGroup().has(l.id)) row.classList.add('selected');
         if (!l.visible) row.classList.add('hidden-layer');
         row.title = 'Drag to reorder';
 
@@ -2601,7 +2701,7 @@ function renderLayerList() {
         }
         thumb.addEventListener('click', ev => {
             ev.stopPropagation();
-            selectLayer(l.id, 'transform');
+            selectLayer(l.id, 'transform', ev.shiftKey);
         });
         const badge = document.createElement('span');
         badge.className = 'layer-type-badge ' + (isRasterLayer(l) ? 'raster' : 'smart');
@@ -2658,7 +2758,7 @@ function renderLayerList() {
         canvasThumb.appendChild(canvasThumbEl);
         canvasThumb.addEventListener('click', ev => {
             ev.stopPropagation();
-            selectLayer(l.id, 'transform');
+            selectLayer(l.id, 'transform', ev.shiftKey);
         });
 
         const name = document.createElement('div');
@@ -2724,13 +2824,14 @@ function renderLayerList() {
         row.appendChild(head);
         row.appendChild(chips);
 
-        row.addEventListener('click', () => selectLayer(l.id, mode));
+        row.addEventListener('click', ev => selectLayer(l.id, mode, ev.shiftKey));
         // Right-click offers Generate. Selecting first means the menu always acts on the row the
         // user pointed at, and it also stops the canvas's own contextmenu from firing instead.
         row.addEventListener('contextmenu', ev => {
             ev.preventDefault();
             ev.stopPropagation();
             if (selectedId !== l.id) selectLayer(l.id, mode);
+            else if (activeGroup().size > 1) selectLayer(l.id, mode);   // the menu has no group items
             openLayerMenu(l, ev.clientX, ev.clientY);
         });
         row.addEventListener('dragstart', ev => {
@@ -2768,12 +2869,22 @@ function renderLayerList() {
     }
 }
 
-function selectLayer(id, nextMode) {
+function selectLayer(id, nextMode, additive) {
     // An armed border-drag keeps its mode; the selection may still move, but a thumb click must
     // not silently drop the Canvas Modify / Expand preview.
     if (nextMode && adjustModeActive() && nextMode !== mode) nextMode = mode;
-    const changed = selectedId !== id || (nextMode && mode !== nextMode);
+    if (additive) {
+        if (id === MASK_LAYER_ID) return;      // the Mask layer is a single, canvas-locked target
+        toggleGroupMember(id);
+        renderLayerList();
+        render();
+        const g = selectedGroup();
+        setStatus(groupStatusText(g ? g.length : 1));
+        return;
+    }
+    const changed = selectedId !== id || (nextMode && mode !== nextMode) || activeGroup().size > 1;
     selectedId = id;
+    groupIds = id === null ? new Set() : new Set([id]);      // a plain click never lands on a group
     if (nextMode) mode = nextMode;
     if (!changed) return;
     syncModeUI();
@@ -2989,6 +3100,7 @@ function removeLayer(id) {
     const i = layers.findIndex(l => l.id === id);
     if (i < 0) return;              // the Mask layer is not in `layers`, so it can never be removed here
     layers.splice(i, 1);
+    groupIds.delete(id);            // the set must never hold a layer that no longer exists
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
     applyCanvasSize();
     layoutCanvas();
@@ -3238,6 +3350,8 @@ function paintRGBA() {
 
 function selectTool(tool) {
     if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
+    // A group can arm the tool but cannot land it — beginStroke refuses the press and says why —
+    // so switching tools while holding one stays silent instead of collapsing the selection.
     maskTool = tool;
     if (mode !== 'mask') setMode('mask');
     else { syncToolUI(); syncBrushCursor(); refreshCursor(); }
@@ -3287,6 +3401,147 @@ function pickLayer(pos) {
 }
 
 // ==================== 变换拖拽 ====================
+// ---- 分组几何 ----
+// The group box is the axis-aligned union of its members' boxes, expressed as a transform-shaped
+// pseudo object: localToCanvas / handleScreenPoints / hitHandleScreen / pointInBox only ever read
+// effectiveTransform(l), so handing them `{ transform }` reuses every handle rule (screen-space
+// hit tests, the 18px inside-slop, the rotate stem) with no second implementation.
+function groupBox(members) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const m of members) {
+        for (const p of boxCorners(m)) {
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+        }
+    }
+    if (!(maxX > minX && maxY > minY) || !canvasW || !canvasH) return null;
+    return {
+        transform: {
+            cx: (minX + maxX) / 2 / canvasW,
+            cy: (minY + maxY) / 2 / canvasH,
+            w: (maxX - minX) / canvasW,
+            h: (maxY - minY) / canvasH,
+            rotation: 0,
+        },
+    };
+}
+
+// The layers a group gesture can actually move: visible, with pixels, two or more of them.
+function dragGroupMembers() {
+    const g = selectedGroup();
+    if (!g) return null;
+    const m = g.filter(l => l.visible && !l.isMaskLayer && l.img);
+    return m.length > 1 ? m : null;
+}
+
+function beginGroupDrag(kind, handle, pos, members, box) {
+    const starts = new Map();
+    // Raster members were already promoted to their content box by the press, so `starts` records
+    // exactly what commitRasterTransform() will be told to scale from — same contract as a
+    // single-layer raster drag.
+    for (const m of members) starts.set(m.id, cloneTransform(m.transform));
+    const bt = box.transform;
+    const cx = bt.cx * canvasW, cy = bt.cy * canvasH;
+    drag = {
+        kind,
+        handle,
+        group: true,
+        layerIds: new Set(members.map(m => m.id)),
+        starts,
+        pos,
+        anchor: handle ? localToCanvas(box, -HANDLE_UV[handle][0], -HANDLE_UV[handle][1]) : null,
+        hu: handle ? HANDLE_UV[handle][0] : 0,
+        hv: handle ? HANDLE_UV[handle][1] : 0,
+        gw0: bt.w * canvasW,
+        gh0: bt.h * canvasH,
+        center: { x: cx, y: cy },
+        startAngle: Math.atan2(pos.y - cy, pos.x - cx),
+        // An anisotropic group scale on a rotated member would need a shear, which the stored
+        // transform cannot represent — so any rotation in the group makes the whole scale uniform.
+        uniform: members.some(m => Math.abs(m.transform.rotation) > 1e-6),
+    };
+    setCursor(kind === 'rotate' ? 'grabbing' : kind === 'scale' ? HANDLE_CURSOR[handle] : 'move');
+}
+
+function applyGroupDrag(e, pos) {
+    const d = drag;
+    if (d.kind === 'move') {
+        let dx = pos.x - d.pos.x, dy = pos.y - d.pos.y;
+        if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+        for (const [id, st] of d.starts) {
+            const l = getLayer(id);
+            if (!l) continue;
+            l.transform.cx = st.cx + dx / canvasW;
+            l.transform.cy = st.cy + dy / canvasH;
+        }
+    } else if (d.kind === 'rotate') {
+        const a = Math.atan2(pos.y - d.center.y, pos.x - d.center.x);
+        let dR = a - d.startAngle;
+        if (e.shiftKey) { const step = Math.PI / 12; dR = Math.round(dR / step) * step; }
+        const cos = Math.cos(dR), sin = Math.sin(dR);
+        for (const [id, st] of d.starts) {
+            const l = getLayer(id);
+            if (!l) continue;
+            const ox = st.cx * canvasW - d.center.x, oy = st.cy * canvasH - d.center.y;
+            l.transform.cx = (d.center.x + ox * cos - oy * sin) / canvasW;
+            l.transform.cy = (d.center.y + ox * sin + oy * cos) / canvasH;
+            l.transform.rotation = st.rotation + dR;
+        }
+    } else {
+        const du = pos.x - d.anchor.x, dv = pos.y - d.anchor.y;
+        let tw = d.hu !== 0 ? Math.max(Math.abs(du), 8) : d.gw0;
+        let th = d.hv !== 0 ? Math.max(Math.abs(dv), 8) : d.gh0;
+        let sx = tw / d.gw0, sy = th / d.gh0;
+        if (e.shiftKey && d.hu !== 0 && d.hv !== 0) {
+            const s = Math.max(sx, sy);
+            sx = s; sy = s;
+        }
+        if (d.uniform) {
+            // An edge handle drags one axis; inside a rotated group that axis carries the other.
+            if (d.hu !== 0 && d.hv !== 0) { const s = Math.max(sx, sy); sx = s; sy = s; }
+            else if (d.hu !== 0) sy = sx;
+            else if (d.hv !== 0) sx = sy;
+        }
+        for (const [id, st] of d.starts) {
+            const l = getLayer(id);
+            if (!l) continue;
+            // Every point maps through the group's own scaling about the opposite handle, so a
+            // member keeps its place in the group instead of drifting away from it.
+            l.transform.cx = (d.anchor.x + sx * (st.cx * canvasW - d.anchor.x)) / canvasW;
+            l.transform.cy = (d.anchor.y + sy * (st.cy * canvasH - d.anchor.y)) / canvasH;
+            l.transform.w = st.w * sx;
+            l.transform.h = st.h * sy;
+            l.transform.rotation = st.rotation;
+        }
+    }
+}
+
+// A gesture ends: bake whatever moved. One call covers a single layer and a group, so a group
+// gesture stays ONE undo step and every raster member is resampled exactly once.
+function endTransformDrag() {
+    const d = drag;
+    drag = null;
+    if (!d) return false;
+    const ids = d.group ? d.layerIds : new Set([d.layerId]);
+    let moved = false, baked = false;
+    for (const id of ids) {
+        const target = getLayer(id);
+        if (!target) continue;
+        const startTr = d.group ? d.starts.get(id) : d.startTransform;
+        const changed = !!startTr && transformChangedSince(startTr, target);
+        if (isRasterLayer(target)) {
+            // The transform was only ever a preview of the content-box drag: bake it into the
+            // buffer (moved), or snap the stored transform back to the identity (a plain click).
+            if (changed) { commitRasterTransform(target, startTr); baked = true; moved = true; }
+            else target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+        } else if (changed) moved = true;
+    }
+    if (baked) renderLayerList();
+    return moved;
+}
+
 function beginScaleDrag(key, pos, l) {
     const tr = l.transform;
     const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
@@ -3328,6 +3583,7 @@ function beginMoveDrag(pos, l) {
 }
 
 function updateTransformDrag(e, pos) {
+    if (drag.group) { applyGroupDrag(e, pos); render(); return; }
     const l = getLayer(drag.layerId);
     if (!l) return;
     const st = drag.startTransform;
@@ -3544,7 +3800,10 @@ function cancelCanvasModify() {
 function startExpand(l) {
     if (!l || l.isMaskLayer || isRasterLayer(l)) return;
     if (guardAdjustMode()) return;
+    // Expand previews one layer's own border, so the gesture that follows is single-target: the
+    // group is dropped rather than left dangling under a one-layer mode.
     selectedId = l.id;
+    groupIds = new Set([l.id]);
     expandState = { layerId: l.id, startTransform: cloneTransform(l.transform) };
     setMode('expand');
     const n = nativeSize(l.img);
@@ -3817,6 +4076,7 @@ function shiftConstrain(pos) {
 function beginStroke() {
     const l = getSelected();
     if (!l) return false;
+    if (groupPaintBlocked()) return false;      // a stroke has one target surface, never a set
     if (isMaskLayerTarget() && !ensureMaskLayer()) {
         setStatus('Add an image (or set a canvas size) before painting the mask', 'error');
         return false;
@@ -3843,6 +4103,7 @@ function beginStroke() {
 // passing a flag: the selection has to actually BE the Mask layer for the duration. It is
 // parked here on press and restored on release, so the shortcut leaves no trace in the panel.
 let maskShortcutPrevSelected = null;
+let maskShortcutPrevGroup = null;
 let maskShortcutActive = false;
 
 function beginMaskStroke(pos, erase, label) {
@@ -3851,8 +4112,10 @@ function beginMaskStroke(pos, erase, label) {
     // saves it: pressing Ctrl again mid-stroke must not overwrite the original.
     if (!maskShortcutActive) {
         maskShortcutPrevSelected = selectedId;
+        maskShortcutPrevGroup = new Set(activeGroup());
         maskShortcutActive = true;
         selectedId = MASK_LAYER_ID;
+        groupIds = new Set();          // the Mask layer is never a group member
         renderLayerList();
         render();
     }
@@ -3876,6 +4139,8 @@ function endMaskShortcut() {
     maskShortcutActive = false;
     if (maskShortcutPrevSelected !== null) selectedId = maskShortcutPrevSelected;
     maskShortcutPrevSelected = null;
+    if (maskShortcutPrevGroup) groupIds = maskShortcutPrevGroup;   // a Ctrl stroke keeps the group
+    maskShortcutPrevGroup = null;
     renderLayerList();
     render();
     refreshCursor();
@@ -3941,6 +4206,7 @@ function commitStroke() {
 function bucketFillAt(pos) {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (groupPaintBlocked()) return;            // a fill writes one layer's surface, never a set
     const toMask = isMaskLayerTarget() || !isDecalTarget();
     if (isMaskLayerTarget() && !ensureMaskLayer()) {
         setStatus('Add an image (or set a canvas size) before painting the mask', 'error'); return;
@@ -4221,6 +4487,27 @@ viewport.addEventListener('mousedown', e => {
     }
     if (e.button !== 0) return;
     if (mode === 'transform') {
+        // Shift is checked first: the group box covers its own members, so a toggle-off tap on a
+        // layer that is already held would otherwise be swallowed as a group drag.
+        if (e.shiftKey) {
+            const hit = pickLayer(pos);
+            if (hit) { selectLayer(hit.id, mode, true); refreshCursor(); return; }
+        }
+        const members = dragGroupMembers();
+        if (members) {
+            // A group owns the press: its handles and its union box are what the pointer meets.
+            // Raster members are promoted for the gesture and reverted when the press grabs
+            // nothing — at rest the stored transform must stay the identity.
+            const promoted = members.filter(isRasterLayer);
+            for (const m of promoted) m.transform = cloneTransform(effectiveTransform(m));
+            const box = groupBox(members);
+            const gh = box ? hitHandleScreen(sp, pos, box) : null;
+            if (gh === 'rotate') { beginGroupDrag('rotate', null, pos, members, box); e.preventDefault(); return; }
+            if (gh) { beginGroupDrag('scale', gh, pos, members, box); e.preventDefault(); return; }
+            if (box && pointInBox(pos, box)) { beginGroupDrag('move', null, pos, members, box); e.preventDefault(); return; }
+            for (const m of promoted) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            return;
+        }
         const l = getSelected();
         // The Mask layer is canvas-locked: its transform must stay the identity.
         if (l && l.visible && !l.isMaskLayer) {
@@ -4239,10 +4526,15 @@ viewport.addEventListener('mousedown', e => {
     }
     const picked = pickLayer(pos);
     if (picked) {
-        if (picked.id !== selectedId) {
-            selectedId = picked.id;
-            renderLayerList();
-            render();
+        if (e.shiftKey) {
+            // Shift+click on the canvas adds or removes the layer under the pointer — same rule
+            // as the rows, so the two ways of selecting cannot disagree.
+            selectLayer(picked.id, mode, true);
+            refreshCursor();
+            return;
+        }
+        if (picked.id !== selectedId || activeGroup().size > 1) {
+            selectLayer(picked.id, mode);
         }
         refreshCursor();
     }
@@ -4317,20 +4609,7 @@ window.addEventListener('mouseup', e => {
     }
     if (maskShortcutActive) endMaskShortcut();   // Ctrl painted the Mask layer — give the panel back
     if (drag) {
-        const target = getLayer(drag.layerId);
-        const startTr = drag.startTransform;
-        const moved = !!target && transformChangedSince(drag.startTransform, target);
-        drag = null;
-        if (target && isRasterLayer(target)) {
-            // The transform was only ever a preview of the content-box drag: bake it into the
-            // buffer (moved), or snap the stored transform back to the identity (a plain click).
-            if (moved) {
-                commitRasterTransform(target, startTr);
-                renderLayerList();
-            } else {
-                target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-            }
-        }
+        const moved = endTransformDrag();
         render();
         if (moved) pushHistory();
         const sp = toScreenCoords(e);
@@ -4387,6 +4666,14 @@ viewport.addEventListener('touchstart', e => {
         drawDot(pos.x, pos.y);
         livePreviewStroke();
     } else {
+        const members = dragGroupMembers();
+        if (members) {
+            for (const m of members) if (isRasterLayer(m)) m.transform = cloneTransform(effectiveTransform(m));
+            const box = groupBox(members);
+            if (box && pointInBox(pos, box)) beginGroupDrag('move', null, pos, members, box);
+            else for (const m of members) if (isRasterLayer(m)) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            return;
+        }
         const l = getSelected();
         if (l && l.visible && pointInBox(pos, l)) beginMoveDrag(pos, l);
     }
@@ -4408,9 +4695,7 @@ viewport.addEventListener('touchend', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
     endMaskShortcut();
     if (drag) {
-        const target = getLayer(drag.layerId);
-        const moved = !!target && transformChangedSince(drag.startTransform, target);
-        drag = null;
+        const moved = endTransformDrag();   // raster members bake here, exactly like a mouse gesture
         render();
         if (moved) pushHistory();
     }
@@ -4630,6 +4915,7 @@ document.getElementById('sidePanel').addEventListener('mouseup', e => {
 document.getElementById('maskInvertBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (groupPaintBlocked()) return;
     // The Mask layer never reaches this button: its own row owns Invert / Full / Clear.
     if (l.isMaskLayer) { runMaskRowAction('invert'); return; }
     if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
@@ -4646,6 +4932,7 @@ document.getElementById('maskFullBtn').addEventListener('click', () => {
 document.getElementById('maskResetBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (groupPaintBlocked()) return;
     if (l.isMaskLayer) { runMaskRowAction('clear'); return; }
     if (isDecalTarget()) {
         l.decal = null;
@@ -5923,24 +6210,27 @@ window.addEventListener('keydown', e => {
     const stepY = (e.shiftKey ? 10 : 1) / (canvasH || 1);
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
-        if (isRasterLayer(l)) {
-            // Raster nudge is destructive like every other raster move: shift the content box,
-            // bake the buffer translation, restore the identity.
-            const from = rasterContentTransform(l);
-            l.transform = cloneTransform(from);
-            if (e.key === 'ArrowLeft') l.transform.cx -= step;
-            else if (e.key === 'ArrowRight') l.transform.cx += step;
-            else if (e.key === 'ArrowUp') l.transform.cy -= stepY;
-            else l.transform.cy += stepY;
-            commitRasterTransform(l, from);
-        } else {
-            if (e.key === 'ArrowLeft') l.transform.cx -= step;
-            else if (e.key === 'ArrowRight') l.transform.cx += step;
-            else if (e.key === 'ArrowUp') l.transform.cy -= stepY;
-            else l.transform.cy += stepY;
+        // The arrow keys drive the whole group — nudging a set is the same gesture, one step.
+        const targets = dragGroupMembers() || [l];
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -stepY : e.key === 'ArrowDown' ? stepY : 0;
+        for (const t of targets) {
+            if (isRasterLayer(t)) {
+                // Raster nudge is destructive like every other raster move: shift the content box,
+                // bake the buffer translation, restore the identity.
+                const from = rasterContentTransform(t);
+                t.transform = cloneTransform(from);
+                t.transform.cx += dx;
+                t.transform.cy += dy;
+                commitRasterTransform(t, from);
+            } else {
+                t.transform.cx += dx;
+                t.transform.cy += dy;
+            }
         }
         render();
-        pushHistory('nudge:' + l.id);    // a run of nudges on one layer collapses to one step
+        // A run of nudges on the same set collapses to one step.
+        pushHistory('nudge:' + targets.map(t => t.id).sort((a, b) => a - b).join(','));
     }
     else return;
 });
@@ -6124,7 +6414,7 @@ async function exportCud() {
             created: new Date().toISOString(),
             canvas: { w: Math.round(canvasW), h: Math.round(canvasH), custom: canvasCustom },
             view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
-            selection: { selectedId, mode, paintTarget },
+            selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
             tools: {
                 maskTool, previewMaskOpacity,
                 extraPrompt: extraPromptInput.value,
@@ -6374,6 +6664,8 @@ async function importCud(file) {
         const sel = header.selection || {};
         const keep = sel.selectedId === MASK_LAYER_ID || layers.some(l => l.id === sel.selectedId);
         selectedId = keep ? sel.selectedId : layers[0].id;
+        groupIds = new Set((sel.selectedIds || []).filter(id => layers.some(l => l.id === id)));
+        if (!groupIds.has(selectedId)) groupIds = new Set([selectedId]);
         paintTarget = sel.paintTarget === 'decal' ? 'decal' : 'mask';
         mode = ['transform', 'mask', 'zoom', 'pan', 'rotate', 'none'].includes(sel.mode) ? sel.mode : 'transform';
         const ml = header.maskLayer || {};
