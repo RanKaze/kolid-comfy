@@ -1463,8 +1463,17 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     action = body.get('action', '')
-                    if action not in ('blend', 'tag', 'detailer', 'layer_generate'):
+                    if action not in ('blend', 'tag', 'detailer', 'layer_generate', 'clear_tag'):
                         self._send_json({'success': False, 'error': f'Unknown action: {action}'}, 400)
+                        return
+
+                    # Clear Tag: touches only the prompt stage — no canvas, no composite, no
+                    # tagger. Running _apply_tag_result('') drops the parsing-source tags exactly
+                    # the way a real tag replaces them, and returns empty tag/tags/custom so the
+                    # host pushes a cleared state into the prompt editor.
+                    if action == 'clear_tag':
+                        parsed_selected, parsed_custom = inst._apply_tag_result('')
+                        self._send_json({'success': True, 'tag': '', 'tags': parsed_selected, 'custom': parsed_custom})
                         return
 
                     # layer_generate does NOT go through compose_blend: the caller sends one layer's
@@ -1506,8 +1515,9 @@ class SnapshotDetailerSamplerServer:
                     # 的就是这张图（浏览器原生 source-over，直通 alpha PNG）。直接把它
                     # 送进管线，不再让后端按 layers 重合成一遍，消除两套合成语义漂移在
                     # 蒙版边缘产生的灰色条带。解不出图（旧前端 / 画布被污染）时回落到
-                    # 后端合成。
-                    comp = decode_image_dataurl(body.get('composite')) if action == 'detailer' else None
+                    # 后端合成。Layer Tag 也走这条：前端把「合成图按该 Layer 原生网格抠好 +
+                    # 该 Layer 自带蒙版」预制送来，后端直接复用现成的 mask/covered/full 语义喂 tagger。
+                    comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag') else None
                     if comp is not None:
                         if comp.dim() == 3:
                             comp = comp.unsqueeze(0)

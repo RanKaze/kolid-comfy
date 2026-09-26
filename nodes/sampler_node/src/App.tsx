@@ -449,7 +449,9 @@ const App: React.FC = () => {
           { type: 'blend-add-layer', smart: true,
             items: [{ name: data.name || 'Blend', src: data.image }],
             note: 'Blend result added as a new smart layer' }, '*');
-      } else if (body.action === 'tag') {
+      } else if (body.action === 'tag' || body.action === 'clear_tag') {
+        // clear_tag returns an empty tag/tags/custom — pushing it through the same auto-tag
+        // channel is exactly how a real tag lands, so the editor clears its parsing tags.
         reply(true, { tag: data.tag });
         setPromptReady(true);
         // Tag output belongs to the prompt stage: push it into the prompt editor's tags.
