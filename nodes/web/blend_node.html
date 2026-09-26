@@ -28,30 +28,22 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #status { position: absolute; top: 0; left: 0; right: 0; margin: 0 auto; pointer-events: none; background: rgba(28,28,30,0.55); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); padding: 8px 20px; border-radius: 20px; color: #fff; font-size: 13px; font-weight: 500; z-index: 50; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 4px 24px rgba(0,0,0,0.25); max-width: 70%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #status.success { background: rgba(48,209,88,0.2); border-color: rgba(48,209,88,0.3); color: #30d158; }
 #status.error { background: rgba(255,69,58,0.2); border-color: rgba(255,69,58,0.35); color: #ff6961; }
-/* ---- Document I/O — the first row of the right column, above the Canvas section ----
-   Export unfolds into a menu (the whole context as a .cud, or the composite as a PNG);
-   Import takes either of those plus any plain image format. */
-#ioBar { position: relative; flex: 0 0 auto; display: flex; align-items: stretch; gap: 6px; padding: 0 6px; margin-right: 6px; }
-.io-btn { flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 7px 10px;
-    color: #fff; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s ease; }
+/* ---- Document I/O — the first block of the right column, above the Canvas section ----
+   Two rows of equal-width buttons: the .cud document (Load / Save / Save As) on top, the flat
+   exports (PNG out, images in) below. The little grey readout at the end of the second row is the
+   file this project is bound to, and it hides completely until one has been loaded or saved. */
+#ioBar { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 0 6px; margin-right: 6px; }
+.io-row { display: flex; align-items: stretch; gap: 6px; }
+.io-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 7px 4px;
+    color: #fff; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s ease; }
 .io-btn:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
 .io-btn:disabled { opacity: 0.45; cursor: default; }
 .io-btn.primary { background: rgba(10,132,255,0.62); border-color: rgba(10,132,255,0.5); }
 .io-btn.primary:hover:not(:disabled) { background: rgba(10,132,255,0.85); }
-.io-caret { font-size: 9px; line-height: 1; opacity: 0.75; }
-/* The dropdown hangs off the Export button. Each entry carries its own one-line explanation:
-   the column is only 280px wide, and a tooltip is no use mid-choice. */
-.io-menu { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 90; display: flex; flex-direction: column;
-    gap: 3px; padding: 5px; border-radius: 11px; background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.12);
-    box-shadow: 0 14px 40px rgba(0,0,0,0.55); }
-.io-menu[hidden] { display: none; }
-.io-menu-item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; width: 100%; text-align: left;
-    background: transparent; border: none; border-radius: 8px; padding: 7px 9px; cursor: pointer; transition: background 0.12s ease; }
-.io-menu-item:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
-.io-menu-item:disabled { opacity: 0.45; cursor: default; }
-.io-menu-title { font-size: 12px; font-weight: 700; color: #fff; }
-.io-menu-sub { font-size: 10.5px; line-height: 1.35; color: rgba(255,255,255,0.45); white-space: normal; }
+#docName { flex: 0 1 88px; min-width: 0; align-self: center; font-size: 10.5px; line-height: 1.2;
+    color: rgba(255,255,255,0.42); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#docName[hidden] { display: none; }
 
 /* Right column: the tool sections scroll in the top part, the Layers palette stays docked at
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
@@ -80,6 +72,18 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .mini-btn.active { background: rgba(0,122,255,0.85); color: #fff; }
 .mini-btn:disabled { opacity: 0.35; cursor: default; background: rgba(255,255,255,0.05); }
 .mini-btn.ico-btn { min-width: 26px; padding: 4px 7px; font-size: 13px; font-weight: 700; line-height: 1; }
+/* The one popover card in the workbench. Each entry carries its own one-line explanation: the
+   column is only 280px wide, and a tooltip is no use mid-choice. */
+.io-menu { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 90; display: flex; flex-direction: column;
+    gap: 3px; padding: 5px; border-radius: 11px; background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.12);
+    box-shadow: 0 14px 40px rgba(0,0,0,0.55); }
+.io-menu[hidden] { display: none; }
+.io-menu-item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; width: 100%; text-align: left;
+    background: transparent; border: none; border-radius: 8px; padding: 7px 9px; cursor: pointer; transition: background 0.12s ease; }
+.io-menu-item:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+.io-menu-item:disabled { opacity: 0.45; cursor: default; }
+.io-menu-title { font-size: 12px; font-weight: 700; color: #fff; }
+.io-menu-sub { font-size: 10.5px; line-height: 1.35; color: rgba(255,255,255,0.45); white-space: normal; }
 /* The Add menu reuses the .io-menu card but hangs off the Layers dock at the bottom of the
    column, so it unfolds upward and anchors under the button rather than across the column. */
 .add-caret { font-size: 8px; line-height: 1; opacity: 0.7; margin-left: 3px; }
@@ -431,26 +435,29 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="toolbarProgress"><i></i></div>
     </div>
     <div id="sidePanel">
-        <!-- Document I/O, above the Canvas section. Export unfolds into a menu: the whole
-             context as a .cud, or the composite as a PNG. Import takes either, or images. -->
+        <!-- Document I/O, above the Canvas section. Top row is the .cud document itself:
+             Load / Save / Save As, Photoshop semantics — once a file is behind the project, Save
+             writes straight back to it. Bottom row flattens or feeds in: PNG out, images in. -->
         <div id="ioBar">
-            <button class="io-btn" id="exportBtn" aria-haspopup="menu" aria-expanded="false"
-                    title="Export: the whole context as a .cud document, or the composite as a PNG">Export<span class="io-caret">&#9662;</span></button>
-            <div class="io-menu" id="exportMenu" role="menu" hidden>
-                <button class="io-menu-item" id="exportCudBtn" role="menuitem"
-                        title="Every layer at its own native resolution with its mask and decal, the Mask layer, the selection, the brush / eraser settings and the view.">
-                    <span class="io-menu-title">.cud &#8212; whole context</span>
-                    <span class="io-menu-sub">Layers, masks, decals, the Mask layer, the tools and the view. Reopen it later.</span>
-                </button>
-                <button class="io-menu-item" id="exportPngBtn" role="menuitem"
-                        title="The visible layers flattened at canvas resolution, transparency kept.">
-                    <span class="io-menu-title">PNG &#8212; composite</span>
-                    <span class="io-menu-sub">The finished image at canvas resolution, transparent where nothing is drawn.</span>
-                </button>
+            <div class="io-row">
+                <button class="io-btn" id="loadBtn"
+                        title="Load a .cud document. It replaces the current project — you are asked first.">Load</button>
+                <button class="io-btn" id="saveBtn"
+                        title="Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.">Save</button>
+                <button class="io-btn" id="saveAsBtn"
+                        title="Save As: write the whole context to a file you pick, and the project becomes bound to it">Save As</button>
             </div>
-            <button class="io-btn primary" id="importBtn"
-                    title="Import a .cud context, or any image format as new layers. A .cud replaces the current project — you are asked first.">Import</button>
-            <input type="file" id="importFile" accept=".cud,image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg" multiple hidden>
+            <div class="io-row">
+                <button class="io-btn" id="exportBtn"
+                        title="Export the composite as a PNG: visible layers flattened at canvas resolution, transparency kept">Export PNG</button>
+                <button class="io-btn primary" id="importBtn"
+                        title="Import images as new layers. A .cud document belongs to Load.">Import</button>
+                <span id="docName" hidden></span>
+            </div>
+            <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg" multiple hidden>
+            <!-- Only used where the File System Access API is missing; a document picked this way
+                 has no handle to write back to, so Save turns into Save As. -->
+            <input type="file" id="cudFile" accept=".cud" hidden>
         </div>
         <!-- Tools scroll in the top part of the column; the Layers palette is docked at
              the bottom-right corner so it stays put no matter how long the tool list is. -->
@@ -685,12 +692,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     <div class="modal" role="dialog" aria-modal="true" aria-label="Replace the current project">
         <div class="modal-title">Replace the current project?</div>
         <div class="modal-sub" id="cudReplaceSub">&#8212;</div>
-        <div class="modal-hint">A .cud restores a whole context, so opening one replaces every layer, the Mask layer, the canvas size and the view. Export the current project first if you want to come back to it. The import is a single undo step either way.</div>
+        <div class="modal-hint">A .cud restores a whole context, so opening one replaces every layer, the Mask layer, the canvas size and the view. Save the current project first if you want to come back to it. The import is a single undo step either way.</div>
         <div class="modal-actions">
             <button class="modal-btn ghost" id="cudReplaceCancelBtn">Cancel</button>
             <div style="flex:1;"></div>
             <button class="modal-btn danger" id="cudReplaceDiscardBtn">Replace</button>
-            <button class="modal-btn primary" id="cudReplaceSaveBtn">Export current, then open</button>
+            <button class="modal-btn primary" id="cudReplaceSaveBtn">Save current, then open</button>
         </div>
     </div>
 </div>
@@ -6155,13 +6162,18 @@ window.addEventListener('keydown', e => {
         else { if (mode === 'canvasModify') cancelCanvasModify(); else cancelExpand(); }
         return;
     }
-    // Esc closes the Export menu first; otherwise it drops the active tool AND straightens the
-    // view. It sits before the text-field guard so it keeps working while the extra-prompt box
-    // has focus — Esc has no native use in a text box.
+    // Ctrl+S saves. It sits above the text-field guard on purpose: typing a prompt and pressing
+    // Ctrl+S must save the document, not hand the keystroke back to the browser's "save page".
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        saveCud();
+        return;
+    }
+    // Esc drops the active tool AND straightens the view. It sits before the text-field guard so
+    // it keeps working while the extra-prompt box has focus — Esc has no native use in a text box.
     if (e.key === 'Escape') {
         e.preventDefault();
         if (layerMenuOpen()) { closeLayerMenu(); return; }
-        if (exportMenuOpen) { closeExportMenu(); return; }
         if (addMenuOpen) { closeAddMenu(); return; }
         if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
         setMode('none');
@@ -6261,39 +6273,50 @@ window.addEventListener('keyup', e => {
 const CUD_MAGIC = 'CUD1';
 const CUD_VERSION = 1;
 let cudBusy = false;
-let exportMenuOpen = false;
 let pendingCudFile = null;      // the .cud waiting behind the replace prompt
+let pendingCudHandle = null;    // its handle, when the picker gave us one
+// The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
+// As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
+// which covers a brand new project and one that came in through the fallback <input type=file>.
+let currentCudHandle = null;
+let currentCudName = '';
 
-const ioBar = document.getElementById('ioBar');
+const loadBtn = document.getElementById('loadBtn');
+const saveBtn = document.getElementById('saveBtn');
+const saveAsBtn = document.getElementById('saveAsBtn');
 const exportBtn = document.getElementById('exportBtn');
-const exportMenu = document.getElementById('exportMenu');
-const exportCudBtn = document.getElementById('exportCudBtn');
-const exportPngBtn = document.getElementById('exportPngBtn');
 const importBtn = document.getElementById('importBtn');
 const importFileInput = document.getElementById('importFile');
+const cudFileInput = document.getElementById('cudFile');
+const docNameEl = document.getElementById('docName');
 const cudReplaceModalEl = document.getElementById('cudReplaceModal');
 const cudReplaceSub = document.getElementById('cudReplaceSub');
 const cudReplaceSaveBtn = document.getElementById('cudReplaceSaveBtn');
 
 function syncIoUI() {
-    exportBtn.disabled = cudBusy;
-    exportCudBtn.disabled = cudBusy;
-    exportPngBtn.disabled = cudBusy;
-    importBtn.disabled = cudBusy;
-    if (cudBusy) closeExportMenu();     // never leave the menu hanging over a running export
+    for (const b of [loadBtn, saveBtn, saveAsBtn, exportBtn, importBtn]) b.disabled = cudBusy;
 }
 
-// ---- the Export menu: one click unfolds the two things it can write ----
-function openExportMenu() {
-    exportMenuOpen = true;
-    exportMenu.hidden = false;
-    exportBtn.setAttribute('aria-expanded', 'true');
+// The readout is the only place the path shows, so it stays hidden until a file is behind the
+// project. Its title is what tells Save from Save As before anything is clicked.
+function setCurrentDocument(handle, name) {
+    currentCudHandle = handle || null;
+    currentCudName = name || '';
+    docNameEl.hidden = !currentCudName;
+    docNameEl.textContent = currentCudName;
+    docNameEl.title = !currentCudName ? ''
+        : currentCudHandle ? `${currentCudName} · Ctrl+S overwrites this file`
+        : `${currentCudName} · opened without a handle, so Ctrl+S asks for a location`;
 }
-function closeExportMenu() {
-    exportMenuOpen = false;
-    exportMenu.hidden = true;
-    exportBtn.setAttribute('aria-expanded', 'false');
+
+// The File System Access API is what lets a button write back to the file it came from: the handle
+// outlives the picker. It needs a secure context (http://127.0.0.1, localhost, https) plus
+// Chromium — anywhere else these same buttons fall back to a download and an <input type=file>.
+function canPickFiles() {
+    return typeof window.showOpenFilePicker === 'function' && typeof window.showSaveFilePicker === 'function';
 }
+const CUD_PICK_TYPES = [{ description: 'Context document', accept: { 'application/octet-stream': ['.cud'] } }];
+function pickerCancelled(err) { return !!err && err.name === 'AbortError'; }
 
 function fileStamp() {
     const d = new Date(), p = n => String(n).padStart(2, '0');
@@ -6375,71 +6398,155 @@ async function exportPng() {
     }
 }
 
-async function exportCud() {
+// Assembles the whole .cud in memory. The sink belongs to the caller: Save writes through the
+// handle the document came from, Save As writes wherever the picker points, and where no handle API
+// exists the bytes simply download.
+async function buildCudBlob() {
+    if (!layers.length || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
+    const assets = [], payload = [];
+    const addAsset = async (role, source, w, h) => {
+        const bytes = await surfaceToPng(source, w, h);
+        const id = assets.length;
+        assets.push({ id, role, w: Math.round(w), h: Math.round(h), length: bytes.byteLength });
+        payload.push(bytes);
+        return id;
+    };
+    // `layers` is kept top-first; the file preserves that order verbatim.
+    const records = [];
+    for (const l of layers) {
+        const n = nativeSize(l.img);
+        records.push({
+            id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
+            raster: !!l.raster,
+            // Raster layers always travel at the identity — their stored transform is
+            // transient drag state, and their buffer is already canvas-sized.
+            transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
+            image: await addAsset('image', l.img, n.w, n.h),
+            mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
+            decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
+        });
+    }
+    const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
+        ? await addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
+        : null;
+    const header = {
+        format: 'cud',
+        version: CUD_VERSION,
+        generator: 'kolid-comfy · blend workbench',
+        created: new Date().toISOString(),
+        canvas: { w: Math.round(canvasW), h: Math.round(canvasH), custom: canvasCustom },
+        view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
+        selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
+        tools: {
+            maskTool, previewMaskOpacity,
+            extraPrompt: extraPromptInput.value,
+            brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
+            eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
+            bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
+        },
+        maskLayer: { visible: maskLayer.visible, surface: maskSurface },
+        layers: records,
+        staging: stagingItems,     // 图池随文档走：导入时原样恢复到宿主工作区
+        assets,
+    };
+    const headerBytes = new TextEncoder().encode(JSON.stringify(header));
+    const size = new Uint8Array(4);
+    new DataView(size.buffer).setUint32(0, headerBytes.byteLength, true);
+    const blob = new Blob([CUD_MAGIC, size, headerBytes].concat(payload), { type: 'application/octet-stream' });
+    return { blob, count: records.length };
+}
+
+async function writeCudTo(handle, blob) {
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+}
+
+// Save As: ask for the destination first — the picker needs the click that opened it, and
+// encoding every layer can take long enough to lose that activation — then bind the project to
+// whatever was chosen, so the next Ctrl+S lands on it without asking again.
+async function saveCudAs() {
     if (cudBusy) return false;
-    if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to export — add a layer first', 'error'); return false; }
-    cudBusy = true; syncIoUI();
-    setStatus('Exporting the context…');
-    try {
-        const assets = [], payload = [];
-        const addAsset = async (role, source, w, h) => {
-            const bytes = await surfaceToPng(source, w, h);
-            const id = assets.length;
-            assets.push({ id, role, w: Math.round(w), h: Math.round(h), length: bytes.byteLength });
-            payload.push(bytes);
-            return id;
-        };
-        // `layers` is kept top-first; the file preserves that order verbatim.
-        const records = [];
-        for (const l of layers) {
-            const n = nativeSize(l.img);
-            records.push({
-                id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
-                raster: !!l.raster,
-                // Raster layers always travel at the identity — their stored transform is
-                // transient drag state, and their buffer is already canvas-sized.
-                transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
-                image: await addAsset('image', l.img, n.w, n.h),
-                mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
-                decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
+    if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    let handle = null;
+    if (canPickFiles()) {
+        try {
+            handle = await window.showSaveFilePicker({
+                suggestedName: currentCudName || cudFileName(),
+                types: CUD_PICK_TYPES,
             });
+        } catch (err) {
+            if (pickerCancelled(err)) { setStatus('Save As cancelled'); return false; }
+            setStatus('Save failed: ' + ((err && err.message) || err), 'error');
+            return false;
         }
-        const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
-            ? await addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
-            : null;
-        const header = {
-            format: 'cud',
-            version: CUD_VERSION,
-            generator: 'kolid-comfy · blend workbench',
-            created: new Date().toISOString(),
-            canvas: { w: Math.round(canvasW), h: Math.round(canvasH), custom: canvasCustom },
-            view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
-            selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
-            tools: {
-                maskTool, previewMaskOpacity,
-                extraPrompt: extraPromptInput.value,
-                brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
-                eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
-                bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
-            },
-            maskLayer: { visible: maskLayer.visible, surface: maskSurface },
-            layers: records,
-            staging: stagingItems,     // 图池随文档走：导入时原样恢复到宿主工作区
-            assets,
-        };
-        const headerBytes = new TextEncoder().encode(JSON.stringify(header));
-        const size = new Uint8Array(4);
-        new DataView(size.buffer).setUint32(0, headerBytes.byteLength, true);
-        const blob = new Blob([CUD_MAGIC, size, headerBytes].concat(payload), { type: 'application/octet-stream' });
-        downloadBlob(blob, cudFileName());
+    }
+    cudBusy = true; syncIoUI();
+    setStatus('Writing the context…');
+    try {
+        const { blob, count } = await buildCudBlob();
         const mb = (blob.size / 1048576).toFixed(1);
-        setStatus(`Exported ${records.length} layer${records.length === 1 ? '' : 's'} · ${mb} MB`, 'success');
+        if (handle) {
+            await writeCudTo(handle, blob);
+            setCurrentDocument(handle, handle.name || cudFileName());
+        } else {
+            // No handle API in this browser: a download is the only way out, and nothing can be
+            // written back to it, so the project keeps the name but not the binding.
+            const name = currentCudName || cudFileName();
+            downloadBlob(blob, name);
+            setCurrentDocument(null, name);
+        }
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB`, 'success');
         return true;
     } catch (err) {
-        setStatus('Export failed: ' + ((err && err.message) || err), 'error');
+        setStatus('Save failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
         cudBusy = false; syncIoUI();
+    }
+}
+
+// Ctrl+S / the Save button: overwrite the file this document came from, and fall through to
+// Save As when there is none — which is exactly how Photoshop behaves.
+async function saveCud() {
+    // The buttons go disabled while a read or write is in flight, but the keyboard has no such
+    // tell, so a Ctrl+S landing mid-export would otherwise vanish without a trace.
+    if (cudBusy) { setStatus('Still working on the last one…'); return false; }
+    if (!currentCudHandle) return saveCudAs();
+    if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
+    cudBusy = true; syncIoUI();
+    setStatus(`Saving ${currentCudName}…`);
+    try {
+        const { blob, count } = await buildCudBlob();
+        await writeCudTo(currentCudHandle, blob);
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB`, 'success');
+        return true;
+    } catch (err) {
+        // The handle can go stale (the file was moved, deleted, or is held open elsewhere).
+        setStatus('Save failed: ' + ((err && err.message) || err) + ' — use Save As', 'error');
+        return false;
+    } finally {
+        cudBusy = false; syncIoUI();
+    }
+}
+
+// Load: the document a project came from is remembered by its handle, which is what lets Save
+// write to the same path. Where the picker is missing, <input type=file> reads it and Save As
+// becomes the only way to write.
+async function loadCud() {
+    if (cudBusy) return false;
+    if (!canPickFiles()) { cudFileInput.click(); return true; }
+    let handle = null;
+    try {
+        const picked = await window.showOpenFilePicker({ multiple: false, types: CUD_PICK_TYPES });
+        handle = picked && picked[0];
+        if (!handle) { setStatus('Load cancelled'); return false; }
+        requestImportCud(await handle.getFile(), handle);
+        return true;
+    } catch (err) {
+        if (pickerCancelled(err)) { setStatus('Load cancelled'); return false; }
+        setStatus('Load failed: ' + ((err && err.message) || err), 'error');
+        return false;
     }
 }
 
@@ -6556,6 +6663,7 @@ function addImageFiles(files) {
 
 // Images become layers; a .cud replaces the document — and replacing asks first whenever there is
 // something on the canvas, so a mis-click can never throw away a project that was never saved.
+// Only a drop can still bring a .cud through here: the Import picker no longer offers one.
 function routeImportFiles(files) {
     const list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
@@ -6566,48 +6674,51 @@ function routeImportFiles(files) {
         return;
     }
     const images = list.filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg)$/i.test(f.name));
-    if (!images.length) { setStatus('Import takes image files or a .cud document', 'error'); return; }
+    if (!images.length) { setStatus('Import takes image files — a .cud document belongs to Load', 'error'); return; }
     addImageFiles(images);
 }
 
-function requestImportCud(file) {
-    if (!projectHasContent()) { importCud(file); return; }
+// The handle is what makes Ctrl+S write back to this file instead of asking where to put it.
+function requestImportCud(file, handle) {
+    if (!projectHasContent()) { importCud(file, handle); return; }
     pendingCudFile = file;
+    pendingCudHandle = handle || null;
     openCudReplaceModal(file);
 }
 
 function openCudReplaceModal(file) {
     const bits = [];
     if (layers.length) bits.push(`${layers.length} layer${layers.length === 1 ? '' : 's'}`);
-    if (maskLayer.decal && maskLayer.decal.width) bits.push('a painted Mask layer');
+    if (maskLayer.decal && maskLayer.decal.width) bits.push('the Mask layer');
     cudReplaceSub.textContent = `${file.name} replaces ${bits.join(' and ') || 'the current project'}.`;
-    closeExportMenu();
     cudReplaceModalEl.classList.add('open');
     cudReplaceSaveBtn.focus();
 }
 function closeCudReplaceModal() {
     cudReplaceModalEl.classList.remove('open');
     pendingCudFile = null;
+    pendingCudHandle = null;
 }
 function cudReplaceModalOpen() { return cudReplaceModalEl.classList.contains('open'); }
 
-// "Export current, then open": keep the outgoing project on disk before the incoming one takes
-// over. If the export fails nothing is replaced — the whole point of the button is to be safe.
-async function exportCurrentThenImport() {
-    const file = pendingCudFile;
+// "Save current, then open": keep the outgoing project on disk before the incoming one takes
+// over. If the save fails — or its Save As picker is dismissed — nothing is replaced, which is the
+// whole point of the button.
+async function saveCurrentThenImport() {
+    const file = pendingCudFile, handle = pendingCudHandle;
     if (!file) { closeCudReplaceModal(); return; }
     if (cudReplaceSaveBtn.disabled) return;
     cudReplaceSaveBtn.disabled = true;
-    const saved = await exportCud();
+    const saved = await saveCud();
     cudReplaceSaveBtn.disabled = false;
-    if (!saved) { setStatus('Export failed — the import was cancelled', 'error'); return; }
+    if (!saved) { setStatus('Nothing was replaced — the save did not go through', 'error'); return; }
     closeCudReplaceModal();
-    importCud(file);
+    importCud(file, handle);
 }
 
 // Replaces the document wholesale. Everything that can fail (parsing, decoding) happens before a
 // single field is touched, so a bad file leaves the open project exactly as it was.
-async function importCud(file) {
+async function importCud(file, handle) {
     if (cudBusy) return false;
     cudBusy = true; syncIoUI();
     setStatus(`Opening ${file.name}…`);
@@ -6701,7 +6812,9 @@ async function importCud(file) {
         syncActionButtons();
         render();
         pushHistory();   // an import is one undoable step: Ctrl+Z brings the previous context back
-        setStatus(`Imported ${layers.length} layer${layers.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
+        // From here on Ctrl+S writes back into this very file — that is the whole point of Load.
+        setCurrentDocument(handle || null, (handle && handle.name) || file.name);
+        setStatus(`Loaded ${layers.length} layer${layers.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
         return true;
     } catch (err) {
         setStatus('Import failed: ' + ((err && err.message) || err), 'error');
@@ -6712,13 +6825,10 @@ async function importCud(file) {
 }
 
 // ---- wiring ----
-exportBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (cudBusy) return;
-    if (exportMenuOpen) closeExportMenu(); else openExportMenu();
-});
-exportCudBtn.addEventListener('click', () => { closeExportMenu(); exportCud(); });
-exportPngBtn.addEventListener('click', () => { closeExportMenu(); exportPng(); });
+loadBtn.addEventListener('click', () => loadCud());
+saveBtn.addEventListener('click', () => saveCud());
+saveAsBtn.addEventListener('click', () => saveCudAs());
+exportBtn.addEventListener('click', () => exportPng());
 importBtn.addEventListener('click', () => importFileInput.click());
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
@@ -6726,17 +6836,22 @@ importFileInput.addEventListener('change', () => {
     importFileInput.value = '';      // so picking the very same file again still fires
     routeImportFiles(files);
 });
-// A press anywhere outside the menu dismisses it. The toggle runs on click, so this cannot fight
-// it for the same press.
-document.addEventListener('mousedown', e => { if (exportMenuOpen && !ioBar.contains(e.target)) closeExportMenu(); });
+// Load without the File System Access API: the bytes come in, no handle comes back, so the next
+// Save asks where to put them.
+cudFileInput.addEventListener('change', () => {
+    const files = Array.prototype.slice.call(cudFileInput.files || []);
+    cudFileInput.value = '';
+    const doc = files.find(f => /\.cud$/i.test(f.name || '')) || files[0];
+    if (doc) requestImportCud(doc);
+});
 cudReplaceModalEl.addEventListener('mousedown', e => { if (e.target === cudReplaceModalEl) closeCudReplaceModal(); });
 document.getElementById('cudReplaceCancelBtn').addEventListener('click', closeCudReplaceModal);
 document.getElementById('cudReplaceDiscardBtn').addEventListener('click', () => {
-    const file = pendingCudFile;
+    const file = pendingCudFile, handle = pendingCudHandle;
     closeCudReplaceModal();
-    if (file) importCud(file);
+    if (file) importCud(file, handle);
 });
-cudReplaceSaveBtn.addEventListener('click', exportCurrentThenImport);
+cudReplaceSaveBtn.addEventListener('click', saveCurrentThenImport);
 
 syncIoUI();
 
