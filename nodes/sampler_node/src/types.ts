@@ -1,12 +1,17 @@
 export interface ServerConfig {
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
-  /** 五个 GLOBAL SETTINGS —— 节点端口已全部取消，这里就是前端唯一读写的地方 */
+  /** GLOBAL SETTINGS —— 节点端口已全部取消，这里就是前端唯一读写的地方。
+   *  ref_* / tgen_* 是输入侧显存**上限**（只压不涨，0 = 关闭），语义与 pixels 的"目标"相反。 */
   pixels: number;
   align: number;
   crop_reserve: number;
   mask_grow: number;
   mask_blur: number;
+  ref_pixels?: number;
+  ref_align?: number;
+  tgen_pixels?: number;
+  tgen_align?: number;
   /** 当前 pipeline 的模型架构（按架构渲染 DetailerBlock 的 edit 设置） */
   architecture?: string | null;
   has_tagger: boolean;
@@ -18,7 +23,7 @@ export interface ServerConfig {
   /** 多套 Pipeline Blocks（工作台里的 tabs）；`blocks` 始终是激活那一套的镜像 */
   blocks_sets?: BlockSet[];
   active_block_set?: string | null;
-  /** Pipeline Settings（Draw 页）：选中的 pipeline + 按名字绑定的五个 override */
+  /** Pipeline Settings（Draw 页）：选中的 pipeline + 按名字绑定的九个 override */
   pipeline_settings?: PipelineSettings;
   /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loaded_pipeline_name?: string;
@@ -40,10 +45,13 @@ export const PIPELINE_DEFAULT = '[Default]';
 /** '[Current Select]' —— 不做任何切换，用当前已加载的那一条。 */
 export const PIPELINE_CURRENT_SELECT = '[Current Select]';
 
-/** 可 override 的五项，与后端 PIPELINE_OVERRIDE_KEYS 一一对应（顺序即 UI 顺序）。 */
-export type PipelineOverrideKey = 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align';
+/** 可 override 的九项，与后端 PIPELINE_OVERRIDE_KEYS 一一对应（顺序即 UI 顺序）。
+ *  ref_* / tgen_* 是**输入侧上限**（只压不涨，0 = 关闭），其余是工作区/预处理参数。 */
+export type PipelineOverrideKey = 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
+  | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align';
 export const PIPELINE_OVERRIDE_KEYS: PipelineOverrideKey[] =
-  ['mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align'];
+  ['mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
+   'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align'];
 
 export interface PipelineOverride {
   value: number;

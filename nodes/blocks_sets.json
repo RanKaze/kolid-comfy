@@ -305,7 +305,7 @@
       "pipeline_name": "[Anima] LizAnima"
     }
   ],
-  "active_block_set": "set-12",
+  "active_block_set": "set-20",
   "global_params": {
     "pixels": 2048576,
     "align": 16,
@@ -356,6 +356,22 @@
           "enabled": true
         },
         "align": {
+          "value": 16,
+          "enabled": true
+        },
+        "ref_pixels": {
+          "value": 1048576,
+          "enabled": true
+        },
+        "ref_align": {
+          "value": 16,
+          "enabled": true
+        },
+        "tgen_pixels": {
+          "value": 1048576,
+          "enabled": true
+        },
+        "tgen_align": {
           "value": 16,
           "enabled": true
         }
