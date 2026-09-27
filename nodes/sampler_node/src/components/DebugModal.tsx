@@ -44,6 +44,14 @@ export const DbgIcon: React.FC<{ name: string; size?: number }> = ({ name, size 
     case 'close': return (
       <svg {...p}><path d="M6 6l12 12M18 6L6 18" /></svg>
     );
+    case 'log': return (
+      <svg {...p}>
+        <circle cx="4.5" cy="6.5" r="1.1" fill="currentColor" stroke="none" />
+        <circle cx="4.5" cy="12" r="1.1" fill="currentColor" stroke="none" />
+        <circle cx="4.5" cy="17.5" r="1.1" fill="currentColor" stroke="none" />
+        <path d="M8.5 6.5h11M8.5 12h8M8.5 17.5h9.5" strokeWidth={1.6} />
+      </svg>
+    );
     case 'chevronRight': return (
       <svg {...p}><path d="M9 5l7 7-7 7" /></svg>
     );

@@ -127,19 +127,6 @@ export interface PipelineBlock {
   exec_options?: InterfaceExecOptions;
 }
 
-/** @deprecated Use PipelineBlock[] + global mask_grow/mask_blur instead */
-export interface DetailerParams {
-  add_noise: string;
-  start_step_rate: number;
-  end_step_rate: number;
-  pixels: number;
-  align: number;
-  crop_reserve: number;
-  mask_grow: number;
-  mask_blur: number;
-  enable_edit: boolean;
-}
-
 /** 一个正停在链条里等用户回答的 Query 块（/api/status 下发；null = 没有块在等）。 */
 export interface PendingQuery {
   id: string;
@@ -149,6 +136,17 @@ export interface PendingQuery {
   preset_id?: string | null;
   /** Confirm 时后端会把最终 selection 写回该 preset */
   persistent?: boolean;
+}
+
+/**
+ * 一条"行为"记录 —— 取代工作台画布顶部那颗常显的状态药丸。
+ * 工作台每一次 setStatus 都改发 'blend-log' 给宿主，宿主自己的动作（跑 preset / Execute /
+ * 取消 / 载入）也写进来，只留最近 32 条，由 Context 标题行的 Log 按钮按需展开。
+ */
+export interface ActionLogEntry {
+  at: number;
+  text: string;
+  kind: '' | 'success' | 'error';
 }
 
 export interface StatusResponse {
