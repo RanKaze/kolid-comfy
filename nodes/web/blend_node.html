@@ -1317,32 +1317,15 @@ function commitRasterTransform(l, fromTr) {
 function rasterContentTransform(l) {
     if (l.rasterTr && l.rasterTr.img === l.img) return l.rasterTr.tr;
     let tr = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-    if (l.img && l.img.width && l.img.height) {
-        const g = l.img.getContext('2d');
-        if (g) {
-            const d = g.getImageData(0, 0, l.img.width, l.img.height).data;
-            let minX = 1e9, minY = 1e9, maxX = -1, maxY = -1;
-            for (let y = 0; y < l.img.height; y++) {
-                const row = y * l.img.width;
-                for (let x = 0; x < l.img.width; x++) {
-                    if (d[(row + x) * 4 + 3] > 0) {
-                        if (x < minX) minX = x;
-                        if (x > maxX) maxX = x;
-                        if (y < minY) minY = y;
-                        if (y > maxY) maxY = y;
-                    }
-                }
-            }
-            if (maxX >= minX) {
-                tr = {
-                    cx: (minX + maxX + 1) / 2 / canvasW,
-                    cy: (minY + maxY + 1) / 2 / canvasH,
-                    w: (maxX - minX + 1) / canvasW,
-                    h: (maxY - minY + 1) / canvasH,
-                    rotation: 0,
-                };
-            }
-        }
+    const b = canvasW && canvasH && l.img ? alphaBounds(l.img, 1) : null;
+    if (b) {
+        tr = {
+            cx: (b.x + b.w / 2) / canvasW,
+            cy: (b.y + b.h / 2) / canvasH,
+            w: b.w / canvasW,
+            h: b.h / canvasH,
+            rotation: 0,
+        };
     }
     l.rasterTr = { img: l.img, tr };
     return tr;
@@ -1480,6 +1463,43 @@ function surfaceHasInk(surface) {
     } catch (e) {
         // Unreadable (e.g. a tainted canvas): never turn that into a false "empty" verdict.
         return true;
+    }
+}
+
+// The smallest box holding every pixel of `surface` whose alpha is at least `minAlpha`, in the
+// surface's OWN pixels — null when nothing qualifies (or the pixels cannot be read). One scan for
+// the three places that need it: a raster layer's content box, the Layer-tag mask bbox (the tag
+// thumbnail has always cut at alpha > 8) and Fit Mask.
+function alphaBounds(surface, minAlpha) {
+    const min = Math.max(1, Math.round(minAlpha || 1));
+    if (!surface || !surface.width || !surface.height) return null;
+    let px = surface;
+    try {
+        if (!px.getContext) {
+            // A decoded <img> has pixels but no readback — only a canvas can be sampled.
+            px = document.createElement('canvas');
+            px.width = Math.max(1, surface.naturalWidth || surface.width);
+            px.height = Math.max(1, surface.naturalHeight || surface.height);
+            px.getContext('2d').drawImage(surface, 0, 0);
+        }
+        const w = px.width, h = px.height;
+        const data = px.getContext('2d').getImageData(0, 0, w, h).data;
+        let x0 = w, y0 = h, x1 = -1, y1 = -1;
+        for (let y = 0; y < h; y++) {
+            const row = y * w;
+            for (let x = 0; x < w; x++) {
+                if (data[(row + x) * 4 + 3] >= min) {
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
+                }
+            }
+        }
+        if (x1 < x0) return null;
+        return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    } catch (e) {
+        return null;
     }
 }
 
@@ -3663,6 +3683,63 @@ function applyMaskToLayer(l) {
     renderLayerList();
     render();
     setStatus(`「${l.name}」mask applied — the hidden area is transparent now, the mask is clear again`, 'success');
+    pushHistory();
+}
+
+// Right-click "Fit Mask": the unattended counterpart of Expand. Shrink the layer's OWN picture to
+// the smallest box that still holds everything the mask leaves visible (image alpha ∪ decal ink,
+// cut by mask alpha). The mirror of Expand in every way that matters: the pixels on canvas stay
+// exactly where they are and stay 1:1, because the native grid and the frame narrow together —
+// placeTransform() with the layer's own transform as `frame` is the same composition drawLayer()
+// does, so a rotated or squashed layer fits correctly for free.
+// Ink the mask hides OUTSIDE the box is dropped along with the crop; the mask comes along cropped
+// rather than being reset to white, so partial coverage INSIDE the box is unchanged.
+// Every surface is a NEW canvas (like applyMaskToLayer): the undo snapshot holds the old img/mask/
+// decal by reference, so nothing here may repaint them in place.
+function fitLayerToMask(l) {
+    if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return;
+    if (guardAdjustMode()) return;
+    const { w: ow, h: oh } = nativeSize(l.img);
+    const b = alphaBounds(layerSource(l), 9);
+    if (!b) {
+        setStatus(`Nothing in「${l.name}」is left visible — there is no box to fit`, 'error');
+        return;
+    }
+    if (b.x === 0 && b.y === 0 && b.w === ow && b.h === oh) {
+        setStatus(`「${l.name}」already fits its own picture (${ow} × ${oh})`, 'success');
+        return;
+    }
+    const tr = placeTransform({ x: b.x, y: b.y, w: b.w, h: b.h, ow, oh }, l.transform);
+    if (!tr) {
+        setStatus(`Fit Mask box fell outside the canvas —「${l.name}」is unchanged`, 'error');
+        return;
+    }
+    // Single-target like Expand: a group member whose frame just moved would leave the rest of the
+    // group dragging it around at the old box.
+    selectedId = l.id;
+    groupIds = new Set([l.id]);
+    // Surfaces are cropped in the layer's native units; a surface that is not exactly that size
+    // (an old .cud import) is resampled by the same fraction layerSource() uses to place it.
+    const crop = surface => {
+        const s = nativeSize(surface);
+        const c = document.createElement('canvas');
+        c.width = b.w; c.height = b.h;
+        c.getContext('2d').drawImage(
+            surface, b.x * (s.w / ow), b.y * (s.h / oh),
+            b.w * (s.w / ow), b.h * (s.h / oh), 0, 0, b.w, b.h);
+        return c;
+    };
+    l.img = crop(l.img);
+    l.src = l.img.toDataURL('image/png');
+    if (l.mask) { l.mask = crop(l.mask); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.decal) { l.decal = crop(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+    l.transform = tr;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    refreshMaskThumb(l);
+    refreshDecalThumb(l);
+    setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, the mask came along`, 'success');
     pushHistory();
 }
 
@@ -5977,6 +6054,22 @@ function openLayerMenu(l, clientX, clientY) {
             startExpand(l);
         });
         menu.appendChild(expand);
+
+        // Fit Mask: the same native-resolution change Expand makes by dragging, done in one click
+        // from the layer's own visible pixels. Only a smart layer has a native resolution to shrink.
+        const fit = document.createElement('button');
+        fit.className = 'layer-menu-item';
+        fit.type = 'button';
+        fit.setAttribute('role', 'menuitem');
+        fit.textContent = 'Fit Mask';
+        fit.disabled = !l.img;
+        fit.title = `Shrink「${l.name}」's own picture (${n.w} × ${n.h}) to the smallest box holding what its mask leaves visible — the image stays 1:1 and exactly where it is, the mask comes along cropped`;
+        fit.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            fitLayerToMask(l);
+        });
+        menu.appendChild(fit);
     }
 
     // Rasterize (one-way): bake the transform into a canvas-sized buffer. The Mask layer is not
@@ -6291,23 +6384,9 @@ function closeTagModal() { tagModalEl.classList.remove('open'); }
 function maskThumbBBox(w, h) {
     const t = document.createElement('canvas');
     t.width = w; t.height = h;
-    const tx = t.getContext('2d');
-    tx.drawImage(maskLayer.decal, 0, 0, w, h);
-    let data;
-    try { data = tx.getImageData(0, 0, w, h).data; } catch (e) { return null; }
-    let x0 = w, y0 = h, x1 = -1, y1 = -1;
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            if (data[(y * w + x) * 4 + 3] > 8) {
-                if (x < x0) x0 = x;
-                if (x > x1) x1 = x;
-                if (y < y0) y0 = y;
-                if (y > y1) y1 = y;
-            }
-        }
-    }
-    if (x1 < 0) return null;
-    return { x0, y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    t.getContext('2d').drawImage(maskLayer.decal, 0, 0, w, h);
+    const b = alphaBounds(t, 9);
+    return b ? { x0: b.x, y0: b.y, w: b.w, h: b.h } : null;
 }
 
 function drawTagSchematic(ctx, w, h, mode) {

@@ -10,12 +10,12 @@
           "name": "Detailer",
           "params": {
             "add_noise": "enable",
-            "start_step_rate": 0.6,
+            "start_step_rate": 0.5,
             "end_step_rate": 1,
             "pixels": 1548576,
             "align": 16,
             "crop_reserve": 32,
-            "recover_crop": true,
+            "recover_crop": false,
             "enable_edit": false,
             "edit_mode": "fit",
             "ref_boost": 4,
@@ -352,7 +352,7 @@
           "enabled": true
         },
         "pixels": {
-          "value": 1048576,
+          "value": 2048576,
           "enabled": true
         },
         "align": {
