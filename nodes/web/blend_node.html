@@ -229,6 +229,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge svg { width: 9px; height: 9px; display: block; }
 .layer-type-badge.smart { color: #9ecbff; }
 .layer-type-badge.raster { color: #ffcf6e; }
+.layer-type-badge.cud { color: #8be3b6; }
+.layer-type-badge.cud.unlinked { color: #ff9d5c; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
 /* The pure Mask layer pins to the top of the list and lives outside `layers`: it is a data
@@ -709,6 +711,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-title">Dynamic Guidance</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
                         </button>
+                        <button class="io-menu-item" id="addCudGuidanceBtn" role="menuitem"
+                                title="Choose a .cud file: its flattened Layers stack becomes this one guidance, and it repaints every time that file is saved. Stored in this file too, so it survives a lost link.">
+                            <span class="io-menu-title">Cud Project</span>
+                            <span class="io-menu-sub">Another .cud as one linked guidance that follows its file.</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -737,6 +744,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                                 title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
                             <span class="io-menu-title">Dynamic Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
+                        </button>
+                        <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
+                                title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
+                            <span class="io-menu-title">Cud Project</span>
+                            <span class="io-menu-sub">Another .cud as one linked layer that follows its file.</span>
                         </button>
                         <button class="io-menu-item" id="addRasterToggleBtn" role="menuitemcheckbox" aria-checked="false"
                                 title="When on, images added from here on — dropped files, Import picks and history injections — become raster layers: their buffer is the canvas, 1:1, and every transform resamples the pixels in place. One-way; rasterize a smart layer from its right-click menu instead.">
@@ -823,7 +835,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div class="tag-groups" id="tagGroups"></div>
         <div class="modal-actions">
             <button class="modal-btn ghost" id="clearTagBtn"
-                    title="Remove the tags Tag wrote into the prompt stage. Nothing new is tagged.">Clear Tag</button>
+                    title="Remove the parsing tags and the Temporary Prompts Tag wrote into the prompt stage. Custom Prompts and your own tags stay. Nothing new is tagged.">Clear Tag</button>
             <div style="flex:1;"></div>
             <button class="modal-btn ghost" id="tagCancelBtn">Cancel</button>
         </div>
@@ -1259,6 +1271,9 @@ function rasterizeLayer(l) {
     if (l.mask) { l.mask = remap(l.mask); l.maskCtx = l.mask.getContext('2d'); }
     if (l.decal) { l.decal = remap(l.decal); l.decalCtx = l.decal.getContext('2d'); }
     l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    // A cud layer detaches on the way in: from here the buffer IS the canvas, so a source refresh
+    // would have nowhere to land — the picture is the file's, not the project's any more.
+    l.cud = null;
     return true;
 }
 
@@ -2609,6 +2624,9 @@ function snapshotState() {
             fragment: !!l.fragment,
             raster: !!l.raster,
             stack: stackOf(l),
+            // Shared by reference, never copied: a cud descriptor is immutable (a relink swaps the
+            // whole object), so an undo step pointing at the old one cannot drift.
+            cud: l.cud || null,
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
         })),
@@ -2641,6 +2659,7 @@ function restoreState(s, opts) {
         // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
         // simply means every entry is a working layer.
         stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
+        cud: ls.cud || null,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -2802,9 +2821,21 @@ function runSvg() {
     return '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M5.4 3.2 12.8 8 5.4 12.8z" fill="currentColor"/></svg>';
 }
 
+// Jump on a cud row: an arrow leaving a frame — "this row opens something else".
+function cudJumpSvg() {
+    return '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M9.6 3.4h3v3"/><path d="M12.6 3.4 7.7 8.3"/>'
+        + '<path d="M11.1 9.6v2.1a1.2 1.2 0 0 1-1.2 1.2H4.3a1.2 1.2 0 0 1-1.2-1.2V6.3a1.2 1.2 0 0 1 1.2-1.2h2.1"/></svg>';
+}
+
 // Type badge for the row's image thumb: smart = non-destructive transform box with corner
-// handles, raster = a 2×2 pixel checker (the layer's pixels are baked 1:1 to the canvas).
+// handles, raster = a 2×2 pixel checker (the layer's pixels are baked 1:1 to the canvas), cud =
+// two sheets stacked (this layer is another project's flattened picture).
 function layerTypeBadgeSvg(l) {
+    if (isCudLayer(l)) {
+        return '<svg viewBox="0 0 10 10"><rect x="3.4" y="1.2" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+            + '<path d="M6.6 8.8H2.1A1 1 0 0 1 1.1 7.8V3.3" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
+    }
     if (isRasterLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
             + '<rect x="5.6" y="1" width="3.4" height="3.4" fill="currentColor" opacity="0.5"/>'
@@ -3025,11 +3056,17 @@ function renderStackList(listEl, stack) {
             selectLayer(l.id, 'transform', ev.shiftKey);
         });
         const badge = document.createElement('span');
-        badge.className = 'layer-type-badge ' + (isRasterLayer(l) ? 'raster' : 'smart');
+        const linked = cudLayerLinked(l);
+        badge.className = 'layer-type-badge '
+            + (isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked') : isRasterLayer(l) ? 'raster' : 'smart');
         badge.innerHTML = layerTypeBadgeSvg(l);
-        badge.title = isRasterLayer(l)
-            ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
-            : 'Smart layer — transform is non-destructive and keeps the native image';
+        badge.title = isCudLayer(l)
+            ? (linked
+                ? `Cud layer — a flattened copy of「${l.cud.name}」, repainted whenever that file is saved`
+                : `Cud layer — its picture is a flattened copy of「${l.cud.name}」, but the link did not survive the page reload. The pixels are this file's own; right-click the row to Relink.`)
+            : isRasterLayer(l)
+                ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
+                : 'Smart layer — transform is non-destructive and keeps the native image';
         thumb.appendChild(badge);
 
         const maskThumb = document.createElement('div');
@@ -3084,12 +3121,30 @@ function renderStackList(listEl, stack) {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = l.name + (isRasterLayer(l) ? ' · raster' : '');
+        name.textContent = l.name + (isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)') : isRasterLayer(l) ? ' · raster' : '');
         name.title = 'Double-click to rename';
         name.addEventListener('dblclick', ev => {
             ev.stopPropagation();
             startRenameLayer(l, name);
         });
+
+        // Jump on a cud row: the source project opens as a tab of its own (or focuses the one that is
+        // already open). This is the deliberate navigation entry — the name's double-click stays the
+        // rename it has always been. No link, no jump: the row says so in its tooltip instead.
+        let jump = null;
+        if (isCudLayer(l)) {
+            jump = document.createElement('button');
+            jump.className = 'icon-btn';
+            jump.innerHTML = cudJumpSvg();
+            jump.disabled = !linked;
+            jump.title = linked
+                ? `Open「${l.cud.name}」as a project tab`
+                : 'Not linked any more — right-click the row to Relink';
+            jump.addEventListener('click', ev => {
+                ev.stopPropagation();
+                openLinkedCudDocument(l);
+            });
+        }
 
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
         // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
@@ -3130,6 +3185,7 @@ function renderStackList(listEl, stack) {
         head.className = 'layer-row-main';
         head.appendChild(thumb);
         head.appendChild(name);
+        if (jump) head.appendChild(jump);
         head.appendChild(run);
         head.appendChild(eye);
         head.appendChild(del);
@@ -3299,6 +3355,8 @@ function addLayer(item, stack) {
             // A detailer patch that came back with a crop rect: it is a piece OF this canvas, not
             // another document dropped onto it, so it must never drive the canvas size.
             fragment: !!item.place,
+            // The pointer a cud layer carries (see the cud link section). An image drop never has one.
+            cud: item.cud || null,
         };
         insertAtStackTop(l);        // new images land on top of their own stack
         selectedId = l.id;
@@ -3307,14 +3365,17 @@ function addLayer(item, stack) {
         if (placed) l.transform = placed; else fitLayerToCanvas(l);
         // "Place images as raster": the drop becomes a canvas-sized buffer right away. Detailer
         // fragments are exempt — their crop-rect placement is the whole point of keeping them smart.
-        if (rasterDrop && !l.fragment && !placed) rasterizeLayer(l);
+        // A cud layer is exempt for the same reason in the other direction: rasterizing detaches it,
+        // so the preference would silently throw the link away on the way in.
+        if (rasterDrop && !l.fragment && !placed && !l.cud) rasterizeLayer(l);
         layoutCanvas();
         renderLayerList();
         render();
         setStatus(l.stack === GUIDANCE_STACK
             ? 'Guidance added — it composites over the Layers image and updates the Guidance card'
-            : (placed ? 'Result placed back at its crop position — tweak it, then Blend'
-                : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added')));
+            : (l.cud ? `「${l.name}」is now a layer — it repaints when ${l.cud.name} is saved`
+                : (placed ? 'Result placed back at its crop position — tweak it, then Blend'
+                    : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added'))));
         pushHistory();
     }, () => {
         // Decoding failed, so no layer was created: give the key back instead of keeping it
@@ -3355,6 +3416,9 @@ function spawnGeneratedLayer(id, item) {
             // not silently drop the result into the working layers (and the other way round).
             stack: stackOf(l),
             fragment: false,
+            // A Generate result is a brand-new picture, not the source project's composite: it never
+            // inherits the link, or the next save of that file would overwrite the refinement.
+            cud: null,
         };
         // A raster source generates a raster result: the buffer must stay canvas-sized, so the
         // fresh image resamples into it immediately (the backend ran at the layer's own
@@ -3475,6 +3539,9 @@ function duplicateLayer(l) {
         canvasThumbEl: null,
         stack: stackOf(l),           // the copy joins the stack its source lives in
         fragment: !!l.fragment,
+        // The link is immutable and shared by reference, so both rows follow the same file: saving it
+        // repaints them together, which is what "a copy of this layer" means for a cud layer.
+        cud: l.cud || null,
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
     if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
@@ -5139,6 +5206,8 @@ const addGuidanceBtn = document.getElementById('addGuidanceBtn');
 const addGuidanceMenu = document.getElementById('addGuidanceMenu');
 const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
 const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
+const addCudLayerBtn = document.getElementById('addCudLayerBtn');
+const addCudGuidanceBtn = document.getElementById('addCudGuidanceBtn');
 const ADD_MENUS = {
     [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
     [GUIDANCE_STACK]: { btn: addGuidanceBtn, menu: addGuidanceMenu },
@@ -5175,6 +5244,8 @@ addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultL
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
+addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
+addCudGuidanceBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(GUIDANCE_STACK); });
 
 // A drop on the list ITSELF (below the last row, or on the empty hint) means "go to the bottom of
 // this stack". Rows stop propagation, so this only ever sees the gaps — and it is the only way into
@@ -5699,8 +5770,10 @@ function sendBlendAction(action, opts) {
 
 // Clear Tag touches only the prompt stage — no canvas, no layers, no composite — so it skips
 // sendBlendAction's guards entirely and posts the bare action. The backend runs the same
-// _apply_tag_result('') the tag flow uses, which drops the parsing-source tags and returns an
-// empty tag the host pushes back into the prompt editor.
+// _apply_tag_result('') the tag flow uses, which drops the parsing-source tags and the
+// Temporary Prompts and returns empty arrays; the host pushes those back through the same
+// auto-tag channel a real tag uses, and the editor treats an explicit (even empty) tag set as
+// a full replacement of its parsing tags.
 function sendClearTag() {
     if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
     window.parent.postMessage({ type: 'blend-action', action: 'clear_tag' }, '*');
@@ -5834,7 +5907,8 @@ function openLayerMenu(l, clientX, clientY) {
         rast.type = 'button';
         rast.setAttribute('role', 'menuitem');
         rast.textContent = 'Rasterize';
-        rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`;
+        rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`
+            + (isCudLayer(l) ? ` This row's link is dropped on the way in: a baked buffer has nothing for a refresh to repaint.` : '');
         rast.disabled = !canvasW || !l.img;
         rast.addEventListener('click', ev => {
             ev.stopPropagation();
@@ -5881,6 +5955,33 @@ function openLayerMenu(l, clientX, clientY) {
         applyMaskToLayer(l);
     });
     menu.appendChild(applyMask);
+
+    // A cud row gets its own two entries: pull the saved file back in, or hand the row a document
+    // again after a reload broke the link. Opening the project is not here — the row's own button
+    // does that, and a menu item for the same thing would only be a second place to look.
+    if (isCudLayer(l)) {
+        const link = cudDocFor(l.cud.link);
+        const cudItem = (label, title, handler, disabled) => {
+            const b = document.createElement('button');
+            b.className = 'layer-menu-item';
+            b.type = 'button';
+            b.setAttribute('role', 'menuitem');
+            b.textContent = label;
+            b.title = title;
+            b.disabled = !!disabled;
+            b.addEventListener('click', ev => {
+                ev.stopPropagation();
+                closeLayerMenu();
+                handler();
+            });
+            menu.appendChild(b);
+        };
+        cudItem('Refresh from file', link
+            ? `Re-read ${l.cud.name} from disk and repaint this row — the transform, mask and decal you set here stay.`
+            : 'Not linked any more — Relink the row first, then this reads the file you point at.', () => { refreshCudLayerFromFile(l); }, !link);
+        cudItem('Relink…', `Point「${l.name}」at a .cud file — the row keeps its placement and paint, and takes that project's flattened picture.`,
+            () => { relinkCudLayer(l); });
+    }
 
     menu.classList.add('open');
     // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
@@ -6252,7 +6353,7 @@ function drawLayerTagThumb(canvas, kind) {
 
 function tagResultLine(d) {
     if (d.action === 'blend') return ['Blend result added as a new smart layer', 'success'];
-    if (d.action === 'clear_tag') return ['Tags cleared from the prompt stage', 'success'];
+    if (d.action === 'clear_tag') return ['Parsing tags and Temporary Prompts cleared from the prompt stage', 'success'];
     return [`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success'];
 }
 
@@ -6753,6 +6854,10 @@ const exportPngBtn = document.getElementById('exportPngBtn');
 const importBtn = document.getElementById('importBtn');
 const importFileInput = document.getElementById('importFile');
 const cudFileInput = document.getElementById('cudFile');
+// Where a no-picker .cud goes once the <input type=file> answers: opened as a project (Load) or
+// flattened into one linked layer (Add ▸ Cud Project). The action that raised the dialog sets it.
+let cudFileInputTarget = 'document';
+let cudFileInputStack = null;
 const fileBtn = document.getElementById('fileBtn');
 const fileMenuEl = document.getElementById('fileMenu');
 const fileGroupEl = document.getElementById('fileGroup');
@@ -6808,6 +6913,10 @@ document.addEventListener('mousedown', e => {
 function setCurrentDocument(handle, name) {
     currentCudHandle = handle || null;
     currentCudName = name || '';
+    // Every binding lands here — an opened project, a Save As destination — so this is where a
+    // document becomes a refresh target: a row in another tab that links this file finds its
+    // document again, which is what makes the Jump button and the save hook work.
+    if (currentCudHandle) registerCudDoc(currentCudHandle);
     // The tab is the same project, so it carries the same binding and shows the same name. An empty
     // name here means "this project has no file", not "rename it to nothing" — a tab keeps the name
     // it was opened with.
@@ -7110,8 +7219,10 @@ async function pickDocuments(mode, kind, suggested, multiple) {
     }
 }
 
-// Reading a chosen document back as a File: a handle knows how, a token has to be fetched.
+// Reading a chosen document back as a File: a handle knows how, a token has to be fetched, and the
+// bytes an <input type=file> already gave us are the file.
 async function docToFile(doc) {
+    if (doc.file) return doc.file;
     if (!doc.token) return await doc.getFile();
     const res = await fetch('/api/io_read?token=' + encodeURIComponent(doc.token));
     if (!res.ok) {
@@ -7247,6 +7358,9 @@ async function buildCudBlob() {
             // transient drag state, and their buffer is already canvas-sized.
             transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
             pw: n.w, ph: n.h,
+            // Where a cud layer's pixels came from. The composite itself is already in `image` —
+            // this says nothing the file needs in order to draw, only what a refresh may re-read.
+            cud: l.cud || null,
             image: blank ? null : await addAsset('image', l.img, n.w, n.h),
             mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
             decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
@@ -7322,7 +7436,10 @@ async function saveCudAs() {
             setCurrentDocument(null, name);
         }
         markDocumentClean();      // whatever the sink, the work is on disk from here
-        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB`, 'success');
+        // Only now may a linked row elsewhere repaint: the refresh can leave a host project dirty,
+        // and this one's own clean mark must not wipe that behind it.
+        const links = await refreshCudLinks(target, blob);
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${mb} MB${cudRefreshSuffix(links)}`, 'success');
         return true;
     } catch (err) {
         setStatus('Save failed: ' + ((err && err.message) || err), 'error');
@@ -7347,7 +7464,11 @@ async function saveCud() {
         const { blob, count } = await buildCudBlob();
         await writeDocTo(currentCudHandle, blob);
         markDocumentClean();
-        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB`, 'success');
+        // The save is the event a linked layer follows: these bytes repaint every row in every open
+        // project that points at this file. After the clean mark on purpose — a host project that
+        // changed underneath has to stay dirty.
+        const links = await refreshCudLinks(currentCudHandle, blob);
+        setStatus(`Saved ${count} layer${count === 1 ? '' : 's'} · ${currentCudName} · ${(blob.size / 1048576).toFixed(1)} MB${cudRefreshSuffix(links)}`, 'success');
         return true;
     } catch (err) {
         // The document can go stale (the file was moved, deleted, or is held open elsewhere).
@@ -7367,7 +7488,7 @@ async function loadCud() {
     if (pick.busy) return false;
     if (pick.error) { setStatus('Load failed: ' + pick.error, 'error'); return false; }
     if (pick.cancelled) { setStatus('Load cancelled'); return false; }
-    if (pick.unsupported) { cudFileInput.click(); return true; }
+    if (pick.unsupported) { cudFileInputTarget = 'document'; cudFileInputStack = null; cudFileInput.click(); return true; }
     const doc = pick.docs[0];
     try {
         requestImportCud(await docToFile(doc), doc);
@@ -7614,6 +7735,12 @@ async function openCudDocument(file, doc) {
                         h: Number.isFinite(tr.h) ? tr.h : 1,
                         rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
                     },
+                // A cud layer's link is a pointer, and pointers do not survive a session: the key an
+                // older file carries resolves only if that document was opened again here. Nothing
+                // depends on that — the row's own pixels arrived above.
+                cud: (rec.cud && typeof rec.cud.link === 'string' && rec.cud.link)
+                    ? { link: rec.cud.link, name: typeof rec.cud.name === 'string' ? rec.cud.name : '', path: typeof rec.cud.path === 'string' ? rec.cud.path : '' }
+                    : null,
                 mask, decal,
             });
         }
@@ -7662,6 +7789,281 @@ function requestImportCud(file, doc) {
     return openCudDocument(file, doc);
 }
 
+// ==================== The cud link ====================
+// A cud layer is another .cud project living inside this one: its picture is the flattened Layers
+// stack of that file — the very image #blendCanvas holds while the project is open — and in every
+// other respect it is an ordinary smart object (transform, mask, decal, Generate, blending).
+//
+// Two decisions shape this whole section:
+//  · The pixels are SELF-CONTAINED. The host file stores the flattened composite as this layer's own
+//    image asset, so render(), layerSpecs(), the Generate channel and the backend need no new branch,
+//    and a project still draws correctly when its source is gone. `l.cud` only says WHERE the pixels
+//    came from; it is a pointer, never the picture.
+//  · A refresh reads SAVED BYTES, never a live tab. That is what makes "project 2 has unsaved
+//    changes" mean "project 1 does not move": the only moment a linked row repaints is the moment its
+//    source reached disk, and the bytes used are the ones that were just written.
+//
+// The link cannot outlive the page. The IO endpoints are addressed by a token a dialog minted and
+// never by a path (that handler answers any origin), so nothing here can re-open a file after a
+// reload. Such a row keeps its picture, wears the amber badge and offers Relink on right-click.
+let cudLinkSeq = 0;
+const cudDocs = new Map();            // link key → the document object its bytes come from
+
+// Backend documents are keyed by their path — every dialog mints a fresh token for the same file, so
+// the path is the only stable identity — while a browser handle has none, so it is keyed by an id
+// minted for this session. Descriptors are IMMUTABLE: a relink swaps the object, it never edits one
+// in place, which is why undo snapshots and tab contexts can share one by reference.
+function cudLinkKey(doc) {
+    if (!doc) return '';
+    if (doc.path) return 'p:' + doc.path;
+    if (!doc.__cudKey) doc.__cudKey = 'h:' + (++cudLinkSeq);
+    return doc.__cudKey;
+}
+function registerCudDoc(doc) {
+    const key = cudLinkKey(doc);
+    if (key) cudDocs.set(key, doc);
+    return key;
+}
+function cudDocFor(link) { return link ? (cudDocs.get(link) || null) : null; }
+function isCudLayer(l) { return !!l && !!l.cud && !l.isMaskLayer; }
+function cudLayerLinked(l) { return isCudLayer(l) && !!cudDocFor(l.cud.link); }
+
+// The file's own working stack, bottom → top, painted into a canvas at the resolution it was saved
+// with. Guidances are skipped because a cud layer stands for the CONTEXT image (what #blendCanvas
+// holds and the backend composites), and the Mask singleton is a data channel, never a picture.
+// `layerSource`/`drawLayer` are the two functions this mirrors pixel for pixel; it cannot call them
+// because they paint the ACTIVE document's canvases.
+async function flattenCudStack(header, blobs) {
+    const c = (header && header.canvas) || {};
+    if (!Number(c.w) || !Number(c.h)) throw new Error('this .cud has no canvas to flatten');
+    const cw = Math.min(MAX_CANVAS_SIDE, Math.max(1, Math.round(Number(c.w))));
+    const ch = Math.min(MAX_CANVAS_SIDE, Math.max(1, Math.round(Number(c.h))));
+    const out = document.createElement('canvas');
+    out.width = cw; out.height = ch;
+    const ctx = out.getContext('2d');
+    const scratch = document.createElement('canvas');
+    const recs = Array.isArray(header.layers) ? header.layers : [];
+    for (let i = recs.length - 1; i >= 0; i--) {
+        const rec = recs[i];
+        if (!rec || rec.visible === false || rec.stack === GUIDANCE_STACK) continue;
+        if (rec.image === null || rec.image === undefined) continue;    // a blank layer paints nothing
+        if (!blobs.has(rec.image)) continue;
+        let src = await blobToCanvas(blobs.get(rec.image));
+        const w = src.width, h = src.height;
+        const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
+        const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
+        if (mask || decal) {
+            if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
+            const sc = scratch.getContext('2d');
+            resetCtx(sc);
+            sc.clearRect(0, 0, w, h);
+            sc.drawImage(src, 0, 0, w, h);
+            if (decal) sc.drawImage(decal, 0, 0, w, h);                 // the decal sits over the image
+            if (mask) {
+                sc.globalCompositeOperation = 'destination-in';
+                sc.drawImage(mask, 0, 0, w, h);
+                sc.globalCompositeOperation = 'source-over';
+            }
+            src = scratch;
+        }
+        if (rec.raster) { ctx.drawImage(src, 0, 0); continue; }          // buffer IS the canvas, 1:1
+        const tr = rec.transform || {};
+        const tw = (Number.isFinite(tr.w) ? tr.w : 1) * cw;
+        const th = (Number.isFinite(tr.h) ? tr.h : 1) * ch;
+        ctx.save();
+        ctx.translate(Number.isFinite(tr.cx) ? tr.cx * cw : cw / 2, Number.isFinite(tr.cy) ? tr.cy * ch : ch / 2);
+        ctx.rotate(Number.isFinite(tr.rotation) ? tr.rotation : 0);
+        ctx.drawImage(src, -tw / 2, -th / 2, tw, th);
+        ctx.restore();
+    }
+    return out;
+}
+
+// One read of the bytes, both answers: the canvas is the layer's new pixels, the PNG data URL is its
+// `src` — and comparing that string is how "did this actually change?" gets decided for free.
+async function flattenCudBytes(buffer) {
+    const { header, blobs } = decodeCud(buffer);
+    const canvas = await flattenCudStack(header, blobs);
+    return { canvas, src: canvas.toDataURL('image/png') };
+}
+
+// Every layer record in every open project that draws from this link. The active tab's records are
+// the live `layers` objects (its `ctx` is only ever the last captured copy), a background tab's are
+// the records sitting in its ctx.
+function linkedCudRecords(link) {
+    const hits = [];
+    if (!link) return hits;
+    for (const entry of documents) {
+        const recs = entry === activeDoc ? layers : ((entry.ctx && entry.ctx.layers) || []);
+        for (const rec of recs) if (rec && rec.cud && rec.cud.link === link) hits.push(rec);
+    }
+    return hits;
+}
+
+// Swaps a record's picture without touching its geometry: the transform, the mask and the decal all
+// stay, because the user arranged them in the HOST project. A source that changed resolution therefore
+// stretches an existing paint surface over the new image — exactly what re-importing a smart object
+// does, and the reason the picture tracks the file while the paint stays behind.
+//
+// `img` is REPLACED, never edited: the undo steps that hold this layer reference the old object, so
+// stepping back through a refresh still finds the picture the refresh overwrote.
+//
+// Counts only — every caller folds them into its own status line, so a refresh never talks over the
+// save that triggered it.
+async function refreshCudLinks(doc, blob) {
+    const hits = linkedCudRecords(cudLinkKey(doc));
+    if (!hits.length) return { updated: 0, failed: 0 };
+    let flat = null;
+    try { flat = await flattenCudBytes(await blob.arrayBuffer()); }
+    catch (err) { return { updated: 0, failed: hits.length }; }
+    const touched = new Set();
+    for (const rec of hits) {
+        if (rec.src === flat.src) continue;
+        rec.src = flat.src;
+        rec.img = flat.canvas;
+        touched.add(rec);
+    }
+    if (!touched.size) return { updated: 0, failed: 0 };
+    // Those projects changed without anyone editing them, and their next save would write a different
+    // picture — so they have to say so. A background tab cannot call markDocumentDirty (it speaks for
+    // the active one only), hence the direct write on that branch.
+    for (const entry of documents) {
+        const recs = entry === activeDoc ? layers : ((entry.ctx && entry.ctx.layers) || []);
+        if (!recs.some(r => touched.has(r))) continue;
+        if (entry === activeDoc) { markDocumentDirty(); renderLayerList(); render(); }
+        else { entry.dirty = true; }
+    }
+    renderDocTabs();
+    return { updated: touched.size, failed: 0 };
+}
+
+function cudRefreshSuffix(result) {
+    if (!result) return '';
+    if (result.failed) return ` · ${result.failed} linked layer${result.failed === 1 ? '' : 's'} could not be re-read`;
+    return result.updated ? ` · ${result.updated} linked layer${result.updated === 1 ? '' : 's'} updated` : '';
+}
+
+// Add ▸ Cud Project. The picker comes first (a browser one needs the click that opens it), then the
+// bytes: the flattened composite becomes an ordinary image layer that also carries a link.
+async function addCudLayerFromPick(stack) {
+    if (cudBusy) { setStatus('Still working on the last one…'); return false; }
+    const pick = await pickDocuments('open', 'cud', '', false);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Add failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Add cancelled'); return false; }
+    if (pick.unsupported) { cudFileInputTarget = 'layer'; cudFileInputStack = stack; cudFileInput.click(); return true; }
+    try {
+        return await addCudLayer(pick.docs[0], stack);
+    } finally { cudFileInputTarget = 'document'; cudFileInputStack = null; }
+}
+
+async function addCudLayer(doc, stack) {
+    if (!doc || cudBusy) return false;
+    const key = registerCudDoc(doc);
+    if (key && activeDoc && activeDoc.doc && cudLinkKey(activeDoc.doc) === key) {
+        setStatus('A project cannot be a layer of itself', 'error');
+        return false;
+    }
+    cudBusy = true; syncIoUI();
+    setStatus('Reading the linked project…');
+    try {
+        const file = await docToFile(doc);
+        const flat = await flattenCudBytes(await file.arrayBuffer());
+        addLayer({
+            name: baseName(file.name),
+            src: flat.src,
+            cud: { link: key, name: file.name || '', path: doc.path || '' },
+        }, stack);
+        return true;
+    } catch (err) {
+        setStatus('Add failed: ' + ((err && err.message) || err), 'error');
+        return false;
+    } finally {
+        cudBusy = false; syncIoUI();
+    }
+}
+
+// The row's jump button: the source opens as a project tab of its own. Already open is already there,
+// so the button switches to it rather than handing the same file a second tab.
+async function openLinkedCudDocument(l) {
+    if (!isCudLayer(l)) return false;
+    const doc = cudDocFor(l.cud.link);
+    if (!doc) { setStatus('This row lost its link when the page reloaded — right-click it to Relink', 'error'); return false; }
+    const already = findOpenDocument(doc);
+    if (already) return switchDocument(already.uid);
+    if (!guardSwitch('what you are doing')) return false;
+    if (cudBusy) { setStatus('Still working on the last one…'); return false; }
+    try {
+        return await requestImportCud(await docToFile(doc), doc);
+    } catch (err) {
+        setStatus('Could not open the linked project: ' + ((err && err.message) || err), 'error');
+        return false;
+    }
+}
+
+// Right-click ▸ Refresh from file: re-read the saved document on purpose. An undoable edit in THIS
+// project (the user asked for it), unlike the save-driven refresh above.
+async function refreshCudLayerFromFile(l) {
+    if (!isCudLayer(l)) return false;
+    const doc = cudDocFor(l.cud.link);
+    if (!doc) { setStatus('This row lost its link when the page reloaded — right-click it to Relink', 'error'); return false; }
+    if (cudBusy) { setStatus('Still working on the last one…'); return false; }
+    cudBusy = true; syncIoUI();
+    try {
+        const file = await docToFile(doc);
+        const flat = await flattenCudBytes(await file.arrayBuffer());
+        if (flat.src === l.src) { setStatus(`${l.cud.name || 'That project'} has not changed since this layer was written`); return false; }
+        l.src = flat.src;
+        l.img = flat.canvas;
+        renderLayerList();
+        render();
+        pushHistory();
+        setStatus(`Refreshed「${l.name}」from ${l.cud.name || 'its project'}`, 'success');
+        return true;
+    } catch (err) {
+        setStatus('Refresh failed: ' + ((err && err.message) || err), 'error');
+        return false;
+    } finally {
+        cudBusy = false; syncIoUI();
+    }
+}
+
+// Right-click ▸ Relink…: hand a row whose link died with the page a document again, then take its
+// pixels right away. Only this row is repointed — other rows on the stale key keep their own history.
+async function relinkCudLayer(l) {
+    if (!l || l.isMaskLayer) return false;
+    if (cudBusy) { setStatus('Still working on the last one…'); return false; }
+    const pick = await pickDocuments('open', 'cud', (l.cud && l.cud.path) || '', false);
+    if (pick.busy) return false;
+    if (pick.error) { setStatus('Relink failed: ' + pick.error, 'error'); return false; }
+    if (pick.cancelled) { setStatus('Relink cancelled'); return false; }
+    if (pick.unsupported) { setStatus('Relink needs a file dialog this page does not have', 'error'); return false; }
+    const doc = pick.docs[0];
+    const key = registerCudDoc(doc);
+    if (activeDoc && activeDoc.doc && cudLinkKey(activeDoc.doc) === key) {
+        setStatus('A project cannot be a layer of itself', 'error');
+        return false;
+    }
+    cudBusy = true; syncIoUI();
+    try {
+        const file = await docToFile(doc);
+        const flat = await flattenCudBytes(await file.arrayBuffer());
+        l.cud = { link: key, name: file.name || '', path: doc.path || '' };
+        l.src = flat.src;
+        l.img = flat.canvas;
+        renderLayerList();
+        render();
+        pushHistory();
+        setStatus(`「${l.name}」now follows ${l.cud.name}`, 'success');
+        return true;
+    } catch (err) {
+        setStatus('Relink failed: ' + ((err && err.message) || err), 'error');
+        return false;
+    } finally {
+        cudBusy = false; syncIoUI();
+    }
+}
+
 // ---- wiring ----
 // Every entry closes the menu on its way out: Load and Save As raise a native dialog, and a
 // popover left open above that dialog is a popover nobody can get back to.
@@ -7677,12 +8079,17 @@ importFileInput.addEventListener('change', () => {
     routeImportFiles(files);
 });
 // Load without the File System Access API: the bytes come in, no handle comes back, so the next
-// Save asks where to put them.
+// Save asks where to put them. The same input serves Add ▸ Cud Project, which wants those bytes
+// flattened into a layer instead — a File is a lazy disk reference, so re-reading it still refreshes.
 cudFileInput.addEventListener('change', () => {
     const files = Array.prototype.slice.call(cudFileInput.files || []);
     cudFileInput.value = '';
+    const target = cudFileInputTarget; cudFileInputTarget = 'document';
+    const stack = cudFileInputStack; cudFileInputStack = null;
     const doc = files.find(f => /\.cud$/i.test(f.name || '')) || files[0];
-    if (doc) requestImportCud(doc);
+    if (!doc) return;
+    if (target === 'layer') addCudLayer({ name: doc.name, file: doc }, stack);
+    else requestImportCud(doc);
 });
 docCloseModalEl.addEventListener('mousedown', e => { if (e.target === docCloseModalEl) closeDocCloseModal(); });
 document.getElementById('docCloseCancelBtn').addEventListener('click', closeDocCloseModal);
