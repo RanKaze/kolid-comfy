@@ -71,7 +71,8 @@
             "enable_mask": false
           }
         }
-      ]
+      ],
+      "pipeline_name": "[Anima] LizAnima"
     },
     {
       "id": "set-19",

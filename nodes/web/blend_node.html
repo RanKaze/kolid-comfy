@@ -16,7 +16,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    tab's title carries the full path a bound document writes back to.
    File is the only place document actions live now, so the tab titles are also the document readout:
    the name, the bound path and the unsaved dot all describe the project File acts on. */
-#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0 0; }
+#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0 0; border-bottom: 1px solid rgba(255,255,255,0.10); }
 #fileGroup { position: relative; flex: 0 0 auto; }
 /* Flush against the column's left edge, so the corners touching that edge are square: only the top
    right stays rounded. #docBar gives up its left inset to make that edge actually the column's.
@@ -48,10 +48,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     justify-content: center; padding: 0; border: none; border-radius: 4px; cursor: pointer;
     background: transparent; color: rgba(255,255,255,0.6); }
 .doc-tab .dt-close:hover { background: rgba(255,69,58,0.8); color: #fff; }
-#docNewBtn { flex: 0 0 auto; align-self: center; width: 22px; height: 22px; display: inline-flex;
-    align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 7px; background: rgba(255,255,255,0.08); color: #fff; cursor: pointer; }
-#docNewBtn:hover { background: rgba(255,255,255,0.16); }
+#docNewBtn { flex: 0 0 auto; width: 22px; align-self: stretch; display: inline-flex;
+    align-items: center; justify-content: center; cursor: pointer;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-bottom: none;
+    border-radius: 8px 8px 0 0; color: rgba(255,255,255,0.62); transition: background 0.15s ease; }
+#docNewBtn:hover { background: rgba(255,255,255,0.11); }
 #canvasArea { flex: 1; min-height: 0; position: relative; margin: 16px; overflow: hidden; }
 /* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
 #viewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; cursor: default; }
@@ -291,14 +292,15 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #extraPrompt .prompt-chip img { height: 36px; width: auto; display: block; border-radius: 5px; }
 /* 引用失效（图已从工作区移除）→ 退回可读文本，而不是一个空洞的方块。 */
 #extraPrompt .prompt-chip.chip-broken { font-size: 10px; color: #ff9f0a; padding: 0 5px; }
-.tb-btn { border: none; border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; color: #fff;
-    background: rgba(255,255,255,0.12); transition: background 0.15s ease, transform 0.15s ease; white-space: nowrap; }
-.tb-btn:hover:not(:disabled) { background: rgba(255,255,255,0.2); }
+/* The two action buttons are icon-only twins in the accent blue every acting control here uses:
+   the glyph says which one it is, the sentence it used to carry lives on in the title. */
+.tb-btn { border: none; border-radius: 9px; padding: 8px 9px; cursor: pointer; color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: rgba(10,132,255,0.9); box-shadow: 0 2px 10px rgba(10,132,255,0.22);
+    transition: background 0.15s ease, transform 0.15s ease; }
+.tb-btn > svg { display: block; }
+.tb-btn:hover:not(:disabled) { background: rgba(10,132,255,1); }
 .tb-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
-.tb-btn.archive { background: rgba(48,209,88,0.9); box-shadow: 0 2px 10px rgba(48,209,88,0.22); }
-.tb-btn.archive:hover:not(:disabled) { background: rgba(48,209,88,1); }
-.tb-btn.tag { background: rgba(175,82,222,0.85); }
-.tb-btn.tag:hover:not(:disabled) { background: rgba(175,82,222,1); }
 /* 运行中才浮出来的 Cancel：画布中下区、toolbar（Extra Prompt 那一行）正上方。
    绝对定位，不参与 flex 布局 —— 出现/消失都不会让工具条挪动一像素。 */
 #runCancelBtn { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%);
@@ -551,8 +553,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                      读回文本时 chip 序列化成 <image_id:xxx>；后端再解码成 <image N>。 -->
                 <div id="extraPrompt" class="is-empty" contenteditable="true" role="textbox" spellcheck="false"
                      data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
-                <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself.">Blend</button>
-                <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads. With an image layer selected you also get Layer tags (the composite over that layer, cut by its own mask), plus Clear Tag to wipe the tags from the prompt stage.">Tag</button>
+                <button class="tb-btn" id="blendBtn" aria-label="Blend" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself."><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="12" r="6" opacity="0.45" /><circle cx="15" cy="12" r="6" /></svg></button>
+                <button class="tb-btn" id="tagBtn" aria-label="Tag" title="Tag the composite — pick which region the tagger reads. With an image layer selected you also get Layer tags (the composite over that layer, cut by its own mask), plus Clear Tag to wipe the tags from the prompt stage."><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.72 2.23l7.05 7.05a2.5 2.5 0 010 3.54l-6.36 6.36a2.5 2.5 0 01-3.54 0l-6.36-6.36a2.5 2.5 0 010-3.54l7.05-7.05a1.5 1.5 0 012.16 0z" /><circle cx="9.5" cy="9.5" r="1.4" fill="currentColor" stroke="none" /></svg></button>
             </div>
             <!-- 工作区（staging）：唯一的图池，toolbar 第二行（固定高度、顶满宽度）。
                  拖文件进来上传；点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>；✕ 移除。
@@ -1463,6 +1465,13 @@ function surfaceDataUrl(surface) {
     try { return surface.toDataURL('image/png'); } catch (e) { return null; }
 }
 
+// Whether a layer's stored `src` can go to the backend as-is. Only the PNG/JPEG/WebP data URLs this
+// file writes itself qualify: PIL is certain to decode them. Everything else — an AVIF/HEIC/SVG
+// dragged in from disk, the `blob:` URL a .cud load hands out, a truncated `data:,` — must be
+// re-encoded from the decoded pixels. Whatever the browser can draw, the backend can receive.
+const TRUSTED_SRC = s => typeof s === 'string'
+    && (s.startsWith('data:image/png') || s.startsWith('data:image/jpeg') || s.startsWith('data:image/webp'));
+
 // The mask that goes out with a layer Generate run. A mask is a coverage map, so an unpainted
 // mask IS the full mask — but "send nothing" is not an option (the backend rejects a
 // zero-coverage mask) and neither is sending the untouched transparent canvas, which decodes to
@@ -1526,7 +1535,11 @@ function layerSourceForGenerate(l) {
     // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
     if (!hasLayerImage(l)) return noiseImageForGenerate(l);
     const { w, h } = nativeSize(l.img);
-    if (!l.decal) return l.src || surfaceDataUrl(renderLayerToScratch(l, w, h));
+    // An untrusted `src` (the `blob:` URL a .cud load hands out, an AVIF dropped from disk) is
+    // re-encoded from the pixels the browser already decoded, exactly as layerSpecs() does. Without
+    // this the backend receives a string that is not a data URL and reports "no decodable image"
+    // for a layer that visibly has an image.
+    if (!l.decal) return TRUSTED_SRC(l.src) ? l.src : surfaceDataUrl(renderLayerToScratch(l, w, h));
     renderLayerToScratch(l, w, h);
     return surfaceDataUrl(generateCanvas);
 }
@@ -5544,9 +5557,8 @@ function layerSpecs() {
     // 后端才能拿到图层自身的像素框，mask/decal 在图层空间里解码才不会错位。
     // 只有 PNG/JPEG/WebP data URL 被原样转发（后端 PIL 必定可解）；其余任何 src
     // （AVIF/HEIC/SVG、blob:/http URL、残缺的 'data:,'）一律用图层 <img> 重编码成
-    // PNG —— 前端显示得出来就送得出去，后端不会再收到解不开的图。
-    const TRUSTED_SRC = s => typeof s === 'string'
-        && (s.startsWith('data:image/png') || s.startsWith('data:image/jpeg') || s.startsWith('data:image/webp'));
+    // PNG —— 前端显示得出来就送得出去，后端不会再收到解不开的图。判据 TRUSTED_SRC
+    // 住在文件作用域，layerSourceForGenerate 的 Generate 通道共用同一条规则。
     const toPng = img => {
         const c = document.createElement('canvas');
         c.width = img.naturalWidth || img.width;
@@ -5587,11 +5599,11 @@ function setActionBusy(busy, label) {
     if (!busy) {
         toolbarProgress.classList.remove('on');
         toolbarProgressFill.style.width = '0';
-        blendBtn.textContent = 'Blend';
         runCancelBtn.classList.remove('on');
     } else {
+        // The buttons no longer carry a word to swap, so the progress strip is what says a run is
+        // in flight; only a detailer run additionally floats Cancel.
         toolbarProgress.classList.add('on');
-        if (label === 'blend') blendBtn.textContent = 'Blending…';
         runCancelBtn.classList.toggle('on', label === 'detailer');
     }
     syncActionButtons();
@@ -7211,6 +7223,14 @@ async function buildCudBlob() {
     const records = [];
     for (const l of layers) {
         const n = nativeSize(l.img);
+        // A layer the row draws with the red × has no image, only a pixel box. Encoding its
+        // all-transparent canvas as a PNG asset is what made the round trip lie: on reload the
+        // layer had a `src` again, so it read as "an image" and displayed as black on the dark UI.
+        // `image: null` says out loud what the layer is, and `pw`/`ph` carry the box a blank
+        // surface needs to be rebuilt at (a Dynamic Layer's box is not the canvas, so the
+        // transform alone cannot recover it). A layer still decoding has no `img` at all — that
+        // one is NOT blank, and encoding it must keep failing loudly instead of saving nothing.
+        const blank = !!l.img && !l.src;
         records.push({
             id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
             raster: !!l.raster,
@@ -7220,7 +7240,8 @@ async function buildCudBlob() {
             // Raster layers always travel at the identity — their stored transform is
             // transient drag state, and their buffer is already canvas-sized.
             transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
-            image: await addAsset('image', l.img, n.w, n.h),
+            pw: n.w, ph: n.h,
+            image: blank ? null : await addAsset('image', l.img, n.w, n.h),
             mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
             decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
         });
@@ -7546,9 +7567,24 @@ async function openCudDocument(file, doc) {
         const records = [];
         let skipped = 0;
         for (const rec of header.layers) {
-            const imgBlob = rec && rec.image !== null && rec.image !== undefined ? blobs.get(rec.image) : null;
-            if (!imgBlob) { skipped++; continue; }
-            const { img, url } = await blobToImage(imgBlob);
+            const hasImage = rec && rec.image !== null && rec.image !== undefined;
+            let img = null, url = '';
+            if (!hasImage) {
+                // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
+                // blank scratch canvas it was saved from, at the pixel box the file carries, so the
+                // layer stays "no image yet" across the round trip instead of arriving as a
+                // transparent (on this dark UI: black) picture. A mask/decal painted on it is a
+                // separate asset and still lands below.
+                const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
+                const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
+                img = makeBlankCanvas(pw, ph);
+            } else {
+                const imgBlob = blobs.get(rec.image);
+                if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
+                const decoded = await blobToImage(imgBlob);
+                img = decoded.img;
+                url = decoded.url;
+            }
             const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
             const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
             const tr = rec.transform || {};
