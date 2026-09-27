@@ -2368,6 +2368,48 @@ class SnapshotDetailerSamplerNode:
             print(f"[GenerateText] ref image lookup failed ({e}) — text-only")
             return None
 
+    def _debug_reference_slots(self, block_no, ref_image, ref_latent, injected, pipeline):
+        """把本块 conditioning **真正收到的每一张参考图**按槽位顺序记进 Debug。
+
+        编号对齐 `parse_prompt_image_refs` 解码出的 `<image N>`：1 = context 图，2 起 =
+        Extra Prompt 里的 staging 引用（首次出现顺序）。`<image 1>` 以前在面板上是空的 ——
+        它不经过注入循环，而是随 `reference_image`（或 Flux2Klein 的本块 latent）从另一条
+        入口进 get_conditioning，于是"看不到"被当成了"没嵌进去"。
+
+        ★ 类归属同 `_resolve_ref_image_for_generate_text`：只在 run 链路的 `self.` 上调用。
+        """
+        if dbg.current_trace() is None:
+            return
+        vae = pipeline.vae
+        slots = []
+        if ref_image is not None:
+            slots.append(('Context Image（本块工作图，Enable Edit 下即 <image 1>）', ref_image))
+        elif ref_latent is not None and vae is not None:
+            try:
+                slots.append(('本块 latent（Flux2Klein 的第一张参考是 latent，此为解码预览）',
+                              VAEDecode().decode(vae=vae, samples={'samples': ref_latent['samples']})[0]))
+            except Exception as e:
+                print(f"[Debug] reference slot latent decode failed: {e}")
+        for _key, _img in injected:
+            slots.append((f'Extra Prompt 嵌图 <image_id:{_key}> → reference_latents', _img))
+
+        if not slots:
+            dbg.record_stage(f'Block {block_no} · 参考图',
+                             '一张都没进 conditioning（Enable Edit 关着时引用图根本不注入）',
+                             block=block_no)
+            return
+        # pipeline 自带的 reference_latents 会插在 context 和嵌图之间，那样 <image N> 的
+        # 编号就和真实槽位错位了。正常情况下它是空的，一旦出现必须在面板上说清楚。
+        _extra = len((pipeline.reference.reference_latents if pipeline.reference else None) or []) - len(injected)
+        if _extra > 0:
+            dbg.record_stage(f'Block {block_no} · 参考图编号错位',
+                             f'pipeline 自带 {_extra} 条 reference_latents，排在嵌图之前 —— '
+                             f'嵌图的实际槽位比文本里的 <image N> 大 {_extra}',
+                             block=block_no)
+        for n, (_src, _img) in enumerate(slots, start=1):
+            dbg.record_image(f'Block {block_no} · Ref <image {n}>', _img, block=block_no,
+                             detail=f'共 {len(slots)} 张 · 第 {n} 张 · 来源：{_src}')
+
     def _preflight_generate_text_images(self, images, clip, params):
         """把「这批图到底能不能变成 embedding」实测一遍，供 Debug 显示。
 
@@ -2965,19 +3007,17 @@ class SnapshotDetailerSamplerNode:
 
                 # Context Reference injection (per-block) — Ref 图来自 Extra Prompt 文本
                 # 解析出的全局 refs（prompt_ref_ids，首次出现顺序 = 注入顺序）。
+                # _injected_refs 把**编码前**的像素留给付费的槽位清单：那是 get_conditioning
+                # 解码回来的同一张图，省一次 VAEDecode。
+                _injected_refs = []
                 if enable_edit and context_reference_keys and server is not None:
                     for _ref_key in context_reference_keys:
                         ref_img = server.get_staging_image(_ref_key)
                         if ref_img is not None:
                             ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
                             next_pipeline.reference.reference_latents.append(ref_latent)
+                            _injected_refs.append((_ref_key, ref_img))
                             print(f"[Block {i+1}] Context reference injected: id={_ref_key}")
-                            # Debug 可视化：这条路径与 Generate Text 无关（只看
-                            # enable_edit），但之前只有控制台日志，Debug 面板上看不到图。
-                            dbg.record_image(
-                                f'Block {i+1} · Ref Image 注入 — {_ref_key}', ref_img,
-                                block=i + 1,
-                                detail=f'第 {len(context_reference_keys)} 张中的 {context_reference_keys.index(_ref_key) + 1} 张（Extra Prompt 嵌图 → reference_latents）')
                         else:
                             print(f"[Block {i+1}] WARNING: context reference id '{_ref_key}' not found in staging")
                             dbg.record_error(
@@ -2995,6 +3035,11 @@ class SnapshotDetailerSamplerNode:
 
                 ref_latent_arg = tmp_latent if (is_flux2klein and enable_edit) else None
                 ref_image_arg = resized_image if ((is_krea2 and enable_edit) or not is_flux2klein) else None
+
+                # 参考图槽位清单（含 <image 1>）—— 必须在 args 定下来之后、真正 conditioning
+                # 之前记，记的才是 get_conditioning 马上要收到的东西。
+                self._debug_reference_slots(i + 1, ref_image_arg, ref_latent_arg,
+                                            _injected_refs, next_pipeline)
 
                 positive_condition = next_pipeline.get_conditioning(
                     mode='positive',
