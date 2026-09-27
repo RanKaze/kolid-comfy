@@ -9,12 +9,24 @@
 body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; }
 #mainArea { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 #canvasColumn { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-/* ---- the open .cud documents, in the strip above the canvas ----
+/* ---- the strip above the canvas: File on the left, the open .cud documents beside it ----
    One tab per project the workbench holds in memory: click it to switch, × to close (a project with
    unsaved changes asks first), + for a blank one. A tab is the file name it came from or Untitled,
    and the dot is the unsaved mark — no labels, the explanation lives in the title, and the active
-   tab's title carries the full path a bound document writes back to. */
-#docTabs { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 4px; padding: 8px 16px 0;
+   tab's title carries the full path a bound document writes back to.
+   File is the only place document actions live now, so the tab titles are also the document readout:
+   the name, the bound path and the unsaved dot all describe the project File acts on. */
+#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0; }
+#fileGroup { position: relative; flex: 0 0 auto; }
+.file-btn { flex: 0 0 auto; padding: 5px 12px; border-radius: 8px 8px 0 0; font-size: 11.5px; }
+#fileMenu { left: 0; right: auto; width: 228px; }
+/* Export unfolds IN PLACE rather than flying out as a second card: one popover is easier to keep
+   honest about what is open, and the menu is already a column of choices. */
+#exportMenu { position: static; border: none; box-shadow: none; background: transparent;
+    padding: 0 0 0 12px; gap: 2px; }
+#exportBtn .io-menu-title::after { content: '\25B8'; font-size: 9px; opacity: 0.7; margin-left: 4px; }
+#exportBtn.open .io-menu-title::after { content: '\25BE'; }
+#docTabs { flex: 1 1 auto; min-width: 0; display: flex; align-items: flex-end; gap: 4px;
     overflow-x: auto; scrollbar-width: thin; }
 #docTabs::-webkit-scrollbar { height: 4px; }
 .doc-tab { flex: 0 1 168px; min-width: 76px; display: flex; align-items: center; gap: 6px;
@@ -60,22 +72,18 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #status { position: absolute; top: 0; left: 0; right: 0; margin: 0 auto; pointer-events: none; background: rgba(28,28,30,0.55); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); padding: 8px 20px; border-radius: 20px; color: #fff; font-size: 13px; font-weight: 500; z-index: 50; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 4px 24px rgba(0,0,0,0.25); max-width: 70%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #status.success { background: rgba(48,209,88,0.2); border-color: rgba(48,209,88,0.3); color: #30d158; }
 #status.error { background: rgba(255,69,58,0.2); border-color: rgba(255,69,58,0.35); color: #ff6961; }
-/* ---- Document I/O — the first block of the right column, above the Canvas section ----
-   Two rows of equal-width buttons: the .cud document (Load / Save / Save As) on top, the flat
-   exports (PNG out, images in) below. The little grey readout at the end of the second row is the
-   file this project is bound to, and it hides completely until one has been loaded or saved. */
-#ioBar { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 0 6px; margin-right: 6px; }
-.io-row { display: flex; align-items: stretch; gap: 6px; }
+/* ---- File menu buttons — .io-btn is the menu's own row style, shared with the Add menus ----
+   The document lives behind the File popover now: Load / Save / Save As / Export ▸ PNG / Import.
+   Each entry carries a one-line sub, because the explanation is needed mid-choice and a tooltip is
+   not readable while the pointer is still hunting. */
 .io-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
     background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 7px 4px;
     color: #fff; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s ease; }
 .io-btn:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
 .io-btn:disabled { opacity: 0.45; cursor: default; }
-.io-btn.primary { background: rgba(10,132,255,0.62); border-color: rgba(10,132,255,0.5); }
-.io-btn.primary:hover:not(:disabled) { background: rgba(10,132,255,0.85); }
-#docName { flex: 0 1 88px; min-width: 0; align-self: center; font-size: 10.5px; line-height: 1.2;
-    color: rgba(255,255,255,0.42); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#docName[hidden] { display: none; }
+/* The one entry in the File menu that ADDS something rather than moving the document around keeps
+   the blue accent the flat row of buttons used to carry. */
+.io-menu-item.primary .io-menu-title { color: #6ab0ff; }
 
 /* Right column: the tool sections scroll in the top part, the Layers palette stays docked at
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
@@ -95,10 +103,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    pinned row plus its label, nothing to scroll. */
 #maskDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 #maskRowSlot { display: flex; flex-direction: column; gap: 4px; }
-/* Guidances get the top of the dock and never more than 42% of it: the working layers stay the
-   main list. With an empty stack it collapses to its hint strip — and that strip is the drop
-   target, because a list with no rows has no row to aim a drag at. */
-#guidanceList { flex: 0 1 auto; min-height: 34px; max-height: 42%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* Guidances get the top of the dock and never more than 62% of it: they are references, the
+   working layers stay the main list — but 42% was a strip two rows tall, which is not a stack you
+   can order by eye. With an empty stack it collapses to its hint strip — and that strip is the
+   drop target, because a list with no rows has no row to aim a drag at. */
+#guidanceList { flex: 0 1 auto; min-height: 34px; max-height: 62%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
 /* While a row is being dragged, both lists say where it would land: the one under the pointer is
    the stack the layer MOVES to. */
 .layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
@@ -449,13 +458,57 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <body>
 <div id="mainArea">
     <div id="canvasColumn">
-        <!-- 打开中的 .cud 文档：一条 tab 一个项目，切换不写盘、不重新编码，全部活在内存里。
-             内容由 renderDocTabs() 生成，这里只留容器和 + 新建入口。 -->
-        <div id="docTabs">
-            <button id="docNewBtn" title="New project — a blank document in its own tab" aria-label="New project">
-                <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11"/></svg>
-            </button>
+        <!-- File 与打开中的 .cud 文档同一条：左边是文档动作，右边一个 tab 一个项目。
+             tab 内容由 renderDocTabs() 生成，这里只留容器和 + 新建入口。 -->
+        <div id="docBar">
+            <div id="fileGroup">
+                <button class="io-btn file-btn" id="fileBtn" aria-haspopup="menu" aria-expanded="false"
+                        title="The document: open and save a .cud, export a flattened image, bring images in as layers">File<span class="add-caret">&#9662;</span></button>
+                <div class="io-menu" id="fileMenu" role="menu" hidden>
+                    <button class="io-menu-item" id="loadBtn" role="menuitem"
+                            title="Load a .cud document. It opens as a new project tab beside the one you are editing.">
+                        <span class="io-menu-title">Load</span>
+                        <span class="io-menu-sub">Open a .cud as its own project tab.</span>
+                    </button>
+                    <button class="io-menu-item" id="saveBtn" role="menuitem"
+                            title="Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.">
+                        <span class="io-menu-title">Save</span>
+                        <span class="io-menu-sub">Ctrl+S — back to the bound file, or ask once if there is none.</span>
+                    </button>
+                    <button class="io-menu-item" id="saveAsBtn" role="menuitem"
+                            title="Save As: write the whole context to a file you pick, and the project becomes bound to it">
+                        <span class="io-menu-title">Save As</span>
+                        <span class="io-menu-sub">Write to a file you pick and bind this project to it.</span>
+                    </button>
+                    <button class="io-menu-item" id="exportBtn" role="menuitem" aria-haspopup="menu" aria-expanded="false"
+                            title="Export the workbench as an image file">
+                        <span class="io-menu-title">Export</span>
+                        <span class="io-menu-sub">Flatten what you see into a file.</span>
+                    </button>
+                    <div class="io-menu" id="exportMenu" role="menu" hidden>
+                        <button class="io-menu-item" id="exportPngBtn" role="menuitem"
+                                title="Export the composite as a PNG: visible LAYERS flattened at canvas resolution, transparency kept — guidances are references, they stay out of the exported image">
+                            <span class="io-menu-title">PNG</span>
+                            <span class="io-menu-sub">The Layers composite, at canvas resolution.</span>
+                        </button>
+                    </div>
+                    <button class="io-menu-item primary" id="importBtn" role="menuitem"
+                            title="Import images as new layers. A .cud document belongs to Load.">
+                        <span class="io-menu-title">Import</span>
+                        <span class="io-menu-sub">Images in as new layers — a .cud goes to Load.</span>
+                    </button>
+                </div>
+            </div>
+            <div id="docTabs">
+                <button id="docNewBtn" title="New project — a blank document in its own tab" aria-label="New project">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11"/></svg>
+                </button>
+            </div>
         </div>
+        <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg" multiple hidden>
+        <!-- Only used where the File System Access API is missing; a document picked this way
+             has no handle to write back to, so Save turns into Save As. -->
+        <input type="file" id="cudFile" accept=".cud" hidden>
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
@@ -489,30 +542,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
     <div id="sidePanel">
-        <!-- Document I/O, above the Canvas section. Top row is the .cud document itself:
-             Load / Save / Save As, Photoshop semantics — once a file is behind the project, Save
-             writes straight back to it. Bottom row flattens or feeds in: PNG out, images in. -->
-        <div id="ioBar">
-            <div class="io-row">
-                <button class="io-btn" id="loadBtn"
-                        title="Load a .cud document. It opens as a new project tab beside the one you are editing.">Load</button>
-                <button class="io-btn" id="saveBtn"
-                        title="Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.">Save</button>
-                <button class="io-btn" id="saveAsBtn"
-                        title="Save As: write the whole context to a file you pick, and the project becomes bound to it">Save As</button>
-            </div>
-            <div class="io-row">
-                <button class="io-btn" id="exportBtn"
-                        title="Export the composite as a PNG: visible layers flattened at canvas resolution, transparency kept">Export PNG</button>
-                <button class="io-btn primary" id="importBtn"
-                        title="Import images as new layers. A .cud document belongs to Load.">Import</button>
-                <span id="docName" hidden></span>
-            </div>
-            <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg" multiple hidden>
-            <!-- Only used where the File System Access API is missing; a document picked this way
-                 has no handle to write back to, so Save turns into Save As. -->
-            <input type="file" id="cudFile" accept=".cud" hidden>
-        </div>
         <!-- Tools scroll in the top part of the column; the Layers palette is docked at
              the bottom-right corner so it stays put no matter how long the tool list is. -->
         <div id="panelScroll">
@@ -6653,10 +6682,14 @@ const loadBtn = document.getElementById('loadBtn');
 const saveBtn = document.getElementById('saveBtn');
 const saveAsBtn = document.getElementById('saveAsBtn');
 const exportBtn = document.getElementById('exportBtn');
+const exportMenuEl = document.getElementById('exportMenu');
+const exportPngBtn = document.getElementById('exportPngBtn');
 const importBtn = document.getElementById('importBtn');
 const importFileInput = document.getElementById('importFile');
 const cudFileInput = document.getElementById('cudFile');
-const docNameEl = document.getElementById('docName');
+const fileBtn = document.getElementById('fileBtn');
+const fileMenuEl = document.getElementById('fileMenu');
+const fileGroupEl = document.getElementById('fileGroup');
 const docTabsEl = document.getElementById('docTabs');
 const docNewBtn = document.getElementById('docNewBtn');
 const docCloseModalEl = document.getElementById('docCloseModal');
@@ -6664,21 +6697,51 @@ const docCloseSub = document.getElementById('docCloseSub');
 const docCloseSaveBtn = document.getElementById('docCloseSaveBtn');
 
 function syncIoUI() {
-    for (const b of [loadBtn, saveBtn, saveAsBtn, exportBtn, importBtn]) b.disabled = cudBusy;
+    for (const b of [loadBtn, saveBtn, saveAsBtn, exportBtn, exportPngBtn, importBtn]) b.disabled = cudBusy;
 }
 
-// The readout is the only place the path shows, so it stays hidden until a file is behind the
-// project. Its title is what tells Save from Save As before anything is clicked.
+// ---- the File menu ----
+// One popover, one sub-popover. Export is a GROUP, not an action: opening it reveals PNG, so adding
+// a format later costs one row and no new state. Clicking outside closes the whole thing, and any
+// entry that acts closes it first — a menu left open over a native dialog is a menu nobody can find.
+let fileMenuOpen = false;
+
+function closeFileMenu() {
+    if (!fileMenuOpen) return;
+    fileMenuOpen = false;
+    fileMenuEl.hidden = true;
+    exportMenuEl.hidden = true;
+    fileBtn.setAttribute('aria-expanded', 'false');
+    exportBtn.classList.remove('open');
+    exportBtn.setAttribute('aria-expanded', 'false');
+}
+
+function openFileMenu() {
+    fileMenuOpen = true;
+    fileMenuEl.hidden = false;
+    fileBtn.setAttribute('aria-expanded', 'true');
+}
+
+fileBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (fileMenuOpen) closeFileMenu(); else openFileMenu();
+});
+exportBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = exportMenuEl.hidden;
+    exportMenuEl.hidden = !open;
+    exportBtn.classList.toggle('open', open);
+    exportBtn.setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('mousedown', e => {
+    if (fileMenuOpen && !fileGroupEl.contains(e.target)) closeFileMenu();
+});
+
+// The tab strip is the document readout: the name, the bound path and the unsaved dot all describe
+// the project File acts on, so binding a file stores it and lets renderDocTabs() say so.
 function setCurrentDocument(handle, name) {
     currentCudHandle = handle || null;
     currentCudName = name || '';
-    docNameEl.hidden = !currentCudName;
-    docNameEl.textContent = currentCudName;
-    // A server document knows its full path; a browser handle only ever reveals the name.
-    const where = currentCudHandle && currentCudHandle.path ? currentCudHandle.path : currentCudName;
-    docNameEl.title = !currentCudName ? ''
-        : currentCudHandle ? `${where} · Ctrl+S overwrites this file`
-        : `${currentCudName} · opened without a handle, so Ctrl+S asks for a location`;
     // The tab is the same project, so it carries the same binding and shows the same name. An empty
     // name here means "this project has no file", not "rename it to nothing" — a tab keeps the name
     // it was opened with.
@@ -7510,11 +7573,13 @@ function requestImportCud(file, doc) {
 }
 
 // ---- wiring ----
-loadBtn.addEventListener('click', () => loadCud());
-saveBtn.addEventListener('click', () => saveCud());
-saveAsBtn.addEventListener('click', () => saveCudAs());
-exportBtn.addEventListener('click', () => exportPng());
-importBtn.addEventListener('click', () => importImages());
+// Every entry closes the menu on its way out: Load and Save As raise a native dialog, and a
+// popover left open above that dialog is a popover nobody can get back to.
+loadBtn.addEventListener('click', () => { closeFileMenu(); loadCud(); });
+saveBtn.addEventListener('click', () => { closeFileMenu(); saveCud(); });
+saveAsBtn.addEventListener('click', () => { closeFileMenu(); saveCudAs(); });
+exportPngBtn.addEventListener('click', () => { closeFileMenu(); exportPng(); });
+importBtn.addEventListener('click', () => { closeFileMenu(); importImages(); });
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
     const files = Array.prototype.slice.call(importFileInput.files || []);
