@@ -100,7 +100,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
-  const [zoom, setZoom] = useState<{ src: string; label: string; w: number; h: number } | null>(null);
+  const [zoom, setZoom] = useState<{ src: string; label: string; w: number; h: number; pixels?: number; align?: number } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -292,7 +292,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         <div style={S.zoomOverlay} onClick={e => { e.stopPropagation(); setZoom(null); }}>
           <div style={S.zoomBar}>
             <span style={{ fontSize: 12.5, fontWeight: 600 }}>{zoom.label}</span>
-            <span style={{ fontSize: 11, opacity: 0.6 }}>{zoom.w}×{zoom.h}</span>
+            <span style={{ fontSize: 11, opacity: 0.6 }}>{sizeText(zoom.w, zoom.h, zoom.pixels, zoom.align)}</span>
             <button style={S.iconBtn} onClick={e => { e.stopPropagation(); setZoom(null); }}><DbgIcon name="close" size={12} /></button>
           </div>
           <img src={zoom.src} alt={zoom.label} style={S.zoomImg} onClick={e => e.stopPropagation()} />
@@ -305,7 +305,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 // ── 单条记录 ──
 const StepView: React.FC<{
   step: DebugTraceStep;
-  onZoom: (z: { src: string; label: string; w: number; h: number }) => void;
+  onZoom: (z: { src: string; label: string; w: number; h: number; pixels?: number; align?: number }) => void;
 }> = ({ step, onZoom }) => {
   const meta = KIND_META[step.kind] || KIND_META.stage;
   const [open, setOpen] = useState(false);
@@ -352,22 +352,31 @@ const StepView: React.FC<{
         </div>
       )}
 
-      {/* 缩略图网格 */}
+      {/* 缩略图网格：卡片下方的文本就是全部信息（标签 + 进管线的实际分辨率 + 像素预算），
+          不挂 tooltip；图本身按真实分辨率编码，所见即所传。 */}
       {!!step.items?.length && (
         <div style={S.grid}>
           {step.items.map((it, i) => (
             <button key={i} style={S.thumb}
-              title={`${it.label}${it.note ? ' — ' + it.note : ''} (${it.width}×${it.height})`}
-              onClick={() => onZoom({ src: it.dataUrl, label: it.label, w: it.width, h: it.height })}>
+              onClick={() => onZoom({ src: it.dataUrl, label: it.label, w: it.width, h: it.height, pixels: it.pixels, align: it.align })}>
               <img src={it.dataUrl} alt={it.label} style={S.thumbImg} />
               <span style={S.thumbCap}>{it.label}</span>
-              <span style={S.thumbSize}>{it.width}×{it.height}</span>
+              <span style={S.thumbSize}>{sizeText(it.width, it.height, it.pixels, it.align)}</span>
             </button>
           ))}
         </div>
       )}
     </div>
   );
+};
+
+// 分辨率后面的括号 = 决定这张图尺寸的那两颗旋钮：像素预算 | 落格。
+// 两颗都没有就不画括号。
+const sizeText = (w: number, h: number, pixels?: number, align?: number) => {
+  let inner = '';
+  if (pixels) inner = align ? `${pixels}|${align}` : `${pixels}`;
+  else if (align) inner = `align ${align}`;
+  return `管线 ${w}×${h}${inner ? ` (${inner})` : ''}`;
 };
 
 // prompt entry 里的附属字段（loras / negative / extra_prompt / instruction …）

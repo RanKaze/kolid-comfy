@@ -25,7 +25,7 @@
             "context_reference": true,
             "context_reference_key": null,
             "context_regex": ".+",
-            "enable_mask": true,
+            "enable_mask": false,
             "enable_text_generate": false,
             "enable_limit": true
           }
@@ -305,7 +305,7 @@
       "pipeline_name": "[Anima] LizAnima"
     }
   ],
-  "active_block_set": "set-20",
+  "active_block_set": "set-12",
   "global_params": {
     "pixels": 2048576,
     "align": 16,
@@ -352,11 +352,11 @@
           "enabled": true
         },
         "pixels": {
-          "value": 2048576,
+          "value": 1048576,
           "enabled": true
         },
         "align": {
-          "value": 16,
+          "value": 32,
           "enabled": true
         },
         "ref_pixels": {
@@ -364,7 +364,7 @@
           "enabled": true
         },
         "ref_align": {
-          "value": 16,
+          "value": 32,
           "enabled": true
         },
         "tgen_pixels": {
@@ -372,7 +372,7 @@
           "enabled": true
         },
         "tgen_align": {
-          "value": 16,
+          "value": 32,
           "enabled": true
         }
       },

@@ -2464,7 +2464,9 @@ class SnapshotDetailerSamplerNode:
             print(f"[GenerateText] ref image lookup failed ({e}) — text-only")
             return None
 
-    def _debug_reference_slots(self, block_no, ref_image, ref_latent, injected, pipeline):
+    def _debug_reference_slots(self, block_no, ref_image, ref_latent, injected, pipeline,
+                               work_limit=None, ref_limit=None,
+                               work_align=None, ref_align=None):
         """把本块 conditioning **真正收到的每一张参考图**按槽位顺序记进 Debug。
 
         编号对齐 `parse_prompt_image_refs` 解码出的 `<image N>`：1 = context 图，2 起 =
@@ -2479,15 +2481,18 @@ class SnapshotDetailerSamplerNode:
         vae = pipeline.vae
         slots = []
         if ref_image is not None:
-            slots.append(('Context Image（本块工作图，Enable Edit 下即 <image 1>）', ref_image))
+            slots.append(('Context Image（本块工作图，Enable Edit 下即 <image 1>）', ref_image,
+                          work_limit, work_align))
         elif ref_latent is not None and vae is not None:
             try:
                 slots.append(('本块 latent（Flux2Klein 的第一张参考是 latent，此为解码预览）',
-                              VAEDecode().decode(vae=vae, samples={'samples': ref_latent['samples']})[0]))
+                              VAEDecode().decode(vae=vae, samples={'samples': ref_latent['samples']})[0],
+                              work_limit, work_align))
             except Exception as e:
                 print(f"[Debug] reference slot latent decode failed: {e}")
         for _key, _img in injected:
-            slots.append((f'Extra Prompt 嵌图 <image_id:{_key}> → reference_latents', _img))
+            slots.append((f'Extra Prompt 嵌图 <image_id:{_key}> → reference_latents', _img,
+                          ref_limit, ref_align))
 
         if not slots:
             dbg.record_stage(f'Block {block_no} · 参考图',
@@ -2502,8 +2507,9 @@ class SnapshotDetailerSamplerNode:
                              f'pipeline 自带 {_extra} 条 reference_latents，排在嵌图之前 —— '
                              f'嵌图的实际槽位比文本里的 <image N> 大 {_extra}',
                              block=block_no)
-        for n, (_src, _img) in enumerate(slots, start=1):
+        for n, (_src, _img, _limit, _align) in enumerate(slots, start=1):
             dbg.record_image(f'Block {block_no} · Ref <image {n}>', _img, block=block_no,
+                             pixel_limit=_limit, align=_align,
                              detail=f'共 {len(slots)} 张 · 第 {n} 张 · 来源：{_src}')
 
     def _preflight_generate_text_images(self, images, clip, params):
@@ -2686,6 +2692,12 @@ class SnapshotDetailerSamplerNode:
         current_image = resized_image
         current_mask = resized_mask
         last_resize_info = None
+        # 工作分辨率是被哪颗像素旋钮定下来的（None = Enable Limit 关，尺寸就是裁剪结果）。
+        # interface 块会把 current_image 换成子图产物 —— 那张没被 limit 过，届时置 None。
+        work_pixel_limit = limit_pixels_val if enable_limit else None
+        # 落格同理：没走 limit 也没走架构格子（或 align=1）时这张图不曾被对齐过，不给读数。
+        work_align = (limit_align if (enable_limit or needs_grid_align) and limit_align > 1
+                      else None)
         dbg.record_stage('裁剪 + 缩放后工作区',
                          f'image={tuple(resized_image.shape)}'
                          + (f', mask={tuple(resized_mask.shape)}' if resized_mask is not None else ', mask=None'),
@@ -2693,8 +2705,10 @@ class SnapshotDetailerSamplerNode:
                          crop_info=({k: (list(v) if isinstance(v, tuple) else v)
                                      for k, v in crop_info.items()} if isinstance(crop_info, dict) else crop_info),
                          resize_info=(list(resize_info) if isinstance(resize_info, (list, tuple)) else resize_info))
-        dbg.record_image('裁剪 / 缩放后工作图', resized_image, block=0)
-        dbg.record_mask('裁剪 / 缩放后工作 mask', resized_mask, block=0)
+        dbg.record_image('裁剪 / 缩放后工作图', resized_image, block=0,
+                         pixel_limit=work_pixel_limit, align=work_align)
+        dbg.record_mask('裁剪 / 缩放后工作 mask', resized_mask, block=0,
+                        pixel_limit=work_pixel_limit, align=work_align)
         last_resized_mask = None
 
         # Save original pipeline state for restoration after each block
@@ -2828,6 +2842,9 @@ class SnapshotDetailerSamplerNode:
                     next_pipeline.mask = result_mask
                     current_image = result_img
                     current_mask = result_mask
+                    # 子图产物的尺寸由它自己决定，全局 pixels 目标没有作用在它身上。
+                    work_pixel_limit = None
+                    work_align = None
                     print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
                     dbg.record_image(f'Block {i+1} · Interface 输出图', result_img, block=i + 1)
                     dbg.record_mask(f'Block {i+1} · Interface 输出 mask', result_mask, block=i + 1)
@@ -2926,12 +2943,15 @@ class SnapshotDetailerSamplerNode:
                                  grounding_px=grounding_px,
                                  context_regex=block_context_regex,
                                  is_last=is_last)
-                dbg.record_image(f'Block {i+1} · 输入工作图', resized_image, block=i + 1)
-                dbg.record_mask(f'Block {i+1} · 输入工作 mask', resized_mask, block=i + 1)
-
                 # 全局工作分辨率已在 crop 后一次性 limit 确定（见上方）。此处把当前 block
                 # 的实际输入（可能已被上游 interface 块替换）同步为处理图，不再重复 limit。
                 resized_image, resized_mask = current_image, current_mask
+                # 记录必须在同步之后：紧接着就是 VAEEncode(pixels=resized_image)，
+                # 同步前手里拿的还是上一块的工作图（interface 之后两者尺寸不同）。
+                dbg.record_image(f'Block {i+1} · 输入工作图', resized_image, block=i + 1,
+                                 pixel_limit=work_pixel_limit, align=work_align)
+                dbg.record_mask(f'Block {i+1} · 输入工作 mask', resized_mask, block=i + 1,
+                                pixel_limit=work_pixel_limit, align=work_align)
 
                 # VAEEncode
                 tmp_latent = VAEEncode().encode(
@@ -3039,6 +3059,8 @@ class SnapshotDetailerSamplerNode:
                         _gsrc = _gt_sources[_gi] if _gi < len(_gt_sources) else f'第 {_gi + 1} 张'
                         dbg.record_image(f'Block {i+1} · c{_gi + 1}) Generate Text 输入图 — {_gsrc}',
                                          _gimg, block=i + 1,
+                                         pixel_limit=(tgen_cap_pixels or None),
+                                         align=(tgen_cap_align if tgen_cap_align > 1 else None),
                                          detail=f'第 {_gi + 1} 张 / 共 {len(_gt_images)} 张')
                     try:
                         current_positive, _gt_used = apply_generate_text_to_prompt(
@@ -3156,7 +3178,11 @@ class SnapshotDetailerSamplerNode:
                 # 参考图槽位清单（含 <image 1>）—— 必须在 args 定下来之后、真正 conditioning
                 # 之前记，记的才是 get_conditioning 马上要收到的东西。
                 self._debug_reference_slots(i + 1, ref_image_arg, ref_latent_arg,
-                                            _injected_refs, next_pipeline)
+                                            _injected_refs, next_pipeline,
+                                            work_limit=work_pixel_limit,
+                                            ref_limit=(ref_cap_pixels or None),
+                                            work_align=work_align,
+                                            ref_align=(ref_cap_align if ref_cap_align > 1 else None))
 
                 positive_condition = next_pipeline.get_conditioning(
                     mode='positive',
