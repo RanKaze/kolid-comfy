@@ -160,6 +160,18 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
   return (
     <div style={S.overlay} onClick={onClose}>
+      {/* Inline style props cannot reach ::-webkit-scrollbar, and this modal is dark on a page whose
+          default scrollbars are light. The rules live here and are scoped by class, matching the
+          workbench's own overlay scrollbar (faint pill, transparent track, no buttons). */}
+      <style>{`
+        .dbg-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+        .dbg-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+        .dbg-scroll::-webkit-scrollbar-track { background: transparent; }
+        .dbg-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border: 3px solid transparent; border-radius: 8px; background-clip: padding-box; }
+        .dbg-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+        .dbg-scroll::-webkit-scrollbar-corner { background: transparent; }
+        .dbg-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+      `}</style>
       <div style={S.shell} onClick={e => e.stopPropagation()}>
         {/* ── 头部 ── */}
         <div style={S.head}>
@@ -212,7 +224,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         </div>
 
         {/* ── 主体 ── */}
-        <div style={S.body}>
+        <div className="dbg-scroll" style={S.body}>
           {loading && <div style={S.empty}>读取中…</div>}
           {!loading && !trace?.available && (
             <div style={S.empty}>
@@ -308,7 +320,7 @@ const StepView: React.FC<{
       {/* prompt 文本 */}
       {step.kind === 'prompt' && (
         <div>
-          <pre style={{ ...S.pre, maxHeight: open || !long ? 320 : 92 }}>{text || '（空）'}</pre>
+          <pre className="dbg-scroll" style={{ ...S.pre, maxHeight: open || !long ? 320 : 92 }}>{text || '（空）'}</pre>
           {long && (
             <button style={S.moreBtn} onClick={() => setOpen(o => !o)}>
               {open ? '收起' : `展开全部（${text.length} 字符）`}
@@ -406,6 +418,8 @@ const S: Record<string, React.CSSProperties> = {
     display: 'flex', flexDirection: 'column', overflow: 'hidden',
     background: '#141416', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 14,
     boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+    // Also tells the UA that anything it paints for us (form controls, scrollbars it owns) is dark.
+    colorScheme: 'dark',
     fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif",
   },
   head: {

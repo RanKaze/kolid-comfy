@@ -2,15 +2,80 @@ import React, { useState, useCallback, useEffect } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 
-// Pipeline Blocks tab-bar atoms (module-level: pure style, no state).
-const tabActionBtn: React.CSSProperties = {
-  background: 'none', border: 'none', cursor: 'pointer', fontSize: 13,
-  padding: '3px 6px', lineHeight: 1, color: 'rgba(255,255,255,0.45)', borderRadius: 6,
-};
+// The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
   background: 'rgba(10,132,255,0.15)', border: '0.5px solid rgba(10,132,255,0.6)', borderRadius: 999,
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
+
+// The four panels of the Draw tab collapse independently. Default is "all open" — a collapsed panel
+// is a choice the user made, so it is remembered; a browser that refuses localStorage just gets the
+// default every time, which is not worth an error banner over.
+type SectionKey = 'global' | 'presets' | 'preprocess' | 'blocks';
+const SECTION_KEYS: SectionKey[] = ['global', 'presets', 'preprocess', 'blocks'];
+const SECTIONS_STORE = 'sampler.editSections';
+const sectionsAllOpen = (): Record<SectionKey, boolean> =>
+  SECTION_KEYS.reduce((a, k) => ({ ...a, [k]: true }), {} as Record<SectionKey, boolean>);
+function loadSections(): Record<SectionKey, boolean> {
+  const open = sectionsAllOpen();
+  try {
+    const raw = localStorage.getItem(SECTIONS_STORE);
+    const saved = raw ? JSON.parse(raw) : null;
+    for (const k of SECTION_KEYS) if (typeof saved?.[k] === 'boolean') open[k] = saved[k];
+  } catch { /* unreadable store => all open */ }
+  return open;
+}
+
+// A section header that IS its own toggle. The chevron is the only thing that moves, so collapsing
+// never reflows the label; `extra` is where a per-section action (Add +) lives, and it has to stop
+// propagation itself or clicking it would collapse the panel it belongs to.
+const SectionHeader: React.FC<{
+  label: string; open: boolean; onToggle: () => void; extra?: React.ReactNode;
+}> = ({ label, open, onToggle, extra }) => (
+  <div onClick={onToggle} title={open ? 'Collapse this section' : 'Expand this section'}
+    style={{
+      ...styles.sectionTitle, display: 'flex', alignItems: 'center', gap: 5,
+      cursor: 'pointer', userSelect: 'none',
+    }}>
+    <span style={{
+      display: 'flex', flexShrink: 0, transform: open ? 'rotate(90deg)' : 'none',
+      transition: 'transform 0.12s ease',
+    }}>
+      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+        strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
+    </span>
+    {label}
+    {extra}
+  </div>
+);
+
+// Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
+// second right-click anywhere), which beats wiring window listeners inside an iframe.
+const ContextMenu: React.FC<{
+  x: number; y: number; items: { label: string; color?: string; onClick: () => void }[];
+  onClose: () => void;
+}> = ({ x, y, items, onClose }) => (
+  <div style={{ position: 'fixed', inset: 0, zIndex: 80 }}
+    onClick={onClose}
+    onContextMenu={e => { e.preventDefault(); onClose(); }}>
+    <div style={{
+      position: 'absolute', top: y, left: Math.min(x, window.innerWidth - 150),
+      minWidth: 132, display: 'flex', flexDirection: 'column', gap: 2, padding: 4,
+      background: 'rgba(40,40,44,0.96)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
+      border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 9,
+      boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
+    }} onClick={e => e.stopPropagation()}>
+      {items.map(it => (
+        <button key={it.label} onClick={() => { it.onClick(); onClose(); }}
+          style={{
+            display: 'block', width: '100%', textAlign: 'left', padding: '5px 9px',
+            background: 'none', border: 'none', borderRadius: 6, cursor: 'pointer',
+            color: it.color || 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: 600,
+          }}>{it.label}</button>
+      ))}
+    </div>
+  </div>
+);
 
 // What the "Add +" dropdown offers. Query is the only kind that interacts with the user
 // mid-run: the chain stops there and waits for a prompt choice.
@@ -20,6 +85,10 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; la
   { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
   { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
 ];
+
+// What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
+// card, which pushed the real parameters down for information you read once.
+const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -202,6 +271,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
   // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // 四块面板的折叠状态（默认全展开，改动落 localStorage）。
+  const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(loadSections);
+  const toggleSection = (k: SectionKey) => setOpenSections(prev => {
+    const next = { ...prev, [k]: !prev[k] };
+    try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
+    return next;
+  });
+  // 右键某个 preset 行才出现的菜单；null = 没有菜单。
+  const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
 
   // Shared prompt presets: loaded once, re-fetched after the preset editor saves so card
@@ -560,7 +638,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </div>
               {/* GLOBAL SETTINGS — 所有 Pipeline Preset 共享的数值参数（server config 持久化）。
                   与 preset 相关的开关在下方 Preprocess Settings。 */}
-              <div style={styles.sectionTitle}>Global Settings</div>
+              <SectionHeader label="Global Settings" open={openSections.global} onToggle={() => toggleSection('global')} />
+              {openSections.global && (<div style={styles.nestedSection}>
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Mask Grow</label>
                 <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
@@ -581,18 +660,24 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <label style={styles.paramLabel}>Align</label>
                 <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={alignVal} onChange={e => onGlobalParamChange('align', parseInt(e.target.value))} />
               </div>
+              </div>)}
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
                   Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
                   也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
-              <div style={styles.sectionTitle}>Pipeline Presets</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginBottom: 8 }}>
+              <SectionHeader label="Pipeline Presets" open={openSections.presets} onToggle={() => toggleSection('presets')}
+                extra={<button title="New preset" onClick={e => { e.stopPropagation(); onAddBlockSet(); }}
+                  style={styles.addPlusBtn}>Add+</button>} />
+              {openSections.presets && (<div style={styles.nestedSection}>
+              {/* 一个 preset 一行：名字吃满整行，右边一个 ▶ 立刻能跑这一套。 */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {blockSets.map((set, setIdx) => {
                   const missing = set.blocks.filter(b => ifaceIsMissing(b)).length;
                   const isActive = set.id === activeBlockSetId;
                   if (renamingSetId === set.id) {
                     return (
-                      <input key={set.id} autoFocus value={renamingValue} style={tabInputStyle}
+                      <input key={set.id} autoFocus value={renamingValue}
+                        style={{ ...tabInputStyle, width: '100%', boxSizing: 'border-box', borderRadius: 8 }}
                         onChange={e => setRenamingValue(e.target.value)}
                         onBlur={() => { onRenameBlockSet(set.id, renamingValue); setRenamingSetId(null); }}
                         onKeyDown={e => {
@@ -602,11 +687,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       />
                     );
                   }
-                  // A capsule: the left half IS the tab (click to switch, double-click to
-                  // rename, drag to reorder) and the right half runs this preset right now.
+                  // One row per preset. The row itself carries the interactions: click switches,
+                  // double-click renames, drag reorders, right-click offers Duplicate / Delete, and
+                  // the ▶ half runs exactly this preset.
                   return (
                     <div key={set.id} style={{
-                      display: 'flex', alignItems: 'stretch', borderRadius: 999, overflow: 'hidden',
+                      display: 'flex', alignItems: 'stretch', borderRadius: 8, overflow: 'hidden',
                       border: '0.5px solid ' + (isActive ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.1)'),
                       background: isActive ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.04)',
                     }}
@@ -614,27 +700,29 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       onDragStart={e => { e.dataTransfer.setData('application/x-blockset', String(setIdx)); e.dataTransfer.effectAllowed = 'move'; }}
                       onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
                       onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('application/x-blockset')); if (!isNaN(from)) onReorderBlockSets(from, setIdx); }}
+                      onContextMenu={e => { e.preventDefault(); setPresetMenu({ x: e.clientX, y: e.clientY, setId: set.id }); }}
                     >
                       <button
-                        title={missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time` : set.name}
+                        title={(missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time\n` : '')
+                          + `${set.name} · double-click to rename · right-click for Duplicate / Delete`}
                         onClick={() => onSwitchBlockSet(set.id)}
                         onDoubleClick={() => { setRenamingSetId(set.id); setRenamingValue(set.name); }}
                         style={{
-                          display: 'flex', alignItems: 'center', gap: 5,
-                          padding: '4px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
-                          border: 'none', background: 'none',
+                          flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 5,
+                          padding: '5px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                          border: 'none', background: 'none', textAlign: 'left',
                           color: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
                         }}>
-                        <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
                         {missing > 0 && (
-                          <span style={{ background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700 }}>Missing ×{missing}</span>
+                          <span style={{ marginLeft: 'auto', background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700, flexShrink: 0 }}>Missing ×{missing}</span>
                         )}
                       </button>
                       <button
                         title={`Run 「${set.name}」 now — the canvas composite, masked by the Mask layer`}
                         onClick={() => onRunPreset(set.id)}
                         style={{
-                          display: 'flex', alignItems: 'center', padding: '4px 9px',
+                          display: 'flex', alignItems: 'center', padding: '4px 10px',
                           border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
                           background: 'rgba(255,255,255,0.06)', cursor: 'pointer', lineHeight: 1,
                           color: isActive ? '#30d158' : 'rgba(48,209,88,0.65)', fontSize: 11,
@@ -642,25 +730,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     </div>
                   );
                 })}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginLeft: 'auto' }}>
-                  <button title="Rename this tab (or double-click the tab)" disabled={!activeBlockSetId}
-                    onClick={() => { const s = blockSets.find(x => x.id === activeBlockSetId); if (s) { setRenamingSetId(s.id); setRenamingValue(s.name); } }}
-                    style={{ ...tabActionBtn, color: activeBlockSetId ? undefined : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>✎</button>
-                  <button title={activeBlockSetId ? 'Duplicate this tab' : 'Select or create a tab first'} disabled={!activeBlockSetId}
-                    onClick={() => onDuplicateBlockSet(activeBlockSetId)}
-                    style={{ ...tabActionBtn, color: activeBlockSetId ? undefined : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>⧉</button>
-                  <button title={activeBlockSetId ? 'Delete this tab' : 'No tab to delete'}
-                    disabled={!activeBlockSetId}
-                    onClick={() => onRemoveBlockSet(activeBlockSetId)}
-                    style={{ ...tabActionBtn, color: activeBlockSetId ? 'rgba(255,90,90,0.8)' : 'rgba(255,255,255,0.15)', cursor: activeBlockSetId ? 'pointer' : 'default' }}>✕</button>
-                  <button title="New tab" onClick={onAddBlockSet} style={{ ...tabActionBtn, color: '#0a84ff', fontWeight: 700 }}>＋</button>
-                </div>
               </div>
+              {presetMenu && (() => {
+                const target = blockSets.find(s => s.id === presetMenu.setId);
+                if (!target) return null;
+                return <ContextMenu x={presetMenu.x} y={presetMenu.y} onClose={() => setPresetMenu(null)} items={[
+                  { label: 'Duplicate', onClick: () => onDuplicateBlockSet(target.id) },
+                  { label: 'Delete', color: '#ff6961', onClick: () => onRemoveBlockSet(target.id) },
+                ]} />;
+              })()}
+              </div>)}
 
               {/* Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
                   block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）已上移
                   到上方 GLOBAL SETTINGS，不按 preset 区分。 */}
-              <div style={styles.sectionTitle}>Preprocess Settings</div>
+              <SectionHeader label="Preprocess Settings" open={openSections.preprocess} onToggle={() => toggleSection('preprocess')} />
+              {openSections.preprocess && (<div style={styles.nestedSection}>
               <div style={styles.paramRow}
                 title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
                 <label style={styles.paramLabel}>Enable Mask</label>
@@ -690,9 +775,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
                 />
               </div>
+              </div>)}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
-                <div style={styles.sectionTitle}>Pipeline Blocks</div>
-                <button
+                <SectionHeader label="Pipeline Blocks" open={openSections.blocks} onToggle={() => toggleSection('blocks')} />
+                {openSections.blocks && (<button
                   title="Append a block to this preset"
                   onClick={() => setAddMenuOpen(v => !v)}
                   style={{
@@ -700,7 +786,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     border: '0.5px solid ' + (addMenuOpen ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.12)'),
                     borderRadius: 999, color: addMenuOpen ? '#fff' : 'rgba(255,255,255,0.7)',
                     fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
-                  }}>Add +</button>
+                  }}>Add +</button>)}
                 {addMenuOpen && (
                   <>
                     {/* A menu, not a modal: clicking anywhere else dismisses it. */}
@@ -724,6 +810,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </>
                 )}
               </div>
+              {openSections.blocks && (<div style={styles.nestedSection}>
               {blocks.map((block, blockIdx) => (
                 <div key={block.id} style={{
                   background: 'rgba(255,255,255,0.03)',
@@ -752,8 +839,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     >
                       <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="3" cy="3" r="1.3"/><circle cx="9" cy="3" r="1.3"/><circle cx="3" cy="6" r="1.3"/><circle cx="9" cy="6" r="1.3"/><circle cx="3" cy="9" r="1.3"/><circle cx="9" cy="9" r="1.3"/></svg>
                     </div>
-                    {/* Centered title */}
-                    <span style={{
+                    {/* Centered title. For a Query card the name doubles as the hint's host. */}
+                    <span title={block.type === 'query' ? QUERY_BLOCK_HINT : undefined} style={{
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
                       color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : '#bf5af2',
                     }}>{block.name}</span>
@@ -787,9 +874,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <label style={styles.paramLabel}>Persistent</label>
                           <IOSToggle checked={bound && !!qp.persistent} disabled={!bound}
                             onChange={v => updateBlockParam(block.id, 'persistent', v)} />
-                        </div>
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
-                          执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。
                         </div>
                       </>);
                     })()}
@@ -1045,6 +1129,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                 </div>
               ))}
+              </div>)}
             </div>
 
           {/* Right: the workbench. Its canvas composite IS the Context Image, and the
@@ -1695,6 +1780,15 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
+  // 折叠块的正文容器：继承设置面板原来的行距（面板本身 gap 10，行与行也隔 10），
+  // 否则把一段包进 div 会让行贴在一起。
+  nestedSection: { display: 'flex', flexDirection: 'column', gap: 10 },
+  addPlusBtn: {
+    marginLeft: 6, padding: '1px 8px', fontSize: 10.5, fontWeight: 700, lineHeight: 1.5,
+    color: '#0a84ff', background: 'rgba(10,132,255,0.14)',
+    border: '0.5px solid rgba(10,132,255,0.45)', borderRadius: 999, cursor: 'pointer',
+    textTransform: 'none', letterSpacing: 0,
+  },
   // Context 标题 + 右侧 Debug 按钮同行
   contextTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
   debugBtn: {

@@ -16,9 +16,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    tab's title carries the full path a bound document writes back to.
    File is the only place document actions live now, so the tab titles are also the document readout:
    the name, the bound path and the unsaved dot all describe the project File acts on. */
-#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0; }
+#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0 0; }
 #fileGroup { position: relative; flex: 0 0 auto; }
-.file-btn { flex: 0 0 auto; padding: 5px 12px; border-radius: 8px 8px 0 0; font-size: 11.5px; }
+/* Flush against the column's left edge, so the corners touching that edge are square: only the top
+   right stays rounded. #docBar gives up its left inset to make that edge actually the column's.
+   Qualified with .io-btn because the File button carries that menu-row class further down the sheet,
+   and two single-class selectors leave it to source order — the menu row would win and these tabs
+   would come back rounded and menu-padded. */
+.io-btn.file-btn { flex: 0 0 auto; padding: 5px 12px; border-radius: 0 8px 0 0; font-size: 11.5px; }
 #fileMenu { left: 0; right: auto; width: 228px; }
 /* Export unfolds IN PLACE rather than flying out as a second card: one popover is easier to keep
    honest about what is open, and the menu is already a column of choices. */
