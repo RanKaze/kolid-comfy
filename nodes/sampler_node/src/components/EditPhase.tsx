@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
@@ -26,6 +26,21 @@ function loadSections(): Record<SectionKey, boolean> {
     for (const k of SECTION_KEYS) if (typeof saved?.[k] === 'boolean') open[k] = saved[k];
   } catch { /* unreadable store => all open */ }
   return open;
+}
+
+// The Draw tab's left column: a width the user sets by dragging its right edge. The default is
+// deliberately roomier than the old fixed 260 — a Pipeline Settings row carries a long label AND a
+// number field AND a toggle on one line, and 260 clipped them. Same storage policy as the
+// collapsed sections: a browser that refuses localStorage just gets the default every time.
+const PANEL_W_STORE = 'sampler.drawPanelWidth';
+const PANEL_W_DEFAULT = 300, PANEL_W_MIN = 240, PANEL_W_MAX = 560, PANEL_W_STEP = 20;
+const clampPanelWidth = (w: number) => Math.min(PANEL_W_MAX, Math.max(PANEL_W_MIN, w));
+function loadPanelWidth(): number {
+  try {
+    const saved = parseFloat(localStorage.getItem(PANEL_W_STORE) || '');
+    if (isFinite(saved)) return clampPanelWidth(saved);
+  } catch { /* unreadable store => default */ }
+  return PANEL_W_DEFAULT;
 }
 
 // A section header that IS its own toggle. The chevron is the only thing that moves, so collapsing
@@ -312,6 +327,42 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
     return next;
   });
+  // 左栏宽度：拖右边缘的把手来调，把手只有 8px，所以指针一旦移出宿主文档就会被右边的
+  // 工作台 iframe 吞掉 —— setPointerCapture 把整段拖动钉在把手上，才能越过 iframe 继续。
+  const [panelWidth, setPanelWidth] = useState<number>(loadPanelWidth);
+  const [panelResizing, setPanelResizing] = useState(false);
+  const panelDragRef = useRef<{ x: number; w: number } | null>(null);
+  const panelWidthRef = useRef(panelWidth);
+  const applyPanelWidth = (w: number, persist: boolean) => {
+    const next = clampPanelWidth(w);
+    panelWidthRef.current = next;
+    setPanelWidth(next);
+    if (persist) { try { localStorage.setItem(PANEL_W_STORE, String(next)); } catch { /* in-memory only */ } }
+  };
+  const onPanelResizeDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    panelDragRef.current = { x: e.clientX, w: panelWidthRef.current };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
+    setPanelResizing(true);
+  };
+  const onPanelResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = panelDragRef.current;
+    if (d) applyPanelWidth(d.w + (e.clientX - d.x), false);
+  };
+  const onPanelResizeUp = () => {
+    if (!panelDragRef.current) return;
+    panelDragRef.current = null;
+    setPanelResizing(false);
+    applyPanelWidth(panelWidthRef.current, true);
+  };
+  const onPanelResizeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowLeft') applyPanelWidth(panelWidthRef.current - PANEL_W_STEP, true);
+    else if (e.key === 'ArrowRight') applyPanelWidth(panelWidthRef.current + PANEL_W_STEP, true);
+    else if (e.key === 'Home' || e.key === 'Enter') applyPanelWidth(PANEL_W_DEFAULT, true);
+    else return;
+    e.preventDefault();
+  };
   // 右键某个 preset 行才出现的菜单；null = 没有菜单。
   const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
@@ -609,6 +660,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   return (
     <div style={styles.container}>
+      {/* Two things an inline style prop cannot express: the panel's dark scrollbar (a
+          ::-webkit-scrollbar rule) and the resize handle's hover/focus tint. Both are scoped by
+          class here, matching the workbench's own overlay scrollbar — faint pill, transparent
+          track, no arrow buttons. */}
+      <style>{`
+        .dark-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
+        .dark-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+        .dark-scroll::-webkit-scrollbar-track { background: transparent; }
+        .dark-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); border: 3px solid transparent; border-radius: 8px; background-clip: padding-box; }
+        .dark-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+        .dark-scroll::-webkit-scrollbar-corner { background: transparent; }
+        .dark-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+        .draw-resizer > i { width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
+        .draw-resizer:hover > i, .draw-resizer:focus-visible > i, .draw-resizer.dragging > i { background: rgba(10,132,255,0.8); }
+        .draw-resizer:focus-visible { outline: none; }
+      `}</style>
       {/* Sidebar — vertical icon tabs */}
       <div style={styles.sidebar}>
         <div style={styles.sidebarTabs}>
@@ -650,7 +717,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             the layer stack and the Mask layer, so unmounting it would lose them. */}
         <div style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
           {/* Left: settings */}
-            <div style={styles.drawSettingsPanel}>
+            <div className="dark-scroll" style={{ ...styles.drawSettingsPanel, width: panelWidth }}>
               {/* Live preview of the workbench composite. The composite IS the Context Image,
                   so this is what Run Detailer feeds on (tinted where the Mask layer is painted). */}
                 <div style={styles.contextPreviewBox}>
@@ -1222,7 +1289,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <div style={styles.paramRow}>
                             <span style={styles.paramLabel}>Ctx Image</span>
                             <select
-                              style={{ ...styles.paramSelect, minWidth: 0 }}
+                              style={styles.paramSelect}
                               value={ip.context_image_key || ''}
                               onChange={e => updateIfaceParam('context_image_key', e.target.value || null)}
                             >
@@ -1244,7 +1311,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           <div style={styles.paramRow}>
                             <span style={styles.paramLabel}>Ctx Mask</span>
                             <select
-                              style={{ ...styles.paramSelect, minWidth: 0 }}
+                              style={styles.paramSelect}
                               value={ip.context_mask_key || ''}
                               onChange={e => updateIfaceParam('context_mask_key', e.target.value || null)}
                             >
@@ -1271,6 +1338,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               ))}
               </div>)}
             </div>
+
+          {/* The column's right edge is the handle. Colours live in the .draw-resizer rules below
+              (an inline style cannot express :hover), the geometry stays in `styles`. */}
+          <div
+            className={`draw-resizer${panelResizing ? ' dragging' : ''}`}
+            style={styles.panelResizer}
+            role="separator" aria-orientation="vertical" tabIndex={0}
+            aria-label="Settings panel width" aria-valuenow={panelWidth}
+            aria-valuemin={PANEL_W_MIN} aria-valuemax={PANEL_W_MAX}
+            title="Drag to resize this panel — double-click (or Home) restores the default width"
+            onPointerDown={onPanelResizeDown}
+            onPointerMove={onPanelResizeMove}
+            onPointerUp={onPanelResizeUp}
+            onPointerCancel={onPanelResizeUp}
+            onDoubleClick={() => applyPanelWidth(PANEL_W_DEFAULT, true)}
+            onKeyDown={onPanelResizeKey}
+          >
+            <i />
+          </div>
 
           {/* Right: the workbench. Its canvas composite IS the Context Image, and the
               pure Mask layer is the mask sent to the backend. */}
@@ -1858,8 +1944,15 @@ const styles: Record<string, React.CSSProperties> = {
   // Draw tab layout: left settings + right main area
   drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
   blendFrame: { flex: 1, minWidth: 0, alignSelf: 'stretch', height: '100%', border: 'none', background: '#0d0d0d', display: 'block' },
+  // The handle itself is 8px of nothing with a 3px pill in the middle; the negative margins pull it
+  // over the panel border and the iframe edge so dragging it never costs the layout a pixel of width.
+  panelResizer: {
+    width: 8, flexShrink: 0, alignSelf: 'stretch', margin: '0 -4px', zIndex: 5,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'col-resize', background: 'transparent', touchAction: 'none' as const,
+  },
   drawSettingsPanel: {
-    width: 260, flexShrink: 0, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
+    width: PANEL_W_DEFAULT, flexShrink: 0, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
     background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
   },
   sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
@@ -1895,8 +1988,8 @@ const styles: Record<string, React.CSSProperties> = {
   // A Pipeline Settings override row carries a longer label ("Override Crop Reserve") and has to fit
   // a number field AND a toggle in 228px, so it drops the fixed 80px floor and the 13px size.
   overrideLabel: { fontSize: 11.5, fontWeight: 500, color: 'rgba(255,255,255,0.6)', flexShrink: 0, minWidth: 0 },
-  paramSelect: { flex: 1, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
-  paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
+  paramSelect: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
+  paramInput: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 

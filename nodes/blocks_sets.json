@@ -304,7 +304,7 @@
       "pipeline_name": "[Anima] LizAnima"
     }
   ],
-  "active_block_set": "set-23",
+  "active_block_set": "set-20",
   "global_params": {
     "pixels": 2048576,
     "align": 16,

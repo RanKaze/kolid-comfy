@@ -90,6 +90,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Right column: the tool sections scroll in the top part, the Layers palette stays docked at
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
 #sidePanel { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; padding: 12px; gap: 10px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow: hidden; }
+/* 右栏的调宽把手：10px 轨道 + 左右各 -5px 负 margin，所以它压在分界线上而不额外吃掉画布宽度。
+   ::after 是那颗可抓握的竖条；hover / 拖动 / 键盘聚焦才点亮，静止时几乎隐形。 */
+#sideSplitter { position: relative; z-index: 5; flex: 0 0 10px; margin: 0 -5px; align-self: stretch;
+    display: flex; align-items: center; justify-content: center; cursor: col-resize; background: transparent; }
+#sideSplitter::after { content: ''; width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14);
+    transition: background 0.12s ease; }
+#sideSplitter:hover::after, #sideSplitter.dragging::after, #sideSplitter:focus-visible::after { background: rgba(10,132,255,0.8); }
 #panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
 /* Docked at the bottom of the right column. The dock sits outside #panelScroll, so it has to give
    back the scroll gutter itself: `margin-right: 6px` keeps its divider and its buttons on the same
@@ -555,6 +562,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="toolbarProgress"><i></i></div>
         </div>
     </div>
+    <div id="sideSplitter" role="separator" aria-orientation="vertical" tabindex="0"
+         title="Drag to resize the tools panel — double-click (or Home) restores 280px"></div>
     <div id="sidePanel">
         <!-- Tools scroll in the top part of the column; the Layers palette is docked at
              the bottom-right corner so it stays put no matter how long the tool list is. -->
@@ -5247,6 +5256,62 @@ splitterEl.addEventListener('keydown', e => {
     e.preventDefault();
 });
 applyStackSplit();
+
+// 右栏（Tools / Layers）调宽。分的是**像素**不是比例：要变的是"工具面板给多宽"，画布只是被挤，
+// 所以和上面那根比例把手各存各的键；手感保持一致（capture、双击/Alt 复位、键盘可调、落盘）。
+const SIDE_W_KEY = 'blend.sidePanelWidth';
+const SIDE_W_DEFAULT = 280, SIDE_W_MIN = 220, SIDE_W_MAX = 620, SIDE_W_STEP = 20;
+const sidePanelEl = document.getElementById('sidePanel');
+const sideSplitterEl = document.getElementById('sideSplitter');
+let sidePanelWidth = SIDE_W_DEFAULT;
+try {
+    const saved = parseFloat(localStorage.getItem(SIDE_W_KEY));
+    if (isFinite(saved)) sidePanelWidth = Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, saved));
+} catch (e) { /* private mode: keep this session's default */ }
+function saveSideWidth() {
+    try { localStorage.setItem(SIDE_W_KEY, String(sidePanelWidth)); } catch (e) { /* as above */ }
+}
+function applySideWidth() {
+    sidePanelEl.style.width = sidePanelWidth + 'px';
+    sideSplitterEl.setAttribute('aria-valuenow', String(Math.round(sidePanelWidth)));
+    // overlay 的盒子是按 viewport 实测尺寸建的，而 iframe 内部布局变化不会发 window resize，
+    // 所以每改一次宽度都要自己重排一次，否则遮罩/笔刷圈和画面错位。
+    layoutCanvas();
+}
+function setSideWidth(next, persist) {
+    sidePanelWidth = Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, next));
+    applySideWidth();
+    if (persist) saveSideWidth();
+}
+sideSplitterEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX, startW = sidePanelWidth;
+    try { sideSplitterEl.setPointerCapture(e.pointerId); } catch (err) { /* fall back to bubbling events */ }
+    sideSplitterEl.classList.add('dragging');
+    // 把手贴在右栏的左缘：往**左**拖才是变宽，所以位移取负。
+    const move = ev => setSideWidth(startW - (ev.clientX - startX), false);
+    const up = () => {
+        sideSplitterEl.classList.remove('dragging');
+        sideSplitterEl.removeEventListener('pointermove', move);
+        saveSideWidth();
+    };
+    sideSplitterEl.addEventListener('pointermove', move);
+    sideSplitterEl.addEventListener('pointerup', up, { once: true });
+    sideSplitterEl.addEventListener('pointercancel', up, { once: true });
+});
+sideSplitterEl.addEventListener('dblclick', () => setSideWidth(SIDE_W_DEFAULT, true));
+sideSplitterEl.addEventListener('click', e => { if (e.altKey) setSideWidth(SIDE_W_DEFAULT, true); });
+sideSplitterEl.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') setSideWidth(sidePanelWidth + SIDE_W_STEP, true);
+    else if (e.key === 'ArrowRight') setSideWidth(sidePanelWidth - SIDE_W_STEP, true);
+    else if (e.key === 'Home' || e.key === 'Enter') setSideWidth(SIDE_W_DEFAULT, true);
+    else return;
+    e.preventDefault();
+});
+sideSplitterEl.setAttribute('aria-valuemin', String(SIDE_W_MIN));
+sideSplitterEl.setAttribute('aria-valuemax', String(SIDE_W_MAX));
+applySideWidth();
 
 // "Place images as raster" — a persisted preference, not a one-shot: it decides how every
 // future image arrives (drop, Import, history injection) until flipped back.
