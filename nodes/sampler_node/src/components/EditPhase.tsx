@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
+import LogModal from './LogModal';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -27,11 +28,11 @@ function loadSections(): Record<SectionKey, boolean> {
 }
 
 // A section header that IS its own toggle. The chevron is the only thing that moves, so collapsing
-// never reflows the label; `extra` is where a per-section action (Add +) lives, and it has to stop
-// propagation itself or clicking it would collapse the panel it belongs to.
+// never reflows the label. A per-section action (Add +) is NOT its child — the header only takes the
+// left half of the row, so the action sits beside it in a flex row both sections build the same way.
 const SectionHeader: React.FC<{
-  label: string; open: boolean; onToggle: () => void; extra?: React.ReactNode;
-}> = ({ label, open, onToggle, extra }) => (
+  label: string; open: boolean; onToggle: () => void;
+}> = ({ label, open, onToggle }) => (
   <div onClick={onToggle} title={open ? 'Collapse this section' : 'Expand this section'}
     style={{
       ...styles.sectionTitle, display: 'flex', alignItems: 'center', gap: 5,
@@ -45,7 +46,6 @@ const SectionHeader: React.FC<{
         strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
     </span>
     {label}
-    {extra}
   </div>
 );
 
@@ -89,6 +89,28 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; la
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
+
+// The "Add +" both section headers share: a pill whose colour tracks the menu it drops, the click-out
+// layer that dismisses it, and the panel/rows. Writing it once is what keeps Pipeline Presets and
+// Pipeline Blocks identical in look and behaviour instead of two near-copies drifting apart.
+const addPillStyle = (open: boolean): React.CSSProperties => ({
+  background: open ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.06)',
+  border: '0.5px solid ' + (open ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.12)'),
+  borderRadius: 999, color: open ? '#fff' : 'rgba(255,255,255,0.7)',
+  fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
+});
+// A menu, not a modal: clicking anywhere else dismisses it.
+const addMenuBackdropStyle: React.CSSProperties = { position: 'fixed', inset: 0, zIndex: 40 };
+const addMenuPanelStyle: React.CSSProperties = {
+  position: 'absolute', top: '100%', right: 0, zIndex: 41, marginTop: 4,
+  background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
+  padding: 4, minWidth: 152, boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
+};
+const addMenuItemStyle: React.CSSProperties = {
+  display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px',
+  background: 'none', border: 'none', borderRadius: 7, cursor: 'pointer',
+  fontSize: 12, fontWeight: 600,
+};
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -231,6 +253,9 @@ interface EditPhaseProps {
   pipelinePackages: PipelinePackageInfo[];
   onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
   currentPipelineKey: string | null;
+  /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
+   *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
+  actionLog: ActionLogEntry[];
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -245,13 +270,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   onAddStagingImage, onLoadFromAssets, loadingAssets,
   blendIframeRef,
   interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
-  pipelinePackages, onSwitchPipeline, currentPipelineKey,
+  pipelinePackages, onSwitchPipeline, currentPipelineKey, actionLog,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [contextDragOver, setContextDragOver] = useState(false);
   // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
   const [showDebug, setShowDebug] = useState(false);
+  // Log 弹窗：最近 32 条行为记录 —— 画布那颗常显状态药丸撤掉后的去处。
+  const [showLog, setShowLog] = useState(false);
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
   const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
   // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
@@ -271,6 +298,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
   // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // The Pipeline Presets "Add +" dropdown — same control, same behaviour as the Blocks one.
+  const [presetAddOpen, setPresetAddOpen] = useState(false);
   // 四块面板的折叠状态（默认全展开，改动落 localStorage）。
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(loadSections);
   const toggleSection = (k: SectionKey) => setOpenSections(prev => {
@@ -607,13 +636,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={styles.contextPreviewBox}>
                   <div style={styles.contextTitleRow}>
                     <div style={styles.sectionTitle}>Context</div>
-                    {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
-                        各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
-                    <button
-                      style={styles.debugBtn}
-                      title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
-                      onClick={() => setShowDebug(true)}
-                    ><DbgIcon name="bug" size={15} /> Debug</button>
+                    <div style={styles.contextTitleActions}>
+                      {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
+                          （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
+                      <button
+                        style={styles.logBtn}
+                        title="Log — 最近 32 条行为记录（工作台与本页每一步的反馈）"
+                        onClick={() => setShowLog(true)}
+                      ><DbgIcon name="log" size={15} /> Log{actionLog.length ? ` · ${actionLog.length}` : ''}</button>
+                      {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
+                          各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
+                      <button
+                        style={styles.debugBtn}
+                        title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
+                        onClick={() => setShowDebug(true)}
+                      ><DbgIcon name="bug" size={15} /> Debug</button>
+                    </div>
                   </div>
                   <div style={styles.contextPreviewWrap}>
                   {blendPreview ? (
@@ -665,9 +703,23 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
                   Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
                   也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
-              <SectionHeader label="Pipeline Presets" open={openSections.presets} onToggle={() => toggleSection('presets')}
-                extra={<button title="New preset" onClick={e => { e.stopPropagation(); onAddBlockSet(); }}
-                  style={styles.addPlusBtn}>Add+</button>} />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
+                <SectionHeader label="Pipeline Presets" open={openSections.presets} onToggle={() => toggleSection('presets')} />
+                {openSections.presets && (<button
+                  title="Add a pipeline preset"
+                  onClick={() => setPresetAddOpen(v => !v)}
+                  style={addPillStyle(presetAddOpen)}>Add +</button>)}
+                {presetAddOpen && (
+                  <>
+                    <div style={addMenuBackdropStyle} onClick={() => setPresetAddOpen(false)} />
+                    <div style={addMenuPanelStyle}>
+                      <button title="An empty preset — add blocks to it below"
+                        onClick={() => { onAddBlockSet(); setPresetAddOpen(false); }}
+                        style={{ ...addMenuItemStyle, color: '#0a84ff' }}>New Preset</button>
+                    </div>
+                  </>
+                )}
+              </div>
               {openSections.presets && (<div style={styles.nestedSection}>
               {/* 一个 preset 一行：名字吃满整行，右边一个 ▶ 立刻能跑这一套。 */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -781,30 +833,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 {openSections.blocks && (<button
                   title="Append a block to this preset"
                   onClick={() => setAddMenuOpen(v => !v)}
-                  style={{
-                    background: addMenuOpen ? 'rgba(10,132,255,0.18)' : 'rgba(255,255,255,0.06)',
-                    border: '0.5px solid ' + (addMenuOpen ? 'rgba(10,132,255,0.6)' : 'rgba(255,255,255,0.12)'),
-                    borderRadius: 999, color: addMenuOpen ? '#fff' : 'rgba(255,255,255,0.7)',
-                    fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
-                  }}>Add +</button>)}
+                  style={addPillStyle(addMenuOpen)}>Add +</button>)}
                 {addMenuOpen && (
                   <>
-                    {/* A menu, not a modal: clicking anywhere else dismisses it. */}
-                    <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setAddMenuOpen(false)} />
-                    <div style={{
-                      position: 'absolute', top: '100%', right: 0, zIndex: 41, marginTop: 4,
-                      background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
-                      padding: 4, minWidth: 152, boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
-                    }}>
+                    <div style={addMenuBackdropStyle} onClick={() => setAddMenuOpen(false)} />
+                    <div style={addMenuPanelStyle}>
                       {ADD_BLOCK_KINDS.map(opt => (
                         <button key={opt.kind}
                           title={opt.hint}
                           onClick={() => { onAddBlock(opt.kind); setAddMenuOpen(false); }}
-                          style={{
-                            display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px',
-                            background: 'none', border: 'none', borderRadius: 7, cursor: 'pointer',
-                            color: opt.color, fontSize: 12, fontWeight: 600,
-                          }}>{opt.label}</button>
+                          style={{ ...addMenuItemStyle, color: opt.color }}>{opt.label}</button>
                       ))}
                     </div>
                   </>
@@ -1379,6 +1417,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
       {/* Debug — 上一次 Run / Generate 的全过程快照 */}
       {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
+      {showLog && <LogModal entries={actionLog} onClose={() => setShowLog(false)} />}
     </div>
   );
 };
@@ -1783,14 +1822,15 @@ const styles: Record<string, React.CSSProperties> = {
   // 折叠块的正文容器：继承设置面板原来的行距（面板本身 gap 10，行与行也隔 10），
   // 否则把一段包进 div 会让行贴在一起。
   nestedSection: { display: 'flex', flexDirection: 'column', gap: 10 },
-  addPlusBtn: {
-    marginLeft: 6, padding: '1px 8px', fontSize: 10.5, fontWeight: 700, lineHeight: 1.5,
-    color: '#0a84ff', background: 'rgba(10,132,255,0.14)',
-    border: '0.5px solid rgba(10,132,255,0.45)', borderRadius: 999, cursor: 'pointer',
-    textTransform: 'none', letterSpacing: 0,
-  },
-  // Context 标题 + 右侧 Debug 按钮同行
+  // Context 标题 + 右侧的 Log / Debug 两颗按钮同行；按钮抱成一组贴右，标题留在左边。
   contextTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
+  contextTitleActions: { display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' },
+  logBtn: {
+    display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
+    fontSize: 10.5, fontWeight: 600, padding: '2px 9px', borderRadius: 999, cursor: 'pointer',
+    background: 'rgba(100,210,255,0.14)', border: '0.5px solid rgba(100,210,255,0.42)',
+    color: '#64d2ff', lineHeight: 1.5,
+  },
   debugBtn: {
     display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
     fontSize: 10.5, fontWeight: 600, padding: '2px 9px', borderRadius: 999, cursor: 'pointer',

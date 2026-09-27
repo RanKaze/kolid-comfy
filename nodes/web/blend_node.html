@@ -71,12 +71,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* The transform box lives on its own screen-space layer so its handles stay visible
    (and grabbable) even when they fall outside the canvas bounds. */
 #overlayCanvas { position: absolute; left: 0; top: 0; pointer-events: none; }
-/* Centred on the canvas area: with left/right both set and auto margins a shrink-to-fit
-   absolute box is clamped to that span, so a long status ellipsizes instead of running off
-   the edge of the workbench. */
-#status { position: absolute; top: 0; left: 0; right: 0; margin: 0 auto; pointer-events: none; background: rgba(28,28,30,0.55); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); padding: 8px 20px; border-radius: 20px; color: #fff; font-size: 13px; font-weight: 500; z-index: 50; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 4px 24px rgba(0,0,0,0.25); max-width: 70%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#status.success { background: rgba(48,209,88,0.2); border-color: rgba(48,209,88,0.3); color: #30d158; }
-#status.error { background: rgba(255,69,58,0.2); border-color: rgba(255,69,58,0.35); color: #ff6961; }
+/* The old centred status pill is gone: every message it used to show is now one row in the
+   host's Log panel (Context 标题行 → Log，最近 32 条). setStatus keeps its name and every call
+   site — only the destination changed. */
 /* ---- File menu buttons — .io-btn is the menu's own row style, shared with the Add menus ----
    The document lives behind the File popover now: Load / Save / Save As / Export ▸ PNG / Import.
    Each entry carries a one-line sub, because the explanation is needed mid-choice and a tooltip is
@@ -535,7 +532,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <canvas id="guidanceCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
         </div>
-        <div id="status">Add layers to start</div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
         <div id="brushCursor"></div>
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
@@ -849,7 +845,6 @@ const blendCanvas = document.getElementById('blendCanvas');
 const guidanceCanvas = document.getElementById('guidanceCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
-const status = document.getElementById('status');
 const brushCursor = document.getElementById('brushCursor');
 const maskTargetLabel = document.getElementById('maskTargetLabel');
 const blendCtx = blendCanvas.getContext('2d');
@@ -1002,7 +997,6 @@ let rectArmed = false;
 // captured when the menu item is clicked and read back when the resolution modal is applied.
 let rectTargetStack = 'layer';
 let cursorInside = false;
-let statusTimer = null;
 
 // Raster layers: the buffer IS the canvas — one image pixel per canvas pixel, transform locked
 // to the identity. A transform drag resamples the pixels in place (destructive, committed when
@@ -1143,12 +1137,15 @@ function groupStatusText(n) {
         : 'Single layer selected';
 }
 
+// 行为日志的唯一入口。这里以前写的是画布顶部那颗常显的状态药丸 —— 药丸已经撤掉，每条消息改发
+// 给宿主累积（Context 标题行的 Log 按钮，最近 32 条）。函数名和所有调用点都保持不变：它是这套
+// 界面"说一句话"的渠道，只是终点从画布挪进了日志。lastStatusText 留下是因为偶尔有人拿最近一句
+// 话判断上一动作的收尾（见 saveCudAs 的取消分支）。
+let lastStatusText = '';
 function setStatus(text, kind) {
-    status.textContent = text;
-    status.classList.toggle('success', kind === 'success');
-    status.classList.toggle('error', kind === 'error');
-    if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
-    if (kind) statusTimer = setTimeout(() => { status.classList.remove('success', 'error'); }, 2600);
+    lastStatusText = text;
+    if (window.parent === window) return;
+    window.parent.postMessage({ type: 'blend-log', text: String(text), kind: kind || '', at: Date.now() }, '*');
 }
 
 // onerror is optional and only addLayer passes it: a history key is claimed before the image is
@@ -7032,7 +7029,7 @@ async function saveThenClose() {
     const saved = await saveCud();
     docCloseSaveBtn.disabled = false;
     if (!saved) {
-        if (!/cancelled/.test(status.textContent)) setStatus('Nothing was closed — the save did not go through', 'error');
+        if (!/cancelled/.test(lastStatusText)) setStatus('Nothing was closed — the save did not go through', 'error');
         return;
     }
     closeDocCloseModal();

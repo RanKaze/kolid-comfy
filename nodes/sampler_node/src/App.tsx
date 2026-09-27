@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -42,6 +42,16 @@ const App: React.FC = () => {
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
   const [interfaceResults, setInterfaceResults] = useState<Record<number, StagingItem[]>>({});
+  /**
+   * 最近 32 条行为记录。工作台画布顶部那颗常显的状态药丸已经撤掉，它每次说话都改发一条
+   * 'blend-log' 到这里；本页自己触发的动作（跑 preset / Execute / 取消 / 载入 / Query）也写进
+   * 同一份列表，由 Context 标题行的 Log 按钮展开。
+   */
+  const [actionLog, setActionLog] = useState<ActionLogEntry[]>([]);
+  const pushLog = useCallback((text: string, kind: ActionLogEntry['kind'] = '') => {
+    if (!text) return;
+    setActionLog(prev => [...prev, { at: Date.now(), text, kind }].slice(-32));
+  }, []);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
   // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
   // Mask layer, which would be lost if React unmounted it on every tab switch.
@@ -602,11 +612,17 @@ const App: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: sid }),
         }).then(() => refreshStaging()).catch(() => {});
+      } else if (event.data?.type === 'blend-log') {
+        // 工作台画布上那颗常显的状态药丸撤掉了：它每次说话改发一条到这里，攒成 Log 面板
+        // （Context 标题行 → Log）。kind 只可能是 '' / 'success' / 'error'，别的按普通行显示。
+        const t = typeof event.data.text === 'string' ? event.data.text : '';
+        const k = event.data.kind === 'success' || event.data.kind === 'error' ? event.data.kind : '';
+        pushLog(t, k);
       }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas, refreshStaging]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas, refreshStaging, pushLog]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
@@ -623,6 +639,7 @@ const App: React.FC = () => {
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
+    pushLog(`Execute interface 「${interfaces[interfaceIndex]?.name || '#' + interfaceIndex}」`);
     // Mutual exclusion: if another interface is currently running, ignore this request.
     if (executedInterfaceIdx !== null && interfaceStatusByIdx[executedInterfaceIdx] === 'running') {
       return;
@@ -641,7 +658,7 @@ const App: React.FC = () => {
       setInterfaceStatusByIdx(prev => ({ ...prev, [interfaceIndex]: 'idle' }));
       setExecutedInterfaceIdx(null);
     }
-  }, [executedInterfaceIdx, interfaceStatusByIdx]);
+  }, [executedInterfaceIdx, interfaceStatusByIdx, interfaces, pushLog]);
 
   const handleSwitchPipeline = useCallback(async (packageIdx: number, pipelineIdx: number) => {
     setError(null);
@@ -752,24 +769,26 @@ const App: React.FC = () => {
    *  POST — that's why the caller awaits us before refreshing the preset summaries. */
   const handleQueryAnswer = useCallback(async (selection: Record<string, any>) => {
     setPendingQuery(null);
+    pushLog('Query confirmed — the chain continues');
     try {
       await fetch('/api/query_answer', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ selection }),
       });
     } catch { /* the run aborts on its own if the answer never lands */ }
-  }, []);
+  }, [pushLog]);
 
   /** Closing the Query dialog aborts the whole chain — the user chose to stop, not to skip. */
   const handleQueryCancel = useCallback(async () => {
     setPendingQuery(null);
+    pushLog('Query closed — the whole chain was aborted', 'error');
     try {
       await fetch('/api/query_answer', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cancelled: true }),
       });
     } catch { /* as above */ }
-  }, []);
+  }, [pushLog]);
 
   // ── Pipeline Blocks tabs（多套 blocks，每套独立持久化在后端 config）──
   const persistSets = useCallback((nextSets: BlockSet[], nextActiveId: string) => {
@@ -987,6 +1006,7 @@ const App: React.FC = () => {
         pipelinePackages={pipelinePackages}
         onSwitchPipeline={handleSwitchPipeline}
         currentPipelineKey={currentPipelineKey}
+        actionLog={actionLog}
       />
 
       {error && (
