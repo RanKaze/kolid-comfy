@@ -229,21 +229,21 @@ export function AppShell() {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'auto-tag') {
-        // If tags array is provided (parsed mode), add as parsing-sourced tag groups
-        if (Array.isArray(event.data.tags) && event.data.tags.length > 0) {
+        // An explicit tags array REPLACES the whole parsing set — including the empty one
+        // Clear Tag sends, which is precisely how it wipes every purple tag in this tab.
+        if (Array.isArray(event.data.tags)) {
           const newTagGroups: TagGroup[] = (event.data.tags as string[]).map((seg: string) => {
             const tg = parseStringToTags(seg, allPrompts);
             return { ...tg, tags: tg.tags.map(t => ({ ...t })), source: 'parsing' as const };
           });
-          if (newTagGroups.length > 0) {
-            setSelectedTags(prev => {
-              // 移除旧的 parsing tag，保留 normal/program tag，然后添加新的 parsing tag
-              const filtered = prev.filter(g => g.source !== 'parsing');
-              const existing = new Set(filtered.map(g => tagsToDisplayString(g)));
-              const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
-              return [...filtered, ...toAdd];
-            });
-          }
+          setSelectedTags(prev => {
+            // 移除旧的 parsing tag，保留 normal/program tag，然后添加新的 parsing tag
+            const filtered = prev.filter(g => g.source !== 'parsing');
+            if (newTagGroups.length === 0) return filtered.length === prev.length ? prev : filtered;
+            const existing = new Set(filtered.map(g => tagsToDisplayString(g)));
+            const toAdd = newTagGroups.filter(g => !existing.has(tagsToDisplayString(g)));
+            return [...filtered, ...toAdd];
+          });
         }
         // If custom text is provided, add to custom prompts
         if (event.data.custom && typeof event.data.custom === 'string' && event.data.custom.trim()) {
