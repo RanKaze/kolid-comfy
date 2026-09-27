@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes,
@@ -14,6 +14,9 @@ export function useApi() {
   const [categoryDisplayModes, setCategoryDisplayModes] = useState<CategoryDisplayModes>({});
   const [categorySizeModes, setCategorySizeModes] = useState<CategorySizeModes>({});
   const [customPrompts, setCustomPrompts] = useState('');
+  const [temporaryPrompts, setTemporaryPrompts] = useState<string[]>([]);
+  const temporaryPromptsRef = useRef<string[]>([]);
+  temporaryPromptsRef.current = temporaryPrompts;
   const [lastSelected, setLastSelected] = useState<string[]>([]);
   const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
   const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
@@ -43,6 +46,7 @@ export function useApi() {
     setLastSelectedLoras((presetSelection?.loras as LoraSelectionData[]) || (SCOPED_SELECTION ? [] : (data.last_selected_loras || [])));
     setLastSelectedPrefabs((presetSelection?.prefabs as { guid: string; active?: boolean }[]) || (SCOPED_SELECTION ? [] : (data.last_selected_prefabs || [])));
     setCustomPrompts(SCOPED_SELECTION ? (presetSelection?.custom_prompts ?? '') : (data.custom_prompts || ''));
+    setTemporaryPrompts(SCOPED_SELECTION ? [] : (data.temporary_prompts || []));
     setLoraRegex(data.lora_regex || '');
     setParsedPrompts(data.parsed_prompts || []);
     setHasTagger(data.has_tagger || false);
@@ -56,7 +60,7 @@ export function useApi() {
     const res = await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: keepParsing || false }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, temporary_prompts: temporaryPromptsRef.current, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: keepParsing || false }),
     });
     if (res.ok) {
       onBeforeClose?.();
@@ -68,7 +72,7 @@ export function useApi() {
     await fetch(`${API_BASE}/select_prompt`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompts, custom_prompts: custom, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: false }),
+      body: JSON.stringify({ prompts, custom_prompts: custom, temporary_prompts: temporaryPromptsRef.current, loras, prefabs, programs, filter_tag_groups: filterTags || [], filter_loras: filterLoras || [], filter_prefabs: filterPrefabs || [], keep_parsing: false }),
     });
   }, []);
 
@@ -93,6 +97,7 @@ export function useApi() {
     categoryDisplayModes, setCategoryDisplayModes,
     categorySizeModes, setCategorySizeModes,
     customPrompts, setCustomPrompts,
+    temporaryPrompts, setTemporaryPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
     loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,

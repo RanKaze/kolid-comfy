@@ -162,7 +162,7 @@ function buildPromptText(ctx: PromptContextBase, findPrefabByGuid: (guid: string
 export function AppShell() {
   const api = useApi();
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
-    customPrompts, setCustomPrompts, loadData: apiLoadData, submitSelection, syncSelection, closeWindow, loraRegex,
+    customPrompts, setCustomPrompts, temporaryPrompts, setTemporaryPrompts, loadData: apiLoadData, submitSelection, syncSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
     loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
@@ -1501,6 +1501,21 @@ export function AppShell() {
     setSelectedTags(prev => [...prev, { ...tagGroup, tags: tagGroup.tags.map(t => ({ ...t })), source: 'normal' }]);
     setCustomAddedTagKeys(prev => new Set(prev).add(displayString));
   }, [setSelectedTags]);
+
+  // ========== Temporary Prompts (unmatched prompt_parsing segments, this run only) ==========
+  const discardTemporaryPrompt = useCallback((idx: number) => {
+    setTemporaryPrompts(prev => prev.filter((_, i) => i !== idx));
+  }, [setTemporaryPrompts]);
+
+  const promoteTemporaryPrompt = useCallback((idx: number) => {
+    const text = temporaryPrompts[idx];
+    if (!text) return;
+    setTemporaryPrompts(prev => prev.filter((_, i) => i !== idx));
+    setCustomPrompts(prev => {
+      const existing = prev.split('\n').map(s => s.trim()).filter(Boolean);
+      return existing.includes(text) ? prev : [...existing, text].join('\n');
+    });
+  }, [temporaryPrompts, setTemporaryPrompts, setCustomPrompts]);
 
   // ========== Select Prompt (full toggle logic) ==========
   const selectPrompt = useCallback((prompt: string) => {
@@ -5367,6 +5382,24 @@ export function AppShell() {
 
           {!tempCtx.mode && !isTemporary ? (
             <>
+              {temporaryPrompts.length > 0 ? (
+                <div className="temporary-prompts-section">
+                  <div className="temp-head">
+                    <h3>Temporary Prompts ({temporaryPrompts.length})</h3>
+                    <button className="clear-btn" onClick={() => setTemporaryPrompts([])} title="Clear all — removed from this run's prompt, never saved">{iconTrash}</button>
+                  </div>
+                  <div className="selected-tags">
+                    {temporaryPrompts.map((text, i) => (
+                      <span className="tag temp-prompt" key={`${text}-${i}`}>
+                        {text}
+                        <span className="remove" onClick={() => promoteTemporaryPrompt(i)} title="Move to Custom Prompts (keep for next runs)">{iconSwapUp}</span>
+                        <span className="remove" onClick={() => discardTemporaryPrompt(i)} title="Drop this term">{iconX}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="custom-input-section">
                 <h3>Custom Prompts</h3>
                 <CustomPromptsEditor

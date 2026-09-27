@@ -85,6 +85,9 @@ class SnapshotPromptServer:
         self.browser_url = None
         self.selected_prompts = []
         self.custom_prompts = ''
+        # Segments prompt_parsing couldn't match. Shown in the Temporary Prompts section and
+        # appended to this run's outputs only — never cached, so they vanish on the next run.
+        self.temporary_prompts = []
         self.last_selected = last_selected or []
         self.should_stop = False
         self.lora_regex = lora_regex
@@ -986,6 +989,7 @@ class SnapshotPromptServer:
                     'category_display_modes': si.category_display_modes,
                     'category_size_modes': si.category_size_modes,
                     'custom_prompts': si.custom_prompts,
+                    'temporary_prompts': si.temporary_prompts,
                     'last_selected_loras': si._resolve_selected_loras_by_fingerprint(si.last_selected_loras),
                     'last_selected_prefabs': si.last_selected_prefabs,
                     'last_selected_programs': si.last_selected_programs,
@@ -1125,6 +1129,10 @@ class SnapshotPromptServer:
                 if self.server_instance:
                     self.server_instance.selected_prompts = data.get('prompts', [])
                     self.server_instance.custom_prompts = data.get('custom_prompts', '')
+                    if 'temporary_prompts' in data:
+                        self.server_instance.temporary_prompts = [
+                            t for t in (x.strip() for x in data.get('temporary_prompts') or []) if t
+                        ]
                     self.server_instance.selected_loras = self.server_instance._convert_loras_to_fingerprint_keys(data.get('loras', []))
                     self.server_instance.selected_prefabs = data.get('prefabs', [])
                     self.server_instance.selected_programs = data.get('programs', [])
@@ -2488,8 +2496,8 @@ class SnapshotPromptServer:
                         img_tensor = torch.from_numpy(img_np)
                         tag = get_tag(tagger, img_tensor)
                         print(f"[tag_from_image] tagger result: {tag[:200]}")
-                        parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
-                        result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                        parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
+                        result = {'success': True, 'tags': parsed_selected, 'custom': ', '.join(parsed_unmatched)}
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -2512,8 +2520,8 @@ class SnapshotPromptServer:
                             result = {'success': False, 'error': 'Capture canceled by user'}
                         else:
                             print(f"[tag_from_capture] tagger result: {tag[:200]}")
-                            parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
-                            result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                            parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
+                            result = {'success': True, 'tags': parsed_selected, 'custom': ', '.join(parsed_unmatched)}
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -2539,8 +2547,8 @@ class SnapshotPromptServer:
                             result = {'success': False, 'error': 'Assets selection canceled or no image in slot'}
                         else:
                             print(f"[tag_from_assets] tagger result: {tag[:200]}")
-                            parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
-                            result = {'success': True, 'tags': parsed_selected, 'custom': parsed_custom}
+                            parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
+                            result = {'success': True, 'tags': parsed_selected, 'custom': ', '.join(parsed_unmatched)}
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -2859,9 +2867,9 @@ class SnapshotPromptNode:
         """Parse a raw prompt string by matching against known prompts and decorations.
         
         Splits by comma, then for each segment attempts to find matching prompts
-        and decorations. Unmatched segments become custom_prompts.
+        and decorations. Unmatched segments are returned as-is.
         
-        Returns (last_selected, custom_prompts).
+        Returns (last_selected, unmatched_segments), unmatched_segments being a list.
         """
         data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "prompt")
         prompt_json = os.path.join(data_dir, "prompt.json")
@@ -2877,7 +2885,7 @@ class SnapshotPromptNode:
                 pass
 
         if not prompts_data:
-            return [], raw_text
+            return [], ([raw_text] if raw_text.strip() else [])
 
         def _ensure_list(val):
             if isinstance(val, list):
@@ -2920,7 +2928,7 @@ class SnapshotPromptNode:
                     tag_to_prompt_texts[t].add(key)
 
         if not prompt_index_lower:
-            return [], raw_text
+            return [], ([raw_text] if raw_text.strip() else [])
 
         # All prompt keys are valid decoration candidates
         all_prompt_keys = set(prompt_index_lower.keys())
@@ -3044,7 +3052,7 @@ class SnapshotPromptNode:
                 if seg_lower in prompt_index_lower:
                     matched = _build_bracket_output(prompt_index_lower[seg_lower], [], strength)
                 else:
-                    # Keep as custom but preserve strength wrapper
+                    # Keep as temporary prompt but preserve strength wrapper
                     custom_parts.append(seg)
                     continue
 
@@ -3053,11 +3061,10 @@ class SnapshotPromptNode:
                 print(f"  [RESULT] matched='{matched}'")
                 last_selected.append(matched)
             else:
-                print(f"  [RESULT] → custom_prompts")
+                print(f"  [RESULT] → temporary_prompts")
                 custom_parts.append(seg)
 
-        custom = ', '.join(custom_parts) if custom_parts else ''
-        return last_selected, custom
+        return last_selected, custom_parts
 
     # Class-level state for the dedicated Qt capture thread
     _qt_capture_thread = None
@@ -3544,16 +3551,18 @@ class SnapshotPromptNode:
 
         last_selected = []
         custom_prompts = ''
+        temporary_prompts = []
 
-        # Parse prompt_parsing if provided — this is the raw text to parse
+        # Parse prompt_parsing if provided — this is the raw text to parse.
+        # Segments that match no known prompt go to the temporary bucket: they are shown
+        # in the UI and emitted by this run, but never written back to a widget.
         parsed_prompts_list = []
         if prompt_parsing and prompt_parsing.strip():
-            parsed_selected, parsed_custom = self._parse_raw_prompt(prompt_parsing.strip())
+            parsed_selected, parsed_unmatched = self._parse_raw_prompt(prompt_parsing.strip())
             parsed_prompts_list = list(parsed_selected)
             last_selected.extend(parsed_selected)
-            if parsed_custom:
-                custom_prompts = parsed_custom
-            print(f"[SnapshotPrompt] Parsed prompt_parsing: '{prompt_parsing}' -> {parsed_selected}, custom='{parsed_custom}'")
+            temporary_prompts = [s.strip() for s in parsed_unmatched if s and s.strip()]
+            print(f"[SnapshotPrompt] Parsed prompt_parsing: '{prompt_parsing}' -> {parsed_selected}, temporary={temporary_prompts}")
 
         # Parse the existing prompt widget (previous saved selections)
         if prompt and prompt.strip():
@@ -3627,6 +3636,7 @@ class SnapshotPromptNode:
             last_selected_programs=last_selected_programs,
         )
         server.custom_prompts = custom_prompts
+        server.temporary_prompts = temporary_prompts
         # Region fields
         server.enable_region = enable_region
         server.image = image
@@ -3829,6 +3839,11 @@ class SnapshotPromptNode:
         selected_prompt_texts = [p['text'] if isinstance(p, dict) else p for p in server.selected_prompts]
         all_prompts_raw = selected_prompt_texts + prefab_prompts_raw
         all_prompts_cleaned = cleaned_prompts + prefab_prompts_cleaned
+
+        # Temporary prompts join this run's output only: they stay out of selected_prompts,
+        # so neither the prompt widget nor the cache dict ever picks them up.
+        all_prompts_raw.extend(server.temporary_prompts)
+        all_prompts_cleaned.extend(server.temporary_prompts)
         
         result_prompt = ", ".join(all_prompts_raw)
         cleaned_result = ", ".join(all_prompts_cleaned)
