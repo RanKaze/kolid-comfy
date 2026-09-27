@@ -105,12 +105,20 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    pinned row plus its label, nothing to scroll. */
 #maskDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 #maskRowSlot { display: flex; flex-direction: column; gap: 4px; }
-/* Guidances own the top of the dock and get a FLOOR, not just a ceiling: `flex: 0 1 auto` makes the
-   box its content height, so a one-row stack used to read as a 34px strip no matter how much room
-   the dock had — raising only the cap changed nothing you could see. 30% is three rows you can drop
-   into and order by eye; 70% keeps the working layers the majority list. Both are shares of the
-   dock's definite height, so the floor scales with the window along with the dock itself. */
-#guidanceList { flex: 0 1 auto; min-height: 30%; max-height: 70%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* The two lists split the dock's leftover height between themselves by flex-GROWTH, with a basis of
+   0: whatever the dock's height is, the heads and the splitter take theirs and the rest divides by
+   this ratio. That is what makes the divider honest — the proportion you dragged to survives window
+   resizes, because neither list is sized by its content any more (both scroll in place). JS rewrites
+   both numbers from `guidanceSplit`; these are just the defaults, so the first paint is right. */
+#guidanceList { flex: 6 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* The grab rail between them. It is deliberately wider than it looks: the visible pill is 3px, the
+   row is 10px, and the dock's own 6px gaps hang off each side of it, so the pointer only has to be
+   roughly on the line. `touch-action: none` keeps a touch drag from scrolling the page instead. */
+#stackSplitter { flex: 0 0 10px; margin: -5px 0; display: flex; align-items: center; justify-content: center;
+    cursor: ns-resize; touch-action: none; border-radius: 5px; outline: none; }
+#stackSplitter::after { content: ''; width: 38px; height: 3px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
+#stackSplitter:hover::after, #stackSplitter.dragging::after, #stackSplitter:focus-visible::after { background: rgba(10,132,255,0.8); }
+#stackSplitter.dragging { cursor: ns-resize; }
 /* While a row is being dragged, both lists say where it would land: the one under the pointer is
    the stack the layer MOVES to. */
 .layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
@@ -146,10 +154,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .add-menu { top: auto; bottom: calc(100% + 6px); left: auto; right: 0; width: 216px; z-index: 95; }
 
 .layer-list { display: flex; flex-direction: column; gap: 4px; }
-/* Fills the rest of the fixed-height dock and scrolls in place, so a long list never pushes the
-   dock's header out of view. `min-height: 0` is what lets a flex child actually shrink and
-   scroll instead of growing past its parent. */
-#layerList { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* The working half of the split above: same zero basis, so the two lists share the leftover dock
+   height by growth ratio and nothing is sized by its content. `min-height: 0` is what lets a flex
+   child actually shrink and scroll instead of growing past its parent. */
+#layerList { flex: 4 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
 
 /* iOS-style dark scrollbar for the column's two scroll areas (the tool sections and the layer
    list). Overlay look: no track, a slim translucent thumb that only reads as a faint grey pill
@@ -429,20 +437,22 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     padding: 0; cursor: pointer;
 }
 .staging-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* 固定的 Context 卡片：工作区最左侧，代表当前 context image（<image 1>）。
-   Enable Edit 下它永远作为 image 1 存在（无论是否插进文本），卡片只是把
-   <image 1> 写进 Extra Prompt 的手段 —— 不可移除（没有 ✕）。 */
-.staging-item.staging-context {
+/* 两张钉死卡片：Context（最左）与 Guidance（紧随）。两者都常驻，与工作区里有没有
+   别的条目无关 —— 它们代表的不是"一张被丢进来的图"，而是两条恒定存在的引用
+   （<image_id:context> / <image_id:staging_guidance>），所以没有 ✕。
+   Enable Edit 下 context 永远作为 image 1 存在（无论是否插进文本），卡片只是把
+   <image 1> 写进 Extra Prompt 的手段。 */
+.staging-item.staging-context, .staging-item.staging-guidance {
     display: flex; align-items: center; justify-content: center;
     background: rgba(10,132,255,0.14); border: 0.5px dashed rgba(10,132,255,0.6);
     color: rgba(255,255,255,0.9); font-size: 10px; font-weight: 700;
     letter-spacing: 0.2px; text-align: center; line-height: 1.2; padding: 2px;
 }
-.staging-item.staging-context:hover { background: rgba(10,132,255,0.24); }
-/* Context 卡片的实时预览：盖满卡片，标签悬浮在底部半透明条上。
-   没有画布内容时 img 无 src（display:none），退回纯 "Context 1" 文字态。 */
-.staging-context .context-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
-.staging-context .context-label {
+.staging-item.staging-context:hover, .staging-item.staging-guidance:hover { background: rgba(10,132,255,0.24); }
+/* 钉死卡片的实时预览：盖满卡片，标签悬浮在底部半透明条上。
+   没有画布内容时 img 无 src（display:none），退回纯文字标签。 */
+.staging-context .context-preview, .staging-guidance .context-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.staging-context .context-label, .staging-guidance .context-label {
     position: absolute; left: 0; right: 0; bottom: 0;
     padding: 1px 0 2px; background: rgba(0,0,0,0.58);
     font-size: 9px; font-weight: 700; letter-spacing: 0.2px; text-align: center; line-height: 1.2;
@@ -684,6 +694,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
             </div>
             <div class="layer-list" id="guidanceList"></div>
+            <!-- The rail between the two stacks: dragging it re-splits the dock's leftover height. -->
+            <div id="stackSplitter" role="separator" aria-orientation="horizontal"
+                 aria-valuemin="15" aria-valuemax="85" aria-valuenow="60"
+                 aria-label="Guidances / Layers split" tabindex="0"
+                 title="Drag to set how the dock is split between Guidances and Layers · double-click (or Alt+click) to reset"></div>
             <div class="panel-head">
                 <div class="panel-label" id="layersLabel">Layers</div>
                 <div class="mini-group">
@@ -2457,7 +2472,7 @@ function render() {
     refreshCanvasThumbs();
     drawOverlay();
     schedulePreview();
-    scheduleContextCardPreview();
+    schedulePinnedCardPreview();
     scheduleGuidanceCard();
 }
 
@@ -2480,16 +2495,14 @@ function scheduleGuidanceCard() {
     guidanceCardTimer = setTimeout(() => { guidanceCardTimer = null; publishGuidanceCard(); }, GUIDANCE_CARD_MS);
 }
 
-// An empty stack must not leave a stale image in the workspace, and an all-hidden one is not
-// guidance either. A hand-made layer with no image and no decal contributes nothing visible, so it
-// does not count as ink until something is painted or generated into it.
-function guidanceStackHasInk() {
-    return stackLayers(GUIDANCE_STACK).some(l => l.visible && (!!l.src || !!l.decal));
-}
-
+// The card is PUBLISHED whenever there is a canvas at all — an empty (or all-hidden) Guidances
+// stack still posts a picture, because the workspace pins a Guidance card the user can click at any
+// time, and a token that resolves to a missing staging entry is worse than a card that happens to
+// look exactly like the context image. With no ink in the stack the merged picture simply IS the
+// composite, which is the truth of what that card shows.
 function publishGuidanceCard() {
     if (window.parent === window) return;         // standalone: there is no workspace to write to
-    if (!guidanceStackHasInk() || !canvasW || !canvasH) {
+    if (!canvasW || !canvasH) {
         if (guidanceCardLast === null) return;    // already withdrawn — say it once
         guidanceCardLast = null;
         window.parent.postMessage({ type: 'blend-guidance-card', image: null }, '*');
@@ -5188,6 +5201,70 @@ function wireStackListDrop(listEl, stack) {
 wireStackListDrop(guidanceListEl, GUIDANCE_STACK);
 wireStackListDrop(layerListEl, WORK_STACK);
 
+// ==================== Guidances / Layers 分隔条 ====================
+// dock 的剩余高度按 guidanceSplit : (1 - guidanceSplit) 分给两块列表（两边都是
+// flex-basis 0，只长不缩），所以拖动定下的比例与窗口高度无关：窗口变高是两块一起变高。
+// 与 genPrefs/runPrefs 同轨存 localStorage —— 这是布局偏好，不进 .cud。
+const SPLIT_KEY = 'blend.stackSplit';
+const SPLIT_DEFAULT = 0.6;            // Guidances 先拿多一半：行多，且它是排序入口
+const SPLIT_MIN = 0.15, SPLIT_MAX = 0.85;
+let guidanceSplit = SPLIT_DEFAULT;
+try {
+    const saved = parseFloat(localStorage.getItem(SPLIT_KEY));
+    if (isFinite(saved)) guidanceSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, saved));
+} catch (e) { /* storage unavailable: the default split holds */ }
+
+function applyStackSplit() {
+    guidanceListEl.style.flexGrow = guidanceSplit;
+    layerListEl.style.flexGrow = 1 - guidanceSplit;
+    splitterEl.setAttribute('aria-valuenow', String(Math.round(guidanceSplit * 100)));
+}
+function saveStackSplit() {
+    try { localStorage.setItem(SPLIT_KEY, String(guidanceSplit)); } catch (e) { /* as above */ }
+}
+// persist=false 是给 pointermove 用的：那里每帧都调，落盘只在 pointerup 补一次。
+function setStackSplit(next, persist) {
+    guidanceSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, next));
+    applyStackSplit();
+    if (persist) saveStackSplit();
+}
+
+const splitterEl = document.getElementById('stackSplitter');
+splitterEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // 分母用两块列表此刻的 clientHeight 之和：basis 为 0 时它只随 dock 变，拖动全程不变，
+    // 所以指针位移能一比一地换算成比例，不用去猜 head/gap 占了多少。
+    const total = guidanceListEl.clientHeight + layerListEl.clientHeight;
+    if (!total) return;
+    const startY = e.clientY, startSplit = guidanceSplit;
+    // Capture is released by the browser on pointerup; without it a fast drag past the 10px rail
+    // would drop the move events. A pointer id the browser no longer knows about throws, which is
+    // not worth losing the drag over.
+    try { splitterEl.setPointerCapture(e.pointerId); } catch (err) { /* fall back to bubbling events */ }
+    splitterEl.classList.add('dragging');
+    const move = ev => setStackSplit(startSplit + (ev.clientY - startY) / total);
+    const up = () => {
+        splitterEl.classList.remove('dragging');
+        splitterEl.removeEventListener('pointermove', move);
+        saveStackSplit();
+    };
+    splitterEl.addEventListener('pointermove', move);
+    splitterEl.addEventListener('pointerup', up, { once: true });
+    splitterEl.addEventListener('pointercancel', up, { once: true });
+});
+// 复位有三条路：拖完双击、Alt+click、键盘 Home/Enter —— 都必须落盘，否则刷新又回到旧比例。
+splitterEl.addEventListener('dblclick', () => setStackSplit(SPLIT_DEFAULT, true));
+splitterEl.addEventListener('click', e => { if (e.altKey) setStackSplit(SPLIT_DEFAULT, true); });
+splitterEl.addEventListener('keydown', e => {
+    if (e.key === 'ArrowUp') setStackSplit(guidanceSplit + 0.05, true);
+    else if (e.key === 'ArrowDown') setStackSplit(guidanceSplit - 0.05, true);
+    else if (e.key === 'Home' || e.key === 'Enter') setStackSplit(SPLIT_DEFAULT, true);
+    else return;
+    e.preventDefault();
+});
+applyStackSplit();
+
 // "Place images as raster" — a persisted preference, not a one-shot: it decides how every
 // future image arrives (drop, Import, history injection) until flipped back.
 const addRasterToggleBtn = document.getElementById('addRasterToggleBtn');
@@ -7827,68 +7904,77 @@ extraPromptInput.addEventListener('paste', e => {
     if (text) insertTextAtCaret(text);
 });
 
-// 固定卡片：Context Image。Enable Edit 下 context 图永远作为 image 1 存在（即使
-// 不插进文本 —— 编号 <image 2>+ 不受影响），点击插入的是 **<image_id:context>**：
-// 一个和别的引用图同构的标记，由后端解析时才解码成 <image 1>。这样「context 图」
-// 在工作区里也是一个可预览、可整块删除的普通条目。
-// 不可移除：没有 ✕，也不绑任何 staging 条目。
-// 卡片同时是该 context image 的**实时预览**：画布合成（blendCanvas）本身就是
-// context image，所以缩略图 = 棋盘格底衬 + blendCanvas（与宿主预览同一套规矩，
-// JPEG 必须有不透明底衬，且必须是棋盘格以保持「透明区域可读」）。
+// 固定卡片：Context Image 与 Guidance。两张都常驻条带最左侧，与图池里有没有条目无关：
+// 它们代表的不是"一张被丢进来的图"，而是两条恒定存在的引用（<image_id:context> /
+// <image_id:staging_guidance>），所以都没有 ✕、也不绑某个可删除的普通条目。
+// Enable Edit 下 context 图永远作为 image 1 存在（即使不插进文本 —— 编号 <image 2>+
+// 不受影响），点击卡片插入的标记由后端解析时才解码成 <image 1>。
+// 卡片同时是各自那幅画的**实时预览**，共用一套规矩：棋盘格底衬 + blendCanvas，
+// Guidance 那张再多叠一层 guidanceCanvas（JPEG 无 alpha，必须有 opaque 底衬）。
 let contextCardImg = null;
-const CONTEXT_CARD_PREVIEW_MS = 150;        // throttle — render() 在笔画期间每帧都跑
-let contextCardTimer = null;
+let guidanceCardImg = null;
+const PINNED_CARD_PREVIEW_MS = 150;        // throttle — render() 在笔画期间每帧都跑
+let pinnedCardTimer = null;
 
-function scheduleContextCardPreview() {
-    if (contextCardTimer) return;
-    contextCardTimer = setTimeout(() => { contextCardTimer = null; updateContextCardPreview(); }, CONTEXT_CARD_PREVIEW_MS);
+function schedulePinnedCardPreview() {
+    if (pinnedCardTimer) return;
+    pinnedCardTimer = setTimeout(() => { pinnedCardTimer = null; updatePinnedCardPreviews(); }, PINNED_CARD_PREVIEW_MS);
 }
 
-function updateContextCardPreview() {
-    const img = contextCardImg;
-    if (!img) return;
+// 一次节流把两张卡都画了：它们读的是同一幅画布的两种读法，分两次只会白编码一遍。
+function updatePinnedCardPreviews() {
+    const ctxSrc = paintPinnedCard(contextCardImg, false);
+    paintPinnedCard(guidanceCardImg, true);
+    // 同一张缩略图也是 <image_id:context> chip 的预览源：画布一变，已经插进
+    // Extra Prompt 的 context chip 也跟着变。
+    if (ctxSrc) {
+        contextChipSrc = ctxSrc;
+        refreshPromptChips();
+    }
+}
+
+// withGuidance = 这张卡要不要把 guidance 叠层算进去。返回 dataURL，画不出就 null。
+function paintPinnedCard(img, withGuidance) {
+    if (!img) return null;
     if (!canvasW || !canvasH) {
         // 空画布：退回纯文字态。
         if (img.getAttribute('src')) img.removeAttribute('src');
         img.style.display = 'none';
-        return;
+        return null;
     }
     const s = Math.min(1, 108 / Math.max(canvasW, canvasH));   // 2x of the 54px card
     const w = Math.max(1, Math.round(canvasW * s)), h = Math.max(1, Math.round(canvasH * s));
-    if (!updateContextCardPreview.buf) updateContextCardPreview.buf = document.createElement('canvas');
-    const buf = updateContextCardPreview.buf;
+    if (!paintPinnedCard.buf) paintPinnedCard.buf = document.createElement('canvas');
+    const buf = paintPinnedCard.buf;
     if (buf.width !== w || buf.height !== h) { buf.width = w; buf.height = h; }
     const bctx = buf.getContext('2d');
     resetCtx(bctx);
     bctx.clearRect(0, 0, w, h);
     paintCheckerboard(bctx, w, h);
     bctx.drawImage(blendCanvas, 0, 0, w, h);
+    if (withGuidance) bctx.drawImage(guidanceCanvas, 0, 0, w, h);
     try {
         img.src = buf.toDataURL('image/jpeg', 0.8);
         img.style.display = '';
-    } catch (e) { /* taint 等异常：保持文字态 */ return; }
-    // 同一张缩略图也是 <image_id:context> chip 的预览源：画布一变，已经插进
-    // Extra Prompt 的 context chip 也跟着变。
-    contextChipSrc = img.src;
-    refreshPromptChips();
+        return img.src;
+    } catch (e) { /* taint 等异常：保持文字态 */ return null; }
 }
 
-function makeContextCard() {
+function makePinnedCard(cls, labelText, tokenId, title) {
     const item = document.createElement('div');
-    item.className = 'staging-item staging-context';
-    item.title = 'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.';
+    item.className = 'staging-item ' + cls;
+    item.title = title;
     const img = document.createElement('img');
     img.className = 'context-preview';
-    img.alt = 'Context image preview';
+    img.alt = `${labelText} preview`;
     img.draggable = false;      // 缩略图不是拖拽源：拖它经过图层列表不该触发排序线
     img.style.display = 'none';
     item.appendChild(img);
     const label = document.createElement('span');
     label.className = 'context-label';
-    label.textContent = 'Context 1';
+    label.textContent = labelText;
     item.appendChild(label);
-    contextCardImg = img;
-    item.addEventListener('click', () => insertImageIdToken('context'));
+    item.addEventListener('click', () => insertImageIdToken(tokenId));
     return item;
 }
 
@@ -7896,9 +7982,16 @@ function renderStaging() {
     const strip = document.getElementById('stagingStrip');
     if (!strip) return;
     strip.textContent = '';
-    // Context 卡片恒在最左侧（空池时也在）。
-    strip.appendChild(makeContextCard());
-    scheduleContextCardPreview();
+    // 两张钉死卡片恒在最左侧（空池时也在），Context 在前、Guidance 紧随。
+    const ctxCard = makePinnedCard('staging-context', 'Context', 'context',
+        'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.');
+    contextCardImg = ctxCard.querySelector('.context-preview');
+    strip.appendChild(ctxCard);
+    const gCard = makePinnedCard('staging-guidance', 'Guidance', GUIDANCE_CARD_ID,
+        'Guidance — the Layers composite with the whole Guidances stack painted over it. Always in the workspace as <image_id:staging_guidance>; with an empty Guidances stack it is the composite alone.');
+    guidanceCardImg = gCard.querySelector('.context-preview');
+    strip.appendChild(gCard);
+    schedulePinnedCardPreview();
     // 图池变了：已经插进 Extra Prompt 的 chip 要跟着换图（或退回失效文字态）。
     refreshPromptChips();
     if (!stagingItems.length) {
@@ -7909,6 +8002,8 @@ function renderStaging() {
         return;
     }
     for (const s of stagingItems) {
+        // Guidance 已经由上面那张钉死卡片代表了，不再重复出一张普通条目。
+        if (s.id === GUIDANCE_CARD_ID) continue;
         const item = document.createElement('div');
         item.className = 'staging-item';
         item.title = `${s.name} — click to insert <image_id:${s.id}> into the extra prompt at the cursor`;
