@@ -76,41 +76,8 @@
           {
             "tags": [
               {
-                "name": "腿",
-                "prompt": "legs",
-                "category": "人物要素"
-              }
-            ],
-            "strength": 1,
-            "source": "normal"
-          },
-          {
-            "tags": [
-              {
-                "name": "脚(复)",
-                "prompt": "feet",
-                "category": "人物要素"
-              }
-            ],
-            "strength": 1,
-            "source": "normal"
-          },
-          {
-            "tags": [
-              {
                 "name": "掰开肉穴",
                 "prompt": "spread pussy",
-                "category": "人物姿势"
-              }
-            ],
-            "strength": 1,
-            "source": "normal"
-          },
-          {
-            "tags": [
-              {
-                "name": "骆驼式(跪姿后弯，手触脚跟)",
-                "prompt": "camel pose",
                 "category": "人物姿势"
               }
             ],
@@ -158,9 +125,9 @@
           {
             "tags": [
               {
-                "name": "长筒袜(丝袜)",
-                "prompt": "thighhighs",
-                "category": "服装"
+                "name": "腰部高度镜头",
+                "prompt": "Hip Level Shot",
+                "category": "视角"
               }
             ],
             "strength": 1,
@@ -169,9 +136,20 @@
           {
             "tags": [
               {
-                "name": "脚(复)",
-                "prompt": "feet",
-                "category": "人物要素"
+                "name": "跪坐",
+                "prompt": "seiza",
+                "category": "人物姿势"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "一个女人",
+                "prompt": "1girl",
+                "category": "对象要素"
               }
             ],
             "strength": 1,
@@ -183,7 +161,7 @@
           {
             "file_path": "F:/ComfyDB/models/loras/滑块/Anima/Darkness-sliderFin3.safetensors",
             "name": "光照(环境)",
-            "strength": 1.2,
+            "strength": 0.5,
             "active_tags": [],
             "active": true,
             "split_mode": false,
@@ -222,27 +200,6 @@
                 }
               ]
             }
-          },
-          {
-            "file_path": "F:/ComfyDB/models/loras/人物/Anima/yuki-suou-s1-anima-lora-nochekaiser.safetensors",
-            "name": "Yuki Suou (周防 有希) - Alya Sometimes Hides Her Feelings in Russian (Tokidoki Bosotto Russia-go de Dereru Tonari no Alya-san) (時々ボソッとロシア語でデレる隣のアーリャさん)",
-            "strength": 1,
-            "active_tags": [
-              "yuki suou",
-              "suou yuki",
-              "long hair",
-              "bangs",
-              "brown hair",
-              "black hair",
-              "hair between eyes",
-              "purple eyes",
-              "half updo",
-              "mature female",
-              "small breasts",
-              "anime screencap"
-            ],
-            "active": true,
-            "split_mode": true
           }
         ],
         "prefabs": [],
