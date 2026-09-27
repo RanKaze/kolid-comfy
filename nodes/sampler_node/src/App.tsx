@@ -469,8 +469,9 @@ const App: React.FC = () => {
             items: [{ name: data.name || 'Blend', src: data.image }],
             note: 'Blend result added as a new smart layer' }, '*');
       } else if (body.action === 'tag' || body.action === 'clear_tag') {
-        // clear_tag returns an empty tag/tags/custom — pushing it through the same auto-tag
-        // channel is exactly how a real tag lands, so the editor clears its parsing tags.
+        // clear_tag returns an empty tag/tags/custom/temporary — pushing it through the same
+        // auto-tag channel is exactly how a real tag lands, so the editor clears its parsing
+        // tags and its Temporary Prompts alike.
         reply(true, { tag: data.tag });
         setPromptReady(true);
         // Tag output belongs to the prompt stage: push it into the prompt editor's tags.
@@ -480,6 +481,9 @@ const App: React.FC = () => {
             tag: data.tag,
             tags: data.tags || [],
             custom: data.custom || '',
+            // What the tagger produced that matches no known prompt. Landing these as
+            // temporary (not custom) keeps a tag one-pass, exactly like prompt_parsing does.
+            temporary: Array.isArray(data.temporary) ? data.temporary : undefined,
           }, '*');
         }, 100);
       } else {

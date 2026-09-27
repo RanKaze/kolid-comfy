@@ -255,6 +255,11 @@ export function AppShell() {
             return prev + '\n' + custom;
           });
         }
+        // A tagger/parse result that resolved nothing lands as temporary prompts: like the
+        // parsing tags above, the set REPLACES what the previous tag left (clear_tag sends []).
+        if (Array.isArray(event.data.temporary)) {
+          setTemporaryPrompts(event.data.temporary.map((t: unknown) => String(t).trim()).filter(Boolean));
+        }
         // Fallback: if no tags/custom but raw tag string, add to custom prompts
         if (!event.data.tags && !event.data.custom && typeof event.data.tag === 'string') {
           const tag = event.data.tag.trim();
@@ -293,7 +298,7 @@ export function AppShell() {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [setCustomPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts]);
+  }, [setCustomPrompts, setTemporaryPrompts, selectedTags, selectedLoras, loraSelections, selectedPrefabs, customPrompts]);
 
   // Helper: find prefab by guid across all libraries
   const findPrefabByGuid = useCallback((guid: string): PrefabData | null => {
@@ -5382,12 +5387,12 @@ export function AppShell() {
 
           {!tempCtx.mode && !isTemporary ? (
             <>
-              {temporaryPrompts.length > 0 ? (
-                <div className="temporary-prompts-section">
-                  <div className="temp-head">
-                    <h3>Temporary Prompts ({temporaryPrompts.length})</h3>
-                    <button className="clear-btn" onClick={() => setTemporaryPrompts([])} title="Clear all — removed from this run's prompt, never saved">{iconTrash}</button>
-                  </div>
+              <div className="temporary-prompts-section">
+                <div className="temp-head">
+                  <h3>Temporary Prompts ({temporaryPrompts.length})</h3>
+                  <button className="clear-btn" onClick={() => setTemporaryPrompts([])} title="Clear all — removed from this run's prompt, never saved">{iconTrash}</button>
+                </div>
+                {temporaryPrompts.length > 0 ? (
                   <div className="selected-tags">
                     {temporaryPrompts.map((text, i) => (
                       <span className="tag temp-prompt" key={`${text}-${i}`}>
@@ -5397,8 +5402,12 @@ export function AppShell() {
                       </span>
                     ))}
                   </div>
-                </div>
-              ) : null}
+                ) : (
+                  <div className="temp-empty" title="Segments a tagger or prompt_parsing produced that match no known prompt land here. They join this run only and are dropped on the next one.">
+                    Nothing left over from parsing
+                  </div>
+                )}
+              </div>
 
               <div className="custom-input-section">
                 <h3>Custom Prompts</h3>
