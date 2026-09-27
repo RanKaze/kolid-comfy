@@ -3445,7 +3445,11 @@ function addLayer(item, stack) {
 // frame onto the crop rect — the patch is only the masked region, not the whole layer. The source
 // layer keeps its image, mask and decal; the fresh layer carries none of them (an unpainted mask
 // IS the full layer). One Generate = one undo step, same as the in-place refill.
-function spawnGeneratedLayer(id, item) {
+// `opts.fit` is preset Enable Fit: the patch inherits the SOURCE layer's mask over its own place
+// rect and then fits onto it, inside this same undo step. Only a placed smart result has a rect to
+// inherit — a whole-canvas result (no place) and a raster buffer (position baked into pixels) are
+// left exactly as they were.
+function spawnGeneratedLayer(id, item, opts) {
     const l = layers.find(x => x.id === id);
     if (!l || !item || !item.src) {
         setStatus('The Generate result could not be matched to its layer', 'error');
@@ -3459,6 +3463,7 @@ function spawnGeneratedLayer(id, item) {
         // 于是新图层是源图层图框的一个（随源图层一起旋转的）子框；mask 铺满整层时算出来恰好等于源
         // 图层的 transform，也就是没有 place 时的那条路径。
         const placed = placeTransform(item.place, t);
+        const fit = !!(opts && opts.fit);
         const copy = {
             id: ++layerSeq,
             name: l.name + ' · gen',
@@ -3500,6 +3505,22 @@ function spawnGeneratedLayer(id, item) {
                 rasterResampleBuffer(copy, canvasW, canvasH);
             }
         }
+        let fitted = false;
+        if (fit && placed && !raster && l.mask && item.place) {
+            const p = item.place;
+            const from = nativeSize(l.mask);
+            const to = nativeSize(copy.img);
+            const m = document.createElement('canvas');
+            m.width = to.w; m.height = to.h;
+            m.getContext('2d').drawImage(
+                l.mask,
+                p.x * (from.w / p.ow), p.y * (from.h / p.oh),
+                p.w * (from.w / p.ow), p.h * (from.h / p.oh),
+                0, 0, to.w, to.h);
+            copy.mask = m;
+            copy.maskCtx = m.getContext('2d');
+            fitted = fitLayerToMask(copy, { silent: true });
+        }
         insertAtStackTop(copy);     // the generated variant lands on top of its own stack
         selectedId = copy.id;
         applyCanvasSize();
@@ -3507,7 +3528,7 @@ function spawnGeneratedLayer(id, item) {
         renderLayerList();
         render();
         setStatus(placed
-            ? `Generated onto a new layer over 「${l.name}」— placed on its masked region`
+            ? `Generated onto a new layer over 「${l.name}」— placed on its masked region${fitted ? ', trimmed to that mask' : ''}`
             : `Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
         pushHistory();
     }, () => setStatus('Could not load the Generate result', 'error'));
@@ -3696,23 +3717,28 @@ function applyMaskToLayer(l) {
 // rather than being reset to white, so partial coverage INSIDE the box is unchanged.
 // Every surface is a NEW canvas (like applyMaskToLayer): the undo snapshot holds the old img/mask/
 // decal by reference, so nothing here may repaint them in place.
-function fitLayerToMask(l) {
-    if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return;
-    if (guardAdjustMode()) return;
+// `opts.silent` is for the automatic path (Enable Fit at the end of a layer Generate): the caller
+// owns the status line, the re-render and the single pushHistory() of its own action, so this
+// returns quietly with false when there was nothing to trim. It never announces a second undo step.
+function fitLayerToMask(l, opts) {
+    const quiet = !!(opts && opts.silent);
+    const say = (msg, kind) => { if (!quiet) setStatus(msg, kind); };
+    if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
+    if (guardAdjustMode()) return false;
     const { w: ow, h: oh } = nativeSize(l.img);
     const b = alphaBounds(layerSource(l), 9);
     if (!b) {
-        setStatus(`Nothing in「${l.name}」is left visible — there is no box to fit`, 'error');
-        return;
+        say(`Nothing in「${l.name}」is left visible — there is no box to fit`, 'error');
+        return false;
     }
     if (b.x === 0 && b.y === 0 && b.w === ow && b.h === oh) {
-        setStatus(`「${l.name}」already fits its own picture (${ow} × ${oh})`, 'success');
-        return;
+        say(`「${l.name}」already fits its own picture (${ow} × ${oh})`, 'success');
+        return false;
     }
     const tr = placeTransform({ x: b.x, y: b.y, w: b.w, h: b.h, ow, oh }, l.transform);
     if (!tr) {
-        setStatus(`Fit Mask box fell outside the canvas —「${l.name}」is unchanged`, 'error');
-        return;
+        say(`Fit Mask box fell outside the canvas —「${l.name}」is unchanged`, 'error');
+        return false;
     }
     // Single-target like Expand: a group member whose frame just moved would leave the rest of the
     // group dragging it around at the old box.
@@ -3734,13 +3760,16 @@ function fitLayerToMask(l) {
     if (l.mask) { l.mask = crop(l.mask); l.maskCtx = l.mask.getContext('2d'); }
     if (l.decal) { l.decal = crop(l.decal); l.decalCtx = l.decal.getContext('2d'); }
     l.transform = tr;
-    layoutCanvas();
-    renderLayerList();
-    render();
-    refreshMaskThumb(l);
-    refreshDecalThumb(l);
-    setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, the mask came along`, 'success');
-    pushHistory();
+    if (!quiet) {
+        layoutCanvas();
+        renderLayerList();
+        render();
+        refreshMaskThumb(l);
+        refreshDecalThumb(l);
+        setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, the mask came along`, 'success');
+        pushHistory();
+    }
+    return true;
 }
 
 // `toStack` is what makes a cross-palette drag a MOVE: the row leaves the origin stack because it
@@ -5962,6 +5991,11 @@ let genTargetLayerId = null;
 let genPresets = [];
 let genActivePresetId = null;
 
+// Enable Fit 是 preset 的开关，但决定必须在 Confirm 那一刻就记死：回包到达时宿主的激活 tab
+// 可能已经换了，不能拿"当时"的值来决定要不要贴合。一次只有一趟图层 Generate 在飞（宿主
+// 的 layerGenerateRef 也只有一个槽位），所以一个标量就够；回包读一次即清。
+let pendingGenFit = false;
+
 // The Generate dialog's parameters persist across opens (and page reloads, via localStorage).
 // The saved preset id is only a preference: when it no longer exists (its tab was deleted or
 // renamed away), the dialog falls back to the currently ACTIVE tab and re-saves that.
@@ -6319,6 +6353,10 @@ function confirmGenModal() {
     if (!image) { setStatus('That layer has no image to send', 'error'); return; }
     if (!mask) { setStatus('Could not build that layer\'s mask', 'error'); return; }
     const size = nativeSize(l.img);
+    // 这一趟的 Enable Fit 在 Confirm 当场读死。它只在结果带 place 矩形时生效（Enable Mask 开 +
+    // Recover Crop 关）：整幅产出本来就铺满图层，贴合是恒等操作，所以不必再读那两个开关。
+    const fitPreset = genPresets.find(x => x.id === presetId);
+    pendingGenFit = !!(fitPreset && fitPreset.enable_fit);
     closeGenModal();
     // The workbench owes the host two images that are NOT the composite: this layer's source and
     // this layer's own mask. Both go out at native resolution; the backend owns the geometry.
@@ -8737,7 +8775,10 @@ window.addEventListener('message', event => {
         // Still NOT addLayer: addLayer would fit-to-canvas and throw away that placement.
         const srcLayer = layers.find(x => x.id === d.layer_id);
         const item = d.items && d.items[0];
-        if (srcLayer && hasLayerImage(srcLayer)) spawnGeneratedLayer(d.layer_id, item);
+        // Enable Fit 只交给新图层：就地填充空图层改的是那一层自己的像素与 mask，没有"框"可缩。
+        const fit = pendingGenFit;
+        pendingGenFit = false;
+        if (srcLayer && hasLayerImage(srcLayer)) spawnGeneratedLayer(d.layer_id, item, { fit });
         else replaceLayerImage(d.layer_id, item);
         return;
     }

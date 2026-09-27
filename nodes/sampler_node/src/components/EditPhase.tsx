@@ -1026,6 +1026,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'recover_crop', v)}
                 />
               </div>
+              <div style={styles.paramRow}
+                title="开 = 图层 Generate 结束时自动 Fit Mask：新图层先继承源图层 mask 落在贴回框内的那一块，再把图层框缩到 mask 真正的外接框，grow/feather 涨出来的死区被一并裁掉，覆盖率不变。关 = 产出铺满整个 crop 框，尺寸不动。只对「图层 Generate」生效（Enable Mask 开 + Recover Crop 关）；整幅 Run 不受影响。">
+                <label style={styles.paramLabel}>Enable Fit</label>
+                <IOSToggle
+                  checked={firstDp ? (firstDp.enable_fit ?? false) : false}
+                  disabled={!enableMask}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_fit', v)}
+                />
+              </div>
               </div>
               <div style={styles.paramRow}
                 title="开 = 按 Pixels / Align 限制工作分辨率。关 = 既不缩放也不对齐，工作分辨率就是裁剪（或整幅）分辨率；Qwen 架构仍会强制 32 对齐，否则 latent / vision token 网格不接受。">

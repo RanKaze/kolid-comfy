@@ -77,6 +77,11 @@ export interface DetailerBlockParams {
   /** 关掉时不 recover crop（也不 recover resize）：产出保持 crop 工作区分辨率，
    *  作为新图层由 Blend 画布用 transform 贴回原位；开 = 合成回整幅图（原行为）。 */
   recover_crop?: boolean;
+  /** Preprocess Settings 的 Enable Fit（默认关）：图层 Generate 带 place 矩形回来时，
+   *  新图层先继承源图层 mask 在 place 框内的那一块，再自动 Fit Mask，把图层框缩到
+   *  mask 真正的外接框（grow/feather 的死区被裁掉）。关 = 产出铺满整个 crop 框。
+   *  只在 Enable Mask 开时可见/可操作。 */
+  enable_fit?: boolean;
   /** Preprocess Settings 的 Enable Mask 总闸（默认开）。关 = 不做 mask 扩张/羽化
    *  （grow/blur 归零）、不按 mask 裁剪（crop_reserve 无效）、不 recover crop；
    *  产出直接落在整幅图坐标系。mask 本身仍然限制重绘区域。 */
