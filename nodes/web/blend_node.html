@@ -3294,9 +3294,19 @@ function fitLayerToCanvas(l) {
 // The rect arrives measured in the run's own image pixels, NOT as fractions:
 //
 //     x, y, w, h   the crop box inside the run's image           (crop_mask's output)
-//     ow, oh       that image's size — i.e. the canvas at run time
+//     ow, oh       that image's size
 //     pw, ph       the returned patch's own pixels               (model's work resolution)
 //     sx, sy       pw/w, ph/h — the limit_pixels scaling the patch went through
+//
+// There are TWO hosts for that image, and they are not the same frame:
+//
+//   * a preset run (`detailer`) sends the canvas composite — ow/oh ARE the canvas, so the rect can
+//     be divided by the canvas directly (and a canvas that changed size since the run is handled by
+//     shifting the rect, see below);
+//   * a Generate on a layer (`layer_generate`) sends that LAYER's own pixels (or the composite
+//     rendered into that layer's grid), so ow/oh are the layer's native size and the rect lives in
+//     the layer's grid — rotated and squashed onto the canvas by the layer's own transform. Passing
+//     that transform as `frame` is what puts the patch back on the piece it was cut from.
 //
 // The whole patch must cover the whole crop box. That is exactly what the Recover Crop ON path
 // produces (recover_size resizes the patch back to w x h, then recover_crop pastes it at x, y),
@@ -3310,7 +3320,9 @@ function fitLayerToCanvas(l) {
 // keeping their absolute pixels (rescaleLayersForCanvas), so shift the rect by half the size
 // delta: that keeps the patch on the content it was cut from.
 // Returns null only for a rect that cannot describe a box: missing, non-finite or empty.
-function placeTransform(place) {
+// `frame` = the transform of the layer whose own pixels were the run's image (a layer Generate);
+// omit it when the run's image was the canvas itself (a preset run).
+function placeTransform(place, frame) {
     if (!place || typeof place !== 'object') return null;
     const x = Number(place.x), y = Number(place.y);
     const w = Number(place.w), h = Number(place.h);
@@ -3318,6 +3330,29 @@ function placeTransform(place) {
     if (![x, y, w, h, ow, oh].every(v => Number.isFinite(v))) return null;
     if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0) return null;
     if (!canvasW || !canvasH) return null;
+    if (frame) {
+        // 宿主是某个图层：那幅 run 图被这个帧画在画布上 ——
+        //     canvas = T(cx,cy) · R(θ) · 框 (±tr.w*canvasW/2, ±tr.h*canvasH/2)
+        // （drawLayer 正着做，layerCompositeForGenerate 逆着做）。crop 矩形先在同一单位里
+        // 变成相对图层中心的画布 px 偏移，再跟着图层一起转 —— 结果框是源图层框的一个旋转子框，
+        // 所以图层被缩放/压扁/旋转过也照样贴得准。图层自己的框就是它的图形的权威位置，
+        // 画布后来有没有变尺寸与它无关，因此这条分支不做下面那种半尺寸差补偿。
+        const fx = Number(frame.cx), fy = Number(frame.cy);
+        const fw = Number(frame.w), fh = Number(frame.h);
+        const rot = Number(frame.rotation) || 0;
+        const FW = fw * canvasW, FH = fh * canvasH;
+        if (![fx, fy, FW, FH].every(Number.isFinite) || FW <= 0 || FH <= 0) return null;
+        const ux = ((x + w / 2) - ow / 2) * (FW / ow);
+        const uy = ((y + h / 2) - oh / 2) * (FH / oh);
+        const c = Math.cos(rot), s = Math.sin(rot);
+        return {
+            cx: (fx * canvasW + ux * c - uy * s) / canvasW,
+            cy: (fy * canvasH + ux * s + uy * c) / canvasH,
+            w: fw * (w / ow),
+            h: fh * (h / oh),
+            rotation: rot,
+        };
+    }
     const dx = (canvasW - ow) / 2, dy = (canvasH - oh) / 2;    // normally 0
     const px = x + dx, py = y + dy;
     // Refuse a rect that lands wholly outside the canvas: it was measured against some other
@@ -3385,10 +3420,11 @@ function addLayer(item, stack) {
 }
 
 // A Generate on a layer that ALREADY has an image must not overwrite it: the result lands on a
-// NEW layer stacked on top — same native resolution (the backend runs at the layer's own size)
-// and the SAME transform, so it exactly covers where the source sits. The source layer keeps
-// its image, mask and decal; the fresh layer carries none of them (an unpainted mask IS the
-// full layer). One Generate = one undo step, same as the in-place refill.
+// NEW layer stacked on top, framed by the SOURCE layer's transform (the backend ran at that
+// layer's own size), so it exactly covers where the source sits. Recover Crop off narrows that
+// frame onto the crop rect — the patch is only the masked region, not the whole layer. The source
+// layer keeps its image, mask and decal; the fresh layer carries none of them (an unpainted mask
+// IS the full layer). One Generate = one undo step, same as the in-place refill.
 function spawnGeneratedLayer(id, item) {
     const l = layers.find(x => x.id === id);
     if (!l || !item || !item.src) {
@@ -3397,14 +3433,21 @@ function spawnGeneratedLayer(id, item) {
     }
     loadImage(item.src, img => {
         const t = l.transform || { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+        const raster = isRasterLayer(l);
+        // Enable Mask 开 + Recover Crop 关：回来的不是整幅图层，而是 mask 外接框那块工作分辨率
+        // patch，place 矩形量的就是它在**这个图层自己的像素网格**里的位置（ow/oh = 图层原始尺寸）。
+        // 于是新图层是源图层图框的一个（随源图层一起旋转的）子框；mask 铺满整层时算出来恰好等于源
+        // 图层的 transform，也就是没有 place 时的那条路径。
+        const placed = placeTransform(item.place, t);
         const copy = {
             id: ++layerSeq,
             name: l.name + ' · gen',
             src: item.src,
             img,
             visible: true,
-            transform: { ...t },
-            raster: isRasterLayer(l),
+            // raster 分支保持恒等：它的位置要烘进画布尺寸的 buffer，transform 动不得。
+            transform: (placed && !raster) ? { ...placed } : { ...t },
+            raster,
             mask: null,
             maskCtx: null,
             maskThumbEl: null,
@@ -3415,7 +3458,10 @@ function spawnGeneratedLayer(id, item) {
             // A generated variant belongs to its source's stack — refining a guidance image must
             // not silently drop the result into the working layers (and the other way round).
             stack: stackOf(l),
-            fragment: false,
+            // patch 的原始尺寸是模型的工作分辨率，比它所属的图层大是常态：它只属于那块矩形，
+            // 不属于整幅画布，所以不得反过来撑画布（见 autoCanvasSize 的 fragment 分支）。
+            // 烘进 buffer 的 raster 结果已经是画布尺寸，不该被当成 fragment。
+            fragment: !!placed && !raster,
             // A Generate result is a brand-new picture, not the source project's composite: it never
             // inherits the link, or the next save of that file would overwrite the refinement.
             cud: null,
@@ -3424,8 +3470,15 @@ function spawnGeneratedLayer(id, item) {
         // fresh image resamples into it immediately (the backend ran at the layer's own
         // resolution — for a raster layer that IS the canvas size). The result's own history
         // key is dropped with it: the buffer no longer matches that history image.
-        if (copy.raster && canvasW && canvasH) {
-            rasterResampleBuffer(copy, canvasW, canvasH);
+        if (raster && canvasW && canvasH) {
+            if (placed) {
+                // 整幅拉伸会把 patch 摊满全画布（等于把 mask 外接框以外的地方也糊上）：
+                // 按 placed 画进画布尺寸的 buffer，位置就落在像素里。
+                copy.img = renderTransformedSurface(img, placed, canvasW, canvasH);
+                copy.src = copy.img.toDataURL('image/png');
+            } else {
+                rasterResampleBuffer(copy, canvasW, canvasH);
+            }
         }
         insertAtStackTop(copy);     // the generated variant lands on top of its own stack
         selectedId = copy.id;
@@ -3433,7 +3486,9 @@ function spawnGeneratedLayer(id, item) {
         layoutCanvas();
         renderLayerList();
         render();
-        setStatus(`Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
+        setStatus(placed
+            ? `Generated onto a new layer over 「${l.name}」— placed on its masked region`
+            : `Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
         pushHistory();
     }, () => setStatus('Could not load the Generate result', 'error'));
 }
@@ -3446,6 +3501,9 @@ function spawnGeneratedLayer(id, item) {
 // The new image can be a different size from the old one (the detailer works at its own resolution
 // and may hand back a crop), so the surfaces that are sized to the image are rescaled to match --
 // an old mask stretched over a differently shaped image would put coverage in the wrong place.
+// With Recover Crop off that "crop" is literal: the result covers only the mask's bounding box
+// inside the layer's own grid, so the layer's transform shrinks onto that rect and the ink surfaces
+// are re-cropped through it, not stretched over it.
 // Everything happens inside the loadImage callback, so the swap is atomic: one pushHistory.
 function replaceLayerImage(id, item) {
     const l = layers.find(x => x.id === id);
@@ -3456,30 +3514,50 @@ function replaceLayerImage(id, item) {
     loadImage(item.src, img => {
         const next = nativeSize(img);
         const prev = nativeSize(l.img);
+        const raster = isRasterLayer(l);
+        // place 矩形量在这个图层自己的像素网格里（ow/oh = 送出去的那幅图的尺寸 = prev）。
+        const placed = placeTransform(item.place, l.transform);
+        const rect = placed ? item.place : null;
         // Rescale the mask / decal only when the aspect actually changed; a same-shape image keeps
         // its surfaces untouched (and their full crispness) rather than going through a resample.
-        const rescale = !!l.img && (prev.w !== next.w || prev.h !== next.h);
+        const rescale = (!!l.img && (prev.w !== next.w || prev.h !== next.h)) || !!rect;
         const resampleSurface = surface => {
             if (!surface || !rescale) return surface;
             const c = document.createElement('canvas');
             c.width = next.w; c.height = next.h;
-            c.getContext('2d').drawImage(surface, 0, 0, next.w, next.h);
+            const cx2d = c.getContext('2d');
+            if (rect) {
+                // 只有 crop 矩形那块像素被模型跑过：墨水按同一块矩形搬过去，跟着新图铺满新框，
+                // 而不是把整张旧网格压进 patch —— 那会把框外的笔迹拉到框内。
+                const sx = Number(rect.x) || 0, sy = Number(rect.y) || 0;
+                const sw = Number(rect.w) || prev.w, sh = Number(rect.h) || prev.h;
+                cx2d.drawImage(surface, sx, sy, sw, sh, 0, 0, next.w, next.h);
+            } else {
+                cx2d.drawImage(surface, 0, 0, next.w, next.h);
+            }
             return c;
         };
-        if (isRasterLayer(l)) {
-            // A raster target refills in place too: the result becomes the canvas-sized buffer
-            // (stretched if the run returned a different size), while the paint surfaces stay
-            // exactly where they were — they are canvas-space and do not follow the image swap.
-            l.img = document.createElement('canvas');
-            l.img.width = Math.max(1, Math.round(canvasW));
-            l.img.height = Math.max(1, Math.round(canvasH));
-            l.img.getContext('2d').drawImage(img, 0, 0, l.img.width, l.img.height);
+        if (raster) {
+            // A raster target refills in place too: the result becomes the canvas-sized buffer,
+            // while the paint surfaces stay exactly where they were — they are canvas-space and do
+            // not follow the image swap. A patch must not be stretched over the whole canvas: it is
+            // drawn through its rect instead (raster transforms are pinned to the identity).
+            if (placed) {
+                l.img = renderTransformedSurface(img, placed, canvasW, canvasH);
+            } else {
+                l.img = document.createElement('canvas');
+                l.img.width = Math.max(1, Math.round(canvasW));
+                l.img.height = Math.max(1, Math.round(canvasH));
+                l.img.getContext('2d').drawImage(img, 0, 0, l.img.width, l.img.height);
+            }
             l.src = l.img.toDataURL('image/png');
         } else {
             l.img = img;
             l.src = item.src;
+            // 图层就是那块 patch 了：画布上的落点随之缩到 crop 子框（随源图层一起旋转）。
+            if (placed) l.transform = { ...placed };
         }
-        if (!isRasterLayer(l)) {
+        if (!raster) {
             if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
             if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
         }
@@ -3489,7 +3567,9 @@ function replaceLayerImage(id, item) {
         refreshMaskThumb(l);
         refreshDecalThumb(l);
         pushHistory();               // one Generate = one undo step
-        setStatus('Generated result written back onto the layer', 'success');
+        setStatus(placed
+            ? 'Generated result written back onto the layer — placed on its masked region'
+            : 'Generated result written back onto the layer', 'success');
     }, () => setStatus('Could not load the Generate result', 'error'));
 }
 
@@ -6084,7 +6164,7 @@ function updateGenModalSub() {
     // The destination depends on the target: an image-full layer spawns a copy above, an
     // empty one is filled in place. Say which, so Confirm never surprises.
     const destPart = hasLayerImage(l)
-        ? `Context mask: its own mask. The result lands on a new layer above — same size and transform; the source stays untouched.`
+        ? `Context mask: its own mask. The result lands on a new layer above, placed on the region it refined; the source stays untouched.`
         : `Context mask: its own mask. The result fills this empty layer in place.`;
     genModalSub.textContent = ctxPart + destPart;
 }
@@ -8572,10 +8652,10 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-replace-layer') {
         // A layer-initiated Generate comes back here. An image-less (from-noise) target keeps
         // the in-place refill — there was nothing to preserve. A target that already carries an
-        // image keeps it: the result lands on a NEW layer above, with the same native resolution
-        // (the backend runs at the layer's own size) and the SAME transform, so it covers
-        // exactly where the source sits. Still NOT addLayer: addLayer would fit-to-canvas and
-        // throw away the transform this result belongs at.
+        // image keeps it: the result lands on a NEW layer above, covering exactly where the source
+        // sits. Either way the result's frame is the SOURCE LAYER's frame — the backend ran at the
+        // layer's own size — narrowed onto `place` when Recover Crop is off (see placeTransform).
+        // Still NOT addLayer: addLayer would fit-to-canvas and throw away that placement.
         const srcLayer = layers.find(x => x.id === d.layer_id);
         const item = d.items && d.items[0];
         if (srcLayer && hasLayerImage(srcLayer)) spawnGeneratedLayer(d.layer_id, item);
