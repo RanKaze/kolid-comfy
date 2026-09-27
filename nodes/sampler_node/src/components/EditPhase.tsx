@@ -106,16 +106,21 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; la
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
 
-// The five Pipeline Settings overrides mirror the five GLOBAL SETTINGS rows one-for-one, so their
+// The Pipeline Settings overrides mirror the GLOBAL SETTINGS rows one-for-one, so their
 // ranges are copied from those inputs rather than invented. The toggle decides whether the value
 // replaces the global one at run time; a row that was never enabled shows (and keeps) the current
 // global value, which is what it will run with the moment the toggle flips on.
+// ref_* / tgen_* are input-side ceilings (0 = off), hence min: 0 on the pixel rows.
 const PIPELINE_OVERRIDE_META: Record<PipelineOverrideKey, { label: string; min: number; max: number; step: number }> = {
   mask_grow: { label: 'Override Mask Grow', min: 0, max: 256, step: 1 },
   mask_blur: { label: 'Override Mask Blur', min: 0, max: 256, step: 1 },
   crop_reserve: { label: 'Override Crop Reserve', min: 0, max: 256, step: 1 },
   pixels: { label: 'Override Pixels', min: 65536, max: 16777216, step: 65536 },
   align: { label: 'Override Align', min: 1, max: 64, step: 1 },
+  ref_pixels: { label: 'Override Ref Pixels', min: 0, max: 16777216, step: 65536 },
+  ref_align: { label: 'Override Ref Align', min: 1, max: 64, step: 1 },
+  tgen_pixels: { label: 'Override TGen Pixels', min: 0, max: 16777216, step: 65536 },
+  tgen_align: { label: 'Override TGen Align', min: 1, max: 64, step: 1 },
 };
 
 // The "Add +" both section headers share: a pill whose colour tracks the menu it drops, the click-out
@@ -231,8 +236,14 @@ interface EditPhaseProps {
   cropReserve: number;
   pixelsVal: number;
   alignVal: number;
+  /** 输入侧显存封顶四件套：ref image / generate text 图的 pixels 上限与落格 */
+  refPixelsVal: number;
+  refAlignVal: number;
+  tgenPixelsVal: number;
+  tgenAlignVal: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
-  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align', value: number) => void;
+  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
+    | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => void;
   onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query') => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
@@ -266,7 +277,7 @@ interface EditPhaseProps {
   interfaceProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   /** 所有可选 pipeline —— Draw 页 enum 与 preset ⚙ 的选项来源。绑定按名字（重名取第一条）。 */
   pipelinePackages: PipelinePackageInfo[];
-  /** Draw 页 Pipeline Settings 的全部状态：选中项 + 按 pipeline 名字绑定的五个 override */
+  /** Draw 页 Pipeline Settings 的全部状态：选中项 + 按 pipeline 名字绑定的九个 override */
   pipelineSettings: PipelineSettings;
   /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loadedPipelineName: string;
@@ -284,7 +295,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
   staging, promptIframeRef,
-  blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
+  refPixelsVal, refAlignVal, tgenPixelsVal, tgenAlignVal,
+  onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
@@ -385,7 +398,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const selectedPipeline = pipelineSettings.selected || '';
   // '' = [Default]（节点输入口那条）。它的身份后端从来没收集过，所以既选不回去也切不回去 ——
-  // 这颗选项只在还没选过任何东西时出现，而它一旦不在，五排 override 也就没有名字可绑，整排禁用。
+  // 这颗选项只在还没选过任何东西时出现，而它一旦不在，九排 override 也就没有名字可绑，整排禁用。
   const isDefaultPipeline = !selectedPipeline || selectedPipeline === PIPELINE_DEFAULT;
   const pipelineIsMissing = (name: string): boolean =>
     !!name && name !== PIPELINE_CURRENT_SELECT
@@ -395,7 +408,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     && !pipelineNames.includes(selectedPipeline);
 
   const globalOf = (key: PipelineOverrideKey): number =>
-    ({ mask_grow: maskGrow, mask_blur: maskBlur, crop_reserve: cropReserve, pixels: pixelsVal, align: alignVal }[key]);
+    ({ mask_grow: maskGrow, mask_blur: maskBlur, crop_reserve: cropReserve, pixels: pixelsVal, align: alignVal,
+       ref_pixels: refPixelsVal, ref_align: refAlignVal, tgen_pixels: tgenPixelsVal, tgen_align: tgenAlignVal }[key]);
 
   /** 写一份 override（值或开关）。整份 Pipeline Settings 由前端独家作者，后端只做归一化。 */
   const setOverride = (key: PipelineOverrideKey, patch: { value?: number; enabled?: boolean }) => {
@@ -762,7 +776,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </div>
               {/* PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
-                  一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择），加五个
+                  一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择），加九
                   跟随 pipeline 名字持久化的 override。 */}
               <SectionHeader label="Pipeline Settings" open={openSections.pipeline} onToggle={() => toggleSection('pipeline')} />
               {openSections.pipeline && (<div style={styles.nestedSection}>
@@ -840,6 +854,32 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               <div style={styles.paramRow}>
                 <label style={styles.paramLabel}>Align</label>
                 <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={alignVal} onChange={e => onGlobalParamChange('align', parseInt(e.target.value))} />
+              </div>
+              {/* 下面四排是**输入侧显存封顶**，与上面 Pixels 的"目标分辨率"语义相反：
+                  只压不涨（limit_pixels 的 cap_only 模式），0 = 不设上限。 */}
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Ref Pixels</label>
+                <input style={styles.paramInput} type="number" min={0} max={16777216} step={65536} value={refPixelsVal}
+                  title="Ceiling for a Ref Image before it is VAE-encoded — images already inside the budget are left alone, nothing is ever enlarged. 0 = no ceiling."
+                  onChange={e => onGlobalParamChange('ref_pixels', parseInt(e.target.value) || 0)} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>Ref Align</label>
+                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={refAlignVal}
+                  title="Grid a capped Ref Image is snapped DOWN to (never up)."
+                  onChange={e => onGlobalParamChange('ref_align', parseInt(e.target.value) || 1)} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>TGen Pixels</label>
+                <input style={styles.paramInput} type="number" min={0} max={16777216} step={65536} value={tgenPixelsVal}
+                  title="Ceiling for every image handed to Generate Text (working image + Ref Images) before it enters the vision tower. Shrink-only. 0 = no ceiling."
+                  onChange={e => onGlobalParamChange('tgen_pixels', parseInt(e.target.value) || 0)} />
+              </div>
+              <div style={styles.paramRow}>
+                <label style={styles.paramLabel}>TGen Align</label>
+                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={tgenAlignVal}
+                  title="Grid a capped Generate Text image is snapped DOWN to (never up)."
+                  onChange={e => onGlobalParamChange('tgen_align', parseInt(e.target.value) || 1)} />
               </div>
               </div>)}
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端

@@ -118,6 +118,11 @@ const App: React.FC = () => {
   const [cropReserve, setCropReserve] = useState(32);
   const [pixelsVal, setPixelsVal] = useState(1048576);
   const [alignVal, setAlignVal] = useState(8);
+  // 输入侧显存封顶四件套 —— pixels 是**上限**（只压不涨），0 = 不设上限
+  const [refPixelsVal, setRefPixelsVal] = useState(1048576);
+  const [refAlignVal, setRefAlignVal] = useState(8);
+  const [tgenPixelsVal, setTgenPixelsVal] = useState(1048576);
+  const [tgenAlignVal, setTgenAlignVal] = useState(8);
   const blockIdCounter = useRef(2);
 
   // Fetch config on mount
@@ -131,6 +136,10 @@ const App: React.FC = () => {
         setCropReserve(data.crop_reserve);
         setPixelsVal(data.pixels);
         setAlignVal(data.align);
+        setRefPixelsVal(data.ref_pixels ?? 1048576);
+        setRefAlignVal(data.ref_align ?? 8);
+        setTgenPixelsVal(data.tgen_pixels ?? 1048576);
+        setTgenAlignVal(data.tgen_align ?? 8);
         if (Array.isArray(data.blocks_sets)) {
           setBlockSets(data.blocks_sets);
           setActiveBlockSetId(
@@ -712,12 +721,17 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, [blockSets, activeBlockSetId]);
 
-  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align', value: number) => {
+  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
+    | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => {
     if (key === 'mask_grow') setMaskGrow(value);
     if (key === 'mask_blur') setMaskBlur(value);
     if (key === 'crop_reserve') setCropReserve(value);
     if (key === 'pixels') setPixelsVal(value);
     if (key === 'align') setAlignVal(value);
+    if (key === 'ref_pixels') setRefPixelsVal(value);
+    if (key === 'ref_align') setRefAlignVal(value);
+    if (key === 'tgen_pixels') setTgenPixelsVal(value);
+    if (key === 'tgen_align') setTgenAlignVal(value);
     fetch('/api/update_config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -949,6 +963,10 @@ const App: React.FC = () => {
         cropReserve={cropReserve}
         pixelsVal={pixelsVal}
         alignVal={alignVal}
+        refPixelsVal={refPixelsVal}
+        refAlignVal={refAlignVal}
+        tgenPixelsVal={tgenPixelsVal}
+        tgenAlignVal={tgenAlignVal}
         onBlocksChange={handleBlocksChange}
         onGlobalParamChange={handleGlobalParamChange}
         onAddBlock={handleAddBlock}

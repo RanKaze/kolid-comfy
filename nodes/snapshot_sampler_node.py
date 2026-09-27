@@ -398,9 +398,11 @@ doc_io = DocumentIo()
 #   PIPELINE_CURRENT_SELECT = [Current Select]，用当前已加载的那一条，不做任何切换。
 #   其余字符串            = pipeline 在 /api/pipeline_package 里的名字（重名时取第一个）。
 PIPELINE_CURRENT_SELECT = '[Current Select]'
-# Pipeline Settings 里可以按 pipeline 名字 override 的五个参数 —— 与 GLOBAL SETTINGS 同名同义，
+# Pipeline Settings 里可以按 pipeline 名字 override 的九个参数 —— 与 GLOBAL SETTINGS 同名同义，
 # 区别只是「这条 pipeline 跑的时候盖掉全局值」，且必须 toggle 开着才生效。
-PIPELINE_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align')
+# 后四个（ref_*/tgen_*）是**输入侧上限**：pixels 只许往下压，永不放大。
+PIPELINE_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
+                          'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align')
 
 
 # =============================================================================
@@ -415,8 +417,12 @@ class SnapshotDetailerSamplerServer:
     # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
     # → 落盘 blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
     # 所以除了这份文件不存在第二个来源，不会出现互相覆盖。
+    # ref_* / tgen_* 是输入侧的显存封顶（喂给 ref image / generate text 之前先 limit_pixels
+    # 的 cap_only 模式压一刀），0 = 不设上限。
     GLOBAL_PARAM_DEFAULTS = {'pixels': 1048576, 'align': 8, 'crop_reserve': 32,
-                             'mask_grow': 32, 'mask_blur': 32}
+                             'mask_grow': 32, 'mask_blur': 32,
+                             'ref_pixels': 1048576, 'ref_align': 8,
+                             'tgen_pixels': 1048576, 'tgen_align': 8}
 
     def __init__(self, detector, tagger, lora_regex, asset=None, package=None,
                  node_instance=None, unique_id=None, config=None, extra_pnginfo=None, prompt=None):
@@ -452,7 +458,7 @@ class SnapshotDetailerSamplerServer:
                   f"total={len(self.packages)}, interface={len(self.interface_packages)}, pipeline={len(self.pipeline_packages)}")
 
         cfg = config or {}
-        # 五个 GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
+        # GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
         # （改动即 POST → _apply_params → _save_global_params_file）。server 是在 sample()
         # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。节点上不再有这些端口 ——
         # 两处各存一份必然不同步。
@@ -1272,12 +1278,10 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',
                     'detail_status': inst.detail_status if inst else 'idle',
-                    # 五个 GLOBAL SETTINGS（前端 Global Settings 的唯一真源）
-                    'pixels': inst.pixels if inst else 1048576,
-                    'align': inst.align if inst else 8,
-                    'crop_reserve': inst.crop_reserve if inst else 32,
-                    'mask_grow': inst.mask_grow if inst else 32,
-                    'mask_blur': inst.mask_blur if inst else 32,
+                    # GLOBAL SETTINGS 的全部键（前端 Global Settings 的唯一真源）—— 按
+                    # GLOBAL_PARAM_DEFAULTS 回显，加参数不必再来这里补一行。
+                    **{k: (getattr(inst, k, d) if inst else d)
+                       for k, d in SnapshotDetailerSamplerServer.GLOBAL_PARAM_DEFAULTS.items()},
                     'has_tagger': inst.tagger is not None if inst else False,
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
@@ -2652,6 +2656,13 @@ class SnapshotDetailerSamplerNode:
         # preset 区分。interface 之后的 block 不再单独 limit，pipeline 内不做额外 resize。
         limit_pixels_val = int(global_params.get('pixels', 1048576))
         limit_align = int(global_params.get('align', 8))
+        # 输入侧显存封顶：ref image 与 generate text 的图在进 VAE / 多模态塔**之前**先按
+        # cap_only 语义 limit 一刀 —— pixels 是上限而不是目标（只压不涨），align 向下落格。
+        # pixels=0 = 不设上限（limit_pixels 的 cap_only 分支把 falsy pixels 当"无预算"）。
+        ref_cap_pixels = int(global_params.get('ref_pixels', 0))
+        ref_cap_align = int(global_params.get('ref_align', 8)) or 1
+        tgen_cap_pixels = int(global_params.get('tgen_pixels', 0))
+        tgen_cap_align = int(global_params.get('tgen_align', 8)) or 1
         # QwenImage2.1: crop 尺寸需与 vision token / latent 共享的 32 像素格对齐
         # 即使 Enable Limit 关掉也要保住 —— 它的 latent 网格不接受未对齐尺寸。
         needs_grid_align = bool(arch_qwen_image21.matches(next_pipeline.config))
@@ -2978,6 +2989,14 @@ class SnapshotDetailerSamplerNode:
                                 _gt_images.append(_ref_img)
                                 _gt_sources.append(f'Ref Image（{_ref_key}）')
                                 _gt_ref_keys.append(_ref_key)
+                        # 输入侧封顶：这些图即将进多模态塔，先各自压到 tgen_pixels 上限
+                        # （cap_only = 只缩不涨，align 向下落格）。压不压、压到多大只由
+                        # (H,W) 决定，所以 normalize_ref_images 的"形状不一致就丢弃"分组
+                        # 不会因为封顶而新丢图。
+                        for _i, _gt in enumerate(_gt_images):
+                            _gt_capped, _, _ = limit_pixels(_gt, tgen_cap_pixels,
+                                                            align=tgen_cap_align, cap_only=True)
+                            _gt_images[_i] = _gt_capped
                         # 明确告诉 Debug：这些图**会不会真的影响**生成。
                         # 先按名字/模板做静态判断，再**实测一次 tokenize**（数 image
                         # embedding）—— 后者才是「图真的进了 token 流」的唯一证据。
@@ -3106,6 +3125,12 @@ class SnapshotDetailerSamplerNode:
                     for _ref_key in context_reference_keys:
                         ref_img = server.get_staging_image(_ref_key)
                         if ref_img is not None:
+                            # 输入侧封顶：ref 马上要进 VAE 编码，像素数直接决定显存 ——
+                            # 编码前压到 ref_pixels 上限（cap_only = 只缩不涨，align 向下
+                            # 落格）。_injected_refs 记的也就是这张压过的图，Debug 槽位
+                            # 清单与真正进 get_conditioning 的像素保持一致。
+                            ref_img, _, _ = limit_pixels(ref_img, ref_cap_pixels,
+                                                         align=ref_cap_align, cap_only=True)
                             ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
                             next_pipeline.reference.reference_latents.append(ref_latent)
                             _injected_refs.append((_ref_key, ref_img))
@@ -3856,17 +3881,12 @@ class SnapshotDetailerSamplerNode:
                                         detail=f'sum={diag_mask_sum:.0f}')
 
                         # Build global_params for pipeline execution.
-                        # 五个 GLOBAL SETTINGS 是基准；Pipeline Settings 里当前 pipeline 打开的
+                        # 每个 GLOBAL SETTINGS 键都取 server 上的当前值（键名与 global_params
+                        # 完全一致，所以这里直接摊平）；Pipeline Settings 里当前 pipeline 打开的
                         # override 逐项覆盖它（toggle 关的键压根不在 pipeline_overrides 里）。
-                        # 键名与 global_params 完全一致，所以 update 一步到位。
                         global_params = {
                             'seed': seed,
-                            'mask_grow': server.mask_grow,
-                            'mask_blur': server.mask_blur,
-                            # GLOBAL SETTINGS：所有 preset 共享同一份（server config）
-                            'crop_reserve': server.crop_reserve,
-                            'pixels': server.pixels,
-                            'align': server.align,
+                            **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
                             # 兜底值：每个 detailer block 自带 context_regex（Edit 页），
                             # 只有没写这个键的遗留块才回落到 ".+"（全量 context）。
                             'context_regex': '.+',

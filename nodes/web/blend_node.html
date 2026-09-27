@@ -7708,9 +7708,19 @@ async function openCudDocument(file, doc) {
             } else {
                 const imgBlob = blobs.get(rec.image);
                 if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
-                const decoded = await blobToImage(imgBlob);
-                img = decoded.img;
-                url = decoded.url;
+                if (rec.raster) {
+                    // A raster row's buffer must arrive as a canvas, not the <img> a smart row keeps:
+                    // effectiveTransform() reads its content box with getImageData and every
+                    // resample/bake calls getContext on it — an <img> there throws mid-Load and
+                    // leaves the project opened but unpainted. The thumbnail follows the same shape
+                    // the rasterize/Generate paths already use.
+                    img = await blobToCanvas(imgBlob);
+                    url = img.toDataURL('image/png');
+                } else {
+                    const decoded = await blobToImage(imgBlob);
+                    img = decoded.img;
+                    url = decoded.url;
+                }
             }
             const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
             const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
