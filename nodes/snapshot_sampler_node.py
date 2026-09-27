@@ -42,6 +42,22 @@ import uuid
 
 
 # =============================================================================
+# Debug 面板的 lora 读数
+# =============================================================================
+def debug_lora_entries(loras):
+    """把链路里的 lora 值归一成"一条 lora 一个条目"，供 Debug 记录用。
+
+    loras 一路是以 `<lora_path:文件:强度>` 逗号拼接的**字符串**在跑（_parse_prompt /
+    _resolve_prompt_* 的返回值都是这种形态），早期 Debug 直接写 list(user_loras) 等于把字符串
+    拆成单字符，面板上就成了 '<, l, o, r, a, _, p, a, t, h, :' 的花汤。context 那条路径本来就
+    是 list，所以两种入口都从这里走，显示口径只有这一个。
+    """
+    if isinstance(loras, str):
+        return get_loras_from_string(loras)
+    return list(loras or [])
+
+
+# =============================================================================
 # Detailer 产出回贴几何（Recover Crop 关闭时）
 # =============================================================================
 def detail_place_rect(crop_info, patch=None):
@@ -2505,7 +2521,7 @@ class SnapshotDetailerSamplerNode:
                          f'image={tuple(original_image.shape)}',
                          block=0,
                          user_positive=user_positive,
-                         user_loras=list(user_loras or []))
+                         user_loras=debug_lora_entries(user_loras))
         dbg.record_image('裁剪前原图（original_image）', original_image, block=0)
         if user_mask is not None:
             dbg.record_mask('原始 mask（未扩张）', user_mask, block=0)
@@ -2745,7 +2761,7 @@ class SnapshotDetailerSamplerNode:
                     print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
                           f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                     dbg.record_prompt(f'Block {i+1} · Query 块回答后', user_positive,
-                                      block=i + 1, loras=list(user_loras or []))
+                                      block=i + 1, loras=debug_lora_entries(user_loras))
                     continue
 
                 if block.get('type') == 'prompt':
@@ -2766,7 +2782,7 @@ class SnapshotDetailerSamplerNode:
                         print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
                               f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
                         dbg.record_prompt(f'Block {i+1} · Prompt 块生效后', user_positive,
-                                          block=i + 1, loras=list(user_loras or []))
+                                          block=i + 1, loras=debug_lora_entries(user_loras))
                     except Exception as e:
                         # fail-open：程序执行失败保留之前的 prompt，不中断整条链
                         import traceback
@@ -3570,7 +3586,7 @@ class SnapshotDetailerSamplerNode:
                         # 「没注入」在日志里一眼可见。
                         print(f"[run_detailer] prompt tab: positive='{user_positive[:200]}' ({len(user_positive)} chars), loras={user_loras}")
                         dbg.record_prompt('1. Prompt tab（_parse_prompt 解析结果）', user_positive,
-                                          loras=list(user_loras or []))
+                                          loras=debug_lora_entries(user_loras))
 
                         # Blend 工作台：输入图 = 画布合成图，遮罩 = 纯 Mask 层，两者随 action 送达。
                         # 走这条路时完全不动 _current_pipeline 的 image/mask，也就没有 context 切换。
@@ -3605,7 +3621,7 @@ class SnapshotDetailerSamplerNode:
                                               extra_prompt=extra_prompt,
                                               ref_ids=list(prompt_ref_ids),
                                               missing_ref_ids=list(missing_ref_ids),
-                                              loras=list(user_loras or []))
+                                              loras=debug_lora_entries(user_loras))
 
                         # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
                         # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
