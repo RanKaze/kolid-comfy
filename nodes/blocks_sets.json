@@ -30,7 +30,8 @@
             "enable_limit": true
           }
         }
-      ]
+      ],
+      "pipeline_name": "[Anima] LizAnima"
     },
     {
       "id": "set-18",
@@ -109,7 +110,8 @@
             "enable_mask": false
           }
         }
-      ]
+      ],
+      "pipeline_name": "[QwenImage21] Base"
     },
     {
       "id": "set-21",
@@ -148,7 +150,8 @@
             "enable_mask": false
           }
         }
-      ]
+      ],
+      "pipeline_name": "[QwenImage21] Base"
     },
     {
       "id": "set-17",
@@ -189,7 +192,8 @@
             "context_reference_keys": []
           }
         }
-      ]
+      ],
+      "pipeline_name": "[QwenImage21] Base"
     },
     {
       "id": "set-22",
@@ -217,7 +221,8 @@
             "enable_mask": false
           }
         }
-      ]
+      ],
+      "pipeline_name": "[QwenImage21] Base"
     },
     {
       "id": "set-20",
@@ -250,7 +255,8 @@
             "context_reference_keys": []
           }
         }
-      ]
+      ],
+      "pipeline_name": "[QwenImage21] Base"
     },
     {
       "id": "set-23",
@@ -283,7 +289,7 @@
             "align": 8,
             "crop_reserve": 32,
             "recover_crop": true,
-            "enable_edit": true,
+            "enable_edit": false,
             "edit_mode": "fit",
             "ref_boost": 4,
             "ref_boost_a": 1,
@@ -294,15 +300,87 @@
             "enable_text_generate": false
           }
         }
-      ]
+      ],
+      "pipeline_name": "[Anima] LizAnima"
     }
   ],
-  "active_block_set": "set-12",
+  "active_block_set": "set-23",
   "global_params": {
     "pixels": 2048576,
     "align": 16,
     "crop_reserve": 32,
     "mask_grow": 32,
     "mask_blur": 32
+  },
+  "pipeline_settings": {
+    "selected": "[QwenImage21] Base",
+    "overrides": {
+      "[Anima] LizAnima": {
+        "mask_grow": {
+          "value": 32,
+          "enabled": true
+        },
+        "mask_blur": {
+          "value": 32,
+          "enabled": true
+        },
+        "crop_reserve": {
+          "value": 32,
+          "enabled": true
+        },
+        "pixels": {
+          "value": 2048576,
+          "enabled": true
+        },
+        "align": {
+          "value": 16,
+          "enabled": true
+        }
+      },
+      "[QwenImage21] Base": {
+        "mask_grow": {
+          "value": 32,
+          "enabled": true
+        },
+        "mask_blur": {
+          "value": 32,
+          "enabled": true
+        },
+        "crop_reserve": {
+          "value": 32,
+          "enabled": true
+        },
+        "pixels": {
+          "value": 2048576,
+          "enabled": true
+        },
+        "align": {
+          "value": 16,
+          "enabled": true
+        }
+      },
+      "[P] Noobai XIN 灰调噪点": {
+        "mask_grow": {
+          "value": 32,
+          "enabled": true
+        },
+        "mask_blur": {
+          "value": 32,
+          "enabled": true
+        },
+        "crop_reserve": {
+          "value": 32,
+          "enabled": true
+        },
+        "pixels": {
+          "value": 1048576,
+          "enabled": true
+        },
+        "align": {
+          "value": 1,
+          "enabled": true
+        }
+      }
+    }
   }
 }

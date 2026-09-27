@@ -259,8 +259,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .icon-btn:disabled:hover { background: transparent; color: rgba(255,255,255,0.45); }
 
 /* ---- Bottom action toolbar ----
-   The composite IS the Context Image, so these buttons are the only exit points:
-   Blend archives it, the Tag button reads it, Run generates from it. */
+   The composite IS the Context Image: Blend archives it, the Tag button reads it, and the
+   detailer is run from the host (every run names its pipeline preset) — this bar only carries
+   the extra prompt and the floating Cancel while one is in flight. */
 #toolbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 60; display: flex; flex-direction: column; align-items: stretch; gap: 6px;
     padding: 8px 10px; border-radius: 14px; background: rgba(28,28,30,0.75); border: 0.5px solid rgba(255,255,255,0.1);
     box-shadow: 0 6px 24px rgba(0,0,0,0.42); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
@@ -291,14 +292,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .tb-btn.archive:hover:not(:disabled) { background: rgba(48,209,88,1); }
 .tb-btn.tag { background: rgba(175,82,222,0.85); }
 .tb-btn.tag:hover:not(:disabled) { background: rgba(175,82,222,1); }
-.tb-btn.run { background: rgba(10,132,255,0.92); box-shadow: 0 2px 10px rgba(10,132,255,0.25); }
-.tb-btn.run:hover:not(:disabled) { background: rgba(10,132,255,1); transform: translateY(-1px); }
-.tb-btn.run.cancel { background: rgba(255,69,58,0.92); box-shadow: 0 2px 10px rgba(255,69,58,0.25); }
-.tb-btn.run.cancel:hover:not(:disabled) { background: rgba(255,69,58,1); transform: translateY(-1px); }
-/* Run is one pill with two halves: the left half runs, the right opens its settings. */
-.tb-pill { display: flex; align-items: stretch; }
-.tb-pill .pill-main { border-radius: 9px 0 0 9px; }
-.tb-pill .pill-set { border-radius: 0 9px 9px 0; padding: 8px 11px; margin-left: 1px; font-size: 13px; line-height: 1; }
+/* 运行中才浮出来的 Cancel：画布中下区、toolbar（Extra Prompt 那一行）正上方。
+   绝对定位，不参与 flex 布局 —— 出现/消失都不会让工具条挪动一像素。 */
+#runCancelBtn { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%);
+    display: none; border: none; border-radius: 999px; padding: 7px 18px; font-size: 12.5px; font-weight: 700;
+    color: #fff; background: rgba(255,69,58,0.92); box-shadow: 0 4px 14px rgba(255,69,58,0.3);
+    cursor: pointer; white-space: nowrap; }
+#runCancelBtn.on { display: block; }
+#runCancelBtn:hover { background: rgba(255,69,58,1); transform: translateX(-50%) translateY(-1px); }
 /* Progress strip drawn over the toolbar while a run is in flight. */
 #toolbarProgress { position: absolute; left: 14px; right: 14px; bottom: 0; height: 3px; border-radius: 0 0 14px 14px; overflow: hidden; background: rgba(255,255,255,0.08); display: none; }
 #toolbarProgress.on { display: block; }
@@ -537,6 +538,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
         <div id="toolbar">
+            <button id="runCancelBtn" title="Cancel — interrupt the current run (works mid-block, mid-sampling or during Generate Text)">Cancel</button>
             <div id="toolbarRow">
                 <!-- Extra Prompt 是 contenteditable：文字与 <image_id:xxx> 的**图片 chip** 混排。
                      读回文本时 chip 序列化成 <image_id:xxx>；后端再解码成 <image N>。 -->
@@ -544,10 +546,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                      data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
                 <button class="tb-btn archive" id="blendBtn" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself.">Blend</button>
                 <button class="tb-btn tag" id="tagBtn" title="Tag the composite — pick which region the tagger reads. With an image layer selected you also get Layer tags (the composite over that layer, cut by its own mask), plus Clear Tag to wipe the tags from the prompt stage.">Tag</button>
-                <div class="tb-pill">
-                    <button class="tb-btn run pill-main" id="runDetailerBtn" title="Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.">Run</button>
-                    <button class="tb-btn run pill-set" id="runSettingsBtn" title="Which pipeline preset Run uses" aria-label="Run settings">&#9881;</button>
-                </div>
             </div>
             <!-- 工作区（staging）：唯一的图池，toolbar 第二行（固定高度、顶满宽度）。
                  拖文件进来上传；点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>；✕ 移除。
@@ -808,22 +806,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
-<div class="modal-overlay" id="runSettingsModal">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="Run settings">
-        <div class="modal-title">Run — settings</div>
-        <div class="modal-sub">Which pipeline preset (a Pipeline Blocks tab) the Run button executes on the composite.</div>
-        <div class="gen-preset-row">
-            <span class="gen-preset-label">Pipeline Preset</span>
-            <select id="runPresetSelect" title="Which pipeline preset (block-set tab) the Run button uses"></select>
-        </div>
-        <div class="modal-hint">Defaults to the tab that is active in the workbench. The choice is remembered, so the next Run uses it too.</div>
-        <div class="modal-actions">
-            <button class="modal-btn ghost" id="runSettingsCancelBtn">Cancel</button>
-            <div style="flex:1;"></div>
-            <button class="modal-btn primary" id="runSettingsApplyBtn">Use this preset</button>
-        </div>
-    </div>
-</div>
 <div class="layer-menu" id="layerMenu" role="menu"></div>
 <div class="modal-overlay" id="docCloseModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Close the project">
@@ -855,12 +837,11 @@ const maskRowSlotEl = document.getElementById('maskRowSlot');
 const blendBtn = document.getElementById('blendBtn');
 const extraPromptInput = document.getElementById('extraPrompt');
 const tagBtn = document.getElementById('tagBtn');
-const runDetailerBtn = document.getElementById('runDetailerBtn');
-const runSettingsBtn = document.getElementById('runSettingsBtn');
+const runCancelBtn = document.getElementById('runCancelBtn');
 const toolbarProgress = document.getElementById('toolbarProgress');
 const toolbarProgressFill = toolbarProgress.querySelector('i');
 const TAG_ACTION_BTNS = [tagBtn];
-const ACTION_BTNS = [blendBtn].concat(TAG_ACTION_BTNS, [runDetailerBtn, runSettingsBtn]);
+const ACTION_BTNS = [blendBtn].concat(TAG_ACTION_BTNS);
 const pickHud = document.getElementById('pickHud');
 const pickSwatch = document.getElementById('pickSwatch');
 const pickHex = document.getElementById('pickHex');
@@ -5206,7 +5187,7 @@ wireStackListDrop(layerListEl, WORK_STACK);
 // ==================== Guidances / Layers 分隔条 ====================
 // dock 的剩余高度按 guidanceSplit : (1 - guidanceSplit) 分给两块列表（两边都是
 // flex-basis 0，只长不缩），所以拖动定下的比例与窗口高度无关：窗口变高是两块一起变高。
-// 与 genPrefs/runPrefs 同轨存 localStorage —— 这是布局偏好，不进 .cud。
+// 与 genPrefs 同轨存 localStorage —— 这是布局偏好，不进 .cud。
 const SPLIT_KEY = 'blend.stackSplit';
 const SPLIT_DEFAULT = 0.6;            // Guidances 先拿多一半：行多，且它是排序入口
 const SPLIT_MIN = 0.15, SPLIT_MAX = 0.85;
@@ -5533,8 +5514,6 @@ function layerSpecs() {
 function syncActionButtons() {
     for (const b of ACTION_BTNS) b.disabled = actionBusy;
     for (const b of TAG_ACTION_BTNS) b.disabled = actionBusy || !hasTagger;
-    // Run 按钮在 detailer 运行中是 Cancel：必须保持可点，点击 = 打断本次运行。
-    if (actionBusy && actionBusyLabel === 'detailer') runDetailerBtn.disabled = false;
 }
 
 function setActionBusy(busy, label) {
@@ -5544,18 +5523,11 @@ function setActionBusy(busy, label) {
         toolbarProgress.classList.remove('on');
         toolbarProgressFill.style.width = '0';
         blendBtn.textContent = 'Blend';
-        runDetailerBtn.textContent = 'Run';
-        runDetailerBtn.classList.remove('cancel');
-        runDetailerBtn.title = 'Run the detailer on the composite, masked by the Mask layer. The result lands in the staging pool and as a new layer below the Mask.';
+        runCancelBtn.classList.remove('on');
     } else {
         toolbarProgress.classList.add('on');
         if (label === 'blend') blendBtn.textContent = 'Blending…';
-        if (label === 'detailer') {
-            // 运行中不再显示 "Running…"——按钮直接变成 Cancel，点了就打断。
-            runDetailerBtn.textContent = 'Cancel';
-            runDetailerBtn.classList.add('cancel');
-            runDetailerBtn.title = 'Cancel — interrupt the current run (works mid-block, mid-sampling or during Generate Text)';
-        }
+        runCancelBtn.classList.toggle('on', label === 'detailer');
     }
     syncActionButtons();
 }
@@ -5626,7 +5598,7 @@ function sendBlendAction(action, opts) {
         // 语义漂移就是蒙版边缘灰色条带的来源）。失败时返回 null，后端自动回退。
         payload.composite = surfaceDataUrl(blendCanvas);
         payload.extra_prompt = extraPromptInput.value.trim();
-        // Which pipeline preset this Run executes (the Run settings dialog). With no id
+        // Which pipeline preset this run executes — named by the host's ▶. With no id
         // the backend falls back to the runner's own chain, i.e. the active tab.
         const runPreset = resolveRunPresetId();
         if (runPreset) payload.preset_id = runPreset;
@@ -5648,15 +5620,8 @@ function sendClearTag() {
 
 blendBtn.addEventListener('click', () => sendBlendAction('blend'));
 tagBtn.addEventListener('click', () => openTagModal());
-runDetailerBtn.addEventListener('click', () => {
-    // 运行中这个按钮是 Cancel —— 打断当前 run，而不是再排一个 detailer。
-    if (actionBusy) {
-        if (actionBusyLabel === 'detailer') sendCancelRun();
-        return;
-    }
-    sendBlendAction('detailer');
-});
-runSettingsBtn.addEventListener('click', () => openRunSettingsModal());
+// 中断当前 run：只发消息、不等结果，收尾在宿主的 status 轮询（detail_status='cancelled'）。
+runCancelBtn.addEventListener('click', sendCancelRun);
 // Enter in the prompt box must not fall through to the canvas keyboard shortcuts.
 extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
 
@@ -5697,71 +5662,19 @@ function saveGenPrefs() {
     try { localStorage.setItem(GEN_PREFS_KEY, JSON.stringify(genPrefs)); } catch (e) { /* as above */ }
 }
 
-// ==================== Run 设置（Pipeline Preset） ====================
+// ==================== Run（Pipeline Preset） ====================
 // Enable Mask 总闸（生效链第一个 detailer 的 params.enable_mask），随 blend-config 从宿主
 // 同步（默认开 = 保守：宿主没说就当作要遮罩）。Run 的遮罩预检用它放行「Enable Mask 关 +
 // 没画 Mask 层」的组合 —— 后端闸门用同一套解析，两边永远不会打架。
 let maskRequired = true;
+// Run 只由宿主发起（Pipeline Preset 的 ▶ 点名这一趟跑哪条链），所以生效 preset 就是它带来的 id。
+let runPresetId = '';
+function resolveRunPresetId() { return runPresetId; }
 function maskRequiredForRun() {
-    const id = resolveRunPresetId();
-    const p = genPresets.find(x => x.id === id);
+    const p = genPresets.find(x => x.id === resolveRunPresetId());
     if (p && typeof p.enable_mask === 'boolean') return p.enable_mask;
     return maskRequired;
 }
-
-const RUN_PREFS_KEY = 'blend.runPreset';
-let runPrefs = { preset_id: null };
-try {
-    const rawRun = localStorage.getItem(RUN_PREFS_KEY);
-    if (rawRun) {
-        const p = JSON.parse(rawRun);
-        if (p && typeof p === 'object') runPrefs.preset_id = typeof p.preset_id === 'string' ? p.preset_id : null;
-    }
-} catch (e) { /* storage unavailable: the active-tab default holds */ }
-const runSettingsModalEl = document.getElementById('runSettingsModal');
-const runPresetSelect = document.getElementById('runPresetSelect');
-
-function saveRunPrefs() {
-    try { localStorage.setItem(RUN_PREFS_KEY, JSON.stringify(runPrefs)); } catch (e) { /* as above */ }
-}
-function runSettingsModalOpen() { return runSettingsModalEl.classList.contains('open'); }
-
-// The id the Run button executes: the remembered pick while its tab still exists, then the
-// host's active tab, then the first preset — the same ladder the Generate dialog walks.
-function resolveRunPresetId() {
-    if (runPrefs.preset_id != null && genPresets.some(p => p.id === runPrefs.preset_id)) return runPrefs.preset_id;
-    if (genActivePresetId != null && genPresets.some(p => p.id === genActivePresetId)) return genActivePresetId;
-    return genPresets[0] ? genPresets[0].id : '';
-}
-function renderRunPresetOptions() {
-    runPresetSelect.innerHTML = '';
-    genPresets.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = p.name || p.id;
-        runPresetSelect.appendChild(opt);
-    });
-}
-function openRunSettingsModal() {
-    renderRunPresetOptions();
-    runPresetSelect.value = resolveRunPresetId();
-    runSettingsModalEl.classList.add('open');
-    syncBrushCursor();
-}
-function closeRunSettingsModal() { runSettingsModalEl.classList.remove('open'); }
-function applyRunSettingsModal() {
-    runPrefs.preset_id = runPresetSelect.value || null;
-    saveRunPrefs();
-    closeRunSettingsModal();
-}
-runSettingsModalEl.addEventListener('mousedown', e => { if (e.target === runSettingsModalEl) closeRunSettingsModal(); });
-runPresetSelect.addEventListener('change', () => { runPrefs.preset_id = runPresetSelect.value || null; saveRunPrefs(); });
-document.getElementById('runSettingsCancelBtn').addEventListener('click', closeRunSettingsModal);
-document.getElementById('runSettingsApplyBtn').addEventListener('click', applyRunSettingsModal);
-runSettingsModalEl.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRunSettingsModal(); }
-    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); applyRunSettingsModal(); }
-});
 
 function layerMenuOpen() { return !!layerMenuEl && layerMenuEl.classList.contains('open'); }
 
@@ -5938,15 +5851,6 @@ function setGenPresets(presets, activeId) {
     if (genPrefs.preset_id !== (resolved || null)) {
         genPrefs.preset_id = resolved || null;
         saveGenPrefs();
-    }
-    // The Run dialog watches the same tab list: a deleted tab must not leave a dangling id
-    // behind, and a renamed or added tab becomes selectable without reopening the dialog.
-    renderRunPresetOptions();
-    const runResolved = resolveRunPresetId();
-    runPresetSelect.value = runResolved;
-    if (runPrefs.preset_id !== (runResolved || null)) {
-        runPrefs.preset_id = runResolved || null;
-        saveRunPrefs();
     }
 }
 
@@ -6341,7 +6245,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || runSettingsModalOpen() || tagModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -6619,11 +6523,6 @@ window.addEventListener('keydown', e => {
     if (genModalOpen()) {
         if (e.key === 'Escape') { e.preventDefault(); closeGenModal(); }
         else if (e.key === 'Enter') { e.preventDefault(); confirmGenModal(); }
-        return;
-    }
-    if (runSettingsModalOpen()) {
-        if (e.key === 'Escape') { e.preventDefault(); closeRunSettingsModal(); }
-        else if (e.key === 'Enter') { e.preventDefault(); applyRunSettingsModal(); }
         return;
     }
     if (tagModalOpen()) {
@@ -8113,16 +8012,10 @@ window.addEventListener('message', event => {
         return;
     }
     if (d.type === 'blend-run-preset') {
-        // The sampler's Pipeline Presets capsule: its ▶ runs this preset NOW. The canvas
-        // composite and the Mask layer are here, so the run is issued from this side —
-        // the host only names the preset. Adopting the id also makes the next plain Run
-        // (and the settings dialog) show the same choice.
-        const rpId = (d.preset_id || '').toString();
-        if (rpId) {
-            runPrefs.preset_id = rpId;
-            saveRunPrefs();
-            if (runPresetSelect) runPresetSelect.value = rpId;
-        }
+        // The sampler's Pipeline Presets capsule: its ▶ is the only way a run starts from here.
+        // The canvas composite and the Mask layer live on this side, so the run is issued here and
+        // the host only names the preset — which also decides the Enable Mask gate for this run.
+        runPresetId = (d.preset_id || '').toString();
         sendBlendAction('detailer');
         return;
     }

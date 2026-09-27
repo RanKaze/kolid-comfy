@@ -18,6 +18,10 @@ export interface ServerConfig {
   /** 多套 Pipeline Blocks（工作台里的 tabs）；`blocks` 始终是激活那一套的镜像 */
   blocks_sets?: BlockSet[];
   active_block_set?: string | null;
+  /** Pipeline Settings（Draw 页）：选中的 pipeline + 按名字绑定的五个 override */
+  pipeline_settings?: PipelineSettings;
+  /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
+  loaded_pipeline_name?: string;
 }
 
 /** 一套 Pipeline Blocks = 一个 tab。id 稳定（重命名不改 id），blocks 与旧模型同构。 */
@@ -25,7 +29,35 @@ export interface BlockSet {
   id: string;
   name: string;
   blocks: PipelineBlock[];
+  /** 这套链跑起来时用哪条 pipeline：'' = 不切换（[Current Select] 语义）、
+   *  PIPELINE_CURRENT_SELECT、或某个 pipeline 名字。绑定按名字（不是索引）。 */
+  pipeline_name?: string | null;
 }
+
+/** '[Default]' —— 节点输入口那条 pipeline。它的身份后端从来没有收集过，所以一旦选过别的
+ *  就再也回不去：enum 里这颗选项只在"还没选过任何东西"时出现。 */
+export const PIPELINE_DEFAULT = '[Default]';
+/** '[Current Select]' —— 不做任何切换，用当前已加载的那一条。 */
+export const PIPELINE_CURRENT_SELECT = '[Current Select]';
+
+/** 可 override 的五项，与后端 PIPELINE_OVERRIDE_KEYS 一一对应（顺序即 UI 顺序）。 */
+export type PipelineOverrideKey = 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align';
+export const PIPELINE_OVERRIDE_KEYS: PipelineOverrideKey[] =
+  ['mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align'];
+
+export interface PipelineOverride {
+  value: number;
+  enabled: boolean;
+}
+
+/** 整份 Pipeline Settings。override 按 pipeline **名字**存（不是 node_id）—— 这是用户要的
+ *  "跟随 pipeline 持久化"；代价是重名的两条会共享同一份 override。 */
+export interface PipelineSettings {
+  selected: string;
+  overrides: Record<string, Partial<Record<PipelineOverrideKey, PipelineOverride>>>;
+}
+
+export const EMPTY_PIPELINE_SETTINGS: PipelineSettings = { selected: '', overrides: {} };
 
 export interface DetailerBlockParams {
   add_noise: string;
@@ -150,7 +182,7 @@ export interface ActionLogEntry {
 }
 
 export interface StatusResponse {
-  /** cancelled = Run 按钮的 Cancel 打断了本次运行（/api/cancel_run） */
+  /** cancelled = 工作台的 Cancel 打断了本次运行（/api/cancel_run） */
   detail_status: 'idle' | 'running' | 'done' | 'error' | 'cancelled';
   error?: string;
   progress?: number;
@@ -163,6 +195,9 @@ export interface StatusResponse {
   interface_total_steps?: number;
   interface_result_keys?: string[];
   pending_query?: PendingQuery | null;
+  /** preset 绑定的 pipeline 可能在本次 run 里被现加载 —— 名字与架构都跟着变，轮询时顺手同步 */
+  loaded_pipeline_name?: string;
+  architecture?: string | null;
 }
 
 export interface TagPreviews {
@@ -260,9 +295,11 @@ export interface InterfaceExecOptions {
 /**
  * `draw` is now the Blend workbench: its canvas composite IS the Context Image, and the pure
  * Mask layer supplies the mask. The standalone `mask` / `blend` / `tag` tabs were folded into
- * it (the Tag buttons live in its toolbar).
+ * it (the Tag buttons live in its toolbar). `context` and `pipeline` are gone for the same
+ * reason — the pipeline switch lives in the Draw panel's Pipeline Settings section now, and
+ * nothing in the workbench reads a separately-selected context image any more.
  */
-export type Tab = 'prompt' | 'draw' | 'context' | 'interface' | 'pipeline';
+export type Tab = 'prompt' | 'draw' | 'interface';
 
 export interface InterfacePort {
   num: number;

@@ -1,5 +1,6 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry } from '../types';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 
@@ -9,11 +10,11 @@ const tabInputStyle: React.CSSProperties = {
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
 
-// The four panels of the Draw tab collapse independently. Default is "all open" — a collapsed panel
+// The panels of the Draw tab collapse independently. Default is "all open" — a collapsed panel
 // is a choice the user made, so it is remembered; a browser that refuses localStorage just gets the
 // default every time, which is not worth an error banner over.
-type SectionKey = 'global' | 'presets' | 'preprocess' | 'blocks';
-const SECTION_KEYS: SectionKey[] = ['global', 'presets', 'preprocess', 'blocks'];
+type SectionKey = 'pipeline' | 'global' | 'presets' | 'preprocess' | 'blocks';
+const SECTION_KEYS: SectionKey[] = ['pipeline', 'global', 'presets', 'preprocess', 'blocks'];
 const SECTIONS_STORE = 'sampler.editSections';
 const sectionsAllOpen = (): Record<SectionKey, boolean> =>
   SECTION_KEYS.reduce((a, k) => ({ ...a, [k]: true }), {} as Record<SectionKey, boolean>);
@@ -90,6 +91,18 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; la
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
 
+// The five Pipeline Settings overrides mirror the five GLOBAL SETTINGS rows one-for-one, so their
+// ranges are copied from those inputs rather than invented. The toggle decides whether the value
+// replaces the global one at run time; a row that was never enabled shows (and keeps) the current
+// global value, which is what it will run with the moment the toggle flips on.
+const PIPELINE_OVERRIDE_META: Record<PipelineOverrideKey, { label: string; min: number; max: number; step: number }> = {
+  mask_grow: { label: 'Override Mask Grow', min: 0, max: 256, step: 1 },
+  mask_blur: { label: 'Override Mask Blur', min: 0, max: 256, step: 1 },
+  crop_reserve: { label: 'Override Crop Reserve', min: 0, max: 256, step: 1 },
+  pixels: { label: 'Override Pixels', min: 65536, max: 16777216, step: 65536 },
+  align: { label: 'Override Align', min: 1, max: 64, step: 1 },
+};
+
 // The "Add +" both section headers share: a pill whose colour tracks the menu it drops, the click-out
 // layer that dismisses it, and the panel/rows. Writing it once is what keeps Pipeline Presets and
 // Pipeline Blocks identical in look and behaviour instead of two near-copies drifting apart.
@@ -150,27 +163,11 @@ const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
         <path d="M12 7.5v9" opacity="0.4" />
       </svg>
     );
-    case 'context': return (
-      <svg {...props}>
-        <rect x="3" y="4" width="18" height="16" rx="2.5" />
-        <circle cx="8.5" cy="9.5" r="1.5" fill="currentColor" stroke="none" />
-        <path d="M3 15l5-5 4 4 5-5 4 4" strokeWidth={1.5} />
-      </svg>
-    );
     case 'interface': return (
       <svg {...props}>
         <rect x="4" y="5" width="16" height="3" rx="1.5" />
         <rect x="4" y="11" width="12" height="3" rx="1.5" />
         <rect x="4" y="17" width="8" height="3" rx="1.5" />
-      </svg>
-    );
-    case 'pipeline': return (
-      <svg {...props}>
-        <circle cx="6" cy="7" r="2.5" />
-        <circle cx="18" cy="7" r="2.5" />
-        <circle cx="6" cy="17" r="2.5" />
-        <circle cx="18" cy="17" r="2.5" />
-        <path d="M8.5 7h7M8.5 17h7M6 9.5v5M18 9.5v5" strokeWidth={1.5} />
       </svg>
     );
     default: return <svg {...props}><circle cx="12" cy="12" r="9" /></svg>;
@@ -195,6 +192,14 @@ const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; di
   </div>
 );
 
+const GearIcon: React.FC<{ size?: number }> = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <circle cx="12" cy="12" r="3.2" />
+    <path d="M12 2.6v2.5M12 18.9v2.5M21.4 12h-2.5M5.1 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2L5.4 5.4" />
+  </svg>
+);
+
 interface EditPhaseProps {
   tab: Tab;
   onTabChange: (tab: Tab) => void;
@@ -202,7 +207,6 @@ interface EditPhaseProps {
   promptReady: boolean;
   detailStatus: 'idle' | 'running' | 'done' | 'error';
   staging: StagingItem[];
-  onRefreshStaging: () => void;
   promptIframeRef: React.RefObject<HTMLIFrameElement>;
   blocks: PipelineBlock[];
   /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
@@ -235,24 +239,27 @@ interface EditPhaseProps {
   onRemoveBlockSet: (id: string) => void;
   onReorderBlockSets: (from: number, to: number) => void;
   onSwitchBlockSet: (id: string) => void;
-  onSelectImage: (key: string) => void;
   onFinishClick: () => void;
   showFinishDialog: boolean;
   onFinish: (selectedKeys?: string[]) => void;
   onCloseFinishDialog: () => void;
-  /** 上传到工作区，返回新条目 id（Context tab 拖文件上传用） */
-  onAddStagingImage: (base64: string) => Promise<string | null>;
-  onLoadFromAssets: () => void;
-  loadingAssets: boolean;
   blendIframeRef: React.RefObject<HTMLIFrameElement>;
   interfaces: InterfaceInfo[];
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: Record<number, StagingItem[]>;
   interfaceStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
   interfaceProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
+  /** 所有可选 pipeline —— Draw 页 enum 与 preset ⚙ 的选项来源。绑定按名字（重名取第一条）。 */
   pipelinePackages: PipelinePackageInfo[];
+  /** Draw 页 Pipeline Settings 的全部状态：选中项 + 按 pipeline 名字绑定的五个 override */
+  pipelineSettings: PipelineSettings;
+  /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条，从未切换过） */
+  loadedPipelineName: string;
+  /** 选中一条 pipeline 就立刻切换（加载上游是昂贵操作，但切换必须是即时的） */
   onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
-  currentPipelineKey: string | null;
+  onPipelineSettingsChange: (next: PipelineSettings) => void;
+  /** preset 行 ⚙：这套链跑起来时用哪条 pipeline（'' = 不切换，即 [Current Select] 语义） */
+  onSetPresetPipeline: (setId: string, pipelineName: string) => void;
   /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
    *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
   actionLog: ActionLogEntry[];
@@ -261,20 +268,18 @@ interface EditPhaseProps {
 const EditPhase: React.FC<EditPhaseProps> = ({
   tab, onTabChange, promptUrl,
   promptReady, detailStatus,
-  staging, onRefreshStaging, promptIframeRef,
+  staging, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal, onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
-  onSelectImage,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
-  onAddStagingImage, onLoadFromAssets, loadingAssets,
   blendIframeRef,
   interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
-  pipelinePackages, onSwitchPipeline, currentPipelineKey, actionLog,
+  pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
+  actionLog,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
-  const [contextDragOver, setContextDragOver] = useState(false);
   // Debug 弹窗：上一次 Run / Generate 的全过程快照（Context 标题右侧的 🐞 按钮打开）。
   const [showDebug, setShowDebug] = useState(false);
   // Log 弹窗：最近 32 条行为记录 —— 画布那颗常显状态药丸撤掉后的去处。
@@ -310,6 +315,68 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 右键某个 preset 行才出现的菜单；null = 没有菜单。
   const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
+  // 某个 preset 行的 ⚙ 打开的 pipeline 绑定弹窗；存的是这套链的 id，null = 没开。
+  const [presetPipelineFor, setPresetPipelineFor] = useState<string | null>(null);
+
+  // ── Pipeline Settings ──
+  // 扁平化的候选：后端按名字找、同名取第一条（find_pipeline_by_name），所以这里也去重，
+  // 保证 enum 上点的和 run 时加载的是同一条。
+  const pipelineNames = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const pkg of pipelinePackages) for (const p of (pkg.pipelines || [])) {
+      if (!p.name || seen.has(p.name)) continue;
+      seen.add(p.name);
+      out.push(p.name);
+    }
+    return out;
+  }, [pipelinePackages]);
+
+  const selectedPipeline = pipelineSettings.selected || '';
+  // '' = [Default]（节点输入口那条）。它的身份后端从来没收集过，所以既选不回去也切不回去 ——
+  // 这颗选项只在还没选过任何东西时出现，而它一旦不在，五排 override 也就没有名字可绑，整排禁用。
+  const isDefaultPipeline = !selectedPipeline || selectedPipeline === PIPELINE_DEFAULT;
+  const pipelineIsMissing = (name: string): boolean =>
+    !!name && name !== PIPELINE_CURRENT_SELECT
+    && pipelinePackages.length > 0 && !pipelineNames.includes(name);
+  // 选中的名字解不出来（包断了/改名）。packages 还没到齐时不下结论，避免闪一下橙标。
+  const selectedUnresolved = !isDefaultPipeline && selectedPipeline !== PIPELINE_CURRENT_SELECT
+    && !pipelineNames.includes(selectedPipeline);
+
+  const globalOf = (key: PipelineOverrideKey): number =>
+    ({ mask_grow: maskGrow, mask_blur: maskBlur, crop_reserve: cropReserve, pixels: pixelsVal, align: alignVal }[key]);
+
+  /** 写一份 override（值或开关）。整份 Pipeline Settings 由前端独家作者，后端只做归一化。 */
+  const setOverride = (key: PipelineOverrideKey, patch: { value?: number; enabled?: boolean }) => {
+    if (isDefaultPipeline) return;
+    const name = selectedPipeline;
+    const cur = pipelineSettings.overrides[name]?.[key];
+    onPipelineSettingsChange({
+      ...pipelineSettings,
+      overrides: {
+        ...pipelineSettings.overrides,
+        [name]: {
+          ...(pipelineSettings.overrides[name] || {}),
+          [key]: {
+            value: patch.value ?? cur?.value ?? globalOf(key),
+            enabled: patch.enabled ?? cur?.enabled ?? false,
+          },
+        },
+      },
+    });
+  };
+
+  // 选 pipeline = 立刻加载那条（切换必须是即时的，昂贵的是加载而不是选择本身）。
+  // [Default] / [Current Select] 都不触发加载：前者切不回去，后者明确"用当前这条"。
+  const choosePipeline = (name: string) => {
+    if (name && name !== PIPELINE_CURRENT_SELECT && !pipelineIsMissing(name)) {
+      for (let pi = 0; pi < pipelinePackages.length; pi++) {
+        const qi = (pipelinePackages[pi].pipelines || []).findIndex(p => p.name === name);
+        if (qi >= 0) { onSwitchPipeline(pi, qi); break; }
+      }
+    }
+    onPipelineSettingsChange({ ...pipelineSettings, selected: name });
+  };
 
   // Shared prompt presets: loaded once, re-fetched after the preset editor saves so card
   // summaries reflect the new content without a full config refetch.
@@ -411,13 +478,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   // `draw` is the Blend workbench: the canvas composite is the Context Image and the pure Mask
   // layer is the mask, so the old mask / blend / tag tabs are gone (the Tag buttons live in the
-  // workbench toolbar).
+  // workbench toolbar). `context` and `pipeline` followed them — the pipeline switch now lives in
+  // the Draw panel's Pipeline Settings section, and nothing reads a separately-picked context.
   const tabs: { id: Tab; icon: string; color: string }[] = [
     { id: 'prompt', icon: 'prompt', color: '#0a84ff' },
     { id: 'draw', icon: 'draw', color: '#30d158' },
-    { id: 'context', icon: 'context', color: '#64d2ff' },
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
-    ...(pipelinePackages.length > 0 ? [{ id: 'pipeline' as Tab, icon: 'pipeline', color: '#30d158' }] : []),
   ];
 
   const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
@@ -521,49 +587,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
 
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
-
-  const uploadFilesToStaging = async (files: FileList | File[] | null) => {
-    const imgs = Array.from(files || []).filter(f => f.type.startsWith('image/'));
-    if (!imgs.length) return;
-    for (const file of imgs) {
-      const dataUrl = await new Promise<string | null>(res => {
-        const reader = new FileReader();
-        reader.onload = () => res(reader.result as string);
-        reader.onerror = () => res(null);
-        reader.readAsDataURL(file);
-      });
-      if (!dataUrl) continue;
-      try { await onAddStagingImage(dataUrl); } catch { /* 单张失败不拖累整批 */ }
-    }
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
-    void uploadFilesToStaging(files);
-    e.target.value = '';
-  };
-
-  const handleContextDragOver = (e: React.DragEvent) => {
-    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    if (!contextDragOver) setContextDragOver(true);
-  };
-
-  const handleContextDragLeave = (e: React.DragEvent) => {
-    // Only clear when leaving the container itself, not entering a child
-    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-    setContextDragOver(false);
-  };
-
-  const handleContextDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setContextDragOver(false);
-    if (e.dataTransfer.files?.length) void uploadFilesToStaging(e.dataTransfer.files);
-  };
-
   const toggleFinishSelection = (key: string) => {
     setSelectedKeys(prev => {
       const next = new Set(prev);
@@ -599,10 +622,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 background: tab === t.id ? t.color + '15' : 'transparent',
                 borderLeft: tab === t.id ? `2px solid ${t.color}` : '2px solid transparent',
               }}
-              onClick={() => {
-                if (t.id === 'context') onRefreshStaging();
-                onTabChange(t.id);
-              }}
+              onClick={() => onTabChange(t.id)}
             >
               <TabIcon icon={t.icon} />
               {t.id === 'prompt' && promptReady && <span style={styles.sidebarDot} />}
@@ -674,6 +694,62 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
                 </div>
               </div>
+              {/* PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
+                  一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择），加五个
+                  跟随 pipeline 名字持久化的 override。 */}
+              <SectionHeader label="Pipeline Settings" open={openSections.pipeline} onToggle={() => toggleSection('pipeline')} />
+              {openSections.pipeline && (<div style={styles.nestedSection}>
+                <div style={styles.paramRow}
+                  title={'Which pipeline is loaded on the node. Picking one switches it immediately.\n'
+                    + PIPELINE_DEFAULT + ' = the pipeline wired into the node input — the workbench never learns its identity, '
+                    + 'so this option only exists until you pick something else.\n'
+                    + PIPELINE_CURRENT_SELECT + ' = keep whatever is loaded now, no reload.'}>
+                  <label style={styles.paramLabel}>Pipeline</label>
+                  <select
+                    style={styles.paramSelect}
+                    value={isDefaultPipeline ? '' : selectedPipeline}
+                    onChange={e => choosePipeline(e.target.value)}
+                  >
+                    {isDefaultPipeline && <option value="" style={{ background: '#1c1c1e' }}>{PIPELINE_DEFAULT}</option>}
+                    <option value={PIPELINE_CURRENT_SELECT} style={{ background: '#1c1c1e' }}>
+                      {PIPELINE_CURRENT_SELECT}{loadedPipelineName ? ` (${loadedPipelineName})` : ''}
+                    </option>
+                    {pipelineNames.map(n => (
+                      <option key={n} value={n} style={{ background: '#1c1c1e' }}>{n}</option>
+                    ))}
+                    {selectedUnresolved && (
+                      <option value={selectedPipeline} style={{ background: '#1c1c1e' }}>
+                        {selectedPipeline} — {pipelinePackages.length > 0 ? 'Missing' : '(not loaded)'}
+                      </option>
+                    )}
+                  </select>
+                </div>
+                {/* 先 field 再 toggle：toggle 关 = 这项不 override，前面的数值格随之锁死。
+                    [Default] 没有名字可绑 → 整排禁用（后端也就永远不会去读这份 override）。 */}
+                <div style={isDefaultPipeline ? { ...styles.nestedSection, opacity: 0.4, pointerEvents: 'none' } : styles.nestedSection}>
+                  {PIPELINE_OVERRIDE_KEYS.map(key => {
+                    const meta = PIPELINE_OVERRIDE_META[key];
+                    const entry = pipelineSettings.overrides[selectedPipeline]?.[key];
+                    const on = !!entry?.enabled;
+                    return (
+                      <div key={key} style={{ ...styles.paramRow, gap: 6 }}
+                        title={`${meta.label} — off = this pipeline runs with the global ${meta.label.replace('Override ', '')} (${globalOf(key)}). `
+                          + 'On = the value on the left replaces it, and it is saved under this pipeline\'s name.'}>
+                        <label style={styles.overrideLabel}>{meta.label}</label>
+                        <input
+                          style={{ ...styles.paramInput, opacity: on ? 1 : 0.4 }}
+                          type="number" min={meta.min} max={meta.max} step={meta.step}
+                          disabled={!on}
+                          value={entry?.value ?? globalOf(key)}
+                          onChange={e => setOverride(key, { value: parseInt(e.target.value) || 0 })}
+                        />
+                        <IOSToggle checked={on} disabled={isDefaultPipeline}
+                          onChange={v => setOverride(key, { enabled: v })} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>)}
               {/* GLOBAL SETTINGS — 所有 Pipeline Preset 共享的数值参数（server config 持久化）。
                   与 preset 相关的开关在下方 Preprocess Settings。 */}
               <SectionHeader label="Global Settings" open={openSections.global} onToggle={() => toggleSection('global')} />
@@ -740,8 +816,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     );
                   }
                   // One row per preset. The row itself carries the interactions: click switches,
-                  // double-click renames, drag reorders, right-click offers Duplicate / Delete, and
-                  // the ▶ half runs exactly this preset.
+                  // double-click renames, drag reorders, right-click offers Duplicate / Delete; the
+                  // gear half picks which pipeline it runs with and the ▶ half runs it right now.
+                  const bound = set.pipeline_name || '';
+                  const boundNamed = !!bound && bound !== PIPELINE_CURRENT_SELECT;
+                  const boundMissing = pipelineIsMissing(bound);
                   return (
                     <div key={set.id} style={{
                       display: 'flex', alignItems: 'stretch', borderRadius: 8, overflow: 'hidden',
@@ -756,6 +835,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     >
                       <button
                         title={(missing > 0 ? `${missing} interface block(s) missing — they will be bypassed at run time\n` : '')
+                          + `Pipeline: ${boundNamed ? (boundMissing ? `${bound} (Missing)` : bound) : PIPELINE_CURRENT_SELECT}\n`
                           + `${set.name} · double-click to rename · right-click for Duplicate / Delete`}
                         onClick={() => onSwitchBlockSet(set.id)}
                         onDoubleClick={() => { setRenamingSetId(set.id); setRenamingValue(set.name); }}
@@ -766,9 +846,31 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           color: isActive ? '#fff' : 'rgba(255,255,255,0.55)',
                         }}>
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{set.name}</span>
-                        {missing > 0 && (
-                          <span style={{ marginLeft: 'auto', background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700, flexShrink: 0 }}>Missing ×{missing}</span>
-                        )}
+                        <span style={{ marginLeft: 'auto', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+                          {/* 只在真的绑定了某条 pipeline 时说话；[Current Select] 是默认，不值得占位。 */}
+                          {boundNamed && (
+                            <span style={{
+                              maxWidth: 88, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              background: boundMissing ? 'rgba(255,159,10,0.22)' : 'rgba(48,209,88,0.16)',
+                              color: boundMissing ? '#ff9f0a' : '#30d158',
+                              borderRadius: 999, fontSize: 9.5, padding: '1px 6px', fontWeight: 700,
+                            }}>{boundMissing ? 'Missing' : bound}</span>
+                          )}
+                          {missing > 0 && (
+                            <span style={{ background: 'rgba(255,159,10,0.22)', color: '#ff9f0a', borderRadius: 999, fontSize: 9.5, padding: '1px 5px', fontWeight: 700 }}>Missing ×{missing}</span>
+                          )}
+                        </span>
+                      </button>
+                      <button
+                        title={`Pipeline for 「${set.name}」 — ${boundNamed ? (boundMissing ? `${bound} (Missing)` : bound) : PIPELINE_CURRENT_SELECT}`}
+                        onClick={() => setPresetPipelineFor(set.id)}
+                        style={{
+                          display: 'flex', alignItems: 'center', padding: '0 9px',
+                          border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
+                          background: 'rgba(255,255,255,0.06)', cursor: 'pointer', lineHeight: 1,
+                          color: boundNamed ? (boundMissing ? '#ff9f0a' : '#30d158') : 'rgba(255,255,255,0.4)',
+                        }}>
+                        <GearIcon size={13} />
                       </button>
                       <button
                         title={`Run 「${set.name}」 now — the canvas composite, masked by the Mask layer`}
@@ -1197,64 +1299,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         {tab === 'interface' && (
           <InterfaceTab interfaces={interfaces} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} staging={staging} />
         )}
-
-        {/* Pipeline — dynamic pipeline switching */}
-        {tab === 'pipeline' && (
-          <PipelineTab pipelinePackages={pipelinePackages} onSwitchPipeline={onSwitchPipeline} currentPipelineKey={currentPipelineKey} />
-        )}
-
-        {/* Context — 精简后的工作区条：拖文件/按钮上传进图池，点缩略图设为 pipeline 当前图。
-            完整的图层工作在 Blend 工作台（工作区就在它的 Extra Prompt 下方）。 */}
-        {tab === 'context' && (
-          <div
-            style={{ ...styles.contextLayout, position: 'relative' }}
-            onDragOver={handleContextDragOver}
-            onDragLeave={handleContextDragLeave}
-            onDrop={handleContextDrop}
-          >
-            <div style={styles.contextLoadBtns}>
-              <button style={styles.contextLoadBtn} onClick={() => fileInputRef.current?.click()}>
-                Load From Image
-              </button>
-              <button
-                style={{ ...styles.contextLoadBtn, opacity: loadingAssets ? 0.5 : 1, cursor: loadingAssets ? 'wait' : 'pointer' }}
-                onClick={onLoadFromAssets}
-                disabled={loadingAssets}
-              >
-                {loadingAssets ? 'Loading…' : 'Load From Assets'}
-              </button>
-              <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
-              <span style={{ color: 'rgba(255,255,255,0.3)', fontSize: 12, alignSelf: 'center' }}>
-                Click a thumbnail to set it as the pipeline image · drag files here to add
-              </span>
-            </div>
-            <div style={{ ...styles.contextThumbList, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {staging.map(s => (
-                <button
-                  key={s.id}
-                  title={`${s.name} — click to set as the pipeline image`}
-                  style={{
-                    ...styles.contextThumb,
-                    width: 84,
-                  }}
-                  onClick={() => onSelectImage(s.id)}
-                >
-                  <img src={s.src} alt={s.name} style={styles.contextThumbImg} />
-                  <div style={styles.contextThumbName}>{s.name}</div>
-                </button>
-              ))}
-              {staging.length === 0 && (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: 20 }}>No staging items yet — drop images here.</div>
-              )}
-            </div>
-            {/* Drag-to-add overlay */}
-            {contextDragOver && (
-              <div style={styles.contextDropOverlay}>
-                <div style={styles.contextDropInner}>Drop images to add to staging</div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {/* Prompt preset editor — the FULL prompt_node UI in preset scope. Its selection is
@@ -1299,6 +1343,61 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 title="Prompt preset editor"
                 style={{ flex: 1, minHeight: 0, width: '100%', border: 'none', background: '#0d0d0d' }}
               />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Preset → pipeline binding (the gear on a preset row). Names, not indexes: the backend
+          resolves a preset's pipeline at run time by name, so a package that grew or shrank cannot
+          silently rebind it — and a name that no longer resolves reads as Missing here and fails the
+          run loudly instead of quietly reusing the previous pipeline. */}
+      {presetPipelineFor && (() => {
+        const target = blockSets.find(s => s.id === presetPipelineFor);
+        if (!target) return null;
+        const bound = target.pipeline_name || '';
+        const boundNamed = !!bound && bound !== PIPELINE_CURRENT_SELECT;
+        const boundMissing = pipelineIsMissing(bound);
+        return (
+          <div style={styles.overlay} onClick={() => setPresetPipelineFor(null)}>
+            <div style={{ ...styles.dialog, width: 380 }} onClick={e => e.stopPropagation()}>
+              <div style={styles.dialogTitle}>Pipeline — {target.name}</div>
+              <div style={styles.dialogSubtitle}>
+                {PIPELINE_CURRENT_SELECT} runs this preset on whatever is loaded now, so no pipeline is
+                reloaded. Picking a named one loads it first — only when it is not the one already in
+                memory, because that load re-runs the whole upstream graph.
+              </div>
+              <select
+                style={{ ...styles.paramSelect, width: '100%' }}
+                value={bound || PIPELINE_CURRENT_SELECT}
+                onChange={e => onSetPresetPipeline(target.id, e.target.value)}
+              >
+                <option value={PIPELINE_CURRENT_SELECT} style={{ background: '#1c1c1e' }}>
+                  {PIPELINE_CURRENT_SELECT}{loadedPipelineName ? ` (${loadedPipelineName})` : ''}
+                </option>
+                {pipelineNames.map(n => (
+                  <option key={n} value={n} style={{ background: '#1c1c1e' }}>{n}</option>
+                ))}
+                {boundNamed && !pipelineNames.includes(bound) && (
+                  <option value={bound} style={{ background: '#1c1c1e' }}>
+                    {bound} — {pipelinePackages.length > 0 ? 'Missing' : '(not loaded)'}
+                  </option>
+                )}
+              </select>
+              {boundMissing && (
+                <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: '#ff9f0a' }}>
+                  Missing — this pipeline is gone from the connected package. Running 「{target.name}」
+                  stops with an error until it is rebound.
+                </div>
+              )}
+              {boundNamed && !boundMissing && (
+                <div style={{ marginTop: 10, fontSize: 11.5, color: 'rgba(255,255,255,0.4)' }}>
+                  This pipeline's overrides (Pipeline Settings) apply whenever it runs.
+                </div>
+              )}
+              <div style={styles.dialogActions}>
+                <button style={styles.confirmBtn} onClick={() => setPresetPipelineFor(null)}>Done</button>
+              </div>
             </div>
           </div>
         );
@@ -1720,61 +1819,6 @@ const InterfaceTab: React.FC<{
   );
 };
 
-// ── PipelineTab ──
-const PipelineTab: React.FC<{
-  pipelinePackages: PipelinePackageInfo[];
-  onSwitchPipeline: (packageIdx: number, pipelineIdx: number) => void;
-  currentPipelineKey: string | null;
-}> = ({ pipelinePackages, onSwitchPipeline, currentPipelineKey }) => {
-  if (pipelinePackages.length === 0) {
-    return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No pipeline packages connected.</div>;
-  }
-
-  return (
-    <div style={{ flex: 1, minHeight: 0, overflowX: 'auto', overflowY: 'hidden', padding: 16, display: 'flex', flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
-      {pipelinePackages.map((pkg, pkgIdx) => (
-        <div key={pkgIdx} style={{ width: 360, flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{pkg.name || 'Pipeline Group ' + (pkgIdx + 1)}</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {pkg.pipelines.map((pl, plIdx) => {
-              const key = pkgIdx + '_' + plIdx;
-              const active = key === currentPipelineKey;
-              return (
-                <div
-                  key={plIdx}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                    borderRadius: 8,
-                    background: active ? 'rgba(48,209,88,0.1)' : 'rgba(255,255,255,0.04)',
-                    border: '0.5px solid ' + (active ? '#30d158' : 'rgba(255,255,255,0.08)'),
-                    boxShadow: active ? '0 0 0 2px rgba(48,209,88,0.2)' : 'none',
-                  }}
-                >
-                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: active ? '#30d158' : 'rgba(255,255,255,0.8)' }}>{pl.name}</div>
-                  {active ? (
-                    <span style={{ fontSize: 11, fontWeight: 700, color: '#30d158' }}>● Active</span>
-                  ) : (
-                    <button
-                      style={{ ...styles.runBtn, padding: '4px 14px', fontSize: 12 }}
-                      onClick={() => onSwitchPipeline(pkgIdx, plIdx)}
-                    >
-                      Switch
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {pkg.pipelines.length === 0 && (
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', padding: 8 }}>No pipelines found.</div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-};
-
-
 const styles: Record<string, React.CSSProperties> = {
   container: { display: 'flex', flexDirection: 'row', height: '100vh', background: '#0d0d0d', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif" },
 
@@ -1848,6 +1892,9 @@ const styles: Record<string, React.CSSProperties> = {
   blendPreviewBadge: { position: 'absolute', right: 6, bottom: 6, padding: '2px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.78)', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
+  // A Pipeline Settings override row carries a longer label ("Override Crop Reserve") and has to fit
+  // a number field AND a toggle in 228px, so it drops the fixed 80px floor and the 13px size.
+  overrideLabel: { fontSize: 11.5, fontWeight: 500, color: 'rgba(255,255,255,0.6)', flexShrink: 0, minWidth: 0 },
   paramSelect: { flex: 1, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
 
@@ -1871,22 +1918,6 @@ const styles: Record<string, React.CSSProperties> = {
   // Draw tab — right side two-column: mask iframe (left) + result cards (right)
 
   // Quick tag buttons row (left of Run Detailer)
-
-  // Context — left/right split layout
-  contextLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
-  contextPreview: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8, background: '#0d0d0d' },
-  contextPreviewImg: { maxWidth: '100%', maxHeight: 'calc(100% - 80px)', objectFit: 'contain', borderRadius: 12 },
-  contextPreviewLabel: { fontSize: 14, fontWeight: 600, color: 'rgba(255,255,255,0.7)' },
-  contextSelectBtn: { padding: '8px 24px', fontSize: 13, fontWeight: 600, color: '#fff', background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 8, cursor: 'pointer' },
-  contextThumbList: { width: 240, flexShrink: 0, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 8, background: 'rgba(28,28,30,0.4)', borderLeft: '0.5px solid rgba(255,255,255,0.06)' },
-  contextThumb: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, padding: 6, background: 'rgba(28,28,30,0.6)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, cursor: 'pointer', transition: 'border-color 0.2s ease' },
-  contextThumbImg: { width: 56, height: 56, objectFit: 'cover', borderRadius: 6, flexShrink: 0 },
-  contextThumbName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  contextActiveDot: { width: 8, height: 8, borderRadius: '50%', background: '#0a84ff', boxShadow: '0 0 6px rgba(10,132,255,0.5)', flexShrink: 0, marginLeft: 'auto' },
-  contextLoadBtns: { display: 'flex', gap: 6, marginBottom: 4 },
-  contextLoadBtn: { flex: 1, padding: '6px 8px', fontSize: 11, fontWeight: 600, color: '#fff', background: 'rgba(255,255,255,0.1)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease' },
-  contextDropOverlay: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(10,132,255,0.12)', border: '2px dashed rgba(10,132,255,0.7)', borderRadius: 12, backdropFilter: 'blur(2px)', pointerEvents: 'none' },
-  contextDropInner: { padding: '14px 28px', fontSize: 15, fontWeight: 700, color: '#fff', background: 'rgba(10,132,255,0.85)', borderRadius: 10, boxShadow: '0 4px 16px rgba(10,132,255,0.3)' },
 
   // History (used in finish dialog)
   dialogHistoryGrid: { display: 'flex', flexWrap: 'wrap', gap: 12, alignContent: 'flex-start' },
