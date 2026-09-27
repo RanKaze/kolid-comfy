@@ -56,6 +56,198 @@
         "prefabs": [],
         "programs": []
       }
+    },
+    {
+      "id": "preset-b08aa24c8892",
+      "name": "请求生成Preset",
+      "selection": {
+        "tags": [
+          {
+            "tags": [
+              {
+                "name": "肉穴",
+                "prompt": "pussy",
+                "category": "人物要素"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "腿",
+                "prompt": "legs",
+                "category": "人物要素"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "脚(复)",
+                "prompt": "feet",
+                "category": "人物要素"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "掰开肉穴",
+                "prompt": "spread pussy",
+                "category": "人物姿势"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "骆驼式(跪姿后弯，手触脚跟)",
+                "prompt": "camel pose",
+                "category": "人物姿势"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "从...",
+                "prompt": "from",
+                "category": "交互"
+              },
+              {
+                "name": "背/背后",
+                "prompt": "back",
+                "category": "对象要素"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "分开大腿",
+                "prompt": "spread legs",
+                "category": "人物姿势"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "全身视角",
+                "prompt": "full body",
+                "category": "视角"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "长筒袜(丝袜)",
+                "prompt": "thighhighs",
+                "category": "服装"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "脚(复)",
+                "prompt": "feet",
+                "category": "人物要素"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          }
+        ],
+        "custom_prompts": "",
+        "loras": [
+          {
+            "file_path": "F:/ComfyDB/models/loras/滑块/Anima/Darkness-sliderFin3.safetensors",
+            "name": "光照(环境)",
+            "strength": 1.2,
+            "active_tags": [],
+            "active": true,
+            "split_mode": false,
+            "slider_config": {
+              "enabled": true,
+              "min": 0,
+              "max": 1.2,
+              "step": 0.1,
+              "default_value": 1,
+              "min_name": "亮",
+              "max_name": "黑",
+              "reverse": true,
+              "marks": []
+            }
+          },
+          {
+            "file_path": "F:/ComfyDB/models/loras/滑块/Anima/RealSkin SliderV2.safetensors",
+            "name": "皮肤真实度",
+            "strength": 0.3,
+            "active_tags": [],
+            "active": true,
+            "split_mode": false,
+            "slider_config": {
+              "enabled": true,
+              "min": -1,
+              "max": 1,
+              "step": 0.1,
+              "default_value": 0,
+              "min_name": "二次元",
+              "max_name": "真实",
+              "reverse": false,
+              "marks": [
+                {
+                  "value": 0,
+                  "label": "标准"
+                }
+              ]
+            }
+          },
+          {
+            "file_path": "F:/ComfyDB/models/loras/人物/Anima/yuki-suou-s1-anima-lora-nochekaiser.safetensors",
+            "name": "Yuki Suou (周防 有希) - Alya Sometimes Hides Her Feelings in Russian (Tokidoki Bosotto Russia-go de Dereru Tonari no Alya-san) (時々ボソッとロシア語でデレる隣のアーリャさん)",
+            "strength": 1,
+            "active_tags": [
+              "yuki suou",
+              "suou yuki",
+              "long hair",
+              "bangs",
+              "brown hair",
+              "black hair",
+              "hair between eyes",
+              "purple eyes",
+              "half updo",
+              "mature female",
+              "small breasts",
+              "anime screencap"
+            ],
+            "active": true,
+            "split_mode": true
+          }
+        ],
+        "prefabs": [],
+        "programs": []
+      }
     }
   ]
 }

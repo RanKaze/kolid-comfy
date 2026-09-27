@@ -40,7 +40,10 @@
           "id": "block-21",
           "type": "query",
           "name": "Query",
-          "params": {}
+          "params": {
+            "preset_id": "preset-b08aa24c8892",
+            "persistent": true
+          }
         },
         {
           "id": "block-20",
@@ -63,7 +66,7 @@
             "context_reference": true,
             "context_reference_key": null,
             "context_regex": ".+",
-            "enable_limit": false,
+            "enable_limit": true,
             "enable_mask": false
           }
         }
@@ -294,7 +297,7 @@
       ]
     }
   ],
-  "active_block_set": "set-21",
+  "active_block_set": "set-18",
   "global_params": {
     "pixels": 2048576,
     "align": 16,
