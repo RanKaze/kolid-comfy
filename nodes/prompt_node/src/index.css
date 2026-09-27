@@ -186,6 +186,7 @@ body {
     margin-bottom: 10px;
 }
 .right-bar .temporary-prompts-section h3 { font-size: 14px; color: var(--text-secondary); margin-bottom: 0; }
+.right-bar .temporary-prompts-section .temp-empty { font-size: 13px; color: var(--text-secondary); }
 .tag.temp-prompt {
     background: rgba(255, 159, 10, 0.16);
     border: 1px dashed rgba(255, 159, 10, 0.55);

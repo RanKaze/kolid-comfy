@@ -879,22 +879,25 @@ class SnapshotDetailerSamplerServer:
     def _apply_tag_result(self, tag):
         """把打标结果写进 prompt 阶段：替换 parsing 来源的项，保留 normal/program。
 
-        返回 (parsed_selected, parsed_custom)。由 /api/blend_action 的 tag 分派调用，
-        保证「Tag 只产出 prompt、不碰 Context」这一语义。
+        返回 (parsed_selected, temporary_list)。由 /api/blend_action 的 tag 分派调用，
+        保证「Tag 只产出 prompt、不碰 Context」这一语义。解析不出来的段进 Temporary
+        Prompts（和 matched 项同属这一次打标，随 prompt 节点的生命周期走），不写进
+        custom_prompts，所以不会被持久化成用户的自定义词条。clear_tag 传空串 = 两边都清空。
         """
         self.tag_result = tag
         parsed_selected, parsed_unmatched = [], [tag]
+        if SnapshotPromptNode is not None:
+            parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
+        temporary = [t.strip() for t in parsed_unmatched if t and t.strip()]
         if self.prompt_server is not None:
-            if SnapshotPromptNode is not None:
-                parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
             new_prompts = [
                 p for p in (self.prompt_server.selected_prompts or [])
                 if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
             ]
             new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
             self.prompt_server.selected_prompts = new_prompts
-            self.prompt_server.custom_prompts = ', '.join(parsed_unmatched)
-        return parsed_selected, ', '.join(parsed_unmatched)
+            self.prompt_server.temporary_prompts = temporary
+        return parsed_selected, temporary
 
     # -------------------------------------------------------------------------
     # 全局参数 / block 链持久化
@@ -1788,8 +1791,8 @@ class SnapshotDetailerSamplerServer:
                     # the way a real tag replaces them, and returns empty tag/tags/custom so the
                     # host pushes a cleared state into the prompt editor.
                     if action == 'clear_tag':
-                        parsed_selected, parsed_custom = inst._apply_tag_result('')
-                        self._send_json({'success': True, 'tag': '', 'tags': parsed_selected, 'custom': parsed_custom})
+                        parsed_selected, parsed_temporary = inst._apply_tag_result('')
+                        self._send_json({'success': True, 'tag': '', 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
                         return
 
                     # layer_generate does NOT go through compose_blend: the caller sends one layer's
@@ -1867,8 +1870,8 @@ class SnapshotDetailerSamplerServer:
                             return
                         mode = body.get('tag_mode', 'mask')
                         tag = inst.node_instance._run_tag_on_image(image, mask, inst.tagger, mode)
-                        parsed_selected, parsed_custom = inst._apply_tag_result(tag)
-                        self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': parsed_custom})
+                        parsed_selected, parsed_temporary = inst._apply_tag_result(tag)
+                        self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
                         return
 
                     # action == 'detailer'：合成结果交给主循环执行（主循环在另一个线程）
@@ -2238,6 +2241,9 @@ class SnapshotDetailerSamplerNode:
                     parts.append(text)
             if custom:
                 parts.append(custom)
+            # The latest tag's unparseable segments live in the editor's Temporary Prompts,
+            # so they belong to this pass's prompt as well — just never persisted.
+            parts.extend(getattr(prompt_server, 'temporary_prompts', None) or [])
             user_positive = ','.join(parts)
 
             loras = list(prompt_server.selected_loras or [])
@@ -2355,6 +2361,8 @@ class SnapshotDetailerSamplerNode:
                 parts.append(text)
         if result['result_custom_prompts']:
             parts.append(result['result_custom_prompts'])
+        # Same as _parse_prompt: the last tag's unparseable segments are this pass's prompt.
+        parts.extend(getattr(ps, 'temporary_prompts', None) or [])
         user_positive = ','.join(parts)
 
         loras = list(result['result_loras'])
