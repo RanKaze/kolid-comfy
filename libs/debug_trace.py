@@ -26,7 +26,10 @@ trace，链条每走一步就往里追加一条记录，run 结束后封存。``
       'detail': '一行补充说明（可选）',
       'block': 1,                 # 属于哪个 block（0 = 链外/全局），可选
       'data': {...},              # 结构化字段（prompt / loras / shape / 参数…）
-      'items': [ {label, dataUrl, width, height} ],   # 图像类 entry 的缩略图
+      'items': [ {label, dataUrl, width, height, pixels?, align?} ],  # 缩略图：dataUrl
+                      # 就是这张图本身（不缩放），width/height 是它进管线的分辨率；pixels/align
+                      # 只在尺寸真由那两颗旋钮（limit_pixels 的目标/上限、落格）决定时才有 ——
+                      # 前端标成 "1024×1024 (1048576|8)"
     }
 """
 
@@ -53,25 +56,24 @@ __all__ = [
 # 单份 trace 的过程图上限 —— 防止某个病态工作流（几十个 block × 多张中间图）
 # 把 base64 撑到几百 MB。超出后新的图被丢弃并记一条说明。
 MAX_IMAGES_PER_TRACE = 240
-# 单张图的像素上限。超过就等比缩小再编码，避免大图 base64 吃掉几百 KB。
-MAX_IMAGE_PIXELS = 1024 * 1024
 
 
-def _shrink(image_tensor, max_pixels=MAX_IMAGE_PIXELS):
-    """把 [B,H,W,C] / [H,W,C] / [B,H,W] / [H,W] 归一成 [1,H,W,C] 并限制像素总量。
+def _as_preview_tensor(image_tensor):
+    """把 [B,H,W,C] / [H,W,C] / [B,H,W] / [H,W] 归一成 [1,H,W,C] 供编码。
 
-    返回 ``(tensor, note)``，note 是被缩放时的说明（否则空串）。
+    **不缩放**：Debug 面板里那张图必须就是管线收到的那张，尺寸也照实报。
+    不可用（None / 维数不对 / 转不成 tensor）时返回 None。
     """
     import torch
 
     t = image_tensor
     if t is None:
-        return None, ''
+        return None
     if not isinstance(t, torch.Tensor):
         try:
             t = torch.as_tensor(t)
         except Exception:
-            return None, ''
+            return None
     if t.dim() == 2:
         t = t.unsqueeze(0).unsqueeze(-1)          # [H,W] -> [1,H,W,1]
     elif t.dim() == 3:
@@ -83,27 +85,12 @@ def _shrink(image_tensor, max_pixels=MAX_IMAGE_PIXELS):
     elif t.dim() == 4:
         pass
     else:
-        return None, ''
+        return None
     if t.shape[-1] not in (1, 3, 4):
         t = t[..., :1]
     if t.shape[-1] == 1:
         t = t.repeat(1, 1, 1, 3)                  # mask 类单通道 → 灰度 RGB
-    note = ''
-    try:
-        h, w = int(t.shape[1]), int(t.shape[2])
-        if h * w > max_pixels:
-            import torch.nn.functional as F
-            import math
-            scale = math.sqrt(max_pixels / float(h * w))
-            nh = max(1, int(round(h * scale)))
-            nw = max(1, int(round(w * scale)))
-            src = t.permute(0, 3, 1, 2)
-            t = F.interpolate(src.float(), size=(nh, nw), mode='bilinear', align_corners=False)
-            t = t.permute(0, 2, 3, 1)
-            note = f'仅 Debug 预览图被缩放：{w}x{h} → {nw}x{nh}（管线里的实际尺寸未变）'
-    except Exception:
-        pass
-    return t.float().clamp(0, 1), note
+    return t.float().clamp(0, 1)
 
 
 class DebugTrace:
@@ -148,8 +135,14 @@ class DebugTrace:
         return self
 
     def add_image(self, label, image_tensor, detail='', block=None,
-                  minify=True, **data):
-        """记录一张过程图。image_tensor 为 None 时静默跳过。"""
+                  pixel_limit=None, align=None, **data):
+        """记录一张过程图。image_tensor 为 None 时静默跳过。
+
+        ``pixel_limit`` / ``align`` 是**这张图的尺寸由哪两颗旋钮定下来的**
+        （limit_pixels 的像素目标/上限，与落格的 align）。没走的那颗就别传 ——
+        前端据此决定分辨率后面那个括号里写什么：两个都有 → ``(1048576|8)``，
+        只有像素预算 → ``(1048576)``，只落格 → ``(align 8)``，都没有 → 不画括号。
+        """
         if image_tensor is None:
             return self
         if self.image_count >= MAX_IMAGES_PER_TRACE:
@@ -168,7 +161,7 @@ class DebugTrace:
             import base64
             from PIL import Image
 
-            t, note = _shrink(image_tensor) if minify else (image_tensor, '')
+            t = _as_preview_tensor(image_tensor)
             if t is None:
                 return self
             arr = t.squeeze(0).cpu().numpy()
@@ -187,6 +180,7 @@ class DebugTrace:
                 buf = io.BytesIO()
                 Image.fromarray(arr).save(buf, format='PNG')
                 data_url = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('utf-8')
+            # 编码没动过几何，所以 arr 的宽高就是这张图进管线的分辨率。
             h = int(arr.shape[0])
             w = int(arr.shape[1]) if arr.ndim >= 2 else 1
             item = {
@@ -194,11 +188,19 @@ class DebugTrace:
                 'dataUrl': data_url,
                 'width': w,
                 'height': h,
-                'note': note or str(detail or ''),
             }
+            try:
+                # 只有真的设了旋钮才透出，前端据此决定括号里画什么。
+                limit = int(pixel_limit or 0)
+                if limit > 0:
+                    item['pixels'] = limit
+                # align=1 就是没落格（limit_pixels 的 step 兜底），不值得占一个读数。
+                grid = int(align or 1)
+                if grid > 1:
+                    item['align'] = grid
+            except (TypeError, ValueError):
+                pass
             payload = dict(data)
-            if detail and not note:
-                payload['shape'] = f'{w}x{h}'
             self._add({
                 'kind': 'image',
                 'label': str(label),
@@ -212,7 +214,8 @@ class DebugTrace:
             print(f'[DebugTrace] image encode failed for "{label}": {e}')
         return self
 
-    def add_mask(self, label, mask_tensor, detail='', block=None, **data):
+    def add_mask(self, label, mask_tensor, detail='', block=None,
+                 pixel_limit=None, align=None, **data):
         """记录一张遮罩。mask 可能是 [B,H,W] / [H,W] / 已有 3 通道的图。"""
         if mask_tensor is None:
             return self
@@ -222,7 +225,8 @@ class DebugTrace:
                 t = t.squeeze(0)
             if hasattr(t, 'dim') and t.dim() == 2:
                 t = t.unsqueeze(-1)
-            self.add_image(label, t, detail=detail, block=block, **data)
+            self.add_image(label, t, detail=detail, block=block,
+                           pixel_limit=pixel_limit, align=align, **data)
         except Exception as e:
             print(f'[DebugTrace] mask encode failed for "{label}": {e}')
         return self
@@ -312,12 +316,16 @@ def record_prompt(label, text, block=None, **data):
     return _with_trace(DebugTrace.prompt, label, text, block, **data)
 
 
-def record_image(label, image_tensor, detail='', block=None, **data):
-    return _with_trace(DebugTrace.add_image, label, image_tensor, detail, block, **data)
+def record_image(label, image_tensor, detail='', block=None, pixel_limit=None,
+                 align=None, **data):
+    return _with_trace(DebugTrace.add_image, label, image_tensor, detail, block,
+                       pixel_limit, align, **data)
 
 
-def record_mask(label, mask_tensor, detail='', block=None, **data):
-    return _with_trace(DebugTrace.add_mask, label, mask_tensor, detail, block, **data)
+def record_mask(label, mask_tensor, detail='', block=None, pixel_limit=None,
+                align=None, **data):
+    return _with_trace(DebugTrace.add_mask, label, mask_tensor, detail, block,
+                       pixel_limit, align, **data)
 
 
 def record_block(index, label, detail='', **data):

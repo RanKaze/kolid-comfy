@@ -239,10 +239,15 @@ export interface DebugRecoverData {
  */
 export interface DebugTraceItem {
   label: string;
+  /** 这张图本身，按真实分辨率编码（服务端不再缩预览）。 */
   dataUrl: string;
+  /** 这张图进入管线的实际分辨率。 */
   width: number;
   height: number;
-  note?: string;
+  /** 尺寸由哪颗像素旋钮定下来的（limit_pixels 的目标/上限）；没走 limit 就没有。 */
+  pixels?: number;
+  /** 尺寸落的那格 align；align=1（没落格）时服务端不发。 */
+  align?: number;
 }
 
 export interface DebugTraceStep {
