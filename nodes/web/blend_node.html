@@ -89,12 +89,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
 #sidePanel { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; padding: 12px; gap: 10px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow: hidden; }
 #panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
-/* The dock sits outside #panelScroll, so it has to give back the scroll gutter itself: this
-   keeps its divider and its buttons on the same rails as the sections above it. */
-/* Docked at the bottom of the right column. Fixed height, NOT content height: the palette is a
-   fixed 520px tall block whose header stays put and whose list scrolls inside it, so the tool
-   sections above never get shoved around by a long/short layer stack. */
-#layersDock { flex: 0 0 520px; height: 520px; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
+/* Docked at the bottom of the right column. The dock sits outside #panelScroll, so it has to give
+   back the scroll gutter itself: `margin-right: 6px` keeps its divider and its buttons on the same
+   rails as the sections above it.
+   Height tracks the window instead of being a fixed 520px block: the palette's header stays put
+   and its lists scroll inside their own share, and a tall window should hand that extra room to the
+   stacks rather than to blank panel. `clamp` keeps a floor (never collapse the palette) and a
+   ceiling (the tool sections above keep their space). */
+#layersDock { flex: 0 0 auto; height: clamp(520px, 58vh, 660px); min-height: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 /* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
    up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
 #layersSpacer { flex: 0 0 16px; pointer-events: none; }
@@ -103,11 +105,12 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    pinned row plus its label, nothing to scroll. */
 #maskDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 #maskRowSlot { display: flex; flex-direction: column; gap: 4px; }
-/* Guidances get the top of the dock and never more than 62% of it: they are references, the
-   working layers stay the main list — but 42% was a strip two rows tall, which is not a stack you
-   can order by eye. With an empty stack it collapses to its hint strip — and that strip is the
-   drop target, because a list with no rows has no row to aim a drag at. */
-#guidanceList { flex: 0 1 auto; min-height: 34px; max-height: 62%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* Guidances own the top of the dock and get a FLOOR, not just a ceiling: `flex: 0 1 auto` makes the
+   box its content height, so a one-row stack used to read as a 34px strip no matter how much room
+   the dock had — raising only the cap changed nothing you could see. 30% is three rows you can drop
+   into and order by eye; 70% keeps the working layers the majority list. Both are shares of the
+   dock's definite height, so the floor scales with the window along with the dock itself. */
+#guidanceList { flex: 0 1 auto; min-height: 30%; max-height: 70%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
 /* While a row is being dragged, both lists say where it would land: the one under the pointer is
    the stack the layer MOVES to. */
 .layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
@@ -173,7 +176,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
 #panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner, #guidanceList::-webkit-scrollbar-corner { background: transparent; }
 #panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button, #guidanceList::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-.layer-empty { font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
+/* The empty state IS the drop target, so it fills its list instead of sitting as a 34px dashed
+   strip at the top of a tall box — otherwise the Guidances floor would just read as blank panel. */
+.layer-empty { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
 /* PS-style two-line layer row: identity on the head line (original image, name, eye, remove),
    the three working chips on the second line (result preview, Decal, Mask). */
 .layer-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
