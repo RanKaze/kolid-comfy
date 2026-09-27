@@ -883,18 +883,18 @@ class SnapshotDetailerSamplerServer:
         保证「Tag 只产出 prompt、不碰 Context」这一语义。
         """
         self.tag_result = tag
-        parsed_selected, parsed_custom = [], tag
+        parsed_selected, parsed_unmatched = [], [tag]
         if self.prompt_server is not None:
             if SnapshotPromptNode is not None:
-                parsed_selected, parsed_custom = SnapshotPromptNode._parse_raw_prompt(tag)
+                parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
             new_prompts = [
                 p for p in (self.prompt_server.selected_prompts or [])
                 if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
             ]
             new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
             self.prompt_server.selected_prompts = new_prompts
-            self.prompt_server.custom_prompts = parsed_custom
-        return parsed_selected, parsed_custom
+            self.prompt_server.custom_prompts = ', '.join(parsed_unmatched)
+        return parsed_selected, ', '.join(parsed_unmatched)
 
     # -------------------------------------------------------------------------
     # 全局参数 / block 链持久化

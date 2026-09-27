@@ -170,6 +170,28 @@ body {
     background: rgba(139, 92, 246, 0.35);
 }
 
+/* Temporary prompt (unmatched prompt_parsing segment) - amber, dropped on next run */
+.right-bar .temporary-prompts-section {
+    flex-shrink: 0;
+    max-height: min(132px, 22vh);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+    margin-bottom: 15px;
+}
+.right-bar .temporary-prompts-section .temp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+.right-bar .temporary-prompts-section h3 { font-size: 14px; color: var(--text-secondary); margin-bottom: 0; }
+.tag.temp-prompt {
+    background: rgba(255, 159, 10, 0.16);
+    border: 1px dashed rgba(255, 159, 10, 0.55);
+    color: #ff9f0a;
+}
+
 /* Program-sourced tag - cyan glow */
 .tag.source-program {
     background: #0d9488;

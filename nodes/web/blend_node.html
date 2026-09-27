@@ -174,14 +174,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    against the dark panel. Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-*
    properties; everything else gets the WebKit set. `scrollbar-gutter: stable` keeps the layer
    rows from shifting sideways when the thumb appears. */
-#panelScroll, #layerList, #guidanceList {
+#panelScroll, #layerList, #guidanceList, .tag-groups {
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.22) transparent;
 }
-#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar, #guidanceList::-webkit-scrollbar { width: 10px; height: 10px; }
-#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track, #guidanceList::-webkit-scrollbar-track { background: transparent; }
-#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb, #guidanceList::-webkit-scrollbar-thumb {
+#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar, #guidanceList::-webkit-scrollbar, .tag-groups::-webkit-scrollbar { width: 10px; height: 10px; }
+#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track, #guidanceList::-webkit-scrollbar-track, .tag-groups::-webkit-scrollbar-track { background: transparent; }
+#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb, #guidanceList::-webkit-scrollbar-thumb, .tag-groups::-webkit-scrollbar-thumb {
     background: rgba(255,255,255,0.22);
     border-radius: 999px;
     /* Inset the pill from both edges with a transparent border + padding-box clip: this is what
@@ -189,11 +189,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border: 3px solid transparent;
     background-clip: padding-box;
 }
-#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover, #guidanceList::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
-#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active, #guidanceList::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover, #guidanceList::-webkit-scrollbar-thumb:hover, .tag-groups::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active, #guidanceList::-webkit-scrollbar-thumb:active, .tag-groups::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
 /* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
-#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner, #guidanceList::-webkit-scrollbar-corner { background: transparent; }
-#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button, #guidanceList::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner, #guidanceList::-webkit-scrollbar-corner, .tag-groups::-webkit-scrollbar-corner { background: transparent; }
+#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button, #guidanceList::-webkit-scrollbar-button, .tag-groups::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 /* The empty state IS the drop target, so it fills its list instead of sitting as a 34px dashed
    strip at the top of a tall box — otherwise the Guidances floor would just read as blank panel. */
 .layer-empty { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
@@ -407,17 +407,26 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     border-radius: 8px; padding: 6px 8px; color: #fff; font-size: 12.5px; font-weight: 600; outline: none; }
 .gen-preset-row select:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 .gen-preset-row select option { background: #1c1c1e; color: #fff; }
-.tag-mode-list { display: flex; flex-direction: column; gap: 8px; }
-.tag-mode-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px;
-    border-radius: 10px; background: rgba(255,255,255,0.05); border: 0.5px solid rgba(255,255,255,0.12);
-    color: #fff; cursor: pointer; text-align: left; font-family: inherit; }
-.tag-mode-item:hover:not(:disabled) { background: rgba(175,82,222,0.22); border-color: rgba(175,82,222,0.5); }
+/* The Tag picker: two groups of three cards, thumbnail on top and the short name under it. The
+   scope (the singleton Mask layer vs the selected layer) is what the group heading says, so the
+   card names repeat; the sentence each mode used to carry is now its hover title. */
+.tag-modal { width: 430px; }
+.tag-groups { display: flex; flex-direction: column; gap: 12px; min-height: 0; max-height: 62vh;
+    overflow-y: auto; }
+.tag-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tag-group-title { font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+    color: rgba(255,255,255,0.42); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tag-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tag-mode-item { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0;
+    padding: 7px; border-radius: 10px; background: rgba(255,255,255,0.05);
+    border: 0.5px solid rgba(255,255,255,0.12); color: #fff; cursor: pointer; text-align: left;
+    font-family: inherit; transition: background 0.15s ease, border-color 0.15s ease; }
+.tag-mode-item:hover:not(:disabled) { background: rgba(10,132,255,0.16); border-color: rgba(10,132,255,0.55); }
 .tag-mode-item:disabled { opacity: 0.45; cursor: default; }
-.tag-mode-thumb { flex: 0 0 auto; width: 96px; height: 64px; border-radius: 6px; background: #101012;
-    border: 0.5px solid rgba(255,255,255,0.1); }
-.tag-mode-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.tag-mode-name { font-size: 12.5px; font-weight: 700; }
-.tag-mode-desc { font-size: 11px; color: rgba(255,255,255,0.55); line-height: 1.35; }
+.tag-mode-thumb { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; border-radius: 6px;
+    background: #101012; border: 0.5px solid rgba(255,255,255,0.1); }
+.tag-mode-name { font-size: 11.5px; font-weight: 700; line-height: 1.25; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
 /* The layer context menu. Fixed-positioned so it can be clamped into the window from JS. */
 .layer-menu { position: fixed; z-index: 300; display: none; flex-direction: column; gap: 2px; min-width: 168px;
     padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
@@ -808,11 +817,14 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     </div>
 </div>
 <div class="modal-overlay" id="tagModal">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="Tag the composite">
+    <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Tag the composite">
         <div class="modal-title">Tag</div>
         <div class="modal-sub">Which part of the composite the tagger reads. The result only feeds the prompt stage — the canvas is untouched.</div>
-        <div class="tag-mode-list" id="tagModeList"></div>
+        <div class="tag-groups" id="tagGroups"></div>
         <div class="modal-actions">
+            <button class="modal-btn ghost" id="clearTagBtn"
+                    title="Remove the tags Tag wrote into the prompt stage. Nothing new is tagged.">Clear Tag</button>
+            <div style="flex:1;"></div>
             <button class="modal-btn ghost" id="tagCancelBtn">Cancel</button>
         </div>
     </div>
@@ -6072,7 +6084,8 @@ window.addEventListener('blur', () => closeLayerMenu());
 // guesses, and each row shows WHAT it sends — the live composite masked / cropped / whole,
 // or a schematic while the canvas is still empty or the Mask has no ink.
 const tagModalEl = document.getElementById('tagModal');
-const tagModeList = document.getElementById('tagModeList');
+const tagGroups = document.getElementById('tagGroups');
+const clearTagBtn = document.getElementById('clearTagBtn');
 const TAG_MODES = [
     { mode: 'mask', name: 'Mask Tag', desc: 'Only the Mask layer\u2019s region — cropped to it, everything else discarded.' },
     { mode: 'covered', name: 'Covered Tag', desc: 'The whole composite, the masked region kept and the rest painted white.' },
@@ -6081,11 +6094,13 @@ const TAG_MODES = [
 // Layer-scoped variants — mirror the three above but read the COMPOSITE over the selected
 // layer's own region and the LAYER's OWN mask (not the singleton Mask layer). Only offered
 // when a real image layer is selected; the actual crop back to the layer grid happens in
-// sendBlendAction via layerCompositeForGenerate + generateMaskDataUrl.
+// sendBlendAction via layerCompositeForGenerate + generateMaskDataUrl. They keep the SAME short
+// names as the three above: in the picker they live under their own "Layer …" heading, so the
+// scope is the heading's job and the card only says which region treatment it is.
 const LAYER_TAG_MODES = [
-    { mode: 'layer_mask', kind: 'mask', name: 'Layer Mask Tag', desc: 'Only this layer\u2019s region, cut by the layer\u2019s own mask — everything else discarded.' },
-    { mode: 'layer_covered', kind: 'covered', name: 'Layer Covered Mask Tag', desc: 'The composite over this layer\u2019s region, masked kept and the rest painted white.' },
-    { mode: 'layer_full', kind: 'full', name: 'Layer Full Tag', desc: 'The composite over this layer\u2019s region as it is, ignoring the layer\u2019s mask.' },
+    { mode: 'layer_mask', kind: 'mask', name: 'Mask Tag', desc: 'Only this layer\u2019s region, cut by the layer\u2019s own mask — everything else discarded.' },
+    { mode: 'layer_covered', kind: 'covered', name: 'Covered Tag', desc: 'The composite over this layer\u2019s region, masked kept and the rest painted white.' },
+    { mode: 'layer_full', kind: 'full', name: 'Full Tag', desc: 'The composite over this layer\u2019s region as it is, ignoring the layer\u2019s mask.' },
 ];
 
 function tagModalOpen() { return tagModalEl.classList.contains('open'); }
@@ -6241,63 +6256,52 @@ function tagResultLine(d) {
     return [`Tag written to the prompt stage${d.tag ? ': ' + d.tag : ''}`, 'success'];
 }
 
-function makeTagItem(name, desc, onPick, thumbPainter) {
+function makeTagCard(name, desc, onPick, thumbPainter) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'tag-mode-item';
+    // Three cards across leaves no room for the sentence under the name, so it is the hover title.
+    item.title = desc;
     const thumb = document.createElement('canvas');
     thumb.className = 'tag-mode-thumb';
     thumb.width = 96; thumb.height = 64;
     thumbPainter(thumb);
-    const text = document.createElement('div');
-    text.className = 'tag-mode-text';
     const nm = document.createElement('span');
     nm.className = 'tag-mode-name';
     nm.textContent = name;
-    const descEl = document.createElement('span');
-    descEl.className = 'tag-mode-desc';
-    descEl.textContent = desc;
-    text.appendChild(nm);
-    text.appendChild(descEl);
     item.appendChild(thumb);
-    item.appendChild(text);
+    item.appendChild(nm);
     item.addEventListener('click', onPick);
     return item;
 }
 
-function openTagModal() {
-    tagModeList.innerHTML = '';
-    // Clear Tag sits on top and is always available — it touches only the prompt stage.
-    tagModeList.appendChild(makeTagItem(
-        'Clear Tag',
-        'Remove the tags Tag wrote into the prompt stage. Nothing new is tagged.',
-        () => { closeTagModal(); sendClearTag(); },
-        (c) => {
-            const x = c.getContext('2d');
-            x.clearRect(0, 0, c.width, c.height);
-            x.strokeStyle = 'rgba(255,255,255,0.4)';
-            x.lineWidth = 2;
-            x.strokeRect(6, 6, c.width - 12, c.height - 12);
-            x.strokeStyle = 'rgba(248,81,73,0.9)';
-            x.beginPath();
-            x.moveTo(c.width * 0.36, c.height * 0.34); x.lineTo(c.width * 0.64, c.height * 0.66);
-            x.moveTo(c.width * 0.64, c.height * 0.34); x.lineTo(c.width * 0.36, c.height * 0.66);
-            x.stroke();
-        },
-    ));
-    TAG_MODES.forEach(m => {
-        tagModeList.appendChild(makeTagItem(m.name, m.desc,
+function makeTagGroup(title, modes, thumbFor) {
+    const group = document.createElement('div');
+    group.className = 'tag-group';
+    const head = document.createElement('div');
+    head.className = 'tag-group-title';
+    head.textContent = title;
+    head.title = title;
+    const cards = document.createElement('div');
+    cards.className = 'tag-cards';
+    for (const m of modes) {
+        cards.appendChild(makeTagCard(m.name, m.desc,
             () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); },
-            (c) => drawTagThumb(c, m.mode)));
-    });
-    // Layer variants — only while a real image layer is selected.
+            c => thumbFor(m, c)));
+    }
+    group.appendChild(head);
+    group.appendChild(cards);
+    return group;
+}
+
+function openTagModal() {
+    tagGroups.innerHTML = '';
+    tagGroups.appendChild(makeTagGroup('Mask layer', TAG_MODES, (m, c) => drawTagThumb(c, m.mode)));
+    // The layer-scoped group only exists while a real image layer is selected.
     const tl = tagLayerTarget();
     if (tl) {
-        LAYER_TAG_MODES.forEach(m => {
-            tagModeList.appendChild(makeTagItem(m.name, m.desc,
-                () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); },
-                (c) => drawLayerTagThumb(c, m.kind)));
-        });
+        tagGroups.appendChild(makeTagGroup('Layer \u00B7 ' + tl.name, LAYER_TAG_MODES,
+            (m, c) => drawLayerTagThumb(c, m.kind)));
     }
     tagModalEl.classList.add('open');
     syncBrushCursor();
@@ -6305,6 +6309,8 @@ function openTagModal() {
 
 tagModalEl.addEventListener('mousedown', e => { if (e.target === tagModalEl) closeTagModal(); });
 document.getElementById('tagCancelBtn').addEventListener('click', closeTagModal);
+// Clear Tag is a modal action, not a fourth mode: it never tags anything, so it sits by Cancel.
+document.getElementById('clearTagBtn').addEventListener('click', () => { closeTagModal(); sendClearTag(); });
 tagModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTagModal(); }
 });
