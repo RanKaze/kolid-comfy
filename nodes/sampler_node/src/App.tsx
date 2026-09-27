@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings } from './types';
+import { EMPTY_PIPELINE_SETTINGS } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -29,7 +30,6 @@ const App: React.FC = () => {
   const [staging, setStaging] = useState<StagingItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
-  const [loadingAssets, setLoadingAssets] = useState(false);
   const [syncingTab, setSyncingTab] = useState(false);
   const syncingTabRef = useRef(false);
   useEffect(() => { syncingTabRef.current = syncingTab; }, [syncingTab]);
@@ -37,7 +37,10 @@ const App: React.FC = () => {
   const consumedPromptConfirmedRef = useRef(false);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
-  const [currentPipelineKey, setCurrentPipelineKey] = useState<string | null>(null);
+  /** Draw 页 Pipeline Settings：选中项 + 按 pipeline 名字绑定的五个 override（后端落盘） */
+  const [pipelineSettings, setPipelineSettings] = useState<PipelineSettings>(EMPTY_PIPELINE_SETTINGS);
+  /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条 = [Default]） */
+  const [loadedPipelineName, setLoadedPipelineName] = useState('');
   const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
@@ -150,6 +153,8 @@ const App: React.FC = () => {
         blockIdCounter.current = Math.max(2, maxIdSuffix(allSets.flatMap(s => (s.blocks ?? []).map(b => b.id)), 'block-') + 1);
         setDetailStatus(data.detail_status);
         setArchitecture(data.architecture ?? null);
+        setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
+        setLoadedPipelineName(data.loaded_pipeline_name ?? '');
         if (data.has_package) {
           fetch('/api/package')
             .then(r => r.json())
@@ -255,7 +260,7 @@ const App: React.FC = () => {
         setPendingQuery(data.pending_query || null);
         const st = data.detail_status;
         if (st === 'cancelled') {
-          // Run 按钮的 Cancel 打断了本次运行：通知工作台复位按钮，本页状态回 idle。
+          // 工作台的 Cancel 打断了本次运行：通知工作台复位，本页状态回 idle。
           post({ status: 'cancelled' });
           setDetailStatus('idle');
           return;
@@ -276,6 +281,10 @@ const App: React.FC = () => {
           total: data.total_steps || 0,
         };
         setDetailStatus(st);
+        // 一条 preset 绑定的 pipeline 是在 run 循环里现加载的：名字与架构都会跟着变，
+        // 轮询顺手同步，前端就不用再拉一次 config。
+        if (typeof data.loaded_pipeline_name === 'string') setLoadedPipelineName(data.loaded_pipeline_name);
+        if (data.architecture !== undefined) setArchitecture(data.architecture ?? null);
         if (st === 'running') {
           post({ status: 'running', ...progress });
         } else if (st === 'error') {
@@ -285,7 +294,7 @@ const App: React.FC = () => {
           post({ status: 'done' });
           // The result never becomes the pipeline image by itself: it lands in the staging pool
           // and then either is written back over the layer it came from (a layer-initiated
-          // Generate) or dropped on as a new layer (the toolbar's Run Detailer).
+          // Generate) or dropped on as a new layer (a preset run).
           const generateTarget = layerGenerateRef.current;
           layerGenerateRef.current = null;
           await refreshStaging();
@@ -364,7 +373,7 @@ const App: React.FC = () => {
   }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshStaging]);
 
   // Flush the prompt editor into prompt_server. The detailer reads the prompt from there, so a
-  // Run Detailer must not start while the editor still holds unsaved edits.
+  // A run must not start while the prompt editor still holds unsaved edits.
   const syncPrompt = useCallback((): Promise<void> => {
     return new Promise((resolve) => {
       const iframe = promptIframeRef.current;
@@ -487,7 +496,7 @@ const App: React.FC = () => {
   /**
    * Generate on a single layer, driven from the layer row's context menu.
    *
-   * The difference from the toolbar's Run Detailer is what is sent: the toolbar composites the
+   * The difference from a preset run is what is sent: a preset run composites the
    * whole canvas and uses the singleton Mask layer, whereas this sends *that layer's* own image as
    * the context image and *that layer's* own mask as the context mask. The result is written back
    * over that layer's image rather than added as a new layer.
@@ -561,7 +570,7 @@ const App: React.FC = () => {
         // Generate from the layer row's context menu: that layer in, that layer out.
         handleLayerGenerate(event.data);
       } else if (event.data?.type === 'blend-cancel-run') {
-        // Blend 工具栏的 Run 按钮在运行中变成了 Cancel —— 打断当前 run
+        // 工作台的 Cancel（运行中才浮出）—— 打断当前 run
         // （后端用 ComfyUI 原生 interrupt：采样步 / block 边界 / Generate Text 后抛
         // InterruptProcessingException，run 循环转成 detail_status='cancelled'）。
         fetch('/api/cancel_run', { method: 'POST' }).catch(() => {});
@@ -670,10 +679,10 @@ const App: React.FC = () => {
       });
       const data = await res.json();
       if (data.success) {
-        setCurrentPipelineKey(`${packageIdx}_${pipelineIdx}`);
-        // Refresh architecture (edit settings are rendered per-architecture)
+        // 切换即加载：edit 设置按架构渲染、override 按名字取，两者都要跟着刷新
         fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
           setArchitecture(cfg.architecture ?? null);
+          setLoadedPipelineName(cfg.loaded_pipeline_name ?? '');
         }).catch(() => {});
         // Notify prompt iframe to reload lora data (lora_regex may have changed)
         setTimeout(() => {
@@ -684,22 +693,6 @@ const App: React.FC = () => {
       }
     } catch (e: any) {
       setError('Failed to switch pipeline: ' + e.message);
-    }
-  }, []);
-
-  // 把工作区某张图设为 pipeline 当前图（下一次 run 从它继续）。
-  const handleSelectImage = useCallback(async (id: string) => {
-    try {
-      await fetch('/api/select_image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: id }),
-      });
-      // Reset state for next iteration
-      setPromptReady(false);
-      setDetailStatus('idle');
-    } catch (e: any) {
-      setError('Failed to select image: ' + e.message);
     }
   }, []);
 
@@ -756,7 +749,7 @@ const App: React.FC = () => {
    * Run one pipeline preset right now — the ▶ half of the sampler's Pipeline Presets
    * capsule. The canvas and the Mask layer live in the Blend workbench, so the workbench
    * issues the run; we only name which preset it should use. Its reply is the ordinary
-   * blend-action, which starts the status poller like the toolbar's Run.
+   * blend-action, which starts the status poller.
    */
   const handleRunPreset = useCallback((presetId: string) => {
     setError(null);
@@ -824,7 +817,7 @@ const App: React.FC = () => {
     const newId = 'set-' + blockSetIdCounter.current++;
     // Deep-copy so editing the copy never aliases the source set's blocks.
     const copy = JSON.parse(JSON.stringify(src.blocks)) as PipelineBlock[];
-    persistSets([...blockSets, { id: newId, name: `${src.name} copy`, blocks: copy }], newId);
+    persistSets([...blockSets, { id: newId, name: `${src.name} copy`, blocks: copy, pipeline_name: src.pipeline_name }], newId);
   }, [blockSets, persistSets]);
 
   const handleRemoveBlockSet = useCallback((id: string) => {
@@ -844,6 +837,21 @@ const App: React.FC = () => {
   const handleSwitchBlockSet = useCallback((id: string) => {
     if (id === activeBlockSetId) return;
     persistSets(blockSets, id);
+  }, [blockSets, activeBlockSetId, persistSets]);
+
+  // Pipeline Settings（选中项 + 按名字的 override）整体落盘在后端 blocks_sets.json 里。
+  const handlePipelineSettingsChange = useCallback((next: PipelineSettings) => {
+    setPipelineSettings(next);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pipeline_settings: next }),
+    }).catch(() => {});
+  }, []);
+
+  // preset 行 ⚙：这套链跑起来时用哪条 pipeline（按名字绑，run 时解析）。
+  const handleSetPresetPipeline = useCallback((setId: string, pipelineName: string) => {
+    persistSets(blockSets.map(s => s.id === setId ? { ...s, pipeline_name: pipelineName } : s), activeBlockSetId);
   }, [blockSets, activeBlockSetId, persistSets]);
 
   // One-time migration: interface blocks saved before name-binding only carry interface_idx.
@@ -892,40 +900,6 @@ const App: React.FC = () => {
     window.close();
   }, []);
 
-  // 上传到工作区，返回新条目的 id —— Context tab / 端口图选择都用它。
-  const handleAddStagingImage = useCallback(async (base64: string): Promise<string | null> => {
-    try {
-      const res = await fetch('/api/staging', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images: [base64], name: 'Loaded' }),
-      });
-      const data = await res.json().catch(() => ({}));
-      refreshStaging();
-      return (data && data.success && Array.isArray(data.added) && data.added[0]?.id) || null;
-    } catch (e: any) {
-      setError('Failed to add image: ' + e.message);
-      return null;
-    }
-  }, [refreshStaging]);
-
-  const handleLoadFromAssets = useCallback(async () => {
-    setLoadingAssets(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/load_from_assets', { method: 'POST' });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || 'Failed to load from assets');
-      }
-      refreshStaging();
-    } catch (e: any) {
-      setError('Failed to load from assets: ' + e.message);
-    } finally {
-      setLoadingAssets(false);
-    }
-  }, [refreshStaging]);
-
   if (!config) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#888' }}>
@@ -963,7 +937,6 @@ const App: React.FC = () => {
         promptReady={promptReady}
         detailStatus={detailStatus}
         staging={staging}
-        onRefreshStaging={refreshStaging}
         promptIframeRef={promptIframeRef}
         blocks={blocks}
         architecture={architecture}
@@ -989,14 +962,10 @@ const App: React.FC = () => {
         onRemoveBlockSet={handleRemoveBlockSet}
         onReorderBlockSets={handleReorderBlockSets}
         onSwitchBlockSet={handleSwitchBlockSet}
-        onSelectImage={handleSelectImage}
         onFinishClick={handleFinishClick}
         showFinishDialog={showFinishDialog}
         onFinish={handleFinish}
         onCloseFinishDialog={() => setShowFinishDialog(false)}
-        onAddStagingImage={handleAddStagingImage}
-        onLoadFromAssets={handleLoadFromAssets}
-        loadingAssets={loadingAssets}
         blendIframeRef={blendIframeRef}
         interfaces={interfaces}
         onExecuteInterface={handleExecuteInterface}
@@ -1004,8 +973,11 @@ const App: React.FC = () => {
         interfaceStatusByIdx={interfaceStatusByIdx}
         interfaceProgressByIdx={interfaceProgressByIdx}
         pipelinePackages={pipelinePackages}
+        pipelineSettings={pipelineSettings}
+        loadedPipelineName={loadedPipelineName}
         onSwitchPipeline={handleSwitchPipeline}
-        currentPipelineKey={currentPipelineKey}
+        onPipelineSettingsChange={handlePipelineSettingsChange}
+        onSetPresetPipeline={handleSetPresetPipeline}
         actionLog={actionLog}
       />
 

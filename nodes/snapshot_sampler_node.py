@@ -390,6 +390,20 @@ doc_io = DocumentIo()
 
 
 # =============================================================================
+# Pipeline Settings（按 pipeline 名字绑定）—— 与前端 types.ts 里的字面量一一对应
+# =============================================================================
+# preset 的 pipeline 绑定只有两类取值：
+#   ''                    = [Default]，节点输入口那条 pipeline。它的名字/信息从未被收集过，
+#                           所以一旦选过别的 pipeline，前端就把这个选项收起来（无从切回）。
+#   PIPELINE_CURRENT_SELECT = [Current Select]，用当前已加载的那一条，不做任何切换。
+#   其余字符串            = pipeline 在 /api/pipeline_package 里的名字（重名时取第一个）。
+PIPELINE_CURRENT_SELECT = '[Current Select]'
+# Pipeline Settings 里可以按 pipeline 名字 override 的五个参数 —— 与 GLOBAL SETTINGS 同名同义，
+# 区别只是「这条 pipeline 跑的时候盖掉全局值」，且必须 toggle 开着才生效。
+PIPELINE_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align')
+
+
+# =============================================================================
 # SnapshotDetailerSamplerServer：前后端交互服务器
 # =============================================================================
 class SnapshotDetailerSamplerServer:
@@ -505,6 +519,16 @@ class SnapshotDetailerSamplerServer:
             else:
                 self.active_block_set = None
                 self.blocks = []
+        # Pipeline Settings：选中的 pipeline 名字 + 每条 pipeline 自己的五个 override。
+        # 与 blocks_sets 同路（config 只是初值，落盘文件赢）—— 同样是纯 UI 状态。
+        self.pipeline_settings = self._normalize_pipeline_settings(cfg.get('pipeline_settings'))
+        _f_ps = self._load_pipeline_settings_file()
+        if _f_ps is not None:
+            self.pipeline_settings = _f_ps
+        # 当前真的加载在 node 上的是哪条 pipeline（'' = 节点输入口那条 = [Default]）。
+        # server 每次节点执行都是新建的，所以这份身份天然随执行复位，不需要额外清理。
+        self.loaded_pipeline_node_id = ''
+        self.loaded_pipeline_name = ''
         self.detail_status = 'idle'
         self.detail_error = None
         self.detail_progress = 0       # 0..1
@@ -923,6 +947,85 @@ class SnapshotDetailerSamplerServer:
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Failed to save blocks_sets: {e}")
 
+    # -------------------------------------------------------------------------
+    # Pipeline Settings（选中项 + 按名字的 override）与 pipeline 名字解析
+    # -------------------------------------------------------------------------
+    def _normalize_pipeline_settings(self, raw):
+        """Coerce anything on disk / from the frontend into the canonical shape.
+
+        {'selected': str, 'overrides': {<pipeline name>: {<key>: {'value': int, 'enabled': bool}}}}
+        Unknown keys are dropped rather than kept — a stale key would silently win over a
+        GLOBAL SETTINGS value at run time.
+        """
+        out = {'selected': '', 'overrides': {}}
+        if not isinstance(raw, dict):
+            return out
+        sel = raw.get('selected')
+        out['selected'] = sel if isinstance(sel, str) else ''
+        ov = raw.get('overrides')
+        if isinstance(ov, dict):
+            for name, entry in ov.items():
+                if not isinstance(name, str) or not isinstance(entry, dict):
+                    continue
+                one = {}
+                for k in PIPELINE_OVERRIDE_KEYS:
+                    v = entry.get(k)
+                    if not isinstance(v, dict):
+                        continue
+                    try:
+                        value = int(v.get('value'))
+                    except (TypeError, ValueError):
+                        continue
+                    one[k] = {'value': value, 'enabled': bool(v.get('enabled'))}
+                if one:
+                    out['overrides'][name] = one
+        return out
+
+    def _load_pipeline_settings_file(self):
+        """Persisted Pipeline Settings, or None when the key is absent (first run)."""
+        ps = self._read_sets_file().get('pipeline_settings')
+        return self._normalize_pipeline_settings(ps) if isinstance(ps, dict) else None
+
+    def _save_pipeline_settings_file(self):
+        try:
+            data = self._read_sets_file()
+            data['pipeline_settings'] = self.pipeline_settings
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save pipeline_settings: {e}")
+
+    def find_pipeline_by_name(self, name):
+        """Resolve a pipeline by its package name → {'package_idx','pipeline_idx','node_id'}.
+
+        Names come from inferred node titles and are NOT unique; the first match wins, which is
+        the same rule the workbench's enum uses. Returns None when the pipeline is gone
+        (renamed / package disconnected) — presets and overrides then read as `Missing`.
+        """
+        if not isinstance(name, str) or not name:
+            return None
+        for pi, pkg in enumerate(self.pipeline_packages or []):
+            for qi, p in enumerate(pkg.get('pipelines') or []):
+                if p.get('name') == name:
+                    return {'package_idx': pi, 'pipeline_idx': qi,
+                            'node_id': p.get('node_id', ''), 'name': name}
+        return None
+
+    def preset_pipeline_name(self, set_id):
+        """Which pipeline a block set (pipeline preset) runs with: '' = [Default]."""
+        s = next((x for x in (self.blocks_sets or [])
+                  if isinstance(x, dict) and x.get('id') == set_id), None)
+        name = s.get('pipeline_name') if isinstance(s, dict) else None
+        return name if isinstance(name, str) else ''
+
+    def pipeline_overrides(self, name):
+        """Enabled override values bound to `name` ({} = nothing overrides the globals)."""
+        if not name:
+            return {}
+        entry = (self.pipeline_settings.get('overrides') or {}).get(name) or {}
+        return {k: v['value'] for k, v in entry.items()
+                if isinstance(v, dict) and v.get('enabled') and k in PIPELINE_OVERRIDE_KEYS}
+
     def _apply_params(self, data):
         for _k in self.GLOBAL_PARAM_DEFAULTS:
             if _k in data:
@@ -951,6 +1054,10 @@ class SnapshotDetailerSamplerServer:
             self._save_blocks_sets_file()
         if 'blocks' in data:
             self._set_blocks(data['blocks'])
+        # Pipeline Settings 整份替换（前端是唯一作者：选中项 + 按名字的 override）。
+        if 'pipeline_settings' in data:
+            self.pipeline_settings = self._normalize_pipeline_settings(data['pipeline_settings'])
+            self._save_pipeline_settings_file()
 
     def _set_blocks(self, blocks):
         """Adopt a flat block chain as the active one.
@@ -1177,6 +1284,10 @@ class SnapshotDetailerSamplerServer:
                     'blocks': inst.blocks if inst else [],
                     'blocks_sets': inst.blocks_sets if inst else [],
                     'active_block_set': inst.active_block_set if inst else None,
+                    # Pipeline Settings（选中项 + 按名字的 override）与此刻真正加载在节点上的
+                    # 那条 pipeline 的名字。'' = 还没选过 = [Default]（节点输入口那条）。
+                    'pipeline_settings': inst.pipeline_settings if inst else {'selected': '', 'overrides': {}},
+                    'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
                 })
                 return
 
@@ -1194,6 +1305,10 @@ class SnapshotDetailerSamplerServer:
                     'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
                     'pending_query': inst._pending_query_view() if inst else None,
+                    # 一条 preset 绑定的 pipeline 可能在这次 run 里被现加载（见 run_detailer）：
+                    # 名字与架构都跟着变，前端轮询时顺手同步，不用重拉 config。
+                    'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    'architecture': self._get_current_architecture(inst),
                 })
                 return
 
@@ -1439,59 +1554,12 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'success': False, 'error': 'Invalid pipeline index'}, 400)
                         return
                     pipeline_info = pipelines[pipeline_idx]
-                    upstream_node_id = pipeline_info.get("node_id", "")
-
-                    # Execute the upstream node via InterfaceExecutor to get PIPELINE_DATA
-                    from .interface_node import InterfaceExecutor
-                    epi = getattr(inst, 'extra_pnginfo', None)
-                    if isinstance(epi, list):
-                        epi = epi[0] if epi else {}
-                    # Provide current pipeline as fallback for unresolved PIPELINE_DATA inputs
-                    current_pipeline = inst.node_instance._current_pipeline
-                    executor = InterfaceExecutor(
-                        extra_pnginfo=epi,
-                        get_pipeline=lambda: current_pipeline,
-                    )
-                    output_values = {}
-                    try:
-                        executor._try_execute_external(upstream_node_id, output_values)
-                    except Exception as ex:
-                        self._send_json({'success': False, 'error': f'Failed to execute upstream node {upstream_node_id}: {ex}'}, 500)
-                        return
-                    if upstream_node_id not in output_values or not output_values[upstream_node_id]:
-                        self._send_json({'success': False, 'error': f'Failed to execute upstream node {upstream_node_id}: execution returned no output'}, 500)
-                        return
-                    new_pipeline = output_values[upstream_node_id][0]
-                    if new_pipeline is None:
-                        self._send_json({'success': False, 'error': 'Upstream node returned None pipeline'}, 500)
-                        return
-
-                    # Switch pipeline (preserve history)
-                    # Inherit image/latent from current pipeline if new pipeline lacks them
-                    if new_pipeline.image is None and current_pipeline is not None and current_pipeline.image is not None:
-                        new_pipeline.image = current_pipeline.image
-                    if new_pipeline.latent is None and current_pipeline is not None and current_pipeline.latent is not None:
-                        new_pipeline.latent = current_pipeline.latent
-                    if new_pipeline.mask is None and current_pipeline is not None and current_pipeline.mask is not None:
-                        new_pipeline.mask = current_pipeline.mask
-                    inst.node_instance._current_pipeline = new_pipeline.copy()
-                    inst.node_instance._base_pipeline = inst.node_instance._current_pipeline
-                    new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
-                    inst.node_instance._switch_image(inst, new_image)
-                    # Update lora_regex from new pipeline's architecture
-                    new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
-                    old_arch = current_pipeline.config.get("architecture") if current_pipeline and current_pipeline.config else None
-                    print(f"[PipelineSwitch] old_arch={old_arch}, new_arch={new_arch}, config_keys={list(new_pipeline.config.keys()) if new_pipeline.config else 'None'}")
-                    if new_arch:
-                        new_arch = str(new_arch)
-                        inst.lora_regex = new_arch
-                        if inst.prompt_server:
-                            inst.prompt_server.update_lora_regex(new_arch)
-                    elif old_arch:
-                        # If new pipeline didn't set architecture, keep old regex
-                        print(f"[PipelineSwitch] WARNING: new pipeline has no architecture in config, keeping old lora_regex={inst.lora_regex}")
-                    print(f"[PipelineSwitch] Switched to pipeline '{pipeline_info.get('name', '')}' (node {upstream_node_id}), lora_regex='{new_arch or inst.lora_regex}'")
-                    self._send_json({'success': True})
+                    # 加载本身（执行上游节点 + 换 current/base pipeline + 架构与 lora_regex）
+                    # 与 run 循环里 preset 绑定用的是同一份代码。
+                    ok, err = inst.node_instance._load_pipeline_from_node(
+                        inst, pipeline_info.get('node_id', ''), pipeline_info.get('name', ''))
+                    self._send_json({'success': True} if ok
+                                    else {'success': False, 'error': err}, 200 if ok else 500)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -1546,7 +1614,7 @@ class SnapshotDetailerSamplerServer:
                 return
 
             if self.path == '/api/cancel_run':
-                # 前端 Run 按钮在运行中变成 Cancel。点击 = 走 ComfyUI 的原生打断：
+                # 工作台浮出的 Cancel 按钮。点击 = 走 ComfyUI 的原生打断：
                 # 全局 interrupt 标志让 KSampler 在下一个采样步抛
                 # InterruptProcessingException；块循环里的检查点会在 block / Generate
                 # Text 边界抛同一个异常。run_detailer 的 except 把它转成
@@ -3251,6 +3319,67 @@ class SnapshotDetailerSamplerNode:
         return next_pipeline, original_image, detailed_image, detail_meta
 
     # -------------------------------------------------------------------------
+    # 按 node_id 现加载一条 pipeline —— /api/switch_pipeline（Pipeline Settings 选）与
+    # run_detailer（preset 绑定）共用这一份。执行上游节点取 PIPELINE_DATA 是这里唯一昂贵
+    # 的一步（模型/VAE/CLIP 全在那条链上重建），所以 run 循环只在「这次要的 pipeline 和已
+    # 加载的不是同一条」时才调它。
+    # -------------------------------------------------------------------------
+    def _load_pipeline_from_node(self, server, upstream_node_id, pipeline_name=''):
+        """→ (ok, error). 成功时把 node 的 current/base pipeline 换成它，并记住身份。"""
+        if not upstream_node_id:
+            return False, 'Pipeline has no source node id'
+        from .interface_node import InterfaceExecutor
+        epi = getattr(server, 'extra_pnginfo', None)
+        if isinstance(epi, list):
+            epi = epi[0] if epi else {}
+        # Provide current pipeline as fallback for unresolved PIPELINE_DATA inputs
+        current_pipeline = self._current_pipeline
+        executor = InterfaceExecutor(
+            extra_pnginfo=epi,
+            get_pipeline=lambda: current_pipeline,
+        )
+        output_values = {}
+        try:
+            executor._try_execute_external(upstream_node_id, output_values)
+        except Exception as ex:
+            return False, f'Failed to execute upstream node {upstream_node_id}: {ex}'
+        if upstream_node_id not in output_values or not output_values[upstream_node_id]:
+            return False, (f'Failed to execute upstream node {upstream_node_id}: '
+                           f'execution returned no output')
+        new_pipeline = output_values[upstream_node_id][0]
+        if new_pipeline is None:
+            return False, 'Upstream node returned None pipeline'
+
+        # Inherit image/latent/mask from the current pipeline if the new one lacks them
+        if new_pipeline.image is None and current_pipeline is not None and current_pipeline.image is not None:
+            new_pipeline.image = current_pipeline.image
+        if new_pipeline.latent is None and current_pipeline is not None and current_pipeline.latent is not None:
+            new_pipeline.latent = current_pipeline.latent
+        if new_pipeline.mask is None and current_pipeline is not None and current_pipeline.mask is not None:
+            new_pipeline.mask = current_pipeline.mask
+        self._current_pipeline = new_pipeline.copy()
+        self._base_pipeline = self._current_pipeline
+        new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
+        self._switch_image(server, new_image)
+        # Update lora_regex from the new pipeline's architecture
+        new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
+        old_arch = current_pipeline.config.get("architecture") if current_pipeline and current_pipeline.config else None
+        print(f"[PipelineSwitch] old_arch={old_arch}, new_arch={new_arch}, config_keys={list(new_pipeline.config.keys()) if new_pipeline.config else 'None'}")
+        if new_arch:
+            new_arch = str(new_arch)
+            server.lora_regex = new_arch
+            if server.prompt_server:
+                server.prompt_server.update_lora_regex(new_arch)
+        elif old_arch:
+            # If new pipeline didn't set architecture, keep old regex
+            print(f"[PipelineSwitch] WARNING: new pipeline has no architecture in config, keeping old lora_regex={server.lora_regex}")
+        # 身份记账：run 循环靠它判断「这次要不要重新加载」。
+        server.loaded_pipeline_node_id = upstream_node_id
+        server.loaded_pipeline_name = pipeline_name or ''
+        print(f"[PipelineSwitch] Switched to pipeline '{pipeline_name}' (node {upstream_node_id}), lora_regex='{new_arch or server.lora_regex}'")
+        return True, None
+
+    # -------------------------------------------------------------------------
     # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
     # -------------------------------------------------------------------------
     def _switch_image(self, server, new_image):
@@ -3623,12 +3752,28 @@ class SnapshotDetailerSamplerNode:
                                               missing_ref_ids=list(missing_ref_ids),
                                               loras=debug_lora_entries(user_loras))
 
+                        # 逐 run 的 preset 选择：取用即清空，下一次普通 Run 一定回落到当前
+                        # 激活 tab 的链（否则上一轮 Generate 选的 preset 会偷偷留下来）。
+                        # 这段解析必须排在"Mask is required"闸门与 pipeline 切换之前 ——
+                        # 闸门看哪条链、切哪条 pipeline、跑哪条链，三者必须是同一套 set。
+                        preset_id = server.pending_generate_preset
+                        server.pending_generate_preset = None
+                        preset_set = next(
+                            (s for s in (server.blocks_sets or [])
+                             if s.get('id') == preset_id and s.get('blocks')),
+                            None,
+                        ) if preset_id else None
+                        if preset_set is not None:
+                            print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
+                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
+                        run_set_id = preset_set['id'] if preset_set is not None else server.active_block_set
+
                         # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
                         # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
-                        # Mask 层没画也允许跑。这里只是读 pending preset 不清空（取用即清
-                        # 仍在下方 blocks 解析处），两条路的选链优先级保持一致。
+                        # Mask 层没画也允许跑。闸门与主循环共用 _first_detailer_enable_mask，
+                        # 两条路的选链优先级保持一致。
                         if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
-                            if server._first_detailer_enable_mask(server.pending_generate_preset):
+                            if server._first_detailer_enable_mask(preset_id):
                                 server.detail_status = 'error'
                                 server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
                                 continue
@@ -3638,8 +3783,34 @@ class SnapshotDetailerSamplerNode:
                         # 状态，单独合并进副本（原始 image / model 来自 base）。
                         if self._base_pipeline is None:
                             server.detail_status = 'error'
-                            server.detail_error = 'Pipeline not initialized — switch a pipeline in the Pipeline tab first'
+                            server.detail_error = 'Pipeline not initialized — pick a pipeline in Pipeline Settings first'
                             continue
+
+                        # Pipeline Settings：这套链绑定了具体 pipeline 名字才切换。
+                        # '' = [Default]、[Current Select] = 用当前已加载的那条，都不切。
+                        # 加载要走一遍上游、极耗性能，所以只有"这次要的和上次加载的不是同一条"
+                        # 时才真的 load —— node_id 是唯一稳定键（名字是推断出来的标题，会重名）。
+                        wanted_pipeline = server.preset_pipeline_name(run_set_id)
+                        if wanted_pipeline and wanted_pipeline != PIPELINE_CURRENT_SELECT:
+                            target = server.find_pipeline_by_name(wanted_pipeline)
+                            if target is None:
+                                server.detail_status = 'error'
+                                server.detail_error = (f"Pipeline '{wanted_pipeline}' is missing — "
+                                                       f"it no longer exists in the connected package; "
+                                                       f"rebind it in Pipeline Settings")
+                                continue
+                            if server.loaded_pipeline_node_id == target['node_id']:
+                                print(f"[run_detailer] pipeline '{wanted_pipeline}' already loaded — skip switch")
+                            else:
+                                print(f"[run_detailer] switching pipeline to '{wanted_pipeline}' "
+                                      f"(node_id={target['node_id']}) for set '{run_set_id}'")
+                                ok, err = self._load_pipeline_from_node(
+                                    server, target['node_id'], wanted_pipeline)
+                                if not ok:
+                                    server.detail_status = 'error'
+                                    server.detail_error = err
+                                    continue
+
                         run_pipeline = self._base_pipeline.copy()
                         run_pipeline.mask = current_mask.clone() if current_mask is not None else None
 
@@ -3676,19 +3847,10 @@ class SnapshotDetailerSamplerNode:
                         dbg.record_mask('输入 Mask（Mask 层）', current_mask,
                                         detail=f'sum={diag_mask_sum:.0f}')
 
-                        # Build global_params and blocks for pipeline execution
-                        # 逐 run 的 preset 选择：取用即清空，下一次普通 Run 一定回落到当前
-                        # 激活 tab 的链（否则上一轮 Generate 选的 preset 会偷偷留下来）。
-                        preset_id = server.pending_generate_preset
-                        server.pending_generate_preset = None
-                        preset_set = next(
-                            (s for s in (server.blocks_sets or [])
-                             if s.get('id') == preset_id and s.get('blocks')),
-                            None,
-                        ) if preset_id else None
-                        if preset_set is not None:
-                            print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
-                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
+                        # Build global_params for pipeline execution.
+                        # 五个 GLOBAL SETTINGS 是基准；Pipeline Settings 里当前 pipeline 打开的
+                        # override 逐项覆盖它（toggle 关的键压根不在 pipeline_overrides 里）。
+                        # 键名与 global_params 完全一致，所以 update 一步到位。
                         global_params = {
                             'seed': seed,
                             'mask_grow': server.mask_grow,
@@ -3701,6 +3863,10 @@ class SnapshotDetailerSamplerNode:
                             # 只有没写这个键的遗留块才回落到 ".+"（全量 context）。
                             'context_regex': '.+',
                         }
+                        overrides = server.pipeline_overrides(server.loaded_pipeline_name)
+                        if overrides:
+                            global_params.update(overrides)
+                            print(f"[run_detailer] pipeline '{server.loaded_pipeline_name}' overrides applied: {overrides}")
                         dbg.record_stage(
                             '4. Pipeline 链',
                             f"{len(blocks)} 个 block"
