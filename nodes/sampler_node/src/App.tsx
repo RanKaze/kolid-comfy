@@ -585,6 +585,15 @@ const App: React.FC = () => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ images, names, name: 'Loaded' }),
         }).then(() => refreshStaging()).catch(() => {});
+      } else if (event.data?.type === 'blend-guidance-card') {
+        // Guidances 栈的那一张总卡（Layers 合成 + 整个 guidance 栈）。后端按保留 id
+        // staging_guidance 原地换像素 —— 工作区永远只有这一张；image 为空 = 撤回它
+        // （栈被清空 / 全隐藏）。条目是真 staging：可删、可 <image_id:…> 引用、可当参考图。
+        fetch('/api/guidance_card', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: event.data.image || null, name: event.data.name || 'Guidance' }),
+        }).then(() => refreshStaging()).catch(() => {});
       } else if (event.data?.type === 'blend-staging-remove') {
         const sid = typeof event.data.id === 'string' ? event.data.id : '';
         if (!sid) return;

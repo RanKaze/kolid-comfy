@@ -46,6 +46,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-image: linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%),
                       linear-gradient(45deg, #242424 25%, transparent 25%, transparent 75%, #242424 75%);
     background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+/* The Guidances stack is a DISPLAY layer, not part of the picture: #blendCanvas stays exactly the
+   context image (working layers only) so every consumer of it — the run input, the Tag regions,
+   Layer Context, Export PNG, the host preview — is guidance-free without a single special case.
+   The guidance pixels are painted here, stacked over the canvas under the same view transform. */
+#guidanceCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; pointer-events: none; border-radius: 4px; }
 /* The transform box lives on its own screen-space layer so its handles stay visible
    (and grabbable) even when they fall outside the canvas bounds. */
 #overlayCanvas { position: absolute; left: 0; top: 0; pointer-events: none; }
@@ -84,7 +89,19 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #layersDock { flex: 0 0 520px; height: 520px; min-height: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 /* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
    up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
-#layersSpacer { flex: 0 0 48px; pointer-events: none; }
+#layersSpacer { flex: 0 0 16px; pointer-events: none; }
+/* The Mask layer has its OWN dock, above both stacks: it is a data channel handed to the backend,
+   never a member of the composite, so it belongs to neither list. Content-sized on purpose — one
+   pinned row plus its label, nothing to scroll. */
+#maskDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
+#maskRowSlot { display: flex; flex-direction: column; gap: 4px; }
+/* Guidances get the top of the dock and never more than 42% of it: the working layers stay the
+   main list. With an empty stack it collapses to its hint strip — and that strip is the drop
+   target, because a list with no rows has no row to aim a drag at. */
+#guidanceList { flex: 0 1 auto; min-height: 34px; max-height: 42%; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
+/* While a row is being dragged, both lists say where it would land: the one under the pointer is
+   the stack the layer MOVES to. */
+.layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
 /* Every section carries the same 6px inner rail. The highlight box of an active tool section
    is its own border box, which is full column width, so the label of a highlighted section and
    the label of a plain one land on the same x — and the box lines up with its neighbours
@@ -127,14 +144,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    against the dark panel. Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-*
    properties; everything else gets the WebKit set. `scrollbar-gutter: stable` keeps the layer
    rows from shifting sideways when the thumb appears. */
-#panelScroll, #layerList {
+#panelScroll, #layerList, #guidanceList {
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.22) transparent;
 }
-#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar { width: 10px; height: 10px; }
-#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track { background: transparent; }
-#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb {
+#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar, #guidanceList::-webkit-scrollbar { width: 10px; height: 10px; }
+#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track, #guidanceList::-webkit-scrollbar-track { background: transparent; }
+#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb, #guidanceList::-webkit-scrollbar-thumb {
     background: rgba(255,255,255,0.22);
     border-radius: 999px;
     /* Inset the pill from both edges with a transparent border + padding-box clip: this is what
@@ -142,11 +159,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border: 3px solid transparent;
     background-clip: padding-box;
 }
-#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
-#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover, #guidanceList::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active, #guidanceList::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
 /* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
-#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner { background: transparent; }
-#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner, #guidanceList::-webkit-scrollbar-corner { background: transparent; }
+#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button, #guidanceList::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 .layer-empty { font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
 /* PS-style two-line layer row: identity on the head line (original image, name, eye, remove),
    the three working chips on the second line (result preview, Decal, Mask). */
@@ -442,6 +459,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
+            <canvas id="guidanceCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
         </div>
         <div id="status">Add layers to start</div>
@@ -556,7 +574,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="tool-body">
                     <div class="control-row"><label>Tolerance</label><input type="range" id="bucketTolerance" min="0" max="1" step="0.01" value="0.2" title="How far a pixel may sit from the clicked colour and still be filled (0 = exact match, 1 = everything)"><span id="bucketToleranceValue">0.20</span></div>
                     <div class="control-row"><label>Continuous</label><input type="checkbox" id="bucketContinuous" checked title="Only fill pixels connected to the clicked point. Off fills every matching pixel on the layer, however far away."><span></span></div>
-                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the whole-canvas composite (what you see). Off matches against this layer's own image + decal. The fill always lands on the surface the Mask / Decal switch picks."><span></span></div>
+                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the layers composite (guidances are references, not pixels to pour into). Off matches against this layer's own image + decal. The fill always lands on the surface the Mask / Decal switch picks."><span></span></div>
                 </div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="eraserSection">
@@ -598,13 +616,46 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-hint" id="viewReadout">100% · 0°</div>
             </div>
         </div><!-- /panelScroll -->
+        <!-- The pure Mask layer has its own dock: it is a data channel, not a member of either
+             stack, so it belongs to neither list. One pinned row, no Add, no dragging. -->
+        <div class="panel-section" id="maskDock">
+            <div class="panel-head">
+                <div class="panel-label" id="maskLayerLabel">Mask</div>
+            </div>
+            <div id="maskRowSlot"></div>
+        </div>
         <div class="panel-section" id="layersDock">
+            <!-- Guidances sit ABOVE Layers in the dock and above the Layers composite on the canvas:
+                 whatever lands here is painted over the flattened image, and the whole stack is what
+                 the workspace Guidance card shows. Same rows, same menus — a row can be dragged
+                 between the two lists, which MOVES it rather than copying it. -->
+            <div class="panel-head">
+                <div class="panel-label" id="guidanceLabel">Guidances</div>
+                <div class="mini-group">
+                    <button class="mini-btn" id="clearGuidanceBtn" title="Remove every guidance layer">Clear All</button>
+                    <button class="mini-btn" id="addGuidanceBtn" aria-haspopup="menu" aria-expanded="false"
+                            title="Add a guidance: composited over the layers image, and what the workspace Guidance card publishes">Add<span class="add-caret">&#9662;</span></button>
+                    <div class="io-menu add-menu" id="addGuidanceMenu" role="menu" hidden>
+                        <button class="io-menu-item" id="addGuidanceDefaultBtn" role="menuitem"
+                                title="A blank guidance covering the canvas, one image pixel per canvas pixel.">
+                            <span class="io-menu-title">Default Guidance</span>
+                            <span class="io-menu-sub">Canvas sized and 1:1 with it — a transparent surface to paint on.</span>
+                        </button>
+                        <button class="io-menu-item" id="addGuidanceDynamicBtn" role="menuitem"
+                                title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
+                            <span class="io-menu-title">Dynamic Guidance</span>
+                            <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="layer-list" id="guidanceList"></div>
             <div class="panel-head">
                 <div class="panel-label" id="layersLabel">Layers</div>
                 <div class="mini-group">
                     <button class="mini-btn ico-btn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
                     <button class="mini-btn ico-btn" id="redoBtn" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" disabled>&#8631;</button>
-                    <button class="mini-btn" id="clearBtn" title="Remove every layer">Clear All</button>
+                    <button class="mini-btn" id="clearBtn" title="Remove every layer (guidances stay)">Clear All</button>
                     <button class="mini-btn" id="addLayerBtn" aria-haspopup="menu" aria-expanded="false"
                             title="Add a layer: one the size of the canvas, or one you draw out at any resolution">Add<span class="add-caret">&#9662;</span></button>
                     <!-- Anchored to the Layers dock, so it unfolds upward over the palette. -->
@@ -741,13 +792,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 const canvasArea = document.getElementById('canvasArea');
 const viewport = document.getElementById('viewport');
 const blendCanvas = document.getElementById('blendCanvas');
+const guidanceCanvas = document.getElementById('guidanceCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
 const status = document.getElementById('status');
 const brushCursor = document.getElementById('brushCursor');
 const maskTargetLabel = document.getElementById('maskTargetLabel');
 const blendCtx = blendCanvas.getContext('2d');
+const guidanceCtx = guidanceCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
+const guidanceListEl = document.getElementById('guidanceList');
+const maskRowSlotEl = document.getElementById('maskRowSlot');
 const blendBtn = document.getElementById('blendBtn');
 const extraPromptInput = document.getElementById('extraPrompt');
 const tagBtn = document.getElementById('tagBtn');
@@ -767,16 +822,25 @@ const sizeHudTool = document.getElementById('sizeHudTool');
 const dropOverlay = document.getElementById('dropOverlay');
 // Section headers carry the explanations as tooltips instead of permanent sidebar text.
 const layersLabel = document.getElementById('layersLabel');
+const guidanceLabel = document.getElementById('guidanceLabel');
+const maskLayerLabel = document.getElementById('maskLayerLabel');
 const transformLabel = document.getElementById('transformLabel');
 const maskDecalLabel = document.getElementById('maskDecalLabel');
 const brushLabel = document.getElementById('brushLabel');
 const eraserLabel = document.getElementById('eraserLabel');
 const viewLabel = document.getElementById('viewLabel');
-layersLabel.title = 'Top of list draws on top · drag rows to reorder. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
+layersLabel.title = 'Top of list draws on top · drag rows to reorder, or drop a row on the Guidances list to MOVE it there. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
+guidanceLabel.title = 'Guidances stack ON TOP of the Layers composite — pose, composition or colour references that guide a run without becoming part of the artwork. The workspace Guidance card is this whole picture, updated in place. Drag a layer row here to MOVE it out of Layers; drag it back to give it up.';
+maskLayerLabel.title = 'The coverage channel. It is not a layer: it never composites into the image, it travels to the backend as its own alpha, and it belongs to neither the Layers nor the Guidances stack.';
 transformLabel.title = 'T / Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
 viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
+// TWO STACKS, ONE ARRAY. `layers` carries both the working layers and the guidance layers in a
+// single bottom-to-top order, and each layer says which stack it belongs to through `stack`
+// ('layer' | 'guidance'). The guidance stack is always the array's TOP prefix, so "guidance
+// composites over the Layers composite" is not a special case anywhere — render(), layerSpecs(),
+// the hit-test and the .cud records all keep reading one plain array.
 let layers = [];
 let selectedId = null;
 // Shift+click builds a GROUP beside the anchor instead of replacing it: `selectedId` stays what the
@@ -880,6 +944,9 @@ let dragRowId = null;
 // space and is thrown away (or taken to the modal) on release.
 let rectDrag = null;           // {x0, y0, x1, y1} in canvas pixels — always normalised on read
 let rectArmed = false;
+// Which palette the armed rectangle is for: the two Add menus share one drag flow, so the stack is
+// captured when the menu item is clicked and read back when the resolution modal is applied.
+let rectTargetStack = 'layer';
 let cursorInside = false;
 let statusTimer = null;
 
@@ -936,6 +1003,28 @@ const previewTintCanvas = document.createElement('canvas');
 const previewTintCtx = previewTintCanvas.getContext('2d');
 
 function getLayer(id) { return layers.find(l => l.id === id) || null; }
+// ==================== 两个栈：Layers / Guidances ====================
+// Both stacks live in `layers` (see the note by the declaration), so these helpers are only about
+// the ONE invariant that keeps the array honest: guidance entries form the top prefix. Creating,
+// reordering and cross-stack moving all funnel through here instead of splicing by hand, because a
+// guidance layer that slipped below a working layer would make the panel and the composite disagree.
+const GUIDANCE_STACK = 'guidance';
+const WORK_STACK = 'layer';
+function stackOf(l) { return l && l.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK; }
+function isGuidanceLayer(l) { return stackOf(l) === GUIDANCE_STACK; }
+// Where the guidance block ends is where the Layers block begins.
+function guidanceCount() {
+    let n = 0;
+    while (n < layers.length && layers[n].stack === GUIDANCE_STACK) n++;
+    return n;
+}
+function stackLayers(stack) { return layers.filter(l => stackOf(l) === stack); }
+// Land a new layer at the top of its own stack's block — the top of the canvas for guidance, the
+// top of the Layers block (still under every guidance layer) otherwise.
+function insertAtStackTop(l) {
+    layers.splice(stackOf(l) === GUIDANCE_STACK ? 0 : guidanceCount(), 0, l);
+    return l;
+}
 // Selecting the Mask layer routes every paint helper (stroke transform, thumbnails, status
 // text) through the same code path as a normal layer, so there is no parallel brush engine.
 function getSelected() { return selectedId === MASK_LAYER_ID ? maskLayer : getLayer(selectedId); }
@@ -1045,10 +1134,14 @@ function noImageGlyph() {
 
 // ==================== 画布尺寸 / 布局 ====================
 function sizeCanvasElement() {
-    blendCanvas.width = canvasW;
-    blendCanvas.height = canvasH;
-    blendCanvas.style.width = canvasW + 'px';
-    blendCanvas.style.height = canvasH + 'px';
+    // The guidance overlay is the same doc-space bitmap as the composite: one size for both, so a
+    // canvas resize can never leave the two out of register.
+    for (const c of [blendCanvas, guidanceCanvas]) {
+        c.width = canvasW;
+        c.height = canvasH;
+        c.style.width = canvasW + 'px';
+        c.style.height = canvasH + 'px';
+    }
 }
 
 // ==================== 光栅图层 ====================
@@ -1585,7 +1678,11 @@ function applyView() {
     // translate · rotate · scale, applied to a 1:1 (doc px = CSS px) canvas element.
     // modOrigin 是 Canvas Modify 预览期的 doc 原点偏移（左/上边拖拽），随视图一起旋转/缩放。
     const mo = linMap(modOrigin);
-    blendCanvas.style.transform = `translate(${view.panX + mo.x}px, ${view.panY + mo.y}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
+    // The guidance overlay rides the exact same transform — it is stacked over the canvas, not
+    // over the viewport, so panning/zooming/rotating keeps the two in register.
+    const viewTransform = `translate(${view.panX + mo.x}px, ${view.panY + mo.y}px) rotate(${view.rotation}rad) scale(${view.zoom * view.flipX}, ${view.zoom})`;
+    blendCanvas.style.transform = viewTransform;
+    guidanceCanvas.style.transform = viewTransform;
     // Keep the transparency checkerboard at a constant size on screen.
     const cb = 16 / view.zoom;
     if (blendCanvas._cb !== cb) {
@@ -1861,12 +1958,13 @@ function layerSource(l) {
     return tmpCanvas;
 }
 
-function drawLayer(l) {
+function drawLayer(l, target) {
+    const ctx = target || blendCtx;
     if (!l.visible || !l.img) return;
     if (isRasterLayer(l)) {
         // Raster pixels ARE canvas pixels — always drawn 1:1. l.transform is transient drag
         // state (the content box), never a display transform.
-        blendCtx.drawImage(layerSource(l), 0, 0);
+        ctx.drawImage(layerSource(l), 0, 0);
         return;
     }
     // While Expand is armed, the live transform belongs to the dragged border, not the image:
@@ -1874,11 +1972,11 @@ function drawLayer(l) {
     // they are while the box grows — committing bakes that same geometry into the new buffer.
     const tr = (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
-    blendCtx.save();
-    blendCtx.translate(tr.cx * canvasW, tr.cy * canvasH);
-    blendCtx.rotate(tr.rotation);
-    blendCtx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
-    blendCtx.restore();
+    ctx.save();
+    ctx.translate(tr.cx * canvasW, tr.cy * canvasH);
+    ctx.rotate(tr.rotation);
+    ctx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
+    ctx.restore();
 }
 
 // Miniature of the layer as it sits on the canvas right now (position, scale, rotation, mask).
@@ -2049,15 +2147,20 @@ function rectBoxPixels(r) {
 function rectBoxUsable(b) { return b.w >= 2 && b.h >= 2; }
 
 // Arms the mode without starting a drag: the rectangle begins when the button actually goes down.
-function armRectDrag() {
+// `stack` is which palette the layer is being drawn for — the Layers and Guidances Add menus share
+// this one flow, so only the destination differs.
+function armRectDrag(stack) {
     if (guardAdjustMode()) return false;
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before drawing a dynamic layer', 'error');
         return false;
     }
+    rectTargetStack = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
     rectArmed = true;
     setCursor(DYNAMIC_CURSOR);
-    setStatus('Drag a rectangle on the canvas to place the new layer');
+    setStatus(rectTargetStack === GUIDANCE_STACK
+        ? 'Drag a rectangle on the canvas to place the new guidance'
+        : 'Drag a rectangle on the canvas to place the new layer');
     return true;
 }
 
@@ -2299,12 +2402,21 @@ function pushPreview() {
 }
 
 function render() {
-    blendCtx.setTransform(1, 0, 0, 1, 0, 0);
-    blendCtx.globalAlpha = 1;
-    blendCtx.globalCompositeOperation = 'source-over';
+    // Two pictures out of one pass: the working layers ARE the context image (every consumer that
+    // ships pixels reads #blendCanvas — the run input, the Tag regions, Layer Context, Export PNG,
+    // the host preview), while the guidances are painted over them on their own canvas and reach
+    // nothing but the eye and the merged Guidance card.
+    for (const c of [blendCtx, guidanceCtx]) {
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        c.globalAlpha = 1;
+        c.globalCompositeOperation = 'source-over';
+        c.clearRect(0, 0, canvasW, canvasH);
+    }
     if (canvasW > 0 && canvasH > 0) {
-        blendCtx.clearRect(0, 0, canvasW, canvasH);
-        for (let i = layers.length - 1; i >= 0; i--) drawLayer(layers[i]);
+        for (let i = layers.length - 1; i >= 0; i--) {
+            const l = layers[i];
+            drawLayer(l, isGuidanceLayer(l) ? guidanceCtx : blendCtx);
+        }
     }
     updateTransformReadout();
     updateMaskTargetLabel();
@@ -2312,6 +2424,69 @@ function render() {
     drawOverlay();
     schedulePreview();
     scheduleContextCardPreview();
+    scheduleGuidanceCard();
+}
+
+// ==================== The Guidance card ====================
+// ONE card for the whole Guidances stack: the Layers composite with every visible guidance painted
+// over it — which is what the user sees, and NOT what `blendCanvas` holds (that canvas is the
+// context image, guidance-free by design). So the card merges the two canvases on the way out.
+// The host parks it in the workspace as a real staging entry under a reserved id, which is what
+// makes it deletable, referenceable as <image_id:staging_guidance> and usable as a run's image.
+const GUIDANCE_CARD_ID = 'staging_guidance';
+const GUIDANCE_CARD_MS = 1200;
+// A DEBOUNCE, not a throttle: the encode is a full-resolution PNG, so a transform drag must never
+// pay for it — only the settled state after the last render() gets published.
+let guidanceCardTimer = null;
+let guidanceCardLast = null;       // the exact dataURL the host holds; null = nothing is published
+let guidanceCardBuf = null;        // the merged picture, reused so a publish allocates nothing
+
+function scheduleGuidanceCard() {
+    if (guidanceCardTimer) clearTimeout(guidanceCardTimer);
+    guidanceCardTimer = setTimeout(() => { guidanceCardTimer = null; publishGuidanceCard(); }, GUIDANCE_CARD_MS);
+}
+
+// An empty stack must not leave a stale image in the workspace, and an all-hidden one is not
+// guidance either. A hand-made layer with no image and no decal contributes nothing visible, so it
+// does not count as ink until something is painted or generated into it.
+function guidanceStackHasInk() {
+    return stackLayers(GUIDANCE_STACK).some(l => l.visible && (!!l.src || !!l.decal));
+}
+
+function publishGuidanceCard() {
+    if (window.parent === window) return;         // standalone: there is no workspace to write to
+    if (!guidanceStackHasInk() || !canvasW || !canvasH) {
+        if (guidanceCardLast === null) return;    // already withdrawn — say it once
+        guidanceCardLast = null;
+        window.parent.postMessage({ type: 'blend-guidance-card', image: null }, '*');
+        return;
+    }
+    let dataUrl = null;
+    // Merge first: the card is the context image plus the guidance overlay, exactly as stacked on
+    // screen. Encoding #blendCanvas alone would publish a card with no guidance in it at all.
+    if (!guidanceCardBuf) guidanceCardBuf = document.createElement('canvas');
+    if (guidanceCardBuf.width !== canvasW || guidanceCardBuf.height !== canvasH) {
+        guidanceCardBuf.width = canvasW;
+        guidanceCardBuf.height = canvasH;
+    }
+    const mergeCtx = guidanceCardBuf.getContext('2d');
+    resetCtx(mergeCtx);
+    mergeCtx.clearRect(0, 0, canvasW, canvasH);
+    mergeCtx.drawImage(blendCanvas, 0, 0);
+    mergeCtx.drawImage(guidanceCanvas, 0, 0);
+    try { dataUrl = guidanceCardBuf.toDataURL('image/png'); } catch (e) { return; }
+    // Clicking a row also re-renders, and an identical picture does not need a new workspace entry —
+    // the comparison is what keeps a plain selection change from round-tripping a few megabytes.
+    if (dataUrl === guidanceCardLast) return;
+    guidanceCardLast = dataUrl;
+    window.parent.postMessage({
+        type: 'blend-guidance-card',
+        image: dataUrl,
+        id: GUIDANCE_CARD_ID,
+        name: 'Guidance',
+        width: Math.round(canvasW),
+        height: Math.round(canvasH),
+    }, '*');
 }
 
 function updateTransformReadout() {
@@ -2369,6 +2544,7 @@ function snapshotState() {
             visible: l.visible,
             fragment: !!l.fragment,
             raster: !!l.raster,
+            stack: stackOf(l),
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
         })),
@@ -2398,6 +2574,9 @@ function restoreState(s, opts) {
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
+        // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
+        // simply means every entry is a working layer.
+        stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -2728,24 +2907,37 @@ function runMaskRowAction(kind) {
 }
 
 function renderLayerList() {
-    layerListEl.innerHTML = '';
-    layerListEl.appendChild(renderMaskLayerRow());
-    if (!layers.length) {
+    // Three containers, one pass: the Mask layer has its own dock (it is a data channel, not a
+    // stack member), and the two stacks each get a list built by the very same row code.
+    maskRowSlotEl.innerHTML = '';
+    maskRowSlotEl.appendChild(renderMaskLayerRow());
+    renderStackList(guidanceListEl, GUIDANCE_STACK);
+    renderStackList(layerListEl, WORK_STACK);
+}
+
+// One row builder for both palettes: a guidance is not a different kind of object, it is the same
+// layer sitting in the other stack — same thumbs, same mask/decal chips, same right-click menu.
+function renderStackList(listEl, stack) {
+    listEl.innerHTML = '';
+    const rows = stackLayers(stack);
+    if (!rows.length) {
         const empty = document.createElement('div');
         empty.className = 'layer-empty';
-        empty.textContent = 'No layers yet — click Add';
-        layerListEl.appendChild(empty);
+        empty.textContent = stack === GUIDANCE_STACK
+            ? 'No guidance yet — Add one, or drag a layer row here'
+            : 'No layers yet — click Add';
+        listEl.appendChild(empty);
         return;
     }
     // 图层不再绑图池 id，"同 key 两个图层"的幽灵层从根上不存在了。
-    for (const l of layers) {
+    for (const l of rows) {
         const row = document.createElement('div');
         row.className = 'layer-row';
         row.draggable = true;
         row.dataset.id = String(l.id);
         if (l.id === selectedId || activeGroup().has(l.id)) row.classList.add('selected');
         if (!l.visible) row.classList.add('hidden-layer');
-        row.title = 'Drag to reorder';
+        row.title = 'Drag to reorder · drop it on the other stack to move it there';
 
         const thumb = document.createElement('div');
         thumb.className = 'layer-thumb';
@@ -2926,11 +3118,14 @@ function renderLayerList() {
             ev.stopPropagation();
             const above = row.classList.contains('drop-above');
             row.classList.remove('drop-above', 'drop-below');
-            if (dragRowId !== null) moveLayer(dragRowId, l.id, above);
+            listEl.classList.remove('drop-target');
+            // `stack` is the list this row belongs to, so a row dropped here joins it — the same
+            // call covers a within-list reorder and a cross-palette move.
+            if (dragRowId !== null) moveLayer(dragRowId, l.id, above, stack);
             dragRowId = null;
         });
 
-        layerListEl.appendChild(row);
+        listEl.appendChild(row);
     }
 }
 
@@ -3017,7 +3212,10 @@ function placeTransform(place) {
     };
 }
 
-function addLayer(item) {
+// `stack` decides which palette the image lands in: the working Layers stack (default) or the
+// Guidances stack that composites on top of it. Everything else — placement, raster preference,
+// canvas sizing, mask/decal surfaces — is deliberately identical between the two.
+function addLayer(item, stack) {
     loadImage(item.src, img => {
         const l = {
             id: ++layerSeq,
@@ -3033,11 +3231,12 @@ function addLayer(item) {
             decalCtx: null,
             decalThumbEl: null,
             canvasThumbEl: null,
+            stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
             // A detailer patch that came back with a crop rect: it is a piece OF this canvas, not
             // another document dropped onto it, so it must never drive the canvas size.
             fragment: !!item.place,
         };
-        layers.unshift(l);          // new images land on top
+        insertAtStackTop(l);        // new images land on top of their own stack
         selectedId = l.id;
         applyCanvasSize();
         const placed = placeTransform(item.place);
@@ -3048,8 +3247,10 @@ function addLayer(item) {
         layoutCanvas();
         renderLayerList();
         render();
-        setStatus(placed ? 'Result placed back at its crop position — tweak it, then Blend'
-            : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added'));
+        setStatus(l.stack === GUIDANCE_STACK
+            ? 'Guidance added — it composites over the Layers image and updates the Guidance card'
+            : (placed ? 'Result placed back at its crop position — tweak it, then Blend'
+                : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added')));
         pushHistory();
     }, () => {
         // Decoding failed, so no layer was created: give the key back instead of keeping it
@@ -3086,6 +3287,9 @@ function spawnGeneratedLayer(id, item) {
             decalCtx: null,
             decalThumbEl: null,
             canvasThumbEl: null,
+            // A generated variant belongs to its source's stack — refining a guidance image must
+            // not silently drop the result into the working layers (and the other way round).
+            stack: stackOf(l),
             fragment: false,
         };
         // A raster source generates a raster result: the buffer must stay canvas-sized, so the
@@ -3095,7 +3299,7 @@ function spawnGeneratedLayer(id, item) {
         if (copy.raster && canvasW && canvasH) {
             rasterResampleBuffer(copy, canvasW, canvasH);
         }
-        layers.unshift(copy);       // the generated variant sits directly on top of its source
+        insertAtStackTop(copy);     // the generated variant lands on top of its own stack
         selectedId = copy.id;
         applyCanvasSize();
         layoutCanvas();
@@ -3205,6 +3409,7 @@ function duplicateLayer(l) {
         decalCtx: null,
         decalThumbEl: null,
         canvasThumbEl: null,
+        stack: stackOf(l),           // the copy joins the stack its source lives in
         fragment: !!l.fragment,
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
@@ -3250,14 +3455,32 @@ function applyMaskToLayer(l) {
     pushHistory();
 }
 
-function moveLayer(fromId, toId, above) {
+// `toStack` is what makes a cross-palette drag a MOVE: the row leaves the origin stack because it
+// simply stops belonging to it — the array is shared, so retagging is the whole operation. Without
+// it this is the ordinary within-list reorder.
+// `toId === null` means "dropped on the list, not on a row" (an empty stack has no row to aim at),
+// which lands at the BOTTOM of that stack's block.
+function moveLayer(fromId, toId, above, toStack) {
     if (fromId === toId) return;
     const from = layers.findIndex(l => l.id === fromId);
     if (from < 0) return;
     const [l] = layers.splice(from, 1);
-    let to = layers.findIndex(x => x.id === toId);
-    if (to < 0) to = layers.length - 1;
-    layers.splice(above ? to : to + 1, 0, l);
+    if (toStack) l.stack = toStack;
+    let at;
+    if (toId === null || toId === undefined) {
+        at = l.stack === GUIDANCE_STACK ? guidanceCount() : layers.length;
+    } else {
+        let to = layers.findIndex(x => x.id === toId);
+        if (to < 0) to = layers.length - 1;
+        at = above ? to : to + 1;
+    }
+    // The one invariant the whole design leans on: guidance entries are the array's TOP prefix. A
+    // drop whose target row has meanwhile vanished could land a guidance below a working layer, so
+    // the landing slot is clamped into the moved layer's own block rather than trusted.
+    const blockStart = l.stack === GUIDANCE_STACK ? 0 : guidanceCount();
+    const blockEnd = l.stack === GUIDANCE_STACK ? guidanceCount() : layers.length;
+    at = Math.max(blockStart, Math.min(blockEnd, at));
+    layers.splice(at, 0, l);
     applyCanvasSize();
     layoutCanvas();
     renderLayerList();
@@ -4367,8 +4590,15 @@ function altPickActive() { return mode === 'mask' && (maskTool === 'brush' || ma
 function pickColorAt(docPos) {
     const x = Math.round(docPos.x), y = Math.round(docPos.y);
     if (x < 0 || y < 0 || x >= canvasW || y >= canvasH) return null;
-    const d = blendCtx.getImageData(x, y, 1, 1).data;
-    return d[3] < 8 ? null : [d[0], d[1], d[2], d[3]];
+    // The guidance overlay really is on top of what you see, so the pixel under the cursor is those
+    // two readings source-over each other — not #blendCanvas, which is now the guidance-free image.
+    const b = blendCtx.getImageData(x, y, 1, 1).data;
+    const g = guidanceCtx.getImageData(x, y, 1, 1).data;
+    const ga = g[3] / 255, ba = b[3] / 255;
+    const oa = ga + ba * (1 - ga);
+    if (oa < 8 / 255) return null;
+    const over = i => (g[i] * ga + b[i] * ba * (1 - ga)) / oa;
+    return [Math.round(over(0)), Math.round(over(1)), Math.round(over(2)), Math.round(oa * 255)];
 }
 
 function rgbToHex(rgb) {
@@ -4831,38 +5061,98 @@ function setupEraserModeButtons() {
 setupEraserModeButtons();
 
 // ==================== 面板按钮 ====================
-// ---- the Add menu: one click unfolds the two kinds of layer you can create by hand ----
-// The old Add behaviour asked the host for the selected history image. That is a different
-// thing from "make a layer" and the host has its own button for it, so Add now only creates
-// blank layers.
+// ---- the Add menus: one per palette, one shared state machine ----
+// Both menus offer the same two hand-made surfaces, so the open/close logic is shared and simply
+// carries the stack its result goes to. The old Add behaviour asked the host for the selected
+// history image; that is a different thing from "make a layer" and the host has its own button for
+// it, so Add only creates blank layers.
 const layersDockEl = document.getElementById('layersDock');
 const addLayerBtn = document.getElementById('addLayerBtn');
 const addLayerMenu = document.getElementById('addLayerMenu');
 const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
 const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
-let addMenuOpen = false;
+const addGuidanceBtn = document.getElementById('addGuidanceBtn');
+const addGuidanceMenu = document.getElementById('addGuidanceMenu');
+const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
+const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
+const ADD_MENUS = {
+    [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
+    [GUIDANCE_STACK]: { btn: addGuidanceBtn, menu: addGuidanceMenu },
+};
+let addMenuOpen = null;          // which stack's menu is unfolded — at most one, or none
 
-function openAddMenu() {
-    addMenuOpen = true;
-    addLayerMenu.hidden = false;
-    addLayerBtn.setAttribute('aria-expanded', 'true');
+function openAddMenu(which) {
+    closeAddMenu();
+    addMenuOpen = which || WORK_STACK;
+    ADD_MENUS[addMenuOpen].menu.hidden = false;
+    ADD_MENUS[addMenuOpen].btn.setAttribute('aria-expanded', 'true');
 }
 function closeAddMenu() {
-    addMenuOpen = false;
-    addLayerMenu.hidden = true;
-    addLayerBtn.setAttribute('aria-expanded', 'false');
+    if (addMenuOpen) {
+        ADD_MENUS[addMenuOpen].menu.hidden = true;
+        ADD_MENUS[addMenuOpen].btn.setAttribute('aria-expanded', 'false');
+    }
+    addMenuOpen = null;
 }
 
 addLayerBtn.addEventListener('click', e => {
     e.stopPropagation();
-    if (addMenuOpen) closeAddMenu(); else openAddMenu();
+    if (addMenuOpen === WORK_STACK) closeAddMenu(); else openAddMenu(WORK_STACK);
+});
+addGuidanceBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (addMenuOpen === GUIDANCE_STACK) closeAddMenu(); else openAddMenu(GUIDANCE_STACK);
 });
 document.addEventListener('mousedown', e => {
     if (addMenuOpen && !layersDockEl.contains(e.target)) closeAddMenu();
 });
 
-addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(); });
-addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(); });
+addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
+addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
+addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
+addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
+
+// A drop on the list ITSELF (below the last row, or on the empty hint) means "go to the bottom of
+// this stack". Rows stop propagation, so this only ever sees the gaps — and it is the only way into
+// a stack that has no rows to aim at yet.
+function wireStackListDrop(listEl, stack) {
+    const guidance = stack === GUIDANCE_STACK;
+    listEl.addEventListener('dragover', ev => {
+        if (dropHasFiles(ev.dataTransfer)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.dataTransfer.dropEffect = 'copy';
+            listEl.classList.add('drop-target');
+            return;
+        }
+        if (dragRowId === null) return;               // workspace thumbs pass through
+        ev.preventDefault();
+        ev.stopPropagation();
+        ev.dataTransfer.dropEffect = 'move';
+        listEl.classList.add('drop-target');
+    });
+    listEl.addEventListener('dragleave', () => listEl.classList.remove('drop-target'));
+    listEl.addEventListener('drop', ev => {
+        listEl.classList.remove('drop-target');
+        if (dropHasFiles(ev.dataTransfer)) {
+            // Files land in the stack the pointer is over, which is the one way to feed the
+            // Guidances list without first making a layer and dragging it across.
+            ev.preventDefault();
+            ev.stopPropagation();
+            dropOverlay.style.display = 'none';
+            routeImportFiles(ev.dataTransfer.files, stack);
+            return;
+        }
+        if (dragRowId === null) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        moveLayer(dragRowId, null, false, stack);
+        dragRowId = null;
+    });
+    if (guidance) listEl.title = 'Drop image files here to make them guidances';
+}
+wireStackListDrop(guidanceListEl, GUIDANCE_STACK);
+wireStackListDrop(layerListEl, WORK_STACK);
 
 // "Place images as raster" — a persisted preference, not a one-shot: it decides how every
 // future image arrives (drop, Import, history injection) until flipped back.
@@ -4919,9 +5209,10 @@ function addSurfaceLayer(opts) {
         decalCtx: null,
         decalThumbEl: null,
         canvasThumbEl: null,
+        stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
     };
-    layers.unshift(l);              // new layers land on top, above the Mask layer row
+    insertAtStackTop(l);            // top of its own stack, never above the guidance block
     selectedId = l.id;
     layoutCanvas();
     renderLayerList();
@@ -4931,8 +5222,11 @@ function addSurfaceLayer(opts) {
 }
 
 // Default Layer: exactly the canvas, one image pixel per canvas pixel, so painting on it needs
-// no resampling at all.
-function addDefaultLayer() {
+// no resampling at all. `stack` picks the palette — a guidance is the same canvas-sized surface,
+// just composited over the Layers image instead of being part of it.
+function addDefaultLayer(stack) {
+    const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
+    const guidance = st === GUIDANCE_STACK;
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before adding a layer', 'error');
         return null;
@@ -4940,9 +5234,11 @@ function addDefaultLayer() {
     const l = addSurfaceLayer({
         pw: canvasW, ph: canvasH,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        name: `Layer ${layers.length + 1}`,
+        stack: st,
+        name: guidance ? `Guidance ${stackLayers(st).length + 1}` : `Layer ${layers.length + 1}`,
     });
-    if (l) setStatus(`Default Layer added — ${canvasW} × ${canvasH}, 1:1 with the canvas`);
+    if (l) setStatus(guidance ? `Guidance added — ${canvasW} × ${canvasH}, composited over the layers`
+                              : `Default Layer added — ${canvasW} × ${canvasH}, 1:1 with the canvas`);
     return l;
 }
 
@@ -5054,19 +5350,27 @@ document.getElementById('zoomToolBtn').addEventListener('click', () => activateM
 document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
 document.getElementById('rotateToolBtn').addEventListener('click', () => activateMode('rotate'));
 
-document.getElementById('clearBtn').addEventListener('click', () => {
-    if (!layers.length) return;
-    if (!window.confirm('Remove all layers? The Mask layer is cleared too.')) return;
-    layers = [];
+// Clear All is per stack: emptying the layers must never throw away the guidance stack sitting on
+// top of it (and the other way round). The Mask layer is a channel, not a stack member, so the
+// layers Clear All keeps clearing it — that is what the message has always promised.
+function clearStack(stack) {
+    const guidance = stack === GUIDANCE_STACK;
+    if (!stackLayers(stack).length) return;
+    if (!window.confirm(guidance ? 'Remove every guidance layer? The layers underneath stay.'
+                                 : 'Remove all layers? The Mask layer is cleared too.')) return;
+    layers = layers.filter(l => stackOf(l) !== stack);
     selectedId = null;
     applyCanvasSize();
     layoutCanvas();
     setMode('transform');
     renderLayerList();
     render();
-    setStatus('Add layers to start');
+    setStatus(guidance ? 'No guidance yet' : 'Add layers to start');
     pushHistory();
-});
+}
+
+document.getElementById('clearBtn').addEventListener('click', () => clearStack(WORK_STACK));
+document.getElementById('clearGuidanceBtn').addEventListener('click', () => clearStack(GUIDANCE_STACK));
 
 document.getElementById('undoBtn').addEventListener('click', undoAction);
 document.getElementById('redoBtn').addEventListener('click', redoAction);
@@ -5091,7 +5395,9 @@ function layerSpecs() {
         c.getContext('2d').drawImage(img, 0, 0);
         return c.toDataURL('image/png');
     };
-    return layers.slice().reverse().map(l => {
+    // 只有 working layers 是画给后端合成的东西：guidance 是参考，永远不参与 context image，
+    // 所以这条后端回退路径（前端 composite 缺席/编码失败时）也不会把它们混进成品。
+    return layers.slice().reverse().filter(l => !isGuidanceLayer(l)).map(l => {
         const src = TRUSTED_SRC(l.src) ? l.src : (l.img ? toPng(l.img) : '');
         return {
             src,
@@ -5150,6 +5456,9 @@ function sendCancelRun() {
 function sendBlendAction(action, opts) {
     if (actionBusy) return;
     if (!layers.length) { setStatus('Add at least one layer first', 'error'); return; }
+    // A guidance-only canvas has nothing to run on: the guidances are deliberately not part of the
+    // picture, so the composite the backend would fall back to is empty transparent pixels.
+    if (!stackLayers(WORK_STACK).length) { setStatus('Only guidances on the canvas — add a working layer to run on', 'error'); return; }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
     const tm = opts && opts.tagMode;
     const layerTag = action === 'tag' && typeof tm === 'string' && tm.indexOf('layer_') === 0;
@@ -6133,9 +6442,11 @@ function applyDynamicModal() {
             h: box.h / canvasH,
             rotation: 0,
         },
-        name: `Dynamic ${pw}×${ph}`,
+        stack: rectTargetStack,
+        name: `${rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic'} ${pw}×${ph}`,
     });
-    if (l) setStatus(`Dynamic Layer added — ${pw} × ${ph} over a ${box.w} × ${box.h} canvas area (rate ${rate})`);
+    if (l) setStatus(`${rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic Layer'} added — `
+        + `${pw} × ${ph} over a ${box.w} × ${box.h} canvas area (rate ${rate})`);
     render();
 }
 
@@ -6792,6 +7103,9 @@ async function buildCudBlob() {
         records.push({
             id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
             raster: !!l.raster,
+            // Which palette this row belongs to. The file keeps `layers` order verbatim, so an
+            // older document (no `stack` on its records) decodes as an all-Layers stack.
+            stack: stackOf(l),
             // Raster layers always travel at the identity — their stored transform is
             // transient drag state, and their buffer is already canvas-sized.
             transform: isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 } : cloneTransform(l.transform),
@@ -6814,7 +7128,10 @@ async function buildCudBlob() {
         tools: captureCudTools(),
         maskLayer: { visible: maskLayer.visible, surface: maskSurface },
         layers: records,
-        staging: stagingItems,     // 图池随文档走：导入时原样恢复到宿主工作区
+        // The Guidance card is a projection of the stacks that are already in this file, so it must
+        // not travel as a workspace image too — reloading would resurrect it as a plain entry and
+        // then publish a second card on top of that.
+        staging: stagingItems.filter(s => s && s.id !== GUIDANCE_CARD_ID),     // 图池随文档走：导入时原样恢复到宿主工作区
         assets,
     };
     const headerBytes = new TextEncoder().encode(JSON.stringify(header));
@@ -7030,10 +7347,10 @@ function applyCudTools(t) {
 }
 
 // ---- import routing: one entry point for the file picker and for a drop ----
-function addImageFiles(files) {
+function addImageFiles(files, stack) {
     for (const f of files) {
         const reader = new FileReader();
-        reader.onload = () => addLayer({ name: baseName(f.name), src: String(reader.result) });
+        reader.onload = () => addLayer({ name: baseName(f.name), src: String(reader.result) }, stack);
         reader.onerror = () => setStatus(`Could not read ${f.name}`, 'error');
         reader.readAsDataURL(f);
     }
@@ -7062,7 +7379,7 @@ async function importImages() {
 // Images become layers; a .cud opens as a project of its own and is never dropped on top of the one
 // being edited. Only a drop can still bring a .cud through here: the Import picker no longer offers
 // one.
-function routeImportFiles(files) {
+function routeImportFiles(files, stack) {
     const list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
     const docs = list.filter(f => /\.cud$/i.test(f.name));
@@ -7073,7 +7390,7 @@ function routeImportFiles(files) {
     }
     const images = list.filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg)$/i.test(f.name));
     if (!images.length) { setStatus('Import takes image files — a .cud document belongs to Load', 'error'); return; }
-    addImageFiles(images);
+    addImageFiles(images, stack);
 }
 
 // A .cud opens as a tab of its own; nothing is replaced any more, so opening one can never throw a
@@ -7131,6 +7448,9 @@ async function openCudDocument(file, doc) {
                 visible: rec.visible !== false,
                 fragment: !!rec.fragment,
                 raster: !!rec.raster,
+                // A document saved before the Guidances stack existed has no `stack` on its rows —
+                // every one of them is a working layer, which is also what it looked like then.
+                stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
                 transform: rec.raster
                     // Old files could carry a non-identity raster transform; the invariant is identity.
                     ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }

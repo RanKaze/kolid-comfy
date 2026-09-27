@@ -106,6 +106,28 @@ IMAGE_ID_TOKEN_RE = re.compile(r'<image_id:([^<>\s]+)>')
 # 而是在解码时直接展开成 <image 1> —— context 图在 Enable Edit 下恒为 image 1。
 CONTEXT_IMAGE_ID = 'context'
 
+# 保留 id：Guidance 卡（Blend 工作台 Guidances 栈的那一张总卡）。与 context 不同，它就是一条
+# 货真价实的 staging 条目 —— 能删、能被 <image_id:staging_guidance> 引用、能被 run 当参考图，
+# 只是全工作区固定只有这一张，重发布时由 /api/guidance_card 原地换像素。
+GUIDANCE_STAGING_ID = 'staging_guidance'
+
+
+def dataurl_to_tensor(image_b64):
+    """dataURL → [1, H, W, 3|4] float tensor（工作区入库用的那一个方向）。
+
+    带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB。
+    解不出图就抛异常，让调用方按各自语义决定是跳过这张还是整单失败。
+    """
+    b64_data = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+    img_bytes = base64.b64decode(b64_data)
+    img = Image.open(io.BytesIO(img_bytes))
+    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+        img = img.convert('RGBA')
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+    arr = np.array(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
+
 
 def parse_prompt_image_refs(text, resolve):
     """解析 text 里的 <image_id:xxx> 标记。
@@ -638,7 +660,7 @@ class SnapshotDetailerSamplerServer:
     # -------------------------------------------------------------------------
     # 历史画廊
     # -------------------------------------------------------------------------
-    def add_staging(self, image, name=None, place=None, hidden=False):
+    def add_staging(self, image, name=None, place=None, hidden=False, sid=None):
         """添加一张图到工作区。保留 tensor 引用以避免 base64 往返。
 
         hidden=True 的条目只作内部引用（seed 画布的 Original、run/接口的产出图），
@@ -648,9 +670,13 @@ class SnapshotDetailerSamplerServer:
         (x, y, w, h, ow, oh)。此时 image 是 RGBA —— alpha 就是 crop 工作区的 mask，
         图层自带的 alpha 承担裁剪，所以条目不需要额外的 mask 字段。前端据此把
         它作为一个新图层贴回原位，而不是由后端合成。
+
+        sid 钉住条目 id，不再另起一个计数器号：Guidance 卡靠它在工作区里永远只占
+        一格，重发布时原地换像素（顺序、位置都不变），而不是越积越多。
         """
-        self._staging_counter += 1
-        sid = f'staging_{self._staging_counter}'
+        if sid is None:
+            self._staging_counter += 1
+            sid = f'staging_{self._staging_counter}'
         # 记录尺寸供前端展示
         h, w = 0, 0
         if image is not None and hasattr(image, 'shape'):
@@ -661,7 +687,7 @@ class SnapshotDetailerSamplerServer:
                 h, w = shp[0], shp[1]
         # 保留 tensor 引用
         self._staging_tensors[sid] = image
-        self.staging_items.append({
+        entry = {
             'id': sid,
             'src': tensor_to_base64(image),
             'name': name or f'#{self._staging_counter}',
@@ -669,7 +695,13 @@ class SnapshotDetailerSamplerServer:
             'height': h,
             'place': place,
             'hidden': bool(hidden),
-        })
+        }
+        for i, old in enumerate(self.staging_items):
+            if old['id'] == sid:
+                # 原地替换：条目留在它原来的格子里，只换图。
+                self.staging_items[i] = entry
+                return sid
+        self.staging_items.append(entry)
         if len(self.staging_items) > 40:
             old = self.staging_items.pop(0)
             self._staging_tensors.pop(old['id'], None)
@@ -1525,26 +1557,11 @@ class SnapshotDetailerSamplerServer:
                         self._send_json({'success': False, 'error': 'No image data'}, 400)
                         return
 
-                    def _decode_dataurl(image_b64):
-                        if ',' in image_b64:
-                            b64_data = image_b64.split(',', 1)[1]
-                        else:
-                            b64_data = image_b64
-                        img_bytes = base64.b64decode(b64_data)
-                        img = Image.open(io.BytesIO(img_bytes))
-                        # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
-                        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
-                            img = img.convert('RGBA')
-                        elif img.mode != 'RGB':
-                            img = img.convert('RGB')
-                        arr = np.array(img).astype(np.float32) / 255.0
-                        return torch.from_numpy(arr).unsqueeze(0)
-
                     added = []
                     names = body.get('names') if isinstance(body.get('names'), list) else None
                     for idx, dataurl in enumerate(images):
                         try:
-                            tensor = _decode_dataurl(dataurl)
+                            tensor = dataurl_to_tensor(dataurl)
                         except Exception as dec_err:
                             print(f"[Staging] skipped image #{idx + 1}: {dec_err}")
                             continue
@@ -1574,6 +1591,34 @@ class SnapshotDetailerSamplerServer:
                     inst._staging_tensors.pop(sid, None)
                     self._send_json({'success': True, 'removed': before - len(inst.staging_items)})
                 except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/guidance_card':
+                # Guidances 栈的唯一总卡：image = 合成好的 PNG dataURL（Layers 合成 + 整个
+                # guidance 栈压在上面），原地替换保留条目；image 为空 = 撤回这张卡（栈被清空）。
+                # 客户端不能指定 id —— 这张卡只可能落在 GUIDANCE_STAGING_ID 那一格。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    dataurl = body.get('image')
+                    if not isinstance(dataurl, str) or not dataurl:
+                        before = len(inst.staging_items)
+                        inst.staging_items = [s for s in inst.staging_items if s['id'] != GUIDANCE_STAGING_ID]
+                        inst._staging_tensors.pop(GUIDANCE_STAGING_ID, None)
+                        self._send_json({'success': True, 'withdrawn': before != len(inst.staging_items)})
+                        return
+                    try:
+                        tensor = dataurl_to_tensor(dataurl)
+                    except Exception as dec_err:
+                        self._send_json({'success': False, 'error': f'Could not decode the guidance image ({dec_err})'}, 400)
+                        return
+                    sid = inst.add_staging(tensor, name=body.get('name') or 'Guidance',
+                                           sid=GUIDANCE_STAGING_ID)
+                    self._send_json({'success': True, 'id': sid})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     self._send_json({'success': False, 'error': str(e)}, 500)
                 return
 
