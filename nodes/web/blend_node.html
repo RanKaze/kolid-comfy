@@ -2599,10 +2599,13 @@ function hitHandleScreen(sp, docPos, l) {
 // as a tint on the overlay canvas — otherwise painting it would be invisible. The tint is
 // Ctrl-gated on purpose: the canvas stays clean while you compose, and holding Ctrl reveals
 // the coverage so you can see what you are about to paint or erase with Ctrl+left / Ctrl+right.
+// What it reveals is exactly what Ctrl paints — the main Mask layer, whatever the Mask/Decal
+// toggle says — so the reveal ignores that toggle too; gating it here made the key show nothing
+// for anyone whose last click was the Decal thumb, while Ctrl kept painting the mask blind.
 // Its strength is the single shared Mask Tint value (the host's slider under the preview).
 function drawMaskTint() {
     if (!canvasW || !canvasH) return;
-    if (!keyCtrl || isDecalTarget()) return;
+    if (!keyCtrl) return;
     // The Ctrl reveal deliberately ignores `maskLayer.visible`: the eye toggle decides whether the
     // Mask layer takes part in the composite, but Ctrl is the one way to look at what you are about
     // to paint, and that has to keep working while the layer is hidden (hiding it is exactly how
