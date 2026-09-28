@@ -101,10 +101,11 @@ function describeEffect(effect) {
     return spec.readout(p, n, effect);
 }
 
-// 一个图层能不能挂特效:detailer 回填的贴片(fragment)带着 crop rect 和工作分辨率,语义不清,
-// 一律不给挂;空白手搓面允许(它有分辨率,只是还没有像素)。
+// 一个图层能不能挂特效:只有固定的 Mask 层不行 (它不是内容图层)。detailer 回填的贴片 (fragment)
+// 一样能挂 —— 链算的就是该层自己那张网格,贴片网格和普通图层网格没有第二种规矩,它只是那块矩形
+// 的**所属图层**,不是另一种图层;空白手搓面允许 (它有分辨率,只是还没有像素)。
 function layerTakesEffects(l) {
-    return !!l && !l.isMaskLayer && !l.fragment;
+    return !!l && !l.isMaskLayer;
 }
 
 // 整链旁路:视图级开关,用来看「加特效前」的原样对比。它不写 undo、不进图层存档,但必须同时被

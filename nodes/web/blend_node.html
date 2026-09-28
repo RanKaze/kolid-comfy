@@ -4072,8 +4072,9 @@ function renderStackList(listEl, stack) {
                 : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
         run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
 
-        // Effects button on the row: the picker entry every layer with a chain gets. Fragment
-        // layers and the pinned Mask row never render it (they can't hold a chain).
+        // Effects button on the row: the picker entry every layer with a chain gets, a detailer
+        // patch included (the chain runs on its own grid like any other layer). Only the pinned
+        // Mask row never renders it — it isn't a content layer.
         let fxBtn = null;
         if (layerTakesEffects(l)) {
             fxBtn = document.createElement('button');
@@ -7370,8 +7371,8 @@ function openLayerMenu(l, clientX, clientY) {
     }
 
     // Effects: the entry point for a chain a row does not have yet (once it has one, the sub-row
-    // block above the head carries its own +). A detailer fragment is never offered one — its
-    // pixels and rect belong to a run, not to this document.
+    // block above the head carries its own +). A detailer fragment gets it like any other layer:
+    // the chain runs on that patch's own grid, which is the same contract everywhere else.
     if (layerTakesEffects(l)) {
         const fx = document.createElement('button');
         fx.className = 'layer-menu-item';
