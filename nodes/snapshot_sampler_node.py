@@ -4437,9 +4437,11 @@ class SnapshotDetailerSamplerNode:
             server.stop()
             print("[SnapshotDetailerSampler] Servers stopped.")
 
-        # 如果是因 interrupt 而 break 出循环，重新抛出异常通知 ComfyUI
+        # 如果是因 interrupt 而 break 出循环，抛 ComfyUI 的干净取消异常通知它 ——
+        # 裸 RuntimeError 会被执行框架当真正的故障渲染成红色 traceback，
+        # InterruptProcessingException 才是 Cancel 按钮同款的"已取消"。
         if mm.processing_interrupted():
-            raise RuntimeError("Processing interrupted")
+            raise mm.InterruptProcessingException()
 
         if server.window_closed and not server.finished:
             raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
