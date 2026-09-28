@@ -1274,6 +1274,27 @@ class SnapshotDetailerSamplerServer:
                     self.send_error(404, "blend_node.html not found")
                 return
 
+            # 图层特效链按特效拆在 web/fx/ 下,blend_node.html 用 <script src> 引它们,所以工作台
+            # 得能送这些文件。只认 fx/ 目录直属的 .js:realpath 之后再验归属,../ 与绝对路径都翻
+            # 不出去。禁缓存是开发回路的命门 —— 否则改了特效文件刷新页面还是旧的。
+            fx_path = urlparse(self.path).path
+            if fx_path.startswith('/fx/'):
+                root = os.path.realpath(os.path.join(os.path.dirname(__file__), 'web', 'fx'))
+                name = fx_path[len('/fx/'):]
+                file_path = os.path.realpath(os.path.join(root, name))
+                if (not name.endswith('.js') or os.path.dirname(file_path) != root
+                        or not os.path.isfile(file_path)):
+                    self.send_error(404, "fx module not found")
+                    return
+                self.send_response(200)
+                self.send_header('Content-type', 'text/javascript; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(file_path, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+
             if self.path == '/api/config':
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',
