@@ -10,7 +10,7 @@ const FX_MAX_PIXELS = 12e6;              // 5 × RGBA16F ≈ 480 MB 的地板,�
 const FX_KAWASE_MAX_ITER = 8;            // 着色器里那个常数次循环的上界
 const fxgl = {
     gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null, maxTex: 0,
-    off: [], texSrc: null, texMask: null, texMap: null, texLut: null, progs: null, canvas: null, hasMask: 0,
+    off: [], texSrc: null, texMask: null, texMap: null, texMap2: null, texLut: null, progs: null, canvas: null, hasMask: 0, hasMap2: 0,
 };
 
 const FX_VS = `#version 300 es
@@ -170,7 +170,7 @@ function fxglInit() {
     gl.bindVertexArray(null);
     fxgl.vao = vao;
     // texLut 是曲线那类特效的查表位:内容逐次上传,所以这里只备好 LINEAR + CLAMP 的采样状态。
-    for (const key of ['texSrc', 'texMask', 'texMap', 'texLut']) {
+    for (const key of ['texSrc', 'texMask', 'texMap', 'texMap2', 'texLut']) {
         const t = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, t);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -318,20 +318,33 @@ function applyLayerEffects(l, surface) {
     for (const effect of chain) {
         const p = effectParams(effect);
         const spec = EFFECT_TYPES[effect.type];
-        // 有些特效只在某个模式下才真吃贴图 (色调映射只在 External 读查找表),要不要像素由它自己
-        // 报一句 —— 否则中性模式会因为「没绑图」被整条跳过,而那模式根本不需要图。
-        if (spec.needsMap && (!spec.needsMapWhen || spec.needsMapWhen(p))) {
-            const ref = fxMapRef(effect);
+        // 槽位由注册数据声明 (见 fx/maps.js 的 fxMapSlots):主槽 params.map → texMap,副槽
+        // spec.needsMap2 → texMap2。「这个模式要不要这张图」由该槽自己的 when 报一句 —— 否则中性
+        // 模式会因为「没绑图」被整条跳过,而那模式根本不需要图。
+        // 主槽解析不出像素就整条跳过:拿一张黑图当深度图去打光,比不打光更糟;副槽是可缺的,没绑
+        // 就把 hasMap2 归零,由该特效自己退化成单图算法 (见 fx/warp.js 的几何)。
+        // 原因一律写在链上 (fxgl.skip),不许静默。
+        fxgl.hasMap2 = 0;
+        let mapMiss = '';
+        for (const slot of fxMapSlots(effect)) {
+            if (slot.when && !slot.when(p)) continue;
+            const ref = fxMapRef(effect, slot.key);
             const img = fxMapImage(ref);
-            // 解析不出像素就跳过这一条 —— 拿一张黑图当深度图去打光,比不打光更糟。原因写在链上。
-            if (!img) { fxgl.skip = `${spec.label}: ${ref ? 'map not ready' : 'no map bound'}`; continue; }
+            if (!img) {
+                if (slot.optional) continue;
+                const nm = slot.key === 'map' ? 'map' : `${slot.role.toLowerCase()} map`;
+                mapMiss = `${spec.label}: ${ref ? `${nm} not ready` : `no ${nm} bound`}`;
+                break;
+            }
             const n = nativeSize(img);
             if (n.w > fxgl.maxTex || n.h > fxgl.maxTex) {
-                fxgl.skip = `${spec.label}: map is ${n.w}×${n.h}, over the texture limit`;
-                continue;
+                mapMiss = `${spec.label}: map is ${n.w}×${n.h}, over the texture limit`;
+                break;
             }
-            fxglUploadCanvas(fxgl.texMap, img);
+            fxglUploadCanvas(slot.key === 'map' ? fxgl.texMap : fxgl.texMap2, img);
+            if (slot.key !== 'map') fxgl.hasMap2 = 1;
         }
+        if (mapMiss) { fxgl.skip = mapMiss; continue; }
         // 跑不动的特效自己写 fxgl.skip (参数为 0 时直接原样返回),引擎只负责把贴图备好。
         // effect 一起传:绑定贴图的尺寸也是该特效的判断依据 (见 fx/tone_map.js 的布局识别)。
         // l 也一起传:有的特效吃的几何是**图层盒子在画布上的位置**,不只是它自己的网格 (见 fx/warp.js 的深度)。

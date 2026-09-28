@@ -11236,18 +11236,22 @@ async function buildCudBlob() {
     const cudEffects = async list => {
         const out = cloneEffects(list);
         for (const e of out) {
-            const ref = fxMapRef(e);
-            if (!ref) continue;
-            const found = fxMapSource(ref);
-            const img = found && fxMapImage(ref);
-            if (!img) continue;
-            let id = mapAssets.get(found.src);
-            if (id === undefined) {
-                const n = nativeSize(img);
-                id = await addAsset('map', img, n.w, n.h);
-                mapAssets.set(found.src, id);
+            // 一条特效可能占两个槽 (几何 warp 的「深度 + 法线」),各写各的资产;同一份像素在一次
+            // 存档里只落一个资产,所以两个槽撞到同一张图也不会写两遍。
+            for (const slot of fxMapSlots(e)) {
+                const ref = fxMapRef(e, slot.key);
+                if (!ref) continue;
+                const found = fxMapSource(ref);
+                const img = found && fxMapImage(ref);
+                if (!img) continue;
+                let id = mapAssets.get(found.src);
+                if (id === undefined) {
+                    const n = nativeSize(img);
+                    id = await addAsset('map', img, n.w, n.h);
+                    mapAssets.set(found.src, id);
+                }
+                e.params[slot.key] = Object.assign({}, ref, { asset: id });
             }
-            e.params.map = Object.assign({}, ref, { asset: id });
         }
         return out;
     };

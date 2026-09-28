@@ -3,12 +3,15 @@
 //   * Lattice —— 一张铺满该层的四边形网格:拖把手 = 网格跟着走,点一条边 = 沿那条边贯通整张网插一排
 //                把手,被这条线穿过的每个四边形都一分为二 (全图只有四边面,不会出三角面)。
 //                目标是把图像扭曲印在一个物体上 (PS 的 Mesh Warp 那一类)。
-//   * Depth   —— 绑一张深度图,按深度的**梯度**把画面推开,像贴在凹凸面上;Align 决定这张图以谁为准:
-//                Canvas = 整张画布 (图层挪到哪就读哪块深度),Local = 该层自己的盒子。
+//   * Geometry —— 绑一张深度图 (再绑一张法线图就更准),把画面重投影到这块凹凸面上:每个像素取的
+//                是「沿 Direction 倾斜的一条视线在该处高度上穿过表面」的位置,所以近处滑得多、远处
+//                滑得少,而且高起的形状会挡住它背后的东西 (occlusion-correct parallax relief)。
+//                Align 决定深度图以谁为准:Canvas = 整张画布 (图层挪到哪就读哪块深度),Local = 该层
+//                自己的盒子。
 // 注册数据与三条地基契约见 fx/core.js;绑定贴图的解析见 fx/maps.js;网格的把手编辑面在页面本体里
 // (blend_node.html 的 warpEdit 那一段 —— 它要拖在真实的画布上,参数区那块小图放不下)。
 
-const WARP_MODES = ['Noise', 'Lattice', 'Depth'];
+const WARP_MODES = ['Noise', 'Lattice', 'Geometry'];
 const WARP_FIELD = 128;                 // 预烘位移面的边长 (格),与图层尺寸无关
 const WARP_MAX_HANDLES = 128;           // 细分的天花板:再往上一次拖拽要重烘的格点就压不住了
 
@@ -318,37 +321,67 @@ void main() {
     Frag = vec4(c.rgb, c.a * cov);
 }`;
 
-// 深度:沿深度的**梯度**推开画面 (贴凹凸的读法)。梯度不取贴图自己的轴,而是沿该层网格的两条轴取
-// 方向导数 —— 于是「图层往右」在 Canvas 对齐下对应画布的哪个方向,全交给 uMapU/uMapV 那对基
-// (图层盒子 → 画布归一化 → 贴图 uv 的同一条仿射,JS 侧算好),着色器不必知道旋转存在。
-// uPush 描述的是**取样点**往哪挪;画面走的正是反方向,所以 Slide 名字读的是画面的去向。
-const FX_FS_WARP_DEPTH = `#version 300 es
+// 几何:视差重投影 (occlusion-correct relief mapping)。深度图的亮度读成「该处多高」(近=亮,深度估计
+// 那条子图的极性),然后从输出像素沿一条**倾斜的视线**往下探:候选高度 λ 处的取样点 = 原点 + 视差偏移
+// ·(λ - Anchor),命中条件是 h(取样点) ≥ λ。从 λ=1 (最近) 往下走、取**第一个**命中,就是这条视线
+// 先撞到谁 —— 于是高起的形状挡住它背后的像素,而不是像朴素视差那样把后面那块一起拉上来。λ=0 时
+// h ≥ 0 恒成立,所以步进必然收敛,没有「打不中」这一支。命中点落在两步之间,还要精修一次:绑了法线
+// 图就用它给的坡度做一次 Newton (坡度免费,但被夹回这一步的区间里,所以法线图的方向极性即使不对也
+// 只是少收敛一点);没绑就拿深度图自己二分 4 次 —— 副槽因此是真·可选,缺图只让边缘没那么锐。
+// 偏移不取贴图自己的轴,而是沿该层网格的两条轴走 (uMapU/uMapV 那对基 = 图层盒子 → 画布 → 贴图 uv
+// 的同一条仿射,JS 侧算好),着色器不必知道旋转存在。uShift 描述的是**取样点**往哪挪;画面走的正是
+// 反方向,所以 Angle 读的是画面的去向。
+const FX_FS_WARP_GEOMETRY = `#version 300 es
 precision highp float;
 in vec2 vUV;
 layout(location = 0) out vec4 Frag;
 uniform sampler2D uTex;
 uniform sampler2D uMap;
+uniform sampler2D uNormal;
 uniform vec2 uMapU;
 uniform vec2 uMapV;
 uniform vec2 uMapB;
-uniform vec2 uSize;
-uniform vec2 uPush;
-uniform float uWindow;
-float warpDepth(vec2 uv) { return texture(uMap, uv).r; }
+uniform vec2 uShift;
+uniform vec2 uSlope;
+uniform float uAnchor;
+uniform int uSteps;
+uniform int uHasNormal;
+float warpHeight(vec2 muv) { return texture(uMap, muv).r; }
 ${WARP_GLSL_SAMPLE}
 void main() {
-    vec2 muv = uMapU * vUV.x + uMapV * vUV.y + uMapB;
-    vec2 tx = uMapU * (uWindow / uSize.x);
-    vec2 ty = uMapV * (uWindow / uSize.y);
-    float dx = (warpDepth(muv + tx) - warpDepth(muv - tx)) * 0.5;
-    float dy = (warpDepth(muv + ty) - warpDepth(muv - ty)) * 0.5;
-    Frag = warpFetch(uTex, vUV + vec2(dx, dy) * uPush);
+    vec2 muv0 = uMapU * vUV.x + uMapV * vUV.y + uMapB;
+    vec2 ray = uMapU * uShift.x + uMapV * uShift.y;
+    // 除以 max(…,1.0): uSteps 万一没被设上 (uniform 名打错就是 null location, 无声取 0), 这里也不会
+    // 得到 inf/NaN 而把整张面洗成透明。
+    float dt = 1.0 / max(float(uSteps), 1.0);
+    float a = 1.0;
+    float fa = -1.0;
+    for (int i = 0; i <= 32; i++) {   // 32 = Steps 的上界,常数次循环是 ESSL 的规矩
+        if (i > uSteps) break;
+        fa = warpHeight(muv0 + ray * (a - uAnchor)) - a;
+        if (fa >= 0.0) break;
+        a -= dt;
+    }
+    float lo = a + dt;
+    if (fa > 0.0 && uHasNormal == 1) {
+        vec3 nrm = texture(uNormal, muv0 + ray * (a - uAnchor)).xyz * 2.0 - 1.0;
+        vec2 grad = vec2(-nrm.x, nrm.y) * uSlope / max(abs(nrm.z), 0.001);
+        float d = dot(grad, ray) - 1.0;
+        if (d < -0.0001) a = clamp(a - fa / d, a, lo);
+    } else {
+        for (int i = 0; i < 4; i++) {
+            float m = (a + lo) * 0.5;
+            if (warpHeight(muv0 + ray * (m - uAnchor)) - m >= 0.0) a = m; else lo = m;
+        }
+    }
+    Frag = warpFetch(uTex, vUV + uShift * (a - uAnchor));
 }`;
 
 // ==================== pass ====================
-// 三种模式都是「一次取样」的位移:像素不外扩 (输出网格 === 输入网格),alpha 跟着像素走 (取样点落到
-// 本来透明的地方,出口就是透明的),蒙版只读不写 —— 三条契约全部守住。
-function warpDepthFrame(p, l) {
+// 三种模式出口都只取**一次**画面:像素不外扩 (输出网格 === 输入网格),alpha 跟着像素走 (取样点落到
+// 本来透明的地方,出口就是透明的),蒙版只读不写 —— 三条契约全部守住。几何在深度图里多走几步,但
+// 画面仍然只采样一次。
+function warpMapFrame(p, l) {
     // Local: 深度图按该层自己的盒子铺满,贴图 uv 与该层网格 uv 完全重合 ⇒ 恒等基。
     if (!l || p.align !== 'Canvas' || !canvasW || !canvasH) return { u: [1, 0], v: [0, 1], b: [0, 0] };
     const tr = effectiveTransform(l);
@@ -400,19 +433,30 @@ function fxglWarp(col, p, effect, l) {
         col.slot = 1 - col.slot;
         return;
     }
-    // Depth:引擎按 needsMapWhen 已经把 texMap 备好并上传 (没绑图 / 图没解码根本走不到这里)。
-    if (p.strength <= 0) return;
-    const fr = warpDepthFrame(p, l);
-    const push = p.strength * (p.slide === 'uphill' ? -1 : 1);
-    fxglRunPass(dst, fxgl.progs.warpDepth, pr => {
+    // Geometry:引擎按槽位声明已经把 texMap (深度) 备好并上传 (没绑深度图 / 图没解码根本走不到这里),
+    // texMap2 是那张法线图 —— 可缺,缺了着色器自己退成二分精修 (fxgl.hasMap2 说这句话)。
+    if (p.shift <= 0) return;
+    const fr = warpMapFrame(p, l);
+    // Angle 读的是**画面**往哪倒 (0° = 右、90° = 下,同 fx/core.js 的角度约定),取样点走的正是反方向。
+    // 位移先落在该层网格的 uv 上,再过仿射基进贴图 uv —— 于是 Canvas 对齐下「往右」对应画布的哪个
+    // 方向,全由 fr.u/fr.v 那对基回答,着色器只管两个轴。
+    const rad = p.dir * Math.PI / 180;
+    const ox = -Math.cos(rad) * p.shift / fxgl.w;
+    const oy = Math.sin(rad) * p.shift / fxgl.h;      // v 朝上:画面往下倒 = 取样点沿 +v
+    // 坡度由法线图自己那套像素数换算 (n.xy 是「每张贴图像素的高度差」),所以两张图分辨率不同也没关系。
+    const nnative = fxgl.hasMap2 ? nativeSize(fxMapImage(fxMapRef(effect, 'normal'))) : null;
+    fxglRunPass(dst, fxgl.progs.warpGeometry, pr => {
         fxglBindTex(pr, 'uTex', src, 0);
         fxglBindTex(pr, 'uMap', fxgl.texMap, 1);
+        fxglBindTex(pr, 'uNormal', fxgl.hasMap2 ? fxgl.texMap2 : fxgl.texMap, 2);
         gl.uniform2f(fxglU(pr, 'uMapU'), fr.u[0], fr.u[1]);
         gl.uniform2f(fxglU(pr, 'uMapV'), fr.v[0], fr.v[1]);
         gl.uniform2f(fxglU(pr, 'uMapB'), fr.b[0], fr.b[1]);
-        gl.uniform2f(fxglU(pr, 'uSize'), fxgl.w, fxgl.h);
-        gl.uniform2f(fxglU(pr, 'uPush'), push / fxgl.w, push / fxgl.h);
-        gl.uniform1f(fxglU(pr, 'uWindow'), p.window);
+        gl.uniform2f(fxglU(pr, 'uShift'), ox, oy);
+        gl.uniform2f(fxglU(pr, 'uSlope'), nnative ? nnative.w : 1, nnative ? nnative.h : 1);
+        gl.uniform1f(fxglU(pr, 'uAnchor'), p.anchor === 'near' ? 1 : 0);
+        gl.uniform1i(fxglU(pr, 'uSteps'), Math.max(4, Math.min(32, p.steps | 0)));
+        gl.uniform1i(fxglU(pr, 'uHasNormal'), fxgl.hasMap2);
     });
     col.slot = 1 - col.slot;
 }
@@ -427,11 +471,13 @@ const WARP_PARAMS = [
     { key: 'octaves', label: 'Oct', min: 1, max: 4, step: 1, def: 2, when: p => p.mode === 'Noise' },
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0, when: p => p.mode === 'Noise' },
     { key: 'lattice', label: 'Grid', def: null, when: p => p.mode === 'Lattice' },
-    { key: 'map', label: 'Map', kind: 'map', def: null, when: p => p.mode === 'Depth' },
-    { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Depth' },
-    { key: 'strength', label: 'Push', min: 0, max: 128, step: 1, def: 24, unit: 'px', when: p => p.mode === 'Depth' },
-    { key: 'window', label: 'Grad', min: 1, max: 64, step: 1, def: 8, unit: 'px', when: p => p.mode === 'Depth' },
-    { key: 'slide', label: 'Slide', kind: 'enum', options: ['downhill', 'uphill'], def: 'downhill', when: p => p.mode === 'Depth' },
+    { key: 'map', label: 'Depth', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
+    { key: 'normal', label: 'Normal', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
+    { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Geometry' },
+    { key: 'dir', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '\u00b0', when: p => p.mode === 'Geometry' },
+    { key: 'shift', label: 'Slide', min: 0, max: 128, step: 1, def: 24, unit: 'px', when: p => p.mode === 'Geometry' },
+    { key: 'anchor', label: 'Anchor', kind: 'enum', options: ['far', 'near'], def: 'far', when: p => p.mode === 'Geometry' },
+    { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.mode === 'Geometry' },
 ];
 
 // 两枚各指一个目的地的钮 (摊开 / 收起),不是一枚读当前状态的翻转钮 —— 见「一键一语义」。
@@ -521,17 +567,28 @@ defineEffect({
     group: 'Distort',
     icon: 'warp',
     needsMap: 'Depth',
-    needsMapWhen: p => p.mode === 'Depth',
-    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Depth reads a bound depth map and slides the picture along the map\u2019s gradient, as if it lay on the relief; Align says whether that map is measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
+    needsMap2: { key: 'normal', role: 'Normal' },
+    needsMapWhen: p => p.mode === 'Geometry',
+    needsMap2When: p => p.mode === 'Geometry',
+    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it: each pixel is fetched where a line of sight leaning along Angle crosses that surface, so near parts slide further than far parts and a tall shape hides what sits behind it. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
     params: WARP_PARAMS,
     editor: warpEditorEl,
-    shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpDepth: FX_FS_WARP_DEPTH },
+    shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpGeometry: FX_FS_WARP_GEOMETRY },
     run: fxglWarp,
-    // Canvas 对齐的深度吃的还是「该层盒子落在画布哪儿」,而拖图层既不改像素也不改 params。缓存身份
-    // 必须知道这一件事,否则挪完层还在用挪之前烘好的那份位移 —— 注册表为此留了 stamp 这个口子。
+    // 参数换形状:旧存档里的 Depth 模式读成 Geometry。绑定的深度图本来就是 params.map,一个字不用
+    // 动;梯度推法换成视差重投影后,Push 落到 Slide 上,上坡/下坡的读法落到 Anchor 上 (画面不动的
+    // 那一面)。Angle 与 Steps 取新默认 —— 旧模式根本没有视线方向这件事。
+    migrate(raw, out) {
+        if (raw.mode !== 'Depth') return;
+        out.mode = 'Geometry';
+        out.shift = Math.max(0, Math.min(128, Number(raw.strength) || 0));
+        out.anchor = raw.slide === 'uphill' ? 'near' : 'far';
+    },
+    // Canvas 对齐的几何吃的还是「该层盒子落在画布哪儿」,而拖图层既不改像素也不改 params。缓存身份
+    // 必须知道这一件事,否则挪完层还在用挪之前算好的那份视差 —— 注册表为此留了 stamp 这个口子。
     stamp(effect, l) {
         const p = effectParams(effect);
-        if (p.mode !== 'Depth' || p.align !== 'Canvas') return '';
+        if (p.mode !== 'Geometry' || p.align !== 'Canvas') return '';
         const tr = effectiveTransform(l);
         return `${tr.cx.toFixed(4)},${tr.cy.toFixed(4)},${tr.w.toFixed(4)},${tr.h.toFixed(4)},${tr.rotation.toFixed(3)}`;
     },
@@ -542,7 +599,9 @@ defineEffect({
             // 读数报的是四边形的个数 (横×纵),因为那才是「网被劈成几块」;把手数 = (横+1)×(纵+1)。
             return lat ? `lattice  ${lat.cols}\u00d7${lat.rows} quads` : 'lattice  no grid';
         }
-        return `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}  p${n(p.strength)}  g${n(p.window)}${p.slide === 'uphill' ? '  up' : ''}`;
+        // 两张绑图都要在可见文本里报出来:法线图缺了不是错误,但「它在退化成二分」必须看得见。
+        const nrm = fxMapRef(effect, 'normal') ? fxMapShort(effect, 'normal') : 'no normal';
+        return `${fxMapShort(effect)} + ${nrm}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}${p.anchor === 'near' ? '  near' : ''}`;
     },
     thumb(g, box) {
         // 一格被按下去一角的方格网:虚线是格子原来占的框,实线是网格拖成什么样。

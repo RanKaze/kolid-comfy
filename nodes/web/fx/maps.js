@@ -1,4 +1,4 @@
-// fx/maps.js —— 特效绑定贴图的解析层:params 里那句 {key, name} 引用在这里变成一张解码好的
+// fx/maps.js —— 特效链绑定外部贴图的解析层:params 里那句 {key, name} 引用在这里变成一张解码好的
 // <img>,GL 侧只看到像素。契约见 fx/core.js 顶部。
 
 // ---- 特效绑定的外部贴图 (bound maps) ----
@@ -8,6 +8,10 @@
 // 选择或 .cud 资产)。两条路都只在这里解析成像素,GL 侧只看到一张已解码的 <img>。
 // 引用对象一律整体替换、绝不原地改字段:cloneEffects 深拷贝只到 params 这一层,里面的 map 对象
 // 是共享引用,原地写会把 undo 指着的旧步骤一起改掉。
+// 一条特效可以占两个槽:主槽永远是 params.map(引擎传到 texMap,注册数据用 needsMap 声明它),
+// 副槽由 spec.needsMap2 = {key, role} 报上来(引擎传到 texMap2,注册数据用 needsMap2 声明它)——
+// 几何 warp 就是「深度 + 法线」两张图一起读。槽位表由注册数据推出来,所以下面每一个函数都按
+// key 取引用,调用方不点名就还是主槽。
 let fxMapSeq = 0;
 let fxMapTagSeq = 0;
 let fxSrcSeq = 0;
@@ -21,8 +25,21 @@ function fxSrcId(src) {
     return v;
 }
 
-function fxMapRef(effect) {
-    const m = effect.params && effect.params.map;
+// 该特效声明了哪几个槽 (主槽永远排第一:引擎按这个顺序决定「缺图就整条跳过」还是「缺图照样跑」)。
+function fxMapSlots(effect) {
+    const spec = effect && EFFECT_TYPES[effect.type];
+    if (!spec) return [];
+    const out = [];
+    if (spec.needsMap) out.push({ key: 'map', role: spec.needsMap, when: spec.needsMapWhen, optional: false });
+    if (spec.needsMap2) {
+        out.push({ key: spec.needsMap2.key, role: spec.needsMap2.role,
+            when: spec.needsMap2When, optional: spec.needsMap2.optional !== false });
+    }
+    return out;
+}
+
+function fxMapRef(effect, key) {
+    const m = effect.params && effect.params[key || 'map'];
     return (m && typeof m.key === 'string' && m.key) ? m : null;
 }
 
@@ -51,14 +68,17 @@ function fxMapImage(ref) {
 
 // 图池条目会在 id 不变的情况下原地换像素(Guidance 卡重发布就是这样),而解码到位的先后也不在
 // params 里 —— 所以缓存身份除了引用 key 还要带上「解析到哪一份 src」和「这份 src 解第几次成功」。
+// 每个槽都要报:副槽换了一张法线图,主槽的 src 一个字没动。
 function fxMapStamp(l) {
     let s = '';
     for (const e of (l.effects || [])) {
-        const ref = fxMapRef(e);
-        if (!ref) continue;
-        const found = fxMapSource(ref);
-        const hit = found ? fxMapDecoded.get(found.src) : null;
-        s += `${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+        for (const slot of fxMapSlots(e)) {
+            const ref = fxMapRef(e, slot.key);
+            if (!ref) continue;
+            const found = fxMapSource(ref);
+            const hit = found ? fxMapDecoded.get(found.src) : null;
+            s += `${slot.key}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+        }
     }
     return s;
 }
@@ -72,8 +92,8 @@ function fxAddLocalMap(name, src) {
     return { key, name: nm };
 }
 
-function fxMapShort(effect) {
-    const ref = fxMapRef(effect);
+function fxMapShort(effect, key) {
+    const ref = fxMapRef(effect, key);
     if (!ref) return 'no map';
     const found = fxMapSource(ref);
     if (!found) return 'missing';
@@ -83,18 +103,20 @@ function fxMapShort(effect) {
 
 // .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
 // 那句 id 是宿主重新编号的,原样留着就是死引用)。资产读不出就退回旧引用本行 —— 按钮转红、链上
-// 写明跳过,总比悄悄换一张图当真。
+// 写明跳过,总比悄悄换一张图当真。每个声明了的槽各存各的资产。
 async function restoreFxMaps(list, blobs) {
     for (const e of list) {
-        const m = e.params && e.params.map;
-        if (!m || m.asset === null || m.asset === undefined) continue;
-        const blob = blobs.get(m.asset);
-        if (!blob) { e.params.map = { key: m.key, name: m.name }; continue; }
-        try {
-            const decoded = await blobToImage(blob);
-            e.params.map = fxAddLocalMap(m.name, decoded.url);
-        } catch (err) {
-            e.params.map = { key: m.key, name: m.name };
+        for (const slot of fxMapSlots(e)) {
+            const m = e.params && e.params[slot.key];
+            if (!m || m.asset === null || m.asset === undefined) continue;
+            const blob = blobs.get(m.asset);
+            if (!blob) { e.params[slot.key] = { key: m.key, name: m.name }; continue; }
+            try {
+                const decoded = await blobToImage(blob);
+                e.params[slot.key] = fxAddLocalMap(m.name, decoded.url);
+            } catch (err) {
+                e.params[slot.key] = { key: m.key, name: m.name };
+            }
         }
     }
     return list;
