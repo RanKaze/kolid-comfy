@@ -12,8 +12,8 @@
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
 //     外阴影的形状故意**只取图层 alpha**:蒙版链外还要整体乘一次,吃过一遍就成了平方。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
-// + 虚化 + 裁回自身轮廓、马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的黑白点/gamma/S 形
-// 对比、景深 = 深度图驱动的三档低通按像素混档、光照 = 切线空间法线图上的漫反射 + Blinn-Phong 高光。
+// + 虚化 + 裁回自身轮廓、马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的一张 PS 式点曲线
+// 查表、景深 = 深度图驱动的三档低通按像素混档、光照 = 切线空间法线图上的漫反射 + Blinn-Phong 高光。
 // 模糊类 (含景深) 同时吃 RGB 与 A,曲线/内阴影/光照只写 RGB;三条契约对全部特效成立。整链只在图层
 // 的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
 // 吃外部图的特效(dof / lighting)在 params 里只存一句 {key, name} 引用:图池 id 或本地池 id,
@@ -30,6 +30,8 @@
 //   shaders: { progName: fragmentSource } —— fxglInit 统一编译进 fxgl.progs
 //   run(col, p) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因
 //   readout(p, n, effect) / thumb(g, box) —— 子行读数与 picker 缩略图 (取景框由 UI 备好)
+//   migrate(raw, out) —— 参数换形状时把旧 raw 读成等价的 out, 只写 out 不动 raw (undo 共享它)
+//   editor(l, effect, syncRead, updaters) —— 有它就整块接管参数区 (点曲线这类非滑块编辑面)
 const EFFECT_TYPES = {};
 
 function defineEffect(spec) {
@@ -48,11 +50,15 @@ function effectParamDefs(type) {
 }
 
 function effectParams(effect) {
+    const spec = EFFECT_TYPES[effect.type];
     const out = {};
     for (const p of effectParamDefs(effect.type)) {
         const v = effect.params && effect.params[p.key];
         out[p.key] = (v === undefined || v === null) ? p.def : v;
     }
+    // 参数换形状时,旧存档和 undo 快照里的特效靠 spec.migrate 读回等价值。它只往 out 里写、绝不
+    // 碰 raw,所以历史快照永远不会被这次读取改写。
+    if (spec && spec.migrate && effect.params) spec.migrate(effect.params, out);
     return out;
 }
 

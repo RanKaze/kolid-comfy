@@ -35,6 +35,11 @@ function fxIconSvg(icon) {
             + '<path d="M2.2 11.8V2.2" opacity="0.55"/><path d="M2.2 11.8h9.6" opacity="0.55"/>'
             + '<path d="M2.6 11.4c3.1-.4 3.1-8.4 8.8-8.8" stroke-width="1.5"/></svg>';
     }
+    if (icon === 'reset') {
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M2.6 4.2h8.8"/><path d="M5.6 4.2V2.4h2.8v1.8"/>'
+            + '<path d="M3.7 4.2l.6 7.4h5.4l.6-7.4"/><path d="M6 6.3v3.2M8 6.3v3.2" opacity="0.6"/></svg>';
+    }
     if (icon === 'dof') {
         // 同一块方砖由清晰到糊依次排开 —— 景深的图标就是「清晰度随景深变」。
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
@@ -200,7 +205,9 @@ function moveEffect(l, dragId, targetId, above) {
 function fxParamsEl(l, effect, spec, syncRead, updaters) {
     const body = document.createElement('div');
     body.className = 'fx-params';
-    for (const def of spec.params) body.appendChild(fxControlRow(l, effect, def, syncRead, updaters));
+    // 有专用编辑面的特效自己出整块面板(曲线就是这样);其余按注册表逐行铺控件。
+    if (spec.editor) body.appendChild(spec.editor(l, effect, syncRead, updaters));
+    else for (const def of spec.params) body.appendChild(fxControlRow(l, effect, def, syncRead, updaters));
     // 参数区里的任何点击都不该顺带选中图层(那会重建列表)。
     body.addEventListener('click', ev => ev.stopPropagation());
     // 图层行是 draggable 的,滑块就压在它里面:从 handle 上起手按住再动,浏览器会往上找最近
