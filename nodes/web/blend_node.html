@@ -2941,38 +2941,26 @@ function applyLayerEffects(l, surface) {
 // 失效信号用 surface 的**对象身份**,不用版本号:笔刷下落笔前会 detachPaintSurface() 换上一份
 // 私有副本,stretch/resample/crop/bake 也都是整体替换 l.mask / l.decal,所以身份就是脏标记。
 // 拖 transform 时身份与参数签名都不变 → 命中缓存,特效链一帧都不会重跑。
-// 文本层是例外:它的 l.img 是跟盒子等大的画布像素面,每个 resize 帧都换身份,拿它当键既会让链
-// 逐帧重跑、又让特效参数按屏幕像素计(拉大盒子模糊不变)。所以键换成**描述符对象身份**、表面
-// 按自然盒结算 —— 参数回到"作者分辨率"上,transform 再把烘好的结果像拉伸任何位图那样摆放。
+// 文本层也吃这条恒等式,而且这不是偷懒:链跑在 syncTextBuffer 烘出的**盒子(=画布像素)分辨率**
+// 缓冲上,特效结果和文字本身一样以显示分辨率光栅化,放大盒子绝不会糊。代价是 resize 帧缓冲换
+// 身份、链会重跑 —— 只发生在挂着启用链的文字层上,而特效参数按画布像素计正是这里要的读法。
 function fxResolved(l) {
     if (!l || !l.img) return l && l.img;
     if (!l.decal && !activeEffects(l).length) return l.img;
-    const isText = isTextLayer(l);
-    let w, h, base;
-    if (isText) {
-        const nat = measureTextNatural(l.text);
-        w = nat.w;
-        h = nat.h;
-        base = l.text;
-    } else {
-        const s = nativeSize(l.img);
-        w = s.w;
-        h = s.h;
-        if (!w || !h) return l.img;
-        base = l.img;
-    }
+    const { w, h } = nativeSize(l.img);
+    if (!w || !h) return l.img;
     const sig = fxSignature(l);
     const c = l.fxCache;
-    if (c && c.w === w && c.h === h && c.img === base && c.decal === l.decal && c.mask === l.mask && c.sig === sig) return c.surface;
+    if (c && c.w === w && c.h === h && c.img === l.img && c.decal === l.decal && c.mask === l.mask && c.sig === sig) return c.surface;
     const surface = document.createElement('canvas');
     surface.width = w;
     surface.height = h;
     const o = surface.getContext('2d');
     resetCtx(o);
-    o.drawImage(isText ? renderTextBuffer(l.text, { w, h }, w, h) : l.img, 0, 0, w, h);
+    o.drawImage(l.img, 0, 0, w, h);
     if (l.decal) o.drawImage(l.decal, 0, 0, w, h);
     if (activeEffects(l).length) applyLayerEffects(l, surface);
-    l.fxCache = { w, h, img: base, decal: l.decal, mask: l.mask, sig, surface };
+    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, surface };
     return surface;
 }
 
