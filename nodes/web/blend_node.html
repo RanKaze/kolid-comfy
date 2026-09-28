@@ -972,6 +972,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/core.js"></script>
 <script src="fx/maps.js"></script>
 <script src="fx/gl.js"></script>
+<script src="fx/drop_shadow.js"></script>
 <script src="fx/inner_shadow.js"></script>
 <script src="fx/gaussian_blur.js"></script>
 <script src="fx/vector_blur.js"></script>
@@ -1873,8 +1874,8 @@ function layerSourceForGenerate(l) {
     // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
     if (!hasLayerImage(l) && !textInk) return noiseImageForGenerate(l);
     // 特效链一旦生效,送出去的就必须是「img + decal + 链」这张结算面 —— 直发 l.src 那条快路会绕过
-    // 整条链,模型看到的和画布上的就不是同一张图。注意这里给的是**未裁蒙版**的结算面:链只改
-    // RGB、不改 alpha,蒙版仍按 generateMaskDataUrl 单独同尺寸送出,后端那一次乘法照旧。
+    // 整条链,模型看到的和画布上的就不是同一张图。注意这里给的是**未裁蒙版**的结算面:链会改 alpha
+    // (模糊类软化它、外阴影往外长), 但蒙版仍按 generateMaskDataUrl 单独同尺寸送出,后端那一次乘法照旧。
     if (l.decal || activeEffects(l).length) return surfaceDataUrl(fxResolved(l));
     if (TRUSTED_SRC(l.src)) return l.src;
     const { w, h } = nativeSize(l.img);

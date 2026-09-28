@@ -13,6 +13,12 @@ function fxIconSvg(icon) {
             + '<rect x="1.9" y="1.9" width="10.2" height="10.2" rx="1.6"/>'
             + '<path d="M4.3 10.1a4.1 4.1 0 0 1 0-6.2" stroke-width="1.7" stroke-linecap="round"/></svg>';
     }
+    if (icon === 'drop') {
+        // 一块实心砖压在偏移的虚影之上:影子跑到形状外面去了,这才是外阴影。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="3.9" y="3.9" width="8.2" height="8.2" rx="1.4" opacity="0.4" stroke-dasharray="1.3 1.3"/>'
+            + '<rect x="1.9" y="1.9" width="8.2" height="8.2" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>';
+    }
     if (icon === 'blur') {
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
             + '<circle cx="7" cy="7" r="2.1" fill="currentColor" stroke="none"/>'
