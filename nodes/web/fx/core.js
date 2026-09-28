@@ -32,7 +32,10 @@
 //   needsMap: 'Depth' | 'Normal' | 'Lookup' —— GL 侧据此上传贴图, UI 据此渲染绑定行
 //   needsMapWhen(p) —— 可选:该模式是否真的需要贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
 //   shaders: { progName: fragmentSource } —— fxglInit 统一编译进 fxgl.progs
-//   run(col, p, effect) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因
+//   run(col, p, effect, l) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因。
+//     l 是该层自己 (几何也是输入之一: Canvas 对齐的深度读的是图层盒子在画布上的落点), 老特效不接就用
+//   stamp(effect, l) —— 可选:该层缓存身份里除「像素 + params + 绑定贴图」之外还要认的那一句外部状态
+//     (只有真要它的那种模式才回字符串, 其余一律空串, 不给别的图层添开销)
 //   readout(p, n, effect) / thumb(g, box) —— 子行读数与 picker 缩略图 (取景框由 UI 备好)
 //   migrate(raw, out) —— 参数换形状时把旧 raw 读成等价的 out, 只写 out 不动 raw (undo 共享它)
 //   editor(l, effect, syncRead, updaters) —— 有它就整块接管参数区 (点曲线这类非滑块编辑面)
@@ -122,6 +125,18 @@ function activeEffects(l) {
 function fxSignature(l) {
     if (!l.effects || !l.effects.length) return '';
     return JSON.stringify([effectsBypass ? 0 : 1, l.effects.map(e => [e.type, e.enabled ? 1 : 0, e.params])]);
+}
+
+// 有些特效的结果还取决于**链外**的状态:Canvas 对齐的深度 warp 读的是图层盒子在画布上的落点,而拖
+// 图层既不改像素、也不改 params —— 于是 fxMapStamp 与签名全都察觉不到它变了。各家自己报一句 (只有
+// 真要它的那种模式才回字符串),缓存身份才不会被一份过期的位移钉住。
+function fxExternalStamp(l) {
+    let s = '';
+    for (const e of activeEffects(l)) {
+        const spec = EFFECT_TYPES[e.type];
+        if (spec && spec.stamp) s += spec.stamp(e, l) + '|';
+    }
+    return s;
 }
 
 function setEffectsBypass(on) {

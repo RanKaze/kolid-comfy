@@ -61,6 +61,17 @@ function fxIconSvg(icon) {
             + '<rect x="5.6" y="4.6" width="3.4" height="4.8" opacity="0.6"/>'
             + '<rect x="9.6" y="4.6" width="3.4" height="4.8" opacity="0.3" stroke-dasharray="1.1 1.1"/></svg>';
     }
+    if (icon === 'warp') {
+        // 一张被拖弯的格子:四条边走得都不直,中间那个点就是把手。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M2.6 3.2c3.1.8 6.1 1.2 8.8 1.1"/>'
+            + '<path d="M11.4 4.3c-.5 3-1.1 5.9-2.2 8.1"/>'
+            + '<path d="M9.2 12.4c-3-.6-5.9-.8-8.3-.1"/>'
+            + '<path d="M2.6 3.2c.7 3 1 6.3.3 9.1"/>'
+            + '<path d="M6.7 3.8c.3 2.9.1 6-.4 8.5" opacity="0.5"/>'
+            + '<path d="M3.1 7.1c2.6-.5 5.3-.6 7.9.1" opacity="0.5"/>'
+            + '<circle cx="6.9" cy="7.1" r="1.4" fill="currentColor" stroke="none"/></svg>';
+    }
     if (icon === 'light') {
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
             + '<circle cx="7" cy="7" r="2.5"/>'

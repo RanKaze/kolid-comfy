@@ -330,11 +330,19 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* 色调映射 (fx/tone_map.js):模式一行,下面只铺该模式要用的参数行。 */
 .fx-tone { display: flex; flex-direction: column; gap: 5px; }
 .fx-tone-tail { display: flex; flex-direction: column; gap: 5px; }
+/* 扭曲 (fx/warp.js):同一个 Mode 分段钮铺三种参数;lattice 的把手提示走通用 foot 样式。 */
+.fx-warp { display: flex; flex-direction: column; gap: 5px; }
+.fx-warp-tail { display: flex; flex-direction: column; gap: 5px; }
+.fx-warp-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.fx-warp-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 /* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
 .fx-map-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
     border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600;
     font-family: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fx-map-btn:hover { background: rgba(10,132,255,0.3); }
+.fx-map-btn.tight { flex: 0 0 auto; }
+/* 网格摊在画布上时 Edit 点亮:它是编辑态的开关读数,不能只靠旁边那颗 Hide 在不在。 */
+.fx-map-btn.active { background: rgba(10,132,255,0.55); color: #fff; }
 .fx-map-btn.unset { color: #ff9f0a; }
 .fx-map-btn.gone { color: #ff453a; }
 /* Text 行的字体按钮: 那几个字就是它自己那张脸, 不用打开就知道选的是什么。本机没有这个字体时转红,
@@ -1124,6 +1132,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/mosaic.js"></script>
 <script src="fx/curves.js"></script>
 <script src="fx/tone_map.js"></script>
+<script src="fx/warp.js"></script>
 <script src="fx/dof.js"></script>
 <script src="fx/lighting.js"></script>
 <script src="fx/bloom.js"></script>
@@ -3156,6 +3165,9 @@ function drawOverlay() {
     drawMaskTint();
     drawRectPreview();
     drawSelectionAnts();
+    // 网格摊在画布上时,它就是这一层唯一的把手:调框/淡框都让开,否则两套 7px 方块叠在一起,
+    // 谁也说不清指针要拿哪一颗。
+    if (warpEdit) { drawWarpGrid(); return; }
     if (mode === 'canvasModify') {
         if (canvasW) drawAdjustBox(canvasHandlePoints(), false);
         return;
@@ -5568,6 +5580,10 @@ function setMode(m) {
     // other tool switch would strand a half-applied preview with no way back to its snapshot.
     // Exiting to 'none' stays legal — that is exactly what apply / cancel do on the way out.
     if (adjustModeActive() && m !== mode && m !== 'none') { guardAdjustMode(); return; }
+    // 摊开的网格占用左键,换工具就得把它收走:数据不动,回到 Lattice 模式点 Edit 再摊开一次。
+    // 上面那几条拒绝换工具的分支都不动它 —— 换工具没换成,画布上的东西也不该跟着消失。
+    warpEdit = null;
+    warpDrag = null;
     mode = m;
     syncModeUI();
     renderLayerList();
@@ -7149,6 +7165,186 @@ function endSizeDrag(e) {
     refreshCursor();
 }
 
+// ==================== 扭曲网格编辑（fx/warp.js 的 Lattice 模式） ====================
+// 网格要摊在真实画布上才能拖,所以这一侧全在页面本体里。warpEdit 只记「哪一层的哪一条特效被摊开」,
+// 不另存一份网格数据 —— 数据永远只有一份,住在 params.lattice 里,撤销、删层、关特效都从那里走。
+// 因此每次用都按 id 重新解析:解不出来就当场收摊,编辑态不可能留在一层已经不存在的网格上。
+let warpEdit = null;    // { layerId, effectId }
+let warpDrag = null;    // { index, moved }
+let warpLive = false;   // 拖拽期间的重算按帧合并 (与 queueLivePreview 同一纪律)
+
+function warpEditActive(l, effect) {
+    return !!warpEdit && warpEdit.layerId === l.id && warpEdit.effectId === effect.id;
+}
+
+// 摊开的网格属于那张特效卡,不属于工具:换工具 (setMode) 或 Esc 就收起。左键被网格占用,所以它
+// 不能和绘制/选区共存 —— 与 Canvas Modify 那条「边界拖拽吃掉每一次按下」同一读法。
+function beginWarpEdit(l, effect) {
+    warpEdit = { layerId: l.id, effectId: effect.id };
+    renderLayerList();            // Edit 那颗的点亮与 Hide 那颗的出现,都靠这一次重建读到新状态
+    drawOverlay();
+    setStatus('Grid on canvas \u2014 drag a handle, click an edge to subdivide');
+}
+
+function endWarpEdit() {
+    if (!warpEdit) return;
+    warpEdit = null;
+    warpDrag = null;
+    renderLayerList();
+    drawOverlay();
+}
+
+function warpTarget() {
+    if (!warpEdit) return null;
+    const l = getLayer(warpEdit.layerId);
+    const effect = l && l.effects && l.effects.find(e => e && e.id === warpEdit.effectId);
+    const lat = effect && effect.enabled && effect.type === 'warp'
+        ? warpLatticeOf(effectParams(effect).lattice) : null;
+    // 卡片折起来 = 那张卡的按钮不见了,画布上却还摊着一套没人能收的把手:网格只在参数区摊开时留在
+    // 画布上。折不折归用户,这里只是跟着他把编辑面关掉。
+    if (fxOpenId !== warpEdit.effectId) { warpPrune(); return null; }
+    // 空白手搓面也挂得住链,所以这里不要求它已经有像素;但藏起来的图层结算不上屏,网格留着只会指错地方。
+    if (!lat || !l.visible || !canvasW) { warpPrune(); return null; }
+    return { l, effect, lat };
+}
+
+// 摊开的网格被从别处撤掉了 (删层、关特效、换模式):画布先把它忘掉,面板排到下一帧再重读一次编辑态
+// —— 这里可能正站在 render() 里面,同步重建列表会把调用栈绕成环。
+function warpPrune() {
+    warpEdit = null;
+    warpDrag = null;
+    requestAnimationFrame(renderLayerList);
+}
+
+// 把手 i 画在哪儿:基准 + 位移 (归一化 0..1, y 向下) 映到该层网格,再走那条唯一的 图层→画布 仿射。
+// 拖拽读回来的也是这条仿射的逆,所以把手与指针全程重合、且图层旋转缩放都不影响手感。
+function warpHandleDoc(p, l) {
+    return localToCanvas(l, (p[0] + p[2]) * 2 - 1, (p[1] + p[3]) * 2 - 1);
+}
+
+function warpDocToGrid(l, doc) {
+    const tr = effectiveTransform(l);
+    const px = doc.x - tr.cx * canvasW, py = doc.y - tr.cy * canvasH;
+    const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
+    const dx = px * cos + py * sin, dy = -px * sin + py * cos;
+    return { x: (2 * dx / (tr.w * canvasW) + 1) / 2, y: (2 * dy / (tr.h * canvasH) + 1) / 2 };
+}
+
+function warpHandleScreen(t) {
+    return t.lat.pts.map(p => docToScreen(warpHandleDoc(p, t.l)));
+}
+
+// 点到线段的距离:细分点整条边都能命中,而不是只能点中点 (那才是「点击边缘」的读法)。
+function warpEdgeDist(sp, a, b) {
+    const vx = b.x - a.x, vy = b.y - a.y;
+    const len = vx * vx + vy * vy;
+    const t = len ? Math.max(0, Math.min(1, ((sp.x - a.x) * vx + (sp.y - a.y) * vy) / len)) : 0;
+    return Math.hypot(sp.x - (a.x + vx * t), sp.y - (a.y + vy * t));
+}
+
+function drawWarpGrid() {
+    const t = warpTarget();
+    if (!t) return;
+    const ctx = overlayCtx;
+    const pts = warpHandleScreen(t);
+    const edges = warpLatticeEdges(t.lat);
+    ctx.save();
+    // 基准框:网格没拖时铺开的位置,拖完它是「原来贴在哪」唯一的痕迹,所以画得比网细。
+    const box = boxCorners(t.l).map(docToScreen);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(0,122,255,0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(box[0].x, box[0].y);
+    for (let i = 1; i < box.length; i++) ctx.lineTo(box[i].x, box[i].y);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 变形后的网格:黑底 + 蓝线,和调框同一读法。边去过重,内部边只描一遍。
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (const [a, b] of edges) {
+        ctx.moveTo(pts[a].x, pts[a].y);
+        ctx.lineTo(pts[b].x, pts[b].y);
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,122,255,0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // 每条边的中点给一个小记号:细分出来的新把手就落在那里,点击的落点必须看得见。
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    for (const [a, b] of edges) ctx.fillRect((pts[a].x + pts[b].x) / 2 - 1.5, (pts[a].y + pts[b].y) / 2 - 1.5, 3, 3);
+    for (let i = 0; i < pts.length; i++) {
+        ctx.beginPath();
+        ctx.rect(pts[i].x - 3.5, pts[i].y - 3.5, 7, 7);
+        ctx.fillStyle = warpDrag && warpDrag.index === i ? '#0a84ff' : '#fff';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+// 左键按下:先认把手,再认边 (细分),都不中就说明这一下没落在网格上。三种落点都算被吃掉 ——
+// 摊着网格的时候让指针去选图层或画蒙版,只会拖走一个谁都没点的把手。
+function warpPress(sp) {
+    const t = warpTarget();
+    if (!t) return false;
+    const pts = warpHandleScreen(t);
+    let best = -1, bestD = 10;
+    for (let i = 0; i < pts.length; i++) {
+        const d = Math.hypot(sp.x - pts[i].x, sp.y - pts[i].y);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0) { warpDrag = { index: best, moved: false }; setCursor('move'); return true; }
+    const edges = warpLatticeEdges(t.lat);
+    let hit = null;
+    bestD = 6;
+    for (const [a, b] of edges) {
+        const d = warpEdgeDist(sp, pts[a], pts[b]);
+        if (d < bestD) { bestD = d; hit = [a, b]; }
+    }
+    if (!hit) { setStatus('Nothing to grab \u2014 drag a handle, click an edge to subdivide', 'error'); return true; }
+    const lat = warpSplitEdge(t.lat, hit[0], hit[1]);
+    if (!lat) { setStatus(`Grid limit: ${WARP_MAX_HANDLES} handles`, 'error'); return true; }
+    // 细分是一次看得见、值得撤销的改动;新把手紧接着就是这一笔要拖的那个。
+    warpSetLattice(t.effect, lat);
+    fxStructuralChange(t.l);
+    warpDrag = { index: lat.pts.length - 1, moved: false };
+    setCursor('move');
+    return true;
+}
+
+function updateWarpDrag(pos) {
+    const t = warpTarget();
+    if (!t || !warpDrag || warpDrag.index >= t.lat.pts.length) { warpDrag = null; return; }
+    const q = warpDocToGrid(t.l, pos);
+    const p = t.lat.pts[warpDrag.index];
+    warpSetLattice(t.effect, warpMoveHandle(t.lat, warpDrag.index, q.x - p[0], q.y - p[1]));
+    warpDrag.moved = true;
+    if (warpLive) return;
+    // 一帧最多烘一次位移场:把手可以比帧率跑得更快,画面只要跟上指针,不需要每个 mousemove 都重算。
+    warpLive = true;
+    requestAnimationFrame(() => {
+        warpLive = false;
+        const u = warpTarget();
+        if (u) fxLiveUpdate(u.l);
+    });
+}
+
+function endWarpDrag() {
+    const d = warpDrag;
+    warpDrag = null;
+    const t = warpTarget();
+    // 最后一帧可能还欠在 rAF 里:松手把它落到画面上,撤销才拍到同一张图。
+    if (t) { fxLiveUpdate(t.l); drawOverlay(); }
+    if (d && d.moved) pushHistory();
+    refreshCursor();
+}
+
 // ==================== 画布交互 ====================
 viewport.addEventListener('mouseenter', () => {
     cursorInside = true;
@@ -7224,6 +7420,8 @@ viewport.addEventListener('mousedown', e => {
     if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { rightGesture = e.button === 2; beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
     if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
+    // 摊开的网格拥有每一个左键 (视图手势在它上面,缩放/平移照常):把手要的是指针,不是选层或画蒙版。
+    if (warpEdit && e.button === 0 && warpPress(sp)) { e.preventDefault(); return; }
     // Ctrl is the Mask shortcut and it outranks everything below: while it is held the canvas
     // paints the top-level Mask layer itself, whatever is selected and whatever the toolbar shows.
     // Left always paints, right always erases — and the button also drives the cursor, so the ring
@@ -7344,6 +7542,7 @@ window.addEventListener('mousemove', e => {
     if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
     if (rectDrag) { updateRectDrag(screenToDoc(toScreenCoords(e))); return; }
+    if (warpDrag) { updateWarpDrag(screenToDoc(toScreenCoords(e))); return; }
     if (selDrag) { updateSelDrag(screenToDoc(toScreenCoords(e))); return; }
     if (modDrag && modDragging) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
     if (picking) { updatePick(e); return; }
@@ -7380,6 +7579,7 @@ window.addEventListener('mouseup', e => {
     if (picking) endPick(e);
     if (sizeDrag) endSizeDrag(e);
     if (rectDrag) endRectDrag();
+    if (warpDrag) endWarpDrag();
     if (selDrag) endSelDrag();
     // modDrag deliberately survives the release: the tentative canvas stays armed until Enter
     // applies it or Esc rewinds it — but modDragging ends, so the rect stops following the
@@ -7420,6 +7620,7 @@ window.addEventListener('mouseup', e => {
 // Safety net: releasing the button outside the frame (or tab switch) must not leave a tool stuck.
 window.addEventListener('blur', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
+    if (warpDrag) endWarpDrag();        // 松手发生在窗口外:把手就地停下,最后一帧与撤销都补上
     endMaskShortcut();
     cancelPick();
     rectArmed = false;
@@ -9745,6 +9946,8 @@ window.addEventListener('keydown', e => {
         e.preventDefault();
         if (layerMenuOpen()) { closeLayerMenu(); return; }
         if (addMenuOpen) { closeAddMenu(); return; }
+        // 摊开的网格先于工具:第一下 Esc 只把它从画布上收走,工具与视图不动 (再按才是原来的 Esc)。
+        if (warpEdit) { endWarpEdit(); setStatus('Grid off canvas'); return; }
         if (cancelSelDrag()) return;      // a marquee mid-sweep is not yet a selection
         if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
         setMode('none');
