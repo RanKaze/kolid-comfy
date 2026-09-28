@@ -231,6 +231,16 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.raster { color: #ffcf6e; }
 .layer-type-badge.cud { color: #8be3b6; }
 .layer-type-badge.cud.unlinked { color: #ff9d5c; }
+.layer-type-badge.text { color: #d9b8ff; }
+/* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
+   canvas — same doc-space rect, same rotation, font size scaled by zoom — so WYSIWYG holds while
+   the composite underneath keeps drawing the last committed render. */
+#textEditor { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-sizing: border-box;
+    margin: 0; padding: 0; border: 1px dashed rgba(0,122,255,0.9); background: transparent;
+    color: #fff; caret-color: #fff; resize: none; overflow: hidden; outline: none; z-index: 6;
+    white-space: pre-wrap; word-break: break-all; }
+.control-row select { flex: 1; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
+    border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
 /* The pure Mask layer pins to the top of the list and lives outside `layers`: it is a data
@@ -552,6 +562,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <canvas id="blendCanvas"></canvas>
             <canvas id="guidanceCanvas"></canvas>
             <canvas id="overlayCanvas"></canvas>
+            <textarea id="textEditor" hidden spellcheck="false" wrap="soft"
+                      title="Type the text — Shift+Enter adds a new line, Enter commits, Esc cancels"></textarea>
         </div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
         <div id="brushCursor"></div>
@@ -593,11 +605,28 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-head">
                     <div class="panel-label" id="transformLabel">Transform</div>
                     <div class="mini-group">
-                        <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T / Ctrl+T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">T</span></button>
+                        <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (Ctrl+T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">Ctrl+T</span></button>
                         <button class="mini-btn" id="transformFillBtn" title="Stretch this layer to cover the whole canvas">Fill</button>
                     </div>
                 </div>
                 <div class="panel-hint" id="transformReadout" title="This layer's transform: centre X/Y, size and rotation as a share of the canvas" style="display:none;"></div>
+            </div>
+            <!-- The Text section answers to nothing but a selected text layer; every other
+                 selection hides the whole block. -->
+            <div class="panel-section" id="textSection" hidden>
+                <div class="panel-head">
+                    <div class="panel-label" id="textLabel" title="A text layer stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas to retype it.">Text</div>
+                    <div class="mini-group">
+                        <button class="mini-btn key-btn" id="textEditBtn" title="Edit (Enter) — retype this layer's text inline on the canvas"><span class="tool-key">&#9166;</span></button>
+                    </div>
+                </div>
+                <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
+                <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
+                <div class="control-row"><label>Weight</label><select id="textWeightSel"><option value="normal">Normal</option><option value="bold">Bold</option></select><span></span></div>
+                <div class="control-row"><label>Align</label><select id="textAlignSel"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><span></span></div>
+                <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
+                <div class="panel-hint" id="textContentLine" style="display:none;"></div>
+                <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
             </div>
             <div class="panel-section tool-section" id="maskSection">
                 <div class="panel-head">
@@ -744,6 +773,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                                 title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
                             <span class="io-menu-title">Dynamic Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
+                        </button>
+                        <button class="io-menu-item" id="addTextLayerBtn" role="menuitem"
+                                title="An editable text layer (T) — it stays vector until Rasterized: double-click it on the canvas to retype, and the pixels re-render sharp at any transform scale.">
+                            <span class="io-menu-title">New Text Layer</span>
+                            <span class="io-menu-sub">Editable text — re-sharpens at any size until you rasterize it.</span>
                         </button>
                         <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
@@ -897,7 +931,7 @@ const viewLabel = document.getElementById('viewLabel');
 layersLabel.title = 'Top of list draws on top · drag rows to reorder, or drop a row on the Guidances list to MOVE it there. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
 guidanceLabel.title = 'Guidances stack ON TOP of the Layers composite — pose, composition or colour references that guide a run without becoming part of the artwork. The workspace Guidance card is this whole picture, updated in place. Drag a layer row here to MOVE it out of Layers; drag it back to give it up.';
 maskLayerLabel.title = 'The coverage channel. It is not a layer: it never composites into the image, it travels to the backend as its own alpha, and it belongs to neither the Layers nor the Guidances stack.';
-transformLabel.title = 'T / Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
+transformLabel.title = 'Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
 viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
@@ -1274,6 +1308,10 @@ function rasterizeLayer(l) {
     // A cud layer detaches on the way in: from here the buffer IS the canvas, so a source refresh
     // would have nowhere to land — the picture is the file's, not the project's any more.
     l.cud = null;
+    // A text layer loses its descriptor the same way: the render is frozen into canvas pixels,
+    // and nothing re-sharpens it any more (PS "Rasterize Type").
+    l.text = null;
+    l.textCache = null;
     return true;
 }
 
@@ -1340,6 +1378,145 @@ function effectiveTransform(l) {
     // drag carries the whole `layerIds` set.
     if (drag && (drag.layerId === l.id || (drag.layerIds && drag.layerIds.has(l.id)))) return l.transform;
     return rasterContentTransform(l);
+}
+
+// ==================== 文本层（smart-text） ====================
+// A text layer is a smart layer whose picture is re-RENDERED from a vector descriptor instead of
+// decoded from a file. Everything downstream — decal, mask, transform sampling, the backend
+// payload — meets it at the ordinary layerSource()/drawLayer汇合点, because `l.img` is just the
+// newest render of `l.text`. The one invariant the rest of this section guards:
+//   · a text layer's buffer is sized to its transform box in canvas pixels (syncTextBuffer), so
+//     the render is always 1:1 with what lands on canvas — text never gets stretched blurry.
+// The descriptor is treated as IMMUTABLE (patchTextLayer swaps a fresh object), so undo snapshots
+// and tab contexts share it by reference exactly like a cud pointer does.
+const TEXT_LINE_HEIGHT = 1.2;
+const TEXT_DEFAULTS = {
+    content: '', fontFamily: 'Arial, "Helvetica Neue", sans-serif',
+    fontSize: 64, fontWeight: 'normal', color: '#ffffff', align: 'center',
+};
+const TEXT_FONT_FAMILIES = [
+    ['Arial, "Helvetica Neue", sans-serif', 'Arial'],
+    ['"Segoe UI", system-ui, sans-serif', 'Segoe UI'],
+    ['Verdana, Geneva, sans-serif', 'Verdana'],
+    ['Tahoma, sans-serif', 'Tahoma'],
+    ['"Times New Roman", Times, serif', 'Times New Roman'],
+    ['Georgia, serif', 'Georgia'],
+    ['"Courier New", Courier, monospace', 'Courier New'],
+    ['"Microsoft YaHei", "微软雅黑", sans-serif', '微软雅黑'],
+    ['SimSun, "Songti SC", serif', '宋体'],
+    ['SimHei, "Heiti SC", sans-serif', '黑体'],
+    ['Kaiti, KaiTi, "STKaiti", serif', '楷体'],
+];
+function isTextLayer(l) { return !!l && !!l.text && !l.isMaskLayer; }
+// Which layer's editor is open right now (null = none). Declared with the model: applyView and
+// drawOverlay consult it, and a `let` may not be read before its declaration has run.
+let textEditingId = null;
+
+// The one place the descriptor's shape is decided: a .cud read back, or a panel patch, goes through
+// this so a corrupt field degrades to the default rather than to a broken render.
+function sanitizeTextDescriptor(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    if (typeof raw.content !== 'string') return null;
+    const fam = typeof raw.fontFamily === 'string' && raw.fontFamily.trim()
+        ? raw.fontFamily : TEXT_DEFAULTS.fontFamily;
+    const size = Number(raw.fontSize);
+    const weight = raw.fontWeight === 'bold' ? 'bold' : 'normal';
+    const color = /^#[0-9a-fA-F]{3,8}$/.test(String(raw.color || '')) ? raw.color : TEXT_DEFAULTS.color;
+    const align = ['left', 'center', 'right'].indexOf(raw.align) >= 0 ? raw.align : TEXT_DEFAULTS.align;
+    return {
+        content: raw.content,
+        fontFamily: fam,
+        fontSize: Number.isFinite(size) ? Math.max(1, Math.min(4096, size)) : TEXT_DEFAULTS.fontSize,
+        fontWeight: weight, color, align,
+    };
+}
+
+function textFontString(desc, px) {
+    return `${desc.fontWeight} ${Math.max(0.5, px)}px ${desc.fontFamily}`;
+}
+function textLines(desc) {
+    const lines = String(desc.content).split(/\r\n|\n|\r/);
+    return lines.length ? lines : [''];
+}
+
+let textMeasureCanvas = null;
+// The descriptor's natural box: the pixel size the text occupies at its authored font size. The
+// transform stores this box (see patchTextLayer), and syncTextBuffer re-renders it into whatever
+// canvas-pixel size the box currently has.
+function measureTextNatural(desc) {
+    if (!textMeasureCanvas) textMeasureCanvas = document.createElement('canvas');
+    const ctx = textMeasureCanvas.getContext('2d');
+    ctx.font = textFontString(desc, desc.fontSize);
+    let w = 0;
+    for (const line of textLines(desc)) w = Math.max(w, ctx.measureText(line).width);
+    return {
+        w: Math.max(4, Math.ceil(w)),
+        h: Math.max(1, Math.ceil(textLines(desc).length * desc.fontSize * TEXT_LINE_HEIGHT)),
+    };
+}
+
+// Paint the descriptor into a w×h canvas. The font size scales with the box height and the letter
+// advances with its width, so an anisotropically stretched box stretches the glyphs exactly like it
+// would stretch a bitmap — except the strokes stay sharp (canvas text is vector to the pixel).
+function renderTextBuffer(desc, nat, w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    if (!String(desc.content)) return c;       // empty text = a transparent box, nothing to paint
+    const ctx = c.getContext('2d');
+    const sy = c.height / nat.h;
+    const sx = (c.width / nat.w) / sy;
+    ctx.setTransform(sx, 0, 0, sy, 0, 0);
+    ctx.font = textFontString(desc, desc.fontSize);
+    ctx.fillStyle = desc.color;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = desc.align === 'left' ? 'left' : (desc.align === 'right' ? 'right' : 'center');
+    const lh = desc.fontSize * TEXT_LINE_HEIGHT;
+    const top = (nat.h - lh * textLines(desc).length) / 2 + lh / 2;
+    for (let x = 0; x < textLines(desc).length; x++) {
+        ctx.fillText(textLines(desc)[x], nat.w / 2, top + x * lh);
+    }
+    return c;
+}
+
+// The buffer-vs-box sync: cheap to call from the render path (two compares when nothing moved).
+// Swaps l.img for a fresh canvas — never repaints it — so every undo step keeps the buffer it saw.
+function syncTextBuffer(l) {
+    const desc = l.text;
+    const tr = l.transform;
+    if (!canvasW || !canvasH || !desc || !tr) return;
+    const w = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.w * canvasW)));
+    const h = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.h * canvasH)));
+    const key = JSON.stringify([desc.content, desc.fontFamily, desc.fontSize, desc.fontWeight, desc.color, desc.align]);
+    if (l.textCache && l.textCache.key === key && l.textCache.img === l.img
+        && l.textCache.w === w && l.textCache.h === h) return;
+    const img = renderTextBuffer(desc, measureTextNatural(desc), w, h);
+    l.img = img;
+    l.textCache = { key, w, h, img };
+}
+
+// The authored box of the descriptor (its natural size at font size 1:1), which a text layer's
+// transform always carries.
+function textLayerBox(desc) { return measureTextNatural(desc); }
+
+// Swap the descriptor and re-fit the box so the RENDERED font size keeps its current on-canvas
+// pixel size: editing 'Text' to 'Longer copy' grows the box, not shrinks the glyphs.
+function patchTextLayer(l, patch, opts) {
+    const next = Object.assign({}, l.text, patch);
+    const oldNat = measureTextNatural(l.text);
+    const nat = measureTextNatural(next);
+    l.text = next;
+    const tr = l.transform;
+    const kx = (tr.w * canvasW) / oldNat.w;
+    const ky = (tr.h * canvasH) / oldNat.h;
+    l.transform = Object.assign({}, tr, { w: nat.w * kx / canvasW, h: nat.h * ky / canvasH });
+    syncTextBuffer(l);
+    if (!(opts && opts.silent)) {
+        layoutCanvas();
+        renderLayerList();
+        render();
+        pushHistory(opts && opts.historyKey);
+    }
 }
 
 // ==================== 纯 Mask 层 ====================
@@ -1579,8 +1756,12 @@ function noiseImageForGenerate(l) {
 // would vanish silently.
 function layerSourceForGenerate(l) {
     if (!l.img) return null;
+    if (isTextLayer(l)) syncTextBuffer(l);
+    // Rendered text carries no `src`, but it is not a blank surface either: the pixels the
+    // detailer sees ARE the glyphs (+ the decal), not noise. An EMPTY text layer stays blank.
+    const textInk = isTextLayer(l) && !!String(l.text.content);
     // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
-    if (!hasLayerImage(l)) return noiseImageForGenerate(l);
+    if (!hasLayerImage(l) && !textInk) return noiseImageForGenerate(l);
     const { w, h } = nativeSize(l.img);
     // An untrusted `src` (the `blob:` URL a .cud load hands out, an AVIF dropped from disk) is
     // re-encoded from the pixels the browser already decoded, exactly as layerSpecs() does. Without
@@ -1793,6 +1974,7 @@ function applyView() {
     }
     updateBrushCursorSize();
     drawOverlay();
+    if (textEditingId !== null) positionTextEditor();
     updateViewReadout();
 }
 
@@ -2044,6 +2226,7 @@ function updateHoverCursor(sp, docPos) {
 // ==================== 渲染 ====================
 // The layer's pixels at native size: image + decal, cut out by the mask — what the transform then places on the canvas.
 function layerSource(l) {
+    if (isTextLayer(l)) syncTextBuffer(l);     // the buffer IS the render: keep it 1:1 with the box
     if (!l.mask && !l.decal) return l.img;
     const { w, h } = nativeSize(l.img);
     if (tmpCanvas.width !== w || tmpCanvas.height !== h) { tmpCanvas.width = w; tmpCanvas.height = h; }
@@ -2342,8 +2525,9 @@ function drawOverlay() {
     if (mode !== 'transform' || !canvasW) {
         // Outside the transform tool there is no adjustment box — but a selected layer's bounds
         // would otherwise be invisible, so hint the footprint with a faint dashed outline.
+        // The layer being retyped keeps even that to itself: the editor frame is its outline.
         for (const sel of (selectedGroup() || [getSelected()])) {
-            if (sel && sel.visible && !sel.isMaskLayer && sel.img) drawFaintBox(handleScreenPoints(sel));
+            if (sel && sel.visible && !sel.isMaskLayer && sel.img && sel.id !== textEditingId) drawFaintBox(handleScreenPoints(sel));
         }
         return;
     }
@@ -2352,12 +2536,12 @@ function drawOverlay() {
         // A group keeps every member's own outline, and the union box carries the handles — the
         // gesture drives the box, so the two must be readable at the same time.
         const box = groupBox(held);
-        for (const m of held) drawFaintBox(handleScreenPoints(m));
+        for (const m of held) if (m.id !== textEditingId) drawFaintBox(handleScreenPoints(m));
         if (box) drawAdjustBox(handleScreenPoints(box), true);
         return;
     }
     const l = getSelected();
-    if (!l || !l.visible || l.isMaskLayer) return;
+    if (!l || !l.visible || l.isMaskLayer || l.id === textEditingId) return;
     drawAdjustBox(handleScreenPoints(l), true);
 }
 
@@ -2647,6 +2831,9 @@ function snapshotState() {
             // Shared by reference, never copied: a cud descriptor is immutable (a relink swaps the
             // whole object), so an undo step pointing at the old one cannot drift.
             cud: l.cud || null,
+            // Same rule for a text descriptor — patchTextLayer swaps it, never edits it. The
+            // rendered buffer travels as `img`, so the snapshot draws without re-rendering.
+            text: l.text || null,
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
         })),
@@ -2664,6 +2851,9 @@ function snapshotState() {
 // canvas core.
 function restoreState(s, opts) {
     const asDocument = !!(opts && opts.document);
+    // A replay rewrites every live layer object, so an open text editor would commit its draft
+    // into a layer that no longer exists. Land the edit first, then replay.
+    if (textEditingId !== null) commitTextEditor();
     // The Mask layer is a live object the paint engine mutates in place, so it travels with the
     // document and is adopted before anything below writes through it.
     if (asDocument && s.maskLayer) maskLayer = s.maskLayer;
@@ -2680,6 +2870,7 @@ function restoreState(s, opts) {
         // simply means every entry is a working layer.
         stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         cud: ls.cud || null,
+        text: ls.text || null,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -2850,11 +3041,14 @@ function cudJumpSvg() {
 
 // Type badge for the row's image thumb: smart = non-destructive transform box with corner
 // handles, raster = a 2×2 pixel checker (the layer's pixels are baked 1:1 to the canvas), cud =
-// two sheets stacked (this layer is another project's flattened picture).
+// two sheets stacked (this layer is another project's flattened picture), text = a serif T.
 function layerTypeBadgeSvg(l) {
     if (isCudLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="3.4" y="1.2" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/>'
             + '<path d="M6.6 8.8H2.1A1 1 0 0 1 1.1 7.8V3.3" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
+    }
+    if (isTextLayer(l)) {
+        return '<svg viewBox="0 0 10 10"><path d="M1.6 2.2h6.8 M5 2.2v6.6 M3.4 8.8h3.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square"/></svg>';
     }
     if (isRasterLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
@@ -3028,6 +3222,7 @@ function renderLayerList() {
     maskRowSlotEl.appendChild(renderMaskLayerRow());
     renderStackList(guidanceListEl, GUIDANCE_STACK);
     renderStackList(layerListEl, WORK_STACK);
+    updateTextPanel();
 }
 
 // One row builder for both palettes: a guidance is not a different kind of object, it is the same
@@ -3066,9 +3261,23 @@ function renderStackList(listEl, stack) {
             img.src = l.src;
             img.draggable = false;
             thumb.appendChild(img);
+        } else if (isTextLayer(l) && String(l.text.content)) {
+            // A text layer has no `src` to point an <img> at — show its current render instead,
+            // letterboxed into the chip the way the canvas draws it onto the box.
+            const c = document.createElement('canvas');
+            c.width = 84; c.height = 56;
+            c.style.width = '100%';
+            c.style.height = '100%';
+            const cx2d = c.getContext('2d');
+            const s = Math.min(c.width / l.img.width, c.height / l.img.height);
+            const dw = Math.max(1, l.img.width * s), dh = Math.max(1, l.img.height * s);
+            cx2d.drawImage(l.img, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
+            thumb.appendChild(c);
         } else {
             thumb.classList.add('no-image');
-            thumb.title = '1 · No image yet — run Generate (the ▶ on the row, or right-click it) or drop an image here';
+            thumb.title = isTextLayer(l)
+                ? '1 · Empty text layer — double-click it on the canvas (or press Enter) to type'
+                : '1 · No image yet — run Generate (the ▶ on the row, or right-click it) or drop an image here';
             thumb.appendChild(noImageGlyph());
         }
         thumb.addEventListener('click', ev => {
@@ -3078,15 +3287,19 @@ function renderStackList(listEl, stack) {
         const badge = document.createElement('span');
         const linked = cudLayerLinked(l);
         badge.className = 'layer-type-badge '
-            + (isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked') : isRasterLayer(l) ? 'raster' : 'smart');
+            + (isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
+                : isTextLayer(l) ? 'text'
+                : isRasterLayer(l) ? 'raster' : 'smart');
         badge.innerHTML = layerTypeBadgeSvg(l);
         badge.title = isCudLayer(l)
             ? (linked
                 ? `Cud layer — a flattened copy of「${l.cud.name}」, repainted whenever that file is saved`
                 : `Cud layer — its picture is a flattened copy of「${l.cud.name}」, but the link did not survive the page reload. The pixels are this file's own; right-click the row to Relink.`)
-            : isRasterLayer(l)
-                ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
-                : 'Smart layer — transform is non-destructive and keeps the native image';
+            : isTextLayer(l)
+                ? 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit'
+                : isRasterLayer(l)
+                    ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
+                    : 'Smart layer — transform is non-destructive and keeps the native image';
         thumb.appendChild(badge);
 
         const maskThumb = document.createElement('div');
@@ -3141,7 +3354,8 @@ function renderStackList(listEl, stack) {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = l.name + (isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)') : isRasterLayer(l) ? ' · raster' : '');
+        name.textContent = l.name + (isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
+            : isTextLayer(l) ? ' · text' : isRasterLayer(l) ? ' · raster' : '');
         name.title = 'Double-click to rename';
         name.addEventListener('dblclick', ev => {
             ev.stopPropagation();
@@ -3169,7 +3383,7 @@ function renderStackList(listEl, stack) {
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
         // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
         // renderMaskLayerRow() builds its own head.
-        const hasImg = hasLayerImage(l);
+        const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text ? l.text.content : ''));
         const canGen = layerMaskIsMeaningful(l);
         const run = document.createElement('button');
         run.className = 'icon-btn';
@@ -3595,6 +3809,10 @@ function replaceLayerImage(id, item) {
         } else {
             l.img = img;
             l.src = item.src;
+            // An in-place refill writes over the whole surface: if this was an (empty) text layer,
+            // the generated pixels ARE the layer now — the descriptor must not re-render on top.
+            l.text = null;
+            l.textCache = null;
             // 图层就是那块 patch 了：画布上的落点随之缩到 crop 子框（随源图层一起旋转）。
             if (placed) l.transform = { ...placed };
         }
@@ -3617,6 +3835,7 @@ function replaceLayerImage(id, item) {
 function removeLayer(id) {
     const i = layers.findIndex(l => l.id === id);
     if (i < 0) return;              // the Mask layer is not in `layers`, so it can never be removed here
+    if (textEditingId === id) closeTextEditor();   // the editor cannot outlive its layer
     layers.splice(i, 1);
     groupIds.delete(id);            // the set must never hold a layer that no longer exists
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
@@ -3663,6 +3882,9 @@ function duplicateLayer(l) {
         // The link is immutable and shared by reference, so both rows follow the same file: saving it
         // repaints them together, which is what "a copy of this layer" means for a cud layer.
         cud: l.cud || null,
+        // Same for the text descriptor — but the buffer is a fresh render (l.img was cloned
+        // above), so the copy keeps its own cache slot and the two never fight over one canvas.
+        text: l.text || null,
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
     if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
@@ -3684,6 +3906,10 @@ function duplicateLayer(l) {
 // mutating them would rewrite history as well as the present.
 function applyMaskToLayer(l) {
     if (!l || !l.mask || !l.img) return;
+    if (isTextLayer(l)) {
+        setStatus(`「${l.name}」is text — its mask applies live on every draw, and a baked one would be wiped by the next re-render. Rasterize first if you want to bake it in`, 'error');
+        return;
+    }
     const { w, h } = nativeSize(l.img);
     const img = document.createElement('canvas');
     img.width = w; img.height = h;
@@ -3724,6 +3950,10 @@ function fitLayerToMask(l, opts) {
     const quiet = !!(opts && opts.silent);
     const say = (msg, kind) => { if (!quiet) setStatus(msg, kind); };
     if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
+    if (isTextLayer(l)) {
+        say(`「${l.name}」is text — its picture is re-rendered from the text itself; trim the box with the transform (Ctrl+T) instead`, 'error');
+        return false;
+    }
     if (guardAdjustMode()) return false;
     const { w: ow, h: oh } = nativeSize(l.img);
     const b = alphaBounds(layerSource(l), 9);
@@ -4404,6 +4634,9 @@ function cancelCanvasModify() {
 // ---- Expand (smart object) ----
 function startExpand(l) {
     if (!l || l.isMaskLayer || isRasterLayer(l)) return;
+    // Expand changes a layer's own resolution; a text buffer is re-rendered at whatever size its
+    // box has (syncTextBuffer), so the gesture is meaningless — the transform box is the tool.
+    if (isTextLayer(l)) { setStatus('A text layer renders sharp at any size — scale it with the transform box (Ctrl+T) instead', 'error'); return; }
     if (guardAdjustMode()) return;
     // Expand previews one layer's own border, so the gesture that follows is single-target: the
     // group is dropped rather than left dangling under a one-layer mode.
@@ -5027,8 +5260,25 @@ viewport.addEventListener('mouseleave', () => {
     syncBrushCursor();          // 正在绘制时笔刷光标保持不变
 });
 
+// Double-click a text layer's picture on the canvas to retype it. The press before this event has
+// already selected the layer (ordinary mousedown routing); all that is left is to check the hit is
+// text. A double-click inside the editor is word selection, not a layer gesture.
+viewport.addEventListener('dblclick', e => {
+    if (e.button !== 0 || e.target === textEditorEl) return;
+    if (textEditingId !== null || rectArmed || adjustModeActive()) return;
+    if (!canvasW) return;
+    const hit = pickLayer(screenToDoc(toScreenCoords(e)));
+    if (hit && isTextLayer(hit)) {
+        e.preventDefault();
+        openTextEditor(hit.id);
+    }
+});
+
 viewport.addEventListener('mousedown', e => {
     if (!canvasW) return;
+    // An open text editor owns the pointer: this press lands OUTSIDE the textarea, so it commits
+    // the draft and is consumed — it must not also select a layer or start a stroke.
+    if (textEditingId !== null) { e.preventDefault(); commitTextEditor(); return; }
     const sp = toScreenCoords(e);
     const pos = screenToDoc(sp);
     // The Dynamic Layer rectangle outranks everything: the user explicitly asked for it, so the
@@ -5388,6 +5638,7 @@ const addLayerBtn = document.getElementById('addLayerBtn');
 const addLayerMenu = document.getElementById('addLayerMenu');
 const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
 const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
+const addTextLayerBtn = document.getElementById('addTextLayerBtn');
 const addGuidanceBtn = document.getElementById('addGuidanceBtn');
 const addGuidanceMenu = document.getElementById('addGuidanceMenu');
 const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
@@ -5428,6 +5679,7 @@ document.addEventListener('mousedown', e => {
 
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
+addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); addTextLayer(); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
@@ -5683,6 +5935,185 @@ function addDefaultLayer(stack) {
     return l;
 }
 
+// ==================== 文本层交互 ====================
+// The editing model is "WYSIWYG overlay": a transparent textarea laid exactly over the layer's
+// box on canvas (same centre, same screen angle, font size scaled by the box), while the composite
+// underneath keeps drawing the last committed render. Enter commits / Shift+Enter wraps / Esc
+// rewinds / a click anywhere else commits first — one committed edit is one undo step.
+const textEditorEl = document.getElementById('textEditor');
+const textSectionEl = document.getElementById('textSection');
+const textFontSel = document.getElementById('textFontSel');
+const textSizeRange = document.getElementById('textSizeRange');
+const textSizeValue = document.getElementById('textSizeValue');
+const textWeightSel = document.getElementById('textWeightSel');
+const textAlignSel = document.getElementById('textAlignSel');
+const textColorInput = document.getElementById('textColorInput');
+const textColorValue = document.getElementById('textColorValue');
+const textContentLine = document.getElementById('textContentLine');
+const textSizeLine = document.getElementById('textSizeLine');
+const textEditBtn = document.getElementById('textEditBtn');
+
+function addTextLayer() {
+    if (textEditingId !== null) commitTextEditor();
+    const desc = Object.assign({}, TEXT_DEFAULTS, { content: 'Text' });
+    const nat = textLayerBox(desc);
+    const l = {
+        id: ++layerSeq,
+        name: 'Text ' + (layers.filter(isTextLayer).length + 1),
+        src: '',                                   // the render is the picture, never a file
+        img: renderTextBuffer(desc, nat, nat.w, nat.h),
+        text: desc,
+        visible: true,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        mask: null, maskCtx: null, maskThumbEl: null,
+        decal: null, decalCtx: null, decalThumbEl: null,
+        canvasThumbEl: null,
+        stack: WORK_STACK,
+        fragment: false,
+        cud: null,
+    };
+    insertAtStackTop(l);
+    selectedId = l.id;
+    groupIds = new Set([l.id]);
+    applyCanvasSize();                             // a first layer may set the canvas from the text box
+    fitLayerToCanvas(l);                           // the contain rule every new entry obeys
+    syncTextBuffer(l);
+    setMode('transform');                          // renders the list + canvas
+    layoutCanvas();
+    setStatus('Text Layer added — type it in · Enter commits · the Text panel restyles it');
+    pushHistory();
+    openTextEditor(l.id, true);
+    return l;
+}
+
+function openTextEditor(id, selectAll) {
+    const l = getLayer(id);
+    if (!isTextLayer(l)) return;
+    if (textEditingId !== null && textEditingId !== id) commitTextEditor();
+    textEditingId = id;
+    textEditorEl.value = l.text.content;
+    textEditorEl.hidden = false;
+    positionTextEditor();
+    textEditorEl.focus();
+    if (selectAll) textEditorEl.select();
+    else { const n = textEditorEl.value.length; textEditorEl.setSelectionRange(n, n); }
+    drawOverlay();                                 // the edit box steps down for the editor frame
+    setStatus('Editing text — Shift+Enter for a new line · Enter commits · Esc cancels');
+}
+
+// The editor's screen box comes from the SAME localToCanvas/docToScreen chain the transform
+// handles use, so rotation, flip and zoom cannot drift it away from the layer.
+function positionTextEditor() {
+    if (textEditingId === null) return;
+    const l = getLayer(textEditingId);
+    if (!l || !isTextLayer(l)) { closeTextEditor(); return; }
+    const tr = effectiveTransform(l);
+    const c = docToScreen({ x: tr.cx * canvasW, y: tr.cy * canvasH });
+    const r = docToScreen(localToCanvas(l, 1, 0));     // centre → right edge
+    const t = docToScreen(localToCanvas(l, 0, -1));    // centre → top edge
+    const w = Math.max(8, Math.hypot(r.x - c.x, r.y - c.y) * 2);
+    const h = Math.max(8, Math.hypot(t.x - c.x, t.y - c.y) * 2);
+    const ang = Math.atan2(t.y - c.y, t.x - c.x) + Math.PI / 2;
+    // Font size on screen = the authored size scaled by the box height — the same sy the render
+    // uses, so what you type sits exactly on what the layer shows.
+    const fs = l.text.fontSize * (tr.h * canvasH) / measureTextNatural(l.text).h;
+    textEditorEl.style.width = w + 'px';
+    textEditorEl.style.height = h + 'px';
+    textEditorEl.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${ang}rad)`;
+    textEditorEl.style.font = `${l.text.fontWeight} ${Math.max(1, fs)}px ${l.text.fontFamily}`;
+    textEditorEl.style.lineHeight = (Math.max(1, fs) * TEXT_LINE_HEIGHT) + 'px';
+    textEditorEl.style.textAlign = l.text.align;
+    textEditorEl.style.color = l.text.color;
+    textEditorEl.style.caretColor = l.text.color;
+}
+
+function closeTextEditor() {
+    textEditingId = null;
+    textEditorEl.hidden = true;
+}
+
+function commitTextEditor() {
+    if (textEditingId === null) return;
+    const id = textEditingId;
+    const v = textEditorEl.value;
+    closeTextEditor();
+    const l = getLayer(id);
+    if (!isTextLayer(l)) { renderLayerList(); render(); return; }
+    if (v !== l.text.content) patchTextLayer(l, { content: v });
+    else { renderLayerList(); render(); }
+}
+
+function cancelTextEditor() {
+    if (textEditingId === null) return;
+    closeTextEditor();
+    renderLayerList();
+    render();
+    setStatus('Text edit cancelled');
+}
+
+textEditorEl.addEventListener('keydown', ev => {
+    ev.stopPropagation();                          // no canvas tool may answer while you type
+    if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); commitTextEditor(); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); cancelTextEditor(); }
+});
+textEditorEl.addEventListener('blur', () => { if (textEditingId !== null) commitTextEditor(); });
+textEditorEl.addEventListener('input', positionTextEditor);
+
+// ---- Text panel ----
+// Every control patches the descriptor; the render and the box follow through patchTextLayer.
+// The readouts are visible text (content + natural|on-canvas sizes), never tooltips.
+for (const [family, label] of TEXT_FONT_FAMILIES) {
+    const o = document.createElement('option');
+    o.value = family;
+    o.textContent = label;
+    o.title = family;
+    textFontSel.appendChild(o);
+}
+const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '#ffffff';
+
+function updateTextPanel() {
+    const l = getSelected();
+    const on = !!l && isTextLayer(l);
+    textSectionEl.hidden = !on;
+    if (!on) return;
+    const t = l.text;
+    if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
+    textSizeRange.value = Math.min(512, t.fontSize);
+    textSizeValue.textContent = String(t.fontSize);
+    textWeightSel.value = t.fontWeight;
+    textAlignSel.value = t.align;
+    textColorInput.value = TEXT_HEX6(t.color);
+    textColorValue.textContent = t.color.toUpperCase();
+    textContentLine.style.display = 'block';
+    textContentLine.textContent = `Content: ${t.content ? t.content.replace(/\n/g, ' ⏎ ') : 'empty — double-click the layer on canvas to type'}`;
+    const nat = textLayerBox(t);
+    const tr = effectiveTransform(l);
+    textSizeLine.style.display = 'block';
+    textSizeLine.textContent = `${nat.w} × ${nat.h} px (${Math.round(tr.w * canvasW)} × ${Math.round(tr.h * canvasH)} on canvas)`;
+}
+
+function patchSelectedText(patch, historyKey) {
+    const l = getSelected();
+    if (!isTextLayer(l)) return;
+    patchTextLayer(l, patch, { historyKey });
+}
+
+textEditBtn.addEventListener('click', () => {
+    const l = getSelected();
+    if (l && isTextLayer(l)) openTextEditor(l.id);
+});
+textFontSel.addEventListener('change', () => patchSelectedText({ fontFamily: textFontSel.value }));
+textWeightSel.addEventListener('change', () => patchSelectedText({ fontWeight: textWeightSel.value }));
+textAlignSel.addEventListener('change', () => patchSelectedText({ align: textAlignSel.value }));
+textSizeRange.addEventListener('input', () => {
+    textSizeValue.textContent = textSizeRange.value;
+    patchSelectedText({ fontSize: Number(textSizeRange.value) || 1 }, 'text-size');
+});
+textColorInput.addEventListener('input', () => {
+    textColorValue.textContent = textColorInput.value.toUpperCase();
+    patchSelectedText({ color: textColorInput.value }, 'text-color');
+});
+
 // ==================== 拖入本地图片 ====================
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
 // hands the pixels to the backend directly.
@@ -5838,6 +6269,10 @@ function layerSpecs() {
     // 只有 working layers 是画给后端合成的东西：guidance 是参考，永远不参与 context image，
     // 所以这条后端回退路径（前端 composite 缺席/编码失败时）也不会把它们混进成品。
     return layers.slice().reverse().filter(l => !isGuidanceLayer(l)).map(l => {
+        // A text layer ships its CURRENT render through the ordinary src channel (its `src` is
+        // empty, so TRUSTED_SRC fails and toPng encodes the fresh buffer) — the backend composites
+        // pixels and knows nothing about descriptors.
+        if (isTextLayer(l)) syncTextBuffer(l);
         const src = TRUSTED_SRC(l.src) ? l.src : (l.img ? toPng(l.img) : '');
         return {
             src,
@@ -6051,7 +6486,7 @@ function openLayerMenu(l, clientX, clientY) {
     // See layerMaskIsMeaningful() for why neither "the mask canvas exists" nor "the mask has ink"
     // is the right question. An image-less layer is fine too: Generate synthesises a noise image
     // at the layer's own resolution, so a blank Default/Dynamic layer is a legitimate start.
-    const hasImg = hasLayerImage(l);
+    const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text.content));
     const canGenerate = layerMaskIsMeaningful(l);
     const disabled = !canGenerate;
 
@@ -6071,10 +6506,29 @@ function openLayerMenu(l, clientX, clientY) {
     });
     menu.appendChild(item);
 
+    // Edit text: the same inline editor the double-click and Enter keys drive. Only a text layer
+    // has authored content to edit.
+    if (isTextLayer(l)) {
+        const edit = document.createElement('button');
+        edit.className = 'layer-menu-item';
+        edit.type = 'button';
+        edit.setAttribute('role', 'menuitem');
+        edit.textContent = String(l.text.content) ? 'Edit text' : 'Type text';
+        edit.title = `Edit「${l.name}」's text in place on the canvas — Enter commits, Shift+Enter adds a line, Esc cancels. (Same as double-clicking the layer or pressing Enter with it selected.)`;
+        edit.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            openTextEditor(l.id);
+        });
+        menu.appendChild(edit);
+    }
+
     // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
     // canvas stay put — the new box only decides how many pixels the layer gets. Raster layers
-    // have no native resolution left to change — their buffer is the canvas — so no entry.
-    if (!l.isMaskLayer && !isRasterLayer(l)) {
+    // have no native resolution left to change — their buffer is the canvas — so no entry. A text
+    // layer's native resolution is recomputed from its descriptor on every draw, so there is
+    // nothing to expand — and Fit Mask would rewrite the buffer the descriptor owns.
+    if (!l.isMaskLayer && !isRasterLayer(l) && !isTextLayer(l)) {
         const expand = document.createElement('button');
         expand.className = 'layer-menu-item';
         expand.type = 'button';
@@ -6115,7 +6569,8 @@ function openLayerMenu(l, clientX, clientY) {
         rast.setAttribute('role', 'menuitem');
         rast.textContent = 'Rasterize';
         rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`
-            + (isCudLayer(l) ? ` This row's link is dropped on the way in: a baked buffer has nothing for a refresh to repaint.` : '');
+            + (isCudLayer(l) ? ` This row's link is dropped on the way in: a baked buffer has nothing for a refresh to repaint.` : '')
+            + (isTextLayer(l) ? ` The text descriptor is destroyed — you cannot type into this layer again.` : '');
         rast.disabled = !canvasW || !l.img;
         rast.addEventListener('click', ev => {
             ev.stopPropagation();
@@ -6153,8 +6608,11 @@ function openLayerMenu(l, clientX, clientY) {
     applyMask.type = 'button';
     applyMask.setAttribute('role', 'menuitem');
     applyMask.textContent = 'Apply Mask';
-    applyMask.disabled = !l.mask;
+    // A text layer's pixels are re-rendered from its descriptor on every draw, so a baked mask
+    // would evaporate on the next keystroke — the mask stays a live multiplier there.
+    applyMask.disabled = !l.mask || isTextLayer(l);
     applyMask.title = !l.mask ? `「${l.name}」has no mask yet — the whole layer is already covered, nothing to apply`
+        : isTextLayer(l) ? `「${l.name}」is text — its mask already applies live, and a baked one would be wiped by the next re-render. Rasterize the layer first if you want to bake it in.`
         : `Bake「${l.name}」's mask into its own pixels: what it hides becomes real transparency, then the mask resets to pure white (whole layer). One-way.`;
     applyMask.addEventListener('click', ev => {
         ev.stopPropagation();
@@ -6972,12 +7430,23 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
-    if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey || !e.altKey)) {
+    // Ctrl+T shows the transform box; a bare T creates a text layer (and lands in its editor).
+    // Alt+T stays unassigned — it was never a transform shortcut either.
+    if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         if (l) activateMode('transform');
         return;
     }
-    if (e.key === 'Enter') { if (mode !== 'none') { e.preventDefault(); setMode('none'); } return; }
+    if ((e.key === 't' || e.key === 'T') && !e.altKey) {
+        e.preventDefault();
+        addTextLayer();
+        return;
+    }
+    if (e.key === 'Enter') {
+        if (mode === 'none' && l && isTextLayer(l)) { e.preventDefault(); openTextEditor(l.id); return; }
+        if (mode !== 'none') { e.preventDefault(); setMode('none'); }
+        return;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || l.isMaskLayer || mode !== 'transform') return;
     const step = (e.shiftKey ? 10 : 1) / (canvasW || 1);
@@ -7197,7 +7666,7 @@ function renderDocTabs() {
     docTabsEl.appendChild(docNewBtn);
 }
 
-function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || modalOpen(); }
+function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || textEditingId !== null || modalOpen(); }
 
 // A gesture mid-flight owns the globals it is working on; swapping the document under it would
 // hand its result to the wrong project.
@@ -7558,6 +8027,10 @@ async function buildCudBlob() {
             // Where a cud layer's pixels came from. The composite itself is already in `image` —
             // this says nothing the file needs in order to draw, only what a refresh may re-read.
             cud: l.cud || null,
+            // A text layer's descriptor. Its render is deliberately NOT stored as `image` (a text
+            // buffer has no src, so it encodes as `image: null` like every hand-made surface): the
+            // fields + transform rebuild the editable layer on Load, and the pixels follow.
+            text: l.text ? Object.assign({}, l.text) : null,
             image: blank ? null : await addAsset('image', l.img, n.w, n.h),
             mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
             decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
@@ -7892,6 +8365,7 @@ async function openCudDocument(file, doc) {
         let skipped = 0;
         for (const rec of header.layers) {
             const hasImage = rec && rec.image !== null && rec.image !== undefined;
+            const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
             let img = null, url = '';
             if (!hasImage) {
                 // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
@@ -7901,7 +8375,12 @@ async function openCudDocument(file, doc) {
                 // separate asset and still lands below.
                 const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
                 const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
-                img = makeBlankCanvas(pw, ph);
+                // A text row rebuilds as an editable layer instead: the descriptor (a corrupt one
+                // degrades to an empty text layer) renders its natural box, and the first paint
+                // re-sharpens it onto the saved transform.
+                img = textDesc ? renderTextBuffer(textDesc, textLayerBox(textDesc),
+                    textLayerBox(textDesc).w, textLayerBox(textDesc).h)
+                    : makeBlankCanvas(pw, ph);
             } else {
                 const imgBlob = blobs.get(rec.image);
                 if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
@@ -7932,6 +8411,8 @@ async function openCudDocument(file, doc) {
                 // A document saved before the Guidances stack existed has no `stack` on its rows —
                 // every one of them is a working layer, which is also what it looked like then.
                 stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
+                // Text descriptor rebuilt above; a raster/`false` record never carries one.
+                text: textDesc,
                 transform: rec.raster
                     // Old files could carry a non-identity raster transform; the invariant is identity.
                     ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
@@ -8778,7 +9259,12 @@ window.addEventListener('message', event => {
         // Enable Fit 只交给新图层：就地填充空图层改的是那一层自己的像素与 mask，没有"框"可缩。
         const fit = pendingGenFit;
         pendingGenFit = false;
-        if (srcLayer && hasLayerImage(srcLayer)) spawnGeneratedLayer(d.layer_id, item, { fit });
+        // A text layer WITH content already carries a picture — it spawns like an image layer.
+        // An empty one is a blank surface and takes the in-place refill (which drops its
+        // descriptor on the way in, see replaceLayerImage).
+        const hasPixels = srcLayer && (hasLayerImage(srcLayer)
+            || (isTextLayer(srcLayer) && !!String(srcLayer.text.content)));
+        if (hasPixels) spawnGeneratedLayer(d.layer_id, item, { fit });
         else replaceLayerImage(d.layer_id, item);
         return;
     }
