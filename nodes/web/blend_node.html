@@ -831,7 +831,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                         <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
                     </div>
                 </div>
-                <div class="panel-hint" id="selectionReadout" style="display:none;"></div>
             </div>
             <div class="panel-section">
                 <div class="panel-head">
@@ -3692,24 +3691,9 @@ function cancelSelDrag() {
 }
 
 // ---- panel ----
-function fmtArea(px) {
-    return px >= 1e6 ? (px / 1e6).toFixed(2) + ' MP' : px.toLocaleString() + ' px';
-}
-
 function selectionUI() {
-    const rectOn = mode === 'rect', lassoOn = mode === 'lasso';
-    document.getElementById('rectSelectBtn').classList.toggle('active', rectOn);
-    document.getElementById('lassoSelectBtn').classList.toggle('active', lassoOn);
-    const sel = hasSelection();
-    let text = '';
-    if (sel) {
-        const b = selection.box;
-        text = `${fmtArea(selection.count)} · ${Math.round(b.w)} × ${Math.round(b.h)} px`
-            + (selection.shapes.length > 1 ? ` · ${selection.shapes.length} shapes` : '');
-    } else if (rectOn || lassoOn) {
-        text = (rectOn ? 'Marquee (M)' : 'Lasso (L)') + ' — drag to select';
-    }
-    setReadout(document.getElementById('selectionReadout'), text);
+    document.getElementById('rectSelectBtn').classList.toggle('active', mode === 'rect');
+    document.getElementById('lassoSelectBtn').classList.toggle('active', mode === 'lasso');
 }
 // ==================== 宿主预览 ====================
 // The canvas composite IS the Context Image, so the host shows a live thumbnail of it next to
