@@ -651,7 +651,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-head">
                     <div class="panel-label" id="transformLabel">Transform</div>
                     <div class="mini-group">
-                        <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (Ctrl+T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">Ctrl+T</span></button>
+                        <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">T</span></button>
                         <button class="mini-btn" id="transformFillBtn" title="Stretch this layer to cover the whole canvas">Fill</button>
                     </div>
                 </div>
@@ -824,7 +824,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
                         </button>
                         <button class="io-menu-item" id="addTextLayerBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas (T) — the text layer lands in exactly that box. It stays vector until Rasterized: double-click it to retype, and the pixels re-render sharp at any transform scale.">
+                                title="Drag a rectangle on the canvas (Alt+T) — the text layer lands in exactly that box. It stays vector until Rasterized: double-click it to retype, and the pixels re-render sharp at any transform scale.">
                             <span class="io-menu-title">New Text Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas — the text fills that box.</span>
                         </button>
@@ -990,7 +990,7 @@ const viewLabel = document.getElementById('viewLabel');
 layersLabel.title = 'Top of list draws on top · drag rows to reorder, or drop a row on the Guidances list to MOVE it there. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
 guidanceLabel.title = 'Guidances stack ON TOP of the Layers composite — pose, composition or colour references that guide a run without becoming part of the artwork. The workspace Guidance card is this whole picture, updated in place. Drag a layer row here to MOVE it out of Layers; drag it back to give it up.';
 maskLayerLabel.title = 'The coverage channel. It is not a layer: it never composites into the image, it travels to the backend as its own alpha, and it belongs to neither the Layers nor the Guidances stack.';
-transformLabel.title = 'Ctrl+T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
+transformLabel.title = 'T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
 viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
@@ -5000,7 +5000,7 @@ function fitLayerToMask(l, opts) {
     const say = (msg, kind) => { if (!quiet) setStatus(msg, kind); };
     if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
     if (isTextLayer(l)) {
-        say(`「${l.name}」is text — its picture is re-rendered from the text itself; trim the box with the transform (Ctrl+T) instead`, 'error');
+        say(`「${l.name}」is text — its picture is re-rendered from the text itself; trim the box with the transform (T) instead`, 'error');
         return false;
     }
     if (guardAdjustMode()) return false;
@@ -5685,7 +5685,7 @@ function startExpand(l) {
     if (!l || l.isMaskLayer || isRasterLayer(l)) return;
     // Expand changes a layer's own resolution; a text buffer is re-rendered at whatever size its
     // box has (syncTextBuffer), so the gesture is meaningless — the transform box is the tool.
-    if (isTextLayer(l)) { setStatus('A text layer renders sharp at any size — scale it with the transform box (Ctrl+T) instead', 'error'); return; }
+    if (isTextLayer(l)) { setStatus('A text layer renders sharp at any size — scale it with the transform box (T) instead', 'error'); return; }
     if (guardAdjustMode()) return;
     // Expand previews one layer's own border, so the gesture that follows is single-target: the
     // group is dropped rather than left dangling under a one-layer mode.
@@ -8563,19 +8563,25 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
-    // Ctrl+T shows the transform box; a bare T arms the rectangle drag that draws a NEW text
-    // layer — the layer lands in the box the user sweeps, not at a default size.
-    // stopPropagation keeps the host page (LiteGraph, other nodes) from also answering Ctrl+T.
-    // Alt+T stays unassigned — it was never a transform shortcut either.
-    if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey)) {
+    // T shows the transform box; Alt+T arms the rectangle drag that draws a NEW text layer —
+    // the layer lands in the box the user sweeps, not at a default size. Ctrl+T is kept as an
+    // alias (a tabbed browser answers it first with a new tab; app windows hand it to the page),
+    // and stopPropagation keeps the host page (LiteGraph, other nodes) from also answering it.
+    const isT = (e.key === 't' || e.key === 'T' || e.code === 'KeyT');
+    if (isT && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         e.stopPropagation();
         if (l) activateMode('transform');
         return;
     }
-    if ((e.key === 't' || e.key === 'T') && !e.altKey) {
+    if (isT && e.altKey) {
         e.preventDefault();
         armRectDrag(WORK_STACK, 'text');
+        return;
+    }
+    if (isT && !e.altKey) {
+        e.preventDefault();
+        if (l) activateMode('transform');
         return;
     }
     if (e.key === 'Enter') {
