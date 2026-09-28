@@ -973,8 +973,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           {boundNamed && (
                             <span style={{
                               maxWidth: 88, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                              background: boundMissing ? 'rgba(255,159,10,0.22)' : 'rgba(255,255,255,0.14)',
-                              color: boundMissing ? '#ff9f0a' : '#fff',
+                              background: boundMissing ? 'rgba(255,159,10,0.22)' : 'rgba(255,255,255,0.07)',
+                              color: boundMissing ? '#ff9f0a' : 'rgba(255,255,255,0.62)',
                               borderRadius: 999, fontSize: 9.5, padding: '1px 6px', fontWeight: 700,
                             }}>{boundMissing ? 'Missing' : bound}</span>
                           )}
@@ -990,7 +990,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           display: 'flex', alignItems: 'center', padding: '0 9px',
                           border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
                           background: 'rgba(255,255,255,0.06)', cursor: 'pointer', lineHeight: 1,
-                          color: boundNamed ? (boundMissing ? '#ff9f0a' : '#fff') : 'rgba(255,255,255,0.4)',
+                          color: boundNamed ? (boundMissing ? '#ff9f0a' : 'rgba(255,255,255,0.7)') : 'rgba(255,255,255,0.4)',
                         }}>
                         <GearIcon size={13} />
                       </button>
