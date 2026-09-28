@@ -6043,9 +6043,14 @@ viewport.addEventListener('dblclick', e => {
 
 viewport.addEventListener('mousedown', e => {
     if (!canvasW) return;
-    // An open text editor owns the pointer: this press lands OUTSIDE the textarea, so it commits
-    // the draft and is consumed — it must not also select a layer or start a stroke.
-    if (textEditingId !== null) { e.preventDefault(); commitTextEditor(); return; }
+    // A press inside the editor belongs to the editor: the textarea has to place its caret (and
+    // drag-select) between the glyphs, so it must be neither prevented nor committed. Only a press
+    // that lands OUTSIDE the textarea is the "somewhere else" click that closes the edit — and even
+    // then it is consumed, so it must not also select a layer or start a stroke.
+    if (textEditingId !== null) {
+        if (e.target !== textEditorEl) { e.preventDefault(); commitTextEditor(); }
+        return;
+    }
     const sp = toScreenCoords(e);
     const pos = screenToDoc(sp);
     // The Dynamic Layer rectangle outranks everything: the user explicitly asked for it, so the
