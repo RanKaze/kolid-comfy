@@ -9,6 +9,7 @@
 - 不拼接 "Picture N:" 前缀与 llama_template（tokenizer 自动生成模板与图像槽位）
 - keep_vision=False 表示 text encoder 丢弃 vision tokens，图像仅经 DiT 的 reference_latents 注入
 - 有 alpha 时 vision 侧按白底合成 RGB，VAE 侧保留 4 通道
+- 与 detailer 联用时第一格参考图 = 本块工作图本身（source_latent 直传，尺寸不再重推）
 
 参考: comfy_extras/nodes_qwen.py TextEncodeQwenImage21
 """
@@ -72,23 +73,37 @@ def _slot_images(vae, reference_latent, reference_image, reference, VAEDecode):
 
 
 def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_image,
-                     reference, conditioning_set_values, VAEDecode):
-    """QwenImage21: TextEncodeQwenImage21 逻辑（positive / negative 携带同一组参考图）。"""
+                     reference, conditioning_set_values, VAEDecode, source_latent=None):
+    """QwenImage21: TextEncodeQwenImage21 逻辑（positive / negative 携带同一组参考图）。
+
+    source_latent: 调用方已经为**第一张参考图**编码好的 target latent（detailer 的
+    tmp_latent["samples"]）。给出时第一格不再自行推导尺寸、也不再重编码：图像原样进
+    视觉槽位，latent 直接沿用 source_latent。核心里 reference 的 RoPE 网格以 target
+    为中心、还带奇偶修正（qwen_image21/model.py build_sequence），第一格与 target 的
+    网格差半格，编辑就整体偏移 —— 让它等于 target 的编码源，比事后按 _slot_size 重推
+    可靠。resolution 与 qwen_image21_resolution 从第二格起才起作用。
+    """
     resolution = RESOLUTION_DEFAULT
     if self.config:
         resolution = self.config.get("qwen_image21_resolution", RESOLUTION_DEFAULT)
 
     images = _slot_images(vae, reference_latent, reference_image, reference, VAEDecode)
+    # 第一格钉在 source_latent 的几何上，只对"就是这张工作图"的槽位成立
+    pinned = source_latent is not None and reference_image is not None
 
     images_vl = []
     ref_latents = []
-    for image in images:
+    for index, image in enumerate(images):
         samples = image[:1].movedim(-1, 1)  # B,H,W,C -> B,C,H,W，每个槽位一张图
-        width, height = _slot_size(samples, resolution)
-        if (width, height) == (samples.shape[3], samples.shape[2]):
+        first = pinned and index == 0
+        if first:
             s = image[:1]
         else:
-            s = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
+            width, height = _slot_size(samples, resolution)
+            if (width, height) == (samples.shape[3], samples.shape[2]):
+                s = image[:1]
+            else:
+                s = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
 
         rgb = s[:, :, :, :3]
         if s.shape[-1] > 3:
@@ -96,7 +111,7 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
             rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
         images_vl.append(rgb)
         if vae is not None:
-            ref_latents.append(vae.encode(s))
+            ref_latents.append(source_latent[:1] if first else vae.encode(s))
 
     if len(images_vl) > 0:
         print(f"[QwenImage21] {len(images_vl)} reference image(s) -> vision slots + "

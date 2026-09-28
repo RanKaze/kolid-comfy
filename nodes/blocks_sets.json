@@ -27,7 +27,53 @@
             "context_regex": ".+",
             "enable_mask": true,
             "enable_text_generate": false,
-            "enable_limit": true
+            "enable_limit": true,
+            "enable_fit": true
+          }
+        }
+      ],
+      "pipeline_name": "[Anima] LizAnima"
+    },
+    {
+      "id": "set-23",
+      "name": "局部重绘",
+      "blocks": [
+        {
+          "id": "block-31",
+          "type": "interface",
+          "name": "Interface",
+          "params": {
+            "interface_idx": 4,
+            "operation": "default",
+            "crop_reserve": 32,
+            "image_keys": {},
+            "context_image_key": null,
+            "context_mask_key": null,
+            "manual_values": {},
+            "interface_name": "结构性重绘"
+          }
+        },
+        {
+          "id": "block-30",
+          "type": "detailer",
+          "name": "Detailer",
+          "params": {
+            "add_noise": "enable",
+            "start_step_rate": 0,
+            "end_step_rate": 1,
+            "pixels": 1048576,
+            "align": 8,
+            "crop_reserve": 32,
+            "recover_crop": true,
+            "enable_edit": false,
+            "edit_mode": "fit",
+            "ref_boost": 4,
+            "ref_boost_a": 1,
+            "enable_ref_boost_mask": false,
+            "grounding_px": 768,
+            "context_regex": ".+",
+            "enable_mask": false,
+            "enable_text_generate": false
           }
         }
       ],
@@ -107,8 +153,8 @@
             "context_reference": true,
             "context_reference_key": null,
             "context_regex": ".+",
-            "enable_limit": false,
-            "enable_mask": false
+            "enable_limit": true,
+            "enable_mask": true
           }
         }
       ],
@@ -258,54 +304,9 @@
         }
       ],
       "pipeline_name": "[QwenImage21] Base"
-    },
-    {
-      "id": "set-23",
-      "name": "局部重绘",
-      "blocks": [
-        {
-          "id": "block-31",
-          "type": "interface",
-          "name": "Interface",
-          "params": {
-            "interface_idx": 4,
-            "operation": "default",
-            "crop_reserve": 32,
-            "image_keys": {},
-            "context_image_key": null,
-            "context_mask_key": null,
-            "manual_values": {},
-            "interface_name": "结构性重绘"
-          }
-        },
-        {
-          "id": "block-30",
-          "type": "detailer",
-          "name": "Detailer",
-          "params": {
-            "add_noise": "enable",
-            "start_step_rate": 0,
-            "end_step_rate": 1,
-            "pixels": 1048576,
-            "align": 8,
-            "crop_reserve": 32,
-            "recover_crop": true,
-            "enable_edit": false,
-            "edit_mode": "fit",
-            "ref_boost": 4,
-            "ref_boost_a": 1,
-            "enable_ref_boost_mask": false,
-            "grounding_px": 768,
-            "context_regex": ".+",
-            "enable_mask": false,
-            "enable_text_generate": false
-          }
-        }
-      ],
-      "pipeline_name": "[Anima] LizAnima"
     }
   ],
-  "active_block_set": "set-12",
+  "active_block_set": "set-20",
   "global_params": {
     "pixels": 2048576,
     "align": 16,

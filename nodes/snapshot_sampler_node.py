@@ -2480,19 +2480,30 @@ class SnapshotDetailerSamplerNode:
             return
         vae = pipeline.vae
         slots = []
+        # QwenImage21 的第一格是"直传"：与本块 target latent 同一份像素、同一份 latent，
+        # 不再独立推尺寸重编码 —— 面板要说清楚，别让人以为它被 ref 旋钮管过。
+        is_qwen21 = bool(arch_qwen_image21.matches(pipeline.config))
+        first_note = ''
+        if is_qwen21:
+            first_note = '与 target latent 同源同尺寸，不再缩放；ref 旋钮只管第 2 张起'
         if ref_image is not None:
+            if not (work_limit or work_align):
+                # 上游 interface 块换过工作图（或 Limit 关）：括号里没旋钮可显示，
+                # 就把"尺寸从哪来"写进正文，避免读数空着被误认成没约束。
+                first_note += ('；本块尺寸沿用上游产出，未被全局 pixels/align 缩放'
+                               if first_note else '尺寸 = 上游产出（未被全局 pixels/align 缩放）')
             slots.append(('Context Image（本块工作图，Enable Edit 下即 <image 1>）', ref_image,
-                          work_limit, work_align))
+                          work_limit, work_align, first_note))
         elif ref_latent is not None and vae is not None:
             try:
                 slots.append(('本块 latent（Flux2Klein 的第一张参考是 latent，此为解码预览）',
                               VAEDecode().decode(vae=vae, samples={'samples': ref_latent['samples']})[0],
-                              work_limit, work_align))
+                              work_limit, work_align, ''))
             except Exception as e:
                 print(f"[Debug] reference slot latent decode failed: {e}")
         for _key, _img in injected:
             slots.append((f'Extra Prompt 嵌图 <image_id:{_key}> → reference_latents', _img,
-                          ref_limit, ref_align))
+                          ref_limit, ref_align, ''))
 
         if not slots:
             dbg.record_stage(f'Block {block_no} · 参考图',
@@ -2507,10 +2518,11 @@ class SnapshotDetailerSamplerNode:
                              f'pipeline 自带 {_extra} 条 reference_latents，排在嵌图之前 —— '
                              f'嵌图的实际槽位比文本里的 <image N> 大 {_extra}',
                              block=block_no)
-        for n, (_src, _img, _limit, _align) in enumerate(slots, start=1):
+        for n, (_src, _img, _limit, _align, _note) in enumerate(slots, start=1):
             dbg.record_image(f'Block {block_no} · Ref <image {n}>', _img, block=block_no,
                              pixel_limit=_limit, align=_align,
-                             detail=f'共 {len(slots)} 张 · 第 {n} 张 · 来源：{_src}')
+                             detail=f'共 {len(slots)} 张 · 第 {n} 张 · 来源：{_src}'
+                                    + (f' · {_note}' if _note else ''))
 
     def _preflight_generate_text_images(self, images, clip, params):
         """把「这批图到底能不能变成 embedding」实测一遍，供 Debug 显示。
@@ -3191,7 +3203,10 @@ class SnapshotDetailerSamplerNode:
                     prompt=current_positive,
                     reference_latent=ref_latent_arg,
                     reference_image=ref_image_arg,
-                    reference=next_pipeline.reference
+                    reference=next_pipeline.reference,
+                    # ref_image_arg 就是 resized_image，本块的 target latent 也由它编码而来
+                    # —— 把这份 latent 交下去，QwenImage21 的第一格就不再重推尺寸（见其模块头）
+                    source_latent=tmp_latent["samples"]
                 )
 
                 negative_condition = next_pipeline.get_conditioning(
@@ -3201,7 +3216,8 @@ class SnapshotDetailerSamplerNode:
                     prompt=current_negative,
                     reference_latent=ref_latent_arg,
                     reference_image=ref_image_arg,
-                    reference=next_pipeline.reference
+                    reference=next_pipeline.reference,
+                    source_latent=tmp_latent["samples"]
                 )
 
                 # 节点级 pixel_state 注入（对齐 krea2edit source patch 数据流）：
