@@ -3096,11 +3096,13 @@ function selDragPath() {
     return path;
 }
 
+// The committed selection and the outline being dragged are two different marks: PS keeps the
+// marching ants of what is already selected visible the whole time you sweep the next add/subtract,
+// and draws the gesture as a solid working path on top. Repainting only one of the two would hide
+// what the boolean is about to act on.
 function drawSelectionAnts() {
     const committed = hasSelection() && ensureSelection();
     if (!committed && !selDrag) return;
-    const path = selDrag ? selDragPath() : selectionAntsPath();
-    if (!path) return;
     const z = Math.max(1e-4, view.zoom);
     const ctx = overlayCtx;
     const cos = Math.cos(view.rotation), sin = Math.sin(view.rotation);
@@ -3111,17 +3113,33 @@ function drawSelectionAnts() {
     // constant on-screen size — the same contract the checkerboard keeps.
     ctx.lineJoin = 'miter';
     ctx.lineCap = 'butt';
-    ctx.setLineDash([]);
-    ctx.lineWidth = 2 / z;
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.stroke(path);
-    ctx.setLineDash([4 / z, 4 / z]);
-    // Off the clock rather than the ticker, so the pointer's own repaints keep the ants marching
-    // mid-stroke without a second full overlay pass stacked on top of them.
-    ctx.lineDashOffset = -(Math.floor(performance.now() / 70) % 8) / z;
-    ctx.lineWidth = 1 / z;
-    ctx.strokeStyle = '#fff';
-    ctx.stroke(path);
+    const under = (path) => {
+        ctx.setLineDash([]);
+        ctx.lineWidth = 2 / z;
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.stroke(path);
+    };
+    if (committed) {
+        const path = selectionAntsPath();
+        if (path) {
+            under(path);
+            ctx.setLineDash([4 / z, 4 / z]);
+            // Off the clock rather than the ticker, so the pointer's own repaints keep the ants
+            // marching mid-stroke without a second full overlay pass stacked on top of them.
+            ctx.lineDashOffset = -(Math.floor(performance.now() / 70) % 8) / z;
+            ctx.lineWidth = 1 / z;
+            ctx.strokeStyle = '#fff';
+            ctx.stroke(path);
+        }
+    }
+    if (selDrag) {
+        const path = selDragPath();
+        under(path);
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1 / z;
+        ctx.strokeStyle = '#fff';
+        ctx.stroke(path);
+    }
     ctx.restore();
 }
 
