@@ -522,6 +522,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 /* The Generate modal's Pipeline Preset enum: one entry per block-set tab (the tabs in the
    host's settings panel). The select takes the slack so a long preset name cannot overflow. */
 .gen-preset-row { display: flex; align-items: center; gap: 10px; }
+/* The row is only for the dialogs that offer a preset; author display:flex would beat the UA's
+   [hidden], so say it again here rather than juggling inline styles. */
+.gen-preset-row[hidden] { display: none; }
 .gen-preset-label { flex: 0 0 auto; font-size: 12.5px; font-weight: 500; color: rgba(255,255,255,0.85); }
 .gen-preset-row select { flex: 1 1 auto; min-width: 0; background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18);
     border-radius: 8px; padding: 6px 8px; color: #fff; font-size: 12.5px; font-weight: 600; outline: none; }
@@ -965,8 +968,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 </div>
 <div class="modal-overlay" id="dynamicModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Dynamic Layer">
-        <div class="modal-title">Dynamic Layer</div>
-        <div class="modal-sub">The rectangle you dragged, at a resolution you choose. The layer covers those canvas pixels and is placed where you drew it.</div>
+        <div class="modal-title" id="dynTitle">Dynamic Layer</div>
+        <div class="modal-sub" id="dynSub">The rectangle you dragged, at a resolution you choose. The layer covers those canvas pixels and is placed where you drew it.</div>
         <div class="canvas-fields">
             <div class="canvas-field"><span>WIDTH</span><input type="number" id="dynWInput" min="1" max="16384" step="1" inputmode="numeric"></div>
             <button class="lock-btn locked" id="dynLockBtn" title="Keep aspect ratio" aria-label="Keep aspect ratio">
@@ -979,6 +982,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <label class="modal-check dyn-limit" title="Limit — the Resolution Rate is derived from the Pixels budget in GLOBAL SETTINGS instead: the layer bakes at most that many pixels spread over the rectangle you dragged (rate = √(Pixels ÷ rectangle)). Uncheck to set the rate by hand.">
                 <input type="checkbox" id="dynLimitChk"><span>Limit</span>
             </label>
+        </div>
+        <div class="gen-preset-row" id="dynPresetRow" hidden>
+            <span class="gen-preset-label">Pipeline Preset</span>
+            <select id="dynPresetSelect" title="Which pipeline preset (block-set tab) runs this Generate"></select>
         </div>
         <div class="modal-hint" id="dynRatioHint">&#8212;</div>
         <div class="modal-actions">
@@ -3345,6 +3352,163 @@ function selectAll() {
     if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
     commitSelectionShape({ kind: 'rect', mode: 'replace', x0: 0, y0: 0, x1: canvasW, y1: canvasH });
     setStatus('Everything selected');
+}
+
+// ---- 右键菜单 (选区的动词, 文档级) ----
+// Photoshop puts the selection's own verbs on the point you right-click. The selection is shared by
+// every layer, so these belong on the canvas and not in a layer row's menu — and they are the only
+// place the boolean result itself can be acted on (invert / fill / copy / generate).
+function openCanvasMenu(clientX, clientY) {
+    ensureLayerMenu().innerHTML = '';
+    layerMenuItem('Invert Selection', 'Swap the selection with the rest of the canvas — what was inside the ants falls outside it (Photoshop: Select → Inverse).', invertSelection);
+    // Fill is the one verb that writes to the layer under the hand, so it is only offered when there is one.
+    const target = getSelected();
+    layerMenuItem('Fill', target
+        ? 'Pour the current Color into the selection on the layer being painted — the same surface the brush writes, and nothing lands outside the ants.'
+        : 'Select a layer first — the pour needs a surface to land on.', fillSelection, !target);
+    layerMenuItem('Layer via Copy', 'Cut what the canvas shows inside the selection into a new layer, with the selection as its mask (Photoshop: Layer via Copy).', layerViaCopy);
+    layerMenuItem('Generate', 'Open the create-layer dialog sized to the selection: a blank smart layer carries the selection as its mask, and the detailer reads the canvas as its Layer Context.', openSelectionGenerate);
+    layerMenuItem('Deselect', 'Drop the selection (same as Ctrl+D).', () => { if (clearSelection()) setStatus('Selection cleared'); });
+    positionLayerMenu(clientX, clientY);
+}
+
+// PS Select → Inverse. The complement is taken from the boolean RESULT's boundary loops, never shape
+// by shape: subtracting a hole from the canvas would remove ink that is already absent. The contour
+// tracer winds every loop with the selected side to one hand, so the signed area alone says region
+// vs hole — regions subtract, holes add back — and nested islands stay exact without testing
+// containment. Materialising the complement into shapes keeps every later boolean mode honest.
+function invertSelection() {
+    if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
+    if (!hasSelection() || !ensureSelection()) { setStatus('Invert — nothing selected to invert', 'error'); return; }
+    const box = selection.box;
+    const shapes = [{ kind: 'rect', mode: 'replace', x0: 0, y0: 0, x1: canvasW, y1: canvasH }];
+    for (const loop of (selection.contours || [])) {
+        if (!loop || loop.length < 3) continue;
+        let a = 0;
+        for (let i = 0; i < loop.length; i++) {
+            const p = loop[i], q = loop[(i + 1) % loop.length];
+            a += p.x * q.y - q.x * p.y;
+        }
+        const pts = loop.map(p => ({ x: box.x + p.x, y: box.y + p.y }));
+        shapes.push({ kind: 'poly', mode: a > 0 ? 'subtract' : 'add', pts });
+    }
+    selection = { shapes, derived: false };
+    if (!ensureSelection()) {
+        selection = null;
+        setStatus('Invert left nothing selected', 'error');
+    } else {
+        setStatus(`Inverted — ${selection.count.toLocaleString()} px selected`);
+    }
+    selectionUI();
+    drawOverlay();
+    syncAntTimer();
+}
+
+// The selection as a mask SURFACE at a chosen pixel size: white ink, coverage in alpha — the same
+// reading every mask in this workbench uses. `w`×`h` is expected to be the bounding box (at 1:1, or
+// scaled by a resolution rate), because the bitmap is laid over the whole box. A lone marquee needs
+// no bitmap at all: its box IS the region, so the mask is simply full.
+function selectionMaskSurface(w, h) {
+    const c = makeBlankCanvas(w, h);
+    const ctx = c.getContext('2d');
+    if (selection.rect) {
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+    } else {
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(selBmpCanvas, 0, 0, w, h);
+    }
+    return c;
+}
+
+// PS Edit → Fill with the foreground colour, clipped to the ants the same way the brush is: the pour
+// costs the footprint's area, never the layer's. Mask ink is white with the coverage in its alpha,
+// exactly as the bucket and the brush write it, so the Color's Alpha reads back as mask coverage.
+function fillSelection() {
+    const l = getSelected();
+    if (!l) { setStatus('Select a layer first', 'error'); return; }
+    if (groupPaintBlocked()) return;            // a fill writes one layer's surface, never a set
+    if (!hasSelection() || !ensureSelection()) { setStatus('Fill — nothing selected', 'error'); return; }
+    const toMask = isMaskLayerTarget() || !isDecalTarget();
+    if (isMaskLayerTarget() && !ensureMaskLayer()) {
+        setStatus('Add an image (or set a canvas size) before painting the mask', 'error'); return;
+    }
+    const { w, h } = nativeSize(l.img);
+    const sm = selectionLayerMask(l);
+    if (!sm) { setStatus('Fill — the selection misses this layer', 'error'); return; }
+    if (!ensurePaintSurface(l)) { setStatus('Fill — could not open the paint surface', 'error'); return; }
+    detachPaintSurface(l);
+    const pctx = paintSurfaceCtx(l);
+    const [r, g, b] = paintColorRGB();
+    const ink = toMask ? `rgba(255, 255, 255, ${brushAlpha})`
+                       : `rgba(${r}, ${g}, ${b}, ${brushAlpha})`;
+    if (sm.whole) {
+        pctx.fillStyle = ink;
+        pctx.fillRect(0, 0, w, h);
+    } else {
+        if (selInkCanvas.width !== sm.w || selInkCanvas.height !== sm.h) {
+            selInkCanvas.width = sm.w; selInkCanvas.height = sm.h;
+        }
+        resetCtx(selInkCtx);
+        selInkCtx.clearRect(0, 0, sm.w, sm.h);
+        selInkCtx.fillStyle = ink;
+        selInkCtx.fillRect(0, 0, sm.w, sm.h);
+        selInkCtx.globalCompositeOperation = 'destination-in';
+        selInkCtx.drawImage(sm.cv, 0, 0);
+        selInkCtx.globalCompositeOperation = 'source-over';
+        pctx.drawImage(selInkCanvas, sm.x, sm.y);
+    }
+    markPainted(l);
+    pushHistory();
+    if (isMaskLayerTarget()) refreshMaskLayerThumb();
+    else if (toMask) refreshMaskThumb(l);
+    else refreshDecalThumb(l);
+    syncPaintUI();
+    render();
+    setStatus(`Fill — ${selection.count.toLocaleString()} px poured into ${l.name}'s ${toMask ? 'mask (coverage ' + Math.round(brushAlpha * 255) + '/255)' : 'decal'}`);
+}
+
+// PS Layer via Copy: the merged picture inside the ants becomes its own layer. The copy is the
+// canvas composite (guidance overlay excluded — it is an overlay, not content) at the selection's
+// bounding box, 1:1 in canvas pixels, and the mask is the boolean result itself, so subtracted
+// holes and intersected corners survive the lift rather than being refilled by the box.
+function layerViaCopy() {
+    if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
+    if (!hasSelection() || !ensureSelection()) { setStatus('Layer via Copy — nothing selected', 'error'); return; }
+    const b = selection.box;
+    if (b.w < 1 || b.h < 1) { setStatus('Layer via Copy — selection too small', 'error'); return; }
+    const img = makeBlankCanvas(b.w, b.h);
+    img.getContext('2d').drawImage(blendCanvas, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    const l = addSurfaceLayer({
+        pw: b.w, ph: b.h,
+        transform: {
+            cx: (b.x + b.w / 2) / canvasW,
+            cy: (b.y + b.h / 2) / canvasH,
+            w: b.w / canvasW,
+            h: b.h / canvasH,
+            rotation: 0,
+        },
+        stack: WORK_STACK,
+        name: `Copy ${b.w}×${b.h}`,
+        img,
+        // The lifted pixels ARE this layer's image, so it gets a src like any image layer: the row
+        // thumbnail, a later Generate and the .cud write-out all read the same picture the canvas shows.
+        src: surfaceDataUrl(img),
+        mask: selection.rect ? null : selectionMaskSurface(b.w, b.h),
+    });
+    if (!l) return;
+    setStatus(`Layer via Copy — ${selection.count.toLocaleString()} px of what the canvas shows lifted onto 「${l.name}」`);
+}
+
+// The selection's Generate: the same dialog a dragged rectangle opens, sized to the selection's box
+// with that box's ratio locked, plus the Pipeline Preset. Confirm builds the masked layer and sends
+// the run from there (applyDynamicModal's selection branch).
+function openSelectionGenerate() {
+    if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
+    if (!hasSelection() || !ensureSelection()) { setStatus('Generate — nothing selected', 'error'); return; }
+    const b = selection.box;
+    if (b.w < 1 || b.h < 1) { setStatus('Generate — selection too small', 'error'); return; }
+    openDynamicModal({ x: b.x, y: b.y, w: b.w, h: b.h }, { fromSelection: true });
 }
 
 // ---- gestures ----
@@ -6406,6 +6570,9 @@ viewport.addEventListener('mousedown', e => {
         if (e.target !== textEditorEl) { e.preventDefault(); commitTextEditor(); }
         return;
     }
+    // Each fresh right-press decides for itself whether it drove a gesture or asks for the menu, so a
+    // contextmenu the platform never sent cannot leave the flag armed and swallow the next click.
+    if (e.button === 2) rightGesture = false;
     const sp = toScreenCoords(e);
     const pos = screenToDoc(sp);
     // The Dynamic Layer rectangle outranks everything: the user explicitly asked for it, so the
@@ -6441,7 +6608,7 @@ viewport.addEventListener('mousedown', e => {
     // View gestures win over the tools.
     if (e.button === 1 || (keySpace && e.button === 0)) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
     if (mode === 'pan' && e.button === 0) { beginViewDrag('pan', e, sp); e.preventDefault(); return; }
-    if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
+    if (mode === 'zoom' && (e.button === 0 || e.button === 2)) { rightGesture = e.button === 2; beginViewDrag('zoom', e, sp); e.preventDefault(); return; }
     if (mode === 'rotate' && e.button === 0) { beginViewDrag('rotate', e, sp); e.preventDefault(); return; }
     // Ctrl is the Mask shortcut and it outranks everything below: while it is held the canvas
     // paints the top-level Mask layer itself, whatever is selected and whatever the toolbar shows.
@@ -6451,6 +6618,7 @@ viewport.addEventListener('mousedown', e => {
     if (e.ctrlKey && (e.button === 0 || e.button === 2)) {
         e.preventDefault();
         ctrlErase = (e.button === 2);
+        rightGesture = ctrlErase;
         updateCursorMode();
         refreshCursor();
         beginMaskStroke(pos, e.button === 2, e.button === 2 ? 'Ctrl + right — erasing the Mask layer' : 'Ctrl + left — painting the Mask layer');
@@ -6463,7 +6631,7 @@ viewport.addEventListener('mousedown', e => {
         if (e.button === 0) beginSelDrag(pos, e);
         return;
     }
-    if (mode === 'mask' && e.altKey && e.button === 2) { beginSizeDrag(e); e.preventDefault(); return; }
+    if (mode === 'mask' && e.altKey && e.button === 2) { rightGesture = true; beginSizeDrag(e); e.preventDefault(); return; }
     if (mode === 'mask' && e.altKey && e.button === 0 && (maskTool === 'brush' || maskTool === 'bucket')) { beginPick(e, pos); e.preventDefault(); return; }
     if (mode === 'mask') {
         if (e.button !== 0) return;   // only the left button paints — the right one does nothing
@@ -6536,7 +6704,20 @@ viewport.addEventListener('mousedown', e => {
     }
 });
 
-viewport.addEventListener('contextmenu', e => e.preventDefault());
+// The right button is both a gesture and the menu key, so a press that drove one must not raise the
+// other: the release that ENDS a zoom drag / Ctrl-erase / Alt-scrub is the same event that would.
+// The flag is consumed by the contextmenu that always follows such a release.
+let rightGesture = false;
+
+viewport.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    if (rightGesture) { rightGesture = false; return; }
+    if (picking || textEditingId !== null || selDrag || rectDrag || modDrag) return;
+    // The menu is the selection's verbs, so it exists exactly when a selection does — whatever tool
+    // is armed (Generate is useful from the paint tools too; PS gates nothing here on the tool).
+    if (!hasSelection() || !ensureSelection()) return;
+    openCanvasMenu(e.clientX, e.clientY);
+});
 viewport.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 
 // Pointer handling lives on the window, so strokes and transform drags keep following
@@ -7016,6 +7197,11 @@ function makeBlankCanvas(w, h) {
 // A hand-made layer: `img` is a scratch canvas rather than a decoded file, so it has a
 // `key` of null (it is not from the history) and a `fragment` of false — a Dynamic Layer is a
 // piece of this canvas, exactly like a detailer patch, and must never drive the canvas size.
+// `opts.img` / `opts.mask` hand the surface over pre-filled (Layer via Copy lifts pixels, the
+// selection's Generate carries the ants as its mask), and `opts.src` is where those pixels came
+// from — a layer built out of pixels needs a displayable src or its row would read "no image".
+// One build path, one history entry: a layer painted into after creation would owe a second undo
+// step just to arrive.
 function addSurfaceLayer(opts) {
     const { pw, ph, transform, name } = opts;
     if (!(pw >= 1 && ph >= 1)) return null;
@@ -7026,12 +7212,12 @@ function addSurfaceLayer(opts) {
     const l = {
         id: ++layerSeq,
         name: name || 'Layer',
-        src: '',
-        img: makeBlankCanvas(pw, ph),
+        src: opts.src || '',
+        img: opts.img || makeBlankCanvas(pw, ph),
         visible: true,
         transform: cloneTransform(transform),
-        mask: null,
-        maskCtx: null,
+        mask: opts.mask || null,
+        maskCtx: opts.mask ? opts.mask.getContext('2d') : null,
         maskThumbEl: null,
         decal: null,
         decalCtx: null,
@@ -7782,6 +7968,35 @@ function closeLayerMenu() {
     layerMenuLayerId = null;
 }
 
+// One item on the shared menu. Both the layer-row menu and the canvas selection menu build through
+// this, so an entry cannot end up looking or behaving differently depending on where it opened.
+function layerMenuItem(label, title, handler, disabled) {
+    const b = document.createElement('button');
+    b.className = 'layer-menu-item';
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.textContent = label;
+    b.title = title;
+    b.disabled = !!disabled;
+    b.addEventListener('click', ev => {
+        ev.stopPropagation();
+        closeLayerMenu();
+        handler();
+    });
+    ensureLayerMenu().appendChild(b);
+}
+
+// Fixed coords, clamped into the window so a menu near an edge cannot hang off-screen.
+function positionLayerMenu(clientX, clientY) {
+    const menu = ensureLayerMenu();
+    menu.classList.add('open');
+    const r = menu.getBoundingClientRect();
+    const x = Math.min(clientX, window.innerWidth - r.width - 6);
+    const y = Math.min(clientY, window.innerHeight - r.height - 6);
+    menu.style.left = Math.max(6, x) + 'px';
+    menu.style.top = Math.max(6, y) + 'px';
+}
+
 function openLayerMenu(l, clientX, clientY) {
     const menu = ensureLayerMenu();
     menu.innerHTML = '';
@@ -7948,35 +8163,14 @@ function openLayerMenu(l, clientX, clientY) {
     // does that, and a menu item for the same thing would only be a second place to look.
     if (isCudLayer(l)) {
         const link = cudDocFor(l.cud.link);
-        const cudItem = (label, title, handler, disabled) => {
-            const b = document.createElement('button');
-            b.className = 'layer-menu-item';
-            b.type = 'button';
-            b.setAttribute('role', 'menuitem');
-            b.textContent = label;
-            b.title = title;
-            b.disabled = !!disabled;
-            b.addEventListener('click', ev => {
-                ev.stopPropagation();
-                closeLayerMenu();
-                handler();
-            });
-            menu.appendChild(b);
-        };
-        cudItem('Refresh from file', link
+        layerMenuItem('Refresh from file', link
             ? `Re-read ${l.cud.name} from disk and repaint this row — the transform, mask and decal you set here stay.`
             : 'Not linked any more — Relink the row first, then this reads the file you point at.', () => { refreshCudLayerFromFile(l); }, !link);
-        cudItem('Relink…', `Point「${l.name}」at a .cud file — the row keeps its placement and paint, and takes that project's flattened picture.`,
+        layerMenuItem('Relink…', `Point「${l.name}」at a .cud file — the row keeps its placement and paint, and takes that project's flattened picture.`,
             () => { relinkCudLayer(l); });
     }
 
-    menu.classList.add('open');
-    // Clamp into the window so a row near the right or bottom edge cannot push the menu off-screen.
-    const r = menu.getBoundingClientRect();
-    const x = Math.min(clientX, window.innerWidth - r.width - 6);
-    const y = Math.min(clientY, window.innerHeight - r.height - 6);
-    menu.style.left = Math.max(6, x) + 'px';
-    menu.style.top = Math.max(6, y) + 'px';
+    positionLayerMenu(clientX, clientY);
     layerMenuLayerId = l.id;
 }
 
@@ -8011,6 +8205,27 @@ genLayerCtxToggle.addEventListener('change', () => {
     saveGenPrefs();
 });
 const genPresetSelect = document.getElementById('genPresetSelect');
+// The selection's Generate dialog offers the SAME preset list, so the two selects are one
+// preference: whichever you last picked is what both show next time.
+const dynPresetSelect = document.getElementById('dynPresetSelect');
+const dynPresetRow = document.getElementById('dynPresetRow');
+
+function pickPresetInto(sel) {
+    const id = resolveGenPresetId();
+    sel.value = id;
+    if (genPrefs.preset_id !== (id || null)) {
+        genPrefs.preset_id = id || null;
+        saveGenPrefs();
+    }
+}
+
+function onPresetPicked(sel) {
+    genPrefs.preset_id = sel.value || null;
+    saveGenPrefs();
+    // Mirror into the sibling select so the two dialogs can never show different answers.
+    const other = sel === genPresetSelect ? dynPresetSelect : genPresetSelect;
+    if (other.value !== sel.value) other.value = sel.value;
+}
 
 function genModalOpen() { return genModalEl.classList.contains('open'); }
 
@@ -8023,12 +8238,8 @@ function setGenPresets(presets, activeId) {
     // Re-resolve the selection LIVE: the user's persisted pick survives list changes, a pick
     // whose tab was deleted falls back to the active tab, and a brand-new tab becomes selectable
     // immediately — without waiting for the dialog to be reopened.
-    const resolved = resolveGenPresetId();
-    genPresetSelect.value = resolved;
-    if (genPrefs.preset_id !== (resolved || null)) {
-        genPrefs.preset_id = resolved || null;
-        saveGenPrefs();
-    }
+    pickPresetInto(genPresetSelect);
+    pickPresetInto(dynPresetSelect);
 }
 
 // The id the enum should show: the user's persisted pick while it still exists, then the host's
@@ -8041,19 +8252,19 @@ function resolveGenPresetId() {
 }
 
 function renderGenPresetOptions() {
-    genPresetSelect.innerHTML = '';
-    genPresets.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = p.name || p.id;
-        genPresetSelect.appendChild(opt);
-    });
+    for (const sel of [genPresetSelect, dynPresetSelect]) {
+        sel.innerHTML = '';
+        genPresets.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name || p.id;
+            sel.appendChild(opt);
+        });
+    }
 }
 
-genPresetSelect.addEventListener('change', () => {
-    genPrefs.preset_id = genPresetSelect.value || null;
-    saveGenPrefs();
-});
+genPresetSelect.addEventListener('change', () => onPresetPicked(genPresetSelect));
+dynPresetSelect.addEventListener('change', () => onPresetPicked(dynPresetSelect));
 
 // The layer the modal was opened for, kept so Confirm still refers to the right one even if the
 // selection changed while the dialog was up.
@@ -8085,11 +8296,7 @@ function openGenModal(layerId) {
     // only a preference — when that preset is MISSING (its tab was deleted), fall back to the
     // currently active tab and re-save it, so Confirm never sends a dangling id.
     genLayerCtxToggle.checked = genPrefs.layer_ctx;
-    genPresetSelect.value = resolveGenPresetId();
-    if (genPrefs.preset_id !== (genPresetSelect.value || null)) {
-        genPrefs.preset_id = genPresetSelect.value || null;
-        saveGenPrefs();
-    }
+    pickPresetInto(genPresetSelect);
     updateGenModalSub();
     genModalEl.classList.add('open');
     syncBrushCursor();
@@ -8105,39 +8312,48 @@ function closeGenModal() {
 function confirmGenModal() {
     const l = layers.find(x => x.id === genTargetLayerId);
     if (!l) { closeGenModal(); return; }
-    if (!l.img) { setStatus('This layer has no surface to generate into', 'error'); return; }
+    const presetId = genPresetSelect.value || null;
+    // Layer Context ON -> the composite of all layers over this layer's region (aligned to
+    // the layer's own pixel grid, so the mask stays valid); OFF -> the layer's own image.
+    const withContext = genLayerCtxToggle.checked;
+    // Close only once the run is really on its way: a refusal leaves the dialog up with the pick
+    // intact, so the user can change the preset instead of starting over.
+    if (sendLayerGenerate(l, presetId, withContext)) closeGenModal();
+}
+
+// The whole cross-window contract of a Generate run, in one place: the layer's own dialog and the
+// selection's both land here, so the two can never disagree about what the backend is sent.
+// `withContext` is a parameter rather than a read of the checkbox because the second caller has no
+// checkbox — Layer Context there is not a choice, it is the point of the command.
+function sendLayerGenerate(l, presetId, withContext) {
+    if (!l || !l.img) { setStatus('This layer has no surface to generate into', 'error'); return false; }
     // Same predicate the menu gates on, so "clickable" and "accepted" can never disagree. It only
     // refuses the Mask layer itself: an unpainted mask is the full mask (generateMaskDataUrl()
     // sends an explicit all-white PNG for it), and an image-less layer passes too —
     // layerSourceForGenerate() hands the backend noise at the layer's own resolution.
     if (!layerMaskIsMeaningful(l)) {
         setStatus(`「${l.name}」is the Mask layer itself — not a Generate target`, 'error');
-        return;
+        return false;
     }
-    if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
-    if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
-    const presetId = genPresetSelect.value || null;
-    const targetId = l.id;
-    const targetName = l.name;
+    if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return false; }
+    if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return false; }
     // Both images must be strings before they cross the window boundary.
     let image = null, mask = null;
     try {
-        // Layer Context ON -> the composite of all layers over this layer's region (aligned to
-        // the layer's own pixel grid, so the mask stays valid); OFF -> the layer's own image.
-        image = genLayerCtxToggle.checked ? layerCompositeForGenerate(l) : layerSourceForGenerate(l);
+        image = withContext ? layerCompositeForGenerate(l) : layerSourceForGenerate(l);
         mask = generateMaskDataUrl(l);
     } catch (err) {
         setStatus('Could not read that layer\'s pixels: ' + err.message, 'error');
-        return;
+        return false;
     }
-    if (!image) { setStatus('That layer has no image to send', 'error'); return; }
-    if (!mask) { setStatus('Could not build that layer\'s mask', 'error'); return; }
+    if (!image) { setStatus('That layer has no image to send', 'error'); return false; }
+    if (!mask) { setStatus('Could not build that layer\'s mask', 'error'); return false; }
     const size = nativeSize(l.img);
-    // 这一趟的 Enable Fit 在 Confirm 当场读死。它只在结果带 place 矩形时生效（Enable Mask 开 +
+    const targetId = l.id, targetName = l.name;
+    // 这一趟的 Enable Fit 在发送当场读死。它只在结果带 place 矩形时生效（Enable Mask 开 +
     // Recover Crop 关）：整幅产出本来就铺满图层，贴合是恒等操作，所以不必再读那两个开关。
     const fitPreset = genPresets.find(x => x.id === presetId);
     pendingGenFit = !!(fitPreset && fitPreset.enable_fit);
-    closeGenModal();
     // The workbench owes the host two images that are NOT the composite: this layer's source and
     // this layer's own mask. Both go out at native resolution; the backend owns the geometry.
     window.parent.postMessage({
@@ -8153,6 +8369,7 @@ function confirmGenModal() {
     }, '*');
     setActionBusy(true, 'detailer');
     setStatus(`Generating on 「${targetName}」…`);
+    return true;
 }
 
 genModalEl.addEventListener('mousedown', e => { if (e.target === genModalEl) closeGenModal(); });
@@ -8507,6 +8724,7 @@ const MAX_RATE = 16;
 let dynBox = null;             // the swept rect in canvas pixels, kept while the modal is up
 let dynLocked = true;
 let dynRatio = 1;
+let dynFromSelection = false;  // the modal raised from the selection's Generate entry, not from a dragged box
 // Limit: when on, the rate is not the user's — it is whatever the GLOBAL SETTINGS Pixels budget
 // (server config, read live from /api/config) allows over the swept rectangle. The fetched value
 // is cached per modal session; the standalone file:// rig has no server, so it falls back.
@@ -8520,6 +8738,14 @@ const dynRateInput = document.getElementById('dynRateInput');
 const dynLockBtn = document.getElementById('dynLockBtn');
 const dynRatioHint = document.getElementById('dynRatioHint');
 const dynLimitChk = document.getElementById('dynLimitChk');
+const dynTitleEl = document.getElementById('dynTitle');
+const dynSubEl = document.getElementById('dynSub');
+const dynApplyBtn = document.getElementById('dynApplyBtn');
+// The wording the markup ships with, kept so the selection mode can be taken back out of the
+// dialog verbatim instead of by retyping it.
+const DYN_TITLE_DEFAULT = dynTitleEl.textContent;
+const DYN_SUB_DEFAULT = dynSubEl.textContent;
+const DYN_APPLY_DEFAULT = dynApplyBtn.textContent;
 
 function dynamicModalOpen() { return dynamicModalEl.classList.contains('open'); }
 
@@ -8575,7 +8801,13 @@ function syncDynLockedField(source) {
 // The sweep already gave the placement; the modal only decides how many pixels the layer bakes.
 // The layer's transform is the placement box divided by the canvas, so the extra resolution
 // lands on the surface, not on the canvas — the canvas is never resized by this.
-function openDynamicModal(box) {
+// `opts.fromSelection` raises the SAME dialog for the selection's Generate entry: the box is the
+// selection's bounding rectangle, the ratio is locked solid (no unlock affordance offered), a
+// Pipeline Preset joins the fields, and Confirm also carries the selection as the new layer's mask
+// and runs the detailer on it. One dialog, one set of geometry maths — the two entries cannot drift.
+function openDynamicModal(box, opts) {
+    const fromSel = !!(opts && opts.fromSelection);
+    dynFromSelection = fromSel;
     dynBox = box;
     dynWInput.value = String(box.w);
     dynHInput.value = String(box.h);
@@ -8583,6 +8815,14 @@ function openDynamicModal(box) {
     dynRatio = box.w / box.h;
     dynLocked = true;
     dynLockBtn.classList.add('locked');
+    // Locked means locked: offering the unlock and then ignoring it would be a lie of a control.
+    dynLockBtn.style.display = fromSel ? 'none' : '';
+    dynPresetRow.hidden = !fromSel;
+    dynTitleEl.textContent = fromSel ? 'Generate from Selection' : DYN_TITLE_DEFAULT;
+    dynSubEl.textContent = fromSel
+        ? 'A blank smart layer over the selection, with the selection as its own mask. WIDTH : HEIGHT stays locked to the selection box; Confirm runs the Detailer on the canvas underneath.'
+        : DYN_SUB_DEFAULT;
+    dynApplyBtn.textContent = fromSel ? 'Generate' : DYN_APPLY_DEFAULT;
     dynLimitChk.checked = dynaLimitOn;
     dynRateInput.disabled = dynaLimitOn;
     if (dynaLimitOn) { refreshDynaPixels(); applyDynaLimit(); }
@@ -8590,14 +8830,15 @@ function openDynamicModal(box) {
     dynamicModalEl.classList.add('open');
     syncBrushCursor();
     // The rate field takes focus only while it is editable; under Limit it is read-only.
-    const focusEl = dynaLimitOn ? dynWInput : dynRateInput;
+    const focusEl = dynaLimitOn ? dynWInput : (fromSel ? dynPresetSelect : dynRateInput);
     focusEl.focus();
-    focusEl.select();
+    if (focusEl.select) focusEl.select();
 }
 
 function closeDynamicModal() {
     dynamicModalEl.classList.remove('open');
     dynBox = null;
+    dynFromSelection = false;
     syncBrushCursor();
     refreshCursor();
 }
@@ -8605,11 +8846,20 @@ function closeDynamicModal() {
 function applyDynamicModal() {
     const box = dynBox;
     if (!box) { closeDynamicModal(); return; }
+    const fromSel = dynFromSelection;
+    const presetId = dynPresetSelect.value || null;
     const rate = Math.max(0.01, Math.min(MAX_RATE, Number(dynRateInput.value) || 1));
     // The fields are the final word: the rate only seeds them, so a user who overrides W or H
     // gets exactly what they typed rather than the rectangle times the rate.
     const pw = Math.max(1, Math.round(Number(dynWInput.value) || 0));
     const ph = Math.max(1, Math.round(Number(dynHInput.value) || 0));
+    // The dialog never lets the selection change while it is up (its backdrop eats the pointer),
+    // but say so out loud rather than bake a mask from whatever the geometry turned into.
+    if (fromSel && (!hasSelection() || !ensureSelection())) {
+        closeDynamicModal();
+        setStatus('Selection is gone — nothing to generate into', 'error');
+        return;
+    }
     closeDynamicModal();
     const l = addSurfaceLayer({
         pw, ph,
@@ -8620,12 +8870,21 @@ function applyDynamicModal() {
             h: box.h / canvasH,
             rotation: 0,
         },
-        stack: rectTargetStack,
-        name: `${rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic'} ${pw}×${ph}`,
+        stack: fromSel ? WORK_STACK : rectTargetStack,
+        name: `${fromSel ? 'Selection' : rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic'} ${pw}×${ph}`,
+        // The layer's box IS the selection's bounding rectangle, so the mask is the selection's own
+        // doc-space bitmap scaled into it — the very region painting would be clipped to.
+        mask: fromSel ? selectionMaskSurface(pw, ph) : null,
     });
-    if (l) setStatus(`${rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic Layer'} added — `
-        + `${pw} × ${ph} over a ${box.w} × ${box.h} canvas area (rate ${rate})`);
-    render();
+    if (!l) return;
+    if (!fromSel) {
+        setStatus(`${rectTargetStack === GUIDANCE_STACK ? 'Guidance' : 'Dynamic Layer'} added — `
+            + `${pw} × ${ph} over a ${box.w} × ${box.h} canvas area (rate ${rate})`);
+        render();
+        return;
+    }
+    setStatus(`Selection layer added — ${pw} × ${ph}, masked to ${selection.count.toLocaleString()} px, generating…`);
+    sendLayerGenerate(l, presetId, true);
 }
 
 document.getElementById('dynCancelBtn').addEventListener('click', closeDynamicModal);
