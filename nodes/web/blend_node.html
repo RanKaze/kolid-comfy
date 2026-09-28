@@ -41,6 +41,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .doc-tab:hover { background: rgba(255,255,255,0.11); }
 .doc-tab.active { background: rgba(10,132,255,0.28); border-color: rgba(10,132,255,0.55); color: #fff; }
 .doc-tab .dt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 场景 tab 的立方体:中性墨色,靠明度分身份,不染强调蓝。 */
+.doc-tab .dt-kind { flex: 0 0 auto; display: inline-flex; align-items: center; color: rgba(255,255,255,0.55); }
+.doc-tab.active .dt-kind { color: rgba(255,255,255,0.85); }
 .doc-tab .dt-dirty { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
     background: #fff; display: none; }
 .doc-tab.dirty .dt-dirty { display: block; }
@@ -235,6 +238,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.cud { color: #8be3b6; }
 .layer-type-badge.cud.unlinked { color: #ff9d5c; }
 .layer-type-badge.text { color: #d9b8ff; }
+.layer-type-badge.model { color: #7ee0d0; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -509,6 +513,38 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-row label { min-width: 46px; font-size: 11px; }
 .control-row input[type="range"] { flex: 1; width: auto; }
 .control-row span { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: rgba(255,255,255,0.7); }
+/* 侧栏里唯一用数字框的地方就是 3D 的 Inspector,给它一套和 #toolbar 文本框同色的深色皮肤
+   (浏览器默认的数字框在深色底上是白底黑字)。 */
+.control-row input[type="number"], .control-row input[type="text"] { flex: 1; min-width: 0; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 3px 6px; color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; outline: none; color-scheme: dark; }
+.control-row input[type="number"]:focus, .control-row input[type="text"]:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
+
+/* ==================== 3D 图层 ==================== */
+/* 两块视口同居 #canvasArea:2D 那块和 3D 那块靠 display 一进一出(Scene3D.enter/exit),
+   底部同样让出 132px 给动作条,所以切 tab 时画面位置不跳。 */
+#sceneViewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; display: none; }
+#sceneCanvas { display: block; width: 100%; height: 100%; }
+/* 右栏在 3D tab 期间整体换掉:#panelScroll / #maskDock / #layersDock 隐去,这一栏顶上。
+   小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多
+   出 Hierarchy 的行本身、Inspector 的分组标题,以及来源说明行。 */
+#scenePanel { display: none; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding-right: 6px; }
+#sceneScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
+.s3d-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 230px; min-height: 44px; }
+.s3d-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
+.s3d-row:hover { background: rgba(255,255,255,0.08); }
+.s3d-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
+.s3d-kind { display: flex; align-items: center; color: rgba(255,255,255,0.5); flex-shrink: 0; }
+.s3d-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.s3d-empty { font-size: 11px; color: rgba(255,255,255,0.35); padding: 6px 2px; }
+.s3d-note { font-size: 10.5px; color: rgba(255,255,255,0.45); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s3d-note.warn { color: #ff9f0a; }
+.s3d-vec { display: flex; flex-direction: column; gap: 2px; }
+.s3d-vec-cap { font-size: 10.5px; color: rgba(255,255,255,0.45); }
+/* Position/Rotation/Scale 三轴一行,标签只留 X Y Z —— 46px 的字段名留给上面那些单词行。 */
+.s3d-vec-row label { min-width: 8px; text-align: center; font-size: 10px; color: rgba(255,255,255,0.45); }
+.s3d-dock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
+.s3d-dock .mini-group { justify-content: flex-start; }
+/* Hierarchy 的 Add 菜单在中栏上方,所以它向下展开(和 Layers  dock 那枚向上的 add-menu 相反)。 */
+.s3d-menu { top: calc(100% + 6px); bottom: auto; left: auto; right: 0; width: 216px; }
 
 #brushCursor { position: fixed; pointer-events: none; border-radius: 50%; z-index: 100; display: none; transform: translate(-50%,-50%); box-sizing: border-box; border: 1.5px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3); }
 #brushCursor.erase { border: 1.5px dashed rgba(255,96,96,0.95); }
@@ -708,6 +744,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <!-- Font files the user brings into the local library. The bytes land in IndexedDB, never in
              the .cud, so this is the only path a font can enter the workbench. -->
         <input type="file" id="textFontFile" accept=".ttf,.otf,.woff,.woff2,.ttc" multiple hidden>
+        <!-- 3D 图层的模型选择框:浏览器自带的就够用(模型只读字节,不需要写回)。 -->
+        <input type="file" id="modelFile" accept=".fbx,.glb,.gltf,.obj" multiple hidden>
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
@@ -716,6 +754,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <textarea id="textEditor" hidden spellcheck="false" wrap="soft"
                       title="Type the text — Shift+Enter adds a new line, Enter commits, Esc cancels"></textarea>
         </div>
+        <!-- 3D tab 的视口:占位和 #viewport 一模一样,只是换一张 GL canvas。
+             进出 3D 靠 CSS 显示/隐藏互换,2D 那三层 canvas 从不参与。 -->
+        <div id="sceneViewport"><canvas id="sceneCanvas"></canvas></div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
         <div id="brushCursor"></div>
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
@@ -898,6 +939,97 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-hint" id="viewReadout">100% · 0°</div>
             </div>
         </div><!-- /panelScroll -->
+        <!-- 3D tab 期间整栏换成这一份:Hierarchy / Inspector 用和中栏同一套控件词汇
+           (.panel-section / .panel-head / .panel-label / .mini-group / .mini-btn / .control-row),
+           长说明一律进 title。#panelScroll、#maskDock、#layersDock 在这期间隐去。 -->
+        <div id="scenePanel">
+            <div id="sceneScroll">
+                <div class="panel-section">
+                    <div class="panel-head">
+                        <div class="panel-label" title="Scene — this 3D layer's own view. Hold the right mouse button to look around and fly with W A S D Q E, like Unity's Scene view.">Scene</div>
+                        <div class="mini-group">
+                            <button class="mini-btn key-btn" id="sceneMoveBtn" title="Move (W) — drag the selected object along the gizmo's arrows."><span class="tool-key">W</span></button>
+                            <button class="mini-btn key-btn" id="sceneRotateBtn" title="Rotate (E) — drag the selected object around the gizmo's rings."><span class="tool-key">E</span></button>
+                            <button class="mini-btn key-btn" id="sceneScaleBtn" title="Scale (R) — drag the selected object along the gizmo's handles."><span class="tool-key">R</span></button>
+                            <button class="mini-btn key-btn" id="sceneFocusBtn" title="Focus (F) — fly the view onto the selected object."><span class="tool-key">F</span></button>
+                        </div>
+                    </div>
+                    <div class="control-row">
+                        <label>Pivot</label>
+                        <div class="mini-group">
+                            <button class="mini-btn" id="sceneLocalBtn" title="Local — the gizmo's axes follow the object's own rotation.">Local</button>
+                            <button class="mini-btn" id="sceneGlobalBtn" title="Global — the gizmo's axes are the world's X Y Z.">Global</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="panel-section">
+                    <div class="panel-head">
+                        <div class="panel-label" title="Hierarchy — every object in this scene: models, primitives, lights and cameras. Click a row to select it, double-click the name to rename, and the eye keeps it out of the render without deleting it.">Hierarchy</div>
+                        <div class="mini-group">
+                            <button class="mini-btn ico-btn" id="sceneDeleteBtn" title="Remove the selected object from the scene">&times;</button>
+                            <button class="mini-btn" id="sceneAddBtn" aria-haspopup="menu" aria-expanded="false"
+                                    title="Add to the scene: a model from disk, a primitive, a light or a camera">Add<span class="add-caret">&#9662;</span></button>
+                            <!-- 挂在栏顶的小节上,所以往下展开(和 Layers dock 那枚向上的 add-menu 相反)。 -->
+                            <div class="io-menu s3d-menu" id="sceneAddMenu" role="menu" hidden>
+                                <button class="io-menu-item" id="s3dAddModel" role="menuitem"
+                                        title="Pick a .fbx / .glb / .gltf / .obj — it is added at the origin and fitted to a sane size.">
+                                    <span class="io-menu-title">Model from disk</span>
+                                    <span class="io-menu-sub">FBX, glTF binary/text and Wavefront OBJ.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddCube" role="menuitem"
+                                        title="A one-metre cube at the origin — the default thing to check lighting against.">
+                                    <span class="io-menu-title">Cube</span>
+                                    <span class="io-menu-sub">A box you can recolour, scale and light.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddSphere" role="menuitem"
+                                        title="A one-metre sphere at the origin.">
+                                    <span class="io-menu-title">Sphere</span>
+                                    <span class="io-menu-sub">24 segments — smooth enough to judge a material.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddCylinder" role="menuitem"
+                                        title="A one-metre cylinder at the origin.">
+                                    <span class="io-menu-title">Cylinder</span>
+                                    <span class="io-menu-sub">Standing on its circular end.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddPlane" role="menuitem"
+                                        title="A one-metre plane — it lies flat, so it takes a shadow like a floor.">
+                                    <span class="io-menu-title">Plane</span>
+                                    <span class="io-menu-sub">One-sided; it faces up at rest.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddDir" role="menuitem"
+                                        title="A directional light — parallel rays, like the sun. The scene already starts with one.">
+                                    <span class="io-menu-title">Directional Light</span>
+                                    <span class="io-menu-sub">Infinite parallel rays from its rotation.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddPoint" role="menuitem"
+                                        title="A point light — radiates from its position out to a range you set.">
+                                    <span class="io-menu-title">Point Light</span>
+                                    <span class="io-menu-sub">Falls off from its position to a range.</span>
+                                </button>
+                                <button class="io-menu-item" id="s3dAddCam" role="menuitem"
+                                        title="A camera object. Select it and Render to Layer shoots from it instead of from where you are looking.">
+                                    <span class="io-menu-title">Camera</span>
+                                    <span class="io-menu-sub">A shot to compose: Render to Layer uses it while selected.</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="s3d-list" id="sceneHierarchy"></div>
+                </div>
+                <div class="panel-section">
+                    <div class="panel-head">
+                        <div class="panel-label" title="Inspector — the selected object's numbers. With nothing selected this shows the scene's Environment instead: ambient light and the ground grid.">Inspector</div>
+                    </div>
+                    <div id="sceneInspectorBody"></div>
+                </div>
+            </div>
+            <div class="s3d-dock">
+                <div class="mini-group">
+                    <button class="mini-btn" id="sceneImportBtn" title="Import a .fbx / .glb / .gltf / .obj into this scene — dropping files anywhere on the page lands here too">Import Model…</button>
+                    <button class="mini-btn" id="sceneBakeBtn" title="Render to Layer — paints what this view sees (or what the selected Camera object sees) into the 3D layer's pixels, at the 2D canvas's resolution">Render to Layer</button>
+                </div>
+            </div>
+        </div>
         <!-- The pure Mask layer has its own dock: it is a data channel, not a member of either
              stack, so it belongs to neither list. One pinned row, no Add, no dragging. -->
         <div class="panel-section" id="maskDock">
@@ -972,6 +1104,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
                             <span class="io-menu-title">Cud Project</span>
                             <span class="io-menu-sub">Another .cud as one linked layer that follows its file.</span>
+                        </button>
+                        <button class="io-menu-item" id="add3DLayerBtn" role="menuitem"
+                                title="A scene of your own: models, lights and a camera you fly around Unity-style. The row keeps the picture you Render to Layer, and its jump button opens the scene again as a tab.">
+                            <span class="io-menu-title">3D Layer</span>
+                            <span class="io-menu-sub">A 3D scene you bake into this row's pixels.</span>
                         </button>
                         <button class="io-menu-item" id="addRasterToggleBtn" role="menuitemcheckbox" aria-checked="false"
                                 title="When on, images added from here on — dropped files, Import picks and history injections — become raster layers: their buffer is the canvas, 1:1, and every transform resamples the pixels in place. One-way; rasterize a smart layer from its right-click menu instead.">
@@ -1141,6 +1278,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <!-- 3D 图层的引擎: three.js + FBX/glTF/OBJ 加载器 + TransformControls 打成的一个离线包,
      挂成 window.K3D。页面不碰 CDN, 静态文件走 /js/ 路由 (snapshot_sampler_node.py)。 -->
 <script src="js/3d-bundle.js"></script>
+<!-- 3D 图层自己的一份模块,一类一文件:core 是记录(对象/材质/灯)与 three.js 的镜像,
+     view 是视口(渲染器、Unity 式飞行相机、gizmo、烘焙),panel 是右栏(Hierarchy/Inspector/把手)。
+     它们在全局词法挂一个 Scene3D,内联脚本只在运行时调它,不在加载时。 -->
+<script src="js/scene3d_core.js"></script>
+<script src="js/scene3d_view.js"></script>
+<script src="js/scene3d_panel.js"></script>
 
 <script>
 const canvasArea = document.getElementById('canvasArea');
@@ -1520,6 +1663,12 @@ function sizeCanvasElement() {
 // definition) is a destructive resample of that buffer — the "smart object" layers keep their
 // original pixels and map them through `transform`, raster layers have nothing left to preserve.
 function isRasterLayer(l) { return !!l && !!l.raster && !l.isMaskLayer; }
+
+// ==================== 3D 图层 ====================
+// 在 2D 这边,3D 图层就是一张正常的智能图层:它的像素是场景烘出来的图,变换、mask、特效链一律照旧。
+// `three` 只负责一个身份 ——「这层的像素背后有一个 3D 场景可以回去改」;`sceneUid` 指向 documents[]
+// 里那枚场景 tab。合成路径不看这两个字段。
+function is3DLayer(l) { return !!l && !!l.three && !l.isMaskLayer; }
 
 // Draws `source` through `tr` (canvas-relative transform) into a w×h canvas.
 function renderTransformedSurface(source, tr, w, h) {
@@ -4244,7 +4393,14 @@ function transformChangedSince(start, l) {
         || Math.abs(t.rotation - start.rotation) > 1e-9;
 }
 
+// 3D tab 的真相是那份场景记录,不是图层栈:undo、tab 切换和烘焙都只搬它。2D 那一套一步都不走,
+// 免得把「上一个文档的 layers」当成这个 tab 的内容去恢复。
 function snapshotState() {
+    if (isSceneDoc(activeDoc)) return Scene3D.snapshot();
+    return snapshot2D();
+}
+
+function snapshot2D() {
     return {
         canvasW, canvasH, canvasCustom,
         selectedId,
@@ -4255,6 +4411,10 @@ function snapshotState() {
             visible: l.visible,
             fragment: !!l.fragment,
             raster: !!l.raster,
+            // 3D 图层的身份和它那块场景 tab 的 uid。合成不看它们;它们只保证一次 undo、一次 tab
+            // 往返之后,行上的跳转按钮还认得原来那个场景。
+            three: !!l.three,
+            sceneUid: l.sceneUid || null,
             stack: stackOf(l),
             // Shared by reference, never copied: a cud descriptor is immutable (a relink swaps the
             // whole object), so an undo step pointing at the old one cannot drift.
@@ -4281,6 +4441,15 @@ function snapshotState() {
 // canvas core.
 function restoreState(s, opts) {
     const asDocument = !!(opts && opts.document);
+    // 一份带 `scene` 的记录就是整个 3D tab:进出视口、换记录一律交给 Scene3D,2D 那套一步都不走
+    // ——不然会把「上一个文档的 layers」当成这个 tab 的内容恢复出来。
+    if (s && s.scene) {
+        if (textEditingId !== null) commitTextEditor();
+        if (Scene3D.active) Scene3D.loadRec(s.scene);
+        else Scene3D.enter(activeDoc, s.scene);
+        return;
+    }
+    if (Scene3D.active) Scene3D.exit();
     // A replay rewrites every live layer object, so an open text editor would commit its draft
     // into a layer that no longer exists. Land the edit first, then replay.
     if (textEditingId !== null) commitTextEditor();
@@ -4300,6 +4469,8 @@ function restoreState(s, opts) {
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
+        three: !!ls.three,
+        sceneUid: ls.sceneUid || null,
         // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
         // simply means every entry is a working layer.
         stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
@@ -4493,6 +4664,11 @@ function cudJumpSvg() {
 // handles, raster = a 2×2 pixel checker (the layer's pixels are baked 1:1 to the canvas), cud =
 // two sheets stacked (this layer is another project's flattened picture), text = a serif T.
 function layerTypeBadgeSvg(l) {
+    if (is3DLayer(l)) {
+        // 一个线框立方体:和 Hierarchy 里模型那枚图标同一个画法,只是 badge 的 10×10 视野。
+        return '<svg viewBox="0 0 10 10"><path d="M5 1.2 8.8 3.1v3.8L5 8.8 1.2 6.9V3.1z" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+            + '<path d="M5 5.05v3.75M1.2 3.1 5 5.05l3.8-1.95" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
+    }
     if (isCudLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="3.4" y="1.2" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/>'
             + '<path d="M6.6 8.8H2.1A1 1 0 0 1 1.1 7.8V3.3" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
@@ -4738,11 +4914,14 @@ function renderStackList(listEl, stack) {
         const badge = document.createElement('span');
         const linked = cudLayerLinked(l);
         badge.className = 'layer-type-badge '
-            + (isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
+            + (is3DLayer(l) ? 'model'
+                : isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
                 : isTextLayer(l) ? 'text'
                 : isRasterLayer(l) ? 'raster' : 'smart');
         badge.innerHTML = layerTypeBadgeSvg(l);
-        badge.title = isCudLayer(l)
+        badge.title = is3DLayer(l)
+            ? `3D layer — its picture was baked from a scene; the jump button opens that scene as a tab`
+            : isCudLayer(l)
             ? (linked
                 ? `Cud layer — a flattened copy of「${l.cud.name}」, repainted whenever that file is saved`
                 : `Cud layer — its picture is a flattened copy of「${l.cud.name}」, but the link did not survive the page reload. The pixels are this file's own; right-click the row to Relink.`)
@@ -4799,7 +4978,8 @@ function renderStackList(listEl, stack) {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
-        name.textContent = l.name + (isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
+        name.textContent = l.name + (is3DLayer(l) ? ' · 3D'
+            : isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
             : isTextLayer(l) ? ' · text' : isRasterLayer(l) ? ' · raster' : '')
             + (layerTakesEffects(l) && l.effects && l.effects.length ? ' · fx' : '');
         name.title = 'Double-click to rename';
@@ -4811,18 +4991,23 @@ function renderStackList(listEl, stack) {
         // Jump on a cud row: the source project opens as a tab of its own (or focuses the one that is
         // already open). This is the deliberate navigation entry — the name's double-click stays the
         // rename it has always been. No link, no jump: the row says so in its tooltip instead.
+        // A 3D row uses the very same button for its scene tab: one navigation idiom, not two.
         let jump = null;
-        if (isCudLayer(l)) {
+        if (isCudLayer(l) || is3DLayer(l)) {
+            const three = is3DLayer(l);
             jump = document.createElement('button');
             jump.className = 'icon-btn';
             jump.innerHTML = cudJumpSvg();
-            jump.disabled = !linked;
-            jump.title = linked
-                ? `Open「${l.cud.name}」as a project tab`
-                : 'Not linked any more — right-click the row to Relink';
+            jump.disabled = !three && !linked;
+            jump.title = three
+                ? `Open the 3D scene behind「${l.name}」as a tab`
+                : linked
+                    ? `Open「${l.cud.name}」as a project tab`
+                    : 'Not linked any more — right-click the row to Relink';
             jump.addEventListener('click', ev => {
                 ev.stopPropagation();
-                openLinkedCudDocument(l);
+                if (three) open3DSceneDocument(l);
+                else openLinkedCudDocument(l);
             });
         }
 
@@ -7789,6 +7974,7 @@ const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
 const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
 const addCudLayerBtn = document.getElementById('addCudLayerBtn');
 const addCudGuidanceBtn = document.getElementById('addCudGuidanceBtn');
+const add3DLayerBtn = document.getElementById('add3DLayerBtn');
 const ADD_MENUS = {
     [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
     [GUIDANCE_STACK]: { btn: addGuidanceBtn, menu: addGuidanceMenu },
@@ -7828,6 +8014,7 @@ addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefau
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
 addCudGuidanceBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(GUIDANCE_STACK); });
+add3DLayerBtn.addEventListener('click', () => { closeAddMenu(); add3DLayer(); });
 
 // A drop on the list ITSELF (below the last row, or on the empty hint) means "go to the bottom of
 // this stack". Rows stop propagation, so this only ever sees the gaps — and it is the only way into
@@ -8055,6 +8242,9 @@ function addSurfaceLayer(opts) {
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
+        // 3D 图层的身份由 add3DLayer 从外面交进来:同一条建层路、同一条 undo。
+        three: !!opts.three,
+        sceneUid: opts.sceneUid || null,
     };
     insertAtStackTop(l);            // top of its own stack, never above the guidance block
     selectedId = l.id;
@@ -9921,6 +10111,9 @@ window.addEventListener('keydown', e => {
         else if (e.key === 'Enter') { e.preventDefault(); applyDynamicModal(); }
         return;
     }
+    // 3D tab 开着的时候按键先给场景:B 在这里不是画笔、E 不是橡皮,而是把手与飞行;同名不同事,
+    // 所以字母一律不许漏到 2D 的工具带上。Ctrl/Meta 的和弦(撤销、存档)它自己放行,仍归页面。
+    if (Scene3D.active && Scene3D.onKeyDown(e)) { e.preventDefault(); return; }
     // Enter / Esc on a border-drag mode: apply or rewind. These outrank the generic tool-exit
     // handling below because both modes strand a live preview that generic setMode('none')
     // would neither commit nor roll back.
@@ -10102,6 +10295,8 @@ window.addEventListener('keydown', e => {
 });
 
 window.addEventListener('keyup', e => {
+    // 松手也要报给场景:飞行是靠 keys 集合积分的,漏一次 keyup 就会一直往前飘。
+    if (Scene3D.active) Scene3D.onKeyUp(e);
     if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
     if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
     if (e.key === 'Shift') { keyShift = false; refreshCursor(); return; }
@@ -10250,13 +10445,21 @@ function blankMaskLayer() {
 }
 
 // A tab context is a history snapshot widened with everything else a document owns.
+// 场景 tab 例外:它的全部所有就是那份记录,画布、图层、工具设置一概不属于它。
 function captureContext() {
-    return Object.assign(snapshotState(), {
+    if (isSceneDoc(activeDoc)) return Scene3D.snapshot();
+    return capture2D();
+}
+
+function capture2D() {
+    return Object.assign(snapshot2D(), {
         maskLayer, mode, paintTarget,
         view: Object.assign({}, view),
         tools: captureCudTools(),
     });
 }
+
+function isSceneDoc(entry) { return !!entry && entry.kind === 'scene'; }
 
 function blankContext() {
     const tools = captureCudTools();
@@ -10282,6 +10485,14 @@ function renderDocTabs() {
             + (entry.dirty ? ' · unsaved changes' : '');
         const name = document.createElement('span');
         name.className = 'dt-name'; name.textContent = entry.name;
+        if (isSceneDoc(entry)) {
+            // 场景 tab 长得和工程 tab 一样,只是名字前多一枚立方体 —— 一眼分得清这是 3D 那块。
+            const kind = document.createElement('span');
+            kind.className = 'dt-kind';
+            kind.innerHTML = '<svg viewBox="0 0 10 10" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M5 1.2 8.8 3.1v3.8L5 8.8 1.2 6.9V3.1z"/><path d="M5 5.05v3.75M1.2 3.1 5 5.05l3.8-1.95"/></svg>';
+            kind.title = '3D scene tab';
+            tab.appendChild(kind);
+        }
         const dot = document.createElement('span');
         dot.className = 'dt-dirty'; dot.title = 'Unsaved changes';
         const close = document.createElement('button');
@@ -10295,7 +10506,10 @@ function renderDocTabs() {
     docTabsEl.appendChild(docNewBtn);
 }
 
-function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || textEditingId !== null || modalOpen(); }
+function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || textEditingId !== null || modalOpen()
+    // 3D tab 里:按住右键飞视角、或正拖着把手,都算一个未完的手势 —— 这时候切 tab 会把结果落到
+    // 别的文档上。
+    || (Scene3D.active && Scene3D.busy()); }
 
 // A gesture mid-flight owns the globals it is working on; swapping the document under it would
 // hand its result to the wrong project.
@@ -10338,9 +10552,13 @@ function activateDocument(entry) {
     return true;
 }
 
-function createDocument(name, doc, ctx, activate) {
+function createDocument(name, doc, ctx, activate, opts) {
+    const o = opts || {};
     const entry = { uid: ++docSeq, name: name || 'Untitled', doc: doc || null, ctx: ctx || blankContext(),
-        undo: [], redo: [], lastActionKey: null, dirty: false };
+        undo: [], redo: [], lastActionKey: null, dirty: false,
+        // `kind: 'scene'` 的这一枚是 3D 图层的场景 tab:它的全部内容是 ctx.scene,`hostUid` 记着
+        // 它是从哪个工程跳过来的(烘焙的像素要交回那边)。
+        kind: o.kind || null, hostUid: o.hostUid || null };
     documents.push(entry);
     if (activate) activateDocument(entry);
     else renderDocTabs();
@@ -10372,6 +10590,9 @@ function closeDocument(uid) {
 function dropDocument(entry) {
     const at = documents.findIndex(d => d === entry);
     if (at < 0) return;
+    // 场景 tab 关了,它带进来的那些模型字节就没有第二处引用了 —— 模板缓存和原始字节一起放手,
+    // 不然每开一次 3D 就漏一份模型进内存。
+    if (isSceneDoc(entry)) releaseSceneAssets(entry);
     const wasActive = entry === activeDoc;
     documents.splice(at, 1);
     if (wasActive) activeDoc = null;
@@ -10433,7 +10654,9 @@ function discardAndClose() {
 // deliberately NOT dirty — the view is saved with the file, but prompting over a look around only
 // trains the user to click "Don't save".
 function markDocumentDirty() {
-    if (docSwapping || !activeDoc || activeDoc.dirty) return;
+    // 场景 tab 永远不脏:.cud 还不会存 3D 记录,给了脏点就等于一句「Save」的谎。它的改动照样能
+    // Ctrl+Z 回去,关 tab 时也直接关 —— 烘进图层的那张像素才是留得下来的东西。
+    if (docSwapping || isSceneDoc(activeDoc) || !activeDoc || activeDoc.dirty) return;
     activeDoc.dirty = true;
     renderDocTabs();
 }
@@ -10441,6 +10664,100 @@ function markDocumentClean() {
     if (!activeDoc || !activeDoc.dirty) return;
     activeDoc.dirty = false;
     renderDocTabs();
+}
+
+// ==================== 3D 图层 ====================
+// 2D 这边只管三件事:这层是 3D 的(`three` + `sceneUid`)、行上的跳转按钮开哪一枚 tab、以及
+// 「Render to Layer」把烘出来的像素交回宿主文档那一行。场景本身(记录、three.js、右栏)全在
+// js/scene3d_core.js / _view.js / _panel.js 里,这一节只是两个世界之间的那道门。
+//
+// 一个 3D 图层 = documents[] 里一枚 `kind: 'scene'` 的 tab:自己的 undo 分支、自己的名字、关掉
+// 就没了。它不是工程文档的缩略图,所以永远不与 .cud 抢一条 Save 的路。
+
+// 建层走 addSurfaceLayer 那一条路(一张画布大小、带 src 的面):图层的 img 一旦为 null,
+// nativeSize 与行渲染里那些「总有一张图」的假设就会踩空。
+function add3DLayer() {
+    if (!Scene3D.available) { setStatus('The 3D engine (js/3d-bundle.js) did not load', 'error'); return null; }
+    if (!canvasW || !canvasH) { setStatus('Set a canvas size before adding a 3D layer', 'error'); return null; }
+    const name = `3D Layer ${stackLayers(WORK_STACK).length + 1}`;
+    const entry = createDocument(name, null, { scene: Scene3D.blankRecord(name) }, false,
+        { kind: 'scene', hostUid: activeDoc ? activeDoc.uid : null });
+    const l = addSurfaceLayer({
+        pw: canvasW, ph: canvasH,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        name, three: true, sceneUid: entry.uid,
+    });
+    if (!l) { dropDocument(entry); return null; }
+    open3DSceneDocument(l);
+    return l;
+}
+
+// 跳转:和 cud 那枚按钮同一个分寸 —— 已经在这一枚 tab 上就什么也不做,否则正常走 tab 切换的闸门。
+function open3DSceneDocument(l) {
+    if (!is3DLayer(l)) return false;
+    const at = documents.findIndex(d => d.uid === l.sceneUid);
+    if (at < 0) { setStatus(`「${l.name}」has no 3D tab — its scene was closed`, 'error'); return false; }
+    if (documents[at] === activeDoc) return true;
+    if (!switchDocument(l.sceneUid)) return false;
+    setStatus('3D scene — hold the right mouse button and fly with W A S D Q E');
+    return true;
+}
+
+// 烘给谁:场景 tab 自己不认识像素,它只交出 GL 画布。宿主那一行按 `sceneUid` 反查 —— 3D tab
+// 开着的时候宿主的 ctx 早已收进 documents[],所以这里查的是那份存好的记录,而不是全局。
+function sceneHostRow(entry) {
+    for (const d of documents) {
+        if (d === entry || !d.ctx || !Array.isArray(d.ctx.layers)) continue;
+        const row = d.ctx.layers.find(r => r.sceneUid === entry.uid);
+        if (row) return { doc: d, row };
+    }
+    return null;
+}
+
+function bake3DLayer() {
+    if (!Scene3D.active || !Scene3D.entry) return false;
+    const host = sceneHostRow(Scene3D.entry);
+    if (!host) { setStatus('This scene has no 3D layer to render into', 'error'); return false; }
+    const W = Math.round(host.doc.ctx.canvasW), H = Math.round(host.doc.ctx.canvasH);
+    let canvas;
+    try {
+        canvas = Scene3D.captureCanvas(W, H);
+    } catch (err) {
+        setStatus(`Could not render the scene: ${err.message || err}`, 'error');
+        return false;
+    }
+    canvasToLayerRow(host, canvas);
+    setStatus(`Rendered to「${host.row.name}」at ${W} × ${H}`, 'success');
+    return true;
+}
+
+// 写像素只写记录,不重画 2D:3D tab 开着的时候视口本就是藏起来的,回到宿主 tab 时 restoreState
+// 自然按新记录重画。宿主文档要在这里标脏(它才是被改了像素的那一枚),还要把它 undo 栈的顶换掉
+// —— 那条不变量是「栈顶就是现在」,而它的旧顶记的还是烘之前那张图。
+function canvasToLayerRow(host, canvas) {
+    const src = canvas.toDataURL('image/png');
+    host.row.img = canvas;
+    host.row.src = src;
+    // 全局此刻往往正拿着宿主的活图层对象(3D tab 多半就是从它跳过来的),一并同步,免得两份各写各的。
+    const live = getLayer(host.row.id);
+    if (live) { live.img = canvas; live.src = src; }
+    if (!host.doc.dirty) { host.doc.dirty = true; renderDocTabs(); }
+    const top = host.doc.undo;
+    if (Array.isArray(top) && top.length) top[top.length - 1] = host.doc.ctx;
+}
+
+// 场景 tab 关了把它带进来的模型字节放手:每张模型只被一个场景 tab 拥有(add3DLayer 一律新建),
+// 所以这里删得干净。正在显示的那一枚还要连 live 记录一起查,它可能比存好的 ctx 新。
+function releaseSceneAssets(entry) {
+    const recs = [entry.ctx && entry.ctx.scene, Scene3D.entry === entry ? Scene3D.rec : null];
+    for (const rec of recs) {
+        for (const o of (rec && rec.objects) || []) {
+            const key = o.model && o.model.assetKey;
+            if (!key) continue;
+            Scene3D.models.delete(key);
+            Scene3D.dropTemplate(key);
+        }
+    }
 }
 
 // ---- where a file dialog comes from ----
@@ -10780,6 +11097,9 @@ async function saveCudAs() {
 // Save As when there is none — which is exactly how Photoshop behaves. With a server document there
 // is no dialog at all on this path, which was the point of moving the picker behind /api/io_*.
 async function saveCud() {
+    // 3D tab 开着的时候不存:此刻的全局拿的是「上一个 2D 文档」,把那份像素写成这个 tab 的文件
+    // 是个地地道道的谎。场景本身也还没有存档格式 —— 留得下来的只有烘进图层的那张像素。
+    if (isSceneDoc(activeDoc)) { setStatus('This tab is a 3D scene — switch back to its project to save it', 'error'); return false; }
     // The buttons go disabled while a read or write is in flight, but the keyboard has no such
     // tell, so a Ctrl+S landing mid-export would otherwise vanish without a trace.
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
@@ -10968,6 +11288,11 @@ async function importImages() {
 function routeImportFiles(files, stack) {
     const list = Array.prototype.slice.call(files || []);
     if (!list.length) return;
+    // 3D tab 开着的时候模型文件归这个场景:拖到页面任何地方都往当前场景里加,而不是报「不是图片」。
+    if (Scene3D.active) {
+        const models = list.filter(f => Scene3D.isModelFile(f.name));
+        if (models.length) { Scene3D.importFiles(models); return; }
+    }
     const docs = list.filter(f => /\.cud$/i.test(f.name));
     if (docs.length) {
         if (docs.length > 1) setStatus('Only one .cud at a time — opening the first', 'error');
@@ -11982,6 +12307,9 @@ adoptDocument(createDocument('Untitled', null, captureContext(), false));
 // 字体库是异步的: 先让页面完整起来, 装好之后再作废一次文字缓冲 (缺了这一步, .cud 里存着自定义字体
 // 名的图层会一直顶着回落脸)。
 loadTextFontLibrary();
+
+// 3D 右栏的把手在这一刻接好:它整个活在 js/scene3d_panel.js 里,这里只负责给它接上 DOM。
+Scene3D.wirePanel();
 
 // Ask the parent for the current context image so the canvas is never empty on first open.
 // The parent only answers when it can resolve one, and the dedupe set keeps this idempotent.
