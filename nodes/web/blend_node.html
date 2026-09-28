@@ -4971,12 +4971,18 @@ function updateMaskTargetLabel() {
 // The left button paints with the active tool; the right button is inert — it never swaps tools.
 function erasingNow() { return (isDrawing ? isErasing : ctrlMaskMode() ? ctrlErase : maskTool === 'eraser'); }
 
-function activeSizeValue() { return erasingNow() ? eraserSize : brushSize; }
-function toolSize(tool) { return tool === 'eraser' ? eraserSize : brushSize; }
+// Ctrl is one shortcut with two hands, not two tools: the right button erases the Mask layer with
+// the very radius the left button paints with. So while the shortcut owns the pointer (Ctrl down,
+// or its stroke still in flight after Ctrl came up) neither hand reads nor writes the Eraser
+// panel's size — that knob belongs to the Eraser tool, and the two must not overwrite each other.
+function sharesBrushSize() { return ctrlMaskMode() || maskShortcutActive; }
+
+function activeSizeValue() { return toolSize(erasingNow() ? 'eraser' : 'brush'); }
+function toolSize(tool) { return tool === 'eraser' && !sharesBrushSize() ? eraserSize : brushSize; }
 
 function setToolSize(tool, v) {
     v = Math.max(2, Math.min(9999, Math.round(v)));
-    if (tool === 'eraser') eraserSize = v;
+    if (tool === 'eraser' && !sharesBrushSize()) eraserSize = v;
     else brushSize = v;
     syncSizeUI();
     updateBrushCursorSize();
