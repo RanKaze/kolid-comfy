@@ -199,7 +199,7 @@ const IOSToggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; di
     onClick={() => { if (!disabled) onChange(!checked); }}
     style={{
       width: 36, height: 22, borderRadius: 22,
-      background: checked ? '#30d158' : '#39393d',
+      background: checked ? '#0a84ff' : '#39393d',
       position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
       cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1,
     }}
