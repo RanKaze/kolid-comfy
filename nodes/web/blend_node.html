@@ -337,6 +337,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-map-btn:hover { background: rgba(10,132,255,0.3); }
 .fx-map-btn.unset { color: #ff9f0a; }
 .fx-map-btn.gone { color: #ff453a; }
+/* Text 行的字体按钮: 那几个字就是它自己那张脸, 不用打开就知道选的是什么。本机没有这个字体时转红,
+   与缺失贴图同一套告警色 —— 文字仍旧在, 只是顶着栈尾的回落脸画。 */
+.text-font-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
+    border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 12px; font-weight: 600;
+    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.text-font-btn:hover { background: rgba(10,132,255,0.3); }
+.text-font-btn.gone { color: #ff453a; }
 .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -505,6 +512,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 /* ---- Canvas size dialog ---- */
 .modal-overlay { position: fixed; inset: 0; z-index: 200; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
 .modal-overlay.open { display: flex; }
+/* The Font picker takes keyboard focus itself, so Esc closes it whichever button the pointer last
+   visited. A focus ring around the whole backdrop would read as a selected panel, so it stays silent. */
+.modal-overlay:focus { outline: none; }
 .modal { width: 370px; max-width: 88vw; background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); display: flex; flex-direction: column; gap: 12px; }
 .modal-title { font-size: 16px; font-weight: 700; color: #fff; }
 .modal-sub { font-size: 12px; color: rgba(255,255,255,0.45); line-height: 1.45; margin-top: -8px; }
@@ -562,6 +572,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     background: #101012; border: 0.5px solid rgba(255,255,255,0.1); }
 .tag-mode-name { font-size: 11.5px; font-weight: 700; line-height: 1.25; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
+/* 字体 picker 要往这套卡片词汇上补两条: 网格原本没有选中态, 而字体必须看得见"现在用的是哪个";
+   本机没有的那张脸照旧可点 (名字写进描述符就行), 只把拇指压暗 —— 点下去会长成什么样, 拇指已经说了。 */
+.tag-mode-item.active { border-color: #0a84ff; background: rgba(10,132,255,0.22); }
+.tag-mode-item.unavailable .tag-mode-thumb { opacity: 0.35; }
 /* The layer context menu. Fixed-positioned so it can be clamped into the window from JS. */
 .layer-menu { position: fixed; z-index: 300; display: none; flex-direction: column; gap: 2px; min-width: 168px;
     padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
@@ -683,6 +697,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <!-- Bound effect maps (depth / normal) from disk. Only used where no file picker of any
              kind exists; the bytes then come from this input instead of /api/io_read. -->
         <input type="file" id="fxMapFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif" hidden>
+        <!-- Font files the user brings into the local library. The bytes land in IndexedDB, never in
+             the .cud, so this is the only path a font can enter the workbench. -->
+        <input type="file" id="textFontFile" accept=".ttf,.otf,.woff,.woff2,.ttc" multiple hidden>
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
@@ -826,7 +843,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                 </div>
                 <div class="tool-body">
-                    <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
+                    <div class="control-row"><label>Font</label><button type="button" class="text-font-btn" id="textFontBtn" title="Font — opens the picker: every name is drawn in its own face, grouped by family, with the fonts you loaded from disk at the bottom. Rendered by this browser, so the .cud shows whatever these fonts give on the machine that opens it">Arial</button><span></span></div>
                     <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
                     <div class="control-row"><label>Padding</label><input type="range" id="textPaddingRange" min="0" max="256" step="1" value="0" title="Clear space around the text, in layer pixels at the authored font size — the box grows outward and the glyphs keep their size. Outer effects (drop shadow, glow) need that room: they are cut at the layer's own edge"><span id="textPaddingValue">0</span></div>
                     <div class="control-row"><label>Weight</label><div class="mini-group">
@@ -1063,6 +1080,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 title="Read a depth / normal map from disk. It is kept with the effect (and archived inside the .cud), not pushed into the workspace pool.">From file&#8230;</button>
             <div style="flex:1;"></div>
             <button class="modal-btn ghost" id="fxMapCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="textFontModal" tabindex="-1">
+    <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Pick a font">
+        <div class="modal-title">Font</div>
+        <div class="modal-sub">Each name is drawn in its own face, so what you see here is what the layer gets. A face this machine does not have is dimmed and draws in the stack's fallback.</div>
+        <div class="tag-groups" id="textFontGroups"></div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="textFontFileBtn"
+                title="Read a .ttf / .otf / .woff2 from disk and keep it in this browser's font library. The file never goes into the .cud: the layer stores only the font name, so someone without it still opens the file, in the fallback face.">From file&#8230;</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn ghost" id="textFontCancelBtn">Cancel</button>
         </div>
     </div>
 </div>
@@ -1714,19 +1744,203 @@ const TEXT_DEFAULTS = {
     content: '', fontFamily: 'Arial, "Helvetica Neue", sans-serif',
     fontSize: 64, fontWeight: 'normal', color: '#ffffff', align: 'center', padding: 0,
 };
-const TEXT_FONT_FAMILIES = [
-    ['Arial, "Helvetica Neue", sans-serif', 'Arial'],
-    ['"Segoe UI", system-ui, sans-serif', 'Segoe UI'],
-    ['Verdana, Geneva, sans-serif', 'Verdana'],
-    ['Tahoma, sans-serif', 'Tahoma'],
-    ['"Times New Roman", Times, serif', 'Times New Roman'],
-    ['Georgia, serif', 'Georgia'],
-    ['"Courier New", Courier, monospace', 'Courier New'],
-    ['"Microsoft YaHei", "微软雅黑", sans-serif', '微软雅黑'],
-    ['SimSun, "Songti SC", serif', '宋体'],
-    ['SimHei, "Heiti SC", sans-serif', '黑体'],
-    ['Kaiti, KaiTi, "STKaiti", serif', '楷体'],
+// 浏览器列不出本机装了哪些字体, 只能逐个点名去问 (`fontAvailable`)。所以这张表是点名的常见族:
+// 每条都是一个 CSS 栈, 以通用族收尾 —— 缺字体的机器上文字照样有脸可画, 而 .cud 里存的仍旧是这个名字。
+// 分组名 = picker 的小标题, sample = 拇指上那几个字 (CJK 组给中文, 只写 "Aa" 看不出中文字脸)。
+const TEXT_FONT_GROUPS = [
+    { name: 'Sans', sample: 'Aa', fonts: [
+        ['Arial, "Helvetica Neue", sans-serif', 'Arial'],
+        ['"Helvetica Neue", Helvetica, Arial, sans-serif', 'Helvetica Neue'],
+        ['"Segoe UI", system-ui, sans-serif', 'Segoe UI'],
+        ['Verdana, Geneva, sans-serif', 'Verdana'],
+        ['Tahoma, Geneva, Verdana, sans-serif', 'Tahoma'],
+        ['"Trebuchet MS", "Lucida Grande", sans-serif', 'Trebuchet MS'],
+        ['Calibri, "Segoe UI", sans-serif', 'Calibri'],
+        ['Candara, Calibri, sans-serif', 'Candara'],
+        ['Corbel, Calibri, sans-serif', 'Corbel'],
+        ['"Century Gothic", Futura, "Segoe UI", sans-serif', 'Century Gothic'],
+        ['"Franklin Gothic Medium", "Franklin Gothic", sans-serif', 'Franklin Gothic'],
+        ['"Arial Narrow", Arial, sans-serif', 'Arial Narrow'],
+    ] },
+    { name: 'Serif', sample: 'Aa', fonts: [
+        ['"Times New Roman", Times, serif', 'Times New Roman'],
+        ['Georgia, serif', 'Georgia'],
+        ['Cambria, Georgia, serif', 'Cambria'],
+        ['Constantia, Georgia, serif', 'Constantia'],
+        ['"Palatino Linotype", Palatino, "Book Antiqua", serif', 'Palatino'],
+        ['"Book Antiqua", Palatino, serif', 'Book Antiqua'],
+        ['Garamond, "EB Garamond", serif', 'Garamond'],
+        ['"Baskerville Old Face", Baskerville, Georgia, serif', 'Baskerville'],
+        ['"Bodoni MT", Didot, "Times New Roman", serif', 'Bodoni MT'],
+        ['Didot, "Bodoni MT", serif', 'Didot'],
+    ] },
+    { name: 'Monospace', sample: 'Ag01', fonts: [
+        ['"Courier New", Courier, monospace', 'Courier New'],
+        ['Consolas, "Courier New", monospace', 'Consolas'],
+        ['"Lucida Console", Monaco, monospace', 'Lucida Console'],
+        ['"Cascadia Mono", "Cascadia Code", Consolas, monospace', 'Cascadia Mono'],
+        ['Menlo, Monaco, "DejaVu Sans Mono", monospace', 'Menlo'],
+    ] },
+    { name: 'Display', sample: 'Aa', fonts: [
+        ['Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif', 'Impact'],
+        ['"Arial Black", Gadget, sans-serif', 'Arial Black'],
+        ['"Comic Sans MS", "Chalkboard SE", cursive', 'Comic Sans MS'],
+        ['"Segoe Print", "Bradley Hand", cursive', 'Segoe Print'],
+        ['"Segoe Script", "Brush Script MT", cursive', 'Segoe Script'],
+        ['"Ink Free", "Segoe Print", cursive', 'Ink Free'],
+        ['"Brush Script MT", cursive', 'Brush Script MT'],
+        ['Papyrus, "Papyrus Font", fantasy', 'Papyrus'],
+    ] },
+    { name: '中文 / CJK', sample: 'Aa 文字', fonts: [
+        ['"Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif', '微软雅黑'],
+        ['"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif', '苹方'],
+        ['"Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif', '思源黑体'],
+        ['SimSun, "宋体", "Songti SC", serif', '宋体'],
+        ['SimHei, "黑体", "Heiti SC", sans-serif', '黑体'],
+        ['KaiTi, "楷体", "STKaiti", serif', '楷体'],
+        ['FangSong, "仿宋", "STFangsong", serif', '仿宋'],
+        ['STZhongsong, "华文中宋", serif', '华文中宋'],
+        ['LiSu, "隶书", "STLiti", serif', '隶书'],
+        ['YouYuan, "幼圆", sans-serif', '幼圆'],
+        ['"MS Mincho", SimSun, serif', '明朝'],
+        ['"MS Gothic", "Malgun Gothic", sans-serif', 'ゴシック'],
+        ['"Yu Gothic", Meiryo, sans-serif', '游ゴシック'],
+    ] },
 ];
+// ==================== 本机字体库 ====================
+// 用户放进来的字体文件字节存 IndexedDB: localStorage 装不下几 MB 的字体, 何况它是同步读写, 一次写入
+// 就能卡住首帧。开机把库里每一条注册成 FontFace (一次性, 全部装完才重画), 文档里存的仍旧只是族名 ——
+// 所以 .cud 发给没这个字体的人照样打得开, 文字用栈尾的通用族画出来。
+const FONT_DB_NAME = 'blend-text-fonts', FONT_DB_VERSION = 1, FONT_DB_STORE = 'files';
+const TEXT_FONT_MAX_BYTES = 32 * 1024 * 1024;
+const TEXT_FONT_FILE_EXT = /\.(ttf|otf|woff2?|ttc)$/i;
+let textLoadedFonts = [];            // [{ name: 注册进 CSS 的族名, label: 他给的文件名 }]
+function fontDb() {
+    return new Promise((resolve, reject) => {
+        if (!window.indexedDB) { reject(new Error('no IndexedDB here')); return; }
+        let req;
+        try { req = indexedDB.open(FONT_DB_NAME, FONT_DB_VERSION); } catch (e) { reject(e); return; }
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(FONT_DB_STORE)) db.createObjectStore(FONT_DB_STORE, { keyPath: 'name' });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error('IndexedDB refused'));
+    });
+}
+function fontDbRun(mode, body) {
+    return fontDb().then(db => new Promise((resolve, reject) => {
+        const req = body(db.transaction(FONT_DB_STORE, mode).objectStore(FONT_DB_STORE));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    }).finally(() => db.close()));
+}
+const fontDbAll = () => fontDbRun('readonly', s => s.getAll());
+const fontDbPut = row => fontDbRun('readwrite', s => s.put(row));
+// 构造挡掉非字体字节, load() 挡掉"看着像但解析不动"的 —— 两步都等完才敢用这个族名, 否则 measureText
+// 量到的是回落脸, 图层框子会按错的宽度长出来。
+function textFontFace(name, bytes) {
+    if (typeof FontFace !== 'function' || !document.fonts) return Promise.reject(new Error('this browser cannot load font files'));
+    let face;
+    try { face = new FontFace(name, bytes); } catch (e) { return Promise.reject(new Error(`Not a readable font file: ${name}`)); }
+    return Promise.resolve(face.load()).then(loaded => {
+        document.fonts.add(loaded);
+        fontAvailableCache.delete(name);      // 这张脸到这才算"有", 之前量出来的答案作废
+        return loaded;
+    }, () => { throw new Error(`Not a readable font file: ${name}`); });
+}
+function textFontBaseLabel(file) {
+    return (String(file && file.name || '').replace(/\.[^.]+$/, '').replace(/["\\]/g, '').trim() || 'Font').slice(0, 60);
+}
+// 同名就加序号: 两个都叫 Helvetica 的文件不该在库里互相顶掉, 也不该让一条 Loaded 卡片指向别人的字节。
+function uniqueTextFontName(base) {
+    let name = base, i = 2;
+    while (textLoadedFonts.some(f => f.name === name)) name = `${base} ${i++}`;
+    return name;
+}
+async function addTextFontFile(file) {
+    if (!TEXT_FONT_FILE_EXT.test(String(file && file.name || ''))) throw new Error('Not a font file');
+    if (!(file.size > 0) || file.size > TEXT_FONT_MAX_BYTES) throw new Error('Font file too large');
+    const bytes = await file.arrayBuffer();
+    const label = String(file.name || 'Font');
+    const name = uniqueTextFontName(textFontBaseLabel(file));
+    await textFontFace(name, bytes);
+    textLoadedFonts.push({ name, label });
+    // 当场已经能用是事实, 留不住也照样画得出来 —— 只有重开页面才发现库是空的, 那才需要告诉他。
+    // 话留给调用方说: 它手上有一整批文件, 只有合起来才说得清"加好了几个、哪几个留不住"。
+    let stored = true;
+    try { await fontDbPut({ name, label, bytes }); } catch (e) { stored = false; }
+    return { name, label, stored };
+}
+// 字体是异步装进来的: 装完之前按回落脸量过的每一张文字缓冲都得重画一次, 否则 .cud 里的名字会一直
+// 顶着 Arial 的脸。一次作废、一次重绘, 不逐条字体各来一遍。
+function invalidateAllTextBuffers() {
+    for (const l of layers) if (isTextLayer(l)) l.textCache = null;
+    renderLayerList();
+    render();
+}
+async function loadTextFontLibrary() {
+    let rows;
+    try { rows = await fontDbAll(); } catch (e) { return; }     // 隐私模式 / file:// 下没有库: 内置字体照常用
+    let installed = 0;
+    for (const r of rows || []) {
+        try {
+            await textFontFace(String(r.name), r.bytes);
+            textLoadedFonts.push({ name: String(r.name), label: String(r.label || r.name) });
+            installed++;
+        } catch (e) { /* 一条坏字节不拖垮整库 */ }
+    }
+    if (!installed) return;
+    invalidateAllTextBuffers();
+    updateTextPanel();
+}
+
+// The stack a font the user dropped in gets: its own registered name first, the default stack after,
+// so a machine without that file still draws the text (in the fallback) instead of nothing.
+function textFontStack(name) { return `"${name}", ${TEXT_DEFAULTS.fontFamily}`; }
+function fontStackHead(stack) {
+    const m = /^\s*(?:"([^"]+)"|'([^']+)'|([^,]+))/.exec(String(stack || ''));
+    return m ? String(m[1] || m[2] || m[3]).trim() : '';
+}
+// 本机到底有没有这个字脸, 唯一可靠的问法是**量它**: `document.fonts.check()` 在 Chrome 里对任何名字都
+// 答 true (缺的字它拿回落脸照样"能画"), 于是 picker 的压暗和 Font 行的红色永远不会出现。量法 = 同一串
+// 探针字, 分别用 `族名, monospace` 和 `monospace` 本身量一遍 —— 族名不存在时两次一模一样, 存在时几乎
+// 不可能同宽 (探针串混了宽窄差异大的字形)。答案按族名缓存: 一次开窗量 48 个名字, 不该反复量。
+const FONT_PROBE_TEXT = 'MWQ@#il089abfgk';
+const fontAvailableCache = new Map();
+let fontProbeCtx = null;
+function fontMeasuresDifferent(spec, base) {
+    if (!fontProbeCtx) fontProbeCtx = document.createElement('canvas').getContext('2d');
+    fontProbeCtx.font = `72px ${base}`;
+    const bare = fontProbeCtx.measureText(FONT_PROBE_TEXT).width;
+    fontProbeCtx.font = `72px ${spec}, ${base}`;
+    return Math.abs(fontProbeCtx.measureText(FONT_PROBE_TEXT).width - bare) > 0.5;
+}
+function fontAvailable(stack) {
+    if (!String(stack || '').trim()) return false;
+    const head = fontStackHead(stack);
+    if (!head) return true;
+    if (fontAvailableCache.has(head)) return fontAvailableCache.get(head);
+    let here;
+    try {
+        const spec = `"${head.replace(/"/g, '')}"`;
+        here = fontMeasuresDifferent(spec, 'monospace') || fontMeasuresDifferent(spec, 'serif');
+    } catch (e) { here = true; }      // 量不动就当有: 把能用的字压暗, 比漏压一个缺的更糟
+    fontAvailableCache.set(head, here);
+    return here;
+}
+// What the Font row and the picker's highlight read: the table's own label, else the stack's head —
+// which for a loaded font IS the family we registered it under. One name in three places (row, card,
+// descriptor), so a card can never read differently from what picking it puts on the row. The original
+// file name lives in the card's title instead; two files called Helvetica.ttf would otherwise be one
+// indistinguishable row.
+function textFontLabel(stack) {
+    for (const g of TEXT_FONT_GROUPS) {
+        for (const [fam, label] of g.fonts) if (fam === stack) return label;
+    }
+    return fontStackHead(stack) || '—';
+}
+
 function isTextLayer(l) { return !!l && !!l.text && !l.isMaskLayer; }
 // Which layer's editor is open right now (null = none). Declared with the model: applyView and
 // drawOverlay consult it, and a `let` may not be read before its declaration has run.
@@ -7671,7 +7885,7 @@ function addDefaultLayer(stack) {
 // underneath keeps drawing the last committed render. Enter commits / Shift+Enter wraps / Esc
 // rewinds / a click anywhere else commits first — one committed edit is one undo step.
 const textEditorEl = document.getElementById('textEditor');
-const textFontSel = document.getElementById('textFontSel');
+const textFontBtn = document.getElementById('textFontBtn');
 const textSizeRange = document.getElementById('textSizeRange');
 const textSizeValue = document.getElementById('textSizeValue');
 const textPaddingRange = document.getElementById('textPaddingRange');
@@ -7852,13 +8066,105 @@ textEditorEl.addEventListener('input', () => {
 // ---- Text panel ----
 // Every control patches the descriptor; the render and the box follow through patchTextLayer.
 // The readouts are visible text (content + natural|on-canvas sizes), never tooltips.
-for (const [family, label] of TEXT_FONT_FAMILIES) {
-    const o = document.createElement('option');
-    o.value = family;
-    o.textContent = label;
-    o.title = family;
-    textFontSel.appendChild(o);
+// ---- 字体 picker ----
+// 与 Tag / 贴图 picker 同一套卡片词汇: 分组小标题 + 三列网格 + 拇指在上短名在下, 长句进 title。
+// 差别只在拇指: 字体的拇指就是那几个字本身, 由浏览器按这条栈画出来 —— 缺的字自动回落到栈尾,
+// 所以卡片上看到的脸, 就是点下去图层拿到的脸。
+const textFontModalEl = document.getElementById('textFontModal');
+const textFontGroupsEl = document.getElementById('textFontGroups');
+const textFontFileInput = document.getElementById('textFontFile');
+function textFontModalOpen() { return textFontModalEl.classList.contains('open'); }
+function closeTextFontModal() {
+    if (!textFontModalOpen()) return;
+    textFontModalEl.classList.remove('open');
+    syncBrushCursor();
 }
+function drawFontThumb(cv, stack, sample) {
+    const g = cv.getContext('2d');
+    g.fillStyle = '#101012';
+    g.fillRect(0, 0, cv.width, cv.height);
+    const text = sample || 'Aa';
+    let px = 30;
+    g.font = `${px}px ${stack}`;
+    // 中文组的样本长 ("Aa 文字"), 按宽度收字号, 别把半边裁掉。
+    const w = g.measureText(text).width;
+    if (w > cv.width - 10) {
+        px = Math.max(8, Math.floor(px * (cv.width - 10) / w));
+        g.font = `${px}px ${stack}`;
+    }
+    g.fillStyle = 'rgba(255,255,255,0.9)';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, cv.width / 2, cv.height / 2);
+}
+function renderTextFontGroups() {
+    const sel = getSelected();
+    const current = isTextLayer(sel) ? sel.text.fontFamily : '';
+    const groups = TEXT_FONT_GROUPS.map(g => ({ title: g.name, sample: g.sample, fonts: g.fonts }));
+    // Loaded 组只装他自己放进来的。空库就不占一行 —— 底部那颗 From file… 已经是它的入口。
+    // 卡片读的是注册用的族名 (与 Font 行、描述符同一个名字), 原始文件名进 title —— 两个都叫
+    // Helvetica.ttf 的文件在网格里必须是两张能分开的卡片。
+    if (textLoadedFonts.length) {
+        groups.push({ title: 'Loaded', sample: 'Aa',
+            fonts: textLoadedFonts.map(f => [textFontStack(f.name), f.name, f.label]) });
+    }
+    textFontGroupsEl.innerHTML = '';
+    for (const g of groups) {
+        const modes = g.fonts.map(([stack, label, note]) => {
+            const here = fontAvailable(stack);
+            return { stack, name: label, here,
+                desc: (note ? `From ${note} · ` : '') + stack
+                    + (here ? '' : ' — not on this machine, so its text draws in the stack\u2019s fallback') };
+        });
+        textFontGroupsEl.appendChild(makeTagGroup(g.title, modes,
+            (m, cv) => drawFontThumb(cv, m.stack, g.sample),
+            {
+                onPick: m => { closeTextFontModal(); patchSelectedText({ fontFamily: m.stack }); },
+                decorate: (card, m) => {
+                    card.classList.toggle('active', m.stack === current);
+                    card.classList.toggle('unavailable', !m.here);
+                },
+            }));
+    }
+}
+function openTextFontModal() {
+    if (!isTextLayer(getSelected())) { setStatus('Select a text layer to change its font', 'error'); return; }
+    renderTextFontGroups();
+    textFontModalEl.classList.add('open');
+    textFontModalEl.focus();           // Esc 归这张模态自己收, 不指望上一次点的是哪颗按钮
+    syncBrushCursor();
+}
+textFontBtn.addEventListener('click', openTextFontModal);
+textFontModalEl.addEventListener('mousedown', e => { if (e.target === textFontModalEl) closeTextFontModal(); });
+textFontModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTextFontModal(); }
+});
+document.getElementById('textFontCancelBtn').addEventListener('click', closeTextFontModal);
+document.getElementById('textFontFileBtn').addEventListener('click', () => textFontFileInput.click());
+textFontFileInput.addEventListener('change', async () => {
+    const files = Array.from(textFontFileInput.files || []);
+    textFontFileInput.value = '';            // 再选同一个文件也得真的触发一次
+    let added = 0, firstError = '';
+    const unsaved = [];
+    for (const f of files) {
+        try {
+            const r = await addTextFontFile(f);
+            added++;
+            if (!r.stored) unsaved.push(r.label);
+        }
+        catch (e) { if (!firstError) firstError = String((e && e.message) || e); }
+    }
+    if (!files.length) return;
+    // 装完就作废一次: 之前按回落脸量出来的缓冲 (还有 .cud 里本来就写着这个名字的那些) 到这才算对上。
+    if (added) { invalidateAllTextBuffers(); updateTextPanel(); if (textFontModalOpen()) renderTextFontGroups(); }
+    // 一句话讲完这一批: 加好了几个 + 哪几个留不住 + 第一个没吃进去的文件。"存不下"不能被"加好了"盖掉,
+    // 那要重开页面才看得出来。只报结果, 不教他下一步做什么 (日志是单行瞬显)。
+    const notes = [];
+    if (added) notes.push(`${added} font${added > 1 ? 's' : ''} added to this machine's font library`);
+    if (unsaved.length) notes.push(`${unsaved.join(', ')} ${unsaved.length > 1 ? 'do' : 'does'} not survive a reload`);
+    if (firstError) notes.push(firstError);
+    if (notes.length) setStatus(notes.join(' · '), unsaved.length || firstError ? 'error' : undefined);
+});
 const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '#ffffff';
 
 function setTextChoice(choices, value) {
@@ -7874,7 +8180,11 @@ function updateTextPanel() {
     textSwatch.style.display = on ? '' : 'none';
     if (!on) return;
     const t = l.text;
-    if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
+    // 按钮上那几个字用的就是它自己那张脸; 本机没有这个字体时转红 (与缺失贴图同一套告警色) —— 文字
+    // 仍旧在, 只是顶着栈尾的回落脸画, 而 .cud 里存的还是这个名字。
+    textFontBtn.textContent = textFontLabel(t.fontFamily);
+    textFontBtn.style.fontFamily = t.fontFamily;
+    textFontBtn.classList.toggle('gone', !fontAvailable(t.fontFamily));
     textSizeRange.value = Math.min(512, t.fontSize);
     textSizeValue.textContent = String(t.fontSize);
     textPaddingRange.value = Math.min(256, t.padding);
@@ -7891,7 +8201,6 @@ function patchSelectedText(patch, historyKey) {
     if (!isTextLayer(l)) return;
     patchTextLayer(l, patch, { historyKey });
 }
-textFontSel.addEventListener('change', () => patchSelectedText({ fontFamily: textFontSel.value }));
 for (const [v, id] of TEXT_WEIGHT_CHOICES) {
     document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
 }
@@ -9014,7 +9323,9 @@ function makeTagCard(name, desc, onPick, thumbPainter) {
     return item;
 }
 
-function makeTagGroup(title, modes, thumbFor) {
+// `opts` is what the other grid pickers (Font) need and the Tag picker does not: its own pick action
+// instead of the tag action, and a per-card decoration pass (current choice lit, absent face dimmed).
+function makeTagGroup(title, modes, thumbFor, opts) {
     const group = document.createElement('div');
     group.className = 'tag-group';
     const head = document.createElement('div');
@@ -9024,9 +9335,14 @@ function makeTagGroup(title, modes, thumbFor) {
     const cards = document.createElement('div');
     cards.className = 'tag-cards';
     for (const m of modes) {
-        cards.appendChild(makeTagCard(m.name, m.desc,
-            () => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); },
-            c => thumbFor(m, c)));
+        // The pick is bound per mode: makeTagCard hands the click handler the EVENT, so a caller that
+        // wants the mode has to close over it here rather than receive it as a parameter.
+        const pick = opts && opts.onPick ? (() => opts.onPick(m))
+            : (() => { closeTagModal(); sendBlendAction('tag', { tagMode: m.mode }); });
+        const card = makeTagCard(m.name, m.desc, pick,
+            c => thumbFor(m, c));
+        if (opts && opts.decorate) opts.decorate(card, m);
+        cards.appendChild(card);
     }
     group.appendChild(head);
     group.appendChild(cards);
@@ -9067,7 +9383,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -11454,6 +11770,9 @@ resetHistory();          // the empty canvas is step 0; everything from here on 
 // The page opens on exactly one project: what the globals already hold becomes the first tab, so the
 // workbench is never in the state of "drawing with nowhere to put it".
 adoptDocument(createDocument('Untitled', null, captureContext(), false));
+// 字体库是异步的: 先让页面完整起来, 装好之后再作废一次文字缓冲 (缺了这一步, .cud 里存着自定义字体
+// 名的图层会一直顶着回落脸)。
+loadTextFontLibrary();
 
 // Ask the parent for the current context image so the canvas is never empty on first open.
 // The parent only answers when it can resolve one, and the dedupe set keeps this idempotent.
