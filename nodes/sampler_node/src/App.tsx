@@ -561,6 +561,58 @@ const App: React.FC = () => {
     }
   }, [syncPrompt]);
 
+  // Processor run initiated by the workbench: upload the input images as hidden staging
+  // entries, then kick an offline interface execution. Results come back through the poller.
+  // Must stay ABOVE the postMessage listener below — the listener's dep array reads this
+  // const, and a declaration below it is a TDZ ReferenceError on the first render.
+  const handleProcessorRun = useCallback(async (data: any) => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win) return;
+    const idx = typeof data.interface_index === 'number' ? data.interface_index : -1;
+    const inputs = Array.isArray(data.inputs) ? data.inputs : [];
+    if (processorRunRef.current !== null || executedInterfaceIdx !== null) {
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Another interface execution is already running' }, '*');
+      return;
+    }
+    if (idx < 0 || idx >= interfaces.length) {
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Processor interface is missing (package disconnected?)' }, '*');
+      return;
+    }
+    processorRunRef.current = idx;
+    pushLog(`Run processor 「${interfaces[idx]?.name || '#' + idx}」`);
+    try {
+      const image_keys: Record<string, string> = {};
+      for (const inp of inputs) {
+        if (!inp || typeof inp.dataUrl !== 'string' || !inp.dataUrl) continue;
+        const res = await fetch('/api/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            images: [inp.dataUrl],
+            names: [`in: value${inp.port}`],
+            hidden: true,
+          }),
+        });
+        const j = await res.json();
+        if (j?.success && j.added?.[0]?.id) image_keys[String(inp.port)] = j.added[0].id;
+      }
+      setProcessorRunning(true);
+      await fetch('/api/execute_interface', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interface_index: idx,
+          manual_values: data.manual_values || {},
+          exec_options: { offline: true, image_keys },
+        }),
+      });
+    } catch (e: any) {
+      setProcessorRunning(false);
+      processorRunRef.current = null;
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: e?.message || String(e) }, '*');
+    }
+  }, [executedInterfaceIdx, interfaces, pushLog]);
+
   // Listen for postMessage from the prompt iframe and the Blend workbench.
   // Declared after the handlers so the listener always closes over the current ones.
   useEffect(() => {
@@ -690,56 +742,6 @@ const App: React.FC = () => {
       }));
     iframe.contentWindow.postMessage({ type: 'blend-processors', processors }, '*');
   }, [interfaces, interfaceMeta]);
-
-  // Processor run initiated by the workbench: upload the input images as hidden staging
-  // entries, then kick an offline interface execution. Results come back through the poller.
-  const handleProcessorRun = useCallback(async (data: any) => {
-    const win = blendIframeRef.current?.contentWindow;
-    if (!win) return;
-    const idx = typeof data.interface_index === 'number' ? data.interface_index : -1;
-    const inputs = Array.isArray(data.inputs) ? data.inputs : [];
-    if (processorRunRef.current !== null || executedInterfaceIdx !== null) {
-      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Another interface execution is already running' }, '*');
-      return;
-    }
-    if (idx < 0 || idx >= interfaces.length) {
-      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Processor interface is missing (package disconnected?)' }, '*');
-      return;
-    }
-    processorRunRef.current = idx;
-    pushLog(`Run processor 「${interfaces[idx]?.name || '#' + idx}」`);
-    try {
-      const image_keys: Record<string, string> = {};
-      for (const inp of inputs) {
-        if (!inp || typeof inp.dataUrl !== 'string' || !inp.dataUrl) continue;
-        const res = await fetch('/api/staging', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            images: [inp.dataUrl],
-            names: [`in: value${inp.port}`],
-            hidden: true,
-          }),
-        });
-        const j = await res.json();
-        if (j?.success && j.added?.[0]?.id) image_keys[String(inp.port)] = j.added[0].id;
-      }
-      setProcessorRunning(true);
-      await fetch('/api/execute_interface', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          interface_index: idx,
-          manual_values: data.manual_values || {},
-          exec_options: { offline: true, image_keys },
-        }),
-      });
-    } catch (e: any) {
-      setProcessorRunning(false);
-      processorRunRef.current = null;
-      win.postMessage({ type: 'blend-processor-result', ok: false, error: e?.message || String(e) }, '*');
-    }
-  }, [executedInterfaceIdx, interfaces, pushLog]);
 
   // Processor 轮询：interface_status 每跳一次就同步给工作台（进度条走 blend-run-status 同款
   // 语义），done 时按 interface_result_meta 把隐藏条目逐端口发回去。started 后第一次 status
