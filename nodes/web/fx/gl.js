@@ -334,7 +334,8 @@ function applyLayerEffects(l, surface) {
         }
         // 跑不动的特效自己写 fxgl.skip (参数为 0 时直接原样返回),引擎只负责把贴图备好。
         // effect 一起传:绑定贴图的尺寸也是该特效的判断依据 (见 fx/tone_map.js 的布局识别)。
-        spec.run(col, p, effect);
+        // l 也一起传:有的特效吃的几何是**图层盒子在画布上的位置**,不只是它自己的网格 (见 fx/warp.js 的深度)。
+        spec.run(col, p, effect, l);
     }
     fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
     const c2 = surface.getContext('2d');
@@ -352,7 +353,9 @@ function applyLayerEffects(l, surface) {
 // 所以写表面的路径要 +1 l.paintGen (画笔/橡皮走 livePreviewStroke,油漆桶自己 +1)。
 // 代次不同而身份全同 = 只有墨变了 → 复用同一块缓存画布重画重跑,绝不新建 canvas:一笔几百帧就是一次
 // 几百张画布的 GC。surface 只被这条缓存持有(快照存的是链的深拷贝,fxCache 从不进快照),接管它安全。
-// 拖 transform 时身份、参数签名与代次都不变 → 命中缓存,特效链一帧都不会重跑。
+// 拖 transform 时身份、参数签名与代次都不变 → 命中缓存,特效链一帧都不会重跑 —— 这是绝大多数
+// 特效想要的 (它们的输入只有像素与 params);真把画布几何当输入的特效 (Canvas 对齐的深度 warp) 靠
+// spec.stamp 把那一句加进身份 (ext),否则它会钉在挪之前烘好的那份位移上。
 // 文本层也吃这条恒等式,而且这不是偷懒:链跑在 syncTextBuffer 烘出的**盒子(=画布像素)分辨率**
 // 缓冲上,特效结果和文字本身一样以显示分辨率光栅化,放大盒子绝不会糊。代价是 resize 帧缓冲换
 // 身份、链会重跑 —— 只发生在挂着启用链的文字层上,而特效参数按画布像素计正是这里要的读法。
@@ -363,10 +366,11 @@ function fxResolved(l) {
     if (!w || !h) return l.img;
     const sig = fxSignature(l);
     const maps = fxMapStamp(l);
+    const ext = fxExternalStamp(l);
     const gen = l.paintGen | 0;
     const c = l.fxCache;
     if (c && c.w === w && c.h === h && c.img === l.img && c.decal === l.decal && c.mask === l.mask
-        && c.sig === sig && c.maps === maps && c.gen === gen) return c.surface;
+        && c.sig === sig && c.maps === maps && c.ext === ext && c.gen === gen) return c.surface;
     const reuse = !!(c && c.w === w && c.h === h && c.surface);
     const surface = reuse ? c.surface : document.createElement('canvas');
     if (!reuse) { surface.width = w; surface.height = h; }
@@ -376,6 +380,6 @@ function fxResolved(l) {
     o.drawImage(l.img, 0, 0, w, h);
     if (l.decal) o.drawImage(l.decal, 0, 0, w, h);
     if (activeEffects(l).length) applyLayerEffects(l, surface);
-    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, maps, gen, surface };
+    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, maps, ext, gen, surface };
     return surface;
 }
