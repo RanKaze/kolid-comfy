@@ -1,24 +1,10 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
 import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings } from './types';
-import { EMPTY_PIPELINE_SETTINGS } from './types';
+import { EMPTY_PIPELINE_SETTINGS, firstDetailerFlag } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
-
-/** 第一个 detailer block 上的某布尔总闸（Preprocess Settings 的开关都存在它的 params 里）。
- *  Blend 工作台的 Run 预检与后端闸门共用同一语义：enable_mask 关 = 不做围绕 mask 的预处理、
- *  整幅就是工作区，Mask 层没画也能跑；enable_fit 开 = 图层 Generate 的产出继承源 mask 后贴合。
- *  默认值由调用方传入，必须与后端/工作台读同一 key 时的默认一致。 */
-function firstDetailerFlag(
-  blockSets: BlockSet[], setId: string | null,
-  key: 'enable_mask' | 'enable_fit', dflt: boolean,
-): boolean {
-  const set = blockSets.find(s => s.id === setId) || blockSets[0];
-  const fd = set?.blocks.find(b => b.type === 'detailer');
-  const dp = fd ? (fd.params as DetailerBlockParams) : undefined;
-  return dp ? (dp[key] ?? dflt) : dflt;
-}
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('draw');
