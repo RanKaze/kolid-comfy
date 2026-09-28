@@ -101,6 +101,27 @@ function fxMapShort(effect, key) {
     return nm.length > 12 ? `${nm.slice(0, 11)}…` : nm;
 }
 
+// 「Align: Canvas / Local」只有一种算法,住在贴图这一侧而不是某个特效里:几何 Warp 与体积雾都在参数里
+// 摆这颗枚举,读的是同一句话 —— Canvas = 贴图铺满整张画布,于是该层网格的 uv 要按图层盒子 (落点、尺寸、
+// 旋转) 映进贴图 uv;Local = 贴图就铺在该层自己的盒子上 ⇒ 恒等基。两份算式迟早会漂开,而漂开的那一侧
+// 面板上写的还是同一个词。返回给着色器三个 vec2: 取样点 = u·x + v·y + b。
+function fxMapFrame(align, l) {
+    if (!l || align !== 'Canvas' || !canvasW || !canvasH) return { u: [1, 0], v: [0, 1], b: [0, 0] };
+    const tr = effectiveTransform(l);
+    const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
+    // 画布归一化 (逐轴除以 canvasW / canvasH,y 向下) 对盒子坐标 (u, v ∈ [-1,1],v 向下) 的偏导。
+    // 两轴各自除的是画布的宽和高,所以那里要乘的是**另一个轴**的比值。
+    const kw = canvasH / canvasW, kh = canvasW / canvasH;
+    const nu = [tr.w / 2 * cos, tr.w / 2 * sin * kh];
+    const nv = [-tr.h / 2 * sin * kw, tr.h / 2 * cos];
+    // 盒子里 x ∈ [0,1] 从左数、vUV.y 从下数 ⇒ u = 2x-1、v = 1-2y;贴图上传翻过 v,所以再翻一次。
+    return {
+        u: [2 * nu[0], -2 * nu[1]],
+        v: [-2 * nv[0], 2 * nv[1]],
+        b: [tr.cx - nu[0] + nv[0], 1 - tr.cy + nu[1] - nv[1]],
+    };
+}
+
 // .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
 // 那句 id 是宿主重新编号的,原样留着就是死引用)。资产读不出就退回旧引用本行 —— 按钮转红、链上
 // 写明跳过,总比悄悄换一张图当真。每个声明了的槽各存各的资产。

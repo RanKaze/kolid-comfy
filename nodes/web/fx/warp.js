@@ -387,24 +387,6 @@ void main() {
 // 三种模式出口都只取**一次**画面:像素不外扩 (输出网格 === 输入网格),alpha 跟着像素走 (取样点落到
 // 本来透明的地方,出口就是透明的),蒙版只读不写 —— 三条契约全部守住。几何在深度图里多走几步,但
 // 画面仍然只采样一次。
-function warpMapFrame(p, l) {
-    // Local: 深度图按该层自己的盒子铺满,贴图 uv 与该层网格 uv 完全重合 ⇒ 恒等基。
-    if (!l || p.align !== 'Canvas' || !canvasW || !canvasH) return { u: [1, 0], v: [0, 1], b: [0, 0] };
-    const tr = effectiveTransform(l);
-    const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
-    // 画布归一化 (逐轴除以 canvasW / canvasH,y 向下) 对盒子坐标 (u, v ∈ [-1,1],v 向下) 的偏导。
-    // 两轴各自除的是画布的宽和高,所以那里要乘的是**另一个轴**的比值。
-    const kw = canvasH / canvasW, kh = canvasW / canvasH;
-    const nu = [tr.w / 2 * cos, tr.w / 2 * sin * kh];
-    const nv = [-tr.h / 2 * sin * kw, tr.h / 2 * cos];
-    // 盒子里 x ∈ [0,1] 从左数、vUV.y 从下数 ⇒ u = 2x-1、v = 1-2y;贴图上传翻过 v,所以再翻一次。
-    return {
-        u: [2 * nu[0], -2 * nu[1]],
-        v: [-2 * nv[0], 2 * nv[1]],
-        b: [tr.cx - nu[0] + nv[0], 1 - tr.cy + nu[1] - nv[1]],
-    };
-}
-
 function fxglWarp(col, p, effect, l) {
     const gl = fxgl.gl;
     const dst = fxgl.off[1 - col.slot];
@@ -442,7 +424,7 @@ function fxglWarp(col, p, effect, l) {
     // Geometry:引擎按槽位声明已经把 texMap (深度) 备好并上传 (没绑深度图 / 图没解码根本走不到这里),
     // texMap2 是那张法线图 —— 可缺,缺了着色器自己退成二分精修 (fxgl.hasMap2 说这句话)。
     if (p.shift <= 0 && p.bulge <= 0) return;
-    const fr = warpMapFrame(p, l);
+    const fr = fxMapFrame(p.align, l);
     // 两份偏移都落在该层网格的 uv 上 (逐轴除以本层像素数),再过仿射基进贴图 uv —— 于是 Canvas 对齐下
     // 「往右」对应画布的哪个方向,由 fr.u/fr.v 那对基回答。Angle 读的是**画面**往哪倒 (0° = 右、90° = 下,
     // 同 fx/core.js 的角度约定),取样点走的正是反方向;Bulge 没有方向,乘的是「离视轴 (该层网格的中心)
