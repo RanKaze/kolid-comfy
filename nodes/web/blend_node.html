@@ -5834,6 +5834,7 @@ function livePreviewStroke() {
             selInkCanvas.width = selMask.w; selInkCanvas.height = selMask.h;
         }
         resetCtx(selInkCtx);
+        selInkCtx.clearRect(0, 0, selMask.w, selMask.h);
         selInkCtx.drawImage(ink, selMask.x, selMask.y, selMask.w, selMask.h, 0, 0, selMask.w, selMask.h);
         selInkCtx.globalCompositeOperation = 'destination-in';
         selInkCtx.drawImage(selMask.cv, 0, 0);
