@@ -2486,7 +2486,10 @@ void main() {
     Frag = vec4(a, a, a, a);
 }`;
 
-// dual-filtering:一个 pass 里做 uIter 次由小到大的四角抽样,抽样数恒为 4n、与半径无关。
+// dual-filtering:一个 pass 里做 uIter 次抽样,每次恒定 4 个抽样点(一对正交十字)、与半径无关。
+// 十字的朝向逐迭代转 45°、起点 22.5°,down/up 两趟用 uPhase 再错一格:旧写法四角永远落在两条对角
+// 线上,半径大而迭代少时高反差边缘就长出肉眼可见的**十字纹**;换成旋转基后各向同性,抽样数与半径
+// 刻度都没变。
 // uAlphaOnly=1 是 silhouette 的模式(数据只在 alpha 上,走纯加权平均);=0 是色彩模式 ——
 // 每个抽样先预乘再累加,最后用「预乘均值 / alpha 均值」除回直通色,并原样写回本像素的 alpha。
 // 于是低通只吃颜色不吃不透明度,且边缘透明区不会把颜色拽向黑(正是多趟累加最容易踩的坑)。
@@ -2501,6 +2504,7 @@ uniform vec2 uStart;
 uniform vec2 uDelta;
 uniform int uIter;
 uniform int uAlphaOnly;
+uniform int uPhase;
 void main() {
     vec4 c0 = texture(uTex, vUV);
     vec3 acc = c0.rgb * c0.a;
@@ -2509,12 +2513,19 @@ void main() {
     for (int i = 0; i < ${FX_KAWASE_MAX_ITER}; i++) {
         if (i >= uIter) break;
         float k = float(i);
-        vec2 o = (uStart + uDelta * k) * uTexel;
+        // 四个抽样点是**一对正交的十字**,距离沿用旧四角的 |r|·√2 刻度;十字本身每迭代转 45°、
+        // 起点 22.5°。4 阶矩上单十字已经各向同性(E[X^4]+E[Y^4] = 6·E[X²Y²] 在 θ=22.5° 时成立),
+        // 相邻迭代再互补一次,所以既没有 × 也没有 +,而抽样数一个没多。
+        float d = (uStart + uDelta * k).x * 1.4142135;
+        float ang = (k + float(uPhase)) * 0.7853982 + 0.3926991;
+        vec2 dir = vec2(cos(ang), sin(ang)) * d;
+        vec2 u = vec2(dir.x * uTexel.x, dir.y * uTexel.y);
+        vec2 v = vec2(-dir.y * uTexel.x, dir.x * uTexel.y);
         float w = 1.0 + k;
-        vec4 s1 = texture(uTex, vUV + o);
-        vec4 s2 = texture(uTex, vUV + vec2(-o.x, o.y));
-        vec4 s3 = texture(uTex, vUV + vec2(o.x, -o.y));
-        vec4 s4 = texture(uTex, vUV - o);
+        vec4 s1 = texture(uTex, vUV + u);
+        vec4 s2 = texture(uTex, vUV - u);
+        vec4 s3 = texture(uTex, vUV + v);
+        vec4 s4 = texture(uTex, vUV - v);
         acc += w * (s1.rgb * s1.a + s2.rgb * s2.a + s3.rgb * s3.a + s4.rgb * s4.a);
         aAcc += w * (s1.a + s2.a + s3.a + s4.a);
         wAcc += 4.0 * w;
@@ -2767,8 +2778,9 @@ function fxglBindTex(prog, name, tex, unit) {
     gl.uniform1i(loc, unit);
 }
 
-// uStart/uDelta 以 texel 计,着色器再乘 uTexel。
-function fxglBox(dst, srcTex, start, delta, iter, alphaOnly) {
+// uStart/uDelta 以 texel 计,着色器再乘 uTexel。phase 只决定抽样朝向从哪一路起(对角/轴向),
+// down 与 up 各取 0/1,两趟的朝向正好互换。同一份着色器也修好了 silhouette 的高斯。
+function fxglBox(dst, srcTex, start, delta, iter, alphaOnly, phase) {
     const gl = fxgl.gl;
     fxglRunPass(dst, fxgl.progs.box, p => {
         fxglBindTex(p, 'uTex', srcTex, 0);
@@ -2777,11 +2789,13 @@ function fxglBox(dst, srcTex, start, delta, iter, alphaOnly) {
         gl.uniform2f(fxglU(p, 'uDelta'), delta, delta);
         gl.uniform1i(fxglU(p, 'uIter'), iter);
         gl.uniform1i(fxglU(p, 'uAlphaOnly'), alphaOnly ? 1 : 0);
+        gl.uniform1i(fxglU(p, 'uPhase'), phase ? 1 : 0);
     });
 }
 
 // 半径 R = n*start + delta*n(n-1)/2;取 start=delta 解出 step,一趟由小到大、一趟由小到大退回,
-// 抽样数只随 n 线性增长(n = radius/5 夹在 1..8),与半径本身脱钩。
+// 抽样数只随 n 线性增长(n = radius/5 夹在 1..8),与半径本身脱钩。朝向旋转把十字摊平是在**同一
+// 个 n** 上完成的,所以这套抽样预算一个字都没动。
 function fxglKawaseIters(radius) {
     return Math.max(1, Math.min(FX_KAWASE_MAX_ITER, Math.round(radius / 5)));
 }
@@ -2791,15 +2805,15 @@ function fxglGauss(col, radius) {
     const step = (2 * radius) / (n * (n + 1));
     const src = fxgl.off[col.slot];
     const mid = fxgl.off[1 - col.slot];
-    fxglBox(mid, src.tex, step, step, n, false);                       // down
-    fxglBox(src, mid.tex, step * (n - 1), -step, n, false);            // up
+    fxglBox(mid, src.tex, step, step, n, false, 0);                     // down
+    fxglBox(src, mid.tex, step * (n - 1), -step, n, false, 1);          // up
 }
 
 function fxglSilGauss(radius) {
     const n = fxglKawaseIters(radius);
     const step = (2 * radius) / (n * (n + 1));
-    fxglBox(fxgl.off[3], fxgl.off[2].tex, step, step, n, true);         // down
-    fxglBox(fxgl.off[4], fxgl.off[3].tex, step * (n - 1), -step, n, true);   // up
+    fxglBox(fxgl.off[3], fxgl.off[2].tex, step, step, n, true, 0);        // down
+    fxglBox(fxgl.off[4], fxgl.off[3].tex, step * (n - 1), -step, n, true, 1);   // up
 }
 
 // 画布坐标(0°=右、90°=下,y 向下增长)→ 纹理 UV(GL 的 y 向上,上传时已翻)。
