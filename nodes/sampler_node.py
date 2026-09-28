@@ -683,7 +683,10 @@ class PipelineData:
         self.latent = None  # 解码后将 latent 设置为 None
         return self.image
     # ==================== 获取 Conditioning（只返回 condition，带缓存） ====================
-    def get_conditioning(self, mode, clip, vae, prompt: str, reference_latent = None, reference_image = None, reference = None):
+    # source_latent: 仅 QwenImage21 使用 —— 第一格参考图的 latent 直接沿用调用方的 target
+    # latent，不再独立推尺寸重编码（见 architecture/QwenImage21.py）。其余架构忽略该参数。
+    def get_conditioning(self, mode, clip, vae, prompt: str, reference_latent = None, reference_image = None, reference = None,
+                         source_latent = None):
         if clip is None:
             raise ValueError("无法获取有效的 clip")
         if self.cache is None:
@@ -715,7 +718,7 @@ class PipelineData:
         elif arch_qwen_image21.matches(self.config):
             condition = arch_qwen_image21.get_conditioning(
                 self, mode, clip, vae, prompt, reference_latent, reference_image,
-                reference, conditioning_set_values, VAEDecode
+                reference, conditioning_set_values, VAEDecode, source_latent=source_latent
             )
         else:
             if condition is None:
