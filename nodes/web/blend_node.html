@@ -674,6 +674,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="tool-body">
                     <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
                     <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
+                    <div class="control-row"><label>Padding</label><input type="range" id="textPaddingRange" min="0" max="256" step="1" value="0" title="Clear space around the text, in layer pixels at the authored font size — the box grows outward and the glyphs keep their size. Outer effects (drop shadow, glow) need that room: they are cut at the layer's own edge"><span id="textPaddingValue">0</span></div>
                     <div class="control-row"><label>Weight</label><select id="textWeightSel"><option value="normal">Normal</option><option value="bold">Bold</option></select><span></span></div>
                     <div class="control-row"><label>Align</label><select id="textAlignSel"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><span></span></div>
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
@@ -1366,6 +1367,20 @@ function renderTransformedSurface(source, tr, w, h) {
     return c;
 }
 
+// Swap a paint surface for a resampled copy at (w, h). Mask and decal live in LAYER space, so the
+// composite already stretches them over whatever the native grid is right now (layerSource draws
+// them at 0,0,w,h) — resampling the stored surface therefore moves nothing visually; it only keeps
+// the surface the size the backend contract demands (image and mask at one and the same grid).
+// A NEW canvas always: the undo steps hold the old surface by reference (see detachPaintSurface),
+// so resizing in place would rewrite history as well as the present.
+function stretchSurfaceTo(surface, w, h) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w));
+    c.height = Math.max(1, Math.round(h));
+    c.getContext('2d').drawImage(surface, 0, 0, c.width, c.height);
+    return c;
+}
+
 // Swaps a raster layer's buffer for a canvas-sized resample of its current pixels.
 function rasterResampleBuffer(l, w, h) {
     const c = document.createElement('canvas');
@@ -1376,15 +1391,8 @@ function rasterResampleBuffer(l, w, h) {
     if (l.src) l.src = c.toDataURL('image/png');
     // Mask and decal live in layer space; for a raster layer that space IS the canvas, so they
     // stretch with it — exactly what the identity transform would do to them at composite time.
-    const stretch = s => {
-        if (!s) return null;
-        const nc = document.createElement('canvas');
-        nc.width = c.width; nc.height = c.height;
-        nc.getContext('2d').drawImage(s, 0, 0, nc.width, nc.height);
-        return nc;
-    };
-    if (l.mask) { l.mask = stretch(l.mask); l.maskCtx = l.mask.getContext('2d'); }
-    if (l.decal) { l.decal = stretch(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+    if (l.mask) { l.mask = stretchSurfaceTo(l.mask, c.width, c.height); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.decal) { l.decal = stretchSurfaceTo(l.decal, c.width, c.height); l.decalCtx = l.decal.getContext('2d'); }
 }
 
 // Smart object → raster: bakes the current transform into a canvas-sized buffer. One-way (PS
@@ -1492,7 +1500,7 @@ function effectiveTransform(l) {
 const TEXT_LINE_HEIGHT = 1.2;
 const TEXT_DEFAULTS = {
     content: '', fontFamily: 'Arial, "Helvetica Neue", sans-serif',
-    fontSize: 64, fontWeight: 'normal', color: '#ffffff', align: 'center',
+    fontSize: 64, fontWeight: 'normal', color: '#ffffff', align: 'center', padding: 0,
 };
 const TEXT_FONT_FAMILIES = [
     ['Arial, "Helvetica Neue", sans-serif', 'Arial'],
@@ -1526,11 +1534,15 @@ function sanitizeTextDescriptor(raw) {
     const weight = raw.fontWeight === 'bold' ? 'bold' : 'normal';
     const color = /^#[0-9a-fA-F]{3,8}$/.test(String(raw.color || '')) ? raw.color : TEXT_DEFAULTS.color;
     const align = ['left', 'center', 'right'].indexOf(raw.align) >= 0 ? raw.align : TEXT_DEFAULTS.align;
+    // Padding is a length in the descriptor's own units, never negative; a file from before the
+    // field simply has no `padding` and lands at 0, so no archive migration is involved.
+    const pad = Number(raw.padding);
     return {
         content: raw.content,
         fontFamily: fam,
         fontSize: Number.isFinite(size) ? Math.max(1, Math.min(4096, size)) : TEXT_DEFAULTS.fontSize,
         fontWeight: weight, color, align,
+        padding: Number.isFinite(pad) ? Math.max(0, Math.min(4096, Math.round(pad))) : 0,
     };
 }
 
@@ -1543,18 +1555,20 @@ function textLines(desc) {
 }
 
 let textMeasureCanvas = null;
-// The descriptor's natural box: the pixel size the text occupies at its authored font size. The
-// transform stores this box (see patchTextLayer), and syncTextBuffer re-renders it into whatever
-// canvas-pixel size the box currently has.
+// The descriptor's DISPLAY box: the glyph box plus the padding ring, in the descriptor's own units
+// at its authored font size. The transform stores this box (see patchTextLayer), and syncTextBuffer
+// re-renders it into whatever canvas-pixel size the box currently has. Padding therefore widens the
+// box outward instead of shrinking the glyphs: every axis still maps linearly box → buffer.
 function measureTextNatural(desc) {
     if (!textMeasureCanvas) textMeasureCanvas = document.createElement('canvas');
     const ctx = textMeasureCanvas.getContext('2d');
     ctx.font = textFontString(desc, desc.fontSize);
     let w = 0;
     for (const line of textLines(desc)) w = Math.max(w, ctx.measureText(line).width);
+    const pad = desc.padding;
     return {
-        w: Math.max(4, Math.ceil(w)),
-        h: Math.max(1, Math.ceil(textLines(desc).length * desc.fontSize * TEXT_LINE_HEIGHT)),
+        w: Math.max(4, Math.ceil(w)) + pad * 2,
+        h: Math.max(1, Math.ceil(textLines(desc).length * desc.fontSize * TEXT_LINE_HEIGHT)) + pad * 2,
     };
 }
 
@@ -1578,11 +1592,15 @@ function renderTextBuffer(desc, nat, w, h) {
     ctx.textBaseline = 'middle';
     ctx.textAlign = desc.align === 'left' ? 'left' : (desc.align === 'right' ? 'right' : 'center');
     const lh = desc.fontSize * TEXT_LINE_HEIGHT;
-    const top = (nat.h - lh * textLines(desc).length) / 2 + lh / 2;
-    // The anchor x follows the alignment: a left-aligned line STARTS at the box edge. Centring
-    // every anchor (the old bug) pushed left/right text half off the buffer, where it was clipped.
-    const ax = desc.align === 'left' ? 0 : (desc.align === 'right' ? nat.w : nat.w / 2);
-    for (let x = 0; x < textLines(desc).length; x++) {
+    const lines = textLines(desc).length;
+    // Vertical needs no padding term: the ring is symmetric, so centring the block in the whole box
+    // lands it on exactly the baseline centring it in the text area would. The anchor x DOES step
+    // inward — a left/right-aligned line starts and ends at the TEXT edge, not the frame (centring
+    // every anchor, the old bug, pushed left/right text half off the buffer, where it was clipped).
+    const top = (nat.h - lh * lines) / 2 + lh / 2;
+    const pad = desc.padding;
+    const ax = desc.align === 'left' ? pad : (desc.align === 'right' ? nat.w - pad : nat.w / 2);
+    for (let x = 0; x < lines; x++) {
         ctx.fillText(textLines(desc)[x], ax, top + x * lh);
     }
     return c;
@@ -1596,20 +1614,33 @@ function syncTextBuffer(l) {
     if (!canvasW || !canvasH || !desc || !tr) return;
     const w = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.w * canvasW)));
     const h = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.h * canvasH)));
-    const key = JSON.stringify([desc.content, desc.fontFamily, desc.fontSize, desc.fontWeight, desc.color, desc.align]);
+    // padding must be IN the key: it re-sizes the box without touching a single glyph metric, so
+    // without it a padding change would look right in the panel and never reach the pixels.
+    const key = JSON.stringify([desc.content, desc.fontFamily, desc.fontSize, desc.fontWeight, desc.color, desc.align, desc.padding]);
     if (l.textCache && l.textCache.key === key && l.textCache.img === l.img
         && l.textCache.w === w && l.textCache.h === h) return;
+    const prev = l.img;
     const img = renderTextBuffer(desc, measureTextNatural(desc), w, h);
     l.img = img;
+    // The grid moved (a retype, or the padding ring growing): resample the two paint surfaces onto
+    // it. Visually nothing shifts — the composite already stretches them over the native grid — but
+    // the mask the backend multiplies by must stay AT that grid, or image and mask arrive at two
+    // different sizes and the alignment contract is gone.
+    if (prev && (prev.width !== img.width || prev.height !== img.height)) {
+        if (l.mask) { l.mask = stretchSurfaceTo(l.mask, img.width, img.height); l.maskCtx = l.mask.getContext('2d'); }
+        if (l.decal) { l.decal = stretchSurfaceTo(l.decal, img.width, img.height); l.decalCtx = l.decal.getContext('2d'); }
+    }
     l.textCache = { key, w, h, img };
 }
 
-// The authored box of the descriptor (its natural size at font size 1:1), which a text layer's
-// transform always carries.
+// The authored display box of the descriptor (glyph box + padding ring, at font size 1:1), which a
+// text layer's transform always carries.
 function textLayerBox(desc) { return measureTextNatural(desc); }
 
 // Swap the descriptor and re-fit the box so the RENDERED font size keeps its current on-canvas
-// pixel size: editing 'Text' to 'Longer copy' grows the box, not shrinks the glyphs.
+// pixel size: editing 'Text' to 'Longer copy' grows the box, not shrinks the glyphs. The same ratio
+// holds for `padding` because the ring is part of the box measureTextNatural returns — raise it and
+// the box widens outward by exactly that much on each side, while sy = box/nat.h stays put.
 function patchTextLayer(l, patch, opts) {
     const next = Object.assign({}, l.text, patch);
     const oldNat = measureTextNatural(l.text);
@@ -6100,6 +6131,8 @@ const textSectionEl = document.getElementById('textSection');
 const textFontSel = document.getElementById('textFontSel');
 const textSizeRange = document.getElementById('textSizeRange');
 const textSizeValue = document.getElementById('textSizeValue');
+const textPaddingRange = document.getElementById('textPaddingRange');
+const textPaddingValue = document.getElementById('textPaddingValue');
 const textWeightSel = document.getElementById('textWeightSel');
 const textAlignSel = document.getElementById('textAlignSel');
 const textColorInput = document.getElementById('textColorInput');
@@ -6202,6 +6235,13 @@ function positionTextEditor() {
     textEditorEl.style.width = (w / kx + 4) + 'px';
     textEditorEl.style.height = h + 'px';
     textEditorEl.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${ang}rad) scale(${kx}, 1)`;
+    // The box the transform carries INCLUDES the padding ring, so the caret has to step inward by
+    // that ring or the editor would type over the margin. box-sizing is border-box, hence padding
+    // insets the text without moving the frame. One length serves both axes: this element lives in
+    // sy-space (its width is the screen box divided back out by kx), so a CSS length of p*sy*zoom
+    // becomes p*sx*zoom = the ring's screen width horizontally, and exactly itself vertically.
+    const pad = l.text.padding * sy * view.zoom;
+    textEditorEl.style.padding = `${pad}px`;
     textEditorEl.style.font = `${l.text.fontWeight} ${fs}px ${l.text.fontFamily}`;
     textEditorEl.style.lineHeight = (fs * TEXT_LINE_HEIGHT) + 'px';
     textEditorEl.style.textAlign = l.text.align;
@@ -6290,6 +6330,8 @@ function updateTextPanel() {
     if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
     textSizeRange.value = Math.min(512, t.fontSize);
     textSizeValue.textContent = String(t.fontSize);
+    textPaddingRange.value = Math.min(256, t.padding);
+    textPaddingValue.textContent = String(t.padding);
     textWeightSel.value = t.fontWeight;
     textAlignSel.value = t.align;
     textColorInput.value = TEXT_HEX6(t.color);
@@ -6299,7 +6341,10 @@ function updateTextPanel() {
     const nat = textLayerBox(t);
     const tr = effectiveTransform(l);
     textSizeLine.style.display = 'block';
-    textSizeLine.textContent = `${nat.w} × ${nat.h} px (${Math.round(tr.w * canvasW)} × ${Math.round(tr.h * canvasH)} on canvas)`;
+    // The box shown IS the buffer the pipeline resolves (glyph box + ring), so state the ring too
+    // whenever it is what makes the box bigger than the text.
+    textSizeLine.textContent = `${nat.w} × ${nat.h} px (${Math.round(tr.w * canvasW)} × ${Math.round(tr.h * canvasH)} on canvas)`
+        + (t.padding ? ` · +${t.padding} padding` : '');
 }
 
 function patchSelectedText(patch, historyKey) {
@@ -6318,6 +6363,10 @@ textAlignSel.addEventListener('change', () => patchSelectedText({ align: textAli
 textSizeRange.addEventListener('input', () => {
     textSizeValue.textContent = textSizeRange.value;
     patchSelectedText({ fontSize: Number(textSizeRange.value) || 1 }, 'text-size');
+});
+textPaddingRange.addEventListener('input', () => {
+    textPaddingValue.textContent = textPaddingRange.value;
+    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding');
 });
 textColorInput.addEventListener('input', () => {
     textColorValue.textContent = textColorInput.value.toUpperCase();
