@@ -761,10 +761,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
                     <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to fold the settings."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
-                    <div class="mini-group">
-                        <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
-                        <button class="mini-btn key-btn" id="textEditBtn" title="Edit (Enter) — retype this layer's text inline on the canvas"><span class="tool-key">&#9166;</span></button>
-                    </div>
+                    <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                 </div>
                 <div class="tool-body">
                     <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
@@ -6656,7 +6653,6 @@ const textColorInput = document.getElementById('textColorInput');
 const textColorValue = document.getElementById('textColorValue');
 const textContentLine = document.getElementById('textContentLine');
 const textSizeLine = document.getElementById('textSizeLine');
-const textEditBtn = document.getElementById('textEditBtn');
 
 // `box` (canvas px, from the armed rectangle) welds the layer's transform to that rectangle;
 // without it the new text falls back to the contain-fit rule every new entry obeys.
@@ -6876,11 +6872,6 @@ function patchSelectedText(patch, historyKey) {
     if (!isTextLayer(l)) return;
     patchTextLayer(l, patch, { historyKey });
 }
-
-textEditBtn.addEventListener('click', () => {
-    const l = getSelected();
-    if (l && isTextLayer(l)) openTextEditor(l.id);
-});
 textFontSel.addEventListener('change', () => patchSelectedText({ fontFamily: textFontSel.value }));
 for (const [v, id] of TEXT_WEIGHT_CHOICES) {
     document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
