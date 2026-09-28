@@ -929,6 +929,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div style="display:flex; gap:4px;"><button class="mini-btn" id="detectRunBtn" title="Open the Detect dialog — pick where the detector looks and where the mask lands" style="flex:1;">Detect</button></div>
                 </div>
             </div>
+            <!-- Processor 工具：把 Interface tab 里开了 Processor 模式的 interface 当离线图像处理器
+                 跑 —— pipeline 的当前图不动，输入按行收集、输出按行落位。行由 JS 依所选 interface
+                 的端口动态填（#processorPorts），枚举照工作台惯例用 mini-group 分段按钮。 -->
+            <div class="panel-section tool-section foldable collapsed" id="processorSection">
+                <div class="panel-head">
+                    <div class="panel-label" id="processorLabel" title="Processor — runs an interface that has Processor mode on (toggle it in the Interface tab) as a fully offline pass: the pipeline's current image is never touched. Each image input reads the Layers composite, the selected layer or a staging entry; each mask input reads the main Mask, the selected layer's mask, its alpha, or mask AND alpha; outputs land as a new layer, back into the selected layer or its mask, or in the workspace. Click the header to open its window."><span class="fold-caret"></span>Processor</div>
+                </div>
+                <div class="tool-body">
+                    <div class="control-row"><label>Interface</label><select id="processorPick" title="Which processor-mode interface to run — the list is every interface with Processor mode on in the Interface tab"></select><span></span></div>
+                    <div id="processorPorts"></div>
+                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button><span></span></div>
+                </div>
+            </div>
             <div class="panel-section">
                 <div class="panel-head">
                     <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
@@ -8776,12 +8789,12 @@ document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rota
 document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
 
 // ---- 工具设置小窗 ----
-// Brush, Bucket, Eraser and Text start folded. Clicking a header row docks that tool's settings as
-// a small window on the sidePanel's left edge instead of opening them inside the column, so the tool
-// rows never jump and a slider gets a row of its own. Windows follow their header while the panel
-// scrolls or the column is dragged wider, and stack in list order so two of them cannot sit on top
-// of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'detectorSection'];
+// Brush, Bucket, Eraser, Text, Detector and Processor start folded. Clicking a header row docks
+// that tool's settings as a small window on the sidePanel's left edge instead of opening them inside
+// the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
+// header while the panel scrolls or the column is dragged wider, and stack in list order so two of
+// them cannot sit on top of each other.
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'detectorSection', 'processorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -12438,6 +12451,321 @@ if (stagingStripEl) {
 }
 renderStaging();
 
+// ==================== Processor 工具 ====================
+// Interface tab 里开了 Processor 模式的 interface 在这里当离线处理器跑。这里只负责两件事：
+// 按每行枚举收集输入 PNG（blend-processor-run 发给宿主）、按每行枚举摆放结果
+// （宿主跑完 blend-processor-result 发回来）。真正的执行与轮询都在宿主（sampler App）。
+let processorList = [];            // [{name, index, start_ports, end_ports}] —— 宿主推送
+let processorChoice = -1;          // processorList 下标，-1 = 还没有可选的
+let processorSel = new Map();      // '<ifaceIndex>:in|out:<port>' -> 枚举值（跨重渲染记住）
+let processorBusy = false;         // 一次 run 在飞，blend-processor-result 收尾
+let processorRunIdx = -1;          // 在飞这次用的 interface（结果按它找目的枚举）
+
+const PROCESSOR_SRC_IMAGE = [
+    ['layers', 'Layers', 'The Layers composite — the canvas as it stands right now'],
+    ['selected', 'Sel. Layer', 'The selected layer\'s own pixels, at its native size'],
+    ['staging', 'Staging', 'A workspace entry picked below'],
+];
+const PROCESSOR_SRC_MASK = [
+    ['main_mask', 'Main Mask', 'The Mask layer\'s coverage — the same mask a run would use'],
+    ['selected_mask', 'Sel. Mask', 'The selected layer\'s own mask'],
+    ['selected_alpha', 'Sel. Alpha', 'The selected layer\'s alpha channel as a mask'],
+    ['mask_alpha', 'Mask&Alpha', 'The selected layer\'s mask AND alpha together'],
+];
+const PROCESSOR_DST_IMAGE = [
+    ['new_layer', 'New Layer', 'The result lands as a new layer on the canvas'],
+    ['staging', 'Staging', 'A copy of the result is parked in the workspace'],
+];
+const PROCESSOR_DST_MASK = [
+    ['selected_mask', 'Sel. Mask', 'The result writes back into the selected layer\'s mask'],
+    ['selected_layer', 'Sel. Layer', 'The mask renders as a black/white image that replaces the selected layer\'s pixels'],
+    ['staging', 'Staging', 'A copy of the mask (as an image) is parked in the workspace'],
+];
+const PROCESSOR_HINTS = {
+    in: { IMAGE: 'Image input', MASK: 'Mask input' },
+    out: { IMAGE: 'Image output', MASK: 'Mask output', PIPELINE_DATA: 'Pipeline output' },
+};
+
+function processorCurrent() {
+    return processorChoice >= 0 && processorChoice < processorList.length ? processorList[processorChoice] : null;
+}
+function procSelKey(ifaceIdx, side, port) { return `${ifaceIdx}:${side}:${port}`; }
+function procPick(ifaceIdx, side, port, table, fallback) {
+    const k = procSelKey(ifaceIdx, side, port);
+    if (!processorSel.has(k)) {
+        const v = table.some(o => o[0] === fallback) ? fallback : table[0][0];
+        processorSel.set(k, v);
+    }
+    return processorSel.get(k);
+}
+function procDstTable(type) { return type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE; }
+
+// 一个 surface（canvas 或解码后的 img）按原生尺寸重编码成 PNG dataURL —— 输入侧统一从这里走。
+function processorEncodePng(surface) {
+    const { w, h } = nativeSize(surface);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(surface, 0, 0);
+    return c.toDataURL('image/png');
+}
+
+// mask 输入的统一出口：覆盖度长在 alpha 通道上，而后端按 RGB 亮度读 mask —— 所以一律转成
+// 不透明灰度图（RGB = 覆盖度，alpha = 255），透明黑才不会在半路变成全零 mask。
+function processorCoverageUrl(surface) {
+    const { w, h } = nativeSize(surface);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const cx = c.getContext('2d');
+    cx.drawImage(surface, 0, 0);
+    const d = cx.getImageData(0, 0, w, h);
+    const px = d.data;
+    for (let i = 0; i < px.length; i += 4) {
+        const v = px[i + 3];
+        px[i] = v; px[i + 1] = v; px[i + 2] = v; px[i + 3] = 255;
+    }
+    cx.putImageData(d, 0, 0);
+    return c.toDataURL('image/png');
+}
+
+function renderProcessorPick() {
+    const sel = document.getElementById('processorPick');
+    sel.innerHTML = '';
+    if (!processorList.length) {
+        const o = document.createElement('option');
+        o.textContent = '— none —';
+        sel.appendChild(o);
+        sel.disabled = true;
+        processorChoice = -1;
+        return;
+    }
+    sel.disabled = false;
+    if (processorChoice < 0 || processorChoice >= processorList.length) processorChoice = 0;
+    for (let i = 0; i < processorList.length; i++) {
+        const o = document.createElement('option');
+        o.value = String(i);
+        o.textContent = processorList[i].name;
+        sel.appendChild(o);
+    }
+    sel.value = String(processorChoice);
+}
+
+function renderProcessorRows() {
+    const host = document.getElementById('processorPorts');
+    host.innerHTML = '';
+    const p = processorCurrent();
+    if (!p) {
+        const hint = document.createElement('div');
+        hint.className = 'panel-hint';
+        hint.textContent = 'No processor interface yet — turn Processor mode on for one in the Interface tab.';
+        host.appendChild(hint);
+        return;
+    }
+    const row = (label, title) => {
+        const r = document.createElement('div');
+        r.className = 'control-row';
+        const lb = document.createElement('label');
+        lb.textContent = label;
+        lb.title = title || '';
+        r.appendChild(lb);
+        return r;
+    };
+    const choiceGroup = (side, port, table) => {
+        const g = document.createElement('div');
+        g.className = 'mini-group';
+        const cur = procPick(p.index, side, port.num, table);
+        for (const [val, text, tip] of table) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'mini-btn' + (val === cur ? ' active' : '');
+            b.textContent = text;
+            b.title = tip;
+            b.addEventListener('click', () => {
+                processorSel.set(procSelKey(p.index, side, port.num), val);
+                renderProcessorRows();     // 换源可能带出/收起 staging 子行
+            });
+            g.appendChild(b);
+        }
+        return g;
+    };
+    // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多一行工作区条目选择。
+    for (const port of p.start_ports) {
+        if (port.type !== 'IMAGE' && port.type !== 'MASK') continue;
+        const table = port.type === 'MASK' ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
+        const r = row(port.name, `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`);
+        r.appendChild(choiceGroup('in', port, table));
+        r.appendChild(document.createElement('span'));
+        host.appendChild(r);
+        if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table) === 'staging') {
+            const sr = row('', 'Which workspace entry feeds this input');
+            const sel = document.createElement('select');
+            sel.title = 'Which workspace entry feeds this input';
+            if (!stagingItems.length) {
+                const o = document.createElement('option');
+                o.textContent = '— workspace is empty —';
+                sel.appendChild(o);
+                sel.disabled = true;
+            } else {
+                const cur = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
+                for (const s of stagingItems) {
+                    const o = document.createElement('option');
+                    o.value = s.id;
+                    o.textContent = s.name;
+                    if (cur ? cur === s.id : s === stagingItems[stagingItems.length - 1]) o.selected = true;
+                    sel.appendChild(o);
+                }
+                sel.addEventListener('change', () =>
+                    processorSel.set(procSelKey(p.index, 'in:staging', port.num), sel.value));
+            }
+            sr.appendChild(sel);
+            sr.appendChild(document.createElement('span'));
+            host.appendChild(sr);
+        }
+    }
+    // 输出行：image 与 pipeline 出口落 New Layer/Staging，mask 出口另有写回两档。
+    for (const port of p.end_ports) {
+        if (port.type !== 'IMAGE' && port.type !== 'MASK' && port.type !== 'PIPELINE_DATA') continue;
+        const dstTable = port.type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE;
+        const r = row(port.name, `${PROCESSOR_HINTS.out[port.type] || 'Output'} — ${port.name}`);
+        r.appendChild(choiceGroup('out', port, dstTable));
+        r.appendChild(document.createElement('span'));
+        host.appendChild(r);
+    }
+}
+
+// 输入收集：返回 dataURL，收集不了（没选图层、mask 没墨、工作区空）返回 null —— 状态已报。
+function processorCollectInput(port, ifaceIdx) {
+    const isMask = port.type === 'MASK';
+    const table = isMask ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
+    const choice = procPick(ifaceIdx, 'in', port.num, table);
+    if (choice === 'staging') {
+        const id = processorSel.get(procSelKey(ifaceIdx, 'in:staging', port.num));
+        const it = stagingItems.find(s => s.id === id) || stagingItems[stagingItems.length - 1];
+        if (!it) { setStatus('The workspace is empty — drop an image into Staging first', 'error'); return null; }
+        processorSel.set(procSelKey(ifaceIdx, 'in:staging', port.num), it.id);
+        return it.src;
+    }
+    if (isMask) {
+        if (choice === 'main_mask') {
+            if (!maskPayload()) { setStatus('Paint the Mask layer first', 'error'); return null; }
+            return processorCoverageUrl(maskLayer.decal);
+        }
+        const l = getSelected();
+        if (!l || l.isMaskLayer) { setStatus('Select an image layer for this mask input', 'error'); return null; }
+        if (choice === 'selected_mask') {
+            // 没画过 mask = 整层都算：合成一张全白，而不是拿空 surface 当全零。
+            if (!l.mask || !surfaceHasInk(l.mask)) {
+                const { w, h } = nativeSize(l.img);
+                const c = document.createElement('canvas');
+                c.width = w; c.height = h;
+                const cx = c.getContext('2d');
+                cx.fillStyle = '#fff';
+                cx.fillRect(0, 0, w, h);
+                return c.toDataURL('image/png');
+            }
+            return processorCoverageUrl(l.mask);
+        }
+        // alpha / mask&alpha：前者取 mask 裁剪前的链输出，后者 layerSource 本来就裁了 ——
+        // 两者的 alpha 恰好是这两个语义，转灰度即可。
+        const src = choice === 'selected_alpha' ? (fxResolved(l) || l.img) : layerSource(l);
+        if (!src) { setStatus('That layer has no pixels to read yet', 'error'); return null; }
+        return processorCoverageUrl(src);
+    }
+    if (choice === 'selected') {
+        const l = getSelected();
+        if (!l || l.isMaskLayer) { setStatus('Select an image layer for this input', 'error'); return null; }
+        return processorEncodePng(layerSource(l));
+    }
+    if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return null; }
+    return blendCanvas.toDataURL('image/png');     // 'layers'：render() 一直把它保持在最新
+}
+
+function runProcessor() {
+    if (processorBusy) { setStatus('A processor run is already in flight', 'error'); return; }
+    const p = processorCurrent();
+    if (!p) { setStatus('No processor interface — enable Processor mode on one in the Interface tab', 'error'); return; }
+    if (!window.parent || window.parent === window) { setStatus('Processor runs need the sampler host — open this workbench from the node', 'error'); return; }
+    const inputs = [];
+    for (const port of p.start_ports) {
+        if (port.type !== 'IMAGE' && port.type !== 'MASK') continue;
+        const dataUrl = processorCollectInput(port, p.index);
+        if (dataUrl === null) return;
+        inputs.push({ port: port.num, dataUrl });
+    }
+    if (!inputs.length) { setStatus('That processor takes no image or mask inputs', 'error'); return; }
+    processorBusy = true;
+    processorRunIdx = p.index;
+    window.parent.postMessage({ type: 'blend-processor-run', interface_index: p.index, inputs }, '*');
+    setStatus('Running processor…');
+}
+
+// 结果落位。image 出口：新图层或工作区（隐藏条目复制一份可见的）；mask 出口：写回选中图层的
+// mask、把 mask 变成图替换选中图层像素、或进工作区。每档都要有选中图层兜底。
+function finishProcessorRun(d) {
+    processorBusy = false;
+    setActionBusy(false);
+    if (!d.ok) {
+        processorRunIdx = -1;
+        setStatus(d.cancelled ? 'Processor run cancelled' : 'Processor failed: ' + (d.error || 'unknown error'),
+            d.cancelled ? 'success' : 'error');
+        return;
+    }
+    const ifaceIdx = typeof d.interface_index === 'number' ? d.interface_index : processorRunIdx;
+    processorRunIdx = -1;
+    const results = Array.isArray(d.results) ? d.results : [];
+    if (!results.length) { setStatus('Processor finished with no results', 'error'); return; }
+    const staged = [];
+    let hitLayerTrouble = false;
+    for (const r of results) {
+        if (!r || typeof r.port !== 'number' || !r.src) continue;
+        const isMask = r.type === 'MASK';
+        const dst = procPick(ifaceIdx, 'out', r.port, procDstTable(isMask ? 'MASK' : 'IMAGE'));
+        if (dst === 'staging') { staged.push({ src: r.src, name: r.name || 'Processed' }); continue; }
+        const l = getSelected();
+        if (!l || l.isMaskLayer) { hitLayerTrouble = true; continue; }
+        if (!isMask && dst === 'new_layer') {
+            addLayer({ src: r.src, name: r.name || 'Processor' }, WORK_STACK);
+        } else if (isMask && dst === 'selected_mask') {
+            // 结果是后端转出的不透明灰度图：亮度搬回 alpha 才是这层的覆盖度面板。
+            loadImage(r.src, img => {
+                const { w, h } = nativeSize(l.img);
+                const cov = document.createElement('canvas');
+                cov.width = w; cov.height = h;
+                const cx = cov.getContext('2d');
+                cx.drawImage(img, 0, 0, w, h);
+                const data = cx.getImageData(0, 0, w, h);
+                const px = data.data;
+                for (let i = 0; i < px.length; i += 4) {
+                    const v = px[i];
+                    px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = v;
+                }
+                cx.putImageData(data, 0, 0);
+                ensureMask(l);
+                l.maskCtx.clearRect(0, 0, l.mask.width, l.mask.height);
+                l.maskCtx.drawImage(cov, 0, 0);
+                refreshMaskThumb(l);
+                renderLayerList();
+                render();
+                pushHistory();
+            }, () => setStatus('Could not load a processor result', 'error'));
+        } else if (isMask && dst === 'selected_layer') {
+            replaceLayerImage(l.id, { src: r.src, name: l.name });
+        }
+    }
+    if (staged.length) {
+        window.parent.postMessage({ type: 'blend-staging-upload', images: staged.map(s => s.src), names: staged.map(s => s.name) }, '*');
+    }
+    if (hitLayerTrouble) setStatus('Processor done — select an image layer for the layer/mask outputs', 'error');
+    else setStatus(`Processor done — ${results.length} result${results.length === 1 ? '' : 's'}`, 'success');
+}
+
+document.getElementById('processorPick').addEventListener('change', () => {
+    processorChoice = Number(document.getElementById('processorPick').value) || 0;
+    renderProcessorRows();
+});
+document.getElementById('processorRunBtn').addEventListener('click', runProcessor);
+renderProcessorPick();
+renderProcessorRows();
+
 window.addEventListener('message', event => {
     const d = event.data || {};
     if (d.type === 'blend-config') {
@@ -12450,13 +12778,25 @@ window.addEventListener('message', event => {
         // contenteditable 没有 placeholder 属性 —— 占位文本走 CSS 的 ::before。
         if (d.tagDisabledHint) extraPromptInput.dataset.placeholder = d.tagDisabledHint;
         // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
-        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); }
+        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); renderProcessorRows(); }
         syncActionButtons();
         return;
     }
     if (d.type === 'blend-staging') {
         stagingItems = Array.isArray(d.items) ? d.items : [];
         renderStaging();
+        renderProcessorRows();      // staging 输入的下拉跟着图池走
+        return;
+    }
+    if (d.type === 'blend-processors') {
+        // Interface tab 的 Processor 开关变了：重填 interface 枚举与端口行。
+        processorList = Array.isArray(d.processors) ? d.processors : [];
+        renderProcessorPick();
+        renderProcessorRows();
+        return;
+    }
+    if (d.type === 'blend-processor-result') {
+        finishProcessorRun(d);
         return;
     }
     if (d.type === 'blend-pipeline-presets') {
@@ -12536,7 +12876,8 @@ window.addEventListener('message', event => {
             setActionBusy(true, 'detailer');
             const total = Number(d.total) || 0, cur = Number(d.current) || 0;
             toolbarProgressFill.style.width = total ? `${Math.round((cur / total) * 100)}%` : '30%';
-            setStatus(total ? `Running detailer — step ${cur} / ${total}` : 'Running detailer…');
+            const what = processorBusy ? 'processor' : 'detailer';
+            setStatus(total ? `Running ${what} — step ${cur} / ${total}` : `Running ${what}…`);
         } else if (st === 'cancelled') {
             setActionBusy(false);
             setStatus('Run cancelled', 'success');
