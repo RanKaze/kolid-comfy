@@ -84,6 +84,15 @@ function fxIconSvg(icon) {
             + '<circle cx="7" cy="7" r="4.5" opacity="0.35" stroke-dasharray="1.4 1.7"/>'
             + '<path d="M7 2.1v1.5M7 10.4v1.5M2.1 7h1.5M10.4 7h1.5" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/></svg>';
     }
+    if (icon === 'fog') {
+        // 长短不齐的三道雾带压在下半幅,上面一根短斜光:雾条既不是 'blur' 的同心圆也不是 'light'
+        // 的八道射线 —— 浓度随高度变薄才是它的样子。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M2.4 3.0 5.2 5.8" opacity="0.5"/><path d="M6.9 1.9v2.9" opacity="0.5"/>'
+            + '<path d="M2.6 7.2h6.1" opacity="0.45"/>'
+            + '<path d="M4.3 9.5h7.1" opacity="0.7"/>'
+            + '<path d="M1.9 11.8h5.7"/></svg>';
+    }
     return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
         + '<path d="M1.9 4.3h5.4M1.9 9.7h5.4" stroke-width="1" opacity="0.55"/>'
         + '<path d="M2.2 7h5.1"/><path d="M7.1 3.9 10.4 7l-3.3 3.1"/></svg>';
