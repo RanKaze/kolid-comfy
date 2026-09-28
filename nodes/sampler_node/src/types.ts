@@ -343,3 +343,19 @@ export interface PipelinePackageInfo {
   name: string;
   pipelines: PipelineInfo[];
 }
+
+/** 第一个 detailer block 上的某布尔总闸（Preprocess Settings 的开关都存在它的 params 里）。
+ *  Blend 工作台的 Run 预检、preset 行的 ▶ 图标与后端闸门共用同一语义：enable_mask 关 = 不做
+ *  围绕 mask 的预处理、整幅就是工作区，Mask 层没画也能跑；enable_fit 开 = 图层 Generate 的产出
+ *  继承源 mask 后贴合。
+ *  setId 解不出链时退回第一套（与后端选链的优先级一致）；默认值由调用方传入，
+ *  必须与后端/工作台读同一 key 时的默认一致（enable_mask 后端默认开）。 */
+export function firstDetailerFlag(
+  blockSets: BlockSet[], setId: string | null,
+  key: 'enable_mask' | 'enable_fit', dflt: boolean,
+): boolean {
+  const set = blockSets.find(s => s.id === setId) || blockSets[0];
+  const fd = set?.blocks.find(b => b.type === 'detailer');
+  const dp = fd ? (fd.params as DetailerBlockParams) : undefined;
+  return dp ? (dp[key] ?? dflt) : dflt;
+}

@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
-import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 
@@ -217,6 +217,19 @@ const GearIcon: React.FC<{ size?: number }> = ({ size = 13 }) => (
     strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
     <circle cx="12" cy="12" r="3.2" />
     <path d="M12 2.6v2.5M12 18.9v2.5M21.4 12h-2.5M5.1 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2L5.4 5.4" />
+  </svg>
+);
+
+/** 预置套件的 Run 图标：本体三角与工作台图层的 runSvg 同几何（viewBox 0 0 16 16）。
+ *  framed = 这条链 Enable Mask 开 —— 跑的是 Mask 层裁出的那块区域，外面这一圈矩形就是
+ *  "有裁剪框"；关 = 整幅图就是工作区，裸三角。图例只在 title 里说，不占行宽。 */
+const RunIcon: React.FC<{ framed: boolean; size?: number }> = ({ framed, size = 12 }) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" style={{ display: 'block' }}>
+    {framed && (
+      <rect x="1.2" y="2" width="13.6" height="12" rx="1.8" fill="none"
+        stroke="currentColor" strokeWidth="1.4" />
+    )}
+    <path d={framed ? 'M6.3 5.6 10.6 8 6.3 10.4z' : 'M5.4 3.2 12.8 8 5.4 12.8z'} fill="currentColor" />
   </svg>
 );
 
@@ -928,6 +941,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   const bound = set.pipeline_name || '';
                   const boundNamed = !!bound && bound !== PIPELINE_CURRENT_SELECT;
                   const boundMissing = pipelineIsMissing(bound);
+                  // ▶ 的形状读这一套自己的第一个 detailer 块（与后端 / 工作台 Run 预检同一函数）
+                  const runMasked = firstDetailerFlag(blockSets, set.id, 'enable_mask', true);
                   return (
                     <div key={set.id} style={{
                       display: 'flex', alignItems: 'stretch', borderRadius: 8, overflow: 'hidden',
@@ -980,14 +995,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         <GearIcon size={13} />
                       </button>
                       <button
-                        title={`Run 「${set.name}」 now — the canvas composite, masked by the Mask layer`}
+                        title={runMasked
+                          ? `Run 「${set.name}」 now — ▶ 带框：按 Mask 层裁出的区域跑，产出贴回原图`
+                          : `Run 「${set.name}」 now — 裸 ▶：整幅图就是工作区（Enable Mask 关，不做 mask 裁剪）`}
                         onClick={() => onRunPreset(set.id)}
                         style={{
                           display: 'flex', alignItems: 'center', padding: '4px 10px',
                           border: 'none', borderLeft: '0.5px solid rgba(255,255,255,0.12)',
                           background: 'rgba(255,255,255,0.06)', cursor: 'pointer', lineHeight: 1,
-                          color: isActive ? '#30d158' : 'rgba(48,209,88,0.65)', fontSize: 11,
-                        }}>▶</button>
+                          color: isActive ? '#30d158' : 'rgba(48,209,88,0.65)',
+                        }}><RunIcon framed={runMasked} /></button>
                     </div>
                   );
                 })}
