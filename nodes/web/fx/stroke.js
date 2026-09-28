@@ -69,7 +69,7 @@ void main() {
     vec2 best = fxDec(texture(uTex, vUV).rg);
     float bd = dot(best, best);
     vec2 p = vUV / uTexel;
-    ivec sz = textureSize(uTex, 0);
+    ivec2 sz = textureSize(uTex, 0);
     for (int j = -1; j <= 1; j++) {
         for (int i = -1; i <= 1; i++) {
             if (i == 0 && j == 0) continue;
