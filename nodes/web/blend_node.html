@@ -9063,7 +9063,8 @@ function sendBlendAction(action, opts) {
         if (!dt || !dt.composite) return;
         payload.composite = dt.composite;
         payload.mask = dt.mask || null;
-        payload.detect = { prompt: dt.prompt || '', threshold: dt.threshold, invert: !!dt.invert };
+        payload.detect = { prompt: dt.prompt || '', threshold: dt.threshold, invert: !!dt.invert,
+            source: dt.source || '', dest: dt.dest || '' };
     } else if (action === 'detailer') {
         // 复用预览的那张合成图：blendCanvas 的像素就是画布合成本身（浏览器原生
         // source-over，toDataURL 出来是标准直通 alpha PNG）。管线约定全部按直通
@@ -10024,6 +10025,8 @@ function confirmDetectModal() {
             prompt: detectPromptInput.value.trim(),
             threshold: Number(detectThresholdRange.value),
             invert: detectInvertInput.checked,
+            source,
+            dest,
         },
     });
 }
