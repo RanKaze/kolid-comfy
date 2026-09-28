@@ -775,9 +775,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
                         </button>
                         <button class="io-menu-item" id="addTextLayerBtn" role="menuitem"
-                                title="An editable text layer (T) — it stays vector until Rasterized: double-click it on the canvas to retype, and the pixels re-render sharp at any transform scale.">
+                                title="Drag a rectangle on the canvas (T) — the text layer lands in exactly that box. It stays vector until Rasterized: double-click it to retype, and the pixels re-render sharp at any transform scale.">
                             <span class="io-menu-title">New Text Layer</span>
-                            <span class="io-menu-sub">Editable text — re-sharpens at any size until you rasterize it.</span>
+                            <span class="io-menu-sub">Drag a rectangle on the canvas — the text fills that box.</span>
                         </button>
                         <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
@@ -1046,6 +1046,9 @@ let rectArmed = false;
 // Which palette the armed rectangle is for: the two Add menus share one drag flow, so the stack is
 // captured when the menu item is clicked and read back when the resolution modal is applied.
 let rectTargetStack = 'layer';
+// What the armed rectangle is drawing: the default flow hands the box to the resolution modal,
+// the text flow creates a text layer straight in that box.
+let rectTargetKind = 'dynamic';
 let cursorInside = false;
 
 // Raster layers: the buffer IS the canvas — one image pixel per canvas pixel, transform locked
@@ -1464,8 +1467,11 @@ function renderTextBuffer(desc, nat, w, h) {
     c.height = Math.max(1, Math.round(h));
     if (!String(desc.content)) return c;       // empty text = a transparent box, nothing to paint
     const ctx = c.getContext('2d');
+    // The fill rule is the same a bitmap stretch obeys: each axis scales linearly with the box.
+    // (The old `sx = (c.width/nat.w) / sy` compounded the height factor into the width, so
+    // shortening the box made the glyphs fatten sideways and spill out of the buffer.)
     const sy = c.height / nat.h;
-    const sx = (c.width / nat.w) / sy;
+    const sx = c.width / nat.w;
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
     ctx.font = textFontString(desc, desc.fontSize);
     ctx.fillStyle = desc.color;
@@ -1473,8 +1479,11 @@ function renderTextBuffer(desc, nat, w, h) {
     ctx.textAlign = desc.align === 'left' ? 'left' : (desc.align === 'right' ? 'right' : 'center');
     const lh = desc.fontSize * TEXT_LINE_HEIGHT;
     const top = (nat.h - lh * textLines(desc).length) / 2 + lh / 2;
+    // The anchor x follows the alignment: a left-aligned line STARTS at the box edge. Centring
+    // every anchor (the old bug) pushed left/right text half off the buffer, where it was clipped.
+    const ax = desc.align === 'left' ? 0 : (desc.align === 'right' ? nat.w : nat.w / 2);
     for (let x = 0; x < textLines(desc).length; x++) {
-        ctx.fillText(textLines(desc)[x], nat.w / 2, top + x * lh);
+        ctx.fillText(textLines(desc)[x], ax, top + x * lh);
     }
     return c;
 }
@@ -2432,19 +2441,23 @@ function rectBoxUsable(b) { return b.w >= 2 && b.h >= 2; }
 
 // Arms the mode without starting a drag: the rectangle begins when the button actually goes down.
 // `stack` is which palette the layer is being drawn for — the Layers and Guidances Add menus share
-// this one flow, so only the destination differs.
-function armRectDrag(stack) {
+// this one flow, so only the destination differs. `kind` picks what the finished box becomes:
+// the resolution modal for a dynamic layer, or (text) a text layer welded straight to the box.
+function armRectDrag(stack, kind) {
     if (guardAdjustMode()) return false;
     if (!canvasW || !canvasH) {
         setStatus('Set a canvas size, or add an image, before drawing a dynamic layer', 'error');
         return false;
     }
     rectTargetStack = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
+    rectTargetKind = kind === 'text' ? 'text' : 'dynamic';
     rectArmed = true;
     setCursor(DYNAMIC_CURSOR);
-    setStatus(rectTargetStack === GUIDANCE_STACK
-        ? 'Drag a rectangle on the canvas to place the new guidance'
-        : 'Drag a rectangle on the canvas to place the new layer');
+    setStatus(rectTargetKind === 'text'
+        ? 'Drag a rectangle on the canvas — the new text layer fills exactly the box you draw (Esc cancels)'
+        : rectTargetStack === GUIDANCE_STACK
+            ? 'Drag a rectangle on the canvas to place the new guidance'
+            : 'Drag a rectangle on the canvas to place the new layer');
     return true;
 }
 
@@ -2460,18 +2473,21 @@ function updateRectDrag(pos) {
     drawOverlay();
 }
 
-// The button came up: a usable sweep opens the resolution modal, anything smaller just cancels
-// the mode rather than silently making a 1px layer.
+// The button came up: a usable sweep opens the resolution modal (or, for a text target, lands the
+// layer straight in the box), anything smaller just cancels the mode rather than silently making
+// a 1px layer.
 function endRectDrag() {
     if (!rectDrag) return false;
     const box = rectBoxPixels(rectDrag);
     rectDrag = null;
+    const textTarget = rectTargetKind === 'text';
     if (!rectBoxUsable(box)) {
         refreshCursor();
         render();
         setStatus('Rectangle too small — drag a bigger one', 'error');
         return false;
     }
+    if (textTarget) { addTextLayer(box); return true; }
     openDynamicModal(box);
     return true;
 }
@@ -2481,9 +2497,10 @@ function cancelRectDrag(silent) {
     rectArmed = false;
     rectDrag = null;
     if (!wasArmed) return false;
+    const wasText = rectTargetKind === 'text';
     refreshCursor();
     render();
-    if (!silent) setStatus('Dynamic Layer cancelled');
+    if (!silent) setStatus(wasText ? 'New text layer cancelled' : 'Dynamic Layer cancelled');
     return true;
 }
 
@@ -5679,7 +5696,7 @@ document.addEventListener('mousedown', e => {
 
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
-addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); addTextLayer(); });
+addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'text'); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
@@ -5953,7 +5970,9 @@ const textContentLine = document.getElementById('textContentLine');
 const textSizeLine = document.getElementById('textSizeLine');
 const textEditBtn = document.getElementById('textEditBtn');
 
-function addTextLayer() {
+// `box` (canvas px, from the armed rectangle) welds the layer's transform to that rectangle;
+// without it the new text falls back to the contain-fit rule every new entry obeys.
+function addTextLayer(box) {
     if (textEditingId !== null) commitTextEditor();
     const desc = Object.assign({}, TEXT_DEFAULTS, { content: 'Text' });
     const nat = textLayerBox(desc);
@@ -5975,12 +5994,23 @@ function addTextLayer() {
     insertAtStackTop(l);
     selectedId = l.id;
     groupIds = new Set([l.id]);
-    applyCanvasSize();                             // a first layer may set the canvas from the text box
-    fitLayerToCanvas(l);                           // the contain rule every new entry obeys
+    if (box) {
+        l.transform = {
+            cx: (box.x + box.w / 2) / canvasW,
+            cy: (box.y + box.h / 2) / canvasH,
+            w: box.w / canvasW,
+            h: box.h / canvasH,
+            rotation: 0,
+        };
+    } else {
+        applyCanvasSize();                             // a first layer may set the canvas from the text box
+        fitLayerToCanvas(l);                           // the contain rule every new entry obeys
+    }
     syncTextBuffer(l);
     setMode('transform');                          // renders the list + canvas
     layoutCanvas();
-    setStatus('Text Layer added — type it in · Enter commits · the Text panel restyles it');
+    setStatus(box ? `Text Layer added — the box is ${box.w} × ${box.h}; type it in · Enter commits`
+                  : 'Text Layer added — type it in · Enter commits · the Text panel restyles it');
     pushHistory();
     openTextEditor(l.id, true);
     return l;
@@ -6014,14 +6044,19 @@ function positionTextEditor() {
     const w = Math.max(8, Math.hypot(r.x - c.x, r.y - c.y) * 2);
     const h = Math.max(8, Math.hypot(t.x - c.x, t.y - c.y) * 2);
     const ang = Math.atan2(t.y - c.y, t.x - c.x) + Math.PI / 2;
-    // Font size on screen = the authored size scaled by the box height — the same sy the render
-    // uses, so what you type sits exactly on what the layer shows.
-    const fs = l.text.fontSize * (tr.h * canvasH) / measureTextNatural(l.text).h;
-    textEditorEl.style.width = w + 'px';
+    // The editor mirrors the composite's fill rule exactly: font height scales with the box
+    // HEIGHT (× the view zoom — the box measures come from screen space), and a separate
+    // horizontal CSS scale reproduces the width axis, so a box dragged out of the text's own
+    // aspect still shows what the canvas shows.
+    const nat = measureTextNatural(l.text);
+    const sx = (tr.w * canvasW) / nat.w, sy = (tr.h * canvasH) / nat.h;
+    const kx = sx / sy;
+    const fs = Math.max(1, l.text.fontSize * sy * view.zoom);
+    textEditorEl.style.width = (w / kx) + 'px';
     textEditorEl.style.height = h + 'px';
-    textEditorEl.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${ang}rad)`;
-    textEditorEl.style.font = `${l.text.fontWeight} ${Math.max(1, fs)}px ${l.text.fontFamily}`;
-    textEditorEl.style.lineHeight = (Math.max(1, fs) * TEXT_LINE_HEIGHT) + 'px';
+    textEditorEl.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${ang}rad) scale(${kx}, 1)`;
+    textEditorEl.style.font = `${l.text.fontWeight} ${fs}px ${l.text.fontFamily}`;
+    textEditorEl.style.lineHeight = (fs * TEXT_LINE_HEIGHT) + 'px';
     textEditorEl.style.textAlign = l.text.align;
     textEditorEl.style.color = l.text.color;
     textEditorEl.style.caretColor = l.text.color;
@@ -7430,7 +7465,8 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
-    // Ctrl+T shows the transform box; a bare T creates a text layer (and lands in its editor).
+    // Ctrl+T shows the transform box; a bare T arms the rectangle drag that draws a NEW text
+    // layer — the layer lands in the box the user sweeps, not at a default size.
     // Alt+T stays unassigned — it was never a transform shortcut either.
     if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -7439,7 +7475,7 @@ window.addEventListener('keydown', e => {
     }
     if ((e.key === 't' || e.key === 'T') && !e.altKey) {
         e.preventDefault();
-        addTextLayer();
+        armRectDrag(WORK_STACK, 'text');
         return;
     }
     if (e.key === 'Enter') {
