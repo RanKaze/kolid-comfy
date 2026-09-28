@@ -322,6 +322,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 .icon-btn:disabled:hover { background: transparent; color: rgba(255,255,255,0.45); }
+.icon-btn svg { display: block; width: 14px; height: 14px; }
 
 /* ---- Bottom action toolbar ----
    The composite IS the Context Image: Blend archives it, the Tag button reads it, and the
@@ -4416,6 +4417,20 @@ function renderStackList(listEl, stack) {
                 : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
         run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
 
+        // Effects button on the row: the same picker the chain's「+」and the context menu open.
+        // Fragment layers and the pinned Mask row never get one (they can't hold a chain).
+        let fxBtn = null;
+        if (layerTakesEffects(l)) {
+            fxBtn = document.createElement('button');
+            fxBtn.className = 'icon-btn';
+            fxBtn.innerHTML = fxWandSvg();
+            const fxN = (l.effects || []).length;
+            fxBtn.title = fxN
+                ? `Effects on「${l.name}」(${fxN}) — pick another to add it on top of the chain`
+                : `Add an effect to「${l.name}」`;
+            fxBtn.addEventListener('click', ev => { ev.stopPropagation(); openFxModal(l.id); });
+        }
+
         const eye = document.createElement('button');
         eye.className = 'icon-btn';
         eye.title = l.visible ? 'Hide layer' : 'Show layer';
@@ -4442,6 +4457,7 @@ function renderStackList(listEl, stack) {
         head.appendChild(thumb);
         head.appendChild(name);
         if (jump) head.appendChild(jump);
+        if (fxBtn) head.appendChild(fxBtn);
         head.appendChild(run);
         head.appendChild(eye);
         head.appendChild(del);
