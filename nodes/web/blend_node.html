@@ -1138,6 +1138,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/bloom.js"></script>
 <script src="fx/ui.js"></script>
 
+<!-- 3D 图层的引擎: three.js + FBX/glTF/OBJ 加载器 + TransformControls 打成的一个离线包,
+     挂成 window.K3D。页面不碰 CDN, 静态文件走 /js/ 路由 (snapshot_sampler_node.py)。 -->
+<script src="js/3d-bundle.js"></script>
+
 <script>
 const canvasArea = document.getElementById('canvasArea');
 const viewport = document.getElementById('viewport');
