@@ -2828,6 +2828,15 @@ const SEL_LASSO_SPACING = 2;     // screen px between lasso samples — a freeha
 // Scratch the selection's shapes are rasterized into — never bigger than the selection's own box.
 const selBmpCanvas = document.createElement('canvas');
 const selBmpCtx = selBmpCanvas.getContext('2d');
+// The selection's coverage as one layer sees it (see selectionLayerMask), plus the scratch the ink
+// is multiplied through before it lands. Both are footprint-sized, and the cache holds one layer at
+// a time because a stroke only ever paints one.
+let selVersion = 0;
+const selMaskCache = { ver: -1, key: '', cv: document.createElement('canvas'), ctx: null,
+    x: 0, y: 0, w: 0, h: 0, empty: true, whole: false };
+selMaskCache.ctx = selMaskCache.cv.getContext('2d');
+const selInkCanvas = document.createElement('canvas');
+const selInkCtx = selInkCanvas.getContext('2d');
 
 function hasSelection() { return !!selection && selection.derived && selection.count > 0; }
 
@@ -2897,8 +2906,9 @@ function ensureSelection() {
         selection.count = r.w * r.h;
         selection.contours = r.w && r.h
             ? [[{ x: 0, y: 0 }, { x: r.w, y: 0 }, { x: r.w, y: r.h }, { x: 0, y: r.h }]] : null;
-        selection.ants = selection.clip = null;
+        selection.ants = null;
         selection.derived = !!selection.contours;
+        if (selection.derived) selVersion++;
         selection.atCanvas = canvasW + 'x' + canvasH;
         return selection.derived;
     }
@@ -2959,9 +2969,20 @@ function ensureSelection() {
     selection.mask = mask;
     selection.atCanvas = canvasW + 'x' + canvasH;
     selection.ants = null;
-    selection.clip = null;
     selection.contours = traceSelContours(mask, tight.w, tight.h);
+    // Re-lay the scratch over the tightened box, from the binary mask rather than by copying the
+    // raster: the fill was antialiased, and an edge pixel that survived the >128 test has to leak
+    // exactly as much ink as the ants claim, no more. Resizing clears it, so nothing stale survives.
+    selBmpCanvas.width = tight.w; selBmpCanvas.height = tight.h;
+    const id = selBmpCtx.createImageData(tight.w, tight.h);
+    for (let i = 0, o = 3; i < mask.length; i++, o += 4) {
+        if (!mask[i]) continue;
+        id.data[o - 3] = id.data[o - 2] = id.data[o - 1] = 255;
+        id.data[o] = 255;
+    }
+    selBmpCtx.putImageData(id, 0, 0);
     selection.derived = true;
+    selVersion++;
     return true;
 }
 
@@ -3059,25 +3080,59 @@ function selectionAntsPath() {
     return path;
 }
 
-// The selection as a fillable region, in doc coordinates — what the paint path clips its draw to.
-// Built once per rebuild and independent of the zoom (unlike the ants, which are allowed to get
-// lazy because a rounded outline is still readable; a clip must stay exact, so it keeps every
-// corner the raster produced and only sheds vertices that sit within a third of a pixel of the
-// line between their neighbours).
-function selectionClipPath() {
-    if (!selection || !selection.contours) return null;
-    if (selection.clip) return selection.clip;
-    const ox = selection.box.x, oy = selection.box.y;
-    const path = new Path2D();
-    for (const loop of selection.contours) {
-        const pts = simplifySelPts(loop, 0.34);
-        if (pts.length < 2) continue;
-        path.moveTo(pts[0].x + ox, pts[0].y + oy);
-        for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x + ox, pts[i].y + oy);
-        path.closePath();
+// The selection's coverage in ONE LAYER's pixel space, over just the box its own bounds land in.
+// Rebuilt only when the selection or that layer's transform moves (selVersion is the selection's
+// rebuild counter), so a stroke's per-frame cost is two blits across that footprint rather than a
+// pass over the whole layer.
+//
+// This is deliberately a bitmap multiply and not `ctx.clip(path)`: an antialiased polygon clip
+// makes Chromium render a full-coverage mask over the clip bounds for every following draw call,
+// which on a live preview running at pointer rate costs far more than the blits it saves.
+function selectionLayerMask(l) {
+    const tr = l.transform;
+    const { w, h } = nativeSize(l.img);
+    const key = `${tr.cx},${tr.cy},${tr.w},${tr.h},${tr.rotation},${w}x${h}`;
+    const c = selMaskCache;
+    if (c.ver === selVersion && c.key === key) return c.empty ? null : c;
+
+    // doc → layer pixel space, the same mapping setBrushCtxTransform installs.
+    const sx = Math.max(tr.w * canvasW / w, 1e-6), sy = Math.max(tr.h * canvasH / h, 1e-6);
+    const cos = Math.cos(tr.rotation), sin = Math.sin(tr.rotation);
+    const toLayer = (X, Y) => {
+        const dx = X - tr.cx * canvasW, dy = Y - tr.cy * canvasH;
+        return { x: (dx * cos + dy * sin) / sx + w / 2, y: (-dx * sin + dy * cos) / sy + h / 2 };
+    };
+    const b = selection.box;
+    const corners = [toLayer(b.x, b.y), toLayer(b.x + b.w, b.y), toLayer(b.x + b.w, b.y + b.h), toLayer(b.x, b.y + b.h)];
+    let x0 = Math.floor(Math.min(...corners.map(p => p.x))), y0 = Math.floor(Math.min(...corners.map(p => p.y)));
+    let x1 = Math.ceil(Math.max(...corners.map(p => p.x))), y1 = Math.ceil(Math.max(...corners.map(p => p.y)));
+    x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(w, x1); y1 = Math.min(h, y1);
+    c.ver = selVersion; c.key = key;
+    c.x = x0; c.y = y0; c.w = Math.max(0, x1 - x0); c.h = Math.max(0, y1 - y0);
+    c.empty = !c.w || !c.h;
+    // The mask covers every pixel this layer can put down: a lone marquee that swallows the whole
+    // layer (Ctrl+A over a canvas-sized layer is the everyday case) clips nothing at all.
+    c.whole = !!selection.rect && c.x === 0 && c.y === 0 && c.w === w && c.h === h;
+    if (c.empty || c.whole) return c.empty ? null : c;
+
+    if (c.cv.width !== c.w || c.cv.height !== c.h) { c.cv.width = c.w; c.cv.height = c.h; }
+    const m = c.ctx;
+    resetCtx(m);
+    m.clearRect(0, 0, c.w, c.h);
+    setBrushCtxTransform(m, l);
+    m.translate(-c.x, -c.y);
+    if (selection.rect) {
+        m.fillStyle = '#fff';
+        m.fillRect(b.x, b.y, b.w, b.h);
+    } else {
+        // Nearest neighbour: the doc-space bitmap IS whole pixels, and smoothing would soften the
+        // boundary and let faint ink leak just outside the ants.
+        m.imageSmoothingEnabled = false;
+        m.drawImage(selBmpCanvas, b.x, b.y);
+        m.imageSmoothingEnabled = true;
     }
-    selection.clip = path;
-    return path;
+    resetCtx(m);
+    return c;
 }
 
 // The geometry of the drag in flight, as a path in doc space (the bitmap is only rebuilt on
@@ -5720,6 +5775,23 @@ function endMaskShortcut() {
     refreshCursor();
 }
 
+// Pointer and touch events arrive faster than a frame can be presented, and a live preview composites
+// the whole layer. Running one per event therefore only builds an event queue the browser drops — the
+// ink lands seconds behind the cursor and finally appears on the next click. Accumulate every event
+// into strokeCanvas (cheap, and nothing is lost), but composite at most once per animation frame.
+let previewQueued = false;
+function queueLivePreview() {
+    if (previewQueued) return;
+    previewQueued = true;
+    requestAnimationFrame(() => {
+        // commitStroke() already painted the finished stroke; a queue that outlives the gesture has
+        // nothing left to show (strokeCanvas is cleared under it).
+        if (!previewQueued) return;
+        previewQueued = false;
+        livePreviewStroke();
+    });
+}
+
 function livePreviewStroke() {
     const l = getSelected();
     if (!l || !paintSurface(l)) return;
@@ -5749,20 +5821,24 @@ function livePreviewStroke() {
         ink = strokeTintCanvas;
     }
     if (maskInk) c.globalAlpha = brushAlpha;
-    // Clip the draw instead of pre-masking the ink: the clip is a scissor, so a small marquee over
-    // a big layer costs a handful of pixels per preview frame rather than a second full-layer
-    // round-trip. 'nonzero' keeps a subtracted hole out — the contour tracer winds every loop with
-    // the selected side to one hand, so inner boundaries come back reversed and cancel the fill.
-    const selClip = hasSelection() && ensureSelection() ? selectionClipPath() : null;
-    if (selClip) {
-        c.save();
-        setBrushCtxTransform(c, l);
-        c.clip(selClip, 'nonzero');
-        c.setTransform(1, 0, 0, 1, 0, 0);
+    // Multiply the ink through the selection's coverage over the footprint it actually covers, so a
+    // small marquee on a large layer costs a small number of pixels per preview frame. No selection
+    // and `whole` (the ants swallow everything this layer can paint) take the plain path; a selection
+    // that misses this layer entirely lets nothing through.
+    const sel = hasSelection() && ensureSelection();
+    const selMask = sel ? selectionLayerMask(l) : null;
+    if (!sel || (selMask && selMask.whole)) {
         c.drawImage(ink, 0, 0, w, h);
-        c.restore();
-    } else {
-        c.drawImage(ink, 0, 0, w, h);
+    } else if (selMask) {
+        if (selInkCanvas.width !== selMask.w || selInkCanvas.height !== selMask.h) {
+            selInkCanvas.width = selMask.w; selInkCanvas.height = selMask.h;
+        }
+        resetCtx(selInkCtx);
+        selInkCtx.drawImage(ink, selMask.x, selMask.y, selMask.w, selMask.h, 0, 0, selMask.w, selMask.h);
+        selInkCtx.globalCompositeOperation = 'destination-in';
+        selInkCtx.drawImage(selMask.cv, 0, 0);
+        selInkCtx.globalCompositeOperation = 'source-over';
+        c.drawImage(selInkCanvas, selMask.x, selMask.y);
     }
     if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
@@ -5771,6 +5847,7 @@ function livePreviewStroke() {
 }
 
 function commitStroke() {
+    previewQueued = false;         // this call draws the finished stroke itself
     livePreviewStroke();
     const l = getSelected();
     if (l) { refreshMaskThumb(l); refreshDecalThumb(l); }
@@ -6212,7 +6289,7 @@ window.addEventListener('mousemove', e => {
             shiftAxisLock = null;
         }
         drawStroke(dp.x, dp.y);
-        livePreviewStroke();
+        queueLivePreview();
         lastX = dp.x; lastY = dp.y;
         if (Math.hypot(dp.x - strokeStart.x, dp.y - strokeStart.y) > 1.5) strokeMoved = true;
         return;
@@ -6328,7 +6405,7 @@ viewport.addEventListener('touchmove', e => {
     const pos = toDocCoords(t);
     if (isDrawing) {
         drawStroke(pos.x, pos.y);
-        livePreviewStroke();
+        queueLivePreview();
         lastX = pos.x; lastY = pos.y;
     } else if (drag) {
         updateTransformDrag({ shiftKey: false }, pos);
