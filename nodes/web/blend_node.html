@@ -417,7 +417,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 /* Ring swatch mirrors the on-canvas brush ring, so the active tool's colour is visible in the UI too */
 .ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
 .ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
-.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.text-choice-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+/* Enum rows inside a tool body: the label names the choice, the buttons fill the row like the
+   Brush / Eraser mode group does. */
+.control-row .mini-group { flex: 1; justify-content: stretch; }
 /* Key-only tool buttons: the badge is the whole label, the name and usage live in the tooltip. */
 .mini-btn.key-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 4px 8px; }
 .mini-btn.key-btn .tool-key { margin-left: 0; min-width: 18px; height: 18px; font-size: 11px; font-weight: 700; }
@@ -739,12 +742,15 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Size</label><input type="range" id="eraserSize" min="2" max="9999" value="60" title="Eraser size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="eraserSizeValue">60</span></div>
                 </div>
             </div>
-            <!-- The Text section folds like the other tool sections, and it stays folded until the
-                 header is clicked — selecting a text layer no longer unfolds it on its own. -->
+            <!-- The Text section folds like the other tool sections and stays folded until its
+                 header is clicked — selecting a text layer only lights the row up and refills the
+                 controls, it never unfolds them. The colour swatch and the two readout lines sit
+                 outside the fold, so a folded Text row still tells you what it is styling. -->
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
                     <div class="panel-label" id="textLabel" title="A text layer stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas to retype it. Click the header to show or fold the settings."><span class="fold-caret"></span>Text</div>
                     <div class="mini-group">
+                        <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                         <button class="mini-btn key-btn" id="textEditBtn" title="Edit (Enter) — retype this layer's text inline on the canvas"><span class="tool-key">&#9166;</span></button>
                     </div>
                 </div>
@@ -752,12 +758,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
                     <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
                     <div class="control-row"><label>Padding</label><input type="range" id="textPaddingRange" min="0" max="256" step="1" value="0" title="Clear space around the text, in layer pixels at the authored font size — the box grows outward and the glyphs keep their size. Outer effects (drop shadow, glow) need that room: they are cut at the layer's own edge"><span id="textPaddingValue">0</span></div>
-                    <div class="control-row"><label>Weight</label><select id="textWeightSel"><option value="normal">Normal</option><option value="bold">Bold</option></select><span></span></div>
-                    <div class="control-row"><label>Align</label><select id="textAlignSel"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><span></span></div>
+                    <div class="control-row"><label>Weight</label><div class="mini-group">
+                        <button class="mini-btn text-choice-btn active" id="textWeightNormal" title="Normal weight">Normal</button>
+                        <button class="mini-btn text-choice-btn" id="textWeightBold" title="Bold weight">Bold</button>
+                    </div></div>
+                    <div class="control-row"><label>Align</label><div class="mini-group">
+                        <button class="mini-btn text-choice-btn active" id="textAlignLeft" title="Align the lines to the left edge of the layer">Left</button>
+                        <button class="mini-btn text-choice-btn" id="textAlignCenter" title="Centre the lines in the layer">Center</button>
+                        <button class="mini-btn text-choice-btn" id="textAlignRight" title="Align the lines to the right edge of the layer">Right</button>
+                    </div></div>
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
-                    <div class="panel-hint" id="textContentLine" style="display:none;"></div>
-                    <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
                 </div>
+                <div class="panel-hint" id="textContentLine" style="display:none;"></div>
+                <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
             </div>
             <div class="panel-section">
                 <div class="panel-head">
@@ -6149,8 +6162,9 @@ const textSizeRange = document.getElementById('textSizeRange');
 const textSizeValue = document.getElementById('textSizeValue');
 const textPaddingRange = document.getElementById('textPaddingRange');
 const textPaddingValue = document.getElementById('textPaddingValue');
-const textWeightSel = document.getElementById('textWeightSel');
-const textAlignSel = document.getElementById('textAlignSel');
+const TEXT_WEIGHT_CHOICES = [['normal', 'textWeightNormal'], ['bold', 'textWeightBold']];
+const TEXT_ALIGN_CHOICES = [['left', 'textAlignLeft'], ['center', 'textAlignCenter'], ['right', 'textAlignRight']];
+const textSwatch = document.getElementById('textSwatch');
 const textColorInput = document.getElementById('textColorInput');
 const textColorValue = document.getElementById('textColorValue');
 const textContentLine = document.getElementById('textContentLine');
@@ -6336,11 +6350,19 @@ for (const [family, label] of TEXT_FONT_FAMILIES) {
 }
 const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '#ffffff';
 
+function setTextChoice(choices, value) {
+    for (const [v, id] of choices) document.getElementById(id).classList.toggle('active', v === value);
+}
+
 function updateTextPanel() {
     const l = getSelected();
     const on = !!l && isTextLayer(l);
-    // The section keeps whatever fold state the header left it in — selecting a text layer only
-    // refills the controls, it never unfolds them on its own.
+    // A text layer lights the section up the way an active paint tool does, and the readouts say
+    // which layer is being styled — the fold state itself is the user's to change, never ours.
+    document.getElementById('textSection').classList.toggle('active-tool', on);
+    textSwatch.style.display = on ? '' : 'none';
+    textContentLine.style.display = on ? 'block' : 'none';
+    textSizeLine.style.display = on ? 'block' : 'none';
     if (!on) return;
     const t = l.text;
     if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
@@ -6348,15 +6370,14 @@ function updateTextPanel() {
     textSizeValue.textContent = String(t.fontSize);
     textPaddingRange.value = Math.min(256, t.padding);
     textPaddingValue.textContent = String(t.padding);
-    textWeightSel.value = t.fontWeight;
-    textAlignSel.value = t.align;
+    setTextChoice(TEXT_WEIGHT_CHOICES, t.fontWeight);
+    setTextChoice(TEXT_ALIGN_CHOICES, t.align);
     textColorInput.value = TEXT_HEX6(t.color);
     textColorValue.textContent = t.color.toUpperCase();
-    textContentLine.style.display = 'block';
+    textSwatch.style.background = textColorInput.value;
     textContentLine.textContent = `Content: ${t.content ? t.content.replace(/\n/g, ' ⏎ ') : 'empty — double-click the layer on canvas to type'}`;
     const nat = textLayerBox(t);
     const tr = effectiveTransform(l);
-    textSizeLine.style.display = 'block';
     // The box shown IS the buffer the pipeline resolves (glyph box + ring), so state the ring too
     // whenever it is what makes the box bigger than the text.
     textSizeLine.textContent = `${nat.w} × ${nat.h} px (${Math.round(tr.w * canvasW)} × ${Math.round(tr.h * canvasH)} on canvas)`
@@ -6374,8 +6395,12 @@ textEditBtn.addEventListener('click', () => {
     if (l && isTextLayer(l)) openTextEditor(l.id);
 });
 textFontSel.addEventListener('change', () => patchSelectedText({ fontFamily: textFontSel.value }));
-textWeightSel.addEventListener('change', () => patchSelectedText({ fontWeight: textWeightSel.value }));
-textAlignSel.addEventListener('change', () => patchSelectedText({ align: textAlignSel.value }));
+for (const [v, id] of TEXT_WEIGHT_CHOICES) {
+    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
+}
+for (const [v, id] of TEXT_ALIGN_CHOICES) {
+    document.getElementById(id).addEventListener('click', () => patchSelectedText({ align: v }));
+}
 textSizeRange.addEventListener('input', () => {
     textSizeValue.textContent = textSizeRange.value;
     patchSelectedText({ fontSize: Number(textSizeRange.value) || 1 }, 'text-size');
