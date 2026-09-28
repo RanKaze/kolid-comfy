@@ -2301,14 +2301,16 @@ function updateHoverCursor(sp, docPos) {
 //   * footprint-neutral —— 输出的像素尺寸 === 输入,一个像素都不外扩。图层的蒙版是按**自身像素
 //     网格**单独送到后端,并靠 layerCompositeForGenerate 的反解 transform 与图层对齐;外扩一次,
 //     那条对齐就废了。所以这里没有「拖到图层框外」的外投影,只有内阴影。
-//   * alpha-preserving —— 特效只改 RGB,出口 alpha 仍是 (img + decal) 的原值。于是后端
-//     composite_layers 里的 `image * mask` 依旧只乘一次,软边蒙版不会被乘成平方而发暗。
+//   * alpha 跟着画面走 —— 低通/运动模糊/马赛克把 A 和 RGB 一起滤波(抽样预乘累加、直通色归一,
+//     alpha 输出同一组抽样的均值):对文字这类「形状就是 alpha」的层,不软化不透明度就等于没特效。
+//     出口 alpha 是该层**新的源不透明度**;蒙版仍独立存档,后端 `image * mask` 依旧只乘一次,
+//     不会把软边乘成平方。曲线与内阴影不碰 alpha。
 //   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × 蒙版 alpha,特效据此计算,但结果
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
 // + 虚化 + 裁回自身轮廓、马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的黑白点/gamma/S 形
-// 对比。每一类都只吃 RGB,所以三条契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一
-// 换过之后重算一次(见 fxResolved)。
+// 对比。模糊类同时吃 RGB 与 A,曲线/内阴影只写 RGB;三条契约对全部特效成立。整链只在图层的
+// img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
 
 const EFFECT_TYPES = {
     inner_shadow: {
@@ -2491,9 +2493,9 @@ void main() {
 // 线上,半径大而迭代少时高反差边缘就长出肉眼可见的**十字纹**;换成旋转基后各向同性,抽样数与半径
 // 刻度都没变。
 // uAlphaOnly=1 是 silhouette 的模式(数据只在 alpha 上,走纯加权平均);=0 是色彩模式 ——
-// 每个抽样先预乘再累加,最后用「预乘均值 / alpha 均值」除回直通色,并原样写回本像素的 alpha。
-// 于是低通只吃颜色不吃不透明度,且边缘透明区不会把颜色拽向黑(正是多趟累加最容易踩的坑)。
-// uIter=0 恰好是恒等拷贝,色彩链用它起步。
+// 每个抽样先预乘再累加,最后用「预乘均值 / alpha 均值」除回直通色,alpha 通道输出同一个 alpha
+// 均值。链**会**重塑不透明度(模糊/运动模糊/马赛克都把软边吹开),色彩归一化保证透明边缘
+// 不把颜色拽向黑(正是多趟累加最容易踩的坑)。uIter=0 恰好是恒等拷贝,色彩链用它起步。
 const FX_FS_BOX = `#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -2532,10 +2534,11 @@ void main() {
     }
     float aAvg = aAcc / wAcc;
     if (uAlphaOnly == 1) { Frag = vec4(aAvg, aAvg, aAvg, aAvg); return; }
-    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), c0.a);
+    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), clamp(aAvg, 0.0, 1.0));
 }`;
 
 // 方向模糊:沿 uStep 做 uTaps 次等权抽样。uTrail=0 抽样 centered 在像素两侧,-1 只往反方向拖。
+// alpha 与其他通道一起被平均 —— 不透明度沿拖拽方向同样被拖开。
 const FX_FS_MOTION = `#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -2545,7 +2548,6 @@ uniform vec2 uStep;
 uniform int uTaps;
 uniform float uTrail;
 void main() {
-    vec4 c0 = texture(uTex, vUV);
     vec3 acc = vec3(0.0);
     float aAcc = 0.0;
     for (int i = 0; i < ${FX_MOTION_MAX_TAPS}; i++) {
@@ -2556,11 +2558,12 @@ void main() {
         acc += c.rgb * c.a;
         aAcc += c.a;
     }
-    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), c0.a);
+    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), clamp(aAcc / max(float(uTaps), 1.0), 0.0, 1.0));
 }`;
 
 // 马赛克:先把 UV 折进所属格子,取格心做 3×3 直通色平均 —— 同一格里的每个像素算的是同一组
-// 抽样点,所以结果是一块**平的**色斑而不是渐变。alpha 一律取本像素自己的,不参与平均。
+// 抽样点,所以结果是一块**平的**色斑;alpha 走同一组抽样的均值,一块格子里颜色与不透明度
+// 一起平,形状的边缘也随格子化软化。
 const FX_FS_PIXELATE = `#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -2568,7 +2571,6 @@ layout(location = 0) out vec4 Frag;
 uniform sampler2D uTex;
 uniform vec2 uCell;
 void main() {
-    vec4 c0 = texture(uTex, vUV);
     vec2 center = (floor(vUV / uCell) + 0.5) * uCell;
     vec3 acc = vec3(0.0);
     float aAcc = 0.0;
@@ -2578,7 +2580,7 @@ void main() {
         acc += c.rgb * c.a;
         aAcc += c.a;
     }
-    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), c0.a);
+    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), clamp(aAcc / 9.0, 0.0, 1.0));
 }`;
 
 // 色彩曲线:黑/白输入点拉伸 → 中间调 gamma → S 形对比量,全在**已编码的显示值**上做,和 PS 的
@@ -7541,8 +7543,8 @@ function layerSpecs() {
         // pixels and knows nothing about descriptors.
         if (isTextLayer(l)) syncTextBuffer(l);
         // 特效链生效时,decal 与链一起已经烘进这张结算面了,所以 src 发结算面、decal 发 null。
-        // 蒙版仍照原样发:链只改 RGB 不改 alpha,后端那一次 `image * mask` 依旧只乘一次,也不会
-        // 出现软边被乘成平方而发暗的老问题。
+        // 蒙版仍照原样发:链从不吃蒙版(silhouette 只是读它),后端那一次 `image * mask` 依旧只乘
+        // 一次;滤波类重塑 alpha 时,重塑的是图层自身的源不透明度,与蒙版各乘各的。
         const resolved = fxResolved(l);
         const baked = resolved && resolved !== l.img;
         const src = (!baked && TRUSTED_SRC(l.src)) ? l.src : (l.img ? toPng(resolved || l.img) : '');
