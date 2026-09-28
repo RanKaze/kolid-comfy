@@ -451,6 +451,8 @@ const App: React.FC = () => {
           // Run 设置（以及 ▶ 预设胶囊）选的 preset：决定后端跑哪条 block 链，
           // Enable Mask 总闸也随这条链解析。之前漏转发 —— 对话框的选择被静默丢弃。
           preset_id: body.preset_id ?? null,
+          // Detector 工具：source 合成图 + 可选的裁剪用 mask + 表达式参数，整体一个对象。
+          detect: body.detect ?? null,
         }),
       });
       const data = await res.json();
@@ -459,7 +461,10 @@ const App: React.FC = () => {
         reply(false, { error: data.error || 'Blend action failed' });
         return;
       }
-      if (body.action === 'blend') {
+      if (body.action === 'detect') {
+        // 检测是同步的：mask 直接随响应回来，转手交给工作台落地（destination 在那边解释）。
+        reply(true, { mask: data.mask || null });
+      } else if (body.action === 'blend') {
         reply(true, {});
         // 合成结果只作为新的智能对象图层放回画布顶层（图层自带像素 dataURL，
         // 非破坏、可继续改 transform / 画 mask）；不再自动归档进工作区 ——
@@ -586,6 +591,8 @@ const App: React.FC = () => {
         iframe.contentWindow.postMessage({
           type: 'blend-config',
           hasTagger: !!config?.has_tagger,
+          // Detector 工具总闸：节点没连 detector 时，工作台整块 Detector 工具隐藏。
+          hasDetector: !!config?.has_detector,
           // 激活 tab 的 Enable Mask 总闸：关 = 整幅是工作区，Run 不要求先画 Mask 层。
           mask_required: firstDetailerFlag(blockSets, activeBlockSetId, 'enable_mask', true),
           staging: stagingRef.current,

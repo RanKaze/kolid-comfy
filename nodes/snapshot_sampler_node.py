@@ -1308,6 +1308,8 @@ class SnapshotDetailerSamplerServer:
                     **{k: (getattr(inst, k, d) if inst else d)
                        for k, d in SnapshotDetailerSamplerServer.GLOBAL_PARAM_DEFAULTS.items()},
                     'has_tagger': inst.tagger is not None if inst else False,
+                    # Detector 工具的总闸：节点没连 detector 时整块工具隐藏。
+                    'has_detector': inst.detector is not None if inst else False,
                     'architecture': self._get_current_architecture(inst),
                     'has_package': bool(inst and inst.interface_packages),
                     'package_count': len(inst.interface_packages) if inst else 0,
@@ -1811,7 +1813,7 @@ class SnapshotDetailerSamplerServer:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
                     action = body.get('action', '')
-                    if action not in ('blend', 'tag', 'detailer', 'layer_generate', 'clear_tag'):
+                    if action not in ('blend', 'tag', 'detailer', 'layer_generate', 'clear_tag', 'detect'):
                         self._send_json({'success': False, 'error': f'Unknown action: {action}'}, 400)
                         return
 
@@ -1865,7 +1867,7 @@ class SnapshotDetailerSamplerServer:
                     # 蒙版边缘产生的灰色条带。解不出图（旧前端 / 画布被污染）时回落到
                     # 后端合成。Layer Tag 也走这条：前端把「合成图按该 Layer 原生网格抠好 +
                     # 该 Layer 自带蒙版」预制送来，后端直接复用现成的 mask/covered/full 语义喂 tagger。
-                    comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag') else None
+                    comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag', 'detect') else None
                     if comp is not None:
                         if comp.dim() == 3:
                             comp = comp.unsqueeze(0)
@@ -1901,6 +1903,61 @@ class SnapshotDetailerSamplerServer:
                         tag = inst.node_instance._run_tag_on_image(image, mask, inst.tagger, mode)
                         parsed_selected, parsed_temporary = inst._apply_tag_result(tag)
                         self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
+                        return
+
+                    if action == 'detect':
+                        # Detector 工具：source 图由前端合成好送来（All Layers = 画布合成图，
+                        # Selected Layer = 那一层自己的结算面），prompt 按 VideoSegmentationNode
+                        # 的掩码表达式语法逐 term 检测（collect_terms 给出 name:threshold 对，
+                        # 与 video 节点同一套 parse/eval），Empty prompt 直接整图一次检测。
+                        # 结果按 invert 翻转、再乘 Main Mask（Masked 变体由前端随 payload 带
+                        # mask，且已换算到 source 图自己的网格），以「白=覆盖」的 RGBA PNG 返回
+                        # —— 亮度进不了 mask 面，alpha 就是覆盖度，四个 destination 都由前端落地。
+                        if inst.detector is None:
+                            self._send_json({'success': False, 'error': 'No detector is connected to the node'})
+                            return
+                        from ..libs.detect_utils import detect_mask
+                        from ..libs.mask_utils import combine_masks
+                        from ..libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
+                        params = body.get('detect') or {}
+                        prompt = str(params.get('prompt') or '').strip()
+                        try:
+                            threshold = float(params.get('threshold', 0.5))
+                        except (TypeError, ValueError):
+                            threshold = 0.5
+                        threshold = min(1.0, max(0.0, threshold))
+                        invert = bool(params.get('invert'))
+                        img = image[0] if image.dim() == 4 else image
+                        if prompt:
+                            root = parse_mask_expression(prompt, threshold)
+                            term_masks = {}
+                            for name, t in collect_terms(root):
+                                term_masks[name] = combine_masks(
+                                    detect_mask(detector=inst.detector, image=img,
+                                                threshold=float(t), prompt=name),
+                                    mode='max')
+                            result = eval_expression(root, term_masks)
+                        else:
+                            result = combine_masks(
+                                detect_mask(detector=inst.detector, image=img,
+                                            threshold=threshold, prompt=''),
+                                mode='max')
+                        if invert:
+                            result = 1.0 - result
+                        if mask is not None and float(mask.sum()) > 0:
+                            m = mask[0] if mask.dim() == 3 else mask
+                            result = result * m
+                        arr = result.detach().cpu().numpy()
+                        arr = np.clip(arr, 0.0, 1.0)
+                        if arr.ndim == 3:
+                            arr = arr[0]
+                        rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
+                        rgba[..., 0:3] = 255
+                        rgba[..., 3] = (arr * 255).astype(np.uint8)
+                        buf = io.BytesIO()
+                        Image.fromarray(rgba, mode='RGBA').save(buf, format='PNG')
+                        self._send_json({'success': True,
+                                         'mask': 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')})
                         return
 
                     # action == 'detailer'：合成结果交给主循环执行（主循环在另一个线程）
