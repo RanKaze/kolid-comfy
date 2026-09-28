@@ -3973,7 +3973,7 @@ class SnapshotDetailerSamplerNode:
                           .get(pkg.get('name', '')) or {}).get('names', {}).get('end') or {}
             result_ports = getattr(executor, 'result_ports', [])
             for i, (ptype, val, name) in enumerate(results):
-                port_num = result_ports[i][0] if i < len(result_ports) else None
+                port_num = result_ports[i] if i < len(result_ports) else None
                 if ptype == 'IMAGE':
                     sid = server.add_staging(val, name=name, hidden=True)
                 elif ptype == 'MASK':
