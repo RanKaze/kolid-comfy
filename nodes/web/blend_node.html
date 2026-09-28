@@ -811,8 +811,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-head">
                     <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
                     <div class="mini-group">
-                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
-                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
+                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle, or click to clear the selection. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
+                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. A click clears the selection. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
                         <button class="mini-btn" id="selectAllBtn" title="Select the whole canvas (Ctrl+A)">All</button>
                         <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
                     </div>
@@ -3330,6 +3330,12 @@ function clearSelection() {
     return true;
 }
 
+// The three entries that throw the whole selection away (the None button, Ctrl+D, and a plain
+// click with a marquee tool) all report the same two ways, so they report from one place.
+function deselectAndReport() {
+    if (clearSelection()) setStatus('Selection cleared'); else setStatus('Nothing was selected');
+}
+
 function selectAll() {
     if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
     commitSelectionShape({ kind: 'rect', mode: 'replace', x0: 0, y0: 0, x1: canvasW, y1: canvasH });
@@ -3379,7 +3385,10 @@ function endSelDrag() {
         const b = selShapeBounds(d);
         if (b.w < SEL_MIN_DRAG || b.h < SEL_MIN_DRAG) {
             refreshCursor(); drawOverlay(); syncAntTimer();
-            setStatus('Marquee too small', 'error');
+            // A press that never swept is PS's deselect gesture. Only a plain one, though: Shift/Alt
+            // arm add/subtract, and a click there means the modifier was for a drag that never came.
+            if (d.mode === 'replace') deselectAndReport();
+            else setStatus('Marquee too small', 'error');
             return;
         }
         commitSelectionShape({ kind: 'rect', mode: d.mode, x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h });
@@ -3393,7 +3402,8 @@ function endSelDrag() {
     }
     if (maxX - minX < SEL_MIN_DRAG || maxY - minY < SEL_MIN_DRAG) {
         refreshCursor(); drawOverlay(); syncAntTimer();
-        setStatus('Lasso too small', 'error');
+        if (d.mode === 'replace') deselectAndReport();
+        else setStatus('Lasso too small', 'error');
         return;
     }
     commitSelectionShape({ kind: 'poly', mode: d.mode, pts: closed });
@@ -7511,9 +7521,7 @@ document.getElementById('rotateToolBtn').addEventListener('click', () => activat
 document.getElementById('rectSelectBtn').addEventListener('click', () => activateMode('rect'));
 document.getElementById('lassoSelectBtn').addEventListener('click', () => activateMode('lasso'));
 document.getElementById('selectAllBtn').addEventListener('click', selectAll);
-document.getElementById('deselectBtn').addEventListener('click', () => {
-    if (clearSelection()) setStatus('Selection cleared'); else setStatus('Nothing was selected');
-});
+document.getElementById('deselectBtn').addEventListener('click', deselectAndReport);
 
 // Clear All is per stack: emptying the layers must never throw away the guidance stack sitting on
 // top of it (and the other way round). The Mask layer is a channel, not a stack member, so the
@@ -8741,7 +8749,7 @@ window.addEventListener('keydown', e => {
     // guard on purpose: inside a text field the browser keeps its own select-all.
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
         e.preventDefault();
-        if (clearSelection()) setStatus('Selection cleared'); else setStatus('Nothing was selected');
+        deselectAndReport();
         return;
     }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
