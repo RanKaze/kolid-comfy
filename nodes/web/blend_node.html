@@ -311,6 +311,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-seg button { flex: 1; background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 3px 4px;
     color: rgba(255,255,255,0.75); font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .fx-seg button.on { background: rgba(0,122,255,0.85); color: #fff; }
+/* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
+.fx-map-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
+    border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600;
+    font-family: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fx-map-btn:hover { background: rgba(10,132,255,0.3); }
+.fx-map-btn.unset { color: #ff9f0a; }
+.fx-map-btn.gone { color: #ff453a; }
 .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -598,6 +605,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <!-- Only used where the File System Access API is missing; a document picked this way
              has no handle to write back to, so Save turns into Save As. -->
         <input type="file" id="cudFile" accept=".cud" hidden>
+        <!-- Bound effect maps (depth / normal) from disk. Only used where no file picker of any
+             kind exists; the bytes then come from this input instead of /api/io_read. -->
+        <input type="file" id="fxMapFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif" hidden>
         <div id="canvasArea">
         <div id="viewport">
             <canvas id="blendCanvas"></canvas>
@@ -926,6 +936,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <div class="tag-groups" id="fxGroups"></div>
         <div class="modal-actions">
             <button class="modal-btn ghost" id="fxCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="fxMapModal">
+    <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Bind a map image">
+        <div class="modal-title" id="fxMapTitle">Bind a map</div>
+        <div class="modal-sub" id="fxMapSub">The image this effect reads. Only a reference is kept — the map never reaches the canvas, the mask or the sampled output.</div>
+        <div class="tag-groups" id="fxMapGroups"></div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="fxMapFileBtn"
+                title="Read a depth / normal map from disk. It is kept with the effect (and archived inside the .cud), not pushed into the workspace pool.">From file&#8230;</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn ghost" id="fxMapCancelBtn">Cancel</button>
         </div>
     </div>
 </div>
@@ -2309,8 +2332,11 @@ function updateHoverCursor(sp, docPos) {
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
 // + 虚化 + 裁回自身轮廓、马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的黑白点/gamma/S 形
-// 对比。模糊类同时吃 RGB 与 A,曲线/内阴影只写 RGB;三条契约对全部特效成立。整链只在图层的
-// img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
+// 对比、景深 = 深度图驱动的三档低通按像素混档、光照 = 切线空间法线图上的漫反射 + Blinn-Phong 高光。
+// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/内阴影/光照只写 RGB;三条契约对全部特效成立。整链只在图层
+// 的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
+// 吃外部图的特效(dof / lighting)在 params 里只存一句 {key, name} 引用:图池 id 或本地池 id,
+// 像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
 
 const EFFECT_TYPES = {
     inner_shadow: {
@@ -2366,6 +2392,37 @@ const EFFECT_TYPES = {
             { key: 'white', label: 'White', min: 50, max: 100, step: 1, def: 100, unit: '%' },
             { key: 'gamma', label: 'Mid', min: 0.2, max: 3, step: 0.05, def: 1, unit: '×' },
             { key: 'contrast', label: 'S-Curve', min: -100, max: 100, step: 1, def: 0, unit: '%' },
+        ],
+    },
+    dof: {
+        label: 'Depth of Field',
+        group: 'Blur',
+        icon: 'dof',
+        needsMap: 'Depth',
+        desc: 'A low-pass whose radius comes from a bound depth map: the plane at Focal stays sharp, and every pixel whose map distance exceeds Thick takes more Iris. The map is read, never drawn, and the radius is symmetric \u2014 nearer or farther both defocus.',
+        params: [
+            { key: 'map', label: 'Map', kind: 'map', def: null },
+            { key: 'focus', label: 'Focal', min: 0, max: 100, step: 1, def: 35, unit: '%' },
+            { key: 'thick', label: 'Thick', min: 0, max: 100, step: 1, def: 10, unit: '%' },
+            { key: 'radius', label: 'Iris', min: 1, max: 64, step: 1, def: 16, unit: 'px' },
+            { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
+        ],
+    },
+    lighting: {
+        label: 'Lighting',
+        group: 'Light',
+        icon: 'light',
+        needsMap: 'Normal',
+        desc: 'Relights the layer through a bound tangent-space normal map \u2014 a diffuse term around the light direction plus an optional specular highlight. Colour only: the map never shows through, nothing moves, alpha untouched.',
+        params: [
+            { key: 'map', label: 'Map', kind: 'map', def: null },
+            { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°' },
+            { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°' },
+            { key: 'intensity', label: 'Light', min: -100, max: 100, step: 1, def: 50, unit: '%' },
+            { key: 'spec', label: 'Spec', min: 0, max: 100, step: 1, def: 25, unit: '%' },
+            { key: 'gloss', label: 'Gloss', min: 0, max: 100, step: 1, def: 60, unit: '%' },
+            { key: 'color', label: 'Color', kind: 'color', def: '#ffffff' },
+            { key: 'green', label: 'Green', kind: 'enum', options: ['up', 'down'], def: 'up' },
         ],
     },
 };
@@ -2425,6 +2482,12 @@ function describeEffect(effect) {
         const s = p.contrast < 0 ? `S${n(p.contrast)}` : `S+${n(p.contrast)}`;
         return `${String(p.channel).toUpperCase()}  b${n(p.black)}-w${n(p.white)}  ${n(p.gamma)}×  ${s}`;
     }
+    if (effect.type === 'dof') {
+        return `${fxMapShort(effect)}  f${n(p.focus)}  t${n(p.thick)}  i${n(p.radius)}${p.near === 'bright' ? '  inv' : ''}`;
+    }
+    if (effect.type === 'lighting') {
+        return `${fxMapShort(effect)}  ${n(p.angle)}°  ${n(p.elev)}°  ${n(p.intensity)}%  s${n(p.spec)}`;
+    }
     return '';
 }
 
@@ -2453,6 +2516,110 @@ function fxSignature(l) {
 function setEffectsBypass(on) {
     effectsBypass = !!on;
     try { localStorage.setItem(EFFECTS_BYPASS_KEY, effectsBypass ? '1' : '0'); } catch (e) { /* session only */ }
+    invalidateAllFx();
+}
+
+// ---- 特效绑定的外部贴图 (bound maps) ----
+// 深度图/法线图进 params 的永远只是一句 {key, name}:params 要进 fxSignature(每次缓存判定都要
+// JSON.stringify)、进 undo 深拷贝、进 .cud 记录 —— 往里塞几 MB 的 data URL,这三处全都垮掉。
+// key 有两个来源:工作区图池的 id(staging_N,宿主镜像过来的),和本地池的 id(map_N,来自文件
+// 选择或 .cud 资产)。两条路都只在这里解析成像素,GL 侧只看到一张已解码的 <img>。
+// 引用对象一律整体替换、绝不原地改字段:cloneEffects 深拷贝只到 params 这一层,里面的 map 对象
+// 是共享引用,原地写会把 undo 指着的旧步骤一起改掉。
+let fxMapSeq = 0;
+let fxMapTagSeq = 0;
+let fxSrcSeq = 0;
+const fxMapPool = new Map();        // map_N -> { name, src }
+const fxMapDecoded = new Map();     // src -> {} 解码中 | { img, tag } | { img: null } 解不开
+const fxSrcIds = new Map();         // src -> 短号;缓存身份要用它,不能拿长字符串比
+
+function fxSrcId(src) {
+    let v = fxSrcIds.get(src);
+    if (v === undefined) { v = ++fxSrcSeq; fxSrcIds.set(src, v); }
+    return v;
+}
+
+function fxMapRef(effect) {
+    const m = effect.params && effect.params.map;
+    return (m && typeof m.key === 'string' && m.key) ? m : null;
+}
+
+function fxMapSource(ref) {
+    if (!ref || !ref.key) return null;
+    const s = stagingItems.find(it => it && it.id === ref.key && it.src);
+    if (s) return { src: s.src, name: ref.name || s.name || ref.key };
+    const p = fxMapPool.get(ref.key);
+    if (p && p.src) return { src: p.src, name: ref.name || p.name };
+    return null;
+}
+
+// 解码是异步的,而链的执行路径全程同步(它跑在 render 里)。所以这里「取不到就顺手起一次解码、
+// 这一次先返回 null」:该特效这次跳过,图到位后 invalidateAllFx 会把链重算出来。
+function fxMapImage(ref) {
+    const found = fxMapSource(ref);
+    if (!found) return null;
+    const hit = fxMapDecoded.get(found.src);
+    if (hit) return hit.img || null;
+    fxMapDecoded.set(found.src, {});
+    loadImage(found.src,
+        img => { fxMapDecoded.set(found.src, { img, tag: ++fxMapTagSeq }); invalidateAllFx(); },
+        () => { fxMapDecoded.set(found.src, { img: null }); invalidateAllFx(); });
+    return null;
+}
+
+// 图池条目会在 id 不变的情况下原地换像素(Guidance 卡重发布就是这样),而解码到位的先后也不在
+// params 里 —— 所以缓存身份除了引用 key 还要带上「解析到哪一份 src」和「这份 src 解第几次成功」。
+function fxMapStamp(l) {
+    let s = '';
+    for (const e of (l.effects || [])) {
+        const ref = fxMapRef(e);
+        if (!ref) continue;
+        const found = fxMapSource(ref);
+        const hit = found ? fxMapDecoded.get(found.src) : null;
+        s += `${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+    }
+    return s;
+}
+
+// 文件选来的图不进工作区(那是一张深度图,不是参考图),它住在本地池里;.cud 存档会把它的像素
+// 写成资产,所以重开还能被同一个 key 解析到。
+function fxAddLocalMap(name, src) {
+    const key = `map_${++fxMapSeq}`;
+    const nm = name || 'Map';
+    fxMapPool.set(key, { name: nm, src });
+    return { key, name: nm };
+}
+
+function fxMapShort(effect) {
+    const ref = fxMapRef(effect);
+    if (!ref) return 'no map';
+    const found = fxMapSource(ref);
+    if (!found) return 'missing';
+    const nm = String(found.name || ref.key);
+    return nm.length > 12 ? `${nm.slice(0, 11)}…` : nm;
+}
+
+// .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
+// 那句 id 是宿主重新编号的,原样留着就是死引用)。资产读不出就退回旧引用本行 —— 按钮转红、链上
+// 写明跳过,总比悄悄换一张图当真。
+async function restoreFxMaps(list, blobs) {
+    for (const e of list) {
+        const m = e.params && e.params.map;
+        if (!m || m.asset === null || m.asset === undefined) continue;
+        const blob = blobs.get(m.asset);
+        if (!blob) { e.params.map = { key: m.key, name: m.name }; continue; }
+        try {
+            const decoded = await blobToImage(blob);
+            e.params.map = fxAddLocalMap(m.name, decoded.url);
+        } catch (err) {
+            e.params.map = { key: m.key, name: m.name };
+        }
+    }
+    return list;
+}
+
+// 贴图迟到/失效、旁路切换,都是「整条链不再可信」—— 两处共用同一套失效动作。
+function invalidateAllFx() {
     for (const l of layers) l.fxCache = null;
     renderLayerList();
     render();
@@ -2465,8 +2632,8 @@ const FX_MAX_PIXELS = 12e6;              // 5 × RGBA16F ≈ 480 MB 的地板,�
 const FX_KAWASE_MAX_ITER = 8;            // 着色器里那个常数次循环的上界
 const FX_MOTION_MAX_TAPS = 32;
 const fxgl = {
-    gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null,
-    off: [], texSrc: null, texMask: null, progs: null, canvas: null, hasMask: 0,
+    gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null, maxTex: 0,
+    off: [], texSrc: null, texMask: null, texMap: null, progs: null, canvas: null, hasMask: 0,
 };
 
 const FX_VS = `#version 300 es
@@ -2603,6 +2770,67 @@ void main() {
     Frag = vec4(mix(c.rgb, v, uSel), c.a);
 }`;
 
+// 景深:半径不是全图一个值,而是逐像素从深度图算 —— |d - Focal| 先扣掉半幅 Thick 的合焦带,
+// 剩余量线性推到 Iris 上限。三档预糊(iris/3、2·iris/3、iris)已经躺在 off[2..4] 里,这一趟按
+// 本像素的半径在「原图 + 三档」这四个 stop 上选相邻两档线性混合,所以档位之间不会跳出硬边。
+// 深度只取 R 通道(PS 的 Lens Blur 读的就是 Red 通道,单通道深度图三通道相同);alpha 恒取本
+// 像素自己的,合焦带与远景之间不会有透明度台阶。
+const FX_FS_DOF = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uSharp;
+uniform sampler2D uL0;
+uniform sampler2D uL1;
+uniform sampler2D uL2;
+uniform sampler2D uMap;
+uniform float uFocus;
+uniform float uThick;
+uniform float uInv;
+void main() {
+    vec4 c0 = texture(uSharp, vUV);
+    float d = texture(uMap, vUV).r;
+    d = uInv > 0.5 ? 1.0 - d : d;
+    float band = uThick * 0.5;
+    // t 就是「本像素该糊到第几档」:合焦带内为 0,带外线性推到 3(= 最糊那一档)。Iris 只体现在
+    // 三档各自的半径上(JS 侧),所以这里不需要绝对半径。
+    float t = clamp(abs(d - uFocus) / max(1.0 - band, 1e-3), 0.0, 1.0) * 3.0;
+    vec4 lo;
+    vec4 hi;
+    if (t < 1.0) { lo = texture(uSharp, vUV); hi = texture(uL0, vUV); }
+    else if (t < 2.0) { lo = texture(uL0, vUV); hi = texture(uL1, vUV); }
+    else { lo = texture(uL1, vUV); hi = texture(uL2, vUV); }
+    float f = t < 1.0 ? t : (t < 2.0 ? t - 1.0 : t - 2.0);
+    Frag = vec4(mix(lo.rgb, hi.rgb, f), c0.a);
+}`;
+
+// 光照:切线空间法线图(uv 基:y 向上,因为上传时已 UNPACK_FLIP_Y;平坦处 = (0.5,0.5,1))做
+// Lambert 漫反射 + Blinn-Phong 高光。绿色通道的朝向按贴图族选(OpenGL 朝上 / DirectX 朝下)。
+// 只改 RGB:高光加在色上,阴影乘在色上,贴图本身永远不渗进画面。
+const FX_FS_LIGHT = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uTex;
+uniform sampler2D uMap;
+uniform vec3 uL;
+uniform vec3 uColor;
+uniform float uIntensity;
+uniform float uSpec;
+uniform float uGloss;
+uniform float uGreen;
+void main() {
+    vec4 c = texture(uTex, vUV);
+    vec3 n = texture(uMap, vUV).xyz;
+    n = vec3(n.x * 2.0 - 1.0, (n.y * 2.0 - 1.0) * uGreen, max(n.z * 2.0 - 1.0, 0.05));
+    n = normalize(n);
+    float diff = max(dot(n, uL), 0.0);
+    vec3 h = normalize(uL + vec3(0.0, 0.0, 1.0));
+    float s = pow(max(dot(n, h), 0.0), mix(6.0, 220.0, uGloss)) * uSpec;
+    vec3 lit = c.rgb * clamp(1.0 + uIntensity * (diff - 0.45), 0.0, 3.0) + uColor * s;
+    Frag = vec4(clamp(lit, 0.0, 1.0), c.a);
+}`;
+
 // 内阴影:把虚化后的 silhouette 沿 uOffset 移开,原地留下的空缺 (1 - shifted) 再被**未虚化**的
 // 自身轮廓裁住 —— 这两步的顺序就是「只在边缘内侧、永不出蒙版」的实现。
 const FX_FS_SHADOW = `#version 300 es
@@ -2676,6 +2904,7 @@ function fxglInit() {
     if (!gl) { fxgl.dead = 'no WebGL2'; return null; }
     fxgl.gl = gl;
     fxgl.canvas = canvas;
+    fxgl.maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) | 0;
     // 可滤色的半浮点是这套算法最合适的落点:32F 还额外要 OES_texture_float_linear 才能做
     // dual-filtering 依赖的线性抽样,而 16F 在 WebGL2 里既可渲又可滤。都没有就退回 8 位。
     if (gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float')) {
@@ -2689,10 +2918,14 @@ function fxglInit() {
         motion: fxglProgram(gl, 'motion', FX_FS_MOTION),
         pixelate: fxglProgram(gl, 'pixelate', FX_FS_PIXELATE),
         curves: fxglProgram(gl, 'curves', FX_FS_CURVES),
+        dof: fxglProgram(gl, 'dof', FX_FS_DOF),
+        light: fxglProgram(gl, 'light', FX_FS_LIGHT),
         shadow: fxglProgram(gl, 'shadow', FX_FS_SHADOW),
         present: fxglProgram(gl, 'present', FX_FS_PRESENT),
     };
-    if (!progs.sil || !progs.box || !progs.motion || !progs.pixelate || !progs.curves || !progs.shadow || !progs.present) { fxgl.gl = null; return null; }
+    const ready = progs.sil && progs.box && progs.motion && progs.pixelate && progs.curves
+        && progs.dof && progs.light && progs.shadow && progs.present;
+    if (!ready) { fxgl.gl = null; return null; }
     fxgl.progs = progs;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -2705,7 +2938,7 @@ function fxglInit() {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
     fxgl.vao = vao;
-    for (const key of ['texSrc', 'texMask']) {
+    for (const key of ['texSrc', 'texMask', 'texMap']) {
         const t = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, t);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -2735,7 +2968,7 @@ function fxglMakeBuffer(gl, w, h) {
 function fxglResize(gl, w, h) {
     if (fxgl.w === w && fxgl.h === h && fxgl.off.length === 5) return true;
     if (w * h > FX_MAX_PIXELS) { fxgl.skip = 'layer too large for the effect chain'; return false; }
-    const maxSide = gl.getParameter(gl.MAX_TEXTURE_SIZE) | 0;
+    const maxSide = fxgl.maxTex;
     if (w > maxSide || h > maxSide) { fxgl.skip = 'layer exceeds the texture limit'; return false; }
     for (const b of fxgl.off) { gl.deleteFramebuffer(b.fb); gl.deleteTexture(b.tex); }
     fxgl.off = [];
@@ -2802,13 +3035,53 @@ function fxglKawaseIters(radius) {
     return Math.max(1, Math.min(FX_KAWASE_MAX_ITER, Math.round(radius / 5)));
 }
 
-function fxglGauss(col, radius) {
+function fxglGauss(dst, srcTex, mid, radius) {
     const n = fxglKawaseIters(radius);
     const step = (2 * radius) / (n * (n + 1));
+    fxglBox(mid, srcTex, step, step, n, false, 0);                     // down
+    fxglBox(dst, mid.tex, step * (n - 1), -step, n, false, 1);         // up
+}
+
+// 景深的三档借用 off[2..4](那三张只在需要 silhouette 的特效里才占用,而一张图层不会同时把两者
+// 算糊),scratch 用色彩乒乓空着的另一半 —— 于是整套景深**一张纹理都不多要**,FX_MAX_PIXELS 的
+// 地板和五张缓冲的预算一个字没动。代价是 3 档 × down/up = 6 趟定 4 抽样的低通,与半径无关。
+function fxglDof(col, p) {
+    const gl = fxgl.gl;
     const src = fxgl.off[col.slot];
-    const mid = fxgl.off[1 - col.slot];
-    fxglBox(mid, src.tex, step, step, n, false, 0);                     // down
-    fxglBox(src, mid.tex, step * (n - 1), -step, n, false, 1);          // up
+    const scratch = fxgl.off[1 - col.slot];
+    const lv = [fxgl.off[2], fxgl.off[3], fxgl.off[4]];
+    for (let i = 0; i < 3; i++) fxglGauss(lv[i], src.tex, scratch, (p.radius * (i + 1)) / 3);
+    fxglRunPass(scratch, fxgl.progs.dof, pr => {
+        fxglBindTex(pr, 'uSharp', src.tex, 0);
+        fxglBindTex(pr, 'uL0', lv[0].tex, 1);
+        fxglBindTex(pr, 'uL1', lv[1].tex, 2);
+        fxglBindTex(pr, 'uL2', lv[2].tex, 3);
+        fxglBindTex(pr, 'uMap', fxgl.texMap, 4);
+        gl.uniform1f(fxglU(pr, 'uFocus'), p.focus / 100);
+        gl.uniform1f(fxglU(pr, 'uThick'), p.thick / 100);
+        gl.uniform1f(fxglU(pr, 'uInv'), p.near === 'bright' ? 1 : 0);
+    });
+    col.slot = 1 - col.slot;
+}
+
+function fxglLight(col, p) {
+    const gl = fxgl.gl;
+    const a = p.angle * Math.PI / 180, e = p.elev * Math.PI / 180, ce = Math.cos(e);
+    const rgb = fxHexToRgb01(p.color);
+    const dst = fxgl.off[1 - col.slot];
+    fxglRunPass(dst, fxgl.progs.light, pr => {
+        fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0);
+        fxglBindTex(pr, 'uMap', fxgl.texMap, 1);
+        // 光朝向量的基与法线图一致:画布角(0° 右、90° 下)映到 uv 时 y 取负,和 fxglDirUV 同一条
+        // 规矩;z = sin(elev) 朝屏幕外,elev=90° 即正对打光。
+        gl.uniform3f(fxglU(pr, 'uL'), Math.cos(a) * ce, -Math.sin(a) * ce, Math.sin(e));
+        gl.uniform3f(fxglU(pr, 'uColor'), rgb[0], rgb[1], rgb[2]);
+        gl.uniform1f(fxglU(pr, 'uIntensity'), p.intensity / 100);
+        gl.uniform1f(fxglU(pr, 'uSpec'), p.spec / 100);
+        gl.uniform1f(fxglU(pr, 'uGloss'), p.gloss / 100);
+        gl.uniform1f(fxglU(pr, 'uGreen'), p.green === 'down' ? -1 : 1);
+    });
+    col.slot = 1 - col.slot;
 }
 
 function fxglSilGauss(radius) {
@@ -2923,10 +3196,27 @@ function applyLayerEffects(l, surface) {
     fxglBox(fxgl.off[0], fxgl.texSrc, 0, 0, 0, false);
     for (const effect of chain) {
         const p = effectParams(effect);
-        if (effect.type === 'gaussian_blur') { if (p.radius > 0) fxglGauss(col, p.radius); }
+        const spec = EFFECT_TYPES[effect.type];
+        if (spec.needsMap) {
+            const ref = fxMapRef(effect);
+            const img = fxMapImage(ref);
+            // 解析不出像素就跳过这一条 —— 拿一张黑图当深度图去打光,比不打光更糟。原因写在链上。
+            if (!img) { fxgl.skip = `${spec.label}: ${ref ? 'map not ready' : 'no map bound'}`; continue; }
+            const n = nativeSize(img);
+            if (n.w > fxgl.maxTex || n.h > fxgl.maxTex) {
+                fxgl.skip = `${spec.label}: map is ${n.w}×${n.h}, over the texture limit`;
+                continue;
+            }
+            fxglUploadCanvas(fxgl.texMap, img);
+        }
+        if (effect.type === 'gaussian_blur') {
+            if (p.radius > 0) fxglGauss(fxgl.off[col.slot], fxgl.off[col.slot].tex, fxgl.off[1 - col.slot], p.radius);
+        }
         else if (effect.type === 'vector_blur') { if (p.distance > 0) fxglMotion(col, p); }
         else if (effect.type === 'mosaic') { if (p.size > 1) fxglPixelate(col, p); }
         else if (effect.type === 'curves') { if (!curvesAreIdentity(p)) fxglCurves(col, p); }
+        else if (effect.type === 'dof') fxglDof(col, p);
+        else if (effect.type === 'lighting') fxglLight(col, p);
         else if (effect.type === 'inner_shadow') fxglInnerShadow(col, p);
     }
     fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
@@ -2950,8 +3240,9 @@ function fxResolved(l) {
     const { w, h } = nativeSize(l.img);
     if (!w || !h) return l.img;
     const sig = fxSignature(l);
+    const maps = fxMapStamp(l);
     const c = l.fxCache;
-    if (c && c.w === w && c.h === h && c.img === l.img && c.decal === l.decal && c.mask === l.mask && c.sig === sig) return c.surface;
+    if (c && c.w === w && c.h === h && c.img === l.img && c.decal === l.decal && c.mask === l.mask && c.sig === sig && c.maps === maps) return c.surface;
     const surface = document.createElement('canvas');
     surface.width = w;
     surface.height = h;
@@ -2960,7 +3251,7 @@ function fxResolved(l) {
     o.drawImage(l.img, 0, 0, w, h);
     if (l.decal) o.drawImage(l.decal, 0, 0, w, h);
     if (activeEffects(l).length) applyLayerEffects(l, surface);
-    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, surface };
+    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, maps, surface };
     return surface;
 }
 
@@ -3998,6 +4289,18 @@ function fxIconSvg(icon) {
             + '<path d="M2.2 11.8V2.2" opacity="0.55"/><path d="M2.2 11.8h9.6" opacity="0.55"/>'
             + '<path d="M2.6 11.4c3.1-.4 3.1-8.4 8.8-8.8" stroke-width="1.5"/></svg>';
     }
+    if (icon === 'dof') {
+        // 同一块方砖由清晰到糊依次排开 —— 景深的图标就是「清晰度随景深变」。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="1.6" y="4.6" width="3.4" height="4.8"/>'
+            + '<rect x="5.6" y="4.6" width="3.4" height="4.8" opacity="0.6"/>'
+            + '<rect x="9.6" y="4.6" width="3.4" height="4.8" opacity="0.3" stroke-dasharray="1.1 1.1"/></svg>';
+    }
+    if (icon === 'light') {
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<circle cx="7" cy="7" r="2.5"/>'
+            + '<path d="M7 1.5v1.5M7 11v1.5M1.5 7H3M11 7h1.5M3.4 3.4l1.1 1.1M9.5 9.5l1.1 1.1M10.6 3.4 9.5 4.5M4.5 9.5l-1.1 1.1"/></svg>';
+    }
     return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
         + '<path d="M1.9 4.3h5.4M1.9 9.7h5.4" stroke-width="1" opacity="0.55"/>'
         + '<path d="M2.2 7h5.1"/><path d="M7.1 3.9 10.4 7l-3.3 3.1"/></svg>';
@@ -4210,6 +4513,40 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
         show();
         return row;
     }
+    if (def.kind === 'map') {
+        // 这一行绑的是一张外部图(深度/法线)。名字直接写在按钮上 = 可见文本,不塞 tooltip;
+        // 解析不到像素时按钮转红,链上也会写出跳过原因 —— 静默降级是最难发现的那种 bug。
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fx-map-btn';
+        const clr = document.createElement('button');
+        clr.className = 'icon-btn';
+        clr.textContent = '×';
+        clr.style.fontSize = '14px';
+        clr.style.lineHeight = '1';
+        clr.title = 'Unbind this map';
+        const show = () => {
+            const ref = fxMapRef(effect);
+            const role = EFFECT_TYPES[effect.type].needsMap;
+            btn.textContent = ref ? fxMapShort(effect) : 'not bound';
+            btn.classList.toggle('unset', !ref);
+            btn.classList.toggle('gone', !!ref && !fxMapSource(ref));
+            btn.title = ref ? `${role}: ${ref.name || ref.key} — click to pick another` : `Pick a ${role} map`;
+            clr.style.display = ref ? '' : 'none';
+        };
+        updaters.push(show);
+        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxMapModal(l, effect); });
+        clr.addEventListener('click', ev => {
+            ev.stopPropagation();
+            // 整体替换,不原地改 —— 那个对象在 undo 快照之间是共享引用。
+            effect.params.map = null;
+            fxStructuralChange(l);
+        });
+        row.appendChild(btn);
+        row.appendChild(clr);
+        show();
+        return row;
+    }
     const inp = document.createElement('input');
     inp.type = 'range';
     inp.min = def.min;
@@ -4311,6 +4648,36 @@ function drawFxThumb(c, type) {
         g.stroke();
         return;
     }
+    if (type === 'dof') {
+        // 同一组条纹,中间一段清晰、两侧按距离逐渐糊掉:景深的样子就是清晰度随景深变。
+        const stripes = (x0, x1, blur) => {
+            g.save();
+            g.beginPath();
+            g.rect(x0, box.y, x1 - x0, box.h);
+            g.clip();
+            if (blur) g.filter = `blur(${blur}px)`;
+            g.fillStyle = '#6f8cff';
+            for (let i = 0; i < 6; i++) g.fillRect(box.x + i * (box.w / 6) + 2, box.y + 5, box.w / 12, box.h - 10);
+            g.restore();
+        };
+        const third = box.w / 3;
+        stripes(box.x, box.x + third, 3.2);
+        stripes(box.x + third, box.x + 2 * third, 0);
+        stripes(box.x + 2 * third, box.x + box.w, 4.6);
+        return;
+    }
+    if (type === 'lighting') {
+        const cx = box.x + box.w / 2, cy = box.y + box.h / 2, r = Math.min(box.w, box.h) / 2;
+        const gr = g.createRadialGradient(cx - r * 0.45, cy - r * 0.45, r * 0.08, cx, cy, r * 1.15);
+        gr.addColorStop(0, '#e8eeff');
+        gr.addColorStop(0.4, '#6f8cff');
+        gr.addColorStop(1, '#12121b');
+        g.fillStyle = gr;
+        g.beginPath();
+        g.arc(cx, cy, r, 0, Math.PI * 2);
+        g.fill();
+        return;
+    }
     g.fillStyle = '#6f8cff';
     g.fillRect(box.x, box.y, box.w, box.h);
     g.save();
@@ -4368,6 +4735,115 @@ fxModalEl.addEventListener('mousedown', e => { if (e.target === fxModalEl) close
 document.getElementById('fxCancelBtn').addEventListener('click', closeFxModal);
 fxModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxModal(); }
+});
+
+// ---- 绑定贴图 (map picker) ----
+// 一个入口、一个 modal:工作区图池 + 文件都在这一格里选。选回来的永远只是 {key, name} ——
+// 图池条目用它的 staging id,文件走本地池 id(它不该挤进参考图池,但要能进 .cud 资产)。
+const fxMapModalEl = document.getElementById('fxMapModal');
+const fxMapGroupsEl = document.getElementById('fxMapGroups');
+const fxMapTitleEl = document.getElementById('fxMapTitle');
+const fxMapFileInput = document.getElementById('fxMapFile');
+let fxMapTarget = null;        // { layerId, effectId } —— 一次只给一条特效绑
+
+function fxMapModalOpen() { return fxMapModalEl.classList.contains('open'); }
+function closeFxMapModal() { fxMapModalEl.classList.remove('open'); fxMapTarget = null; syncBrushCursor(); }
+
+function bindFxMap(ref) {
+    const t = fxMapTarget;
+    if (!t) { setStatus('The picker was closed — that map is not bound', 'error'); return; }
+    const l = getLayer(t.layerId);
+    const e = l && (l.effects || []).find(x => x.id === t.effectId);
+    if (!e) return;
+    // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,map 对象在 undo 快照之间是共享的。
+    e.params.map = ref;
+    closeFxMapModal();
+    fxStructuralChange(l);
+    setStatus(ref ? `Bound「${ref.name}」as the ${EFFECT_TYPES[e.type].needsMap.toLowerCase()} map`
+        : `Unbound the ${EFFECT_TYPES[e.type].needsMap.toLowerCase()} map`, 'success');
+}
+
+function fxMapCardGroup(title, items) {
+    const group = document.createElement('div');
+    group.className = 'tag-group';
+    const head = document.createElement('div');
+    head.className = 'tag-group-title';
+    head.textContent = title;
+    head.title = title;
+    const cards = document.createElement('div');
+    cards.className = 'tag-cards';
+    for (const s of items) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'tag-mode-item';
+        // 缩略图在上、短名在下,长句与尺寸走 title(卡片那种「读数摆在可见文本」的规矩是给
+        // 常驻信息用的,picker 是一次性动作,标题栏就是它的说明)。
+        card.title = `${s.name}${s.width ? ` · ${s.width}×${s.height}` : ''}`;
+        const img = document.createElement('img');
+        img.className = 'tag-mode-thumb';
+        img.src = s.src;
+        img.alt = s.name;
+        img.draggable = false;
+        const nm = document.createElement('span');
+        nm.className = 'tag-mode-name';
+        nm.textContent = s.name;
+        card.appendChild(img);
+        card.appendChild(nm);
+        card.addEventListener('click', () => bindFxMap({ key: s.id, name: s.name }));
+        cards.appendChild(card);
+    }
+    group.appendChild(head);
+    group.appendChild(cards);
+    return group;
+}
+
+function openFxMapModal(l, effect) {
+    if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
+    fxMapTarget = { layerId: l.id, effectId: effect.id };
+    fxMapTitleEl.textContent = `Bind a ${EFFECT_TYPES[effect.type].needsMap.toLowerCase()} map`;
+    fxMapGroupsEl.textContent = '';
+    // Guidance 卡是 Layers 的投影,当深度/法线图没有意义;图池为空时只剩文件这条路。
+    const items = stagingItems.filter(s => s && s.src && s.id !== GUIDANCE_CARD_ID);
+    if (items.length) fxMapGroupsEl.appendChild(fxMapCardGroup('Workspace', items));
+    else {
+        const hint = document.createElement('div');
+        hint.className = 'modal-hint';
+        hint.textContent = 'The workspace holds no images yet — use From file below.';
+        fxMapGroupsEl.appendChild(hint);
+    }
+    fxMapModalEl.classList.add('open');
+    syncBrushCursor();
+}
+
+// 文件的落点:本地池 + data URL。它不进工作区条带(那是一张深度图,不是参考图),但会随 .cud
+// 一起存档,所以重开项目还认得这个 key。
+function readFxMapFile(file) {
+    const r = new FileReader();
+    r.onload = () => bindFxMap(fxAddLocalMap(baseName(file && file.name), r.result));
+    r.onerror = () => setStatus('Could not read that map file', 'error');
+    r.readAsDataURL(file);
+}
+
+async function pickFxMapFile() {
+    const pick = await pickDocuments('open', 'image', '', false);
+    if (pick.busy || pick.cancelled) return;
+    if (pick.error) { setStatus('Could not open the file picker: ' + pick.error, 'error'); return; }
+    if (pick.unsupported) { fxMapFileInput.click(); return; }
+    const doc = pick.docs[0];
+    try { readFxMapFile(await docToFile(doc)); }
+    catch (err) { setStatus(`Could not read ${doc.name}`, 'error'); }
+}
+
+fxMapModalEl.addEventListener('mousedown', e => { if (e.target === fxMapModalEl) closeFxMapModal(); });
+document.getElementById('fxMapCancelBtn').addEventListener('click', closeFxMapModal);
+document.getElementById('fxMapFileBtn').addEventListener('click', pickFxMapFile);
+fxMapFileInput.addEventListener('change', () => {
+    const f = (fxMapFileInput.files || [])[0];
+    fxMapFileInput.value = '';      // so picking the very same file again still fires
+    if (f) readFxMapFile(f);
+});
+fxMapModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxMapModal(); }
 });
 
 function syncFxBypassBtn() {
@@ -8364,7 +8840,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -8791,7 +9267,10 @@ window.addEventListener('keyup', e => {
 // reader can never drift apart. Every asset is PNG — masks and decals are alpha channels, where a
 // lossy codec would bleed, and it keeps a round trip faithful for the pixels painted on.
 const CUD_MAGIC = 'CUD1';
-const CUD_VERSION = 2;
+// v2 给每条链加了 `effects` 字段(链缺省 = 没有特效,所以旧文件读进来不必迁移);v3 多了一类
+// role='map' 的资产,因为特效绑定的深度/法线图必须随文件走 —— 图池的 id 是宿主在导入时重新
+// mint 的,文件里那句 key 重开就认不出了。
+const CUD_VERSION = 3;
 let cudBusy = false;
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
@@ -9294,6 +9773,28 @@ async function buildCudBlob() {
         payload.push(bytes);
         return id;
     };
+    // 链里绑定的贴图存成自己的资产:图池 id 由宿主在导入时重新编号,文件里那句 key 出了这个会话
+    // 就不作数,所以像素必须自带。同一份像素一次存档只写一个资产。还没解码完成的图不写资产 ——
+    // 那一层重开后显示成「missing」并跳过该特效,这比悄悄绑一张别的图诚实。
+    const mapAssets = new Map();
+    const cudEffects = async list => {
+        const out = cloneEffects(list);
+        for (const e of out) {
+            const ref = fxMapRef(e);
+            if (!ref) continue;
+            const found = fxMapSource(ref);
+            const img = found && fxMapImage(ref);
+            if (!img) continue;
+            let id = mapAssets.get(found.src);
+            if (id === undefined) {
+                const n = nativeSize(img);
+                id = await addAsset('map', img, n.w, n.h);
+                mapAssets.set(found.src, id);
+            }
+            e.params.map = Object.assign({}, ref, { asset: id });
+        }
+        return out;
+    };
     // `layers` is kept top-first; the file preserves that order verbatim.
     const records = [];
     for (const l of layers) {
@@ -9324,7 +9825,8 @@ async function buildCudBlob() {
             // fields + transform rebuild the editable layer on Load, and the pixels follow.
             text: l.text ? Object.assign({}, l.text) : null,
             // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
-            effects: cloneEffects(l.effects),
+            // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
+            effects: await cudEffects(l.effects),
             image: blank ? null : await addAsset('image', l.img, n.w, n.h),
             mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
             decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
@@ -9725,7 +10227,7 @@ async function openCudDocument(file, doc) {
                     : null,
                 mask, decal,
                 // v1 文件里没有这个字段 —— 空白链就是「没有特效」,不是「特效坏了」。
-                effects: normalizeEffects(rec.effects),
+                effects: await restoreFxMaps(normalizeEffects(rec.effects), blobs),
             });
         }
         if (!records.length) throw new Error('the .cud holds no readable layers');
