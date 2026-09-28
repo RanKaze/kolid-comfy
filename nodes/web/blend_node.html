@@ -435,6 +435,15 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .fold-caret::before { content: '\25B8'; font-size: 9px; }
 .tool-section.foldable:not(.collapsed) .fold-caret { transform: rotate(90deg); }
 .tool-section.foldable.collapsed .tool-body { display: none; }
+/* 工具设置的小窗：Brush / Bucket / Eraser / Text 的 .tool-body 被搬进 body 下的 host，贴在 sidePanel
+   左缘成一列小窗，工具栏那一列的宽度和滚动位置都不再被展开挤动。 */
+#toolFlyHost { position: fixed; inset: 0; z-index: 150; pointer-events: none; }
+.tool-flyout { position: fixed; pointer-events: auto; width: 320px; display: flex; flex-direction: column;
+    gap: 8px; padding: 10px 12px 12px; border-radius: 14px; box-sizing: border-box;
+    background: rgba(28,28,30,0.92); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 10px 32px rgba(0,0,0,0.45); }
+.tool-flyout-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tool-flyout .tool-body { display: flex; flex-direction: column; gap: 8px; }
 .control-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
@@ -719,7 +728,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-section tool-section foldable collapsed" id="bucketSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto the surface the Mask / Decal switch picks: a decal gets the colour (Alpha included), a mask gets the Color's Alpha poured in as coverage. Alt+click picks the Color from the canvas, like the brush. Click the header to fold the settings."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
+                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto the surface the Mask / Decal switch picks: a decal gets the colour (Alpha included), a mask gets the Color's Alpha poured in as coverage. Alt+click picks the Color from the canvas, like the brush. Click the header to open or close its settings window."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
                 </div>
                 <div class="tool-body">
                     <div class="control-row"><label>Tolerance</label><input type="range" id="bucketTolerance" min="0" max="1" step="0.01" value="0.2" title="How far a pixel may sit from the clicked colour and still be filled (0 = exact match, 1 = everything)"><span id="bucketToleranceValue">0.20</span></div>
@@ -751,7 +760,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                  outside the fold, so a folded Text row still tells you what it is styling. -->
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to fold the settings."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
+                    <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to open or close its settings window."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
                     <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                 </div>
                 <div class="tool-body">
@@ -4878,8 +4887,8 @@ function syncPaintUI() {
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. The Color\u2019s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
-    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to fold the settings.` + selNote;
-    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to fold the settings.` + selNote;
+    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
+    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     updateMaskTargetLabel();
     updateCursorMode();
 }
@@ -7061,15 +7070,104 @@ document.getElementById('viewRotateCWBtn').addEventListener('click', () => rotat
 document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rotateView(-Math.PI / 12));
 document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
 
-// ---- Folding tool sections ----
-// Brush, Bucket, Eraser and Text start folded; clicking their header row shows or hides the
-// settings. A button inside a header acts on its own — it never toggles the fold.
-for (const id of ['brushSection', 'bucketSection', 'eraserSection', 'textSection']) {
+// ---- 工具设置小窗 ----
+// Brush, Bucket, Eraser and Text start folded. Clicking a header row docks that tool's settings as
+// a small window on the sidePanel's left edge instead of opening them inside the column, so the tool
+// rows never jump and a slider gets a row of its own. Windows follow their header while the panel
+// scrolls or the column is dragged wider, and stack in list order so two of them cannot sit on top
+// of each other.
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection'];
+const TOOL_WINDOW_GAP = 8;
+const toolFlyHost = document.createElement('div');
+toolFlyHost.id = 'toolFlyHost';
+document.body.appendChild(toolFlyHost);
+const toolWindows = new Map();   // section id -> { fly, body, anchor }
+let toolWindowZ = 150;           // the host sits above the canvas overlays; the newest window on top
+
+function openToolWindow(id) {
     const section = document.getElementById(id);
-    section.querySelector('.panel-head').addEventListener('click', ev => {
-        if (ev.target.closest('button')) return;
-        section.classList.toggle('collapsed');
-    });
+    const body = section.querySelector('.tool-body');
+    const label = section.querySelector('.panel-label');
+    const anchor = body.nextSibling;
+    const fly = document.createElement('div');
+    fly.className = 'tool-flyout';
+    fly.style.zIndex = String(++toolWindowZ);   // a stacked column can still end up overlapping
+    const head = document.createElement('div');
+    head.className = 'tool-flyout-head';
+    // The header row keeps the caret, the window keeps the name and its shortcut chip — cloned from
+    // the panel label so the two can never read differently.
+    const title = document.createElement('div');
+    title.className = 'panel-label';
+    title.title = label.title;
+    title.append(...Array.from(label.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE || !n.classList.contains('fold-caret'))
+        .map(n => n.cloneNode(true)));
+    const close = document.createElement('button');
+    close.className = 'mini-btn';
+    close.textContent = '✕';
+    close.title = 'Close this window — the settings fold back into the header row';
+    close.addEventListener('click', () => toggleToolWindow(id));
+    head.append(title, close);
+    fly.append(head, body);
+    toolFlyHost.appendChild(fly);
+    toolWindows.set(id, { fly, body, anchor });
+    section.classList.remove('collapsed');
+    toolWindowObserver.observe(fly);
+    layoutToolWindows();
+}
+
+function closeToolWindow(id) {
+    const w = toolWindows.get(id);
+    if (!w) return;
+    const section = document.getElementById(id);
+    section.insertBefore(w.body, w.anchor);
+    section.classList.add('collapsed');
+    w.fly.remove();
+    toolWindows.delete(id);
+    toolWindowObserver.unobserve(w.fly);
+    layoutToolWindows();
+}
+
+function toggleToolWindow(id) {
+    if (toolWindows.has(id)) closeToolWindow(id);
+    else openToolWindow(id);
+}
+
+function layoutToolWindows() {
+    const panel = sidePanelEl.getBoundingClientRect();
+    const place = [];
+    let nextTop = TOOL_WINDOW_GAP;
+    for (const id of TOOL_WINDOW_IDS) {
+        const w = toolWindows.get(id);
+        if (!w) continue;
+        const box = w.fly.getBoundingClientRect();
+        const headTop = document.getElementById(id).querySelector('.panel-head').getBoundingClientRect().top;
+        let top = Math.max(headTop, nextTop);
+        if (top + box.height > window.innerHeight - TOOL_WINDOW_GAP)
+            top = Math.max(TOOL_WINDOW_GAP, window.innerHeight - TOOL_WINDOW_GAP - box.height);
+        let left = panel.left - box.width - TOOL_WINDOW_GAP;
+        if (left < TOOL_WINDOW_GAP) left = TOOL_WINDOW_GAP;
+        place.push([w.fly, left, top]);
+        nextTop = top + box.height + TOOL_WINDOW_GAP;
+    }
+    for (const [fly, left, top] of place) {
+        if (fly.style.left !== `${left}px`) fly.style.left = `${left}px`;
+        if (fly.style.top !== `${top}px`) fly.style.top = `${top}px`;
+    }
+}
+
+// Relayout is event-driven, never a per-frame loop: a window moves when the panel scrolls, when the
+// iframe resizes, or when anything in the column changes height — a readout line appearing shifts the
+// headers under it, so every row is observed, and a brush mode switch that makes its own window
+// taller is observed too.
+const toolWindowRelayout = () => { if (toolWindows.size) layoutToolWindows(); };
+const toolWindowObserver = new ResizeObserver(toolWindowRelayout);
+for (const el of document.querySelectorAll('#panelScroll .panel-section')) toolWindowObserver.observe(el);
+document.getElementById('panelScroll').addEventListener('scroll', toolWindowRelayout, { passive: true });
+window.addEventListener('resize', toolWindowRelayout);
+
+for (const id of TOOL_WINDOW_IDS) {
+    document.getElementById(id).querySelector('.panel-head').addEventListener('click', () => toggleToolWindow(id));
 }
 
 document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
