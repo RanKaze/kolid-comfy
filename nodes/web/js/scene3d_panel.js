@@ -279,6 +279,7 @@
     }
 
     // 什么都没选中 → Environment,和 Unity 选中空处显示 Lighting 那一屏一个意思。
+    // Grid 不在这里:它现在是视口左上角那一枚开关(见 scene3d_view.js 的 setGrid),一个动作一个入口。
     function environmentBlock(host) {
         host.appendChild(num('Ambient', Scene3D.rec.ambient.color, (v, commit) => {
             Scene3D.rec.ambient.color = v;
@@ -290,10 +291,6 @@
             Scene3D.applyAmbient();
             if (commit) pushHistory();
         }, { range: true, min: 0, max: 2, step: 0.05, readout: v => Number(v).toFixed(2) }));
-        host.appendChild(segment('Grid', [
-            [true, 'On', 'Ground grid and axis colours — helpers only, they never render into a layer.'],
-            [false, 'Off', ''],
-        ], Scene3D.rec.grid, v => { Scene3D.setGrid(v); Scene3D.renderPanel(); pushHistory(); }));
     }
 
     // ---- 顶部把手区 ----
@@ -335,6 +332,9 @@
         el('sceneFocusBtn').addEventListener('click', () => Scene3D.focus());
         el('sceneLocalBtn').addEventListener('click', () => Scene3D.setSpace('local'));
         el('sceneGlobalBtn').addEventListener('click', () => Scene3D.setSpace('world'));
+        // 视口左上角那枚浮层开关。点亮状态由 setGrid 自己刷新(它是记录的唯一出口),
+        // 这里只管按下 —— G 键走同一条路。
+        el('sceneGridBtn').addEventListener('click', () => Scene3D.setGrid(!(Scene3D.rec && Scene3D.rec.grid)));
         el('sceneAddBtn').addEventListener('click', e => {
             e.stopPropagation();
             if (menuOpen) closeSceneMenu();

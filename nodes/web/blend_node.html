@@ -530,6 +530,22 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
    底部同样让出 132px 给动作条,所以切 tab 时画面位置不跳。 */
 #sceneViewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; display: none; }
 #sceneCanvas { display: block; width: 100%; height: 100%; }
+/* 视口的两块浮层:Unity Scene 视图那两个小挂件 —— 左上角管水平面,右上角管朝向。都是 DOM 而不是
+   画进 GL,所以烘进图层的像素永远带不走它们。底盘沿用 #toolbar / .hud 那块玻璃,按钮沿用 .icon-btn。 */
+.s3d-float { position: absolute; z-index: 12; display: flex; align-items: center; gap: 4px; padding: 3px 5px;
+    border-radius: 10px; background: rgba(28,28,30,0.82); border: 0.5px solid rgba(255,255,255,0.14);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.45); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
+#sceneGridDock { top: 10px; left: 10px; }
+#sceneGridBtn.active { background: rgba(0,122,255,0.85); color: #fff; }
+#sceneGridBtn.active .tool-key { background: rgba(255,255,255,0.24); color: #fff; }
+#sceneAxisDock { top: 10px; right: 10px; padding: 2px; pointer-events: none; }
+#sceneAxisGizmo { display: block; }
+/* 按住右键飞视角:光标换成一只眼睛,按住多久就在多久。浏览器的 cursor:url() 不吃 SVG,所以眼睛
+   走 #brushCursor 那条 DOM 老路 —— 系统光标收掉,眼睛自己跟着 pointermove 钉在指针上。 */
+#sceneCanvas.looking { cursor: none; }
+#lookCursor { position: fixed; z-index: 130; display: none; pointer-events: none; transform: translate(-50%,-50%);
+    color: rgba(255,255,255,0.95); filter: drop-shadow(0 1px 3px rgba(0,0,0,0.8)); }
+#lookCursor.on { display: block; }
 /* 右栏在 3D tab 期间整体换掉:#panelScroll / #maskDock / #layersDock 隐去,这一栏顶上。
    小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多
    出 Hierarchy 的行本身、Inspector 的分组标题,以及来源说明行。 */
@@ -763,9 +779,22 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
         <!-- 3D tab 的视口:占位和 #viewport 一模一样,只是换一张 GL canvas。
              进出 3D 靠 CSS 显示/隐藏互换,2D 那三层 canvas 从不参与。 -->
-        <div id="sceneViewport"><canvas id="sceneCanvas"></canvas></div>
+        <div id="sceneViewport">
+            <canvas id="sceneCanvas"></canvas>
+            <div id="sceneGridDock" class="s3d-float">
+                <button class="icon-btn" id="sceneGridBtn"
+                        title="Ground grid (G) — the y=0 plane, so the horizontal is something to put things back on">
+                    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" aria-hidden="true"><path d="M1.6 5.2h10.8M1.6 8.8h10.8M5.2 1.6v10.8M8.8 1.6v10.8"/></svg>
+                    <span class="tool-key">G</span>
+                </button>
+            </div>
+            <!-- 一副轴向罗盘:三根世界轴按当前视线投影,朝着眼睛的那根画在最上面。 -->
+            <div id="sceneAxisDock" class="s3d-float"><svg id="sceneAxisGizmo" viewBox="-32 -32 64 64" width="62" height="62" aria-hidden="true" focusable="false"></svg></div>
+        </div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
         <div id="brushCursor"></div>
+        <!-- 按住右键那一路的眼睛光标:瞳孔正好钉在指针上,和 #brushCursor 同一套 DOM 光标。 -->
+        <div id="lookCursor"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.4 12S5.9 6.2 12 6.2 21.6 12 21.6 12 18.1 17.8 12 17.8 2.4 12 2.4 12z"/><circle cx="12" cy="12" r="3.1" fill="currentColor" stroke="none"/></svg></div>
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
         <div id="toolbar">
@@ -1053,7 +1082,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
                 <div class="panel-section">
                     <div class="panel-head">
-                        <div class="panel-label" title="Inspector — the selected object's numbers. With nothing selected this shows the scene's Environment instead: ambient light and the ground grid.">Inspector</div>
+                        <div class="panel-label" title="Inspector — the selected object's numbers. With nothing selected this shows the scene's Environment instead: the ambient light.">Inspector</div>
                     </div>
                     <div id="sceneInspectorBody"></div>
                 </div>

@@ -6,6 +6,7 @@
     let raf = 0, last = 0, dirty = true;
     let renderer, scene, root, cam, grid, axes, ambient, controls, raycaster, host, canvasEl;
     let rt = null, rtSize = [0, 0];
+    let lookEl = null, axisSvg = null, axisEls = null;
 
     const V = () => Scene3D.rec.view;
 
@@ -46,6 +47,7 @@
         Scene3D.live = true;
         Scene3D.root = root;
         wirePointer();
+        buildAxisWidget();
         new ResizeObserver(() => resize()).observe(host);
         return true;
     }
@@ -66,6 +68,10 @@
         cam.rotation.set(v.pitch * Math.PI / 180, v.yaw * Math.PI / 180, 0, 'YXZ');
         cam.fov = v.fov || 60;
         cam.updateProjectionMatrix();
+        // 罗盘读的是相机的世界矩阵,而 renderer 要到 render 里才刷新它 —— 不先补这一步,右上角那副
+        // 朝向永远慢一帧,飞起来能看出它在后面拖。
+        cam.updateMatrixWorld(true);
+        syncAxisWidget();
         if (controls) controls.update();
     }
 
@@ -105,6 +111,75 @@
     }
 
     Scene3D.invalidate = () => { dirty = true; };
+
+    // ---- 右上角的轴向罗盘 ----
+    // 走 DOM/SVG 而不是画进 GL:bake 用的是同一个 renderer、同一张 scene,任何挂进去的辅助物都会被
+    // 烘进图层像素(captureCanvas 正是为此才把 grid/axes/controls 藏起来的)。摆在 DOM 里则天然不进图。
+    // 每帧把三根世界轴投到当前相机的 right/up 平面上,朝着眼睛的那根最后画,于是它盖在其余之上。
+    const AXIS_RO = 20;                                  // 臂长(viewBox 单位)
+    const AXIS_COL = { x: '#ff6f61', y: '#5dd97c', z: '#4fa8ff' };
+
+    function svgNode(tag, attrs) {
+        const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const k in attrs) n.setAttribute(k, attrs[k]);
+        return n;
+    }
+
+    function buildAxisWidget() {
+        axisSvg = document.getElementById('sceneAxisGizmo');
+        if (!axisSvg) return;
+        axisSvg.innerHTML = '';
+        axisEls = ['x', 'y', 'z'].map(key => {
+            const back = svgNode('line', { stroke: AXIS_COL[key], 'stroke-width': 1.3, 'stroke-linecap': 'round', opacity: 0.3 });
+            const arm = svgNode('line', { stroke: AXIS_COL[key], 'stroke-width': 2.2, 'stroke-linecap': 'round' });
+            const tip = svgNode('circle', { r: 6, fill: AXIS_COL[key], stroke: 'rgba(0,0,0,0.5)', 'stroke-width': 0.8 });
+            const label = svgNode('text', { fill: '#0d0d0f', 'font-size': 8.5, 'font-weight': 700,
+                'text-anchor': 'middle', 'dominant-baseline': 'central' });
+            label.textContent = key.toUpperCase();
+            for (const n of [back, arm, tip, label]) axisSvg.appendChild(n);
+            return { key, back, arm, tip, label };
+        });
+    }
+
+    function syncAxisWidget() {
+        if (!axisEls) return;
+        const THREE = K3D.THREE;
+        const fwd = new THREE.Vector3(); cam.getWorldDirection(fwd);
+        const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+        const vecs = { x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+        for (const e of axisEls) {
+            const a = vecs[e.key];
+            e.sx = right.dot(a) * AXIS_RO;
+            e.sy = -up.dot(a) * AXIS_RO;      // SVG 的 y 朝下,屏幕上才是向上为正
+            e.toward = -fwd.dot(a);           // >0 = 这根轴朝着眼睛
+        }
+        axisEls.sort((p, q) => p.toward - q.toward);
+        for (const e of axisEls) {
+            const sx = +e.sx.toFixed(2), sy = +e.sy.toFixed(2);
+            // 重新 append 就是重排绘制顺序,近的那根落到最后。
+            axisSvg.append(e.back, e.arm, e.tip, e.label);
+            e.back.setAttribute('x2', (-sx * 0.55).toFixed(2));   // 负轴短一截、暗一档:Unity 也靠这个分正反
+            e.back.setAttribute('y2', (-sy * 0.55).toFixed(2));
+            e.arm.setAttribute('x2', sx);
+            e.arm.setAttribute('y2', sy);
+            e.tip.setAttribute('cx', sx); e.tip.setAttribute('cy', sy);
+            e.label.setAttribute('x', sx); e.label.setAttribute('y', sy);
+        }
+    }
+
+    // ---- 按住右键那只眼睛 ----
+    // 浏览器的 cursor: url() 不吃 SVG(只有 PNG/GIF/WEBP),而 canvas 里也没法摆一个跟着指针走的挂件,
+    // 所以照 #brushCursor 那条老路:系统光标收掉,眼睛用 DOM 钉在指针上。
+    function lookCursor(on, ev) {
+        if (!lookEl) lookEl = document.getElementById('lookCursor');
+        if (lookEl) lookEl.classList.toggle('on', !!on);
+        canvasEl.classList.toggle('looking', !!on);
+        if (on && ev && lookEl) {
+            lookEl.style.left = ev.clientX + 'px';
+            lookEl.style.top = ev.clientY + 'px';
+        }
+    }
 
     // ---- 点选 ----
     function pickables() {
@@ -149,6 +224,7 @@
                 Scene3D.looking = true;
                 Scene3D.lookStart = { x: e.clientX, y: e.clientY };
                 controls.enabled = false;            // 飞的时候把手不吃鼠标
+                lookCursor(true, e);
                 return;
             }
             if (e.button !== 0 || controls.axis) return;   // 按在把手上就让把手自己处理
@@ -162,12 +238,14 @@
             v.yaw -= (e.clientX - s.x) * 0.18;
             v.pitch = Math.max(-89, Math.min(89, v.pitch - (e.clientY - s.y) * 0.18));
             Scene3D.lookStart = { x: e.clientX, y: e.clientY };
+            lookCursor(true, e);
             dirty = true;
         });
         const stopLook = e => {
             if (!Scene3D.looking) return;
             Scene3D.looking = false;
             controls.enabled = true;
+            lookCursor(false, e);
             if (e && canvasEl.hasPointerCapture && canvasEl.hasPointerCapture(e.pointerId)) {
                 canvasEl.releasePointerCapture(e.pointerId);
             }
@@ -254,6 +332,7 @@
         Scene3D.entry = null;
         Scene3D.keys.clear();
         Scene3D.looking = false;
+        lookCursor(false);
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
         document.getElementById('viewport').style.display = '';
         host.style.display = 'none';
@@ -274,6 +353,7 @@
         controls.detach();
         Scene3D.sync();
         applyView();
+        syncGridBtn();
         dirty = true;
     };
 
@@ -300,7 +380,7 @@
         if (MOVE.has(key) || key === 'r') Scene3D.keys.add(key);
         if (key === 'escape') { Scene3D.select(null); return true; }
         if (key === 'f') { Scene3D.focus(); return true; }
-        if (key === 'g') { Scene3D.setGrid(!Scene3D.rec.grid); Scene3D.renderPanel(); return true; }
+        if (key === 'g') { Scene3D.setGrid(!Scene3D.rec.grid); return true; }
         if (!Scene3D.looking && TOOLS[key]) Scene3D.setTool(TOOLS[key]);
         if (key === ' ') return true;        // 空格留给页面会改动 2D 视图状态,这里按掉
         // 这三个在 2D 那边是「提交/删除图层/换绘制面」的手势。3D tab 开着的时候它们会打到
@@ -461,10 +541,22 @@
         dirty = true;
     };
 
+    // 左上角那枚开关的点亮状态。记录是唯一真相,所以换 tab、撤销、还原之后也要照它刷新一次。
+    function syncGridBtn() {
+        const b = document.getElementById('sceneGridBtn');
+        if (b) b.classList.toggle('active', !!(Scene3D.rec && Scene3D.rec.grid));
+    }
+
+    // Grid 就是 y=0 那张水平面,让用户看得见「地面在哪」。坐标轴十字和它一起收放:两者都是辅助线,
+    // 按同一条分寸一律不进烘出来的像素(captureCanvas 里已经把它们藏掉)。
     Scene3D.setGrid = function setGrid(on) {
-        Scene3D.rec.grid = !!on;
-        grid.visible = !!on;
-        axes.visible = !!on;
+        on = !!on;
+        Scene3D.rec.grid = on;
+        grid.visible = on;
+        axes.visible = on;
+        syncGridBtn();
+        // 开关写进记录,所以它和改一个属性同量级 —— G 键和左上角那枚都从这里过一条撤销。
+        pushHistory();
         dirty = true;
     };
 })();
