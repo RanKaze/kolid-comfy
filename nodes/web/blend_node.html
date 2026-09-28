@@ -710,7 +710,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <button class="mini-btn" id="canvasSizeBtn" title="Set a fixed canvas resolution. Until you set one the canvas follows the bottom layer; image files can also be dropped onto the canvas to become layers.">Canvas Size…</button>
                     <button class="mini-btn" id="canvasModifyBtn" title="Modify — drag the canvas border to resize it. Smart layers keep their pixels (top-left anchored); raster layers resample to the new canvas. Enter applies, Esc cancels.">Modify</button>
                 </div>
-                <div class="panel-hint" id="canvasReadout" style="display:none;"></div>
             </div>
             <div class="panel-section">
                 <div class="panel-head">
@@ -2174,8 +2173,6 @@ function updateCanvasReadout() {
     }
     const modifyBtn = document.getElementById('canvasModifyBtn');
     if (modifyBtn) modifyBtn.disabled = !canvasW;
-    const el = document.getElementById('canvasReadout');
-    if (el) setReadout(el, canvasW && canvasH ? (canvasCustom ? 'Fixed' : 'Follows the bottom layer') : '');
 }
 
 // ==================== 视图（缩放 / 旋转 / 翻转 / 平移） ====================
