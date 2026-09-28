@@ -3368,7 +3368,7 @@ function openCanvasMenu(clientX, clientY) {
         : 'Select a layer first — the pour needs a surface to land on.', fillSelection, !target);
     layerMenuItem('Layer via Copy', 'Cut what the canvas shows inside the selection into a new layer, with the selection as its mask (Photoshop: Layer via Copy).', layerViaCopy);
     layerMenuItem('Generate', 'Open the create-layer dialog sized to the selection: a blank smart layer carries the selection as its mask, and the detailer reads the canvas as its Layer Context.', openSelectionGenerate);
-    layerMenuItem('Deselect', 'Drop the selection (same as Ctrl+D).', () => { if (clearSelection()) setStatus('Selection cleared'); });
+    layerMenuItem('Deselect', 'Drop the selection (same as Ctrl+D).', deselectAndReport);
     positionLayerMenu(clientX, clientY);
 }
 
