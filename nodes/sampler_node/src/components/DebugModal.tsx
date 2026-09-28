@@ -164,7 +164,14 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   };
 
   const statusColor = (st?: string) =>
-    st === 'done' ? '#30d158' : st === 'error' ? '#ff453a' : st === 'running' ? '#0a84ff' : 'rgba(255,255,255,0.45)';
+    st === 'done' ? '#30d158' : st === 'error' ? '#ff453a' : st === 'running' || st === 'cancelled' ? '#0a84ff' : 'rgba(255,255,255,0.45)';
+
+  // 来源 chip：离线 Processor / Interface tab Execute 与 detailer run 共用一份 trace 模型，
+  // 靠 meta 里的 action/offline 区分。
+  const sourceLabel = (meta?: DebugTraceResponse['meta']) =>
+    meta?.offline ? 'Processor（离线）'
+      : meta?.action === 'execute_interface' ? 'Interface tab'
+        : meta?.from_blend ? 'Blend 工作台' : 'Run Detailer';
 
   return (
     <div style={S.overlay} onClick={onClose}>
@@ -188,7 +195,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             <div style={{ minWidth: 0 }}>
               <div style={S.headTitle}>Run Debug</div>
               <div style={S.headSub}>
-                上一次 Run / Generate / Detect 的全过程快照
+                上一次 Run / Generate / Detect / Processor 的全过程快照
               </div>
             </div>
           </div>
@@ -205,7 +212,10 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               <span style={S.metaChip}>
                 <b style={{ color: statusColor(trace.meta?.status) }}>{trace.meta?.status || 'unknown'}</b>
               </span>
-              <span style={S.metaChip}>来源 <b>{trace.meta?.from_blend ? 'Blend 工作台' : 'Run Detailer'}</b></span>
+              <span style={S.metaChip}>来源 <b>{sourceLabel(trace.meta)}</b></span>
+              {trace.meta?.interface && (
+                <span style={S.metaChip}>Interface <b>{String(trace.meta.interface)}</b></span>
+              )}
               <span style={S.metaChip}>时间 <b>{fmtTime(trace.generated_at || trace.meta?.generated_at)}</b></span>
               <span style={S.metaChip}>记录 <b>{steps.length}</b></span>
               <span style={S.metaChip}>过程图 <b>{imageTotal}</b></span>
@@ -219,7 +229,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             </>
           ) : (
             <span style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12 }}>
-              还没有可用的快照 —— 先跑一次 Run / Generate。
+              还没有可用的快照 —— 先跑一次 Run / Generate / Processor。
             </span>
           )}
           <div style={{ flex: 1 }} />
@@ -238,7 +248,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             <div style={S.empty}>
               还没有快照。<br />
               <span style={{ fontSize: 12, opacity: 0.6 }}>
-                触发一次 Run Detailer（或 Blend 工作台里的 Generate / ▶ preset），然后再打开这里。
+                触发一次 Run Detailer（或 Blend 工作台里的 Generate / ▶ preset / Processor），然后再打开这里。
               </span>
             </div>
           )}

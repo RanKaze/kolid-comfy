@@ -211,6 +211,8 @@ export interface StatusResponse {
   interface_current_step?: number;
   interface_total_steps?: number;
   interface_result_keys?: string[];
+  /** 离线 processor 的结果清单（key/port/type/name），done 时由宿主按端口发回工作台 */
+  interface_result_meta?: { key: string; port: number; type: string; name: string }[];
   pending_query?: PendingQuery | null;
   /** preset 绑定的 pipeline 可能在本次 run 里被现加载 —— 名字与架构都跟着变，轮询时顺手同步 */
   loaded_pipeline_name?: string;
