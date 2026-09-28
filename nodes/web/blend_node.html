@@ -327,6 +327,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-curve-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .fx-curve-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 .fx-curve-reset svg { width: 14px; height: 14px; }
+/* 色调映射 (fx/tone_map.js):模式一行,下面只铺该模式要用的参数行。 */
+.fx-tone { display: flex; flex-direction: column; gap: 5px; }
+.fx-tone-tail { display: flex; flex-direction: column; gap: 5px; }
 /* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
 .fx-map-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
     border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600;
@@ -1018,6 +1021,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/vector_blur.js"></script>
 <script src="fx/mosaic.js"></script>
 <script src="fx/curves.js"></script>
+<script src="fx/tone_map.js"></script>
 <script src="fx/dof.js"></script>
 <script src="fx/lighting.js"></script>
 <script src="fx/bloom.js"></script>

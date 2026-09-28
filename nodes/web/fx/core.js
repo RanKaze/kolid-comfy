@@ -8,18 +8,19 @@
 //   * alpha 跟着画面走 —— 低通/运动模糊/马赛克把 A 和 RGB 一起滤波(抽样预乘累加、直通色归一,
 //     alpha 输出同一组抽样的均值):对文字这类「形状就是 alpha」的层,不软化不透明度就等于没特效。
 //     出口 alpha 是该层**新的源不透明度**;蒙版仍独立存档,后端 `image * mask` 依旧只乘一次,
-//     不会把软边乘成平方。曲线/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条)。
+//     不会把软边乘成平方。曲线/色调/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条)。
 //   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × 蒙版 alpha,特效据此计算,但结果
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
 //     外阴影与描边的形状故意**只取图层 alpha**:蒙版链外还要整体乘一次,吃过一遍就成了平方。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
 // + 虚化 + 裁回自身轮廓、描边 = 把虚化后的 silhouette 当带符号距离、读它的水平集等距带、
 // 马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的一张 PS 式点曲线查表、
+// 色调映射 = 线性光上的一张单调响应曲线(Neutral/ACES/Custom)或一张外部查找表、
 // 景深 = 深度图驱动的三档低通按像素混档、光照 = 切线空间法线图上的漫反射 + Blinn-Phong 高光。
-// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/内阴影/光照/泛光只写 RGB,外阴影与描边加 alpha;三条契约
-// 对全部特效成立。整链只在图层的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
-// 吃外部图的特效(dof / lighting)在 params 里只存一句 {key, name} 引用:图池 id 或本地池 id,
-// 像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
+// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光只写 RGB,外阴影与描边加 alpha;三条
+// 契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
+// 吃外部图的特效(dof / lighting / tone 的 External)在 params 里只存一句 {key, name} 引用:图池 id
+// 或本地池 id,像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
 //
 // 文件切分:本文件只装「链的模型」(注册表容器 + 参数/克隆/签名/旁路)。每类特效自己一个
 // fx/<effect>.js,里面齐活:注册数据 + 着色器 + pass + 子行读数 + picker 缩略图;引擎在 fx/gl.js,
@@ -28,9 +29,10 @@
 // 注册表由 fx/<effect>.js 的 defineEffect() 填。picker 里的顺序 = 注册顺序,所以页面的 <script>
 // 列表按组排 (Shadow → Blur → Pixelate → Color → Light)。字段约定:
 //   type/label/group/icon/desc/params —— 注册数据 (参数行、默认值、白名单迁移都读它)
-//   needsMap: 'Depth' | 'Normal' —— GL 侧据此上传贴图, UI 据此渲染绑定行
+//   needsMap: 'Depth' | 'Normal' | 'Lookup' —— GL 侧据此上传贴图, UI 据此渲染绑定行
+//   needsMapWhen(p) —— 可选:该模式是否真的需要贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
 //   shaders: { progName: fragmentSource } —— fxglInit 统一编译进 fxgl.progs
-//   run(col, p) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因
+//   run(col, p, effect) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因
 //   readout(p, n, effect) / thumb(g, box) —— 子行读数与 picker 缩略图 (取景框由 UI 备好)
 //   migrate(raw, out) —— 参数换形状时把旧 raw 读成等价的 out, 只写 out 不动 raw (undo 共享它)
 //   editor(l, effect, syncRead, updaters) —— 有它就整块接管参数区 (点曲线这类非滑块编辑面)

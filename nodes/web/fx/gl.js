@@ -318,7 +318,9 @@ function applyLayerEffects(l, surface) {
     for (const effect of chain) {
         const p = effectParams(effect);
         const spec = EFFECT_TYPES[effect.type];
-        if (spec.needsMap) {
+        // 有些特效只在某个模式下才真吃贴图 (色调映射只在 External 读查找表),要不要像素由它自己
+        // 报一句 —— 否则中性模式会因为「没绑图」被整条跳过,而那模式根本不需要图。
+        if (spec.needsMap && (!spec.needsMapWhen || spec.needsMapWhen(p))) {
             const ref = fxMapRef(effect);
             const img = fxMapImage(ref);
             // 解析不出像素就跳过这一条 —— 拿一张黑图当深度图去打光,比不打光更糟。原因写在链上。
@@ -331,7 +333,8 @@ function applyLayerEffects(l, surface) {
             fxglUploadCanvas(fxgl.texMap, img);
         }
         // 跑不动的特效自己写 fxgl.skip (参数为 0 时直接原样返回),引擎只负责把贴图备好。
-        spec.run(col, p);
+        // effect 一起传:绑定贴图的尺寸也是该特效的判断依据 (见 fx/tone_map.js 的布局识别)。
+        spec.run(col, p, effect);
     }
     fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
     const c2 = surface.getContext('2d');
