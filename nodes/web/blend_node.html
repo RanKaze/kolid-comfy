@@ -1507,6 +1507,10 @@ function rasterResampleBuffer(l, w, h) {
 function rasterizeLayer(l) {
     if (!l || l.isMaskLayer || !l.img || !canvasW || !canvasH) return false;
     if (isRasterLayer(l)) return false;
+    // Rasterizing writes the transform away — the placement becomes part of the buffer — so a
+    // gesture the button released is folded into that same step rather than left pointing at a
+    // placement that no longer exists. Quiet: the caller owns the undo entry.
+    applyTransformPending(true);
     l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
     l.raster = true;
     l.src = l.img.toDataURL('image/png');
@@ -1535,7 +1539,22 @@ function resampleRasterLayers(w, h) {
     for (const l of layers) if (isRasterLayer(l) && l.img) rasterResampleBuffer(l, w, h);
 }
 
-// A transform drag on a raster layer moved the (temporarily non-identity) transform: bake it.
+// The affine a live raster preview puts on its canvas-sized buffer: the buffer's CONTENT box (the
+// transform the press promoted) travels to the box the drag currently holds. Drawing and baking
+// share this one matrix, so what the pointer moves is exactly what Enter writes. W/H is whatever
+// space the caller draws in — canvas pixels, or a thumbnail's.
+function rasterDragAffine(from, to, W, H) {
+    const sx = to.w / from.w, sy = to.h / from.h;
+    const dR = to.rotation - from.rotation;
+    const cos = Math.cos(dR), sin = Math.sin(dR);
+    const ox = from.cx * W, oy = from.cy * H;
+    const nx = to.cx * W, ny = to.cy * H;
+    const a = cos * sx, b = sin * sx, c = -sin * sy, d = cos * sy;
+    return { a, b, c, d, e: nx - (a * ox + c * oy), f: ny - (b * ox + d * oy) };
+}
+
+// The bake Enter performs on a previewed raster layer: the (temporarily non-identity) transform
+// becomes pixels.
 // The drag starts from the CONTENT box (rasterContentTransform), so `from` is that box and the
 // bake must carry every canvas point through A = T_to ∘ T_from⁻¹ — rotation AND the box's scale
 // change — not just the raw transform. Afterwards the buffer is again canvas-sized pixels shown
@@ -1543,19 +1562,12 @@ function resampleRasterLayers(w, h) {
 function commitRasterTransform(l, fromTr) {
     if (!isRasterLayer(l) || !l.img) return;
     const from = fromTr || rasterContentTransform(l);
-    const to = l.transform;
-    const sx = (to.w * canvasW) / (from.w * canvasW);
-    const sy = (to.h * canvasH) / (from.h * canvasH);
-    const dR = to.rotation - from.rotation;
-    const cos = Math.cos(dR), sin = Math.sin(dR);
-    const ox = from.cx * canvasW, oy = from.cy * canvasH;
-    const nx = to.cx * canvasW, ny = to.cy * canvasH;
-    const a = cos * sx, b = sin * sx, c = -sin * sy, d = cos * sy;
+    const m = rasterDragAffine(from, l.transform, canvasW, canvasH);
     const c2 = document.createElement('canvas');
     c2.width = Math.max(1, Math.round(canvasW));
     c2.height = Math.max(1, Math.round(canvasH));
     const ctx = c2.getContext('2d');
-    ctx.setTransform(a, b, c, d, nx - (a * ox + c * oy), ny - (b * ox + d * oy));
+    ctx.setTransform(m.a, m.b, m.c, m.d, m.e, m.f);
     ctx.drawImage(l.img, 0, 0);
     l.img = c2;
     if (l.src) l.src = l.img.toDataURL('image/png');
@@ -1583,15 +1595,90 @@ function rasterContentTransform(l) {
     return tr;
 }
 
+// A released transform gesture is not a committed one: the picture stays where the pointer left it
+// and Enter (or an action that cannot wait) lands the pixels. `transformPending` is that waiting
+// state, keyed by layer: a raster entry remembers the box its UNBAKED buffer was read at, so the
+// whole travel of the session is one resample; a smart entry only remembers where it started, so
+// Esc can give the gesture back. Every reader of "is this raster layer previewing a move" goes
+// through rasterLiveFrame().
+let transformPending = null;          // Map<layerId, { from: box, raster: bool }> or null
+
+function dragCovers(id) {
+    return !!drag && (drag.layerId === id || (drag.layerIds && drag.layerIds.has(id)));
+}
+
+// Is this layer's stored transform currently a preview owed to Enter? Every path that would park
+// a transform back has to ask first, or it silently discards the user's gesture.
+function transformIsPending(id) {
+    return !!transformPending && transformPending.has(id);
+}
+
+// { from, to } while the layer is previewing a drag, null when it rests on its own buffer. The
+// pending session wins over the live drag: its `from` is the box the buffer was read at, and that
+// never changes while the pixels stay unbaked — a second drag extends the same travel instead of
+// restarting it from the box the first drag left.
+function rasterLiveFrame(l) {
+    if (!isRasterLayer(l)) return null;
+    const held = transformPending && transformPending.get(l.id);
+    if (held) return { from: held.from, to: l.transform };
+    if (dragCovers(l.id)) {
+        const from = drag.group ? drag.starts.get(l.id) : drag.startTransform;
+        return from ? { from, to: l.transform } : null;
+    }
+    return null;
+}
+
+// Enter — the bake is visually a no-op: it moves the pixels from the live box into the buffer and
+// parks the transform back at the identity, which is also why a drag off the canvas edge costs
+// nothing until this moment. One gesture is one undo step, and it lands here because this is where
+// pixels really change.
+function applyTransformPending(quiet) {
+    if (!transformPending) return false;
+    const held = transformPending;
+    transformPending = null;
+    let live = false;
+    for (const [id, e] of held) {
+        const l = getLayer(id);
+        if (!l) continue;                 // the layer left the document, and its gesture left with it
+        if (e.raster && isRasterLayer(l)) commitRasterTransform(l, e.from);
+        live = true;
+    }
+    if (!live) return true;
+    // `quiet` is for a caller already inside a bigger action that re-renders and records its own
+    // step (a canvas resize re-samples every raster buffer anyway): the bake rides along in that
+    // step instead of landing as an undo entry that changes nothing on screen.
+    if (quiet) return true;
+    renderLayerList();
+    render();
+    pushHistory();
+    return true;
+}
+
+// Esc — the gesture never became pixels, so giving it back is only a transform write: a raster
+// layer parks at the identity, a smart layer returns to the box the press found it at.
+function cancelTransformPending() {
+    if (!transformPending) return false;
+    const held = transformPending;
+    transformPending = null;
+    for (const [id, e] of held) {
+        const l = getLayer(id);
+        if (!l) continue;
+        l.transform = e.raster && isRasterLayer(l)
+            ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+            : cloneTransform(e.from);
+    }
+    renderLayerList();
+    render();
+    return true;
+}
+
 // The transform that boxes/handles/readouts should show. For a raster layer at rest that is the
-// content bbox (the stored transform stays the identity — it IS the display transform); while
-// one of its drags is live, l.transform itself holds the dragged content box.
+// content bbox (the stored transform stays the identity — it IS the display transform); while one
+// of its drags is live or waiting for Enter, the box that drag holds is where the picture is.
 function effectiveTransform(l) {
     if (!isRasterLayer(l)) return l.transform;
-    // A promoted raster is only ever a live drag state: single-layer drags carry `layerId`, a group
-    // drag carries the whole `layerIds` set.
-    if (drag && (drag.layerId === l.id || (drag.layerIds && drag.layerIds.has(l.id)))) return l.transform;
-    return rasterContentTransform(l);
+    const frame = rasterLiveFrame(l);
+    return frame ? frame.to : rasterContentTransform(l);
 }
 
 // ==================== 文本层（smart-text） ====================
@@ -2141,6 +2228,9 @@ function setCanvasSize(w, h, scaleLayers) {
     }
     const oldW = canvasW, oldH = canvasH;
     if (w === oldW && h === oldH) { canvasCustom = true; updateCanvasReadout(); return false; }
+    // Resizing re-samples raster buffers against the canvas they are welded to, so a preview the
+    // button released has to become pixels first — while canvasW/H still mean the old canvas.
+    applyTransformPending(true);
     if (!scaleLayers) rescaleLayersForCanvas(oldW, oldH, w, h);
     canvasW = w; canvasH = h;
     canvasCustom = true;
@@ -2541,9 +2631,18 @@ function drawLayer(l, target) {
     const ctx = target || blendCtx;
     if (!l.visible || !l.img) return;
     if (isRasterLayer(l)) {
-        // Raster pixels ARE canvas pixels — always drawn 1:1. l.transform is transient drag
-        // state (the content box), never a display transform.
+        // Raster pixels ARE canvas pixels — at rest they are drawn 1:1. The only exception is a
+        // live drag: the content box the press promoted is carried to the box the drag holds, so
+        // the picture follows the pointer and Enter bakes the very same affine (see
+        // rasterDragAffine). Nothing is lost by dragging past the canvas edge — the buffer still
+        // holds those pixels until the bake clips them, which is what Enter is for.
+        const frame = rasterLiveFrame(l);
+        if (!frame) { ctx.drawImage(layerSource(l), 0, 0); return; }
+        const m = rasterDragAffine(frame.from, frame.to, canvasW, canvasH);
+        ctx.save();
+        ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
         ctx.drawImage(layerSource(l), 0, 0);
+        ctx.restore();
         return;
     }
     // While Expand is armed, the live transform belongs to the dragged border, not the image:
@@ -2577,17 +2676,25 @@ function paintCanvasThumb(el, l) {
         thumbCtx.beginPath();
         thumbCtx.rect(0, 0, dw, dh);
         thumbCtx.clip();
-        // Raster: the buffer IS the canvas, drawn 1:1. Smart: while Expand is armed the image
-        // does not follow the dragged box.
-        const tr = isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
-            : (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
-        const tw = tr.w * dw, th = tr.h * dh;
-        thumbCtx.translate(tr.cx * dw, tr.cy * dh);
-        thumbCtx.rotate(tr.rotation);
-        // One source of truth: layerSource() IS "this layer as it sits on the canvas" (image +
-        // decal + the effect chain, cut by the mask) — repainting the trio by hand here used to
-        // drift the moment the chain joined them.
-        thumbCtx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
+        // Raster: the buffer IS the canvas, drawn 1:1 — unless a drag is previewing a move, in
+        // which case the miniature carries the same affine the canvas does. Smart: while Expand is
+        // armed the image does not follow the dragged box.
+        const frame = rasterLiveFrame(l);
+        if (frame) {
+            const m = rasterDragAffine(frame.from, frame.to, dw, dh);
+            thumbCtx.transform(m.a, m.b, m.c, m.d, m.e, m.f);
+            thumbCtx.drawImage(layerSource(l), 0, 0);
+        } else {
+            const tr = isRasterLayer(l) ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+                : (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
+            const tw = tr.w * dw, th = tr.h * dh;
+            thumbCtx.translate(tr.cx * dw, tr.cy * dh);
+            thumbCtx.rotate(tr.rotation);
+            // One source of truth: layerSource() IS "this layer as it sits on the canvas" (image +
+            // decal + the effect chain, cut by the mask) — repainting the trio by hand here used to
+            // drift the moment the chain joined them.
+            thumbCtx.drawImage(layerSource(l), -tw / 2, -th / 2, tw, th);
+        }
         thumbCtx.restore();
         c.drawImage(thumbCanvas, 0, 0, dw, dh, ox, oy, dw, dh);
     }
@@ -3890,6 +3997,18 @@ function restoreState(s, opts) {
         effects: ls.effects || [],
         fxCache: null,
     }));
+    // A replay can land on an uncommitted gesture: a raster layer only ever stores a non-identity
+    // transform while a preview owns it, and the one box its unbaked buffer can be read at is its
+    // own content box. Re-opening the session here is what makes undo/redo and a tab switch draw
+    // the previewed picture instead of the buffer at rest.
+    transformPending = null;
+    for (const l of layers) {
+        if (!isRasterLayer(l)) continue;
+        if (transformChangedSince({ cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }, l)) {
+            if (!transformPending) transformPending = new Map();
+            transformPending.set(l.id, { from: rasterContentTransform(l), raster: true });
+        }
+    }
     const keep = s.selectedId === MASK_LAYER_ID
         || (s.selectedId !== null && layers.some(l => l.id === s.selectedId));
     selectedId = keep ? s.selectedId : (layers.length ? layers[0].id : null);
@@ -4515,6 +4634,9 @@ function renderStackList(listEl, stack) {
 }
 
 function selectLayer(id, nextMode, additive) {
+    // Selecting somewhere else commits a released transform gesture instead of stranding its
+    // preview over a different target — the same rule as a tool switch (see setMode).
+    if (additive || id !== selectedId || activeGroup().size > 1) applyTransformPending();
     // An armed border-drag keeps its mode; the selection may still move, but a thumb click must
     // not silently drop the Canvas Modify / Expand preview.
     if (nextMode && adjustModeActive() && nextMode !== mode) nextMode = mode;
@@ -5076,6 +5198,9 @@ function moveLayer(fromId, toId, above, toStack) {
 
 // ==================== 模式 ====================
 function setMode(m) {
+    // Changing tool commits a released transform gesture: the preview would otherwise sit over a
+    // canvas the pointer no longer drives (PS behaves the same way about a pending free transform).
+    if (m !== mode) applyTransformPending();
     if (m === 'mask' && !getSelected()) { setStatus('Select a layer to paint its mask', 'error'); return; }
     // The marquee and the lasso select canvas pixels, so they need a canvas to measure against.
     if ((m === 'rect' || m === 'lasso') && (!canvasW || !canvasH)) {
@@ -5481,8 +5606,8 @@ function dragGroupMembers() {
 function beginGroupDrag(kind, handle, pos, members, box) {
     const starts = new Map();
     // Raster members were already promoted to their content box by the press, so `starts` records
-    // exactly what commitRasterTransform() will be told to scale from — same contract as a
-    // single-layer raster drag.
+    // the box each buffer is read at — what the pending session hands to commitRasterTransform()
+    // on Enter, same contract as a single-layer raster drag.
     for (const m of members) starts.set(m.id, cloneTransform(m.transform));
     const bt = box.transform;
     const cx = bt.cx * canvasW, cy = bt.cy * canvasH;
@@ -5560,27 +5685,37 @@ function applyGroupDrag(e, pos) {
     }
 }
 
-// A gesture ends: bake whatever moved. One call covers a single layer and a group, so a group
-// gesture stays ONE undo step and every raster member is resampled exactly once.
+// A gesture ends: whatever moved stays a preview. Nothing bakes here — releasing the button only
+// stops the pointer, Enter turns the box into pixels and Esc gives the gesture back (see
+// applyTransformPending / cancelTransformPending). One call covers a single layer and a group, so a
+// group gesture stays ONE pending session, and each raster member keeps the single content box its
+// unbaked buffer was read at however many drags pile onto it.
 function endTransformDrag() {
     const d = drag;
     drag = null;
     if (!d) return false;
     const ids = d.group ? d.layerIds : new Set([d.layerId]);
-    let moved = false, baked = false;
+    let moved = false;
     for (const id of ids) {
         const target = getLayer(id);
         if (!target) continue;
         const startTr = d.group ? d.starts.get(id) : d.startTransform;
         const changed = !!startTr && transformChangedSince(startTr, target);
-        if (isRasterLayer(target)) {
-            // The transform was only ever a preview of the content-box drag: bake it into the
-            // buffer (moved), or snap the stored transform back to the identity (a plain click).
-            if (changed) { commitRasterTransform(target, startTr); baked = true; moved = true; }
-            else target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-        } else if (changed) moved = true;
+        if (!changed) {
+            // A plain click promoted the content box and moved nothing: park it back — unless the
+            // box is already a preview Enter owns.
+            if (!transformIsPending(id)) target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            continue;
+        }
+        if (!transformPending) transformPending = new Map();
+        // Never overwrite an open session's entry: for a raster layer it is the box the buffer
+        // itself was read at, for a smart layer the box the first press found.
+        if (!transformIsPending(id)) transformPending.set(id, { from: startTr, raster: isRasterLayer(target) });
+        moved = true;
     }
-    if (baked) renderLayerList();
+    // The row miniature draws the layer as it sits on the canvas, preview included — so it gets
+    // the same repaint a bake used to get.
+    if (moved) renderLayerList();
     return moved;
 }
 
@@ -5680,6 +5815,9 @@ function guardAdjustMode() {
 // ---- Canvas Modify ----
 function startCanvasModify() {
     if (!canvasW || !canvasH) { setStatus('Nothing to modify — the canvas does not exist yet', 'error'); return; }
+    // Land a pending preview before the snapshot: the border-drag records the state it rolls back
+    // to, and a raster layer whose transform is still a gesture would replay as a half-move.
+    applyTransformPending();
     if (guardAdjustMode()) return;
     // The snapshot shares image / paint-surface references with the live layers (no copies),
     // and the preview below never mutates buffers — so Esc can rewind from it verbatim.
@@ -6654,7 +6792,9 @@ viewport.addEventListener('mousedown', e => {
             if (gh === 'rotate') { beginGroupDrag('rotate', null, pos, members, box); e.preventDefault(); return; }
             if (gh) { beginGroupDrag('scale', gh, pos, members, box); e.preventDefault(); return; }
             if (box && pointInBox(pos, box)) { beginGroupDrag('move', null, pos, members, box); e.preventDefault(); return; }
-            for (const m of promoted) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            // The press grabbed nothing: un-promote — except a layer whose box is already a preview
+            // owed to Enter, whose transform IS that preview.
+            for (const m of promoted) if (!transformIsPending(m.id)) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
             return;
         }
         const l = getSelected();
@@ -6670,7 +6810,9 @@ viewport.addEventListener('mousedown', e => {
             if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
             if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
             if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
-            if (rasterGrab) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            // Nothing was grabbed: un-promote the bbox unless this layer's box is a live preview
+            // that Enter still owns.
+            if (rasterGrab && !transformIsPending(l.id)) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
         }
     }
     const picked = pickLayer(pos);
@@ -6775,7 +6917,9 @@ window.addEventListener('mouseup', e => {
     if (drag) {
         const moved = endTransformDrag();
         render();
-        if (moved) pushHistory();
+        // An open session owns the undo step: it lands when Enter bakes the pixels, not here.
+        if (moved && !transformPending) pushHistory();
+        else if (moved) setStatus('Move kept as a preview — Enter applies, Esc cancels');
         const sp = toScreenCoords(e);
         updateHoverCursor(sp, screenToDoc(sp));
     }
@@ -6835,7 +6979,7 @@ viewport.addEventListener('touchstart', e => {
             for (const m of members) if (isRasterLayer(m)) m.transform = cloneTransform(effectiveTransform(m));
             const box = groupBox(members);
             if (box && pointInBox(pos, box)) beginGroupDrag('move', null, pos, members, box);
-            else for (const m of members) if (isRasterLayer(m)) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            else for (const m of members) if (isRasterLayer(m) && !transformIsPending(m.id)) m.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
             return;
         }
         const l = getSelected();
@@ -6859,9 +7003,10 @@ viewport.addEventListener('touchend', () => {
     if (isDrawing) { commitStroke(); isDrawing = false; }
     endMaskShortcut();
     if (drag) {
-        const moved = endTransformDrag();   // raster members bake here, exactly like a mouse gesture
+        const moved = endTransformDrag();   // nothing bakes here either — Enter does, like a mouse gesture
         render();
-        if (moved) pushHistory();
+        if (moved && !transformPending) pushHistory();
+        else if (moved) setStatus('Move kept as a preview — Enter applies, Esc cancels');
     }
 });
 
@@ -7569,6 +7714,9 @@ document.getElementById('transformFillBtn').addEventListener('click', () => {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
     if (l.isMaskLayer) { setStatus('The Mask layer is canvas-locked — there is nothing to stretch', 'error'); return; }
+    // Commit the released gesture before overwriting the transform wholesale, so a pending box is
+    // never dropped on the floor.
+    applyTransformPending();
     l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
     setMode('transform');
     setStatus('Layer stretched to canvas');
@@ -7722,6 +7870,10 @@ document.getElementById('redoBtn').addEventListener('click', redoAction);
 // backend: the layer stack (bottom → top, the Mask layer excluded — it travels separately as
 // its own alpha channel), the canvas size, and the Mask layer's rasterised coverage.
 function layerSpecs() {
+    // The backend reads buffers, and a preview the button released is not a buffer yet: land it
+    // first (with its own undo step — this is a commit), so the payload is the picture on screen
+    // rather than where the layer used to sit.
+    applyTransformPending();
     // 图层自带像素（dataURL）直达后端，不引用任何图池 id。
     // 空白图层刻意没有 src —— 发送时把它的透明画布编码成 PNG（体积极小），
     // 后端才能拿到图层自身的像素框，mask/decal 在图层空间里解码才不会错位。
@@ -8322,6 +8474,10 @@ function sendLayerGenerate(l, presetId, withContext) {
     }
     if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return false; }
     if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return false; }
+    // layerCompositeForGenerate() inverts the layer's stored transform onto the canvas composite,
+    // and a released gesture still holds that box — commit it, or the sampled region would be cut
+    // from where the picture no longer is.
+    applyTransformPending();
     // Both images must be strings before they cross the window boundary.
     let image = null, mask = null;
     try {
@@ -8948,6 +9104,15 @@ window.addEventListener('keydown', e => {
         else { if (mode === 'canvasModify') cancelCanvasModify(); else cancelExpand(); }
         return;
     }
+    // Enter / Esc on a released transform drag: the box the pointer left is a preview until now.
+    // Same ranking reason as the border-drag modes — the generic tool handling below would neither
+    // bake nor roll it back.
+    if (transformPending && (e.key === 'Enter' || e.key === 'Escape')) {
+        e.preventDefault();
+        if (e.key === 'Enter') { if (applyTransformPending()) setStatus('Transform applied'); }
+        else if (cancelTransformPending()) setStatus('Transform cancelled');
+        return;
+    }
     // Ctrl+S saves. It sits above the text-field guard on purpose: typing a prompt and pressing
     // Ctrl+S must save the document, not hand the keystroke back to the browser's "save page".
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
@@ -9054,7 +9219,12 @@ window.addEventListener('keydown', e => {
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
         const dy = e.key === 'ArrowUp' ? -stepY : e.key === 'ArrowDown' ? stepY : 0;
         for (const t of targets) {
-            if (isRasterLayer(t)) {
+            if (isRasterLayer(t) && rasterLiveFrame(t)) {
+                // A released drag is still waiting for Enter, so there is nothing to bake into —
+                // the nudge just extends the preview the session already holds.
+                t.transform.cx += dx;
+                t.transform.cy += dy;
+            } else if (isRasterLayer(t)) {
                 // Raster nudge is destructive like every other raster move: shift the content box,
                 // bake the buffer translation, restore the identity.
                 const from = rasterContentTransform(t);
@@ -9596,6 +9766,9 @@ async function exportPng() {
 // exists the bytes simply download.
 async function buildCudBlob() {
     if (!layers.length || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
+    // A file writes a raster layer at the identity (its buffer IS its picture), so a released
+    // gesture has to become pixels before the bytes are assembled.
+    applyTransformPending();
     const assets = [], payload = [];
     const addAsset = async (role, source, w, h) => {
         const bytes = await surfaceToPng(source, w, h);
