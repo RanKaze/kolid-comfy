@@ -3793,7 +3793,10 @@ class SnapshotDetailerSamplerNode:
             # Generate Text（MARKER_GENERATE_TEXT_INTERFACE）：独立 interface tab 时，
             # 上游 pipeline 若启用了 PipelineEnableGenerateTextNode，同样在 prompt
             # 注入点替换 positive（与 Draw tab block 链的语义保持一致）。
-            if injected_pipeline and injected_pipeline.config.get('enable_generate_text'):
+            # 离线 Processor 不走这里：那是 block 链的环节（一次真实 LLM 调用 +
+            # 文本编码器整卡加载），Processor 只跑 interface 子图本身。
+            if (injected_pipeline and injected_pipeline.config.get('enable_generate_text')
+                    and not exec_options.get('offline')):
                 try:
                     # interface 块没有 Enable Edit / Ref Image 概念 → 始终纯文本
                     # （image 省略即 None），与 block 链里未选 Ref Image 时一致。
