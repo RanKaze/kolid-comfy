@@ -756,8 +756,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <!-- The Text section folds like the other tool sections and stays folded until its
                  header is clicked — selecting a text layer only lights the row up and refills the
-                 controls, it never unfolds them. The colour swatch and the two readout lines sit
-                 outside the fold, so a folded Text row still tells you what it is styling. -->
+                 controls, it never opens the window for you. -->
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
                     <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to open or close its settings window."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
@@ -778,8 +777,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     </div><span></span></div>
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
-                <div class="panel-hint" id="textContentLine" style="display:none;"></div>
-                <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
             </div>
             <div class="panel-section">
                 <div class="panel-head">
@@ -6732,8 +6729,6 @@ const TEXT_ALIGN_CHOICES = [['left', 'textAlignLeft'], ['center', 'textAlignCent
 const textSwatch = document.getElementById('textSwatch');
 const textColorInput = document.getElementById('textColorInput');
 const textColorValue = document.getElementById('textColorValue');
-const textContentLine = document.getElementById('textContentLine');
-const textSizeLine = document.getElementById('textSizeLine');
 
 // `box` (canvas px, from the armed rectangle) welds the layer's transform to that rectangle;
 // without it the new text falls back to the contain-fit rule every new entry obeys.
@@ -6921,12 +6916,10 @@ function setTextChoice(choices, value) {
 function updateTextPanel() {
     const l = getSelected();
     const on = !!l && isTextLayer(l);
-    // A text layer lights the section up the way an active paint tool does, and the readouts say
-    // which layer is being styled — the fold state itself is the user's to change, never ours.
+    // A text layer lights the section up the way an active paint tool does — the fold state itself
+    // is the user's to change, never ours.
     document.getElementById('textSection').classList.toggle('active-tool', on);
     textSwatch.style.display = on ? '' : 'none';
-    textContentLine.style.display = on ? 'block' : 'none';
-    textSizeLine.style.display = on ? 'block' : 'none';
     if (!on) return;
     const t = l.text;
     if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
@@ -6939,13 +6932,6 @@ function updateTextPanel() {
     textColorInput.value = TEXT_HEX6(t.color);
     textColorValue.textContent = t.color.toUpperCase();
     textSwatch.style.background = textColorInput.value;
-    textContentLine.textContent = `Content: ${t.content ? t.content.replace(/\n/g, ' ⏎ ') : 'empty — double-click the layer on canvas to type'}`;
-    const nat = textLayerBox(t);
-    const tr = effectiveTransform(l);
-    // The box shown IS the buffer the pipeline resolves (glyph box + ring), so state the ring too
-    // whenever it is what makes the box bigger than the text.
-    textSizeLine.textContent = `${nat.w} × ${nat.h} px (${Math.round(tr.w * canvasW)} × ${Math.round(tr.h * canvasH)} on canvas)`
-        + (t.padding ? ` · +${t.padding} padding` : '');
 }
 
 function patchSelectedText(patch, historyKey) {
