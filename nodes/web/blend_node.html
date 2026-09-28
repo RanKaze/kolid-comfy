@@ -236,13 +236,15 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.cud.unlinked { color: #ff9d5c; }
 .layer-type-badge.text { color: #d9b8ff; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
-   canvas — same doc-space rect, same rotation, font size scaled by zoom — so WYSIWYG holds while
-   the composite re-renders on every keystroke (live patch), so editor and canvas always show
-   the same text at the same scale. */
+   canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
+   (color: transparent): the live-patched composite underneath is the only rendered text, so the
+   preview is the final pixels — never a second copy with the DOM's own wrap/centring. The caret
+   and selection stay visible to mark where you type. */
 #textEditor { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-sizing: border-box;
     margin: 0; padding: 0; border: 1px dashed rgba(0,122,255,0.9); background: transparent;
-    color: #fff; caret-color: #fff; resize: none; overflow: hidden; outline: none; z-index: 6;
+    color: transparent; caret-color: #fff; resize: none; overflow: hidden; outline: none; z-index: 6;
     white-space: pre-wrap; word-break: keep-all; overflow-wrap: normal; }
+#textEditor::selection { background: rgba(0,122,255,0.35); }
 .control-row select { flex: 1; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
     border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
@@ -7081,7 +7083,8 @@ function positionTextEditor() {
     textEditorEl.style.font = `${l.text.fontWeight} ${fs}px ${l.text.fontFamily}`;
     textEditorEl.style.lineHeight = (fs * TEXT_LINE_HEIGHT) + 'px';
     textEditorEl.style.textAlign = l.text.align;
-    textEditorEl.style.color = l.text.color;
+    // The glyphs stay transparent (the composite draws the only visible copy); only the
+    // caret takes the text colour so you can still see where you type.
     textEditorEl.style.caretColor = l.text.color;
 }
 
