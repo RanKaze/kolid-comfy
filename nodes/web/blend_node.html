@@ -7374,7 +7374,7 @@ function beginWarpEdit(l, effect) {
     warpEdit = { layerId: l.id, effectId: effect.id };
     renderLayerList();            // Edit 那颗的点亮与 Hide 那颗的出现,都靠这一次重建读到新状态
     drawOverlay();
-    setStatus('Grid on canvas \u2014 drag a handle, click an edge to subdivide');
+    setStatus('Grid on canvas \u2014 drag a handle, click an edge to split the grid');
 }
 
 function endWarpEdit() {
@@ -7451,7 +7451,8 @@ function drawWarpGrid() {
     ctx.closePath();
     ctx.stroke();
     ctx.setLineDash([]);
-    // 变形后的网格:黑底 + 蓝线,和调框同一读法。边去过重,内部边只描一遍。
+    // 变形后的网格:黑底 + 蓝线,和调框同一读法。只有横平竖直的格线,一条对角线都没有 ——
+    // 这张网永远由四边形组成,那正是「点一条边 = 沿它劈开整张网」剩下的样子。
     ctx.lineJoin = 'round';
     ctx.beginPath();
     for (const [a, b] of edges) {
@@ -7464,7 +7465,8 @@ function drawWarpGrid() {
     ctx.strokeStyle = 'rgba(0,122,255,0.9)';
     ctx.lineWidth = 1;
     ctx.stroke();
-    // 每条边的中点给一个小记号:细分出来的新把手就落在那里,点击的落点必须看得见。
+    // 每条格线的中点给一个小记号:点下去时贯通线上的每个记号都会长成一个把手,手指底下那个就是
+    // 这一笔要拖的 —— 落点必须看得见。
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
     for (const [a, b] of edges) ctx.fillRect((pts[a].x + pts[b].x) / 2 - 1.5, (pts[a].y + pts[b].y) / 2 - 1.5, 3, 3);
     for (let i = 0; i < pts.length; i++) {
@@ -7498,13 +7500,15 @@ function warpPress(sp) {
         const d = warpEdgeDist(sp, pts[a], pts[b]);
         if (d < bestD) { bestD = d; hit = [a, b]; }
     }
-    if (!hit) { setStatus('Nothing to grab \u2014 drag a handle, click an edge to subdivide', 'error'); return true; }
-    const lat = warpSplitEdge(t.lat, hit[0], hit[1]);
-    if (!lat) { setStatus(`Grid limit: ${WARP_MAX_HANDLES} handles`, 'error'); return true; }
+    if (!hit) { setStatus('Nothing to grab \u2014 drag a handle, click an edge to split the grid', 'error'); return true; }
+    // 劈下去的是**一整条贯通线**:横边插一列、竖边插一行,沿途每个四边形都一分为二。
+    // split 只报这一次点击长出的、该接着拖的那个把手。
+    const cut = warpSplitEdge(t.lat, hit[0], hit[1]);
+    if (!cut) { setStatus(`Grid limit: ${WARP_MAX_HANDLES} handles`, 'error'); return true; }
     // 细分是一次看得见、值得撤销的改动;新把手紧接着就是这一笔要拖的那个。
-    warpSetLattice(t.effect, lat);
+    warpSetLattice(t.effect, cut.lat);
     fxStructuralChange(t.l);
-    warpDrag = { index: lat.pts.length - 1, moved: false };
+    warpDrag = { index: cut.index, moved: false };
     setCursor('move');
     return true;
 }

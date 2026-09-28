@@ -1,7 +1,8 @@
 // fx/warp.js —— 特效链的一类特效:位移 (Distort 组)。三种模式共用一个 Warp 条目,靠 Mode 分段钮切换:
 //   * Noise   —— 程序化值噪声驱动的位移,像热浪/水波那样把画面揉皱。
-//   * Lattice —— 一张铺满该层的四边形网格:拖把手 = 网格跟着走,点一条边 = 在那条边的中点细分出一个
-//                新把手。目标是把图像扭曲印在一个物体上 (PS 的 Mesh Warp 那一类)。
+//   * Lattice —— 一张铺满该层的四边形网格:拖把手 = 网格跟着走,点一条边 = 沿那条边贯通整张网插一排
+//                把手,被这条线穿过的每个四边形都一分为二 (全图只有四边面,不会出三角面)。
+//                目标是把图像扭曲印在一个物体上 (PS 的 Mesh Warp 那一类)。
 //   * Depth   —— 绑一张深度图,按深度的**梯度**把画面推开,像贴在凹凸面上;Align 决定这张图以谁为准:
 //                Canvas = 整张画布 (图层挪到哪就读哪块深度),Local = 该层自己的盒子。
 // 注册数据与三条地基契约见 fx/core.js;绑定贴图的解析见 fx/maps.js;网格的把手编辑面在页面本体里
@@ -9,44 +10,46 @@
 
 const WARP_MODES = ['Noise', 'Lattice', 'Depth'];
 const WARP_FIELD = 128;                 // 预烘位移面的边长 (格),与图层尺寸无关
-const WARP_MAX_HANDLES = 128;           // 细分的天花板:再往上一次拖拽要重烘的三角形就压不住了
+const WARP_MAX_HANDLES = 128;           // 细分的天花板:再往上一次拖拽要重烘的格点就压不住了
 
 // ==================== Lattice 的数据模型 ====================
-// lattice = { pts: [[x, y, dx, dy], ...], tris: [[i, j, k], ...] }
-//   x/y 是**该层自己网格**里的归一化坐标 (0..1,y 向下 = 图像读法),dx/dy 是把手被拖走的归一化位移。
+// lattice = { cols, rows, pts: [[x, y, dx, dy], ...] }
+//   cols/rows 是**四边形**的个数 (横 cols 个、纵 rows 个),pts 按行优先铺 (cols+1)×(rows+1) 个把手:
+//   把手 i 在第 i % (cols+1) 列、第 floor(i / (cols+1)) 行。x/y 是该把手**基准**位置在该层网格里的
+//   归一化坐标 (0..1,y 向下 = 图像读法),dx/dy 是它被拖走的归一化位移。
 //   纯数组、四位小数:它要进 fxSignature (每次缓存判定都要 stringify)、进 undo 深拷贝、进 .cud。
-// tris 不是冗余信息,而是这套模型的地基:细分走的是「劈一条边」,不是重做一次 Delaunay —— 规则阵的
-// 四个角天生共圆,外接圆判据在这种退化上给不出稳定结果 (点序不同就翻面)。劈边把 PLG 原地加密:
-// 一条边两侧的三角形各拆成两个,覆盖面一个不差、拓扑确定、也不会长出悬空点 (T 形接头会在烘位移
-// 面时漏出洞)。起始 2×2 只有一条对角线,每劈一次多两个三角形,128 个把手也才 ~250 个。
+// 基准位置为什么逐点存着,而不是拿 cols/rows 现算:细分走的是「贯通整张网插一行/一列」,新线落在被点
+// 那个格带的中点上,而各带被插的先后次序不同 ⇒ 格距再也不均匀 (会出现 0, 0.25, 0.5, 1 这种排布)。
+// 存着基准,插一次只是多一排把手,已有把手一个都不挪窝、画面也一动不动 —— 那才是「把控制网加密」,
+// 而不是「把网重排一遍」。
+// 全图只有四边面还有一条硬理由:位移场按四边形逐格反查 (见下面的烘法),三角形或 T 形接头都会在格里
+// 漏出一条没源的缝。
 function warpLatticeStart() {
+    // 一个铺满该层的四边形:四个角 = 一层网格的四角,位移全零。
     return {
-        pts: [[0, 0, 0, 0], [1, 0, 0, 0], [1, 1, 0, 0], [0, 1, 0, 0]],
-        tris: [[0, 1, 2], [0, 2, 3]],
+        cols: 1, rows: 1,
+        pts: [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [1, 1, 0, 0]],
     };
 }
 
 const warpR4 = v => Math.round(v * 1e4) / 1e4;
 
-// 读入即清洗:形状不对 / 索引越界 / 非数字就整张回退到「还没有网格」,让 run() 干脆跳过这次 pass,
-// 而不是拿半张网去烘 (那会在画面上留一条来历不明的错位带)。
+// 读入即清洗:形状不对 / 点数跟 cols×rows 对不上 / 非数字就整张回退到「还没有网格」,让 run() 干脆
+// 跳过这次 pass,而不是拿半张网去烘 (那会在画面上留一条来历不明的错位带)。
 function warpLatticeOf(raw) {
-    if (!raw || !Array.isArray(raw.pts) || !Array.isArray(raw.tris) || !raw.tris.length) return null;
+    if (!raw || !Array.isArray(raw.pts)) return null;
+    const cols = raw.cols | 0, rows = raw.rows | 0;
+    if (!(cols >= 1 && rows >= 1)) return null;
+    const n = (cols + 1) * (rows + 1);
+    if (raw.pts.length !== n || n > WARP_MAX_HANDLES) return null;
     const pts = [];
     for (const q of raw.pts) {
         if (!Array.isArray(q) || q.length < 4) return null;
-        const n = [Number(q[0]), Number(q[1]), Number(q[2]), Number(q[3])];
-        if (n.some(v => !isFinite(v))) return null;
-        pts.push(n);
+        const v = [Number(q[0]), Number(q[1]), Number(q[2]), Number(q[3])];
+        if (v.some(z => !isFinite(z))) return null;
+        pts.push(v);
     }
-    const tris = [];
-    for (const t of raw.tris) {
-        if (!Array.isArray(t) || t.length < 3) return null;
-        const a = t[0] | 0, b = t[1] | 0, c = t[2] | 0;
-        if (a < 0 || b < 0 || c < 0 || a >= pts.length || b >= pts.length || c >= pts.length) return null;
-        tris.push([a, b, c]);
-    }
-    return { pts, tris };
+    return { cols, rows, pts };
 }
 
 function warpLatticeIsIdentity(lat) {
@@ -54,39 +57,59 @@ function warpLatticeIsIdentity(lat) {
     return lat.pts.every(q => Math.abs(q[2]) < 1e-5 && Math.abs(q[3]) < 1e-5);
 }
 
-// 去重后的边:内部边被两个三角形各给一次。命中判据与画线都要它,否则同一条边会被描两遍、
-// 也会被同一个点击劈两次。
+// 网格线:横边一排、竖边一排,每条只出现一次 (结构化格点连号就能列全,不需要再去重)。
+// 命中判据与画线都读它。
 function warpLatticeEdges(lat) {
-    const seen = new Set();
-    const out = [];
-    for (const t of lat.tris) {
-        for (const pair of [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]]) {
-            const key = pair[0] < pair[1] ? pair[0] + ':' + pair[1] : pair[1] + ':' + pair[0];
-            if (seen.has(key)) continue;
-            seen.add(key);
-            out.push(pair);
-        }
+    const W = lat.cols + 1, out = [];
+    for (let r = 0; r <= lat.rows; r++) {
+        for (let c = 0; c < lat.cols; c++) out.push([r * W + c, r * W + c + 1]);
+    }
+    for (let r = 0; r < lat.rows; r++) {
+        for (let c = 0; c < W; c++) out.push([r * W + c, (r + 1) * W + c]);
     }
     return out;
 }
 
-// 劈开一条边:新把手落在那条边**基准**位置的中点上,位移取两端位移的中点 —— 细分不改变画面,
-// 只是把控制网加密。所有同时含 a、b 的三角形 (一到两个) 一起拆; (a,m,c) + (m,b,c) 与原 (a,b,c)
-// 同向、面积相加正好等于它,所以拆完覆盖面与绕向都不变。
+// 劈开一条边,并且**贯通整张网**:横边 (同排两点的连线) 插一整列把手、竖边插一整行,于是该方向上每
+// 一个四边形都被一分为二,全图仍是四边面。新把手的基准取被点那条边两端的**基准**中点、位移取两端位移
+// 的中点 ⇒ 它的变形后位置正好落在那条已画出的网格线的中点上,画面一个像素都不动:细分只是加密控制网。
+// 双线性片沿中线一劈为二与原来那片**严格等价** (固定 v 时它对 u 就是线性的),所以这条「不动画面」
+// 不是近似。返回 { lat, index }:index 就是被点那条边上新长出来的那个把手,手指接着就得拖它。
 function warpSplitEdge(lat, a, b) {
-    if (!lat || lat.pts.length >= WARP_MAX_HANDLES) return null;
-    const A = lat.pts[a], B = lat.pts[b];
-    const pts = lat.pts.map(q => [warpR4(q[0]), warpR4(q[1]), warpR4(q[2]), warpR4(q[3])]);
-    pts.push([warpR4((A[0] + B[0]) / 2), warpR4((A[1] + B[1]) / 2), warpR4((A[2] + B[2]) / 2), warpR4((A[3] + B[3]) / 2)]);
-    const m = pts.length - 1;
-    const tris = [];
-    for (const t of lat.tris) {
-        if ((t[0] === a || t[1] === a || t[2] === a) && (t[0] === b || t[1] === b || t[2] === b)) {
-            const c = t.find(q => q !== a && q !== b);
-            tris.push([a, m, c], [m, b, c]);
-        } else tris.push(t.slice());
+    if (!lat) return null;
+    const W = lat.cols + 1;
+    const ca = a % W, ra = (a - ca) / W, cb = b % W, rb = (b - cb) / W;
+    const horiz = ra === rb;
+    if (!horiz && ca !== cb) return null;       // 不是相邻格点之间就没有「贯通」可言
+    const band = horiz ? Math.min(ca, cb) : Math.min(ra, rb);
+    const add = horiz ? lat.rows + 1 : lat.cols + 1;
+    if (lat.pts.length + add > WARP_MAX_HANDLES) return null;
+    const P = lat.pts;
+    const copy = q => [warpR4(q[0]), warpR4(q[1]), warpR4(q[2]), warpR4(q[3])];
+    const mid = (A, B) => [warpR4((A[0] + B[0]) / 2), warpR4((A[1] + B[1]) / 2),
+        warpR4((A[2] + B[2]) / 2), warpR4((A[3] + B[3]) / 2)];
+    const pts = [];
+    let index = -1;
+    if (horiz) {
+        for (let r = 0; r <= lat.rows; r++) {
+            for (let c = 0; c <= lat.cols; c++) {
+                if (c === band + 1) {
+                    if (r === ra) index = pts.length;   // 被点那一排上新长出来的那个
+                    pts.push(mid(P[r * W + band], P[r * W + band + 1]));
+                }
+                pts.push(copy(P[r * W + c]));
+            }
+        }
+        return { lat: { cols: lat.cols + 1, rows: lat.rows, pts }, index };
     }
-    return { pts, tris };
+    for (let r = 0; r <= lat.rows; r++) {
+        if (r === band + 1) {
+            index = pts.length + ca;                      // 被点那一列上新长出来的那个
+            for (let c = 0; c < W; c++) pts.push(mid(P[band * W + c], P[(band + 1) * W + c]));
+        }
+        for (let c = 0; c < W; c++) pts.push(copy(P[r * W + c]));
+    }
+    return { lat: { cols: lat.cols, rows: lat.rows + 1, pts }, index };
 }
 
 // 拖动一个把手:只改它的位移,基准点永远钉在格子的原始位置上 —— 那才是「网格跟着走」而不是
@@ -95,21 +118,24 @@ function warpMoveHandle(lat, index, dx, dy) {
     if (!lat) return lat;
     const pts = lat.pts.map(q => q.slice());
     pts[index] = [warpR4(pts[index][0]), warpR4(pts[index][1]), warpR4(dx), warpR4(dy)];
-    return { pts, tris: lat.tris.slice() };
+    return { cols: lat.cols, rows: lat.rows, pts };
 }
 
 // 写回 params 永远整体替换 (同上,共享引用那条规矩)。刷新纪律交给手势那一侧:拖途中走
-// fxLiveUpdate,松手才 pushHistory;劈边是一次离散动作,走 fxStructuralChange 连带重建子行。
+// fxLiveUpdate,松手才 pushHistory;插一行/一列是一次离散动作,走 fxStructuralChange 连带重建子行。
 function warpSetLattice(effect, lat) {
     if (!effect.params) effect.params = {};
     effect.params.lattice = lat;
 }
 
 // ==================== 位移场 ====================
-// 烘在**输出**网格上:取输出点 q,找它落在哪个**变形后**的三角形里,用那一组重心坐标回取**基准**
-// 三角形的同位置点 s,位移 = s - q。方向必须是这个 (按输出查源),反过来 (拿源点找落点) 是散点
-// 填空,格子之间会漏。面积塌成零的三角形 (把手拖到彼此身上) 让开:那块没有源 = 透明,而不是拿一份
-// 错的位移硬填。把手互相交叉到三角形翻面时,后画的那片盖住先画的那片 —— 与 PS 的网格同一个读法。
+// 烘在**输出**网格上:取输出点 q,找它落在哪个**变形后**的四边形里,解出该四边形里的双线性参数
+// (u,v),拿同一组参数回取**基准**四边形的同位置点 s,位移 = s - q。方向必须是这个 (按输出查源),
+// 反过来 (拿源点找落点) 是散点填空,格子之间会漏。
+// 反解走 Newton:四边形先按线性部分 (丢掉 u·v 那一项) 给一个初始猜测,再迭代收敛。解不出来 (不收敛、
+// 雅可比退化、跑出质心范围) 就当作不在这个格里:面积塌成零的格 (把手互相拖到身上) 因此自然让开,
+// 那块没有源 = 透明,而不是拿一份错的位移硬填。把手交叉到格子翻面时,后画的那片盖住先画的那片 ——
+// 与 PS 的网格同一个读法。
 const warpField = { gl: null, tex: null, bytes: null, dx: null, dy: null, cov: null };
 
 // 纹理跟着 GL 上下文活,不是跟着页面活:引擎在编译失败时会把 fxgl.gl 置空、下次重建一个新上下文,
@@ -137,33 +163,62 @@ function warpBakeField(lat, w, h) {
     const F = WARP_FIELD;
     const cov = warpField.cov, dxs = warpField.dx, dys = warpField.dy, bytes = warpField.bytes;
     cov.fill(0);
-    const pts = lat.pts;
-    for (const t of lat.tris) {
-        const A = pts[t[0]], B = pts[t[1]], C = pts[t[2]];
-        const ax = A[0] + A[2], ay = A[1] + A[3];
-        const bx = B[0] + B[2], by = B[1] + B[3];
-        const cx = C[0] + C[2], cy = C[1] + C[3];
-        const den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
-        if (!(Math.abs(den) > 1e-9)) continue;
-        // 只扫这个三角形自己的包围盒:代价是 Σ(三角形面积) 而不是 三角形数 × 格数,
-        // 128×128 一张面才拖得动实时预览。
-        const x0 = Math.max(0, Math.floor(Math.min(ax, bx, cx) * F));
-        const x1 = Math.min(F - 1, Math.ceil(Math.max(ax, bx, cx) * F) - 1);
-        const y0 = Math.max(0, Math.floor(Math.min(ay, by, cy) * F));
-        const y1 = Math.min(F - 1, Math.ceil(Math.max(ay, by, cy) * F) - 1);
-        for (let fy = y0; fy <= y1; fy++) {
-            const qy = (fy + 0.5) / F;
-            for (let fx = x0; fx <= x1; fx++) {
-                const qx = (fx + 0.5) / F;
-                const la = ((by - cy) * (qx - cx) + (cx - bx) * (qy - cy)) / den;
-                if (la < 0) continue;
-                const lb = ((cy - ay) * (qx - cx) + (ax - cx) * (qy - cy)) / den;
-                if (lb < 0 || la + lb > 1) continue;
-                const lc = 1 - la - lb;
-                const i = fy * F + fx;
-                dxs[i] = la * A[0] + lb * B[0] + lc * C[0] - qx;
-                dys[i] = la * A[1] + lb * B[1] + lc * C[1] - qy;
-                cov[i] = 1;
+    const P = lat.pts, W = lat.cols + 1;
+    for (let rr = 0; rr < lat.rows; rr++) {
+        for (let cc = 0; cc < lat.cols; cc++) {
+            const i00 = rr * W + cc, i10 = i00 + 1, i11 = i00 + W + 1, i01 = i00 + W;
+            const A = P[i00], B = P[i10], C = P[i11], D = P[i01];
+            // 变形后那片:A + u·bu + v·bv + u·v·bc
+            const p0x = A[0] + A[2], p0y = A[1] + A[3];
+            const p1x = B[0] + B[2], p1y = B[1] + B[3];
+            const p2x = C[0] + C[2], p2y = C[1] + C[3];
+            const p3x = D[0] + D[2], p3y = D[1] + D[3];
+            const bux = p1x - p0x, buy = p1y - p0y;
+            const bvx = p3x - p0x, bvy = p3y - p0y;
+            const bcx = p2x - p1x - p3x + p0x, bcy = p2y - p1y - p3y + p0y;
+            // 基准那片:同一组 (u,v) 直接插出源点 (双线性片的边就是直线,端点中点那些推导都成立)。
+            const s0x = A[0], s0y = A[1];
+            const sux = B[0] - s0x, suy = B[1] - s0y;
+            const svx = D[0] - s0x, svy = D[1] - s0y;
+            const scx = C[0] - B[0] - D[0] + s0x, scy = C[1] - B[1] - D[1] + s0y;
+            const det = bux * bvy - bvx * buy;
+            if (!(Math.abs(det) > 1e-9)) continue;
+            // 只扫这个四边形自己的包围盒:代价是 Σ(格子面积) 而不是 格子数 × 格数,
+            // 128×128 一张面才拖得动实时预览。
+            const x0 = Math.max(0, Math.floor(Math.min(p0x, p1x, p2x, p3x) * F));
+            const x1 = Math.min(F - 1, Math.ceil(Math.max(p0x, p1x, p2x, p3x) * F) - 1);
+            const y0 = Math.max(0, Math.floor(Math.min(p0y, p1y, p2y, p3y) * F));
+            const y1 = Math.min(F - 1, Math.ceil(Math.max(p0y, p1y, p2y, p3y) * F) - 1);
+            for (let fy = y0; fy <= y1; fy++) {
+                const qy = (fy + 0.5) / F;
+                for (let fx = x0; fx <= x1; fx++) {
+                    const qx = (fx + 0.5) / F;
+                    const ex = qx - p0x, ey = qy - p0y;
+                    let u = (ex * bvy - ey * bvx) / det;
+                    let v = (bux * ey - buy * ex) / det;
+                    for (let it = 0; it < 6; it++) {
+                        const rx = p0x + u * bux + v * bvx + u * v * bcx - qx;
+                        const ry = p0y + u * buy + v * bvy + u * v * bcy - qy;
+                        const jx = bux + v * bcx, jy = buy + v * bcy;
+                        const kx = bvx + u * bcx, ky = bvy + u * bcy;
+                        const jd = jx * ky - kx * jy;
+                        if (!(Math.abs(jd) > 1e-12)) break;
+                        const du = (kx * ry - ky * rx) / jd;
+                        const dv = (jy * rx - jx * ry) / jd;
+                        u += du; v += dv;
+                        if (!isFinite(u) || !isFinite(v)) break;
+                        if (Math.abs(du) < 1e-9 && Math.abs(dv) < 1e-9) break;
+                    }
+                    if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+                    const rx = p0x + u * bux + v * bvx + u * v * bcx - qx;
+                    const ry = p0y + u * buy + v * bvy + u * v * bcy - qy;
+                    // 不收敛 (翻面、退化的格) 就当作不在这个格里:让另一格去接,谁都没接就是透明。
+                    if (rx * rx + ry * ry > 1e-10) continue;
+                    const i = fy * F + fx;
+                    dxs[i] = s0x + u * sux + v * svx + u * v * scx - qx;
+                    dys[i] = s0y + u * suy + v * svy + u * v * scy - qy;
+                    cov[i] = 1;
+                }
             }
         }
     }
@@ -380,7 +435,7 @@ const WARP_PARAMS = [
 ];
 
 // 两枚各指一个目的地的钮 (摊开 / 收起),不是一枚读当前状态的翻转钮 —— 见「一键一语义」。
-// 摊开那颗还兼「没有网格就先铺一张 2×2」:那是同一次落点 (网格出现在画布上),不是第二个语义。
+// 摊开那颗还兼「没有网格就先铺一个四边形」:那是同一次落点 (网格出现在画布上),不是第二个语义。
 function warpLatticeRowEl(l, effect) {
     const row = document.createElement('div');
     row.className = 'control-row';
@@ -388,7 +443,7 @@ function warpLatticeRowEl(l, effect) {
     edit.type = 'button';
     edit.className = 'fx-map-btn';
     edit.textContent = 'Edit the grid';
-    edit.title = 'Lay the grid on the canvas: drag a handle to warp, click an edge to subdivide';
+    edit.title = 'Lay the grid on the canvas: drag a handle to warp, click an edge to split the grid all the way across';
     const hide = document.createElement('button');
     hide.type = 'button';
     hide.className = 'fx-map-btn tight';
@@ -401,7 +456,7 @@ function warpLatticeRowEl(l, effect) {
     clr.title = 'Drop the grid (every handle and its displacement)';
     const show = () => {
         const lat = warpLatticeOf(effectParams(effect).lattice);
-        edit.textContent = lat ? 'Edit the grid' : 'Add a 2\u00d72 grid';
+        edit.textContent = lat ? 'Edit the grid' : 'Add a grid';
         edit.classList.toggle('active', warpEditActive(l, effect));
         hide.style.display = warpEditActive(l, effect) ? '' : 'none';
         clr.style.display = lat ? '' : 'none';
@@ -447,7 +502,7 @@ function warpEditorEl(l, effect, syncRead, updaters) {
             .map(d => fxControlRow(l, effect, d, syncRead, updaters));
         if (p.mode === 'Lattice') rows.push(warpLatticeRowEl(l, effect));
         tail.replaceChildren(...rows);
-        hint.textContent = p.mode === 'Lattice' ? 'drag a handle \u00b7 click an edge to subdivide' : '';
+        hint.textContent = p.mode === 'Lattice' ? 'drag a handle \u00b7 click an edge to split across' : '';
         foot.style.display = hint.textContent ? '' : 'none';
         syncRead();
     }
@@ -467,7 +522,7 @@ defineEffect({
     icon: 'warp',
     needsMap: 'Depth',
     needsMapWhen: p => p.mode === 'Depth',
-    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to subdivide it \u2014 that is how artwork gets printed onto a shape. Depth reads a bound depth map and slides the picture along the map\u2019s gradient, as if it lay on the relief; Align says whether that map is measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
+    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Depth reads a bound depth map and slides the picture along the map\u2019s gradient, as if it lay on the relief; Align says whether that map is measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
     params: WARP_PARAMS,
     editor: warpEditorEl,
     shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpDepth: FX_FS_WARP_DEPTH },
@@ -484,7 +539,8 @@ defineEffect({
         if (p.mode === 'Noise') return `noise  s${n(p.scale)}  a${n(p.amount)}  o${p.octaves}  #${p.seed}`;
         if (p.mode === 'Lattice') {
             const lat = warpLatticeOf(p.lattice);
-            return lat ? `lattice  ${lat.pts.length} pts` : 'lattice  no grid';
+            // 读数报的是四边形的个数 (横×纵),因为那才是「网被劈成几块」;把手数 = (横+1)×(纵+1)。
+            return lat ? `lattice  ${lat.cols}\u00d7${lat.rows} quads` : 'lattice  no grid';
         }
         return `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}  p${n(p.strength)}  g${n(p.window)}${p.slide === 'uphill' ? '  up' : ''}`;
     },
