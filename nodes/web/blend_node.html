@@ -311,11 +311,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-seg button { flex: 1; background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 3px 4px;
     color: rgba(255,255,255,0.75); font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .fx-seg button.on { background: rgba(0,122,255,0.85); color: #fff; }
-.fx-add { display: inline-flex; align-items: center; gap: 3px; align-self: flex-start; margin-top: 1px;
-    background: rgba(255,255,255,0.06); border: none; border-radius: 6px; padding: 2px 5px;
-    color: rgba(255,255,255,0.6); font-size: 10px; font-weight: 700; cursor: pointer; }
-.fx-add:hover { background: rgba(255,255,255,0.14); color: #fff; }
-.fx-add svg { width: 11px; height: 11px; display: block; }
 .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -3878,11 +3873,6 @@ function fxWandSvg() {
         + '<path d="M5.2 2.2l.55 1.35 1.35.55-1.35.55L5.2 6l-.55-1.35L3.3 4.1l1.35-.55z" fill="currentColor" stroke="none" opacity="0.65"/></svg>';
 }
 
-function fxPlusSvg() {
-    return '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">'
-        + '<path d="M6 1.8v8.4M1.8 6h8.4"/></svg>';
-}
-
 // 只清缓存 + 重画布,不重建列表 —— 拖滑块期间重建列表会把正在拖的那个控件拆掉。
 function fxLiveUpdate(l) {
     l.fxCache = null;
@@ -4019,14 +4009,11 @@ function fxParamsEl(l, effect, spec, syncRead, updaters) {
     for (const def of spec.params) body.appendChild(fxControlRow(l, effect, def, syncRead, updaters));
     // 参数区里的任何点击都不该顺带选中图层(那会重建列表)。
     body.addEventListener('click', ev => ev.stopPropagation());
-    // 图层行是 draggable 的,而滑块就压在它里面:不临时关掉 draggable,拖半径会被浏览器当成
-    // 图层重排序的拖拽 —— 滑块不动,栈反倒乱了。
-    body.addEventListener('pointerdown', () => {
-        const rowEl = body.parentElement;
-        if (!rowEl || !rowEl.draggable) return;
-        rowEl.draggable = false;
-        window.addEventListener('pointerup', () => { rowEl.draggable = true; }, { once: true });
-    });
+    // 图层行是 draggable 的,滑块就压在它里面:从 handle 上起手按住再动,浏览器会往上找最近
+    // 的可拖祖先 —— 也就是图层行 —— 把调参变成图层重排序。所以参数区自己得先成为那个最近
+    // 祖先 (draggable=true),再取消它自己的 dragstart:两步缺一,拖拽都会漏到图层行上。
+    body.draggable = true;
+    body.addEventListener('dragstart', ev => { ev.preventDefault(); ev.stopPropagation(); });
     return body;
 }
 
@@ -4116,15 +4103,6 @@ function fxChainEl(l) {
         warn.textContent = `Chain skipped — ${fxgl.skip}`;
         box.appendChild(warn);
     }
-    const add = document.createElement('button');
-    add.className = 'fx-add';
-    add.innerHTML = fxPlusSvg();
-    add.title = 'Add an effect to this layer';
-    add.addEventListener('click', ev => {
-        ev.stopPropagation();
-        openFxModal(l.id);
-    });
-    box.appendChild(add);
     return box;
 }
 
@@ -4417,8 +4395,8 @@ function renderStackList(listEl, stack) {
                 : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
         run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
 
-        // Effects button on the row: the same picker the chain's「+」and the context menu open.
-        // Fragment layers and the pinned Mask row never get one (they can't hold a chain).
+        // Effects button on the row: the picker entry every layer with a chain gets. Fragment
+        // layers and the pinned Mask row never render it (they can't hold a chain).
         let fxBtn = null;
         if (layerTakesEffects(l)) {
             fxBtn = document.createElement('button');
