@@ -418,9 +418,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
 .ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
 .mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.text-choice-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
-/* Enum rows inside a tool body: the label names the choice, the buttons fill the row like the
-   Brush / Eraser mode group does. */
-.control-row .mini-group { flex: 1; justify-content: stretch; }
+/* Enum rows inside a tool body: the label names the choice, the button group takes the same
+   slack a range takes, so the value column lines up with the rows above and below it. */
+.control-row .mini-group { flex: 1; min-width: 0; flex-wrap: nowrap; }
 /* Key-only tool buttons: the badge is the whole label, the name and usage live in the tooltip. */
 .mini-btn.key-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 4px 8px; }
 .mini-btn.key-btn .tool-key { margin-left: 0; min-width: 18px; height: 18px; font-size: 11px; font-weight: 700; }
@@ -748,7 +748,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                  outside the fold, so a folded Text row still tells you what it is styling. -->
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="textLabel" title="A text layer stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas to retype it. Click the header to show or fold the settings."><span class="fold-caret"></span>Text</div>
+                    <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to fold the settings."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
                     <div class="mini-group">
                         <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                         <button class="mini-btn key-btn" id="textEditBtn" title="Edit (Enter) — retype this layer's text inline on the canvas"><span class="tool-key">&#9166;</span></button>
@@ -761,12 +761,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Weight</label><div class="mini-group">
                         <button class="mini-btn text-choice-btn active" id="textWeightNormal" title="Normal weight">Normal</button>
                         <button class="mini-btn text-choice-btn" id="textWeightBold" title="Bold weight">Bold</button>
-                    </div></div>
+                    </div><span></span></div>
                     <div class="control-row"><label>Align</label><div class="mini-group">
                         <button class="mini-btn text-choice-btn active" id="textAlignLeft" title="Align the lines to the left edge of the layer">Left</button>
                         <button class="mini-btn text-choice-btn" id="textAlignCenter" title="Centre the lines in the layer">Center</button>
                         <button class="mini-btn text-choice-btn" id="textAlignRight" title="Align the lines to the right edge of the layer">Right</button>
-                    </div></div>
+                    </div><span></span></div>
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
                 <div class="panel-hint" id="textContentLine" style="display:none;"></div>
