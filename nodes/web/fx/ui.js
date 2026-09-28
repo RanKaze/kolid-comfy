@@ -42,6 +42,13 @@ function fxIconSvg(icon) {
             + '<path d="M2.2 11.8V2.2" opacity="0.55"/><path d="M2.2 11.8h9.6" opacity="0.55"/>'
             + '<path d="M2.6 11.4c3.1-.4 3.1-8.4 8.8-8.8" stroke-width="1.5"/></svg>';
     }
+    if (icon === 'tone') {
+        // 宽范围压成窄范围:上面那条长线是场景响应,下面那条短线是显示范围,中间一个往下压的箭头。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M1.9 3.4h10.2"/>'
+            + '<path d="M4.3 10.6h5.4" opacity="0.6"/>'
+            + '<path d="M7 5v3.6M5.6 7.2 7 8.8l1.4-1.6"/></svg>';
+    }
     if (icon === 'reset') {
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
             + '<path d="M2.6 4.2h8.8"/><path d="M5.6 4.2V2.4h2.8v1.8"/>'
