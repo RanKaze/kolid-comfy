@@ -19,6 +19,13 @@ function fxIconSvg(icon) {
             + '<rect x="3.9" y="3.9" width="8.2" height="8.2" rx="1.4" opacity="0.4" stroke-dasharray="1.3 1.3"/>'
             + '<rect x="1.9" y="1.9" width="8.2" height="8.2" rx="1.4" fill="currentColor" fill-opacity="0.18"/></svg>';
     }
+    if (icon === 'stroke') {
+        // 一圈等宽的轮廓环套着小方块:环本身就是这条特效。和 'drop'(偏移的虚影)与 'shadow'
+        // (内缘弧)都区分得开 —— 描边不位移, 只是沿边缘长宽。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor">'
+            + '<rect x="2.6" y="2.6" width="8.8" height="8.8" rx="2" stroke-width="2.4" opacity="0.45"/>'
+            + '<rect x="5" y="5" width="4" height="4" rx="0.8" fill="currentColor" stroke="none"/></svg>';
+    }
     if (icon === 'blur') {
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
             + '<circle cx="7" cy="7" r="2.1" fill="currentColor" stroke="none"/>'
