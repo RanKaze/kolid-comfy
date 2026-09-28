@@ -145,6 +145,44 @@ def dataurl_to_tensor(image_b64):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
+def staging_image_to_mask(img):
+    """[1,H,W,C] 工作区图 → [1,H,W] float mask（取亮度）。
+
+    Processor 的 MASK 端口覆盖走的就是 staging 运输（图都是 PNG dataURL），落到
+    端口上时按这个方向转。带 alpha 的图亮度用 RGB 均值 —— mask 语义里 alpha 不参与
+    （透明处的颜色依然算数），与工作台「把图当 mask 读」的读法一致。
+    """
+    if img is None or not hasattr(img, 'shape'):
+        return None
+    if img.dim() == 4:
+        return img[..., :3].mean(dim=-1)
+    if img.dim() == 3:
+        if img.shape[-1] in (3, 4):
+            return img[..., :3].mean(dim=-1).unsqueeze(0)
+        return img
+    if img.dim() == 2:
+        return img.unsqueeze(0)
+    return None
+
+
+def staging_mask_to_image(mask):
+    """[1,H,W]（兼容 [H,W] / [1,H,W,1]）mask → [1,H,W,3] 灰度图。
+
+    接口的 MASK 产出没有直接过线的通道 —— staging 只运图。灰度展开成 RGB 后
+    工作台拿到的就是一张普通 PNG，写回蒙版时按亮度读回来。
+    """
+    m = mask
+    if m is None or not hasattr(m, 'shape'):
+        return None
+    while m.dim() > 2 and m.shape[-1] == 1:
+        m = m[..., 0]
+    if m.dim() == 2:
+        m = m.unsqueeze(0)
+    if m.dim() != 3:
+        return None
+    return m.unsqueeze(-1).expand(-1, -1, -1, 3).clamp(0.0, 1.0)
+
+
 def parse_prompt_image_refs(text, resolve):
     """解析 text 里的 <image_id:xxx> 标记。
 
@@ -531,6 +569,13 @@ class SnapshotDetailerSamplerServer:
         _f_ps = self._load_pipeline_settings_file()
         if _f_ps is not None:
             self.pipeline_settings = _f_ps
+        # Interface meta：Interface tab 里给每个 interface 配置的东西 —— 端口改名、
+        # block/processor 模式开关、block 模式的两个端口绑定。接口包本身每次从工作流
+        # 图现推导、不可持久化，所以这些「贴在包上的标注」按包名字单独落盘。
+        self.interface_meta = self._normalize_interface_meta(cfg.get('interface_meta'))
+        _f_im = self._load_interface_meta_file()
+        if _f_im is not None:
+            self.interface_meta = _f_im
         # 当前真的加载在 node 上的是哪条 pipeline（'' = 节点输入口那条 = [Default]）。
         # server 每次节点执行都是新建的，所以这份身份天然随执行复位，不需要额外清理。
         self.loaded_pipeline_node_id = ''
@@ -545,6 +590,7 @@ class SnapshotDetailerSamplerServer:
         self.interface_progress = 0
         self.interface_total_steps = 0
         self.interface_current_step = 0
+        self.interface_result_meta = []   # 离线 processor 执行的结果明细（key/port/type/name）
         self.finished = False
         self.finish_selected_key = None
         self.finish_selected_keys = None  # 多选 keys 列表
@@ -1004,6 +1050,70 @@ class SnapshotDetailerSamplerServer:
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Failed to save pipeline_settings: {e}")
 
+    # -------------------------------------------------------------------------
+    # Interface meta（按 interface 名字贴的标注：端口改名 / 模式 / block 端口绑定）
+    # -------------------------------------------------------------------------
+    def _normalize_interface_meta(self, raw):
+        """把磁盘 / 前端来的任意形状收敛成规范形，未知键一律丢弃。
+
+        {<interface name>: {'names':   {'start': {<port num>: label}, 'end': {...}},
+                            'modes':   {'block': bool, 'processor': bool},
+                            'block_ports': {'in': <start port num>, 'out': <end port num>}}}
+        端口号一律收成 str（JSON 键本就是字符串），label 去空白、空 label 视为没改。
+        """
+        out = {}
+        if not isinstance(raw, dict):
+            return out
+        for name, entry in raw.items():
+            if not isinstance(name, str) or not name or not isinstance(entry, dict):
+                continue
+            one = {}
+            raw_names = entry.get('names')
+            if isinstance(raw_names, dict):
+                names = {}
+                for side in ('start', 'end'):
+                    sub = raw_names.get(side)
+                    if not isinstance(sub, dict):
+                        continue
+                    clean = {}
+                    for num, label in sub.items():
+                        if (isinstance(num, str) and num.isdigit()
+                                and isinstance(label, str) and label.strip()):
+                            clean[str(int(num))] = label.strip()
+                    if clean:
+                        names[side] = clean
+                if names:
+                    one['names'] = names
+            modes = entry.get('modes')
+            if isinstance(modes, dict):
+                one['modes'] = {'block': bool(modes.get('block')),
+                                'processor': bool(modes.get('processor'))}
+            bp = entry.get('block_ports')
+            if isinstance(bp, dict):
+                ports = {}
+                for side in ('in', 'out'):
+                    v = bp.get(side)
+                    if isinstance(v, int) and 1 <= v <= 20:
+                        ports[side] = v
+                if ports:
+                    one['block_ports'] = ports
+            if one:
+                out[name] = one
+        return out
+
+    def _load_interface_meta_file(self):
+        im = self._read_sets_file().get('interface_meta')
+        return self._normalize_interface_meta(im) if isinstance(im, dict) else None
+
+    def _save_interface_meta_file(self):
+        try:
+            data = self._read_sets_file()
+            data['interface_meta'] = self.interface_meta
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save interface_meta: {e}")
+
     def find_pipeline_by_name(self, name):
         """Resolve a pipeline by its package name → {'package_idx','pipeline_idx','node_id'}.
 
@@ -1067,6 +1177,10 @@ class SnapshotDetailerSamplerServer:
         if 'pipeline_settings' in data:
             self.pipeline_settings = self._normalize_pipeline_settings(data['pipeline_settings'])
             self._save_pipeline_settings_file()
+        # Interface meta 整份替换（前端是唯一作者：Interface tab 的改名 / 模式 / 端口绑定）。
+        if 'interface_meta' in data:
+            self.interface_meta = self._normalize_interface_meta(data['interface_meta'])
+            self._save_interface_meta_file()
 
     def _set_blocks(self, blocks):
         """Adopt a flat block chain as the active one.
@@ -1321,6 +1435,7 @@ class SnapshotDetailerSamplerServer:
                     # Pipeline Settings（选中项 + 按名字的 override）与此刻真正加载在节点上的
                     # 那条 pipeline 的名字。'' = 还没选过 = [Default]（节点输入口那条）。
                     'pipeline_settings': inst.pipeline_settings if inst else {'selected': '', 'overrides': {}},
+                    'interface_meta': getattr(inst, 'interface_meta', {}) if inst else {},
                     'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
                 })
                 return
@@ -1338,6 +1453,7 @@ class SnapshotDetailerSamplerServer:
                     'interface_current_step': getattr(inst, 'interface_current_step', 0) if inst else 0,
                     'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
                     'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
+                    'interface_result_meta': getattr(inst, 'interface_result_meta', []) if inst else [],
                     'pending_query': inst._pending_query_view() if inst else None,
                     # 一条 preset 绑定的 pipeline 可能在这次 run 里被现加载（见 run_detailer）：
                     # 名字与架构都跟着变，前端轮询时顺手同步，不用重拉 config。
@@ -1429,22 +1545,33 @@ class SnapshotDetailerSamplerServer:
                             port['options'] = get_combo_options(num)
                         return port
 
+                    # Interface meta（改名 / 模式 / block 端口绑定）按包名字贴回来。
+                    # 端口名本身只是展示 —— 执行全程按端口号走,改名不影响链路。
+                    iface_name = fresh_pkg.get('name', pkg.get('name', ''))
+                    meta = (getattr(inst, 'interface_meta', None) or {}).get(iface_name) or {}
+                    names_meta = meta.get('names') or {}
+
+                    def port_label(side, num):
+                        return (names_meta.get(side) or {}).get(str(num)) or ('value' + str(num))
+
                     # Start ports: ONLY from start_types (Start node's connected value ports)
                     start_ports = []
                     for port_num_str, ptype in sorted(start_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
                         port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
-                        start_ports.append(make_port(port_num, 'value' + str(port_num), ptype))
+                        start_ports.append(make_port(port_num, port_label('start', port_num), ptype))
 
                     # End ports: ONLY from end_types (End node's connected value ports)
                     end_ports = []
                     for port_num_str, ptype in sorted(end_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
                         port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
-                        end_ports.append(make_port(port_num, 'value' + str(port_num), ptype))
+                        end_ports.append(make_port(port_num, port_label('end', port_num), ptype))
 
                     interfaces.append({
-                        'name': fresh_pkg.get('name', pkg.get('name', '')),
+                        'name': iface_name,
                         'start_ports': start_ports,
                         'end_ports': end_ports,
+                        'modes': meta.get('modes') or {'block': False, 'processor': False},
+                        'block_ports': meta.get('block_ports') or {},
                     })
                 self._send_json({'interfaces': interfaces})
                 return
@@ -1686,7 +1813,8 @@ class SnapshotDetailerSamplerServer:
                         chosen = names[idx] if (names and idx < len(names) and names[idx]) else None
                         base_name = chosen or body.get('name') or 'Loaded'
                         name = base_name if len(images) == 1 else f"{base_name} #{len(inst.staging_items) + 1}"
-                        sid = inst.add_staging(tensor, name=name)
+                        # hidden=True（Processor 的输入等）只进图池不进条带 —— 跟接口产出同款。
+                        sid = inst.add_staging(tensor, name=name, hidden=bool(body.get('hidden')))
                         added.append({'id': sid, 'name': name, 'src': dataurl})
                     if not added:
                         self._send_json({'success': False, 'error': 'All images failed to decode'}, 400)
@@ -3662,14 +3790,20 @@ class SnapshotDetailerSamplerNode:
             if base_mask is not None:
                 injected_pipeline.mask = base_mask
 
-        # 构建端口级图片覆盖
+        # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
+        # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
+        start_types = pkg.get('start_types', {})
         port_overrides = {}
         for port_num_str, key in image_keys.items():
             if key:
                 img = server.get_staging_image(key)
                 if img is not None:
-                    port_overrides[int(port_num_str)] = img
-                    print(f"[InterfaceExec] Port {port_num_str} image override: id={key}")
+                    declared = start_types.get(str(port_num_str))
+                    if declared == 'MASK':
+                        port_overrides[int(port_num_str)] = staging_image_to_mask(img)
+                    else:
+                        port_overrides[int(port_num_str)] = img
+                    print(f"[InterfaceExec] Port {port_num_str} image override: id={key} ({declared or 'IMAGE'})")
 
         injected_img = base_img
         injected_mask = base_mask
@@ -3692,6 +3826,7 @@ class SnapshotDetailerSamplerNode:
 
         # 记录 interface 结果 keys
         server.interface_result_keys = []
+        server.interface_result_meta = []
 
         # 不在执行期直接加 history——等 uncrop 之后再以最终图加入
         def _on_result_image(img, name):
@@ -3738,6 +3873,25 @@ class SnapshotDetailerSamplerNode:
                     uncropped_results.append(item)
             results = uncropped_results
             print(f"[InterfaceExec] uncropped {len(results)} results back to full size")
+
+        # 离线 processor 语义：结果（IMAGE 与 MASK 都算）全部作为隐藏 staging 条目送回，
+        # 端口对应关系记进 interface_result_meta 供工作台按端口落位；pipeline 当前图
+        # 一概不动 —— processor 是「拿工作台的图去算一枚结果」，不是接力 run。
+        if exec_options.get('offline'):
+            result_ports = getattr(executor, 'result_ports', [])
+            for i, (ptype, val, name) in enumerate(results):
+                port_num = result_ports[i][0] if i < len(result_ports) else None
+                if ptype == 'IMAGE':
+                    sid = server.add_staging(val, name=name, hidden=True)
+                elif ptype == 'MASK':
+                    sid = server.add_staging(staging_mask_to_image(val), name=name, hidden=True)
+                else:
+                    continue
+                server.interface_result_keys.append(sid)
+                server.interface_result_meta.append(
+                    {'key': sid, 'port': port_num, 'type': ptype, 'name': name})
+            print(f"[InterfaceExec] offline processor: {len(server.interface_result_meta)} results, pipeline untouched")
+            return None
 
         # 提取结果图 / mask
         result_img = None

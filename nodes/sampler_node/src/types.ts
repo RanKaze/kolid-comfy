@@ -27,6 +27,8 @@ export interface ServerConfig {
   active_block_set?: string | null;
   /** Pipeline Settings（Draw 页）：选中的 pipeline + 按名字绑定的九个 override */
   pipeline_settings?: PipelineSettings;
+  /** Interface tab 的持久化配置：端口改名 / 模式开关 / block 端口绑定（按包名索引） */
+  interface_meta?: InterfaceMeta;
   /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loaded_pipeline_name?: string;
 }
@@ -334,7 +336,20 @@ export interface InterfaceInfo {
   name: string;
   start_ports: InterfacePort[];
   end_ports: InterfacePort[];
+  /** Interface tab 贴在包上的标注（/api/package 已按名字合并）。 */
+  modes?: { block: boolean; processor: boolean };
+  block_ports?: { in?: number; out?: number };
 }
+
+/** 一个 interface 的持久化配置（blocks_sets.json 的 interface_meta 键，按包名索引）。
+ *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
+export interface InterfaceMetaEntry {
+  names?: { start?: Record<string, string>; end?: Record<string, string> };
+  modes?: { block: boolean; processor: boolean };
+  block_ports?: { in?: number; out?: number };
+}
+
+export type InterfaceMeta = Record<string, InterfaceMetaEntry>;
 
 export interface PipelineInfo {
   name: string;

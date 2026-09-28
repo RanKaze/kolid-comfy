@@ -1007,6 +1007,9 @@ class InterfaceExecutor:
         self.on_sampler_progress = on_sampler_progress
         self._sg_widget_values = {}  # Set during execute from pkg
         self._sg_input_defs = []
+        # 与最近一次 execute() 的 results 逐条对齐的端口号 —— 离线 processor 按
+        # 「哪个 end 端口出的这张图/mask」落位，靠它对表。
+        self.result_ports = []
 
     def execute(self, pkg, manual_values=None, port_overrides=None):
         """执行一个 interface package。
@@ -2033,9 +2036,10 @@ class InterfaceExecutor:
         end_outputs = output_values.get(end_id, ())
         end_types = pkg.get('types', {})
         results = []
+        self.result_ports = []
         added_count = 0
 
-        def _add_one(ptype, val, name):
+        def _add_one(ptype, val, name, port_num):
             nonlocal added_count
             if ptype == 'PIPELINE_DATA':
                 if hasattr(val, 'get_image'):
@@ -2043,6 +2047,7 @@ class InterfaceExecutor:
                         img = val.get_image()
                         if img is not None:
                             results.append(('IMAGE', img, name))
+                            self.result_ports.append(port_num)
                             if self.on_result_image:
                                 self.on_result_image(img, name)
                             added_count += 1
@@ -2050,6 +2055,7 @@ class InterfaceExecutor:
                         pass
                 elif hasattr(val, 'image') and val.image is not None:
                     results.append(('IMAGE', val.image, name))
+                    self.result_ports.append(port_num)
                     if self.on_result_image:
                         self.on_result_image(val.image, name)
                     added_count += 1
@@ -2061,11 +2067,13 @@ class InterfaceExecutor:
                 tensors = _normalize_image_value(val)
                 for img in tensors:
                     results.append(('IMAGE', img, name))
+                    self.result_ports.append(port_num)
                     if self.on_result_image:
                         self.on_result_image(img, name)
                     added_count += 1
             else:
                 results.append((ptype, val, name))
+                self.result_ports.append(port_num)
                 added_count += 1
 
         for port_num_str, port_type in end_types.items():
@@ -2080,7 +2088,7 @@ class InterfaceExecutor:
                 for item in val:
                     if item is None:
                         continue
-                    _add_one(port_type, item, f'{interface_name} #{added_count + 1}')
+                    _add_one(port_type, item, f'{interface_name} #{added_count + 1}', port_num)
             else:
-                _add_one(port_type, val, f'{interface_name} #{added_count + 1}')
+                _add_one(port_type, val, f'{interface_name} #{added_count + 1}', port_num)
         return results

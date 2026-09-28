@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta } from './types';
 import { EMPTY_PIPELINE_SETTINGS, firstDetailerFlag } from './types';
 
 const POLL_INTERVAL = 500;
@@ -30,9 +30,15 @@ const App: React.FC = () => {
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
   /** Draw 页 Pipeline Settings：选中项 + 按 pipeline 名字绑定的五个 override（后端落盘） */
   const [pipelineSettings, setPipelineSettings] = useState<PipelineSettings>(EMPTY_PIPELINE_SETTINGS);
+  /** Interface tab 给每个 interface 配置的持久化标注：端口改名 / 模式开关 / block 端口绑定 */
+  const [interfaceMeta, setInterfaceMeta] = useState<InterfaceMeta>({});
   /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条 = [Default]） */
   const [loadedPipelineName, setLoadedPipelineName] = useState('');
   const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
+  // Processor 运行（工作台 Tools → Processor 发起）：与 Interface tab 的 Execute 共用
+  // 后端的 interface_status，但有自己的轮询与回程通道 —— 结果按端口送回工作台落位。
+  const [processorRunning, setProcessorRunning] = useState(false);
+  const processorRunRef = useRef<number | null>(null);
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
   const [interfaceResults, setInterfaceResults] = useState<Record<number, StagingItem[]>>({});
@@ -154,6 +160,7 @@ const App: React.FC = () => {
         setDetailStatus(data.detail_status);
         setArchitecture(data.architecture ?? null);
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
+        setInterfaceMeta(data.interface_meta ?? {});
         setLoadedPipelineName(data.loaded_pipeline_name ?? '');
         if (data.has_package) {
           fetch('/api/package')
@@ -578,6 +585,9 @@ const App: React.FC = () => {
       } else if (event.data?.type === 'blend-layer-generate') {
         // Generate from the layer row's context menu: that layer in, that layer out.
         handleLayerGenerate(event.data);
+      } else if (event.data?.type === 'blend-processor-run') {
+        // Processor 工具的 Run：输入图上传为隐藏条目 → 离线 interface 执行，轮询回程。
+        void handleProcessorRun(event.data);
       } else if (event.data?.type === 'blend-cancel-run') {
         // 工作台的 Cancel（运行中才浮出）—— 打断当前 run
         // （后端用 ComfyUI 原生 interrupt：采样步 / block 边界 / Generate Text 后抛
@@ -646,7 +656,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, seedBlendCanvas, refreshStaging, pushLog]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, pushLog]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
@@ -664,6 +674,126 @@ const App: React.FC = () => {
       active_id: activeBlockSetId,
     }, '*');
   }, [blockSets, activeBlockSetId]);
+
+  // Push processor-mode interfaces to the workbench whenever they change: the Processor tool's
+  // enum picks from this list, and its source/destination pickers read the (renamed) ports.
+  useEffect(() => {
+    const iframe = blendIframeRef.current;
+    if (!iframe?.contentWindow) return;
+    const processors = interfaces
+      .filter(itf => !!itf.modes?.processor)
+      .map(itf => ({
+        name: itf.name,
+        index: interfaces.indexOf(itf),
+        start_ports: itf.start_ports,
+        end_ports: itf.end_ports,
+      }));
+    iframe.contentWindow.postMessage({ type: 'blend-processors', processors }, '*');
+  }, [interfaces, interfaceMeta]);
+
+  // Processor run initiated by the workbench: upload the input images as hidden staging
+  // entries, then kick an offline interface execution. Results come back through the poller.
+  const handleProcessorRun = useCallback(async (data: any) => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win) return;
+    const idx = typeof data.interface_index === 'number' ? data.interface_index : -1;
+    const inputs = Array.isArray(data.inputs) ? data.inputs : [];
+    if (processorRunRef.current !== null || executedInterfaceIdx !== null) {
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Another interface execution is already running' }, '*');
+      return;
+    }
+    if (idx < 0 || idx >= interfaces.length) {
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Processor interface is missing (package disconnected?)' }, '*');
+      return;
+    }
+    processorRunRef.current = idx;
+    pushLog(`Run processor 「${interfaces[idx]?.name || '#' + idx}」`);
+    try {
+      const image_keys: Record<string, string> = {};
+      for (const inp of inputs) {
+        if (!inp || typeof inp.dataUrl !== 'string' || !inp.dataUrl) continue;
+        const res = await fetch('/api/staging', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            images: [inp.dataUrl],
+            names: [`in: value${inp.port}`],
+            hidden: true,
+          }),
+        });
+        const j = await res.json();
+        if (j?.success && j.added?.[0]?.id) image_keys[String(inp.port)] = j.added[0].id;
+      }
+      setProcessorRunning(true);
+      await fetch('/api/execute_interface', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interface_index: idx,
+          manual_values: data.manual_values || {},
+          exec_options: { offline: true, image_keys },
+        }),
+      });
+    } catch (e: any) {
+      setProcessorRunning(false);
+      processorRunRef.current = null;
+      win.postMessage({ type: 'blend-processor-result', ok: false, error: e?.message || String(e) }, '*');
+    }
+  }, [executedInterfaceIdx, interfaces, pushLog]);
+
+  // Processor 轮询：interface_status 每跳一次就同步给工作台（进度条走 blend-run-status 同款
+  // 语义），done 时按 interface_result_meta 把隐藏条目逐端口发回去。started 后第一次 status
+  // 可能还是 idle（action 还没被取走），所以 idle 不收尾、running 见过一次才算数。
+  useEffect(() => {
+    if (!processorRunning) return;
+    let cancelled = false;
+    let seenRunning = false;
+    const poll = async () => {
+      try {
+        const data: StatusResponse = await fetch('/api/status').then(r => r.json());
+        if (cancelled) return;
+        const st = data.interface_status || 'idle';
+        const win = blendIframeRef.current?.contentWindow;
+        if (win) {
+          win.postMessage({
+            type: 'blend-run-status',
+            status: st === 'running' ? 'running' : st,
+            current: data.interface_current_step || 0,
+            total: data.interface_total_steps || 0,
+          }, '*');
+        }
+        if (st === 'running') seenRunning = true;
+        if (st === 'idle' && !seenRunning) return;
+        if (st === 'done' || st === 'error' || st === 'idle') {
+          cancelled = true;
+          setProcessorRunning(false);
+          const idx = processorRunRef.current;
+          processorRunRef.current = null;
+          if (!win) return;
+          if (st === 'done') {
+            const meta = (data.interface_result_meta || []) as { key: string; port: number; type: string; name: string }[];
+            const full = await fetch('/api/staging').then(r => r.json()).catch(() => null);
+            const list = (full?.staging || []) as StagingItem[];
+            const results = meta
+              .map(m => {
+                const item = list.find((s: StagingItem) => s.id === m.key);
+                return item ? { port: m.port, type: m.type, name: m.name, id: item.id, src: item.src, width: item.width, height: item.height } : null;
+              })
+              .filter(Boolean);
+            win.postMessage({ type: 'blend-processor-result', ok: true, interface_index: idx, results }, '*');
+            pushLog(`Processor done — ${results.length} result${results.length === 1 ? '' : 's'}`, 'success');
+          } else {
+            win.postMessage({ type: 'blend-processor-result', ok: false, cancelled: st === 'idle', error: data.interface_error || 'Processor failed' }, '*');
+            if (st === 'error') pushLog(`Processor failed: ${data.interface_error || 'error'}`, 'error');
+          }
+          clearInterval(interval);
+        }
+      } catch { /* keep polling */ }
+    };
+    poll();
+    const interval = setInterval(poll, POLL_INTERVAL);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [processorRunning, pushLog]);
 
   const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
     setError(null);
@@ -873,6 +1003,16 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
+  // Interface meta（端口改名 / 模式开关 / block 端口绑定）同一落盘路径，按 interface 名字索引。
+  const handleChangeInterfaceMeta = useCallback((next: InterfaceMeta) => {
+    setInterfaceMeta(next);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interface_meta: next }),
+    }).catch(() => {});
+  }, []);
+
   // preset 行 ⚙：这套链跑起来时用哪条 pipeline（按名字绑，run 时解析）。
   const handleSetPresetPipeline = useCallback((setId: string, pipelineName: string) => {
     persistSets(blockSets.map(s => s.id === setId ? { ...s, pipeline_name: pipelineName } : s), activeBlockSetId);
@@ -996,6 +1136,8 @@ const App: React.FC = () => {
         onCloseFinishDialog={() => setShowFinishDialog(false)}
         blendIframeRef={blendIframeRef}
         interfaces={interfaces}
+        interfaceMeta={interfaceMeta}
+        onChangeInterfaceMeta={handleChangeInterfaceMeta}
         onExecuteInterface={handleExecuteInterface}
         interfaceResults={interfaceResults}
         interfaceStatusByIdx={interfaceStatusByIdx}

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -284,6 +284,9 @@ interface EditPhaseProps {
   onCloseFinishDialog: () => void;
   blendIframeRef: React.RefObject<HTMLIFrameElement>;
   interfaces: InterfaceInfo[];
+  /** Interface tab 的持久化配置（端口改名 / 模式开关 / block 端口绑定），按 interface 名字索引 */
+  interfaceMeta: InterfaceMeta;
+  onChangeInterfaceMeta: (next: InterfaceMeta) => void;
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: Record<number, StagingItem[]>;
   interfaceStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
@@ -315,7 +318,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   blendIframeRef,
-  interfaces, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
+  interfaces, interfaceMeta, onChangeInterfaceMeta, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   actionLog,
 }) => {
@@ -1262,14 +1265,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     })()}
                     {block.type === 'interface' && (() => {
                       const ip = block.params as any;
-                      // 仅允许：输入端口恰好 1 个 PIPELINE_DATA、输出端口恰好 1 个 PIPELINE_DATA 的 interface
-                      // （这样才能正确以 pipeline 串联注入）
-                      const isChainable = (itf: any) => {
+                      // 只列开了 Block 模式的 interface（Interface tab 里的开关决定谁上得了链）。
+                      // meta 里还没有标注的旧 interface 保持原判定（1 pipeline 进 + 1 pipeline 出），
+                      // 免得存量 chain 在刷新后突然全部 Missing。
+                      const isBlockCapable = (itf: any) => {
+                        const meta = interfaceMeta[itf?.name];
+                        if (meta?.modes) return !!meta.modes.block;
                         const inP = itf?.start_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
                         const outP = itf?.end_ports?.filter((p: any) => p.type === 'PIPELINE_DATA')?.length ?? 0;
                         return inP === 1 && outP === 1;
                       };
-                      const selectableInterfaces = interfaces.filter(isChainable);
+                      const selectableInterfaces = interfaces.filter(isBlockCapable);
                       const safeInterfaces = selectableInterfaces.length > 0 ? selectableInterfaces : interfaces;
                       const updateIfaceParam = (key: string, value: any) => updateBlockParam(block.id, key, value);
                       // 绑定以名字为准（接口包重排/增删不会错绑到别的接口）；旧配置只有
@@ -1286,7 +1292,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '4px 0' }}>
                           {selectableInterfaces.length === 0 && (
                             <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                              No chainable interface (need exactly 1 PIPELINE in &amp; 1 PIPELINE out)
+                              No interface with Block mode on — enable it in the Interface tab.
                             </div>
                           )}
                           {/* Interface sub-graph selection */}
@@ -1449,7 +1455,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} staging={staging} />
+          <InterfaceTab interfaces={interfaces} interfaceMeta={interfaceMeta} onChangeInterfaceMeta={onChangeInterfaceMeta} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} staging={staging} />
         )}
       </div>
 
@@ -1676,16 +1682,50 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 // ── InterfaceTab ──
 const InterfaceTab: React.FC<{
   interfaces: InterfaceInfo[];
+  interfaceMeta: InterfaceMeta;
+  onChangeInterfaceMeta: (next: InterfaceMeta) => void;
   detailStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
   detailProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
   interfaceResults: Record<number, StagingItem[]>;
   staging: StagingItem[];
-}> = ({ interfaces, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, staging }) => {
+}> = ({ interfaces, interfaceMeta, onChangeInterfaceMeta, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, staging }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
   // 每个 interface 的执行选项: operation 和 crop_reserve 是卡片级, image_keys 是端口级
   const [execOptions, setExecOptions] = useState<Record<number, { operation: 'default' | 'crop'; crop_reserve: number; image_keys: Record<number, string | null> }>>({});
   const [showImageSelect, setShowImageSelect] = useState<{ ifaceIdx: number; portNum: number } | null>(null);
+  // 端口改名：哪个卡片的哪个端口的行内输入框正开着
+  const [renamingPort, setRenamingPort] = useState<{ iface: string; side: 'start' | 'end'; num: number } | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  // 形状不满足时点模式开关给的一句话说明（按卡片索引记）
+  const [modeHint, setModeHint] = useState<Record<number, string>>({});
+
+  const metaFor = (name: string): InterfaceMeta[string] => interfaceMeta[name] || {};
+  const patchMeta = (name: string, patch: Partial<NonNullable<InterfaceMeta[string]>>) => {
+    onChangeInterfaceMeta({ ...interfaceMeta, [name]: { ...metaFor(name), ...patch } });
+  };
+  // 改名只是展示层 —— 执行全程按端口号走。改回 valueN 等于没改，删掉这份标注。
+  const renamePort = (iface: string, side: 'start' | 'end', num: number, label: string) => {
+    const cur = metaFor(iface);
+    const names = { ...(cur.names || {}) } as NonNullable<InterfaceMeta[string]['names']>;
+    const sideMap = { ...(names[side] || {}) };
+    const trimmed = label.trim();
+    if (trimmed && trimmed !== 'value' + num) sideMap[String(num)] = trimmed;
+    else delete sideMap[String(num)];
+    if (Object.keys(sideMap).length) names[side] = sideMap; else delete names[side];
+    const nextNames: InterfaceMeta[string]['names'] = Object.keys(names).length ? names : undefined;
+    patchMeta(iface, { names: nextNames });
+  };
+  const setIfaceMode = (iface: string, key: 'block' | 'processor', on: boolean) => {
+    const cur = metaFor(iface);
+    patchMeta(iface, { modes: { block: false, processor: false, ...(cur.modes || {}), [key]: on } });
+  };
+  const setBlockPort = (iface: string, side: 'in' | 'out', num: number) => {
+    const cur = metaFor(iface);
+    patchMeta(iface, { block_ports: { ...(cur.block_ports || {}), [side]: num } });
+  };
+  const portDisplay = (iface: string, side: 'start' | 'end', port: InterfacePort) =>
+    metaFor(iface).names?.[side]?.[String(port.num)] || port.name;
 
   if (interfaces.length === 0) {
     return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
@@ -1732,17 +1772,39 @@ const InterfaceTab: React.FC<{
     }
   };
 
-  const renderPort = (port: InterfacePort, idx: number, isStart: boolean) => {
+  const renderPort = (port: InterfacePort, idx: number, isStart: boolean, ifaceName: string) => {
     const mv = manualValues[idx]?.[String(port.num)] ?? port.value ?? '';
     const cat = port.category;
     const badgeColor = cat === 'inject' ? 'rgba(48,209,88,0.15)' : cat === 'manual' ? 'rgba(10,132,255,0.15)' : 'rgba(255,255,255,0.08)';
     const badgeText = cat === 'inject' ? '#30d158' : cat === 'manual' ? '#0a84ff' : 'rgba(255,255,255,0.3)';
     const label = cat === 'inject' ? '(inject)' : cat === 'manual' ? '(widget)' : '(port)';
+    const side = isStart ? 'start' as const : 'end' as const;
+    const shownName = portDisplay(ifaceName, side, port);
+    const renaming = renamingPort?.iface === ifaceName && renamingPort.side === side && renamingPort.num === port.num;
 
     return (
       <div key={port.num} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', minWidth: 0 }}>
-        {/* Port name */}
-        <div style={{ minWidth: 80, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{port.name}</div>
+        {/* Port name — double-click to rename (display only; execution keys on the port number) */}
+        <div
+          style={{ minWidth: 80, maxWidth: 130, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: renaming ? 'text' : 'pointer', flexShrink: 0 }}
+          title={`value${port.num} — double-click to rename`}
+          onDoubleClick={() => { setRenamingPort({ iface: ifaceName, side, num: port.num }); setRenameDraft(shownName); }}
+        >
+          {renaming ? (
+            <input
+              autoFocus
+              style={{ width: '100%', background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(10,132,255,0.5)', borderRadius: 4, padding: '1px 4px', color: '#fff', fontSize: 12, outline: 'none' }}
+              value={renameDraft}
+              onChange={e => setRenameDraft(e.target.value)}
+              onBlur={() => { renamePort(ifaceName, side, port.num, renameDraft); setRenamingPort(null); }}
+              onKeyDown={e => {
+                e.stopPropagation();
+                if (e.key === 'Enter') { renamePort(ifaceName, side, port.num, renameDraft); setRenamingPort(null); }
+                if (e.key === 'Escape') setRenamingPort(null);
+              }}
+            />
+          ) : shownName}
+        </div>
         {/* Type badge */}
         <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: badgeColor, color: badgeText, minWidth: 70, textAlign: 'center', flexShrink: 0 }}>
           {port.type}
@@ -1837,12 +1899,79 @@ const InterfaceTab: React.FC<{
         <div key={idx} style={{ width: 360, flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{iface.name || `Interface ${idx + 1}`}</div>
 
+          {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
+              开关受形状校验：不满足就拒开并在下方说一句话。 */}
+          {(() => {
+            const meta = metaFor(iface.name);
+            const modes = { block: false, processor: false, ...(meta.modes || {}) };
+            const pipelineIn = iface.start_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
+            const pipelineOut = iface.end_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
+            const mediaIn = iface.start_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
+            const mediaOut = iface.end_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
+            const canBlock = pipelineIn.length > 0 && pipelineOut.length > 0;
+            const canProcessor = mediaIn.length > 0 && mediaOut.length > 0;
+            const toggleRow = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } as React.CSSProperties;
+            const toggleLabel = { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.65)' } as React.CSSProperties;
+            return (
+              <div style={{ marginBottom: 12, padding: 10, background: 'rgba(191,90,242,0.06)', borderRadius: 8, border: '0.5px solid rgba(191,90,242,0.18)' }}>
+                <div style={toggleRow}>
+                  <span style={toggleLabel} title="Block 模式：作为 pipeline 链中的一环，吃进 pipeline 吐出 pipeline。开启后才会出现在 Draw 面板的 Interface 块下拉里。">Block</span>
+                  <IOSToggle checked={modes.block} onChange={v => {
+                    if (v && !canBlock) { setModeHint(prev => ({ ...prev, [idx]: 'Block mode needs at least one PIPELINE input port and one PIPELINE output port.' })); return; }
+                    setModeHint(prev => ({ ...prev, [idx]: '' }));
+                    setIfaceMode(iface.name, 'block', v);
+                  }} />
+                  <span style={{ ...toggleLabel, marginLeft: 12 }} title="Processor 模式：在 Blend 工作台 Tools → Processor 里以图层/蒙版为输入离线执行，不接力 pipeline。">Processor</span>
+                  <IOSToggle checked={modes.processor} onChange={v => {
+                    if (v && !canProcessor) { setModeHint(prev => ({ ...prev, [idx]: 'Processor mode needs at least one image/mask input port and one on the output side.' })); return; }
+                    setModeHint(prev => ({ ...prev, [idx]: '' }));
+                    setIfaceMode(iface.name, 'processor', v);
+                  }} />
+                </div>
+                {modeHint[idx] && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 4 }}>{modeHint[idx]}</div>}
+                {modes.block && pipelineIn.length > 0 && pipelineOut.length > 0 && (() => {
+                  const blockPorts = meta.block_ports || {};
+                  const inNum = blockPorts.in && pipelineIn.some(p => p.num === blockPorts.in) ? blockPorts.in : pipelineIn[0].num;
+                  const outNum = blockPorts.out && pipelineOut.some(p => p.num === blockPorts.out) ? blockPorts.out : pipelineOut[0].num;
+                  const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
+                  const portLabel = (p: InterfacePort, side: 'start' | 'end') =>
+                    `${portDisplay(iface.name, side, p)}（value${p.num}）`;
+                  return (
+                    <>
+                      <div style={{ ...toggleRow, marginBottom: 0 }}>
+                        <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline In</span>
+                        <select style={{ ...styles.paramSelect, flex: 1 }} value={inNum}
+                          onChange={e => setBlockPort(iface.name, 'in', parseInt(e.target.value, 10))}
+                          title="chain 跑到这块时，pipeline 数据从这个 start 端口进。">
+                          {pipelineIn.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'start')}</option>)}
+                        </select>
+                      </div>
+                      <div style={{ ...toggleRow, marginBottom: 0 }}>
+                        <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline Out</span>
+                        <select style={{ ...styles.paramSelect, flex: 1 }} value={outNum}
+                          onChange={e => setBlockPort(iface.name, 'out', parseInt(e.target.value, 10))}
+                          title="这块执行完，pipeline 数据从这个 end 端口出去，交给链上的下一块。">
+                          {pipelineOut.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'end')}</option>)}
+                        </select>
+                      </div>
+                    </>
+                  );
+                })()}
+                {modes.processor && (
+                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                    Runs from the Blend workbench — Tools → Processor.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Start ports (inputs) */}
           {iface.start_ports && iface.start_ports.length > 0 && (
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Start (Inputs)</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {iface.start_ports.map(port => renderPort(port, idx, true))}
+                {iface.start_ports.map(port => renderPort(port, idx, true, iface.name))}
               </div>
             </div>
           )}
@@ -1871,7 +2000,7 @@ const InterfaceTab: React.FC<{
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>End (Outputs)</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {iface.end_ports.map(port => renderPort(port, idx, false))}
+                {iface.end_ports.map(port => renderPort(port, idx, false, iface.name))}
               </div>
             </div>
           )}
