@@ -3635,6 +3635,86 @@ function openSelectionGenerate() {
     openDynamicModal({ x: b.x, y: b.y, w: b.w, h: b.h }, { fromSelection: true });
 }
 
+// ---- Ctrl+C / Ctrl+V (剪贴板, 工作台级) ----
+// Photoshop's clipboard is pixels PLUS the place they came from: a paste lands back on the copy's
+// spot rather than under the cursor, and it comes back as plain pixels instead of a second reference
+// to the source. The record lives outside the document for the same reason the OS clipboard does —
+// copy in one tab, paste in another — and the box it remembers is absolute doc pixels, which is what
+// keeps meaning the same place across a canvas resize (layers hold fractions for exactly that reason).
+let clipboardRecord = null;
+
+// The doc-space box a copy takes. With ants, that box IS the ants — they can never reach past the
+// canvas (clampSelBox already clipped them when the selection was derived). Without them it is the
+// layer's own placed footprint, clipped to the canvas the same way: PS's clipboard is bounded by the
+// document, so a layer that hangs off the edge copies what is on it and pastes back exactly there.
+function clipboardBoxFor(l) {
+    if (hasSelection() && ensureSelection()) return selection.box;
+    // x0/y0 in, x/y out: selection.box already speaks the doc-box convention every other verb here
+    // uses (fillSelection, layerViaCopy), the thumbnail helper is the one that names its corners x0.
+    const b = layerCanvasBBox(l, true);
+    return { x: b.x0, y: b.y0, w: b.w, h: b.h };
+}
+
+// PS Edit → Copy: the ACTIVE LAYER's own contribution (what every visible layer shows inside the ants
+// is Layer via Copy in the right-click menu, not this key), rasterised 1:1 in doc pixels and cut by
+// the selection. The cut is the last step and only when there is one to make — a lone marquee covers
+// its whole box, so multiplying it in would be a full pass over the copy for nothing.
+function copyToClipboard() {
+    const l = getSelected();
+    if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
+    if (!l) { setStatus('Select a layer first to copy', 'error'); return; }
+    // PS greys Copy out on a hidden layer, and the Mask is an overlay rather than content — neither
+    // is on the composite, so there is nothing here to take.
+    if (!l.visible || l.isMaskLayer) { setStatus('Copy — the layer is hidden or is the Mask overlay', 'error'); return; }
+    const sel = hasSelection() && ensureSelection();
+    const box = clipboardBoxFor(l);
+    if (box.w < 1 || box.h < 1) { setStatus('Copy — none of this layer is on the canvas', 'error'); return; }
+    const img = makeBlankCanvas(box.w, box.h);
+    const ctx = img.getContext('2d');
+    ctx.save();
+    ctx.translate(-box.x, -box.y);
+    // The composite's own path, so mask, decal and the effect chain are all in what gets copied.
+    drawLayer(l, ctx);
+    ctx.restore();
+    if (sel && !selection.rect) {
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(selectionMaskSurface(box.w, box.h), 0, 0);
+        ctx.globalCompositeOperation = 'source-over';
+    }
+    clipboardRecord = { img, box: { x: box.x, y: box.y, w: box.w, h: box.h }, name: l.name };
+    setStatus(sel ? `Copied — ${selection.count.toLocaleString()} px of 「${l.name}」`
+                  : `Copied — 「${l.name}」 at ${box.w} × ${box.h}`);
+}
+
+// PS Edit → Paste: a NEW pixel layer, back at the recorded spot, on top of the stack. The surface is
+// blitted rather than handed over, so the record stays intact for another paste and the layer that
+// lands owns its own pixels (a later rasterise or resample swaps objects, never writes into them).
+function pasteFromClipboard() {
+    const rec = clipboardRecord;
+    if (!rec) { setStatus('Clipboard is empty', 'error'); return; }
+    if (!canvasW || !canvasH) { setStatus('Set a canvas size before pasting', 'error'); return; }
+    const img = makeBlankCanvas(rec.box.w, rec.box.h);
+    img.getContext('2d').drawImage(rec.img, 0, 0);
+    const l = addSurfaceLayer({
+        pw: img.width, ph: img.height,
+        // Fractions of the CURRENT canvas, resolving to the same absolute doc pixels the copy came
+        // from — that is the whole of PS's "paste in place".
+        transform: {
+            cx: (rec.box.x + img.width / 2) / canvasW,
+            cy: (rec.box.y + img.height / 2) / canvasH,
+            w: img.width / canvasW,
+            h: img.height / canvasH,
+            rotation: 0,
+        },
+        stack: WORK_STACK,
+        name: `Paste ${img.width}×${img.height}`,
+        img,
+        src: surfaceDataUrl(img),
+    });
+    if (!l) return;
+    setStatus(`Pasted — 「${rec.name}」 landed back at ${rec.box.x}, ${rec.box.y} as 「${l.name}」`);
+}
+
 // ---- gestures ----
 function beginSelDrag(pos, e) {
     selDrag = {
@@ -8765,7 +8845,11 @@ function tagLayerTarget() {
 // Axis-aligned bounding box, in canvas pixels, of a layer's placement transform — the four
 // rotated corners of its box on the canvas. Thumbnails crop to this; the real payload uses the
 // exact inverse transform in layerCompositeForGenerate.
-function layerCanvasBBox(l) {
+//
+// `clip` additionally bounds the far edges by the canvas, so the box is the part of the layer that
+// is ON the document (a clipboard holds nothing off it). Without it only the origin is lifted, which
+// is what a thumbnail wants — it may pad with transparency rather than lose the layer's proportions.
+function layerCanvasBBox(l, clip) {
     const tr = l.transform;
     const cx = tr.cx * canvasW, cy = tr.cy * canvasH;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
@@ -8775,6 +8859,10 @@ function layerCanvasBBox(l) {
         const x = cx + px * co - py * si, y = cy + px * si + py * co;
         if (x < x0) x0 = x; if (x > x1) x1 = x;
         if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    if (clip) {
+        const c = clampSelBox({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+        return { x0: c.x, y0: c.y, w: c.w, h: c.h };
     }
     return { x0: Math.max(0, x0), y0: Math.max(0, y0), w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
 }
@@ -9296,6 +9384,22 @@ window.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
         e.preventDefault();
         selectAll();
+        return;
+    }
+    // Ctrl+C / Ctrl+V — the clipboard pair, shift-free so Ctrl+Shift+C stays free for a merged copy
+    // later. They sit below the text guard on purpose: inside the Extra Prompt box the browser keeps
+    // its own copy/paste. stopPropagation because this page lives inside the node graph, where the
+    // same keys would otherwise also copy and paste a NODE while the workbench is typing.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+        e.preventDefault();
+        e.stopPropagation();
+        copyToClipboard();
+        return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'v' || e.key === 'V')) {
+        e.preventDefault();
+        e.stopPropagation();
+        pasteFromClipboard();
         return;
     }
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
