@@ -448,26 +448,25 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
-/* RGBA 调色盘: 一行色块 (透明底纹上盖当前颜色, 所以 α<1 看得出来) + 一张 PS 式弹层小窗。 */
-.rgba-chip { width: 34px; height: 22px; flex-shrink: 0; padding: 0; position: relative; overflow: hidden;
-    border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer;
+/* RGBA 双色: 前景色块叠在背景色块之上 (PS 工具栏的那一对), 底下常驻一张取色面板 —— 面板调的永远是前景。 */
+.rgba-dual { position: relative; width: 48px; height: 28px; flex-shrink: 0; }
+.rgba-chip { position: absolute; padding: 0; overflow: hidden; border: 0.5px solid rgba(255,255,255,0.28);
+    border-radius: 6px; background-color: transparent; cursor: pointer;
     background-image: linear-gradient(45deg, rgba(255,255,255,0.18) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.18) 75%),
         linear-gradient(45deg, rgba(255,255,255,0.18) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.18) 75%);
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
-.rgba-chip:hover { border-color: rgba(255,255,255,0.45); }
 .rgba-chip span { position: absolute; inset: 2px; border-radius: 4px; display: block; }
-/* 宽度让内容说了算: 三格的尺寸在 JS 里 (RGBA_SV_W/RGBA_STRIP_W), 写死数字必然和它们对不上,
-   溢出会把 Alpha 条挤到窗边上贴住。 */
-.rgba-pop { position: fixed; z-index: 320; display: none; flex-direction: column; gap: 8px; width: fit-content;
-    padding: 10px; border-radius: 10px; background: rgba(28,28,30,0.96);
-    backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 8px 28px rgba(0,0,0,0.5); }
-.rgba-pop.open { display: flex; }
-.rgba-pop-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700;
-    color: rgba(255,255,255,0.8); }
-.rgba-grid { display: flex; gap: 6px; }
+.rgba-chip:hover { border-color: rgba(255,255,255,0.5); }
+.rgba-chip.front { left: 0; top: 0; width: 27px; height: 22px; z-index: 1; }
+.rgba-chip.back { left: 21px; top: 6px; width: 25px; height: 20px; }
+/* 常驻面板铺在色块行下面: SV 方格吃掉栏宽剩下的, 两条定宽。拇指按百分比落位, 拖分隔条就不用重算;
+   JS 里那几个常量只当绘制缓冲的分辨率用。 */
+.rgba-panel { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.rgba-grid { display: flex; gap: 6px; height: 116px; }
 .rgba-field { position: relative; cursor: crosshair; touch-action: none; }
-.rgba-field canvas { display: block; border-radius: 6px; }
+.rgba-field.sv { flex: 1 1 auto; min-width: 0; }
+.rgba-field.strip { flex: 0 0 16px; }
+.rgba-field canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
 .rgba-field.grabbing { cursor: none; }
 .rgba-thumb { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
     border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none; }
@@ -735,7 +734,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-hint" id="maskTargetLabel" title="Paint target and the layer being painted" style="display:none; color:rgba(255,255,255,0.72); font-weight:600;"></div>
             </div>
             <div class="panel-section">
-                <div class="control-row" id="paintColorRow"><label>RGBA</label><button class="rgba-chip" id="rgbaChip" type="button" title="One colour, four channels: the swatch opens the RGBA palette — hue, saturation, value and Alpha together, shared by Brush and Bucket. On a decal it paints translucent strokes; on a mask that same Alpha IS the coverage you pour (0 = nothing, 1 = full). Alt+click on the canvas picks the colour and its Alpha."><span id="rgbaChipFill"></span></button><span id="rgbaValue">#FF3B30 α 1.00</span></div>
+                <div class="control-row" id="paintColorRow"><label>RGBA <span class="tool-key" title="Swap the two colours (X)">X</span></label>
+                    <div class="rgba-dual">
+                        <button class="rgba-chip front" id="rgbaChipFront" type="button" title="Foreground — the colour you paint with. On a decal it paints translucent strokes; on a mask that same Alpha IS the coverage you pour (0 = nothing, 1 = full). Alt+click on the canvas picks into it. The panel below edits this one."><span id="rgbaChipFrontFill"></span></button>
+                        <button class="rgba-chip back" id="rgbaChipBack" type="button" title="Background — the parked colour. Click to bring it forward, same as X."><span id="rgbaChipBackFill"></span></button>
+                    </div>
+                    <span id="rgbaValue">#FF3B30 α 1.00</span>
+                </div>
+                <div class="rgba-panel" id="rgbaPanel">
+                    <div class="rgba-grid">
+                        <div class="rgba-field sv" id="rgbaSvField"><canvas id="rgbaSv"></canvas><span class="rgba-thumb" id="rgbaSvThumb"></span></div>
+                        <div class="rgba-field strip" id="rgbaHueField"><canvas id="rgbaHue"></canvas><span class="rgba-bar" id="rgbaHueBar"></span></div>
+                        <div class="rgba-field strip" id="rgbaAlphaField"><canvas id="rgbaAlpha"></canvas><span class="rgba-bar" id="rgbaAlphaBar"></span></div>
+                    </div>
+                    <div class="rgba-fields"><label>Hex</label><input class="rgba-hex" id="rgbaHex" spellcheck="false" maxlength="7" title="Type #RRGGBB"><span style="flex:1;"></span><label>&alpha;</label><input class="rgba-num" id="rgbaAlphaNum" type="number" min="0" max="100" step="1"><span>%</span></div>
+                </div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="brushSection">
                 <div class="panel-head">
@@ -1030,16 +1043,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     </div>
 </div>
 <div class="layer-menu" id="layerMenu" role="menu"></div>
-<!-- RGBA 调色盘 (fx 之外的页面控件, 逻辑在 paintRGBA 下面的 rgba* 段): 色块点开, 右缘贴 sidePanel 左缘。 -->
-<div class="rgba-pop" id="rgbaPop">
-    <div class="rgba-pop-head"><span>RGBA</span><span style="flex:1;"></span><button class="mini-btn ico-btn" id="rgbaCloseBtn" type="button" title="Close the palette"><svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.4 3.4 10.6 10.6M10.6 3.4 3.4 10.6"/></svg></button></div>
-    <div class="rgba-grid">
-        <div class="rgba-field" id="rgbaSvField"><canvas id="rgbaSv"></canvas><span class="rgba-thumb" id="rgbaSvThumb"></span></div>
-        <div class="rgba-field" id="rgbaHueField"><canvas id="rgbaHue"></canvas><span class="rgba-bar" id="rgbaHueBar"></span></div>
-        <div class="rgba-field" id="rgbaAlphaField"><canvas id="rgbaAlpha"></canvas><span class="rgba-bar" id="rgbaAlphaBar"></span></div>
-    </div>
-    <div class="rgba-fields"><label>Hex</label><input class="rgba-hex" id="rgbaHex" spellcheck="false" maxlength="7" title="Type #RRGGBB"><span style="flex:1;"></span><label>&alpha;</label><input class="rgba-num" id="rgbaAlphaNum" type="number" min="0" max="100" step="1"><span>%</span></div>
-</div>
 <div class="modal-overlay" id="docCloseModal">
     <div class="modal" role="dialog" aria-modal="true" aria-label="Close the project">
         <div class="modal-title">Close this project?</div>
@@ -1224,9 +1227,14 @@ let paintTarget = 'mask';      // 'mask' | 'decal'
 let selection = null;   // { shapes:[{kind:'rect'|'poly', mode, ...}] } + derived mask/box/count/contours
 let selDrag = null;     // {kind, mode, x0, y0, x1, y1, pts:[]} — the gesture in flight
 let antTimer = null;
-let brushColor = '#ff3b30';
+let brushColor = '#ff3b30';    // 前景 = 当前色: 笔刷/油漆桶真正用的就是这三个
 let brushAlpha = 1;            // 0..1 — decal strokes paint translucent; on a mask this IS the coverage
 let brushHue = 0;              // 0..1 — PS 的做法: 纯黑/纯白反解不出色相, 得单独存一份方向, 不然拖到黑点再拖回来方向就丢了
+// PS 式双色: 背景只是**停在后面**的另一色, 除了 X/点它换到前台, 没有任何绘制路径读它。hue 方向
+// 各存各的 —— 换到前台时要把自己那份一起搬过去, 否则灰阶槽换上来会继承上一个颜色的色相。
+let backColor = '#ffffff';
+let backAlpha = 1;
+let backHue = 0;
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
 let dragRowId = null;
@@ -5056,8 +5064,20 @@ function setPaintAlpha(a) {
     updateCursorMode();
 }
 
-function paintColorRGB() {
-    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(brushColor).trim());
+// X (或点背景色块): 前景与背景互换。走 setter 而不是直接对调字段 —— 色块、读数、光标环、
+// 常驻面板全得跟着翻, 而 hue 方向是各槽自己存的, 也得一起搬。
+function swapPaintColors() {
+    const c = brushColor, a = brushAlpha, h = brushHue;
+    setPaintColor(backColor);
+    setPaintAlpha(backAlpha);
+    brushHue = backHue;
+    backColor = c; backAlpha = a; backHue = h;
+    syncRgbaUI();
+    setStatus('Foreground and background swapped');
+}
+
+function paintColorRGB(hex = brushColor) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex).trim());
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 255, 255];
 }
 
@@ -5091,14 +5111,17 @@ function hsvToRgb(h, s, v) {
     return rgb.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255));
 }
 
-// ==================== RGBA 调色盘 ====================
-// 右上角一行色块, 点开一张 PS 式小窗: SV 方块 + 色相条 + Alpha 条 + hex/α 数值。它不引入新的状态
-// —— 每次改动都走 setPaintColor / setPaintAlpha, 而这两个 setter 反过来调 syncRgbaUI(), 所以 Alt+click
-// 拾色、设置回读、hex 手输全都自动把窗同步过来, 不会出现两处读数各说各话。
+// ==================== RGBA 双色 + 常驻调色盘 ====================
+// 侧栏一对 PS 式色块 (前景压在背景上) + 它下面常驻的取色面板: SV 方块 + 色相条 + Alpha 条 + hex/α。
+// 面板调的、笔刷用的都是**前景**; 背景只是停在那儿的另一色, X 或点它把它换到前台。
+// 这一整套不引入新的状态 —— 每次改动都走 setPaintColor / setPaintAlpha, 而这两个 setter 反过来调
+// syncRgbaUI(), 所以 Alt+click 拾色、设置回读、hex 手输、X 交换全都自动把面板同步过来, 不会出现
+// 两处读数各说各话。
 const RGBA_SV_W = 188, RGBA_SV_H = 116, RGBA_STRIP_W = 16, RGBA_STRIP_H = 116;
-const rgbaPop = document.getElementById('rgbaPop');
-const rgbaChip = document.getElementById('rgbaChip');
-const rgbaChipFill = document.getElementById('rgbaChipFill');
+const rgbaChipFront = document.getElementById('rgbaChipFront');
+const rgbaChipBack = document.getElementById('rgbaChipBack');
+const rgbaChipFrontFill = document.getElementById('rgbaChipFrontFill');
+const rgbaChipBackFill = document.getElementById('rgbaChipBackFill');
 const rgbaValueEl = document.getElementById('rgbaValue');
 const rgbaHexInput = document.getElementById('rgbaHex');
 const rgbaAlphaInput = document.getElementById('rgbaAlphaNum');
@@ -5108,12 +5131,11 @@ const rgbaFields = {
     alpha: { box: document.getElementById('rgbaAlphaField'), cv: document.getElementById('rgbaAlpha'), thumb: document.getElementById('rgbaAlphaBar') },
 };
 const rgbaHueCss = () => `hsl(${(brushHue * 360).toFixed(1)}, 100%, 50%)`;
-const rgbaPopOpen = () => rgbaPop.classList.contains('open');
 
+// 常量只决定绘制缓冲的分辨率; 屏幕上多大归 CSS 说 (SV 吃掉栏宽剩下的)。
 function rgbaCanvas(cv, w, h) {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
-    cv.style.width = w + 'px'; cv.style.height = h + 'px';
     const g = cv.getContext('2d');
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     return g;
@@ -5152,53 +5174,26 @@ function drawRgbaFields() {
     g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
 }
 
-// setter 的脸: 色块 + 读数 always, 窗里那些只在开着时算 (没开就别白画三张画布)。
+// setter 的脸: 两块色块 + 读数 + 那张常驻面板 (三格、拇指、hex、α)。
 function syncRgbaUI() {
     const rgb = paintColorRGB();
-    rgbaChipFill.style.background = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${brushAlpha})`;
+    rgbaChipFrontFill.style.background = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${brushAlpha})`;
     rgbaValueEl.textContent = `${String(brushColor).toUpperCase()} α ${brushAlpha.toFixed(2)}`;
-    if (!rgbaPopOpen()) return;
+    const back = paintColorRGB(backColor);
+    rgbaChipBackFill.style.background = `rgba(${back[0]}, ${back[1]}, ${back[2]}, ${backAlpha})`;
     if (document.activeElement !== rgbaHexInput) rgbaHexInput.value = String(brushColor).toUpperCase();
     if (document.activeElement !== rgbaAlphaInput) rgbaAlphaInput.value = String(Math.round(brushAlpha * 100));
     drawRgbaFields();
     const hsv = rgbToHsv(rgb);
-    rgbaFields.sv.thumb.style.left = (hsv[1] * RGBA_SV_W).toFixed(1) + 'px';
-    rgbaFields.sv.thumb.style.top = ((1 - hsv[2]) * RGBA_SV_H).toFixed(1) + 'px';
-    rgbaFields.hue.thumb.style.top = (brushHue * RGBA_STRIP_H).toFixed(1) + 'px';
-    rgbaFields.alpha.thumb.style.top = ((1 - brushAlpha) * RGBA_STRIP_H).toFixed(1) + 'px';
+    // 拇指按**百分比**落位: 格子宽度跟着栏宽走, 写 px 的话一拖分隔条拇指就歪了, 还得为此挂 resize 监听。
+    rgbaFields.sv.thumb.style.left = (hsv[1] * 100).toFixed(2) + '%';
+    rgbaFields.sv.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
+    rgbaFields.hue.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
+    rgbaFields.alpha.thumb.style.top = ((1 - brushAlpha) * 100).toFixed(2) + '%';
 }
 
-// 小窗右缘贴 sidePanel 左缘 (栏内那条 280px 太窄, 塞不下拾色器), 顶边对齐色块自己那一行。
-function positionRgbaPop() {
-    if (!rgbaPopOpen()) return;
-    const panel = document.getElementById('sidePanel').getBoundingClientRect();
-    const chip = rgbaChip.getBoundingClientRect();
-    const w = rgbaPop.offsetWidth, h = rgbaPop.offsetHeight;
-    let left = panel.left - w - 8;
-    if (left < 8) left = Math.max(8, Math.min(panel.right - w - 8, window.innerWidth - w - 8));
-    let top = Math.max(8, Math.min(chip.top, window.innerHeight - h - 8));
-    rgbaPop.style.left = Math.round(left) + 'px';
-    rgbaPop.style.top = Math.round(top) + 'px';
-}
-
-function openRgbaPop() {
-    rgbaPop.classList.add('open');
-    syncRgbaUI();
-    positionRgbaPop();
-}
-
-function closeRgbaPop() { rgbaPop.classList.remove('open'); }
-
-rgbaChip.addEventListener('click', () => { rgbaPopOpen() ? closeRgbaPop() : openRgbaPop(); });
-document.getElementById('rgbaCloseBtn').addEventListener('click', closeRgbaPop);
-// 窗外按下就收 (capture: 画布上的按下要抢在工具落笔之前关掉窗)。
-document.addEventListener('pointerdown', ev => {
-    if (!rgbaPopOpen()) return;
-    if (rgbaPop.contains(ev.target) || rgbaChip.contains(ev.target)) return;
-    closeRgbaPop();
-}, true);
-window.addEventListener('resize', positionRgbaPop);
-document.getElementById('panelScroll').addEventListener('scroll', positionRgbaPop, { passive: true });
+// 点背景色块 = 把它换到前台, 与 X 同一条路 (PS 里点后面那块也是提到前面)。
+rgbaChipBack.addEventListener('click', swapPaintColors);
 
 // 拖三格: 按下即定位、按住拖动连续改, 用 pointer capture 所以拖出格子也继续跟手。
 function bindRgbaField(field, apply) {
@@ -5233,7 +5228,7 @@ bindRgbaField(rgbaFields.hue, (x, y) => {
         setPaintColor('#' + rgb.map(v => v.toString(16).padStart(2, '0')).join(''));
     } else {
         drawRgbaFields();
-        rgbaFields.hue.thumb.style.top = (brushHue * RGBA_STRIP_H).toFixed(1) + 'px';
+        rgbaFields.hue.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
     }
 });
 bindRgbaField(rgbaFields.alpha, (x, y) => setPaintAlpha(1 - y));
@@ -8723,7 +8718,6 @@ window.addEventListener('keydown', e => {
     // it keeps working while the extra-prompt box has focus — Esc has no native use in a text box.
     if (e.key === 'Escape') {
         e.preventDefault();
-        if (rgbaPopOpen()) { closeRgbaPop(); return; }
         if (layerMenuOpen()) { closeLayerMenu(); return; }
         if (addMenuOpen) { closeAddMenu(); return; }
         if (cancelSelDrag()) return;      // a marquee mid-sweep is not yet a selection
@@ -8775,6 +8769,8 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
+    // X swaps the two colours (PS). It is not a tool, so it answers whatever mode is armed.
+    if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); swapPaintColors(); return; }
     // PS's own letters: M is the marquee family, L the lasso family. Both are canvas-level tools,
     // so unlike B/E/G they need no selected layer.
     if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
