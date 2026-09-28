@@ -673,6 +673,18 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-section">
                 <div class="panel-head">
+                    <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
+                    <div class="mini-group">
+                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle; Shift squares it. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
+                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
+                        <button class="mini-btn" id="selectAllBtn" title="Select the whole canvas (Ctrl+A)">All</button>
+                        <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
+                    </div>
+                </div>
+                <div class="panel-hint" id="selectionReadout" style="display:none;"></div>
+            </div>
+            <div class="panel-section">
+                <div class="panel-head">
                     <div class="panel-label" id="transformLabel">Transform</div>
                     <div class="mini-group">
                         <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">T</span></button>
@@ -1073,7 +1085,7 @@ let selectedId = null;
 // activeGroup() — a plain `selectedId = …` anywhere else points the anchor at a layer the group does
 // not contain, which dissolves the group by construction instead of by remembering 14 call sites.
 let groupIds = new Set();
-let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'none'
+let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'rect' | 'lasso' | 'none'
 
 // The pure Mask layer. It deliberately does NOT live in `layers`: ordering, deletion,
 // transform, composition and thumbnails all stay untouched, and `render()` never draws it
@@ -1161,6 +1173,12 @@ let eraserGamma = 2.0;
 
 // Both tools paint onto the same surface, chosen here: the layer's mask (coverage) or its decal (colour).
 let paintTarget = 'mask';      // 'mask' | 'decal'
+// The canvas-level pixel selection (see the 像素选区 section): shapes are the source of truth,
+// everything else about it is derived. 'rect' / 'lasso' join the mode list as its two tools.
+let selection = null;   // { shapes:[{kind:'rect'|'poly', mode, ...}] } + derived mask/box/count/contours
+let selDrag = null;     // {kind, mode, x0, y0, x1, y1, pts:[], square} — the gesture in flight
+let antPhase = 0;
+let antTimer = null;
 let brushColor = '#ff3b30';
 let brushAlpha = 1;            // 0..1 — decal strokes paint translucent; on a mask this IS the coverage
 
@@ -2265,6 +2283,8 @@ function refreshCursor() {
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
+    // Both marquee tools aim at a pixel, so the pointer is the crosshair PS uses.
+    if (mode === 'rect' || mode === 'lasso') { setCursor('crosshair'); return; }
     // The managed brush ring replaces the native cursor; Ctrl's shortcut mode shows the same ring
     // even when the toolbar is on some other tool. The bucket opts out of the ring: it is a click
     // tool, so the pointer is the bucket itself (Ctrl still means "paint with the brush ring").
@@ -2693,6 +2713,7 @@ function drawOverlay() {
     overlayCtx.clearRect(0, 0, w, h);
     drawMaskTint();
     drawRectPreview();
+    drawSelectionAnts();
     if (mode === 'canvasModify') {
         if (canvasW) drawAdjustBox(canvasHandlePoints(), false);
         return;
@@ -2783,6 +2804,437 @@ function drawAdjustBox(pts, showRotate) {
     }
 }
 
+// ==================== 像素选区（文档级，所有图层共用） ====================
+// One selection per document, NOT per layer: it lives in canvas (doc) pixels and every layer's
+// mask, every decal and the Mask layer get clipped by the same bitmap. That is also why it is not
+// a layer effect and never reaches the backend — it constrains what the tools can land, nothing
+// else. The shapes are the source of truth (vector, doc px); the alpha bitmap, the boundary
+// contours and the marching-ants path are all derived and rebuilt lazily, so a canvas resize
+// (which moves the doc origin under the pixels) costs nothing but a rebuild on next use.
+//
+// Compositing the ants from the BITMAP rather than from the shape outlines is what makes
+// subtract/intersect honest: the visible boundary is the boolean result, so a hole punched by an
+// Alt-drag shows its own outline instead of leaving the original box marching around it.
+const SEL_MIN_DRAG = 2;          // doc px — a stray click is not a marquee
+const SEL_LASSO_SPACING = 1.2;   // screen px between lasso samples (scaled by 1/zoom)
+// Scratch the selection is rasterized into — never bigger than the selection's own bounding box.
+const selBmpCanvas = document.createElement('canvas');
+const selBmpCtx = selBmpCanvas.getContext('2d');
+// Scratch the ink is clipped in before it lands on a paint surface (layer-sized, like strokeCanvas).
+const selClipCanvas = document.createElement('canvas');
+const selClipCtx = selClipCanvas.getContext('2d');
+
+function hasSelection() { return !!selection && !!selection.mask && selection.count > 0; }
+
+function selectionMode(e) {
+    // PS's four boolean modes are the two modifier keys, in either order of thinking.
+    if (e.shiftKey && e.altKey) return 'intersect';
+    if (e.altKey) return 'subtract';
+    if (e.shiftKey) return 'add';
+    return 'replace';
+}
+
+function selShapeBounds(s) {
+    if (s.kind === 'rect') {
+        const x = Math.min(s.x0, s.x1), y = Math.min(s.y0, s.y1);
+        return { x, y, w: Math.abs(s.x1 - s.x0), h: Math.abs(s.y1 - s.y0) };
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of s.pts) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+function traceSelPath(ctx, s) {
+    ctx.beginPath();
+    if (s.kind === 'rect') {
+        const b = selShapeBounds(s);
+        ctx.rect(b.x, b.y, b.w, b.h);
+        return;
+    }
+    ctx.moveTo(s.pts[0].x, s.pts[0].y);
+    for (let i = 1; i < s.pts.length; i++) ctx.lineTo(s.pts[i].x, s.pts[i].y);
+    ctx.closePath();
+}
+
+// Re-derive bitmap + mask + contours whenever they no longer describe the current canvas (a size
+// change) or the shapes were rewritten (a commit). Returns false when nothing is selected.
+//
+// The bitmap is only the selection's bounding box, not the whole canvas: a 40 MP document would
+// otherwise park another 160 MB RGBA next to the composite just to remember a rectangle. Shapes
+// are filled in doc coordinates under a translate, and whatever falls outside the canvas is
+// clipped away with it — a selection cannot reach past the canvas, same as in PS.
+function ensureSelection() {
+    if (!selection || !selection.shapes.length) { selection = null; return false; }
+    if (!canvasW || !canvasH) { selection = null; return false; }
+    if (selection.mask && selection.atCanvas === canvasW + 'x' + canvasH) return true;
+
+    // Conservative box = union of the shapes since the last 'replace'; subtract and intersect can
+    // only shrink what is inside it, so keeping it is conservative but never wrong.
+    let box = null;
+    for (const s of selection.shapes) {
+        const sb = selShapeBounds(s);
+        if (s.mode === 'replace' || !box) box = { x: sb.x, y: sb.y, w: sb.w, h: sb.h };
+        else {
+            const x1 = Math.max(box.x + box.w, sb.x + sb.w), y1 = Math.max(box.y + box.h, sb.y + sb.h);
+            box.x = Math.min(box.x, sb.x); box.y = Math.min(box.y, sb.y);
+            box.w = x1 - box.x; box.h = y1 - box.y;
+        }
+    }
+    box.x = Math.max(0, Math.floor(box.x)); box.y = Math.max(0, Math.floor(box.y));
+    box.w = Math.max(0, Math.min(canvasW - box.x, Math.ceil(box.x + box.w) - box.x));
+    box.h = Math.max(0, Math.min(canvasH - box.y, Math.ceil(box.y + box.h) - box.y));
+    if (!box.w || !box.h) { selection.mask = null; selection.count = 0; return false; }
+
+    // The alpha buffer lives on one module-level canvas: a selection is rebuilt on every commit,
+    // and resizing a canvas clears it, so no stale pixel can survive into the new mask.
+    selBmpCanvas.width = box.w; selBmpCanvas.height = box.h;
+    const b = selBmpCtx;
+    resetCtx(b);
+    b.clearRect(0, 0, box.w, box.h);
+    b.translate(-box.x, -box.y);
+    b.fillStyle = '#fff';
+    for (const s of selection.shapes) {
+        b.globalCompositeOperation = s.mode === 'subtract' ? 'destination-out'
+            : s.mode === 'intersect' ? 'destination-in' : 'source-over';
+        traceSelPath(b, s);
+        b.fill();
+    }
+    resetCtx(b);
+
+    const data = b.getImageData(0, 0, box.w, box.h).data;
+    const wide = new Uint8Array(box.w * box.h);
+    let count = 0, x0 = box.w, y0 = box.h, x1 = -1, y1 = -1;
+    for (let p = 0, i = 3; p < wide.length; p++, i += 4) {
+        if (data[i] < 128) continue;
+        wide[p] = 1; count++;
+        const px = p % box.w, py = (p - px) / box.w;
+        if (px < x0) x0 = px; if (px > x1) x1 = px;
+        if (py < y0) y0 = py; if (py > y1) y1 = py;
+    }
+    selection.count = count;
+    if (!count) { selection.mask = null; return false; }
+    // Tighten to the pixels that actually survived the boolean, then hand the contour tracer and
+    // the sampler a mask that matches that smaller box.
+    const tight = { x: box.x + x0, y: box.y + y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    const mask = new Uint8Array(tight.w * tight.h);
+    for (let y = 0; y < tight.h; y++) {
+        const src = (y0 + y) * box.w + x0, dst = y * tight.w;
+        for (let x = 0; x < tight.w; x++) mask[dst + x] = wide[src + x];
+    }
+    selection.box = tight;
+    selection.mask = mask;
+    selection.atCanvas = canvasW + 'x' + canvasH;
+    selection.ants = null;
+    selection.contours = traceSelContours(mask, tight.w, tight.h);
+    return true;
+}
+
+// Boundary edges of the boolean result, chained into closed loops and stripped of collinear
+// vertices (a rectangle comes out as 4 points, not its perimeter). Every boundary edge is emitted
+// with the selected side kept to one hand, so in-degree equals out-degree at each corner and the
+// greedy walk below closes each loop without dropping a segment.
+function traceSelContours(mask, w, h) {
+    const inside = (x, y) => x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x] === 1;
+    const stride = w + 1;
+    const out = new Map();          // corner key → [destination corner key]
+    const add = (ax, ay, bx, by) => {
+        const k = ay * stride + ax;
+        const list = out.get(k);
+        if (list) list.push(by * stride + bx); else out.set(k, [by * stride + bx]);
+    };
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            if (!inside(x, y)) continue;
+            if (!inside(x, y - 1)) add(x, y, x + 1, y);
+            if (!inside(x + 1, y)) add(x + 1, y, x + 1, y + 1);
+            if (!inside(x, y + 1)) add(x + 1, y + 1, x, y + 1);
+            if (!inside(x - 1, y)) add(x, y + 1, x, y);
+        }
+    }
+    const contours = [];
+    for (const startKey of Array.from(out.keys())) {
+        while ((out.get(startKey) || []).length) {
+            const pts = [];
+            let key = startKey, dirX = 0, dirY = 0;
+            for (;;) {
+                const list = out.get(key);
+                if (!list || !list.length) break;
+                const next = list.pop();
+                const nx = next % stride, ny = (next - nx) / stride;
+                const x = key % stride, y = (key - x) / stride;
+                const dx = nx - x, dy = ny - y;
+                if (dx !== dirX || dy !== dirY) { pts.push({ x, y }); dirX = dx; dirY = dy; }
+                key = next;
+                if (key === startKey) break;      // closePath() supplies the closing vertex
+            }
+            if (pts.length > 1) contours.push(pts);
+        }
+    }
+    return contours;
+}
+
+// Ramer–Douglas–Peucker on each loop, with the tolerance tied to the zoom: pixel-exact when the
+// view is zoomed in (the staircase IS the selection), progressively straightened out when it is
+// not, which is what keeps a full-canvas lasso cheap to re-stroke 14 times a second.
+function simplifySelPts(pts, eps) {
+    if (pts.length < 3 || eps <= 0) return pts;
+    const keep = new Uint8Array(pts.length);
+    keep[0] = keep[pts.length - 1] = 1;
+    const stack = [[0, pts.length - 1]];
+    const dist = (p, a, b) => {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const l2 = dx * dx + dy * dy;
+        if (!l2) return Math.hypot(p.x - a.x, p.y - a.y);
+        let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+    };
+    while (stack.length) {
+        const [a, b] = stack.pop();
+        let worst = 0, at = -1;
+        for (let i = a + 1; i < b; i++) {
+            const d = dist(pts[i], pts[a], pts[b]);
+            if (d > worst) { worst = d; at = i; }
+        }
+        if (worst > eps && at > 0) { keep[at] = 1; stack.push([a, at], [at, b]); }
+    }
+    return pts.filter((p, i) => keep[i]);
+}
+
+function selectionAntsPath() {
+    if (!selection || !selection.contours) return null;
+    const z = view.zoom || 1;
+    // Cache key is a coarse zoom bucket: re-simplifying on every wheel tick would be worse than
+    // the stroke itself, and a 1.5× step is below what the eye reads as a change in the ants.
+    const bucket = Math.log(z) / Math.log(1.5);
+    if (selection.ants && selection.antsBucket === bucket) return selection.ants;
+    const eps = Math.max(0.5, 1.2 / z);
+    const ox = selection.box.x, oy = selection.box.y;
+    const path = new Path2D();
+    for (const loop of selection.contours) {
+        const pts = simplifySelPts(loop, eps);
+        if (pts.length < 2) continue;
+        path.moveTo(pts[0].x + ox, pts[0].y + oy);
+        for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x + ox, pts[i].y + oy);
+        path.closePath();
+    }
+    selection.ants = path;
+    selection.antsBucket = bucket;
+    return path;
+}
+
+// The geometry of the drag in flight, as a path in doc space (the bitmap is only rebuilt on
+// release, so a sweep does not re-trace contours per pointer event).
+function selDragPath() {
+    const path = new Path2D();
+    if (!selDrag) return path;
+    if (selDrag.kind === 'rect') {
+        const p = selDrag.points();
+        path.moveTo(p[0].x, p[0].y);
+        for (let i = 1; i < p.length; i++) path.lineTo(p[i].x, p[i].y);
+        path.closePath();
+        return path;
+    }
+    const pts = selDrag.pts;
+    if (!pts.length) return path;
+    path.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x, pts[i].y);
+    path.closePath();
+    return path;
+}
+
+function drawSelectionAnts() {
+    const committed = hasSelection() && ensureSelection();
+    if (!committed && !selDrag) return;
+    const path = selDrag ? selDragPath() : selectionAntsPath();
+    if (!path) return;
+    const z = Math.max(1e-4, view.zoom);
+    const ctx = overlayCtx;
+    const cos = Math.cos(view.rotation), sin = Math.sin(view.rotation);
+    ctx.save();
+    const mo = linMap(modOrigin);
+    ctx.transform(cos * z * view.flipX, sin * z * view.flipX, -sin * z, cos * z, view.panX + mo.x, view.panY + mo.y);
+    // Dash lengths and the marching offset are given in doc units so the CTM scales them into a
+    // constant on-screen size — the same contract the checkerboard keeps.
+    ctx.lineJoin = 'miter';
+    ctx.lineCap = 'butt';
+    ctx.setLineDash([]);
+    ctx.lineWidth = 2 / z;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.stroke(path);
+    ctx.setLineDash([4 / z, 4 / z]);
+    ctx.lineDashOffset = -antPhase / z;
+    ctx.lineWidth = 1 / z;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke(path);
+    ctx.restore();
+}
+
+function antsNeeded() { return (!!selDrag || hasSelection()) && !!canvasW; }
+
+function syncAntTimer() {
+    if (antsNeeded() && !antTimer) {
+        antTimer = setInterval(() => { antPhase = (antPhase + 1) % 8; drawOverlay(); }, 70);
+    } else if (!antsNeeded() && antTimer) {
+        clearInterval(antTimer); antTimer = null;
+    }
+}
+
+function commitSelectionShape(shape) {
+    if (!selection) selection = { shapes: [] };
+    if (shape.mode === 'replace') selection.shapes = [shape];
+    else selection.shapes.push(shape);
+    selection.mask = null;                      // the shapes moved; force the rebuild
+    const ok = ensureSelection();
+    const what = shape.kind === 'rect' ? 'Marquee' : 'Lasso';
+    if (!ok) {
+        selection = null;
+        setStatus(what + ' — nothing selected', 'error');
+    } else {
+        setStatus(`${what} ${selection.count.toLocaleString()} px selected`
+            + (shape.mode === 'add' ? ' · added' : shape.mode === 'subtract' ? ' · subtracted' : shape.mode === 'intersect' ? ' · intersected' : ''));
+    }
+    selectionUI();
+    drawOverlay();
+    syncAntTimer();
+}
+
+function clearSelection() {
+    if (!selection) return false;
+    selection = null;
+    selectionUI();
+    drawOverlay();
+    syncAntTimer();
+    return true;
+}
+
+function selectAll() {
+    if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
+    commitSelectionShape({ kind: 'rect', mode: 'replace', x0: 0, y0: 0, x1: canvasW, y1: canvasH });
+    setStatus('Everything selected');
+}
+
+// Cut the accumulated ink down to the selection before it reaches a paint surface. The stroke was
+// accumulated with the doc→layer transform applied, so the doc-space bitmap goes through the very
+// same transform and lands exactly on the ink.
+function clipInkToSelection(ink, l) {
+    if (!hasSelection() || !ensureSelection()) return ink;
+    const { w, h } = nativeSize(l.img);
+    if (selClipCanvas.width !== w || selClipCanvas.height !== h) { selClipCanvas.width = w; selClipCanvas.height = h; }
+    resetCtx(selClipCtx);
+    selClipCtx.clearRect(0, 0, w, h);
+    selClipCtx.drawImage(ink, 0, 0, w, h);
+    selClipCtx.globalCompositeOperation = 'destination-in';
+    setBrushCtxTransform(selClipCtx, l);
+    // Nearest-neighbour on purpose: the selection is whole doc pixels, and bilinear resampling into
+    // a scaled layer would soften the edge and leak faint ink just outside the ants.
+    selClipCtx.imageSmoothingEnabled = false;
+    selClipCtx.drawImage(selBmpCanvas, selection.box.x, selection.box.y);
+    resetCtx(selClipCtx);
+    return selClipCanvas;
+}
+
+// ---- gestures ----
+function beginSelDrag(pos, e) {
+    selDrag = {
+        kind: mode === 'lasso' ? 'poly' : 'rect',
+        mode: selectionMode(e),
+        x0: pos.x, y0: pos.y, x1: pos.x, y1: pos.y,
+        pts: [{ x: pos.x, y: pos.y }],
+        square: false,
+        points() {
+            if (this.kind !== 'rect') return this.pts;
+            let x1 = this.x1, y1 = this.y1;
+            if (this.square) {
+                // Shift squares the marquee on the longer side, keeping the anchor corner fixed.
+                const dx = x1 - this.x0, dy = y1 - this.y0, m = Math.max(Math.abs(dx), Math.abs(dy));
+                x1 = this.x0 + Math.sign(dx || 1) * m; y1 = this.y0 + Math.sign(dy || 1) * m;
+            }
+            return [
+                { x: Math.min(this.x0, x1), y: Math.min(this.y0, y1) },
+                { x: Math.max(this.x0, x1), y: Math.min(this.y0, y1) },
+                { x: Math.max(this.x0, x1), y: Math.max(this.y0, y1) },
+                { x: Math.min(this.x0, x1), y: Math.max(this.y0, y1) },
+            ];
+        },
+    };
+    setCursor('crosshair');
+    setStatus(selDrag.kind === 'rect'
+        ? 'Drag the marquee — Shift adds to a square, Alt subtracts, Shift+Alt intersects (Esc leaves the tool)'
+        : 'Hold and sweep the lasso — it closes where you release (Alt subtracts, Shift adds)');
+}
+
+function updateSelDrag(pos) {
+    if (!selDrag) return;
+    selDrag.square = keyShift && selDrag.kind === 'rect';
+    if (selDrag.kind === 'rect') { selDrag.x1 = pos.x; selDrag.y1 = pos.y; }
+    else {
+        const last = selDrag.pts[selDrag.pts.length - 1];
+        const minDist = SEL_LASSO_SPACING / Math.max(0.05, view.zoom);
+        if (Math.hypot(pos.x - last.x, pos.y - last.y) >= minDist) selDrag.pts.push({ x: pos.x, y: pos.y });
+    }
+    drawOverlay();
+}
+
+function endSelDrag() {
+    const d = selDrag;
+    selDrag = null;
+    if (!d) return;
+    if (d.kind === 'rect') {
+        const b = selShapeBounds(d);
+        if (b.w < SEL_MIN_DRAG || b.h < SEL_MIN_DRAG) {
+            refreshCursor(); drawOverlay(); syncAntTimer();
+            setStatus('Marquee too small', 'error');
+            return;
+        }
+        commitSelectionShape({ kind: 'rect', mode: d.mode, x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h });
+        return;
+    }
+    const closed = d.pts;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of closed) {
+        if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+    if (maxX - minX < SEL_MIN_DRAG || maxY - minY < SEL_MIN_DRAG) {
+        refreshCursor(); drawOverlay(); syncAntTimer();
+        setStatus('Lasso too small', 'error');
+        return;
+    }
+    commitSelectionShape({ kind: 'poly', mode: d.mode, pts: closed });
+}
+
+function cancelSelDrag() {
+    if (!selDrag) return false;
+    selDrag = null;
+    drawOverlay();
+    syncAntTimer();
+    return true;
+}
+
+// ---- panel ----
+function fmtArea(px) {
+    return px >= 1e6 ? (px / 1e6).toFixed(2) + ' MP' : px.toLocaleString() + ' px';
+}
+
+function selectionUI() {
+    const rectOn = mode === 'rect', lassoOn = mode === 'lasso';
+    document.getElementById('rectSelectBtn').classList.toggle('active', rectOn);
+    document.getElementById('lassoSelectBtn').classList.toggle('active', lassoOn);
+    const sel = hasSelection();
+    let text = '';
+    if (sel) {
+        const b = selection.box;
+        text = `${fmtArea(selection.count)} · ${Math.round(b.w)} × ${Math.round(b.h)} px`
+            + (selection.shapes.length > 1 ? ` · ${selection.shapes.length} shapes` : '');
+    } else if (rectOn || lassoOn) {
+        text = (rectOn ? 'Marquee (M)' : 'Lasso (L)') + ' — drag to select';
+    }
+    setReadout(document.getElementById('selectionReadout'), text);
+}
 // ==================== 宿主预览 ====================
 // The canvas composite IS the Context Image, so the host shows a live thumbnail of it next to
 // the detailer settings. Throttled to ~8 fps: `render()` runs on every pointermove while
@@ -3036,6 +3488,10 @@ function restoreState(s, opts) {
     // A replay rewrites every live layer object, so an open text editor would commit its draft
     // into a layer that no longer exists. Land the edit first, then replay.
     if (textEditingId !== null) commitTextEditor();
+    // A selection is doc-space geometry with no place in a history record, and this replay
+    // re-canvas-sizes everything it was measured against (undo, redo, tab switch, Load) — so it
+    // goes rather than pointing at pixels that no longer mean what they did.
+    clearSelection();
     // The Mask layer is a live object the paint engine mutates in place, so it travels with the
     // document and is adopted before anything below writes through it.
     if (asDocument && s.maskLayer) maskLayer = s.maskLayer;
@@ -4252,6 +4708,11 @@ function moveLayer(fromId, toId, above, toStack) {
 // ==================== 模式 ====================
 function setMode(m) {
     if (m === 'mask' && !getSelected()) { setStatus('Select a layer to paint its mask', 'error'); return; }
+    // The marquee and the lasso select canvas pixels, so they need a canvas to measure against.
+    if ((m === 'rect' || m === 'lasso') && (!canvasW || !canvasH)) {
+        setStatus('Set a canvas size, or add an image, before selecting', 'error');
+        return;
+    }
     // An armed border-drag (Canvas Modify / Expand) owns the mode slot until Enter or Esc: any
     // other tool switch would strand a half-applied preview with no way back to its snapshot.
     // Exiting to 'none' stays legal — that is exactly what apply / cancel do on the way out.
@@ -4272,6 +4733,7 @@ function syncModeUI() {
     document.getElementById('zoomToolBtn').classList.toggle('active', mode === 'zoom');
     document.getElementById('panToolBtn').classList.toggle('active', mode === 'pan');
     document.getElementById('rotateToolBtn').classList.toggle('active', mode === 'rotate');
+    selectionUI();
     syncToolUI();
     syncBrushCursor();
     refreshCursor();
@@ -4357,13 +4819,14 @@ function syncPaintUI() {
         : 'Reset this layer\'s mask to fully visible';
     maskDecalLabel.textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
+    const selNote = hasSelection() ? ' A selection is live: it clips this tool, so nothing lands outside the ants.' : '';
     maskDecalLabel.title = maskLayerSel
         ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer.'
         : decal
         ? 'Paint the decal: colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.'
         : 'Paint the mask (coverage): white shows the image, black hides it. The Color\u2019s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
-    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to fold the settings.`;
-    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to fold the settings.`;
+    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to fold the settings.` + selNote;
+    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to fold the settings.` + selNote;
     updateMaskTargetLabel();
     updateCursorMode();
 }
@@ -5227,7 +5690,7 @@ function livePreviewStroke() {
         ink = strokeTintCanvas;
     }
     if (maskInk) c.globalAlpha = brushAlpha;
-    c.drawImage(ink, 0, 0, w, h);
+    c.drawImage(clipInkToSelection(ink, l), 0, 0, w, h);
     if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
     if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
@@ -5328,8 +5791,22 @@ function bucketFillAt(pos) {
     const pctx = paintSurfaceCtx(l);
     const surf = pctx.getImageData(0, 0, w, h);
     const od = surf.data;
+    // The flood runs in layer pixels but the selection is doc-space geometry: step back out
+    // through the inverse of setBrushCtxTransform to ask it. Read straight off the mask because
+    // this loop runs once per pixel of the layer.
+    const selClip = hasSelection() && ensureSelection();
+    const sbox = selClip ? selection.box : null;
+    const smask = selClip ? selection.mask : null;
+    let skipped = 0;
     for (let p = 0; p < w * h; p++) {
         if (!region[p]) continue;
+        if (selClip) {
+            const px = p % w, py = (p - px) / w;
+            const X = (px - w / 2) * sx, Y = (py - h / 2) * sy;
+            const mx = Math.floor(X * c - Y * s + tr.cx * canvasW) - sbox.x;
+            const my = Math.floor(X * s + Y * c + tr.cy * canvasH) - sbox.y;
+            if (mx < 0 || my < 0 || mx >= sbox.w || my >= sbox.h || smask[my * sbox.w + mx] !== 1) { skipped++; continue; }
+        }
         const j = p * 4;
         od[j] = ir; od[j + 1] = ig; od[j + 2] = ib; od[j + 3] = fa;
     }
@@ -5340,7 +5817,8 @@ function bucketFillAt(pos) {
     else refreshDecalThumb(l);
     syncPaintUI();
     render();
-    setStatus(`Bucket — filled ${count} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`);
+    setStatus(`Bucket — filled ${(count - skipped).toLocaleString()} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`
+        + (selClip && skipped ? ` · ${skipped.toLocaleString()} px outside the selection left alone` : ''));
 }
 
 // ==================== 吸色（画笔模式下按住 Alt + 左键） ====================
@@ -5543,6 +6021,13 @@ viewport.addEventListener('mousedown', e => {
         beginMaskStroke(pos, e.button === 2, e.button === 2 ? 'Ctrl + right — erasing the Mask layer' : 'Ctrl + left — painting the Mask layer');
         return;
     }
+    // The marquee tools own the press: a sweep builds a selection instead of picking a layer or
+    // painting. The right button is inert here, as it is for the paint tools.
+    if (mode === 'rect' || mode === 'lasso') {
+        e.preventDefault();
+        if (e.button === 0) beginSelDrag(pos, e);
+        return;
+    }
     if (mode === 'mask' && e.altKey && e.button === 2) { beginSizeDrag(e); e.preventDefault(); return; }
     if (mode === 'mask' && e.altKey && e.button === 0 && (maskTool === 'brush' || maskTool === 'bucket')) { beginPick(e, pos); e.preventDefault(); return; }
     if (mode === 'mask') {
@@ -5625,6 +6110,7 @@ window.addEventListener('mousemove', e => {
     if (sizeDrag) { updateSizeDrag(e); return; }   // 尺寸拖拽时环钉在按下的位置, 只有 HUD 跟着指针
     moveCursor(e);
     if (rectDrag) { updateRectDrag(screenToDoc(toScreenCoords(e))); return; }
+    if (selDrag) { updateSelDrag(screenToDoc(toScreenCoords(e))); return; }
     if (modDrag && modDragging) { updateCanvasModify(screenToDoc(toScreenCoords(e))); return; }
     if (picking) { updatePick(e); return; }
     if (!canvasW) return;
@@ -5660,6 +6146,7 @@ window.addEventListener('mouseup', e => {
     if (picking) endPick(e);
     if (sizeDrag) endSizeDrag(e);
     if (rectDrag) endRectDrag();
+    if (selDrag) endSelDrag();
     // modDrag deliberately survives the release: the tentative canvas stays armed until Enter
     // applies it or Esc rewinds it — but modDragging ends, so the rect stops following the
     // pointer (a fresh press on a handle starts a new drag from the tentative geometry).
@@ -6525,6 +7012,12 @@ for (const id of ['brushSection', 'bucketSection', 'eraserSection', 'textSection
 document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
 document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
 document.getElementById('rotateToolBtn').addEventListener('click', () => activateMode('rotate'));
+document.getElementById('rectSelectBtn').addEventListener('click', () => activateMode('rect'));
+document.getElementById('lassoSelectBtn').addEventListener('click', () => activateMode('lasso'));
+document.getElementById('selectAllBtn').addEventListener('click', selectAll);
+document.getElementById('deselectBtn').addEventListener('click', () => {
+    if (clearSelection()) setStatus('Selection cleared'); else setStatus('Nothing was selected');
+});
 
 // Clear All is per stack: emptying the layers must never throw away the guidance stack sitting on
 // top of it (and the other way round). The Mask layer is a channel, not a stack member, so the
@@ -7722,6 +8215,7 @@ window.addEventListener('keydown', e => {
         e.preventDefault();
         if (layerMenuOpen()) { closeLayerMenu(); return; }
         if (addMenuOpen) { closeAddMenu(); return; }
+        if (cancelSelDrag()) return;      // a marquee mid-sweep is not yet a selection
         if (cancelRectDrag()) return;      // the Dynamic Layer rectangle is a mode of its own
         setMode('none');
         if (resetViewRotation()) setStatus('View rotation reset');
@@ -7746,6 +8240,18 @@ window.addEventListener('keydown', e => {
         return;
     }
     const l = getSelected();
+    // Ctrl+D / Ctrl+A are the selection's two whole-document commands. They sit below the text
+    // guard on purpose: inside a text field the browser keeps its own select-all.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();
+        if (clearSelection()) setStatus('Selection cleared'); else setStatus('Nothing was selected');
+        return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        selectAll();
+        return;
+    }
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
     if (e.key === 'Shift') { keyShift = true; return; }
@@ -7756,6 +8262,10 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('brush'); return; }
     if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('eraser'); return; }
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
+    // PS's own letters: M is the marquee family, L the lasso family. Both are canvas-level tools,
+    // so unlike B/E/G they need no selected layer.
+    if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
+    if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('lasso'); return; }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     // T shows the transform box; Alt+T arms the rectangle drag that draws a NEW text layer —
     // the layer lands in the box the user sweeps, not at a default size. Ctrl+T is kept as an
