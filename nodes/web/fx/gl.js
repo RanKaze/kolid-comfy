@@ -10,7 +10,7 @@ const FX_MAX_PIXELS = 12e6;              // 5 × RGBA16F ≈ 480 MB 的地板,�
 const FX_KAWASE_MAX_ITER = 8;            // 着色器里那个常数次循环的上界
 const fxgl = {
     gl: null, dead: '', skip: '', w: 0, h: 0, fmt: null, vao: null, maxTex: 0,
-    off: [], texSrc: null, texMask: null, texMap: null, progs: null, canvas: null, hasMask: 0,
+    off: [], texSrc: null, texMask: null, texMap: null, texLut: null, progs: null, canvas: null, hasMask: 0,
 };
 
 const FX_VS = `#version 300 es
@@ -169,7 +169,8 @@ function fxglInit() {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
     fxgl.vao = vao;
-    for (const key of ['texSrc', 'texMask', 'texMap']) {
+    // texLut 是曲线那类特效的查表位:内容逐次上传,所以这里只备好 LINEAR + CLAMP 的采样状态。
+    for (const key of ['texSrc', 'texMask', 'texMap', 'texLut']) {
         const t = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, t);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
