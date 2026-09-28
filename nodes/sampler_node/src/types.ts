@@ -15,6 +15,8 @@ export interface ServerConfig {
   /** 当前 pipeline 的模型架构（按架构渲染 DetailerBlock 的 edit 设置） */
   architecture?: string | null;
   has_tagger: boolean;
+  /** Detector 工具总闸：节点的 detector 输入有没有连东西 */
+  has_detector: boolean;
   has_package: boolean;
   package_count: number;
   has_pipeline_package: boolean;

@@ -356,6 +356,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .text-font-btn:hover { background: rgba(10,132,255,0.3); }
 .text-font-btn.gone { color: #ff453a; }
+/* Detector 行: 表达式要写词与阈值, 一行输入框装不下 —— 同 gen-preset-row select 的一套皮。 */
+.control-row textarea#detectPrompt { flex: 1 1 auto; min-width: 0; height: 58px; resize: vertical;
+    background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18); border-radius: 8px;
+    color: rgba(255,255,255,0.9); font: inherit; font-size: 12.5px; line-height: 1.4; padding: 5px 8px;
+    box-sizing: border-box; outline: none; }
+.control-row textarea#detectPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
+.control-row textarea#detectPrompt::placeholder { color: rgba(255,255,255,0.3); }
 .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
@@ -907,6 +914,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
             </div>
+            <!-- The Detector section only exists when the node's detector input is actually
+                 connected (blend-config's hasDetector): the tool has nothing to do otherwise, so
+                 it ships hidden and the config is what unfolds it. The prompt speaks the mask
+                 expression grammar VideoSegmentationNode established. -->
+            <div class="panel-section tool-section foldable collapsed" id="detectorSection" style="display:none;">
+                <div class="panel-head">
+                    <div class="panel-label" id="detectorLabel" title="Detector — runs the detector connected to the node's detector input and turns what it finds into a mask. Click the header to open or close its settings window."><span class="fold-caret"></span>Detector</div>
+                </div>
+                <div class="tool-body">
+                    <div class="control-row"><label>Prompt</label><textarea id="detectPrompt" rows="3" spellcheck="false" title="Mask expression, e.g. '(face:0.4)&amp;(hair:0.3)-mouth'. Operators (left-to-right): &amp; intersect, + union, - subtract, | union. Terms: name, name:0.3, name(0.3). Functions: max(a,b,…), min(a,b,…), grow(x,n) — n&gt;0 dilates, n&lt;0 erodes. Statements ';' or newline separated; 'x = expr' then reuse x." placeholder="e.g. (face:0.4)&amp;(hair:0.3)-mouth"></textarea></div>
+                    <div class="control-row"><label>Threshold</label><input type="range" id="detectThresholdRange" min="0" max="1" step="0.01" value="0.5" title="Confidence threshold used by terms without an explicit one — write 'face:0.3' to override it per term"><span id="detectThresholdValue">0.50</span></div>
+                    <div class="control-row"><label>Invert</label><input type="checkbox" id="detectInvert" title="Flip the final mask (1 - mask): what the detector found becomes the hole, everything else the coverage"><span></span></div>
+                    <div style="display:flex; gap:4px;"><button class="mini-btn" id="detectRunBtn" title="Open the Detect dialog — pick where the detector looks and where the mask lands" style="flex:1;">Detect</button></div>
+                </div>
+            </div>
             <div class="panel-section">
                 <div class="panel-head">
                     <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
@@ -1192,6 +1214,36 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
+<div class="modal-overlay" id="detectModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Detect">
+        <div class="modal-title">Detect</div>
+        <div class="modal-sub">Where the detector looks, and where the mask it finds lands.</div>
+        <div class="gen-preset-row">
+            <span class="gen-preset-label">Source</span>
+            <select id="detectSourceSelect" title="All Layers — the whole canvas composite. Masked All Layers — the composite, cut to the Mask layer. Selected Layer — just the selected layer's own pixels. Masked Selected Layer — that, cut to the Mask layer.">
+                <option value="all">All Layers</option>
+                <option value="all_masked">Masked All Layers</option>
+                <option value="selected">Selected Layer</option>
+                <option value="selected_masked">Masked Selected Layer</option>
+            </select>
+        </div>
+        <div class="gen-preset-row">
+            <span class="gen-preset-label">Destination</span>
+            <select id="detectDestSelect" title="Main Mask — replaces the singleton Mask layer. Selected Mask — replaces the selected layer's own mask. Staging — drops the mask into the staging strip. New Layer — adds the mask as a new smart layer.">
+                <option value="main_mask">Main Mask</option>
+                <option value="selected_mask">Selected Mask</option>
+                <option value="staging">Staging</option>
+                <option value="new_layer">New Layer</option>
+            </select>
+        </div>
+        <div class="modal-hint">Masked sources cut the result to the Mask layer's coverage. The result replaces whatever the destination held — undo takes it back.</div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="detectCancelBtn">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn primary" id="detectConfirmBtn">Detect</button>
+        </div>
+    </div>
+</div>
 <div class="modal-overlay" id="tagModal">
     <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Tag the composite">
         <div class="modal-title">Tag</div>
@@ -1373,6 +1425,10 @@ let maskLayer = {
 let actionBusy = false;
 let actionBusyLabel = '';
 let hasTagger = true;
+// The Detector tool's total gate: hidden until blend-config confirms the node's detector input
+// is actually connected. Unlike the tagger there is no degraded mode — without a detector the
+// tool has nothing to run, so the whole section stays folded away.
+let hasDetector = false;
 // Strength of the red Mask tint. One single value now feeds two places: the host's Context
 // preview (below the preview image) and the on-canvas overlay that only appears while Ctrl is
 // held. The host owns the slider and forwards changes via the 'blend-preview-tint' message;
@@ -8725,7 +8781,7 @@ document.getElementById('viewFlipBtn').addEventListener('click', () => flipView(
 // rows never jump and a slider gets a row of its own. Windows follow their header while the panel
 // scrolls or the column is dragged wider, and stack in list order so two of them cannot sit on top
 // of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection'];
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'detectorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -8986,7 +9042,16 @@ function sendBlendAction(action, opts) {
     } else if (tm) {
         payload.tag_mode = tm;
     }
-    if (action === 'detailer') {
+    if (action === 'detect') {
+        // source 图不按 layers 重合成：Detect 对话框已经把所选 source 烘好了（All Layers =
+        // 画布合成图，Selected Layer = 那层的结算面），mask 只有 Masked source 才带、且已
+        // 换算到 source 自己的网格 —— 所以这里整包覆盖，不走 8549 行的 maskPayload()。
+        const dt = opts && opts.detect;
+        if (!dt || !dt.composite) return;
+        payload.composite = dt.composite;
+        payload.mask = dt.mask || null;
+        payload.detect = { prompt: dt.prompt || '', threshold: dt.threshold, invert: !!dt.invert };
+    } else if (action === 'detailer') {
         // 复用预览的那张合成图：blendCanvas 的像素就是画布合成本身（浏览器原生
         // source-over，toDataURL 出来是标准直通 alpha PNG）。管线约定全部按直通
         // alpha 读图 —— 直接送它，而不是让后端按图层栈再合成一遍（两次合成的
@@ -9000,7 +9065,8 @@ function sendBlendAction(action, opts) {
     }
     window.parent.postMessage(payload, '*');
     setActionBusy(true, action);
-    setStatus(action === 'blend' ? 'Archiving…' : (action === 'tag' ? 'Tagging…' : 'Running detailer…'));
+    setStatus(action === 'blend' ? 'Archiving…' : (action === 'tag' ? 'Tagging…'
+        : (action === 'detect' ? 'Detecting…' : 'Running detailer…')));
 }
 
 // Clear Tag touches only the prompt stage — no canvas, no layers, no composite — so it skips
@@ -9771,6 +9837,193 @@ tagModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTagModal(); }
 });
 
+// ==================== Detector 工具 ====================
+// The node's detector input, surfaced. The flyout holds the expression knobs; the Detect dialog
+// picks the source (what the detector sees) and the destination (where the mask lands). The
+// source is composited HERE — the same deal as the detailer's composite — so the backend never
+// re-derives what the user was looking at; only the detection itself and the optional mask
+// multiplication happen over there. The result rides back on blend-action-result and lands
+// through applyDetectMask below.
+const detectModalEl = document.getElementById('detectModal');
+const detectSourceSelect = document.getElementById('detectSourceSelect');
+const detectDestSelect = document.getElementById('detectDestSelect');
+const detectPromptInput = document.getElementById('detectPrompt');
+const detectThresholdRange = document.getElementById('detectThresholdRange');
+const detectThresholdValue = document.getElementById('detectThresholdValue');
+const detectInvertInput = document.getElementById('detectInvert');
+const detectRunBtn = document.getElementById('detectRunBtn');
+
+function detectModalOpen() { return detectModalEl.classList.contains('open'); }
+
+// The section's whole visibility contract: absent until blend-config says the detector input is
+// connected, and if the settings window is docked when that flips false, it folds back with it.
+function syncDetectorSection() {
+    const section = document.getElementById('detectorSection');
+    if (section) section.style.display = hasDetector ? '' : 'none';
+    if (!hasDetector && toolWindows.has('detectorSection')) closeToolWindow('detectorSection');
+    if (!hasDetector && detectModalOpen()) closeDetectModal();
+}
+
+detectThresholdRange.addEventListener('input', () => {
+    detectThresholdValue.textContent = Number(detectThresholdRange.value).toFixed(2);
+});
+
+function openDetectModal() {
+    if (guardAdjustMode()) return;
+    if (!hasDetector) { setStatus('No detector is connected to the node', 'error'); return; }
+    if (!canvasW || !canvasH) { setStatus('Canvas size is not set yet', 'error'); return; }
+    detectModalEl.classList.add('open');
+    syncBrushCursor();
+}
+
+function closeDetectModal() {
+    detectModalEl.classList.remove('open');
+    syncBrushCursor();
+}
+
+// Layer-grid result → canvas space, stretched over the layer's own box: the forward recipe
+// drawLayer paints with (translate(Cx,Cy) · rotate(θ) · drawImage at (-tw/2,-th/2,tw,th)).
+function detectImageToCanvas(img, tr) {
+    const c = document.createElement('canvas');
+    c.width = Math.round(canvasW); c.height = Math.round(canvasH);
+    const g = c.getContext('2d');
+    resetCtx(g);
+    const tw = tr.w * canvasW, th = tr.h * canvasH;
+    g.translate(tr.cx * canvasW, tr.cy * canvasH);
+    g.rotate(tr.rotation || 0);
+    g.drawImage(img, -tw / 2, -th / 2, tw, th);
+    return c;
+}
+
+// Canvas-space result → the layer's native grid: setBrushCtxTransform IS that inverse (the
+// brush paints through it for the same reason), so the mask lands exactly where the layer sits.
+function detectImageToLayerGrid(img, l) {
+    const { w, h } = nativeSize(l.img);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    setBrushCtxTransform(g, l);
+    g.drawImage(img, 0, 0, canvasW, canvasH);
+    resetCtx(g);
+    return c;
+}
+
+function detectSurfaceAt(img, l) {
+    const { w, h } = nativeSize(l.img);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    resetCtx(g);
+    g.drawImage(img, 0, 0, w, h);
+    return c;
+}
+
+// The decoded result is an <img>, not a surface — staging and New Layer need actual canvas
+// pixels to hand out. For the All Layers sources the image already IS canvas-sized.
+function detectImageToCanvasSurface(img) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, img.naturalWidth || img.width || 1);
+    c.height = Math.max(1, img.naturalHeight || img.height || 1);
+    const g = c.getContext('2d');
+    resetCtx(g);
+    g.drawImage(img, 0, 0, c.width, c.height);
+    return c;
+}
+
+// The destination bookkeeping captured when the Detect confirm fired — the result comes back
+// asynchronously and the modal is already gone by then.
+let pendingDetect = null;
+
+function applyDetectMask(dataUrl) {
+    const pend = pendingDetect;
+    pendingDetect = null;
+    if (!pend || !dataUrl) return;
+    const img = new Image();
+    img.onload = () => {
+        const inLayerGrid = pend.source.indexOf('selected') === 0;
+        // Every destination except the layer's own mask consumes the result in canvas space.
+        const onCanvas = inLayerGrid ? detectImageToCanvas(img, pend.transform) : detectImageToCanvasSurface(img);
+        if (pend.dest === 'main_mask') {
+            // replaceMaskSurface owns the copy-on-write swap, the thumb, render and history.
+            if (!replaceMaskSurface((ctx, _prev, w, h) => { ctx.drawImage(onCanvas, 0, 0, w, h); })) {
+                setStatus('Add an image (or set a canvas size) before painting the mask', 'error');
+                return;
+            }
+            setStatus('Detection landed on the Mask layer', 'success');
+        } else if (pend.dest === 'selected_mask') {
+            const l = getLayer(pend.layerId);
+            if (!l || l.isMaskLayer || !l.img) { setStatus('The layer that was selected is gone', 'error'); return; }
+            const local = inLayerGrid ? detectSurfaceAt(img, l) : detectImageToLayerGrid(img, l);
+            l.mask = local;
+            l.maskCtx = local.getContext('2d');
+            markPainted(l);
+            renderLayerList();
+            render();
+            pushHistory();
+            setStatus(`Detection landed on 「${l.name}」's own mask`, 'success');
+        } else if (pend.dest === 'staging') {
+            window.parent.postMessage({ type: 'blend-staging-upload', images: [surfaceDataUrl(onCanvas)], name: 'Detect' }, '*');
+            setStatus('Detection mask sent to staging', 'success');
+        } else {
+            addLayer({ name: 'Detect', src: surfaceDataUrl(onCanvas) });
+        }
+    };
+    img.onerror = () => setStatus('The detection result could not be decoded', 'error');
+    img.src = dataUrl;
+}
+
+function confirmDetectModal() {
+    if (actionBusy) return;
+    const source = detectSourceSelect.value;
+    const dest = detectDestSelect.value;
+    const sel = tagLayerTarget();
+    if ((source.indexOf('selected') === 0 || dest === 'selected_mask') && !sel) {
+        setStatus('Select an image layer first', 'error');
+        return;
+    }
+    const masked = source.indexOf('_masked') > 0;
+    let maskUrl = null;
+    if (masked) {
+        maskUrl = maskPayload();
+        if (!maskUrl) {
+            setStatus(maskLayer.visible ? 'Paint the Mask layer first' : 'The Mask layer is hidden — show it (eye icon) to send it', 'error');
+            return;
+        }
+        if (!maskHasInk()) {
+            setStatus('Paint the Mask layer first — a Masked source detects only inside it', 'error');
+            return;
+        }
+    }
+    // All Layers sources detect on the canvas composite; Selected Layer sources on that layer's
+    // own picture (decal and live chain included) at its own resolution.
+    const composite = source.indexOf('selected') === 0 ? layerSourceForGenerate(sel) : surfaceDataUrl(blendCanvas);
+    // A Masked Selected Layer sends the mask already converted into the layer's own grid: the
+    // backend multiplies source and mask elementwise, so they must share one grid.
+    if (masked && source.indexOf('selected') === 0) {
+        maskUrl = detectImageToLayerGrid(maskLayer.decal, sel).toDataURL('image/png');
+    }
+    pendingDetect = { source, dest, layerId: sel ? sel.id : null, transform: sel ? { ...sel.transform } : null };
+    closeDetectModal();
+    sendBlendAction('detect', {
+        detect: {
+            composite,
+            mask: maskUrl,
+            prompt: detectPromptInput.value.trim(),
+            threshold: Number(detectThresholdRange.value),
+            invert: detectInvertInput.checked,
+        },
+    });
+}
+
+detectModalEl.addEventListener('mousedown', e => { if (e.target === detectModalEl) closeDetectModal(); });
+document.getElementById('detectCancelBtn').addEventListener('click', closeDetectModal);
+document.getElementById('detectConfirmBtn').addEventListener('click', confirmDetectModal);
+detectRunBtn.addEventListener('click', openDetectModal);
+detectModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeDetectModal(); }
+    else if (e.key === 'Enter') { e.preventDefault(); confirmDetectModal(); }
+});
+
 // ==================== 画布尺寸弹窗 ====================
 let canvasLocked = true;
 let canvasRatio = 1;
@@ -9784,7 +10037,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen() || detectModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -10108,6 +10361,11 @@ window.addEventListener('keydown', e => {
     }
     if (tagModalOpen()) {
         if (e.key === 'Escape') { e.preventDefault(); closeTagModal(); }
+        return;
+    }
+    if (detectModalOpen()) {
+        if (e.key === 'Escape') { e.preventDefault(); closeDetectModal(); }
+        else if (e.key === 'Enter') { e.preventDefault(); confirmDetectModal(); }
         return;
     }
     if (dynamicModalOpen()) {
@@ -12184,6 +12442,9 @@ window.addEventListener('message', event => {
     const d = event.data || {};
     if (d.type === 'blend-config') {
         hasTagger = d.hasTagger !== false;
+        // Detector 工具总闸（宿主从 /api/config 的 has_detector 带来）。
+        hasDetector = d.hasDetector === true;
+        syncDetectorSection();
         // 激活 tab 的 Enable Mask 总闸（宿主从第一个 detailer block 读出）。
         maskRequired = d.mask_required !== false;
         // contenteditable 没有 placeholder 属性 —— 占位文本走 CSS 的 ::before。
@@ -12261,6 +12522,11 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
         if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
+        else if (d.action === 'detect') {
+            // 检测是同步动作：mask 直接随结果回来，落地由 pendingDetect 记下的 destination 决定。
+            if (d.mask) applyDetectMask(d.mask);
+            else setStatus('Detection returned no mask', 'error');
+        }
         else { const [msg, kind] = tagResultLine(d); setStatus(msg, kind); }
         return;
     }
