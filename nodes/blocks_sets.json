@@ -10,7 +10,7 @@
           "name": "Detailer",
           "params": {
             "add_noise": "enable",
-            "start_step_rate": 0.5,
+            "start_step_rate": 0.6,
             "end_step_rate": 1,
             "pixels": 1548576,
             "align": 16,
@@ -299,7 +299,8 @@
             "enable_mask": false,
             "enable_limit": true,
             "enable_text_generate": true,
-            "context_reference_keys": []
+            "context_reference_keys": [],
+            "enable_override_prompt": false
           }
         }
       ],
@@ -315,7 +316,7 @@
     "mask_blur": 32
   },
   "pipeline_settings": {
-    "selected": "[QwenImage21] Base",
+    "selected": "[Anima] LizAnima",
     "overrides": {
       "[Anima] LizAnima": {
         "mask_grow": {
