@@ -3636,29 +3636,20 @@ function openSelectionGenerate() {
 }
 
 // ---- Ctrl+C / Ctrl+V (剪贴板, 工作台级) ----
-// Photoshop's clipboard is pixels PLUS the place they came from: a paste lands back on the copy's
-// spot rather than under the cursor, and it comes back as plain pixels instead of a second reference
-// to the source. The record lives outside the document for the same reason the OS clipboard does —
-// copy in one tab, paste in another — and the box it remembers is absolute doc pixels, which is what
-// keeps meaning the same place across a canvas resize (layers hold fractions for exactly that reason).
+// The record is a LAYER, not a picture: image, mask, decal, placement and a DEEP COPY of the effect
+// chain, frozen at the moment of the copy. That is what copying a layer has to mean here — a paste
+// whose effects were already flattened into its pixels could not be edited again, and the chain is
+// live data every draw re-resolves (see fxResolved). The record lives outside the document for the
+// same reason the OS clipboard does (copy in one tab, paste in another), and it remembers the canvas
+// the copy was made on, because a layer's transform is a fraction of that canvas: keeping the
+// fractions instead of the rectangle would make a paste after a canvas resize land scaled.
 let clipboardRecord = null;
 
-// The doc-space box a copy takes. With ants, that box IS the ants — they can never reach past the
-// canvas (clampSelBox already clipped them when the selection was derived). Without them it is the
-// layer's own placed footprint, clipped to the canvas the same way: PS's clipboard is bounded by the
-// document, so a layer that hangs off the edge copies what is on it and pastes back exactly there.
-function clipboardBoxFor(l) {
-    if (hasSelection() && ensureSelection()) return selection.box;
-    // x0/y0 in, x/y out: selection.box already speaks the doc-box convention every other verb here
-    // uses (fillSelection, layerViaCopy), the thumbnail helper is the one that names its corners x0.
-    const b = layerCanvasBBox(l, true);
-    return { x: b.x0, y: b.y0, w: b.w, h: b.h };
-}
-
-// PS Edit → Copy: the ACTIVE LAYER's own contribution (what every visible layer shows inside the ants
-// is Layer via Copy in the right-click menu, not this key), rasterised 1:1 in doc pixels and cut by
-// the selection. The cut is the last step and only when there is one to make — a lone marquee covers
-// its whole box, so multiplying it in would be a full pass over the copy for nothing.
+// PS Edit → Copy: the ACTIVE LAYER, whole (what the composite shows inside the ants is Layer via Copy
+// in the canvas menu, and this key never touches the merged canvas). With ants the selection is a
+// MASK question, not a crop: the paste keeps this layer's own grid, transform and chain, and the
+// selection's coverage is multiplied into the paste's mask — everything outside them is invisible
+// rather than deleted, so the pixels are still there for a later mask edit.
 function copyToClipboard() {
     const l = getSelected();
     if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
@@ -3666,53 +3657,69 @@ function copyToClipboard() {
     // PS greys Copy out on a hidden layer, and the Mask is an overlay rather than content — neither
     // is on the composite, so there is nothing here to take.
     if (!l.visible || l.isMaskLayer) { setStatus('Copy — the layer is hidden or is the Mask overlay', 'error'); return; }
+    // No picture, no pixels to carry — PS refuses an empty layer the same way ("no pixel data").
+    if (!l.img) { setStatus(`Copy —「${l.name}」has no picture yet`, 'error'); return; }
+    const rec = cloneLayerFields(l);
     const sel = hasSelection() && ensureSelection();
-    const box = clipboardBoxFor(l);
-    if (box.w < 1 || box.h < 1) { setStatus('Copy — none of this layer is on the canvas', 'error'); return; }
-    const img = makeBlankCanvas(box.w, box.h);
-    const ctx = img.getContext('2d');
-    ctx.save();
-    ctx.translate(-box.x, -box.y);
-    // The composite's own path, so mask, decal and the effect chain are all in what gets copied.
-    drawLayer(l, ctx);
-    ctx.restore();
-    if (sel && !selection.rect) {
-        ctx.globalCompositeOperation = 'destination-in';
-        ctx.drawImage(selectionMaskSurface(box.w, box.h), 0, 0);
-        ctx.globalCompositeOperation = 'source-over';
+    if (sel) {
+        // selectionLayerMask returns null when the ants miss this layer's whole footprint.
+        const sm = selectionLayerMask(l);
+        if (!sm) { setStatus('Copy — the selection misses this layer', 'error'); return; }
+        // `whole` = the ants swallow every pixel this layer can put down, so they cut nothing at all.
+        if (!sm.whole) {
+            // A layer with no mask IS fully covered (mask = null is the full mask), so the cut needs a
+            // surface to live on — and the clone above is already private to the record, which is why
+            // the multiply can paint into it without touching the source's own mask.
+            if (!rec.mask) {
+                const { w, h } = nativeSize(l.img);
+                const c = document.createElement('canvas');
+                c.width = w; c.height = h;
+                const g = c.getContext('2d');
+                g.fillStyle = '#fff';
+                g.fillRect(0, 0, w, h);
+                rec.mask = c;
+                rec.maskCtx = g;
+            }
+            rec.maskCtx.globalCompositeOperation = 'destination-in';
+            rec.maskCtx.drawImage(sm.cv, sm.x, sm.y);   // a shared cache canvas: blit it, never keep it
+            rec.maskCtx.globalCompositeOperation = 'source-over';
+        }
     }
-    clipboardRecord = { img, box: { x: box.x, y: box.y, w: box.w, h: box.h }, name: l.name };
-    setStatus(sel ? `Copied — ${selection.count.toLocaleString()} px of 「${l.name}」`
-                  : `Copied — 「${l.name}」 at ${box.w} × ${box.h}`);
+    clipboardRecord = { layer: rec, canvasW, canvasH };
+    const n = rec.effects.filter(e => e && e.enabled).length;
+    setStatus(`Copied — 「${l.name}」${n ? ` with ${n} live effect${n === 1 ? '' : 's'}` : ''}`
+        + `${sel ? ', selection cut into its mask' : ''}`);
 }
 
-// PS Edit → Paste: a NEW pixel layer, back at the recorded spot, on top of the stack. The surface is
-// blitted rather than handed over, so the record stays intact for another paste and the layer that
-// lands owns its own pixels (a later rasterise or resample swaps objects, never writes into them).
+// PS Edit → Paste: a new layer on top of its stack, with the record's grid, transform, mask, decal
+// and chain. Everything is cloned AGAIN here, so two pastes of one record own separate pixels and
+// neither shares a surface with the record (a later rasterise or resample swaps objects on one layer,
+// it must never repaint something the clipboard still holds).
 function pasteFromClipboard() {
     const rec = clipboardRecord;
     if (!rec) { setStatus('Clipboard is empty', 'error'); return; }
     if (!canvasW || !canvasH) { setStatus('Set a canvas size before pasting', 'error'); return; }
-    const img = makeBlankCanvas(rec.box.w, rec.box.h);
-    img.getContext('2d').drawImage(rec.img, 0, 0);
-    const l = addSurfaceLayer({
-        pw: img.width, ph: img.height,
-        // Fractions of the CURRENT canvas, resolving to the same absolute doc pixels the copy came
-        // from — that is the whole of PS's "paste in place".
-        transform: {
-            cx: (rec.box.x + img.width / 2) / canvasW,
-            cy: (rec.box.y + img.height / 2) / canvasH,
-            w: img.width / canvasW,
-            h: img.height / canvasH,
-            rotation: 0,
-        },
-        stack: WORK_STACK,
-        name: `Paste ${img.width}×${img.height}`,
-        img,
-        src: surfaceDataUrl(img),
-    });
-    if (!l) return;
-    setStatus(`Pasted — 「${rec.name}」 landed back at ${rec.box.x}, ${rec.box.y} as 「${l.name}」`);
+    const src = rec.layer;
+    const { w, h } = nativeSize(src.img);
+    const l = cloneLayerFields(src, `Paste ${w}×${h}`);
+    l.id = ++layerSeq;
+    // Fractions of the copy-time canvas → the same document rectangle on this one. A raster layer is
+    // the one layer whose stored transform must stay the identity (its buffer IS the display box), so
+    // it pastes at the current canvas size like every other raster operation follows the canvas.
+    if (!l.raster) {
+        const sx = rec.canvasW / canvasW, sy = rec.canvasH / canvasH;
+        if (sx !== 1 || sy !== 1) {
+            const tr = l.transform;
+            tr.cx *= sx; tr.cy *= sy; tr.w *= sx; tr.h *= sy;
+        }
+    }
+    insertAtStackTop(l);
+    selectedId = l.id;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    pushHistory();
+    setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${l.effects.filter(e => e && e.enabled).length ? ' and live effects' : ''}`);
 }
 
 // ---- gestures ----
@@ -5083,14 +5090,15 @@ function removeLayer(id) {
     pushHistory();
 }
 
-// Right-click "Duplicate": a copy stacked directly above its source, same placement. The paint
-// surfaces are CLONED — two layers sharing one mask canvas would make every later stroke land on
-// both, and detachPaintSurface only ever detaches the layer being painted. A smart layer's `img`
-// is a decoded image nobody mutates, so it (and its src) is shared as-is; a raster buffer is a
-// canvas the layer repaints, so it must be copied.
-function duplicateLayer(l) {
-    const i = layers.findIndex(x => x.id === l.id);
-    if (i < 0) return;
+// What "a copy of this layer" carries, in one place so the right-click Duplicate and Ctrl+V can
+// never disagree about it. The paint surfaces are CLONED — two layers sharing one mask canvas would
+// make every later stroke land on both, and detachPaintSurface only ever detaches the layer being
+// painted. A smart layer's `img` is a decoded image nobody mutates, so it (and its src) is shared
+// as-is; a raster buffer is a canvas the layer repaints, so it must be copied. `cud` and `text` are
+// descriptors every writer replaces wholesale (patchTextLayer builds a new object, it never mutates
+// one), so a shared reference is immutable here. No id: the caller assigns one at the moment the
+// copy becomes a layer — the clipboard record passes through here too, and a record is not a layer.
+function cloneLayerFields(l, name) {
     const cloneSurface = surface => {
         if (!surface) return null;
         const c = document.createElement('canvas');
@@ -5099,8 +5107,7 @@ function duplicateLayer(l) {
         return c;
     };
     const copy = {
-        id: ++layerSeq,
-        name: `${l.name} copy`,
+        name: name || l.name,
         src: l.src,
         img: l.img && l.img.getContext ? cloneSurface(l.img) : l.img,
         visible: l.visible,
@@ -5127,6 +5134,15 @@ function duplicateLayer(l) {
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
     if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
+    return copy;
+}
+
+// Right-click "Duplicate": a copy stacked directly above its source, same placement.
+function duplicateLayer(l) {
+    const i = layers.findIndex(x => x.id === l.id);
+    if (i < 0) return;
+    const copy = cloneLayerFields(l, `${l.name} copy`);
+    copy.id = ++layerSeq;
     layers.splice(i, 0, copy);       // index 0 is the top, so this sits above the source
     selectedId = copy.id;
     layoutCanvas();
@@ -5169,6 +5185,55 @@ function applyMaskToLayer(l) {
     renderLayerList();
     render();
     setStatus(`「${l.name}」mask applied — the hidden area is transparent now, the mask is clear again`, 'success');
+    pushHistory();
+}
+
+// Right-click "Apply Effect": the chain stops being a live description and becomes the layer's own
+// pixels, at its OWN resolution — the box on canvas, the transform and the mask all stay exactly as
+// they are, because only the buffer underneath them changes. What gets baked is precisely what
+// fxResolved() hands the composite (img + decal + chain, before the mask cuts), so the pixels the
+// menu promises are the pixels on screen rather than a second approximation of them — and that is
+// also why the decal folds in: the chain runs on the decal-topped picture, so keeping the decal live
+// on top of a bake that already contains it would draw it twice.
+// One-way, like Apply Mask and Rasterize. The buffer is a NEW canvas and the resolved surface is
+// never adopted: the snapshot on top of the undo stack holds the old img BY REFERENCE, and
+// fxResolved's own result is a surface its cache owns and repaints in place on the next stroke.
+function applyEffectsToLayer(l) {
+    if (!l || !layerTakesEffects(l)) return;
+    if (isTextLayer(l)) {
+        setStatus(`「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize first if you want to bake it in`, 'error');
+        return;
+    }
+    if (!l.img) { setStatus(`「${l.name}」has no picture for its chain to run on`, 'error'); return; }
+    const armed = (l.effects || []).filter(e => e && e.enabled);
+    if (!armed.length) { setStatus(`「${l.name}」has no enabled effect — nothing to apply`, 'error'); return; }
+    // The bypass is a VIEW switch: with it on, the chain is drawn nowhere, so baking now would clear
+    // a chain the user has never seen applied. Say so instead of doing something else.
+    if (effectsBypass) { setStatus('Apply Effect — the chains are suspended, resume them (⏸ in the Effects panel) first', 'error'); return; }
+    const { w, h } = nativeSize(l.img);
+    const img = document.createElement('canvas');
+    img.width = w; img.height = h;
+    const g = img.getContext('2d');
+    g.drawImage(l.img, 0, 0, w, h);
+    if (l.decal) g.drawImage(l.decal, 0, 0, w, h);
+    // It runs the whole chain IN PLACE and returns false without touching the surface when it cannot
+    // (no WebGL2, over the texture limit), the reason left in fxgl.skip. Nothing is cleared on that
+    // path — the chain stays live rather than silently vanishing.
+    if (!applyLayerEffects(l, img)) {
+        setStatus(`Apply Effect — ${fxgl.skip || 'the chain could not be run'}`, 'error');
+        return;
+    }
+    const hadDecal = !!l.decal;
+    l.img = img;
+    l.src = img.toDataURL('image/png');
+    l.decal = null;
+    l.decalCtx = null;
+    l.effects = [];
+    l.fxCache = null;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    setStatus(`「${l.name}」effects applied — ${armed.length} baked into its pixels${hadDecal ? ', its decal folded in' : ''}, the chain is clear again`, 'success');
     pushHistory();
 }
 
@@ -8407,6 +8472,29 @@ function openLayerMenu(l, clientX, clientY) {
             openFxModal(l.id);
         });
         menu.appendChild(fx);
+
+        // Apply Effect: the counterpart of the entry above — it takes the chain that runs on every
+        // draw and turns it into the layer's own pixels, once. Offered to the same layers that can
+        // carry a chain, which excludes the Mask overlay (layerTakesEffects) and, like Apply Mask,
+        // text layers, whose picture is re-rendered from a descriptor on every draw.
+        const armed = (l.effects || []).filter(e => e && e.enabled).length;
+        const bake = document.createElement('button');
+        bake.className = 'layer-menu-item';
+        bake.type = 'button';
+        bake.setAttribute('role', 'menuitem');
+        bake.textContent = 'Apply Effect';
+        bake.disabled = !armed || !l.img || isTextLayer(l) || effectsBypass;
+        bake.title = !armed ? `「${l.name}」has no enabled effect — nothing to bake in`
+            : !l.img ? `「${l.name}」has no picture yet — the chain has nothing to run on`
+            : isTextLayer(l) ? `「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize the layer first if you want to bake it in.`
+                : effectsBypass ? 'The effect chains are suspended (the ⏸ in the Effects panel) — resume them first: applying now would drop the chain without ever drawing it.'
+                : `Bake「${l.name}」's ${armed} effect${armed === 1 ? '' : 's'} into its own pixels at its own resolution — the placement and the mask stay exactly as they are. Its decal folds in too (the chain runs on the decal-topped picture), and the chain is removed after. One-way${isCudLayer(l) ? '; a later Refresh from file repaints these pixels from the linked file' : ''}.`;
+        bake.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            applyEffectsToLayer(l);
+        });
+        menu.appendChild(bake);
     }
 
     // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
@@ -8843,10 +8931,9 @@ function tagLayerTarget() {
 // rotated corners of its box on the canvas. Thumbnails crop to this; the real payload uses the
 // exact inverse transform in layerCompositeForGenerate.
 //
-// `clip` additionally bounds the far edges by the canvas, so the box is the part of the layer that
-// is ON the document (a clipboard holds nothing off it). Without it only the origin is lifted, which
-// is what a thumbnail wants — it may pad with transparency rather than lose the layer's proportions.
-function layerCanvasBBox(l, clip) {
+// Only the origin is lifted off the canvas, never the far edges: a thumbnail may pad with
+// transparency rather than lose the layer's proportions.
+function layerCanvasBBox(l) {
     const tr = l.transform;
     const cx = tr.cx * canvasW, cy = tr.cy * canvasH;
     const tw = tr.w * canvasW, th = tr.h * canvasH;
@@ -8856,10 +8943,6 @@ function layerCanvasBBox(l, clip) {
         const x = cx + px * co - py * si, y = cy + px * si + py * co;
         if (x < x0) x0 = x; if (x > x1) x1 = x;
         if (y < y0) y0 = y; if (y > y1) y1 = y;
-    }
-    if (clip) {
-        const c = clampSelBox({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-        return { x0: c.x, y0: c.y, w: c.w, h: c.h };
     }
     return { x0: Math.max(0, x0), y0: Math.max(0, y0), w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
 }
