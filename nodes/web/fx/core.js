@@ -29,8 +29,11 @@
 // 注册表由 fx/<effect>.js 的 defineEffect() 填。picker 里的顺序 = 注册顺序,所以页面的 <script>
 // 列表按组排 (Shadow → Blur → Pixelate → Color → Light)。字段约定:
 //   type/label/group/icon/desc/params —— 注册数据 (参数行、默认值、白名单迁移都读它)
-//   needsMap: 'Depth' | 'Normal' | 'Lookup' —— GL 侧据此上传贴图, UI 据此渲染绑定行
-//   needsMapWhen(p) —— 可选:该模式是否真的需要贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
+//   needsMap: 'Depth' | 'Normal' | 'Lookup' —— 主绑定槽 params.map,引擎上传到 fxgl.texMap
+//   needsMapWhen(p) —— 可选:该模式是否真的需要主槽贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
+//   needsMap2: { key, role, optional } —— 第二张外部图 (params[key] → fxgl.texMap2,fxgl.hasMap2 说它
+//     到没到位)。optional 缺省当可缺:主槽缺图整条跳过,副槽缺图照样 run,由特效自己退化。
+//   needsMap2When(p) —— 同上,逐模式。UI 一格一个绑定行,槽位表由这两条推出来 (见 fx/maps.js 的 fxMapSlots)。
 //   shaders: { progName: fragmentSource } —— fxglInit 统一编译进 fxgl.progs
 //   run(col, p, effect, l) —— 就地改写色彩乒乓, 自己翻转 col.slot; 跑不了就写 fxgl.skip 说原因。
 //     l 是该层自己 (几何也是输入之一: Canvas 对齐的深度读的是图层盒子在画布上的落点), 老特效不接就用

@@ -299,8 +299,11 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
         return row;
     }
     if (def.kind === 'map') {
-        // 这一行绑的是一张外部图(深度/法线)。名字直接写在按钮上 = 可见文本,不塞 tooltip;
-        // 解析不到像素时按钮转红,链上也会写出跳过原因 —— 静默降级是最难发现的那种 bug。
+        // 这一行绑的是一张外部图(深度 / 法线)。哪个槽由这行自己的 key 说 —— 一条特效可以占两个槽
+        // (几何 warp 读「深度 + 法线」),两行长得一模一样、各写各的 params[def.key]。
+        // 名字直接写在按钮上 = 可见文本,不塞 tooltip;解析不到像素时按钮转红,链上也会写出跳过
+        // 原因 —— 静默降级是最难发现的那种 bug。
+        const slot = (fxMapSlots(effect).find(s => s.key === def.key)) || { key: def.key, role: def.label };
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'fx-map-btn';
@@ -309,22 +312,22 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
         clr.textContent = '×';
         clr.style.fontSize = '14px';
         clr.style.lineHeight = '1';
-        clr.title = 'Unbind this map';
+        clr.title = `Unbind this ${slot.role.toLowerCase()} map`;
         const show = () => {
-            const ref = fxMapRef(effect);
-            const role = EFFECT_TYPES[effect.type].needsMap;
-            btn.textContent = ref ? fxMapShort(effect) : 'not bound';
+            const ref = fxMapRef(effect, slot.key);
+            btn.textContent = ref ? fxMapShort(effect, slot.key) : 'not bound';
             btn.classList.toggle('unset', !ref);
             btn.classList.toggle('gone', !!ref && !fxMapSource(ref));
-            btn.title = ref ? `${role}: ${ref.name || ref.key} — click to pick another` : `Pick a ${role} map`;
+            btn.title = ref ? `${slot.role}: ${ref.name || ref.key} — click to pick another`
+                : `Pick a ${slot.role.toLowerCase()} map${slot.optional ? ' (optional)' : ''}`;
             clr.style.display = ref ? '' : 'none';
         };
         updaters.push(show);
-        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxMapModal(l, effect); });
+        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxMapModal(l, effect, slot.key); });
         clr.addEventListener('click', ev => {
             ev.stopPropagation();
             // 整体替换,不原地改 —— 那个对象在 undo 快照之间是共享引用。
-            effect.params.map = null;
+            effect.params[slot.key] = null;
             fxStructuralChange(l);
         });
         row.appendChild(btn);
@@ -438,7 +441,7 @@ const fxMapModalEl = document.getElementById('fxMapModal');
 const fxMapGroupsEl = document.getElementById('fxMapGroups');
 const fxMapTitleEl = document.getElementById('fxMapTitle');
 const fxMapFileInput = document.getElementById('fxMapFile');
-let fxMapTarget = null;        // { layerId, effectId } —— 一次只给一条特效绑
+let fxMapTarget = null;        // { layerId, effectId, slot } —— 一次只给一条特效的一个槽绑
 
 function fxMapModalOpen() { return fxMapModalEl.classList.contains('open'); }
 function closeFxMapModal() { fxMapModalEl.classList.remove('open'); fxMapTarget = null; syncBrushCursor(); }
@@ -449,12 +452,14 @@ function bindFxMap(ref) {
     const l = getLayer(t.layerId);
     const e = l && (l.effects || []).find(x => x.id === t.effectId);
     if (!e) return;
-    // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,map 对象在 undo 快照之间是共享的。
-    e.params.map = ref;
+    const slot = t.slot || 'map';
+    const role = ((fxMapSlots(e).find(s => s.key === slot)) || { role: 'map' }).role;
+    // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,槽对象在 undo 快照之间是共享的。
+    e.params[slot] = ref;
     closeFxMapModal();
     fxStructuralChange(l);
-    setStatus(ref ? `Bound「${ref.name}」as the ${EFFECT_TYPES[e.type].needsMap.toLowerCase()} map`
-        : `Unbound the ${EFFECT_TYPES[e.type].needsMap.toLowerCase()} map`, 'success');
+    setStatus(ref ? `Bound「${ref.name}」as the ${role.toLowerCase()} map`
+        : `Unbound the ${role.toLowerCase()} map`, 'success');
 }
 
 function fxMapCardGroup(title, items) {
@@ -491,10 +496,12 @@ function fxMapCardGroup(title, items) {
     return group;
 }
 
-function openFxMapModal(l, effect) {
+function openFxMapModal(l, effect, slotKey) {
     if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
-    fxMapTarget = { layerId: l.id, effectId: effect.id };
-    fxMapTitleEl.textContent = `Bind a ${EFFECT_TYPES[effect.type].needsMap.toLowerCase()} map`;
+    const slot = fxMapSlots(effect).find(s => s.key === (slotKey || 'map'));
+    if (!slot) return;
+    fxMapTarget = { layerId: l.id, effectId: effect.id, slot: slot.key };
+    fxMapTitleEl.textContent = `Bind a ${slot.role.toLowerCase()} map`;
     fxMapGroupsEl.textContent = '';
     // Guidance 卡是 Layers 的投影,当深度/法线图没有意义;图池为空时只剩文件这条路。
     const items = stagingItems.filter(s => s && s.src && s.id !== GUIDANCE_CARD_ID);
