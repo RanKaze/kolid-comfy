@@ -2306,7 +2306,9 @@ function updateHoverCursor(sp, docPos) {
 //   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × 蒙版 alpha,特效据此计算,但结果
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
-// + 虚化 + 裁回自身轮廓。整链只在图层的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
+// + 虚化 + 裁回自身轮廓、马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的黑白点/gamma/S 形
+// 对比。每一类都只吃 RGB,所以三条契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一
+// 换过之后重算一次(见 fxResolved)。
 
 const EFFECT_TYPES = {
     inner_shadow: {
@@ -2340,6 +2342,28 @@ const EFFECT_TYPES = {
             { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '°' },
             { key: 'distance', label: 'Dist', min: 1, max: 256, step: 1, def: 24, unit: 'px' },
             { key: 'anchor', label: 'Anchor', kind: 'enum', options: ['center', 'trailing'], def: 'center' },
+        ],
+    },
+    mosaic: {
+        label: 'Mosaic',
+        group: 'Pixelate',
+        icon: 'pixel',
+        desc: 'Averages the colour inside each cell, so the cell reads as one flat block in the layer\u2019s own pixels. Alpha is never averaged, so a painted mask still cuts the same crisp edge.',
+        params: [
+            { key: 'size', label: 'Cell', min: 2, max: 128, step: 1, def: 12, unit: 'px' },
+        ],
+    },
+    curves: {
+        label: 'Curves',
+        group: 'Color',
+        icon: 'curve',
+        desc: 'A display-referred tone curve on the selected channel(s): input black/white points, a midtone gamma and an S-curve amount. Pure remap \u2014 nothing moves, nothing blurs, alpha untouched.',
+        params: [
+            { key: 'channel', label: 'Channel', kind: 'enum', options: ['rgb', 'r', 'g', 'b'], def: 'rgb' },
+            { key: 'black', label: 'Black', min: 0, max: 50, step: 1, def: 0, unit: '%' },
+            { key: 'white', label: 'White', min: 50, max: 100, step: 1, def: 100, unit: '%' },
+            { key: 'gamma', label: 'Mid', min: 0.2, max: 3, step: 0.05, def: 1, unit: '×' },
+            { key: 'contrast', label: 'S-Curve', min: -100, max: 100, step: 1, def: 0, unit: '%' },
         ],
     },
 };
@@ -2394,6 +2418,11 @@ function describeEffect(effect) {
     if (effect.type === 'inner_shadow') return `${n(p.angle)}°  d${n(p.distance)}  r${n(p.radius)}  ${n(p.opacity)}%  ${p.color}`;
     if (effect.type === 'gaussian_blur') return `r${n(p.radius)}`;
     if (effect.type === 'vector_blur') return `${n(p.angle)}°  d${n(p.distance)}  ${p.anchor === 'trailing' ? 'trail' : 'center'}`;
+    if (effect.type === 'mosaic') return `${n(p.size)} px`;
+    if (effect.type === 'curves') {
+        const s = p.contrast < 0 ? `S${n(p.contrast)}` : `S+${n(p.contrast)}`;
+        return `${String(p.channel).toUpperCase()}  b${n(p.black)}-w${n(p.white)}  ${n(p.gamma)}×  ${s}`;
+    }
     return '';
 }
 
@@ -2519,6 +2548,48 @@ void main() {
     Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), c0.a);
 }`;
 
+// 马赛克:先把 UV 折进所属格子,取格心做 3×3 直通色平均 —— 同一格里的每个像素算的是同一组
+// 抽样点,所以结果是一块**平的**色斑而不是渐变。alpha 一律取本像素自己的,不参与平均。
+const FX_FS_PIXELATE = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uTex;
+uniform vec2 uCell;
+void main() {
+    vec4 c0 = texture(uTex, vUV);
+    vec2 center = (floor(vUV / uCell) + 0.5) * uCell;
+    vec3 acc = vec3(0.0);
+    float aAcc = 0.0;
+    for (int i = 0; i < 9; i++) {
+        vec2 o = (vec2(float(i - (i / 3) * 3), float(i / 3)) - 1.0) * (uCell / 3.0);
+        vec4 c = texture(uTex, center + o);
+        acc += c.rgb * c.a;
+        aAcc += c.a;
+    }
+    Frag = vec4(clamp(acc / max(aAcc, 1e-5), 0.0, 1.0), c0.a);
+}`;
+
+// 色彩曲线:黑/白输入点拉伸 → 中间调 gamma → S 形对比量,全在**已编码的显示值**上做,和 PS 的
+// curves 同一坐标架。uSel 决定哪些通道吃这条曲线,没选中的通道原样通过;alpha 永不参与。
+const FX_FS_CURVES = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uTex;
+uniform vec3 uSel;
+uniform float uBlack;
+uniform float uWhite;
+uniform float uInvGamma;
+uniform float uContrast;
+void main() {
+    vec4 c = texture(uTex, vUV);
+    vec3 v = clamp((c.rgb - uBlack) / max(uWhite - uBlack, 1e-4), 0.0, 1.0);
+    v = pow(v, vec3(uInvGamma));
+    v = uContrast >= 0.0 ? mix(v, v * v * (3.0 - 2.0 * v), uContrast) : mix(v, vec3(0.5), -uContrast);
+    Frag = vec4(mix(c.rgb, v, uSel), c.a);
+}`;
+
 // 内阴影:把虚化后的 silhouette 沿 uOffset 移开,原地留下的空缺 (1 - shifted) 再被**未虚化**的
 // 自身轮廓裁住 —— 这两步的顺序就是「只在边缘内侧、永不出蒙版」的实现。
 const FX_FS_SHADOW = `#version 300 es
@@ -2568,7 +2639,7 @@ function fxglProgram(gl, name, fragSrc) {
     const p = gl.createProgram();
     gl.attachShader(p, vs);
     gl.attachShader(p, fs);
-    // 钉死 aPos = location 0:五个程序共用同一个 VAO,Attribute 必须落在同一处。
+    // 钉死 aPos = location 0:所有程序共用同一个 VAO,Attribute 必须落在同一处。
     gl.bindAttribLocation(p, 0, 'aPos');
     gl.linkProgram(p);
     gl.deleteShader(vs);
@@ -2603,10 +2674,12 @@ function fxglInit() {
         sil: fxglProgram(gl, 'sil', FX_FS_SIL),
         box: fxglProgram(gl, 'box', FX_FS_BOX),
         motion: fxglProgram(gl, 'motion', FX_FS_MOTION),
+        pixelate: fxglProgram(gl, 'pixelate', FX_FS_PIXELATE),
+        curves: fxglProgram(gl, 'curves', FX_FS_CURVES),
         shadow: fxglProgram(gl, 'shadow', FX_FS_SHADOW),
         present: fxglProgram(gl, 'present', FX_FS_PRESENT),
     };
-    if (!progs.sil || !progs.box || !progs.motion || !progs.shadow || !progs.present) { fxgl.gl = null; return null; }
+    if (!progs.sil || !progs.box || !progs.motion || !progs.pixelate || !progs.curves || !progs.shadow || !progs.present) { fxgl.gl = null; return null; }
     fxgl.progs = progs;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -2757,6 +2830,39 @@ function fxglMotion(col, p) {
     col.slot = 1 - col.slot;
 }
 
+function fxglPixelate(col, p) {
+    const gl = fxgl.gl;
+    const dst = fxgl.off[1 - col.slot];
+    fxglRunPass(dst, fxgl.progs.pixelate, pr => {
+        fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0);
+        // 边长以图层像素给,换算成 UV —— 横竖各自的 texel 数不同,但格子在像素空间是正方形。
+        gl.uniform2f(fxglU(pr, 'uCell'), p.size / fxgl.w, p.size / fxgl.h);
+    });
+    col.slot = 1 - col.slot;
+}
+
+const FX_CHANNEL_SEL = { rgb: [1, 1, 1], r: [1, 0, 0], g: [0, 1, 0], b: [0, 0, 1] };
+
+// 默认参数就是恒等映射,这种曲线不必占用一次 pass。
+function curvesAreIdentity(p) {
+    return p.black === 0 && p.white === 100 && Math.abs(p.gamma - 1) < 1e-3 && p.contrast === 0;
+}
+
+function fxglCurves(col, p) {
+    const gl = fxgl.gl;
+    const sel = FX_CHANNEL_SEL[p.channel] || FX_CHANNEL_SEL.rgb;
+    const dst = fxgl.off[1 - col.slot];
+    fxglRunPass(dst, fxgl.progs.curves, pr => {
+        fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0);
+        gl.uniform3f(fxglU(pr, 'uSel'), sel[0], sel[1], sel[2]);
+        gl.uniform1f(fxglU(pr, 'uBlack'), p.black / 100);
+        gl.uniform1f(fxglU(pr, 'uWhite'), p.white / 100);
+        gl.uniform1f(fxglU(pr, 'uInvGamma'), 1 / Math.max(0.05, p.gamma));
+        gl.uniform1f(fxglU(pr, 'uContrast'), p.contrast / 100);
+    });
+    col.slot = 1 - col.slot;
+}
+
 function fxglInnerShadow(col, p) {
     const gl = fxgl.gl;
     fxglRunPass(fxgl.off[2], fxgl.progs.sil, pr => {
@@ -2803,6 +2909,8 @@ function applyLayerEffects(l, surface) {
         const p = effectParams(effect);
         if (effect.type === 'gaussian_blur') { if (p.radius > 0) fxglGauss(col, p.radius); }
         else if (effect.type === 'vector_blur') { if (p.distance > 0) fxglMotion(col, p); }
+        else if (effect.type === 'mosaic') { if (p.size > 1) fxglPixelate(col, p); }
+        else if (effect.type === 'curves') { if (!curvesAreIdentity(p)) fxglCurves(col, p); }
         else if (effect.type === 'inner_shadow') fxglInnerShadow(col, p);
     }
     fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
@@ -3860,6 +3968,17 @@ function fxIconSvg(icon) {
             + '<circle cx="7" cy="7" r="2.1" fill="currentColor" stroke="none"/>'
             + '<circle cx="7" cy="7" r="4.7" stroke-dasharray="1.7 1.9"/></svg>';
     }
+    if (icon === 'pixel') {
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="1.9" y="1.9" width="10.2" height="10.2" rx="1.2"/>'
+            + '<path d="M7 1.9v10.2M1.9 7h10.2" opacity="0.6"/>'
+            + '<rect x="1.9" y="1.9" width="5.1" height="5.1" fill="currentColor" stroke="none" opacity="0.55"/></svg>';
+    }
+    if (icon === 'curve') {
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M2.2 11.8V2.2" opacity="0.55"/><path d="M2.2 11.8h9.6" opacity="0.55"/>'
+            + '<path d="M2.6 11.4c3.1-.4 3.1-8.4 8.8-8.8" stroke-width="1.5"/></svg>';
+    }
     return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
         + '<path d="M1.9 4.3h5.4M1.9 9.7h5.4" stroke-width="1" opacity="0.55"/>'
         + '<path d="M2.2 7h5.1"/><path d="M7.1 3.9 10.4 7l-3.3 3.1"/></svg>';
@@ -4140,6 +4259,37 @@ function drawFxThumb(c, type) {
             g.fillRect(box.x - 7 + i * 2.4, box.y - 3 + i * 1.1, box.w, box.h);
         }
         g.globalAlpha = 1;
+        return;
+    }
+    if (type === 'mosaic') {
+        // 一条对角渐变被折成方格:每格取格心的渐变值,填成一块平色 —— 马赛克的样子就是"渐变变方"。
+        const cell = 9;
+        const lerp = (a, b, k) => Math.round(a + (b - a) * k);
+        for (let y = box.y; y < box.y + box.h; y += cell) {
+            for (let x = box.x; x < box.x + box.w; x += cell) {
+                const t = (((x + cell / 2) - box.x) / box.w + ((y + cell / 2) - box.y) / box.h) / 2;
+                g.fillStyle = `rgb(${lerp(0x14, 0x6f, t)},${lerp(0x14, 0x8c, t)},${lerp(0x1c, 0xff, t)})`;
+                g.fillRect(x, y, Math.min(cell, box.x + box.w - x), Math.min(cell, box.y + box.h - y));
+            }
+        }
+        return;
+    }
+    if (type === 'curves') {
+        g.strokeStyle = 'rgba(255,255,255,0.22)';
+        g.lineWidth = 1;
+        g.strokeRect(box.x, box.y, box.w, box.h);
+        g.setLineDash([3, 3]);
+        g.beginPath();
+        g.moveTo(box.x, box.y + box.h);
+        g.lineTo(box.x + box.w, box.y);
+        g.stroke();
+        g.setLineDash([]);
+        g.strokeStyle = '#6f8cff';
+        g.lineWidth = 2;
+        g.beginPath();
+        g.moveTo(box.x, box.y + box.h);
+        g.bezierCurveTo(box.x + box.w * 0.35, box.y + box.h * 0.95, box.x + box.w * 0.65, box.y + box.h * 0.05, box.x + box.w, box.y);
+        g.stroke();
         return;
     }
     g.fillStyle = '#6f8cff';
