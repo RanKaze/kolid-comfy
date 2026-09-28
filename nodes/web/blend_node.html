@@ -5308,12 +5308,18 @@ function syncPaintUI() {
     // own textContent would erase it.
     document.getElementById('maskDecalName').textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
+    // Tab wears two meanings and the tooltip has to name the live one: while the paint mode is armed
+    // the key is the switch to the OTHER surface, away from it the target kept its value through the
+    // detour, so the key is the way back to THIS surface.
+    const tabNote = mode === 'mask'
+        ? (decal ? 'Tab switches to the mask' : 'Tab switches to the decal')
+        : `Tab starts painting ${target} again`;
     const selNote = hasSelection() ? ' A selection is live: it clips this tool, so nothing lands outside the ants.' : '';
     maskDecalLabel.title = maskLayerSel
         ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer. It has one surface, so Tab has nothing to switch here.'
         : decal
-        ? 'Paint the decal (Tab switches to the mask): colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.'
-        : 'Paint the mask (coverage) (Tab switches to the decal): white shows the image, black hides it. The Color\u2019s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.';
+        ? `Paint the decal (${tabNote}): colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.`
+        : `Paint the mask (coverage) (${tabNote}): white shows the image, black hides it. The Color’s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.`;
     brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     updateCursorMode();
@@ -9306,15 +9312,20 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) { selectTool('bucket'); return; }
     // X swaps the two colours (PS). It is not a tool, so it answers whatever mode is armed.
     if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); swapPaintColors(); return; }
-    // Tab hops the paint target between the layer's two channels — the same switch the Mask and
-    // Decal thumbs in the list make, through the same entry, arming the paint mode the way they do.
-    // A keyboard switch has no chip to light up, so the status line says which surface is live now.
+    // Tab is the keyboard for the surface switch the Mask and Decal thumbs in the list make — the same
+    // entry, arming the paint mode the way they do. A keyboard switch has no chip to light up, so the
+    // status line says which surface is live now.
     if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (modalOpen()) return;             // a modal keeps its own focus traversal
         e.preventDefault();
         if (!l) { setStatus('No layer selected to paint', 'error'); return; }
         if (isMaskLayerTarget()) { setStatus('The Mask layer has one surface — nothing to switch', 'error'); return; }
-        setPaintTarget(isDecalTarget() ? 'mask' : 'decal', l);
+        // Two different presses wear one key. Inside the paint mode it is the toggle between the
+        // layer's two surfaces; away from it (Transform, the marquee, a view tool cancelled the
+        // paint mode) the target kept its value through the detour, so the key is the way BACK to
+        // that surface — flipping it here would land him on the channel he had already left.
+        const next = mode === 'mask' ? (isDecalTarget() ? 'mask' : 'decal') : paintTarget;
+        setPaintTarget(next, l);
         setStatus(isDecalTarget() ? 'Paint target — the decal' : 'Paint target — the mask');
         return;
     }
