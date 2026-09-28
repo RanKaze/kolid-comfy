@@ -234,11 +234,12 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.text { color: #d9b8ff; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom — so WYSIWYG holds while
-   the composite underneath keeps drawing the last committed render. */
+   the composite re-renders on every keystroke (live patch), so editor and canvas always show
+   the same text at the same scale. */
 #textEditor { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-sizing: border-box;
     margin: 0; padding: 0; border: 1px dashed rgba(0,122,255,0.9); background: transparent;
     color: #fff; caret-color: #fff; resize: none; overflow: hidden; outline: none; z-index: 6;
-    white-space: pre-wrap; word-break: break-all; }
+    white-space: pre-wrap; word-break: keep-all; overflow-wrap: normal; }
 .control-row select { flex: 1; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
     border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
@@ -1414,6 +1415,9 @@ function isTextLayer(l) { return !!l && !!l.text && !l.isMaskLayer; }
 // Which layer's editor is open right now (null = none). Declared with the model: applyView and
 // drawOverlay consult it, and a `let` may not be read before its declaration has run.
 let textEditingId = null;
+// What Esc rewinds to when a typing session is cancelled: the descriptor and box as they were
+// when the editor opened, plus the undo-stack depth at that moment.
+let textEditSnapshot = null;
 
 // The one place the descriptor's shape is decided: a .cud read back, or a panel patch, goes through
 // this so a corrupt field degrades to the default rather than to a broken render.
@@ -6021,6 +6025,11 @@ function openTextEditor(id, selectAll) {
     if (!isTextLayer(l)) return;
     if (textEditingId !== null && textEditingId !== id) commitTextEditor();
     textEditingId = id;
+    // The edit is LIVE (every keystroke patches the descriptor and re-renders the canvas), so
+    // the overlay and the composite can never disagree. The snapshot is what Esc rewinds to —
+    // the descriptor and the box exactly, plus the undo-stack depth so the session's own
+    // coalesced entry can be taken back out.
+    textEditSnapshot = { desc: l.text, tr: Object.assign({}, l.transform), len: undoStack.length };
     textEditorEl.value = l.text.content;
     textEditorEl.hidden = false;
     positionTextEditor();
@@ -6052,7 +6061,10 @@ function positionTextEditor() {
     const sx = (tr.w * canvasW) / nat.w, sy = (tr.h * canvasH) / nat.h;
     const kx = sx / sy;
     const fs = Math.max(1, l.text.fontSize * sy * view.zoom);
-    textEditorEl.style.width = (w / kx) + 'px';
+    // +4px slack: the longest line is exactly the content width, and DOM text metrics can sit a
+    // hair wider than canvas measureText — without slack the tail wraps to a second line the
+    // composite never shows.
+    textEditorEl.style.width = (w / kx + 4) + 'px';
     textEditorEl.style.height = h + 'px';
     textEditorEl.style.transform = `translate(${c.x - w / 2}px, ${c.y - h / 2}px) rotate(${ang}rad) scale(${kx}, 1)`;
     textEditorEl.style.font = `${l.text.fontWeight} ${fs}px ${l.text.fontFamily}`;
@@ -6070,17 +6082,34 @@ function closeTextEditor() {
 function commitTextEditor() {
     if (textEditingId === null) return;
     const id = textEditingId;
-    const v = textEditorEl.value;
     closeTextEditor();
     const l = getLayer(id);
+    textEditSnapshot = null;
     if (!isTextLayer(l)) { renderLayerList(); render(); return; }
-    if (v !== l.text.content) patchTextLayer(l, { content: v });
-    else { renderLayerList(); render(); }
+    // The canvas already carries every keystroke (live input patches); committing only closes
+    // the overlay. One typed-and-undone session leaves one coalesced 'text-content' undo step.
+    renderLayerList();
+    render();
 }
 
 function cancelTextEditor() {
     if (textEditingId === null) return;
+    const l = getLayer(textEditingId);
+    if (l && textEditSnapshot && l.text.content !== textEditSnapshot.desc.content) {
+        l.text = textEditSnapshot.desc;
+        l.transform = Object.assign({}, textEditSnapshot.tr);
+        syncTextBuffer(l);
+        // Take back this session's undo entry: the first keystroke pushed it (stack grew), later
+        // ones coalesced into it. If it coalesced into an older entry instead, overwrite that one
+        // with the rewound state.
+        if (undoStack.length > textEditSnapshot.len) undoStack.pop();
+        else if (undoStack.length > 1) undoStack[undoStack.length - 1] = snapshotState();
+        lastActionKey = null;
+        syncHistoryUI();
+    }
+    textEditSnapshot = null;
     closeTextEditor();
+    layoutCanvas();
     renderLayerList();
     render();
     setStatus('Text edit cancelled');
@@ -6092,7 +6121,16 @@ textEditorEl.addEventListener('keydown', ev => {
     else if (ev.key === 'Escape') { ev.preventDefault(); cancelTextEditor(); }
 });
 textEditorEl.addEventListener('blur', () => { if (textEditingId !== null) commitTextEditor(); });
-textEditorEl.addEventListener('input', positionTextEditor);
+// Live editing: every keystroke patches the descriptor so the composite under the overlay IS
+// the preview — the two can never disagree. The box grows to the new natural size exactly as
+// a panel patch would, and the coalescing key keeps the whole typing session one undo step.
+textEditorEl.addEventListener('input', () => {
+    const l = getLayer(textEditingId);
+    if (isTextLayer(l) && l.text.content !== textEditorEl.value) {
+        patchTextLayer(l, { content: textEditorEl.value }, { historyKey: 'text-content' });
+    }
+    positionTextEditor();
+});
 
 // ---- Text panel ----
 // Every control patches the descriptor; the render and the box follow through patchTextLayer.
