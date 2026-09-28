@@ -3772,6 +3772,20 @@ class SnapshotDetailerSamplerNode:
         base_src = base_pipeline if chain_mode else self._current_pipeline
         injected_pipeline = base_src.copy() if base_src else None
 
+        # Debug：独立执行（Interface tab Execute / 离线 Processor）开一份自己的 trace ——
+        # 与 run_detailer 的 trace 同一模型，Debug 窗口原样能读。chain 内的 interface 块
+        # 不在这里开：那份 trace 归整条 run，另开会把 run 已收集的过程整份丢掉。
+        own_trace = False
+        if not chain_mode:
+            dbg.begin_trace({
+                'from_blend': False,
+                'action': 'execute_interface',
+                'interface': pkg.get('name', ''),
+                'interface_index': interface_idx,
+                'offline': bool(exec_options.get('offline')),
+            })
+            own_trace = dbg.current_trace() is not None
+
         # 仅在非 chain 模式（独立 interface tab）提前把 prompt tab 的 lora/prompt 注入到
         # pipeline 上下文；chain 模式完全通过 pipeline 传递，不在此解析 prompt/lora。
         if not chain_mode:
@@ -3800,6 +3814,9 @@ class SnapshotDetailerSamplerNode:
                 entry.negative = ''
                 entry.loras = get_loras_from_string(user_loras) if user_loras else []
                 injected_pipeline.context.contexts['__prompt_tab__'] = entry
+        if own_trace:
+            dbg.record_prompt('Prompt tab（注入 pipeline 上下文）', user_positive,
+                              loras=debug_lora_entries(user_loras))
         # 默认注入的图 + mask (context image)
         # chain 模式：优先使用调用方显式传入的输入图/mask（来自上一 block 的 pipeline）
         base_img = input_image if input_image is not None else (
@@ -3817,9 +3834,20 @@ class SnapshotDetailerSamplerNode:
             if base_mask is not None:
                 injected_pipeline.mask = base_mask
 
+        if own_trace:
+            dbg.record_stage(
+                '执行模式',
+                '离线 processor —— pipeline 当前图不改动' if exec_options.get('offline')
+                else 'Interface tab 独立执行',
+                interface=pkg.get('name', ''), index=interface_idx, operation=operation)
+            dbg.record_image('上下文图（pipeline 当前图）', base_img)
+            dbg.record_mask('上下文 mask', base_mask)
+
         # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
         # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
         start_types = pkg.get('start_types', {})
+        _start_names = ((getattr(server, 'interface_meta', None) or {})
+                        .get(pkg.get('name', '')) or {}).get('names', {}).get('start') or {}
         port_overrides = {}
         for port_num_str, key in image_keys.items():
             if key:
@@ -3830,6 +3858,14 @@ class SnapshotDetailerSamplerNode:
                         port_overrides[int(port_num_str)] = staging_image_to_mask(img)
                     else:
                         port_overrides[int(port_num_str)] = img
+                    if own_trace:
+                        _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                        _detail = f'staging {key}' + ('（亮度转 mask）' if declared == 'MASK' else '')
+                        if declared == 'MASK':
+                            dbg.record_mask(f'输入覆盖 · {_pname}',
+                                            port_overrides[int(port_num_str)], detail=_detail)
+                        else:
+                            dbg.record_image(f'输入覆盖 · {_pname}', img, detail=_detail)
                     print(f"[InterfaceExec] Port {port_num_str} image override: id={key} ({declared or 'IMAGE'})")
 
         injected_img = base_img
@@ -3850,6 +3886,12 @@ class SnapshotDetailerSamplerNode:
                 'mask': cropped_mask,
             }
             print(f"[InterfaceExec] cropped {base_img.shape} → {cropped_img.shape} crop_info={crop_info}")
+            if own_trace:
+                dbg.record_stage('Crop 工作区',
+                                 f'{tuple(base_img.shape)} → {tuple(cropped_img.shape)}',
+                                 reserve=crop_reserve)
+                dbg.record_image('Crop 后工作图', cropped_img)
+                dbg.record_mask('Crop 后工作 mask', cropped_mask)
 
         # 记录 interface 结果 keys
         server.interface_result_keys = []
@@ -3880,7 +3922,24 @@ class SnapshotDetailerSamplerNode:
             on_sampler_progress=lambda cur, total, node_id: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
         )
 
-        results = executor.execute(pkg, manual_values, port_overrides=port_overrides)
+        try:
+            results = executor.execute(pkg, manual_values, port_overrides=port_overrides)
+        except mm.InterruptProcessingException:
+            # Cancel（/api/cancel_run）触发的打断：标成 cancelled，别写成 error。
+            if own_trace:
+                dbg.record_stage('执行已取消', 'cancelled by user (interrupt)')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'cancelled'
+            raise
+        except Exception as e:
+            if own_trace:
+                dbg.record_error('interface 执行异常', str(e), where='_execute_interface')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'error'
+                    _tr.meta['error'] = str(e)
+            raise
 
         # Uncrop：将裁剪结果复原回完整图
         if pending_crop is not None:
@@ -3900,11 +3959,15 @@ class SnapshotDetailerSamplerNode:
                     uncropped_results.append(item)
             results = uncropped_results
             print(f"[InterfaceExec] uncropped {len(results)} results back to full size")
+            if own_trace:
+                dbg.record_stage('Uncrop', f'{len(results)} 个结果复原回完整图')
 
         # 离线 processor 语义：结果（IMAGE 与 MASK 都算）全部作为隐藏 staging 条目送回，
         # 端口对应关系记进 interface_result_meta 供工作台按端口落位；pipeline 当前图
         # 一概不动 —— processor 是「拿工作台的图去算一枚结果」，不是接力 run。
         if exec_options.get('offline'):
+            _end_names = ((getattr(server, 'interface_meta', None) or {})
+                          .get(pkg.get('name', '')) or {}).get('names', {}).get('end') or {}
             result_ports = getattr(executor, 'result_ports', [])
             for i, (ptype, val, name) in enumerate(results):
                 port_num = result_ports[i][0] if i < len(result_ports) else None
@@ -3917,6 +3980,20 @@ class SnapshotDetailerSamplerNode:
                 server.interface_result_keys.append(sid)
                 server.interface_result_meta.append(
                     {'key': sid, 'port': port_num, 'type': ptype, 'name': name})
+                if own_trace:
+                    _pname = (_end_names.get(str(port_num)) if port_num is not None else None) \
+                        or (f'value{port_num}' if port_num is not None else name)
+                    _detail = f'staging {sid}' + ('（mask→灰度图，工作台侧再落位）' if ptype == 'MASK' else '')
+                    if ptype == 'MASK':
+                        dbg.record_mask(f'输出 · {_pname}', val, detail=_detail)
+                    else:
+                        dbg.record_image(f'输出 · {_pname}', val, detail=_detail)
+            if own_trace:
+                dbg.record_stage('离线结果',
+                                 f'{len(server.interface_result_meta)} 个结果进图池（hidden），pipeline 当前图未改动')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'done'
             print(f"[InterfaceExec] offline processor: {len(server.interface_result_meta)} results, pipeline untouched")
             return None
 
@@ -3946,6 +4023,8 @@ class SnapshotDetailerSamplerNode:
             if ptype == 'IMAGE':
                 server.interface_result_keys.append(
                     server.add_staging(img, name=name, hidden=True))
+                if own_trace:
+                    dbg.record_image(f'输出 · {name}', img)
 
         # 接口结果图同时接管 pipeline image（后续 block / 下一次 run 从它继续）
         if results:
@@ -3954,6 +4033,12 @@ class SnapshotDetailerSamplerNode:
             if last_image is not None:
                 self._switch_image(server, last_image)
                 print(f"[InterfaceExec] Pipeline image updated from staging {new_key}")
+        if own_trace:
+            dbg.record_stage('执行结束',
+                             f'{len(server.interface_result_keys)} 个结果进图池（hidden）')
+            _tr = dbg.current_trace()
+            if _tr is not None:
+                _tr.meta['status'] = 'done'
 
     # -------------------------------------------------------------------------
     # 主入口
