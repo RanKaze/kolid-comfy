@@ -285,7 +285,16 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 画布尺寸: 初始取最底层图片的像素尺寸; 在 Canvas 面板用弹窗 (Canvas Size…) 手动设置后即与图层解耦, 之后增删/重排图层都不再改变画布; 清空所有图层后回到跟随模式; 新图层默认拉伸铺满
 - Canvas Size 弹窗 (PS 式): 宽/高输入 + 比例锁 (默认锁定, 按当前值取基准; 解锁后可自由改比例), Match Bottom Layer 一键取底层尺寸, 上限 16384 px/边 与 40 MP; 开关 "Scale layers with the canvas" — 开 = 图层随新尺寸等比拉伸 (归一化 transform 不变), 关 = 图层的像素尺寸与位置保持不变、以画布中心为锚 (新区域透明, 画布变小则裁切)
 - 每个图层两张绘制面 (都在图层自身像素空间, 都随 transform 一起缩放/旋转/平移): 蒙版 (覆盖率, 白色 = 可见) 与 decal (叠在图片之上的颜色面)
-- 单层结算顺序: 原图 + decal (straight alpha source-over) → 乘蒙版 → 按 transform 采样进画布 → 层间 source-over 合并; 蒙版因此同时裁切图片与 decal
+- 单层结算顺序: 原图 + decal (straight alpha source-over) → **[特效链]** → 乘蒙版 → 按 transform 采样进画布 → 层间 source-over 合并; 蒙版因此同时裁切图片与 decal
+- 图层特效链 (per-layer effect chain, `layer.effects[]`): 附属式挂载 (不是栈里的新条目类型), 逐层就地生效 (自下而上走到该层时跑它自己的链), 前端 WebGL2 算完把结果当作该层的源像素交出去。首批三种: Inner Shadow / Gaussian Blur / Vector Blur, 参数全在**图层自身像素空间**
+  - 三条地基契约 (决定了能做与不能做): ① **footprint-neutral** — 输出像素尺寸 === 输入, 一个像素都不外扩, 否则单独送往后端的原生尺寸蒙版与 layerCompositeForGenerate 的反解 transform 对齐就废了; ② **alpha-preserving** — 只改 RGB, 出口 alpha 仍是 img+decal 的原值, 于是后端 `image * mask` 依旧只乘一次 (乘两次会把软边按 alpha² 压暗); ③ **蒙版只当输入读、不当输出用** — silhouette = 图层 alpha × 蒙版 alpha 参与运算, 但结果不裁进输出, 所以"阴影只出现在蒙版内的边缘"是推论而非选项。**推论: 这套约束下不存在外投影 (drop shadow), 它的像素必然落在蒙版 alpha=0 处**
+  - GL 实现: 五张离屏缓冲按当前图层尺寸跨图层复用 (0/1 色彩乒乓, 2 silhouette 原样, 3/4 silhouette 虚化), RGBA16F (无 float 扩展退回 RGBA8); 可变半径低通走 dual-filtering/Kawase (每次迭代固定 4 抽样, 代价与半径无关, `uAlphaOnly` 复用同一份着色器算 silhouette); 方向模糊固定 32 抽样; 内阴影 = 轮廓偏移 + 虚化 + 裁回未虚化轮廓。角度按画布坐标读 (0° 向右、90° 向下), 故 GL UV 里 y 取负
+  - 重算时机: `fxResolved(l)` 缓存合成面, key = `l.img`/`l.decal`/`l.mask` 的**对象身份** + `fxSignature` (链的 JSON)。成立前提是绘制走 `detachPaintSurface` 的写时复制 (笔画换新面), 缩放/重采样/裁切同样整面替换; 因此 transform 拖拽、视图缩放都不会重跑 GL
+  - UI: 特效子行块挂在图层行的**上方** (左侧竖线标归属), 显示序 = 执行序的倒序 (越贴近图层者越先执行, effects[0] 紧挨 head 行); 空链不占位。每行 = 逐条开关 (checkbox) + SVG 图标 + 名称 + 可见读数 (`135° d8 r12 45% #000000`, 不塞 tooltip) + ×; 点行在该行下方内联展开参数区 (滑块/取色器/分段枚举, 拖动途中只重画布, 松手才记一步 undo); 行内 + 与图层右键菜单 Effects 都进同一个 picker (按 group 小标题 + 3 列网格, 缩略图在上短名在下); 子行可拖拽重排 (插入线指示); 图层名后缀 `· fx`
+  - 整链旁路: Layers 面板头的魔杖按钮 (`blend.effectsBypass` 存 localStorage), 视图级 — 画布路径与采样路径同时读到, 不会出现"画布上关了、送进 detailer 还开着"的分裂; 旁路时子行块左线转琥珀色
+  - 进采样的通路 (`layerSpecs` 一处收口): 链算过就把解析面 PNG 当 `image`, 并把 `decal` 置 null (已烘进解析面, 后端不再叠一次), `mask` 仍按原生尺寸单独发 — **后端 composite_layers / snapshot_sampler_node 因此零改动**; 未挂链的图层继续走 `TRUSTED_SRC(l.src)` 原图直传
+  - 持久化: undo 快照与 `.cud` v2 (`CUD_VERSION = 2`) 都存 `effects` 的**深拷贝** (参数是就地改写的, 共享引用会让 undo 步骤跟着变), 存档里的 `image` 资产仍是**原图** ⇒ 非破坏性往返; 读取走 `normalizeEffects` 白名单迁移 (认不出的 type 丢弃, 缺参数补注册表默认值), `fxSeq` 与 `layerSeq` 同样只增不减
+  - fragment 图层 (detailer 回填贴片) 不允许挂链; 空白手搓面 (Default / Dynamic Layer) 允许 (`noiseImageForGenerate` 结算前同样跑链)
 - 绘制目标 Mask / Decal (M / D 键, 或点侧栏分段按钮/行内 chip): decal 模式下才显示颜色选择器 (默认 #ff3b30), 笔刷与光标色环、侧栏色环都按该颜色着色; 蒙版恒画白色 (只看 alpha); decal 模式下 Invert 隐藏, Reset 变 Clear (清空该层 decal)
 - 蒙版画笔 (B) 与橡皮 (E) 是两个独立工具: 各自独立的尺寸与参数 (模式/strength/center/edge/gamma), 用 B/E 键或侧栏点击切换; 左键用当前工具, 右键用另一个工具 (所以画笔右键 = 擦除, 橡皮右键 = 补回); 两个工具共用当前的绘制目标 (蒙版或 decal)
 - 无悬浮面板: Mask / Decal / Brush / Eraser 都在侧栏, 当前工具与所属 section 高亮 (.active-tool), 各自带色环标识 (实线白 = 画笔, 红色虚线 = 橡皮); 画布上的笔刷光标环同色同形, 并按正在生效的工具实时切换 (含右键与吸色中)
