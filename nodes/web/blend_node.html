@@ -12312,6 +12312,19 @@ adoptDocument(createDocument('Untitled', null, captureContext(), false));
 // 名的图层会一直顶着回落脸)。
 loadTextFontLibrary();
 
+// js/scene3d_*.js 没进来时 —— 典型是节点进程还跑着没有 /js/ 路由的旧代码 —— 3D 模块整体缺席,
+// 裸引用 Scene3D 会一路 ReferenceError 把启动尾部炸掉。顶一枚「永不可用」的占位,跟 FX 链在引擎
+// 缺失时的降级同一个分寸:2D 一切照常,Add 3D 入口收掉(真点也只会得到 available=false 的说明)。
+if (typeof Scene3D === 'undefined') {
+    window.Scene3D = {
+        available: false, active: false, entry: null, rec: null, models: new Map(),
+        busy: () => false, snapshot: () => null, blankRecord: () => null,
+        loadRec: () => {}, enter: () => {}, exit: () => {},
+        onKeyDown: () => false, onKeyUp: () => {}, wirePanel: () => {},
+        isModelFile: () => false, importFiles: () => {}, dropTemplate: () => {},
+    };
+    add3DLayerBtn.style.display = 'none';
+}
 // 3D 右栏的把手在这一刻接好:它整个活在 js/scene3d_panel.js 里,这里只负责给它接上 DOM。
 Scene3D.wirePanel();
 
