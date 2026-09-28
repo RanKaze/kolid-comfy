@@ -6199,9 +6199,11 @@ function endTransformDrag() {
         const startTr = d.group ? d.starts.get(id) : d.startTransform;
         const changed = !!startTr && transformChangedSince(startTr, target);
         if (!changed) {
-            // A plain click promoted the content box and moved nothing: park it back — unless the
-            // box is already a preview Enter owns.
-            if (!transformIsPending(id)) target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            // Only a RASTER press carries a promotion to undo: the mousedown copied its content box
+            // into l.transform, and at rest that field must be the identity again. A smart layer's
+            // stored transform IS its box — parking it at the identity would stretch the picture
+            // over the whole canvas, and since nothing moved there is nothing to give back.
+            if (isRasterLayer(target) && !transformIsPending(id)) target.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
             continue;
         }
         if (!transformPending) transformPending = new Map();
