@@ -1783,7 +1783,7 @@ const InterfaceTab: React.FC<{
     const renaming = renamingPort?.iface === ifaceName && renamingPort.side === side && renamingPort.num === port.num;
 
     return (
-      <div key={port.num} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', minWidth: 0 }}>
+      <div key={port.num} style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', rowGap: 2, gap: 8, padding: '4px 0', minWidth: 0 }}>
         {/* Port name — double-click to rename (display only; execution keys on the port number) */}
         <div
           style={{ minWidth: 80, maxWidth: 130, fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: renaming ? 'text' : 'pointer', flexShrink: 0 }}
@@ -1894,9 +1894,12 @@ const InterfaceTab: React.FC<{
   };
 
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowX: 'auto', overflowY: 'hidden', padding: 16, display: 'flex', flexDirection: 'row', gap: 16, alignItems: 'flex-start' }}>
+    // Wrap + vertical scroll: cards stack into rows as the panel allows and nothing is ever
+    // clipped — the old single-row + overflowY:hidden layout cut everything below the fold
+    // (ports, results, the Execute button) off without any way to reach it.
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexWrap: 'wrap', gap: 16, alignContent: 'flex-start', alignItems: 'flex-start' }}>
       {interfaces.map((iface, idx) => (
-        <div key={idx} style={{ width: 360, flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
+        <div key={idx} style={{ width: 360, maxWidth: '100%', flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{iface.name || `Interface ${idx + 1}`}</div>
 
           {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
@@ -1979,7 +1982,7 @@ const InterfaceTab: React.FC<{
           {/* Operation options (card-level) */}
           {iface.start_ports && iface.start_ports.some(p => p.type === 'IMAGE' || p.type === 'MASK') && (
             <div style={{ marginBottom: 12, padding: 10, background: 'rgba(10,132,255,0.06)', borderRadius: 8, border: '0.5px solid rgba(10,132,255,0.15)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', rowGap: 6, gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Operation</label>
                 <select style={styles.paramSelect} value={execOptions[idx]?.operation ?? 'default'} onChange={e => updateOpts(idx, { operation: e.target.value as 'default' | 'crop' })}>
                   <option value="default" style={{ background: '#1c1c1e', color: '#fff' }}>默认 (整图)</option>
