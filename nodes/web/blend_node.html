@@ -733,7 +733,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                         <button class="mini-btn" id="maskResetBtn" title="Reset the mask to fully visible">Reset</button>
                     </div>
                 </div>
-                <div class="panel-hint" id="maskTargetLabel" title="Paint target and the layer being painted" style="display:none; color:rgba(255,255,255,0.72); font-weight:600;"></div>
             </div>
             <div class="panel-section">
                 <div class="control-row" id="paintColorRow"><label>RGBA <span class="tool-key" title="Swap the two colours (X)">X</span></label>
@@ -1089,7 +1088,6 @@ const guidanceCanvas = document.getElementById('guidanceCanvas');
 const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
 const brushCursor = document.getElementById('brushCursor');
-const maskTargetLabel = document.getElementById('maskTargetLabel');
 const blendCtx = blendCanvas.getContext('2d');
 const guidanceCtx = guidanceCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
@@ -3707,7 +3705,6 @@ function render() {
         }
     }
     updateTransformReadout();
-    updateMaskTargetLabel();
     refreshCanvasThumbs();
     drawOverlay();
     schedulePreview();
@@ -5125,17 +5122,6 @@ function syncBrushCursor() {
     brushCursor.style.display = show ? 'block' : 'none';
 }
 
-function updateMaskTargetLabel() {
-    const l = getSelected();
-    if (mode !== 'mask' || !l) { setReadout(maskTargetLabel, ''); return; }
-    if (l.isMaskLayer) {
-        setReadout(maskTargetLabel, canvasW && canvasH ? `Mask layer — ${canvasW} × ${canvasH}` : 'Mask layer — no canvas yet');
-        return;
-    }
-    const which = isDecalTarget() ? 'Decal' : 'Mask';
-    setReadout(maskTargetLabel, `${which} — ${l.name}`);
-}
-
 // ==================== 工具（画笔 / 橡皮） ====================
 // The left button paints with the active tool; the right button is inert — it never swaps tools.
 function erasingNow() { return (isDrawing ? isErasing : ctrlMaskMode() ? ctrlErase : maskTool === 'eraser'); }
@@ -5205,7 +5191,6 @@ function syncPaintUI() {
         : 'Paint the mask (coverage): white shows the image, black hides it. The Color\u2019s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list switch target.';
     brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
-    updateMaskTargetLabel();
     updateCursorMode();
 }
 
