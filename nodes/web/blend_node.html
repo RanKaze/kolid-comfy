@@ -656,22 +656,24 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
                 <div class="panel-hint" id="transformReadout" title="This layer's transform: centre X/Y, size and rotation as a share of the canvas" style="display:none;"></div>
             </div>
-            <!-- The Text section answers to nothing but a selected text layer; every other
-                 selection hides the whole block. -->
-            <div class="panel-section" id="textSection" hidden>
+            <!-- The Text section folds like the tool sections: its header row is always there,
+                 and selecting a text layer is what unfolds it again. -->
+            <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="textLabel" title="A text layer stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas to retype it.">Text</div>
+                    <div class="panel-label" id="textLabel" title="A text layer stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas to retype it."><span class="fold-caret"></span>Text</div>
                     <div class="mini-group">
                         <button class="mini-btn key-btn" id="textEditBtn" title="Edit (Enter) — retype this layer's text inline on the canvas"><span class="tool-key">&#9166;</span></button>
                     </div>
                 </div>
-                <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
-                <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
-                <div class="control-row"><label>Weight</label><select id="textWeightSel"><option value="normal">Normal</option><option value="bold">Bold</option></select><span></span></div>
-                <div class="control-row"><label>Align</label><select id="textAlignSel"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><span></span></div>
-                <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
-                <div class="panel-hint" id="textContentLine" style="display:none;"></div>
-                <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
+                <div class="tool-body">
+                    <div class="control-row"><label>Font</label><select id="textFontSel" title="Font family — rendered by this browser, so the .cud shows whatever these fonts give"></select><span></span></div>
+                    <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
+                    <div class="control-row"><label>Weight</label><select id="textWeightSel"><option value="normal">Normal</option><option value="bold">Bold</option></select><span></span></div>
+                    <div class="control-row"><label>Align</label><select id="textAlignSel"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><span></span></div>
+                    <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
+                    <div class="panel-hint" id="textContentLine" style="display:none;"></div>
+                    <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
+                </div>
             </div>
             <div class="panel-section tool-section" id="maskSection">
                 <div class="panel-head">
@@ -7161,7 +7163,8 @@ const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '
 function updateTextPanel() {
     const l = getSelected();
     const on = !!l && isTextLayer(l);
-    textSectionEl.hidden = !on;
+    // Selecting a text layer unfolds the section; any other selection folds it back to its header.
+    textSectionEl.classList.toggle('collapsed', !on);
     if (!on) return;
     const t = l.text;
     if (TEXT_FONT_FAMILIES.some(f => f[0] === t.fontFamily)) textFontSel.value = t.fontFamily;
@@ -7299,10 +7302,14 @@ document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rota
 document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
 
 // ---- Folding tool sections ----
-// Brush, Bucket and Eraser start folded; clicking their header row shows or hides the settings.
-for (const id of ['brushSection', 'bucketSection', 'eraserSection']) {
+// Brush, Bucket, Eraser and Text start folded; clicking their header row shows or hides the
+// settings. A button inside a header acts on its own — it never toggles the fold.
+for (const id of ['brushSection', 'bucketSection', 'eraserSection', 'textSection']) {
     const section = document.getElementById(id);
-    section.querySelector('.panel-head').addEventListener('click', () => section.classList.toggle('collapsed'));
+    section.querySelector('.panel-head').addEventListener('click', ev => {
+        if (ev.target.closest('button')) return;
+        section.classList.toggle('collapsed');
+    });
 }
 
 document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
