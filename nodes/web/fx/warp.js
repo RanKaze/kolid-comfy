@@ -3,11 +3,13 @@
 //   * Lattice —— 一张铺满该层的四边形网格:拖把手 = 网格跟着走,点一条边 = 沿那条边贯通整张网插一排
 //                把手,被这条线穿过的每个四边形都一分为二 (全图只有四边面,不会出三角面)。
 //                目标是把图像扭曲印在一个物体上 (PS 的 Mesh Warp 那一类)。
-//   * Geometry —— 绑一张深度图 (再绑一张法线图就更准),把画面重投影到这块凹凸面上:每个像素取的
-//                是「沿 Direction 倾斜的一条视线在该处高度上穿过表面」的位置,所以近处滑得多、远处
-//                滑得少,而且高起的形状会挡住它背后的东西 (occlusion-correct parallax relief)。
-//                Align 决定深度图以谁为准:Canvas = 整张画布 (图层挪到哪就读哪块深度),Local = 该层
-//                自己的盒子。
+//   * Geometry —— 绑一张深度图 (再绑一张法线图就更准),把画面重投影到这块凹凸面上:每个像素沿**自己
+//                那条**视线往下探,视线从视轴 (该层网格的中心) 发散出去,所以高起的部分把画面朝外撑开、
+//                背向的那面把画面压紧,而形状背后那一块被自己挡住 (perspective relief reprojection)。
+//                这就是「布铺在形状上」而不是「一块平面压上去」:铺上去的画面跟着面的坡度被拉伸压缩。
+//                Bulge = 视轴两侧的张开程度 (径向,画面中心不动),Slide = 整体的斜视 (恒定那一份),
+//                Anchor = 哪一面深度钉在原地不动。Align 决定深度图以谁为准:Canvas = 整张画布 (图层
+//                挪到哪就读哪块深度),Local = 该层自己的盒子。
 // 注册数据与三条地基契约见 fx/core.js;绑定贴图的解析见 fx/maps.js;网格的把手编辑面在页面本体里
 // (blend_node.html 的 warpEdit 那一段 —— 它要拖在真实的画布上,参数区那块小图放不下)。
 
@@ -321,16 +323,18 @@ void main() {
     Frag = vec4(c.rgb, c.a * cov);
 }`;
 
-// 几何:视差重投影 (occlusion-correct relief mapping)。深度图的亮度读成「该处多高」(近=亮,深度估计
-// 那条子图的极性),然后从输出像素沿一条**倾斜的视线**往下探:候选高度 λ 处的取样点 = 原点 + 视差偏移
-// ·(λ - Anchor),命中条件是 h(取样点) ≥ λ。从 λ=1 (最近) 往下走、取**第一个**命中,就是这条视线
-// 先撞到谁 —— 于是高起的形状挡住它背后的像素,而不是像朴素视差那样把后面那块一起拉上来。λ=0 时
-// h ≥ 0 恒成立,所以步进必然收敛,没有「打不中」这一支。命中点落在两步之间,还要精修一次:绑了法线
-// 图就用它给的坡度做一次 Newton (坡度免费,但被夹回这一步的区间里,所以法线图的方向极性即使不对也
-// 只是少收敛一点);没绑就拿深度图自己二分 4 次 —— 副槽因此是真·可选,缺图只让边缘没那么锐。
-// 偏移不取贴图自己的轴,而是沿该层网格的两条轴走 (uMapU/uMapV 那对基 = 图层盒子 → 画布 → 贴图 uv
-// 的同一条仿射,JS 侧算好),着色器不必知道旋转存在。uShift 描述的是**取样点**往哪挪;画面走的正是
-// 反方向,所以 Angle 读的是画面的去向。
+// 几何:透视重投影 (occlusion-correct relief mapping)。深度图的亮度读成「该处多高」(近=亮,深度估计
+// 那条子图的极性),然后从输出像素沿视线往下探:候选高度 λ 处的取样点 = 原点 + 视线偏移·(λ - Anchor),
+// 命中条件是 h(取样点) ≥ λ。从 λ=1 (最近) 往下走、取**第一个**命中,就是这条视线先撞到谁 —— 于是高起
+// 的形状挡住它背后的像素,而不是像朴素视差那样把后面那块一起拉上来。λ=0 时 h ≥ 0 恒成立,所以步进必然
+// 收敛,没有「打不中」这一支。命中点落在两步之间,还要精修一次:绑了法线图就用它给的坡度做一次 Newton
+// (坡度免费,但被夹回这一步的区间里,所以法线图的方向极性即使不对也只是少收敛一点);没绑就拿深度图自己
+// 二分 4 次 —— 副槽因此是真·可选,缺图只让边缘没那么锐。
+// 视线是**逐像素**的:off = 斜视那一份 + Bulge·(像素 - 视轴)。视轴取该层网格的中心,于是近处的面把
+// 画面朝外撑开、背面把画面压紧 (梯度进雅可比 = 跟着面的坡度走),而整块平移那种「一块平面压上来」的
+// 读法正是常数视线造成的。偏移不取贴图自己的轴,而是落在该层网格的 uv 上再过仿射基进贴图 uv —— 于是
+// Canvas 对齐下「往右」对应画布的哪个方向,全由 uMapU/uMapV 那对基回答,着色器只管两个轴。off 描述的是
+// **取样点**往哪挪;画面走的正是反方向,所以 Angle 读的是画面的去向。
 const FX_FS_WARP_GEOMETRY = `#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -342,6 +346,7 @@ uniform vec2 uMapU;
 uniform vec2 uMapV;
 uniform vec2 uMapB;
 uniform vec2 uShift;
+uniform vec2 uBulge;
 uniform vec2 uSlope;
 uniform float uAnchor;
 uniform int uSteps;
@@ -350,7 +355,8 @@ float warpHeight(vec2 muv) { return texture(uMap, muv).r; }
 ${WARP_GLSL_SAMPLE}
 void main() {
     vec2 muv0 = uMapU * vUV.x + uMapV * vUV.y + uMapB;
-    vec2 ray = uMapU * uShift.x + uMapV * uShift.y;
+    vec2 off = uShift + uBulge * (vUV - vec2(0.5));
+    vec2 ray = uMapU * off.x + uMapV * off.y;
     // 除以 max(…,1.0): uSteps 万一没被设上 (uniform 名打错就是 null location, 无声取 0), 这里也不会
     // 得到 inf/NaN 而把整张面洗成透明。
     float dt = 1.0 / max(float(uSteps), 1.0);
@@ -374,7 +380,7 @@ void main() {
             if (warpHeight(muv0 + ray * (m - uAnchor)) - m >= 0.0) a = m; else lo = m;
         }
     }
-    Frag = warpFetch(uTex, vUV + uShift * (a - uAnchor));
+    Frag = warpFetch(uTex, vUV + off * (a - uAnchor));
 }`;
 
 // ==================== pass ====================
@@ -435,14 +441,21 @@ function fxglWarp(col, p, effect, l) {
     }
     // Geometry:引擎按槽位声明已经把 texMap (深度) 备好并上传 (没绑深度图 / 图没解码根本走不到这里),
     // texMap2 是那张法线图 —— 可缺,缺了着色器自己退成二分精修 (fxgl.hasMap2 说这句话)。
-    if (p.shift <= 0) return;
+    if (p.shift <= 0 && p.bulge <= 0) return;
     const fr = warpMapFrame(p, l);
-    // Angle 读的是**画面**往哪倒 (0° = 右、90° = 下,同 fx/core.js 的角度约定),取样点走的正是反方向。
-    // 位移先落在该层网格的 uv 上,再过仿射基进贴图 uv —— 于是 Canvas 对齐下「往右」对应画布的哪个
-    // 方向,全由 fr.u/fr.v 那对基回答,着色器只管两个轴。
+    // 两份偏移都落在该层网格的 uv 上 (逐轴除以本层像素数),再过仿射基进贴图 uv —— 于是 Canvas 对齐下
+    // 「往右」对应画布的哪个方向,由 fr.u/fr.v 那对基回答。Angle 读的是**画面**往哪倒 (0° = 右、90° = 下,
+    // 同 fx/core.js 的角度约定),取样点走的正是反方向;Bulge 没有方向,乘的是「离视轴 (该层网格的中心)
+    // 多远」,2·(uv-0.5) 这个因子让「边缘那一圈」在满幅高度上正好走 bulge 个像素,两轴各除自己的像素数
+    // 所以各向同性的。径向取**负号**:眼在视轴上方、视线发散着落到平面上,所以高度 h 的那个面在平面上的
+    // 位置比它的投影更**靠内** (q = p - h/h_e·(p-e)) —— 取样点往视轴找,画面才被朝外撑开放大;取正就成了
+    // 往中心吸紧。把这两项合起来读就是「眼在 (Slide 指向的那侧、离视轴那么远)」:恒定那份正是眼偏离
+    // 视轴时的整体斜视,径向那份是眼离平面有多近。
     const rad = p.dir * Math.PI / 180;
     const ox = -Math.cos(rad) * p.shift / fxgl.w;
     const oy = Math.sin(rad) * p.shift / fxgl.h;      // v 朝上:画面往下倒 = 取样点沿 +v
+    const bx = -2 * p.bulge / fxgl.w;
+    const by = -2 * p.bulge / fxgl.h;
     // 坡度由法线图自己那套像素数换算 (n.xy 是「每张贴图像素的高度差」),所以两张图分辨率不同也没关系。
     const nnative = fxgl.hasMap2 ? nativeSize(fxMapImage(fxMapRef(effect, 'normal'))) : null;
     fxglRunPass(dst, fxgl.progs.warpGeometry, pr => {
@@ -453,6 +466,7 @@ function fxglWarp(col, p, effect, l) {
         gl.uniform2f(fxglU(pr, 'uMapV'), fr.v[0], fr.v[1]);
         gl.uniform2f(fxglU(pr, 'uMapB'), fr.b[0], fr.b[1]);
         gl.uniform2f(fxglU(pr, 'uShift'), ox, oy);
+        gl.uniform2f(fxglU(pr, 'uBulge'), bx, by);
         gl.uniform2f(fxglU(pr, 'uSlope'), nnative ? nnative.w : 1, nnative ? nnative.h : 1);
         gl.uniform1f(fxglU(pr, 'uAnchor'), p.anchor === 'near' ? 1 : 0);
         gl.uniform1i(fxglU(pr, 'uSteps'), Math.max(4, Math.min(32, p.steps | 0)));
@@ -475,7 +489,8 @@ const WARP_PARAMS = [
     { key: 'normal', label: 'Normal', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Geometry' },
     { key: 'dir', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '\u00b0', when: p => p.mode === 'Geometry' },
-    { key: 'shift', label: 'Slide', min: 0, max: 128, step: 1, def: 24, unit: 'px', when: p => p.mode === 'Geometry' },
+    { key: 'shift', label: 'Slide', min: 0, max: 128, step: 1, def: 0, unit: 'px', when: p => p.mode === 'Geometry' },
+    { key: 'bulge', label: 'Bulge', min: 0, max: 384, step: 1, def: 128, unit: 'px', when: p => p.mode === 'Geometry' },
     { key: 'anchor', label: 'Anchor', kind: 'enum', options: ['far', 'near'], def: 'far', when: p => p.mode === 'Geometry' },
     { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.mode === 'Geometry' },
 ];
@@ -570,18 +585,20 @@ defineEffect({
     needsMap2: { key: 'normal', role: 'Normal' },
     needsMapWhen: p => p.mode === 'Geometry',
     needsMap2When: p => p.mode === 'Geometry',
-    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it: each pixel is fetched where a line of sight leaning along Angle crosses that surface, so near parts slide further than far parts and a tall shape hides what sits behind it. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
+    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it. Every pixel gets its **own** line of sight, opening out from a view axis that runs through the middle of this layer: a face standing toward you spreads the picture outward, a face turned away packs it tighter, and a tall shape hides what sits behind it \u2014 that is what makes the picture lie over the form rather than slide across it. Bulge = how wide those sight lines open (how far the rim of the layer is pushed at full depth). Angle and Slide add one lean that every sight line shares, so the whole relief appears to be viewed from off to the side. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
     params: WARP_PARAMS,
     editor: warpEditorEl,
     shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpGeometry: FX_FS_WARP_GEOMETRY },
     run: fxglWarp,
     // 参数换形状:旧存档里的 Depth 模式读成 Geometry。绑定的深度图本来就是 params.map,一个字不用
-    // 动;梯度推法换成视差重投影后,Push 落到 Slide 上,上坡/下坡的读法落到 Anchor 上 (画面不动的
-    // 那一面)。Angle 与 Steps 取新默认 —— 旧模式根本没有视线方向这件事。
+    // 动;梯度推法换成重投影后,Push 落到 Slide 上 (那份偏移同样是恒定的一支),上坡/下坡的读法落到
+    // Anchor 上 (画面不动的那一面)。Bulge 按 0 读回来:旧 Depth 没有「视线发散」这件事,新默认会让
+    // 它凭空多出一层径向形变。Angle 与 Steps 取新默认。
     migrate(raw, out) {
         if (raw.mode !== 'Depth') return;
         out.mode = 'Geometry';
         out.shift = Math.max(0, Math.min(128, Number(raw.strength) || 0));
+        out.bulge = 0;
         out.anchor = raw.slide === 'uphill' ? 'near' : 'far';
     },
     // Canvas 对齐的几何吃的还是「该层盒子落在画布哪儿」,而拖图层既不改像素也不改 params。缓存身份
@@ -600,8 +617,10 @@ defineEffect({
             return lat ? `lattice  ${lat.cols}\u00d7${lat.rows} quads` : 'lattice  no grid';
         }
         // 两张绑图都要在可见文本里报出来:法线图缺了不是错误,但「它在退化成二分」必须看得见。
+        // 视线两份成分也都要报:s 是共享的那支斜视、b 是发散的张开,只报一颗的话另一颗被调了画面
+        // 变了读数却不动。
         const nrm = fxMapRef(effect, 'normal') ? fxMapShort(effect, 'normal') : 'no normal';
-        return `${fxMapShort(effect)} + ${nrm}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}${p.anchor === 'near' ? '  near' : ''}`;
+        return `${fxMapShort(effect)} + ${nrm}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}  b${n(p.bulge)}${p.anchor === 'near' ? '  near' : ''}`;
     },
     thumb(g, box) {
         // 一格被按下去一角的方格网:虚线是格子原来占的框,实线是网格拖成什么样。
