@@ -8565,9 +8565,11 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     // Ctrl+T shows the transform box; a bare T arms the rectangle drag that draws a NEW text
     // layer — the layer lands in the box the user sweeps, not at a default size.
+    // stopPropagation keeps the host page (LiteGraph, other nodes) from also answering Ctrl+T.
     // Alt+T stays unassigned — it was never a transform shortcut either.
     if ((e.key === 't' || e.key === 'T') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
+        e.stopPropagation();
         if (l) activateMode('transform');
         return;
     }
