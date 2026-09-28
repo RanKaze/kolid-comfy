@@ -2307,6 +2307,45 @@ const BUCKET_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2
 // out a new layer".
 const DYNAMIC_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32' fill='none'%3E%3Cg stroke='%23000' stroke-width='4.6'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cg stroke='%23fff' stroke-width='1.8'%3E%3Cpath d='M16 15h12v13h-12z M19.5 15v-3h8.5v8h-3' stroke-dasharray='3.4 2.6'/%3E%3C/g%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23fff' stroke-width='3.2'/%3E%3Cpath d='M3 8H13M8 3V13' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E") 8 8, crosshair`;
 
+// 两支选框指针, 解剖和油漆桶一致: **准星**才是拿来瞄准的 (交点即落点, hotspot 8 8), 右下的徽章
+// 只报身份 —— 外面那枚说工具 (实线方框 = 矩形选框, 带绳的环 = 套索), 角上那枚说这次按下会提交
+// 哪种布尔模式 (+ 加选 / − 减选 / × 交选; 空按 = 替换, 它本来就是"没按住东西", 所以角上是空的)。
+// 模式是拿 mousedown 同一句 selectionMode() 读出来的, 所以光标不可能承诺一个松手给不出的模式。
+// 徽章画在 32×32 里, 只用绝对指令 (M/L/H/V/C/A/Z) —— 相对指令的数是增量, 越界了没人看得见, 而这套
+// 光标在这里没法目视, 只能靠探针按坐标断言"每一笔都落在 viewBox 内、且不压到准星"。
+const SEL_TOOL_GLYPH = {
+    rect: 'M14.6 14.4H23.2V22H14.6Z',
+    lasso: 'M22.2 17.4A3.7 3.7 0 1 1 14.8 17.4A3.7 3.7 0 1 1 22.2 17.4 M18.5 21.1C18.9 23.1 18 24.3 16.3 24.7',
+};
+const SEL_MODE_GLYPH = {
+    add: 'M24.6 27.2H29.6M27.1 24.7V29.7',
+    subtract: 'M24.6 27.2H29.6',
+    intersect: 'M25 25.1L29.2 29.3M29.2 25.1L25 29.3',
+};
+const selCursorCache = {};
+function selCursor(kind, mode) {
+    const key = kind + ':' + mode;
+    if (!selCursorCache[key]) {
+        const tool = SEL_TOOL_GLYPH[kind] || SEL_TOOL_GLYPH.rect;
+        const badge = SEL_MODE_GLYPH[mode] || '';
+        // 黑晕 + 白芯成对画, 和油漆桶/新图层同一个做法: 深底浅底都读得出来。准星最后画, 压在徽章之上。
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none" stroke-linecap="round" stroke-linejoin="round">`
+            + `<g stroke="#000" stroke-width="4.8"><path d="${tool}"/></g><g stroke="#fff" stroke-width="2"><path d="${tool}"/></g>`
+            + (badge ? `<g stroke="#000" stroke-width="5.6"><path d="${badge}"/></g><g stroke="#fff" stroke-width="2.2"><path d="${badge}"/></g>` : '')
+            + `<path d="M3 8H13M8 3V13" stroke="#fff" stroke-width="3.2"/>`
+            + `<path d="M3 8H13M8 3V13" stroke="#000" stroke-width="1.4"/></svg>`;
+        selCursorCache[key] = `url("data:image/svg+xml,${encodeURIComponent(svg)}") 8 8, crosshair`;
+    }
+    return selCursorCache[key];
+}
+
+// 光标此刻说的模式: 正在拖的这一次说**按下时已定**的那个 (拖到一半再按 Shift 不改判, 所以徽章也
+// 不该跟着亮), 空闲时说的就是"现在按下会提交什么"。
+function selPointerMode() {
+    return selDrag ? selDrag.mode : selectionMode({ shiftKey: keyShift, altKey: keyAlt });
+}
+function selPointerCursor() { return selCursor(mode === 'lasso' ? 'lasso' : 'rect', selPointerMode()); }
+
 // True while the Dynamic Layer rectangle owns the pointer — armed or mid-sweep. Every cursor
 // site asks this FIRST so the brush ring / bucket crosshair / transform arrows can never leak
 // into the placement drag.
@@ -2329,8 +2368,9 @@ function refreshCursor() {
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
-    // Both marquee tools aim at a pixel, so the pointer is the crosshair PS uses.
-    if (mode === 'rect' || mode === 'lasso') { setCursor('crosshair'); return; }
+    // Both marquee tools aim at a pixel, so the pointer is the crosshair PS uses — with its own
+    // tool badge and the boolean mode this press will commit riding next to it.
+    if (mode === 'rect' || mode === 'lasso') { setCursor(selPointerCursor()); return; }
     // The managed brush ring replaces the native cursor; Ctrl's shortcut mode shows the same ring
     // even when the toolbar is on some other tool. The bucket opts out of the ring: it is a click
     // tool, so the pointer is the bucket itself (Ctrl still means "paint with the brush ring").
@@ -2426,6 +2466,9 @@ function updateHoverCursor(sp, docPos) {
     if (mode === 'pan') { setCursor('grab'); return; }
     if (mode === 'zoom') { setCursor('zoom-in'); return; }
     if (mode === 'rotate') { setCursor(ROTATE_CURSOR); return; }
+    // Same rank as refreshCursor: the marquee tools must survive the per-mousemove pass here too,
+    // otherwise the very first move after picking M walks the pointer back to the plain arrow.
+    if (mode === 'rect' || mode === 'lasso') { setCursor(selPointerCursor()); return; }
     // Ctrl borrows the Mask tool's ring cursor even when another tool is active, so the shortcut
     // looks like what it does.
     if (mode === 'mask' || ctrlMaskMode()) {
@@ -3311,7 +3354,7 @@ function beginSelDrag(pos, e) {
             ];
         },
     };
-    setCursor('crosshair');
+    setCursor(selPointerCursor());
     setStatus(selDrag.kind === 'rect'
         ? 'Drag the marquee — Shift adds, Alt subtracts, Shift+Alt intersects (Esc leaves the tool)'
         : 'Hold and sweep the lasso — it closes where you release (Alt subtracts, Shift adds)');
@@ -8708,7 +8751,9 @@ window.addEventListener('keydown', e => {
     }
     if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); if (!keySpace) { keySpace = true; onViewKeyChange(); } return; }
     if (e.key === 'Alt') { if (!keyAlt) { keyAlt = true; syncBrushCursor(); refreshCursor(); } return; }
-    if (e.key === 'Shift') { keyShift = true; return; }
+    // Shift moves the marquee's boolean badge, so the pointer has to be re-read for it exactly
+    // like Alt already is — otherwise the + only appears once the button goes down.
+    if (e.key === 'Shift') { keyShift = true; refreshCursor(); return; }
     if (e.key === 'Control' || e.metaKey) { setKeyCtrl(true); return; }
     if ((e.key === 'z' || e.key === 'Z') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('zoom'); return; }
     if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('pan'); return; }
@@ -8781,7 +8826,7 @@ window.addEventListener('keydown', e => {
 window.addEventListener('keyup', e => {
     if (e.key === ' ' || e.key === 'Spacebar') { keySpace = false; onViewKeyChange(); return; }
     if (e.key === 'Alt') { keyAlt = false; syncBrushCursor(); refreshCursor(); return; }
-    if (e.key === 'Shift') { keyShift = false; return; }
+    if (e.key === 'Shift') { keyShift = false; refreshCursor(); return; }
     if (e.key === 'Control' || e.key === 'Meta') { setKeyCtrl(false); return; }
 });
 
