@@ -676,18 +676,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <div class="panel-section">
                 <div class="panel-head">
-                    <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
-                    <div class="mini-group">
-                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle; Shift squares it. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
-                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
-                        <button class="mini-btn" id="selectAllBtn" title="Select the whole canvas (Ctrl+A)">All</button>
-                        <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
-                    </div>
-                </div>
-                <div class="panel-hint" id="selectionReadout" style="display:none;"></div>
-            </div>
-            <div class="panel-section">
-                <div class="panel-head">
                     <div class="panel-label" id="transformLabel">Transform</div>
                     <div class="mini-group">
                         <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">T</span></button>
@@ -783,6 +771,18 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
                 <div class="panel-hint" id="textContentLine" style="display:none;"></div>
                 <div class="panel-hint" id="textSizeLine" style="display:none;"></div>
+            </div>
+            <div class="panel-section">
+                <div class="panel-head">
+                    <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
+                    <div class="mini-group">
+                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle; Shift squares it. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
+                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
+                        <button class="mini-btn" id="selectAllBtn" title="Select the whole canvas (Ctrl+A)">All</button>
+                        <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
+                    </div>
+                </div>
+                <div class="panel-hint" id="selectionReadout" style="display:none;"></div>
             </div>
             <div class="panel-section">
                 <div class="panel-head">
@@ -1178,7 +1178,6 @@ let paintTarget = 'mask';      // 'mask' | 'decal'
 // everything else about it is derived. 'rect' / 'lasso' join the mode list as its two tools.
 let selection = null;   // { shapes:[{kind:'rect'|'poly', mode, ...}] } + derived mask/box/count/contours
 let selDrag = null;     // {kind, mode, x0, y0, x1, y1, pts:[], square} — the gesture in flight
-let antPhase = 0;
 let antTimer = null;
 let brushColor = '#ff3b30';
 let brushAlpha = 1;            // 0..1 — decal strokes paint translucent; on a mask this IS the coverage
@@ -2817,15 +2816,14 @@ function drawAdjustBox(pts, showRotate) {
 // subtract/intersect honest: the visible boundary is the boolean result, so a hole punched by an
 // Alt-drag shows its own outline instead of leaving the original box marching around it.
 const SEL_MIN_DRAG = 2;          // doc px — a stray click is not a marquee
-const SEL_LASSO_SPACING = 1.2;   // screen px between lasso samples (scaled by 1/zoom)
-// Scratch the selection is rasterized into — never bigger than the selection's own bounding box.
+const SEL_LASSO_SPACING = 2;     // screen px between lasso samples — a freehand sweep does not
+                                 // need a vertex every pixel, and every one of them is re-stroked
+                                 // and re-rasterized later
+// Scratch the selection's shapes are rasterized into — never bigger than the selection's own box.
 const selBmpCanvas = document.createElement('canvas');
 const selBmpCtx = selBmpCanvas.getContext('2d');
-// Scratch the ink is clipped in before it lands on a paint surface (layer-sized, like strokeCanvas).
-const selClipCanvas = document.createElement('canvas');
-const selClipCtx = selClipCanvas.getContext('2d');
 
-function hasSelection() { return !!selection && !!selection.mask && selection.count > 0; }
+function hasSelection() { return !!selection && selection.derived && selection.count > 0; }
 
 function selectionMode(e) {
     // PS's four boolean modes are the two modifier keys, in either order of thinking.
@@ -2860,17 +2858,45 @@ function traceSelPath(ctx, s) {
     ctx.closePath();
 }
 
+// A selection cannot reach past the canvas, same as in PS: the box is clipped to it.
+function clampSelBox(b) {
+    const x = Math.max(0, Math.floor(b.x)), y = Math.max(0, Math.floor(b.y));
+    return { x, y,
+        w: Math.max(0, Math.min(canvasW, Math.ceil(b.x + b.w)) - x),
+        h: Math.max(0, Math.min(canvasH, Math.ceil(b.y + b.h)) - y) };
+}
+
 // Re-derive bitmap + mask + contours whenever they no longer describe the current canvas (a size
 // change) or the shapes were rewritten (a commit). Returns false when nothing is selected.
 //
 // The bitmap is only the selection's bounding box, not the whole canvas: a 40 MP document would
 // otherwise park another 160 MB RGBA next to the composite just to remember a rectangle. Shapes
 // are filled in doc coordinates under a translate, and whatever falls outside the canvas is
-// clipped away with it — a selection cannot reach past the canvas, same as in PS.
+// clipped away with it.
 function ensureSelection() {
     if (!selection || !selection.shapes.length) { selection = null; return false; }
     if (!canvasW || !canvasH) { selection = null; return false; }
-    if (selection.mask && selection.atCanvas === canvasW + 'x' + canvasH) return true;
+    if (selection.derived && selection.atCanvas === canvasW + 'x' + canvasH) return true;
+    selection.derived = false;
+
+    const only = selection.shapes.length === 1 ? selection.shapes[0] : null;
+    if (only && only.kind === 'rect' && only.mode === 'replace') {
+        // A lone marquee is an axis-aligned rectangle: four corners and a multiply are the whole
+        // answer, so rasterising and scanning it would be pure waste — Ctrl+A on a large document
+        // would otherwise walk tens of millions of pixels to rediscover the box just drawn.
+        const r = clampSelBox(selShapeBounds(only));
+        selection.rect = r;
+        selection.box = r;
+        selection.mask = null;
+        selection.count = r.w * r.h;
+        selection.contours = r.w && r.h
+            ? [[{ x: 0, y: 0 }, { x: r.w, y: 0 }, { x: r.w, y: r.h }, { x: 0, y: r.h }]] : null;
+        selection.ants = selection.clip = null;
+        selection.derived = !!selection.contours;
+        selection.atCanvas = canvasW + 'x' + canvasH;
+        return selection.derived;
+    }
+    selection.rect = null;
 
     // Conservative box = union of the shapes since the last 'replace'; subtract and intersect can
     // only shrink what is inside it, so keeping it is conservative but never wrong.
@@ -2884,9 +2910,7 @@ function ensureSelection() {
             box.w = x1 - box.x; box.h = y1 - box.y;
         }
     }
-    box.x = Math.max(0, Math.floor(box.x)); box.y = Math.max(0, Math.floor(box.y));
-    box.w = Math.max(0, Math.min(canvasW - box.x, Math.ceil(box.x + box.w) - box.x));
-    box.h = Math.max(0, Math.min(canvasH - box.y, Math.ceil(box.y + box.h) - box.y));
+    box = clampSelBox(box);
     if (!box.w || !box.h) { selection.mask = null; selection.count = 0; return false; }
 
     // The alpha buffer lives on one module-level canvas: a selection is rebuilt on every commit,
@@ -2929,7 +2953,9 @@ function ensureSelection() {
     selection.mask = mask;
     selection.atCanvas = canvasW + 'x' + canvasH;
     selection.ants = null;
+    selection.clip = null;
     selection.contours = traceSelContours(mask, tight.w, tight.h);
+    selection.derived = true;
     return true;
 }
 
@@ -3027,6 +3053,27 @@ function selectionAntsPath() {
     return path;
 }
 
+// The selection as a fillable region, in doc coordinates — what the paint path clips its draw to.
+// Built once per rebuild and independent of the zoom (unlike the ants, which are allowed to get
+// lazy because a rounded outline is still readable; a clip must stay exact, so it keeps every
+// corner the raster produced and only sheds vertices that sit within a third of a pixel of the
+// line between their neighbours).
+function selectionClipPath() {
+    if (!selection || !selection.contours) return null;
+    if (selection.clip) return selection.clip;
+    const ox = selection.box.x, oy = selection.box.y;
+    const path = new Path2D();
+    for (const loop of selection.contours) {
+        const pts = simplifySelPts(loop, 0.34);
+        if (pts.length < 2) continue;
+        path.moveTo(pts[0].x + ox, pts[0].y + oy);
+        for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x + ox, pts[i].y + oy);
+        path.closePath();
+    }
+    selection.clip = path;
+    return path;
+}
+
 // The geometry of the drag in flight, as a path in doc space (the bitmap is only rebuilt on
 // release, so a sweep does not re-trace contours per pointer event).
 function selDragPath() {
@@ -3039,7 +3086,9 @@ function selDragPath() {
         path.closePath();
         return path;
     }
-    const pts = selDrag.pts;
+    // A third of a doc pixel of tolerance sheds only vertices the eye cannot separate, and it is
+    // what keeps a long sweep cheap to re-stroke on every pointer event.
+    const pts = simplifySelPts(selDrag.pts, 0.34 / Math.max(0.05, view.zoom));
     if (!pts.length) return path;
     path.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length; i++) path.lineTo(pts[i].x, pts[i].y);
@@ -3067,7 +3116,9 @@ function drawSelectionAnts() {
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
     ctx.stroke(path);
     ctx.setLineDash([4 / z, 4 / z]);
-    ctx.lineDashOffset = -antPhase / z;
+    // Off the clock rather than the ticker, so the pointer's own repaints keep the ants marching
+    // mid-stroke without a second full overlay pass stacked on top of them.
+    ctx.lineDashOffset = -(Math.floor(performance.now() / 70) % 8) / z;
     ctx.lineWidth = 1 / z;
     ctx.strokeStyle = '#fff';
     ctx.stroke(path);
@@ -3078,7 +3129,9 @@ function antsNeeded() { return (!!selDrag || hasSelection()) && !!canvasW; }
 
 function syncAntTimer() {
     if (antsNeeded() && !antTimer) {
-        antTimer = setInterval(() => { antPhase = (antPhase + 1) % 8; drawOverlay(); }, 70);
+        // A stroke repaints the overlay off the pointer already (render → drawOverlay), so the
+        // ticker only has to carry the march while nothing else is moving the canvas.
+        antTimer = setInterval(() => { if (!isDrawing) drawOverlay(); }, 70);
     } else if (!antsNeeded() && antTimer) {
         clearInterval(antTimer); antTimer = null;
     }
@@ -3088,7 +3141,7 @@ function commitSelectionShape(shape) {
     if (!selection) selection = { shapes: [] };
     if (shape.mode === 'replace') selection.shapes = [shape];
     else selection.shapes.push(shape);
-    selection.mask = null;                      // the shapes moved; force the rebuild
+    selection.derived = false;                  // the shapes moved; force the rebuild
     const ok = ensureSelection();
     const what = shape.kind === 'rect' ? 'Marquee' : 'Lasso';
     if (!ok) {
@@ -3116,26 +3169,6 @@ function selectAll() {
     if (!canvasW || !canvasH) { setStatus('No canvas yet', 'error'); return; }
     commitSelectionShape({ kind: 'rect', mode: 'replace', x0: 0, y0: 0, x1: canvasW, y1: canvasH });
     setStatus('Everything selected');
-}
-
-// Cut the accumulated ink down to the selection before it reaches a paint surface. The stroke was
-// accumulated with the doc→layer transform applied, so the doc-space bitmap goes through the very
-// same transform and lands exactly on the ink.
-function clipInkToSelection(ink, l) {
-    if (!hasSelection() || !ensureSelection()) return ink;
-    const { w, h } = nativeSize(l.img);
-    if (selClipCanvas.width !== w || selClipCanvas.height !== h) { selClipCanvas.width = w; selClipCanvas.height = h; }
-    resetCtx(selClipCtx);
-    selClipCtx.clearRect(0, 0, w, h);
-    selClipCtx.drawImage(ink, 0, 0, w, h);
-    selClipCtx.globalCompositeOperation = 'destination-in';
-    setBrushCtxTransform(selClipCtx, l);
-    // Nearest-neighbour on purpose: the selection is whole doc pixels, and bilinear resampling into
-    // a scaled layer would soften the edge and leak faint ink just outside the ants.
-    selClipCtx.imageSmoothingEnabled = false;
-    selClipCtx.drawImage(selBmpCanvas, selection.box.x, selection.box.y);
-    resetCtx(selClipCtx);
-    return selClipCanvas;
 }
 
 // ---- gestures ----
@@ -5691,7 +5724,21 @@ function livePreviewStroke() {
         ink = strokeTintCanvas;
     }
     if (maskInk) c.globalAlpha = brushAlpha;
-    c.drawImage(clipInkToSelection(ink, l), 0, 0, w, h);
+    // Clip the draw instead of pre-masking the ink: the clip is a scissor, so a small marquee over
+    // a big layer costs a handful of pixels per preview frame rather than a second full-layer
+    // round-trip. 'nonzero' keeps a subtracted hole out — the contour tracer winds every loop with
+    // the selected side to one hand, so inner boundaries come back reversed and cancel the fill.
+    const selClip = hasSelection() && ensureSelection() ? selectionClipPath() : null;
+    if (selClip) {
+        c.save();
+        setBrushCtxTransform(c, l);
+        c.clip(selClip, 'nonzero');
+        c.setTransform(1, 0, 0, 1, 0, 0);
+        c.drawImage(ink, 0, 0, w, h);
+        c.restore();
+    } else {
+        c.drawImage(ink, 0, 0, w, h);
+    }
     if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
     if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
@@ -5806,7 +5853,9 @@ function bucketFillAt(pos) {
             const X = (px - w / 2) * sx, Y = (py - h / 2) * sy;
             const mx = Math.floor(X * c - Y * s + tr.cx * canvasW) - sbox.x;
             const my = Math.floor(X * s + Y * c + tr.cy * canvasH) - sbox.y;
-            if (mx < 0 || my < 0 || mx >= sbox.w || my >= sbox.h || smask[my * sbox.w + mx] !== 1) { skipped++; continue; }
+            // A lone marquee carries no mask (its box IS the region), so the bounds test settles it.
+            if (mx < 0 || my < 0 || mx >= sbox.w || my >= sbox.h
+                || (smask && smask[my * sbox.w + mx] !== 1)) { skipped++; continue; }
         }
         const j = p * 4;
         od[j] = ir; od[j + 1] = ig; od[j + 2] = ib; od[j + 3] = fa;
