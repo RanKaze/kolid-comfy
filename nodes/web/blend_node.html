@@ -5784,6 +5784,14 @@ function paintSurfaceCtx(l) {
     if (isMaskLayerTarget()) return maskLayer.decalCtx;
     return isDecalTarget() ? l.decalCtx : l.maskCtx;
 }
+// A stroke or a flood rewrites the surface canvas IN PLACE, which the effect chain's cache cannot
+// see (its key is surface identity, which only changes at detach). The generation counter is how the
+// paint path says "same object, different pixels" — see fxResolved. The Mask layer owns its own
+// coverage canvas, so a Ctrl-draw onto it invalidates that layer, not the selected one.
+function markPainted(l) {
+    const owner = isMaskLayerTarget() ? maskLayer : l;
+    owner.paintGen = (owner.paintGen | 0) + 1;
+}
 
 function invertMask(l) {
     const { w, h } = nativeSize(l.img);
@@ -6008,6 +6016,7 @@ function queueLivePreview() {
 function livePreviewStroke() {
     const l = getSelected();
     if (!l || !paintSurface(l)) return;
+    markPainted(l);
     const { w, h } = nativeSize(l.img);
     const c = paintSurfaceCtx(l);
     resetCtx(c);
@@ -6177,6 +6186,7 @@ function bucketFillAt(pos) {
         od[j] = ir; od[j + 1] = ig; od[j + 2] = ib; od[j + 3] = fa;
     }
     pctx.putImageData(surf, 0, 0);
+    markPainted(l);
     pushHistory();
     if (isMaskLayerTarget()) refreshMaskLayerThumb();
     else if (toMask) refreshMaskThumb(l);
