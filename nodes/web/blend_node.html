@@ -448,7 +448,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
-/* RGBA 双色: 前景色块叠在背景色块之上 (PS 工具栏的那一对), 底下常驻一张取色面板 —— 面板调的永远是前景。 */
+/* Color 双色: 前景色块叠在背景色块之上 (PS 工具栏的那一对), 底下常驻一张调色盘 —— 盘调的永远是前景。
+   行尾不再有 #HEX 读数, 那个位置换成 RGBA / HSBA 两种盘式的分段按钮。 */
 .rgba-dual { position: relative; width: 48px; height: 28px; flex-shrink: 0; }
 .rgba-chip { position: absolute; padding: 0; overflow: hidden; border: 0.5px solid rgba(255,255,255,0.28);
     border-radius: 6px; background-color: transparent; cursor: pointer;
@@ -459,24 +460,35 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .rgba-chip:hover { border-color: rgba(255,255,255,0.5); }
 .rgba-chip.front { left: 0; top: 0; width: 27px; height: 22px; z-index: 1; }
 .rgba-chip.back { left: 21px; top: 6px; width: 25px; height: 20px; }
-/* 常驻面板铺在色块行下面: SV 方格吃掉栏宽剩下的, 两条定宽。拇指按百分比落位, 拖分隔条就不用重算;
-   JS 里那几个常量只当绘制缓冲的分辨率用。 */
+/* 行尾的 Mode 分段按钮与画笔那组同一套词汇, 只是收一点字号: 色块 + 两个四字母词得挤进同一行。 */
+.mini-group.paint-mode { flex-shrink: 0; }
+.mini-btn.paint-mode-btn { padding: 4px 6px; font-size: 10px; }
+/* 常驻面板铺在色块行下面。RGBA 模式: 方格吃掉栏宽剩下的 + 色相条 + Alpha 条。HSBA 模式: 定边 116 的
+   圆盘 (角度=色相, 半径=饱和度) + 明度条 + Alpha 条。两种排布都让第一格贴左缘、两条贴右缘, 圆盘为了
+   保持正圆让出来的那点空当留在中间。拇指一律按百分比落位, 格子宽度跟着栏宽走, 拖分隔条不用重算;
+   JS 里那几个常量只当绘制缓冲的分辨率。 */
 .rgba-panel { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
 .rgba-grid { display: flex; gap: 6px; height: 116px; }
+.rgba-grid.hsb { justify-content: space-between; }
 .rgba-field { position: relative; cursor: crosshair; touch-action: none; }
-.rgba-field.sv { flex: 1 1 auto; min-width: 0; }
-.rgba-field.strip { flex: 0 0 16px; }
+.rgba-field.plate { flex: 1 1 auto; min-width: 0; }
+.rgba-grid.hsb .rgba-field.plate { flex: 0 0 auto; width: 116px; }
+.rgba-field.ramp { flex: 0 0 16px; }
 .rgba-field canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
 .rgba-field.grabbing { cursor: none; }
 .rgba-thumb { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
     border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none; }
 .rgba-bar { position: absolute; left: -1px; right: -1px; height: 3px; margin-top: -1.5px; border-radius: 2px;
     background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none; }
-.rgba-fields { display: flex; align-items: center; gap: 6px; font-size: 11px; color: rgba(255,255,255,0.62); }
-.rgba-fields input { background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
-    border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
-.rgba-fields input.rgba-hex { width: 74px; text-transform: uppercase; letter-spacing: 0.04em; }
-.rgba-fields input.rgba-num { width: 48px; }
+/* 四格手输: mode 决定前三格是 R/G/B (0..255) 还是 H/S/B, Alpha 恒为 0..100%。宽度按栏宽等分,
+   所以拖分隔条时它们自己缩, 不需要 JS 参与。 */
+.rgba-fields { display: flex; align-items: center; gap: 5px; font-size: 11px; color: rgba(255,255,255,0.62); }
+.rgba-cell { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; }
+.rgba-cell input { flex: 1 1 0; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
+    border-radius: 4px; font-size: 11px; padding: 2px 3px; outline: none; }
+.rgba-cell input::-webkit-inner-spin-button, .rgba-cell input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.rgba-cell input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
+.rgba-cell .unit { flex-shrink: 0; }
 .control-row input[type="color"]::-moz-color-swatch { border: none; border-radius: 4px; }
 .control-row { display: flex; align-items: center; gap: 8px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
 .control-row label { min-width: 46px; font-size: 11px; }
@@ -735,20 +747,28 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
             </div>
             <div class="panel-section">
-                <div class="control-row" id="paintColorRow"><label>RGBA <span class="tool-key" title="Swap the two colours (X)">X</span></label>
+                <div class="control-row" id="paintColorRow"><label>Color <span class="tool-key" title="Swap the two colours (X)">X</span></label>
                     <div class="rgba-dual">
                         <button class="rgba-chip front" id="rgbaChipFront" type="button" title="Foreground — the colour you paint with. On a decal it paints translucent strokes; on a mask that same Alpha IS the coverage you pour (0 = nothing, 1 = full). Alt+click on the canvas picks into it. The panel below edits this one."><span id="rgbaChipFrontFill"></span></button>
                         <button class="rgba-chip back" id="rgbaChipBack" type="button" title="Background — the parked colour. Click to bring it forward, same as X."><span id="rgbaChipBackFill"></span></button>
                     </div>
-                    <span id="rgbaValue">#FF3B30 α 1.00</span>
+                    <div class="mini-group paint-mode" id="paintModeGroup">
+                        <button class="mini-btn paint-mode-btn active" id="paintModeRgba" type="button" title="RGBA — the plate is Saturation × Brightness at the hue on the bar next to it; the four fields below read Red / Green / Blue (0..255) and Alpha %.">RGBA</button>
+                        <button class="mini-btn paint-mode-btn" id="paintModeHsb" type="button" title="HSBA — a colour wheel: angle is Hue, radius is Saturation, and the bar beside it dims the whole wheel to Brightness. The fields read Hue (0..360) / Saturation / Brightness (0..100) and Alpha %.">HSBA</button>
+                    </div>
                 </div>
                 <div class="rgba-panel" id="rgbaPanel">
-                    <div class="rgba-grid">
-                        <div class="rgba-field sv" id="rgbaSvField"><canvas id="rgbaSv"></canvas><span class="rgba-thumb" id="rgbaSvThumb"></span></div>
-                        <div class="rgba-field strip" id="rgbaHueField"><canvas id="rgbaHue"></canvas><span class="rgba-bar" id="rgbaHueBar"></span></div>
-                        <div class="rgba-field strip" id="rgbaAlphaField"><canvas id="rgbaAlpha"></canvas><span class="rgba-bar" id="rgbaAlphaBar"></span></div>
+                    <div class="rgba-grid" id="rgbaGrid">
+                        <div class="rgba-field plate" id="rgbaPlateField"><canvas id="rgbaPlate"></canvas><span class="rgba-thumb" id="rgbaPlateThumb"></span></div>
+                        <div class="rgba-field ramp" id="rgbaRampField"><canvas id="rgbaRamp"></canvas><span class="rgba-bar" id="rgbaRampBar"></span></div>
+                        <div class="rgba-field ramp" id="rgbaAlphaField"><canvas id="rgbaAlpha"></canvas><span class="rgba-bar" id="rgbaAlphaBar"></span></div>
                     </div>
-                    <div class="rgba-fields"><label>Hex</label><input class="rgba-hex" id="rgbaHex" spellcheck="false" maxlength="7" title="Type #RRGGBB"><span style="flex:1;"></span><label>&alpha;</label><input class="rgba-num" id="rgbaAlphaNum" type="number" min="0" max="100" step="1"><span>%</span></div>
+                    <div class="rgba-fields" title="Type a channel value — R/G/B 0..255 in RGBA, H 0..360 with S/B 0..100 in HSBA. The two buttons above pick which three.">
+                        <span class="rgba-cell"><label id="rgbaNumLabel0">R</label><input id="rgbaNum0" type="number" min="0" max="255" step="1"></span>
+                        <span class="rgba-cell"><label id="rgbaNumLabel1">G</label><input id="rgbaNum1" type="number" min="0" max="255" step="1"></span>
+                        <span class="rgba-cell"><label id="rgbaNumLabel2">B</label><input id="rgbaNum2" type="number" min="0" max="255" step="1"></span>
+                        <span class="rgba-cell"><label>A</label><input id="rgbaAlphaNum" type="number" min="0" max="100" step="1" title="Alpha as a percentage — strokes paint at this opacity; on a mask it is the coverage one pass pours"><span class="unit">%</span></span>
+                    </div>
                 </div>
             </div>
             <div class="panel-section tool-section foldable collapsed" id="brushSection">
@@ -5362,26 +5382,38 @@ function hsvToRgb(h, s, v) {
     return rgb.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255));
 }
 
-// ==================== RGBA 双色 + 常驻调色盘 ====================
-// 侧栏一对 PS 式色块 (前景压在背景上) + 它下面常驻的取色面板: SV 方块 + 色相条 + Alpha 条 + hex/α。
-// 面板调的、笔刷用的都是**前景**; 背景只是停在那儿的另一色, X 或点它把它换到前台。
-// 这一整套不引入新的状态 —— 每次改动都走 setPaintColor / setPaintAlpha, 而这两个 setter 反过来调
-// syncRgbaUI(), 所以 Alt+click 拾色、设置回读、hex 手输、X 交换全都自动把面板同步过来, 不会出现
-// 两处读数各说各话。
+// ==================== Color 双色 + 常驻调色盘 (RGBA / HSBA 两种盘式) ====================
+// 侧栏一对 PS 式色块 (前景压在背景上) + 它下面常驻的调色盘。盘调的、笔刷用的都是**前景**; 背景只是停在
+// 那儿的另一色, X 或点它把它换到前台。
+// 盘式不是第二份状态, 只是同一份状态的两副手势与读数: paintMode 决定第一格画 SV 方块还是 HSB 圆盘、第二格
+// 是色相条还是明度条、下面三格是 R/G/B 还是 H/S/B。每一次改动仍旧只走 setPaintColor / setPaintAlpha, 而这
+// 两个 setter 反过来调 syncRgbaUI(), 所以 Alt+click 拾色、设置回读、手输、X 交换、切盘式全都会自动把色块、
+// 圆盘、拇指、四格读数同步过来, 不会出现两处读数各说各话。
 const RGBA_SV_W = 188, RGBA_SV_H = 116, RGBA_STRIP_W = 16, RGBA_STRIP_H = 116;
+// 圆盘在屏上必须是正圆, 所以它不像 SV 方块那样吃栏宽, 而是定边 116 (与 CSS 里 .rgba-grid.hsb .plate
+// 写死的同一个数)。
+const RGBA_WHEEL = 116;
+let paintMode = 'rgba';        // 'rgba' | 'hsb'
+const PAINT_MODES = {
+    rgba: { labels: ['R', 'G', 'B'], max: [255, 255, 255] },
+    hsb: { labels: ['H', 'S', 'B'], max: [360, 100, 100] },
+};
 const rgbaChipFront = document.getElementById('rgbaChipFront');
 const rgbaChipBack = document.getElementById('rgbaChipBack');
 const rgbaChipFrontFill = document.getElementById('rgbaChipFrontFill');
 const rgbaChipBackFill = document.getElementById('rgbaChipBackFill');
-const rgbaValueEl = document.getElementById('rgbaValue');
-const rgbaHexInput = document.getElementById('rgbaHex');
+const rgbaGrid = document.getElementById('rgbaGrid');
+const rgbaModeBtns = { rgba: document.getElementById('paintModeRgba'), hsb: document.getElementById('paintModeHsb') };
 const rgbaAlphaInput = document.getElementById('rgbaAlphaNum');
+const rgbaNum = [0, 1, 2].map(i => document.getElementById('rgbaNum' + i));
+const rgbaNumLabel = [0, 1, 2].map(i => document.getElementById('rgbaNumLabel' + i));
 const rgbaFields = {
-    sv: { box: document.getElementById('rgbaSvField'), cv: document.getElementById('rgbaSv'), thumb: document.getElementById('rgbaSvThumb') },
-    hue: { box: document.getElementById('rgbaHueField'), cv: document.getElementById('rgbaHue'), thumb: document.getElementById('rgbaHueBar') },
+    plate: { box: document.getElementById('rgbaPlateField'), cv: document.getElementById('rgbaPlate'), thumb: document.getElementById('rgbaPlateThumb') },
+    ramp: { box: document.getElementById('rgbaRampField'), cv: document.getElementById('rgbaRamp'), thumb: document.getElementById('rgbaRampBar') },
     alpha: { box: document.getElementById('rgbaAlphaField'), cv: document.getElementById('rgbaAlpha'), thumb: document.getElementById('rgbaAlphaBar') },
 };
 const rgbaHueCss = () => `hsl(${(brushHue * 360).toFixed(1)}, 100%, 50%)`;
+const hexOf = rgb => '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
 
 // 常量只决定绘制缓冲的分辨率; 屏幕上多大归 CSS 说 (SV 吃掉栏宽剩下的)。
 function rgbaCanvas(cv, w, h) {
@@ -5401,21 +5433,59 @@ function rgbaChecker(g, w, h) {
     }
 }
 
+// HSB 圆盘: 角度 = 色相, 半径 = 饱和度, 一律按 B=1 画 (跟 PS 的色相条一样, 盘/条本身只表示方向, 明暗
+// 交给旁边那条明度条)。形状与状态无关, 所以位图算一次存着, 之后每次重画只是贴一张图 —— 但那张图必须按
+// 画布的**设备像素**尺寸算, 否则 320 的源贴进 348 的目标会被重采样成一团糊。尺寸变了 (换屏/改 dpr) 才重算。
+let rgbaWheelCv = null, rgbaWheelPx = 0;
+function rgbaWheelBitmap(px) {
+    if (rgbaWheelCv && rgbaWheelPx === px) return rgbaWheelCv;
+    const size = Math.max(32, Math.round(px)), R = size / 2;
+    const cv = document.createElement('canvas'); cv.width = cv.height = size;
+    const g = cv.getContext('2d');
+    const img = g.createImageData(size, size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const dx = (x + 0.5 - R) / R, dy = (R - y - 0.5) / R;
+        const len = Math.hypot(dx, dy), i = (y * size + x) * 4;
+        const a = Math.max(0, Math.min(1, (1 - len) * R / 1.5)) * 255;
+        if (a <= 0) continue;
+        const c = hsvToRgb(len === 0 ? 0 : (Math.atan2(dy, dx) / (Math.PI * 2) + 1) % 1, Math.min(1, len), 1);
+        img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = Math.round(a);
+    }
+    g.putImageData(img, 0, 0);
+    rgbaWheelCv = cv; rgbaWheelPx = size;
+    return cv;
+}
+
 function drawRgbaFields() {
     const rgb = paintColorRGB();
-    let g = rgbaCanvas(rgbaFields.sv.cv, RGBA_SV_W, RGBA_SV_H);
-    g.fillStyle = rgbaHueCss(); g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
-    let grad = g.createLinearGradient(0, 0, RGBA_SV_W, 0);
-    grad.addColorStop(0, '#fff'); grad.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
-    grad = g.createLinearGradient(0, 0, 0, RGBA_SV_H);
-    grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, '#000');
-    g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
+    const hsv = rgbToHsv(rgb);
+    let g, grad;
+    if (paintMode === 'hsb') {
+        g = rgbaCanvas(rgbaFields.plate.cv, RGBA_WHEEL, RGBA_WHEEL);
+        g.clearRect(0, 0, RGBA_WHEEL, RGBA_WHEEL);
+        g.drawImage(rgbaWheelBitmap(rgbaFields.plate.cv.width), 0, 0, RGBA_WHEEL, RGBA_WHEEL);
+        // 明度条: 当前那份色相/饱和度下的纯色一路压到黑, 所以条上的位置就是盘里那点颜色的明暗。
+        const full = hsvToRgb(brushHue, hsv[1], 1);
+        g = rgbaCanvas(rgbaFields.ramp.cv, RGBA_STRIP_W, RGBA_STRIP_H);
+        grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
+        grad.addColorStop(0, `rgb(${full[0]}, ${full[1]}, ${full[2]})`);
+        grad.addColorStop(1, 'rgb(0, 0, 0)');
+        g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
+    } else {
+        g = rgbaCanvas(rgbaFields.plate.cv, RGBA_SV_W, RGBA_SV_H);
+        g.fillStyle = rgbaHueCss(); g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
+        grad = g.createLinearGradient(0, 0, RGBA_SV_W, 0);
+        grad.addColorStop(0, '#fff'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+        g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
+        grad = g.createLinearGradient(0, 0, 0, RGBA_SV_H);
+        grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, '#000');
+        g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
 
-    g = rgbaCanvas(rgbaFields.hue.cv, RGBA_STRIP_W, RGBA_STRIP_H);
-    grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
-    for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, `hsl(${i * 60}, 100%, 50%)`);
-    g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
+        g = rgbaCanvas(rgbaFields.ramp.cv, RGBA_STRIP_W, RGBA_STRIP_H);
+        grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
+        for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, `hsl(${i * 60}, 100%, 50%)`);
+        g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
+    }
 
     g = rgbaCanvas(rgbaFields.alpha.cv, RGBA_STRIP_W, RGBA_STRIP_H);
     rgbaChecker(g, RGBA_STRIP_W, RGBA_STRIP_H);
@@ -5425,23 +5495,79 @@ function drawRgbaFields() {
     g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
 }
 
-// setter 的脸: 两块色块 + 读数 + 那张常驻面板 (三格、拇指、hex、α)。
+// setter 的脸: 两块色块 + 那张常驻盘 (一格盘/方块、两条、四格数字)。盘式变了这里全变, 状态一个没多。
 function syncRgbaUI() {
     const rgb = paintColorRGB();
+    const hsv = rgbToHsv(rgb);
     rgbaChipFrontFill.style.background = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${brushAlpha})`;
-    rgbaValueEl.textContent = `${String(brushColor).toUpperCase()} α ${brushAlpha.toFixed(2)}`;
     const back = paintColorRGB(backColor);
     rgbaChipBackFill.style.background = `rgba(${back[0]}, ${back[1]}, ${back[2]}, ${backAlpha})`;
-    if (document.activeElement !== rgbaHexInput) rgbaHexInput.value = String(brushColor).toUpperCase();
-    if (document.activeElement !== rgbaAlphaInput) rgbaAlphaInput.value = String(Math.round(brushAlpha * 100));
     drawRgbaFields();
-    const hsv = rgbToHsv(rgb);
-    // 拇指按**百分比**落位: 格子宽度跟着栏宽走, 写 px 的话一拖分隔条拇指就歪了, 还得为此挂 resize 监听。
-    rgbaFields.sv.thumb.style.left = (hsv[1] * 100).toFixed(2) + '%';
-    rgbaFields.sv.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
-    rgbaFields.hue.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
+    // 拇指一律按**百分比**落位: 格子宽度跟着栏宽走, 写 px 的话一拖分隔条拇指就歪了, 还得为此挂 resize 监听。
+    if (paintMode === 'hsb') {
+        // 圆盘上颜色那点 = 角度 brushHue、半径 S。灰 (S=0) 落在圆心, 角度在这一格里看不见, 与 PS 一致。
+        const a = brushHue * Math.PI * 2, r = hsv[1] * 50;
+        rgbaFields.plate.thumb.style.left = (50 + Math.cos(a) * r).toFixed(2) + '%';
+        rgbaFields.plate.thumb.style.top = (50 - Math.sin(a) * r).toFixed(2) + '%';
+        rgbaFields.ramp.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
+    } else {
+        rgbaFields.plate.thumb.style.left = (hsv[1] * 100).toFixed(2) + '%';
+        rgbaFields.plate.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
+        rgbaFields.ramp.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
+    }
     rgbaFields.alpha.thumb.style.top = ((1 - brushAlpha) * 100).toFixed(2) + '%';
+    syncRgbaNumFields(rgb, hsv);
 }
+
+// 三格读数 (加共享的 Alpha): RGBA 模式报 R/G/B 0..255, HSBA 模式报 H/S/B。H 读的是 brushHue 而不是从颜色
+// 反解的那一个 —— 灰阶反解不出方向, 而盘/条上指的方向正是用户上一回指的那个 (与色相条同一套规矩)。
+function paintModeValues(rgb, hsv) {
+    return paintMode === 'hsb'
+        ? [Math.round(brushHue * 360), Math.round(hsv[1] * 100), Math.round(hsv[2] * 100)]
+        : rgb;
+}
+
+function syncRgbaNumFields(rgb, hsv, force = false) {
+    const spec = PAINT_MODES[paintMode], vals = paintModeValues(rgb, hsv);
+    spec.labels.forEach((text, i) => {
+        if (rgbaNumLabel[i].textContent !== text) rgbaNumLabel[i].textContent = text;
+        const el = rgbaNum[i];
+        el.max = String(spec.max[i]);
+        if (force || document.activeElement !== el) el.value = String(vals[i]);
+    });
+    if (force || document.activeElement !== rgbaAlphaInput) rgbaAlphaInput.value = String(Math.round(brushAlpha * 100));
+}
+
+// 手输: 三格一起读 (空着或写歪的那格回落到现值), 夹到本 mode 的上限后一次落地 —— 逐格落地会让另一个格子的
+// 取整误差把色相拽偏, 也让 H/S/B 三格互相打架。
+function applyRgbaNumFromFields() {
+    const spec = PAINT_MODES[paintMode];
+    const rgb = paintColorRGB(), hsv = rgbToHsv(rgb), cur = paintModeValues(rgb, hsv);
+    const vals = rgbaNum.map((el, i) => {
+        const raw = String(el.value).trim(), n = Number(raw);
+        const v = raw !== '' && Number.isFinite(n) ? n : cur[i];
+        return Math.max(0, Math.min(spec.max[i], v));
+    });
+    if (paintMode === 'hsb') {
+        brushHue = vals[0] / 360;
+        setPaintColor(hexOf(hsvToRgb(brushHue, vals[1] / 100, vals[2] / 100)));
+    } else {
+        setPaintColor(hexOf(vals.map(Math.round)));
+    }
+}
+
+// 切盘式: 换的是手势与读数, 前景色本身一动不动。定宽的圆盘要靠 .hsb 这个类从 CSS 那儿拿到 (方块吃栏宽、
+// 圆盘保持正圆是两种不同的排布, 让 CSS 说)。
+function setPaintMode(next) {
+    if (paintMode === next) return;
+    paintMode = next;
+    rgbaGrid.classList.toggle('hsb', next === 'hsb');
+    for (const [key, el] of Object.entries(rgbaModeBtns)) el.classList.toggle('active', key === next);
+    syncRgbaUI();
+    setStatus(next === 'hsb' ? 'Colour wheel — angle sets the hue, radius the saturation'
+        : 'Colour square — saturation across, brightness down, hue on the bar');
+}
+for (const [key, el] of Object.entries(rgbaModeBtns)) el.addEventListener('click', () => setPaintMode(key));
 
 // 点背景色块 = 把它换到前台, 与 X 同一条路 (PS 里点后面那块也是提到前面)。
 rgbaChipBack.addEventListener('click', swapPaintColors);
@@ -5466,29 +5592,42 @@ function bindRgbaField(field, apply) {
     field.box.addEventListener('pointercancel', end);
 }
 
-bindRgbaField(rgbaFields.sv, (x, y) => {
-    const rgb = hsvToRgb(brushHue, x, 1 - y);
-    setPaintColor('#' + rgb.map(v => v.toString(16).padStart(2, '0')).join(''));
-});
-bindRgbaField(rgbaFields.hue, (x, y) => {
-    brushHue = y;
+bindRgbaField(rgbaFields.plate, (x, y) => {
     const hsv = rgbToHsv(paintColorRGB());
+    if (paintMode === 'hsb') {
+        // 圆盘: 角度 = 色相, 半径 = 饱和度, 明度保持现在这一份。正圆心那一下方向无意义 (半径 0),
+        // 就留住原来的朝向, 免得拖到中心颜色突然跳到红。
+        const dx = x * 2 - 1, dy = 1 - y * 2, len = Math.hypot(dx, dy);
+        if (len > 0.0001) brushHue = (Math.atan2(dy, dx) / (Math.PI * 2) + 1) % 1;
+        setPaintColor(hexOf(hsvToRgb(brushHue, Math.min(1, len), hsv[2])));
+        return;
+    }
+    setPaintColor(hexOf(hsvToRgb(brushHue, x, 1 - y)));
+});
+bindRgbaField(rgbaFields.ramp, (x, y) => {
+    const hsv = rgbToHsv(paintColorRGB());
+    if (paintMode === 'hsb') {
+        // 明度条把当前这份色相/饱和度一路压到黑。灰阶也照样拖得动 (白→黑本来就是它的变化), 所以不需要
+        // 色相条那套"没颜色就只挪条"的分支。
+        setPaintColor(hexOf(hsvToRgb(brushHue, hsv[1], 1 - y)));
+        return;
+    }
+    brushHue = y;
     // 有色就跟着新色相重算颜色; 灰阶 (s=0) 只挪色相条, 颜色本来就不该变。
     if (hsv[1] > 0.004) {
-        const rgb = hsvToRgb(brushHue, hsv[1], hsv[2]);
-        setPaintColor('#' + rgb.map(v => v.toString(16).padStart(2, '0')).join(''));
+        setPaintColor(hexOf(hsvToRgb(brushHue, hsv[1], hsv[2])));
     } else {
         drawRgbaFields();
-        rgbaFields.hue.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
+        rgbaFields.ramp.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
     }
 });
 bindRgbaField(rgbaFields.alpha, (x, y) => setPaintAlpha(1 - y));
 
-rgbaHexInput.addEventListener('input', () => {
-    const m = /^#?([0-9a-f]{6})$/i.exec(rgbaHexInput.value.trim());
-    if (m) setPaintColor('#' + m[1].toLowerCase());
-});
-rgbaHexInput.addEventListener('blur', () => { rgbaHexInput.value = String(brushColor).toUpperCase(); });
+for (const el of rgbaNum) {
+    el.addEventListener('input', applyRgbaNumFromFields);
+    // 松手把文本回写成规范值 (去掉 032 这种前导零、把越界的夹回来), 正在别的格子里打字不受影响。
+    el.addEventListener('blur', () => syncRgbaNumFields(paintColorRGB(), rgbToHsv(paintColorRGB()), true));
+}
 rgbaAlphaInput.addEventListener('input', () => {
     const v = Number(rgbaAlphaInput.value);
     if (Number.isFinite(v)) setPaintAlpha(v / 100);
