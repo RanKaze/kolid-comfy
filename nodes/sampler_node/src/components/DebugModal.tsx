@@ -188,7 +188,7 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             <div style={{ minWidth: 0 }}>
               <div style={S.headTitle}>Run Debug</div>
               <div style={S.headSub}>
-                上一次 Run / Generate 的全过程快照
+                上一次 Run / Generate / Detect 的全过程快照
               </div>
             </div>
           </div>

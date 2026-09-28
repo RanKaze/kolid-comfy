@@ -2056,14 +2056,35 @@ class SnapshotDetailerSamplerServer:
                         threshold = min(1.0, max(0.0, threshold))
                         invert = bool(params.get('invert'))
                         img = image[0] if image.dim() == 4 else image
+                        # Detect 也是「最近一次动作」: 一次 detect = 一份新 trace (与 Run
+                        # 同一个只留最近一次的约定), Debug 窗口里看得见表达式、源图、
+                        # 每个术语检到几张、以及最终落地的那张蒙版。
+                        _src = str(params.get('source') or '')
+                        _dst = str(params.get('dest') or '')
+                        _SRC_LABELS = {'all': 'All Layers', 'all_masked': 'Masked All Layers',
+                                       'selected': 'Selected Layer', 'selected_masked': 'Masked Selected Layer'}
+                        _DST_LABELS = {'main_mask': 'Main Mask', 'selected_mask': 'Selected Mask',
+                                       'staging': 'Staging', 'new_layer': 'New Layer'}
+                        dbg.begin_trace({'from_blend': True, 'action': 'detect'})
+                        dbg.record_prompt('Detect 表达式', prompt,
+                                          source=_SRC_LABELS.get(_src, _src or '—'),
+                                          dest=_DST_LABELS.get(_dst, _dst or '—'),
+                                          threshold=threshold, invert=invert)
+                        dbg.record_image('Detect 源图', img)
+                        if mask is not None and float(mask.sum()) > 0:
+                            dbg.record_mask('随行的 Mask', mask)
                         if prompt:
                             root = parse_mask_expression(prompt, threshold)
+                            # eval_expression 用 (name, threshold) 二元组作键 —— 只放名字它永远
+                            # 找不到, 同一个词换阈值就该是两条独立的掩码。
                             term_masks = {}
                             for name, t in collect_terms(root):
-                                term_masks[name] = combine_masks(
-                                    detect_mask(detector=inst.detector, image=img,
-                                                threshold=float(t), prompt=name),
-                                    mode='max')
+                                term_hits = detect_mask(detector=inst.detector, image=img,
+                                                        threshold=float(t), prompt=name)
+                                combined = combine_masks(term_hits, mode='max')
+                                term_masks[(name, float(t))] = combined
+                                dbg.record_mask(f"术语 '{name}' @ {t}", combined,
+                                                detail=f'{len(term_hits)} 个实例')
                             result = eval_expression(root, term_masks)
                         else:
                             result = combine_masks(
@@ -2075,6 +2096,9 @@ class SnapshotDetailerSamplerServer:
                         if mask is not None and float(mask.sum()) > 0:
                             m = mask[0] if mask.dim() == 3 else mask
                             result = result * m
+                        dbg.record_mask('Detect 结果', result,
+                                        detail=('invert 后' if invert else '') +
+                                        ('乘 Main Mask' if mask is not None and float(mask.sum()) > 0 else ''))
                         arr = result.detach().cpu().numpy()
                         arr = np.clip(arr, 0.0, 1.0)
                         if arr.ndim == 3:
@@ -2084,6 +2108,9 @@ class SnapshotDetailerSamplerServer:
                         rgba[..., 3] = (arr * 255).astype(np.uint8)
                         buf = io.BytesIO()
                         Image.fromarray(rgba, mode='RGBA').save(buf, format='PNG')
+                        _tr = dbg.current_trace()
+                        if _tr is not None:
+                            _tr.meta['status'] = 'done'
                         self._send_json({'success': True,
                                          'mask': 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')})
                         return
