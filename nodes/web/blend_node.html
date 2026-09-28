@@ -2773,8 +2773,8 @@ void main() {
 // 景深:半径不是全图一个值,而是逐像素从深度图算 —— |d - Focal| 先扣掉半幅 Thick 的合焦带,
 // 剩余量线性推到 Iris 上限。三档预糊(iris/3、2·iris/3、iris)已经躺在 off[2..4] 里,这一趟按
 // 本像素的半径在「原图 + 三档」这四个 stop 上选相邻两档线性混合,所以档位之间不会跳出硬边。
-// 深度只取 R 通道(PS 的 Lens Blur 读的就是 Red 通道,单通道深度图三通道相同);alpha 恒取本
-// 像素自己的,合焦带与远景之间不会有透明度台阶。
+// 深度只取 R 通道(PS 的 Lens Blur 读的就是 Red 通道,单通道深度图三通道相同)。模糊类契约:
+// alpha 与 RGB 一起混档 —— 三档低通里躺的就是各自滤过的不透明度,糊开的边不透明度也跟着软。
 const FX_FS_DOF = `#version 300 es
 precision highp float;
 in vec2 vUV;
@@ -2788,7 +2788,6 @@ uniform float uFocus;
 uniform float uThick;
 uniform float uInv;
 void main() {
-    vec4 c0 = texture(uSharp, vUV);
     float d = texture(uMap, vUV).r;
     d = uInv > 0.5 ? 1.0 - d : d;
     float band = uThick * 0.5;
@@ -2801,7 +2800,8 @@ void main() {
     else if (t < 2.0) { lo = texture(uL0, vUV); hi = texture(uL1, vUV); }
     else { lo = texture(uL1, vUV); hi = texture(uL2, vUV); }
     float f = t < 1.0 ? t : (t < 2.0 ? t - 1.0 : t - 2.0);
-    Frag = vec4(mix(lo.rgb, hi.rgb, f), c0.a);
+    // 模糊类:alpha 与颜色同进同出,各档里已经带着滤过的不透明度,混档时一起混。
+    Frag = clamp(mix(lo, hi, f), 0.0, 1.0);
 }`;
 
 // 光照:切线空间法线图(uv 基:y 向上,因为上传时已 UNPACK_FLIP_Y;平坦处 = (0.5,0.5,1))做
