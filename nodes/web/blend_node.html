@@ -545,6 +545,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 #sceneCanvas.looking { cursor: none; }
 #lookCursor { position: fixed; z-index: 130; display: none; pointer-events: none; transform: translate(-50%,-50%);
     color: rgba(255,255,255,0.95); filter: drop-shadow(0 1px 3px rgba(0,0,0,0.8)); }
+/* svg 是 inline 的,行盒会在它下面多留一截基线空隙 —— 于是 -50% 居中居中的是那个更高的盒子,
+   眼睛会浮在指针上方两三个像素。光标的热点必须压在指针尖上,所以让它别参与行内排版。 */
+#lookCursor svg { display: block; }
 #lookCursor.on { display: block; }
 /* 右栏在 3D tab 期间整体换掉:#panelScroll / #maskDock / #layersDock 隐去,这一栏顶上。
    小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多

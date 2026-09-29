@@ -367,7 +367,7 @@
         });
         el('s3dAddCam').addEventListener('click', () => {
             closeSceneMenu();
-            Scene3D.add(Scene3D.makeObject({ kind: 'camera', name: 'Camera', trs: { p: [0, 1, -4], r: [0, 0, 0], s: [1, 1, 1] } }));
+            Scene3D.add(Scene3D.makeObject({ kind: 'camera', name: 'Camera', trs: { p: [0, 1, 4], r: [0, 0, 0], s: [1, 1, 1] } }));
         });
         el('sceneImportBtn').addEventListener('click', () => import3DModels());
         el('sceneBakeBtn').addEventListener('click', () => bake3DLayer());

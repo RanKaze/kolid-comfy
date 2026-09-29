@@ -57,10 +57,12 @@ const Scene3D = {
                 Scene3D.makeObject({ kind: 'light', name: 'Directional Light', lightType: 'directional',
                     trs: { p: [0, 3, 0], r: [50, -30, 0], s: [1, 1, 1] } }),
                 Scene3D.makeObject({ kind: 'camera', name: 'Main Camera',
-                    trs: { p: [0, 1, -4], r: [0, 0, 0], s: [1, 1, 1] } }),
+                    trs: { p: [0, 1, 4], r: [0, 0, 0], s: [1, 1, 1] } }),
             ],
             selectedId: null,
-            view: { p: [0, 1.2, -4], yaw: 0, pitch: 0, fov: 60 },
+            // 相机的朝向按 three.js 的读法走:它的前方是 −Z。所以视点放在 +Z 一侧、yaw 0,
+            // 视线才落在原点那堆内容上 —— 放在 −4 会背对场景,开 tab 就是一片空。
+            view: { p: [0, 1.2, 4], yaw: 0, pitch: 0, fov: 60 },
             ambient: { color: '#ffffff', intensity: 0.35 },
             grid: true,
         };
