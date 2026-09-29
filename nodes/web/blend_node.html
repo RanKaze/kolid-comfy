@@ -9411,6 +9411,7 @@ document.getElementById('redoBtn').addEventListener('click', redoAction);
 // The composite IS the Context Image, so every button ships the same payload straight to the
 // backend: the layer stack (bottom → top, the Mask layer excluded — it travels separately as
 // its own alpha channel), the canvas size, and the Mask layer's rasterised coverage.
+// 交回来的是 `{layers, attributes}` 两样:后者是这一包里所有面各一份 PNG,图层那条只留表键。
 function layerSpecs() {
     // The backend reads buffers, and a preview the button released is not a buffer yet: land it
     // first (with its own undo step — this is a commit), so the payload is the picture on screen
@@ -9432,7 +9433,11 @@ function layerSpecs() {
     };
     // 只有 working layers 是画给后端合成的东西：guidance 是参考，永远不参与 context image，
     // 所以这条后端回退路径（前端 composite 缺席/编码失败时）也不会把它们混进成品。
-    return layers.slice().reverse().filter(l => !isGuidanceLayer(l)).map(l => {
+    // 面住在 payload 的 `attributes` 表里 (一枚一份 PNG),图层那条只剩表键 —— 两层引用同一枚蒙版时
+    // 后端拿到的是同一份像素,不会被重复编码两遍 (与 .cud v5 同一份账)。
+    const attributes = [];
+    const attrSeen = new Map();          // 记录 guid -> 入表那条 (空面记成 null = 不入表)
+    const specs = layers.slice().reverse().filter(l => !isGuidanceLayer(l)).map(l => {
         // A text layer ships its CURRENT render through the ordinary src channel (its `src` is
         // empty, so TRUSTED_SRC fails and toPng encodes the fresh buffer) — the backend composites
         // pixels and knows nothing about descriptors.
@@ -9445,9 +9450,14 @@ function layerSpecs() {
         const baked = split.surface !== l.img;
         const attrs = [];
         for (const r of split.rest) {
-            const s = r.surface;
-            if (!s || !s.width || !s.height) continue;
-            attrs.push({ type: r.type, image: s.toDataURL('image/png') });
+            if (!attrSeen.has(r.id)) {
+                const s = r.surface;
+                const e = (s && s.width && s.height)
+                    ? { id: r.id, type: r.type, image: s.toDataURL('image/png') } : null;
+                attrSeen.set(r.id, e);
+                if (e) attributes.push(e);
+            }
+            if (attrSeen.get(r.id)) attrs.push(r.id);
         }
         const src = (!baked && TRUSTED_SRC(l.src)) ? l.src : (l.img ? toPng(baked ? split.surface : l.img) : '');
         return {
@@ -9465,6 +9475,7 @@ function layerSpecs() {
             attrs,
         };
     });
+    return { layers: specs, attributes };
 }
 
 function syncActionButtons() {
@@ -9530,10 +9541,12 @@ function sendBlendAction(action, opts) {
         return;
     }
     if (window.parent === window) { setStatus('This page only works inside the Sampler window', 'error'); return; }
+    const specs = layerSpecs();
     const payload = {
         type: 'blend-action',
         action,
-        layers: layerSpecs(),
+        layers: specs.layers,
+        attributes: specs.attributes,
         width: canvasW,
         height: canvasH,
         mask,

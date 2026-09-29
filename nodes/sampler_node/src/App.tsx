@@ -420,6 +420,9 @@ const App: React.FC = () => {
           action: body.action,
           tag_mode: body.tag_mode,
           layers: body.layers,
+          // attribute 面表：图层那条只剩表键，共享的一面只编码一份，所以这张表必须跟着包走 ——
+          // 漏转发 = 后端认不出键 = 条带上归它重放的那一段整段消失（静默，画面少了蒙版/贴片）。
+          attributes: body.attributes ?? [],
           width: body.width,
           height: body.height,
           mask: body.mask,
