@@ -68,16 +68,19 @@ function fxMapImage(ref) {
 
 // 图池条目会在 id 不变的情况下原地换像素(Guidance 卡重发布就是这样),而解码到位的先后也不在
 // params 里 —— 所以缓存身份除了引用 key 还要带上「解析到哪一份 src」和「这份 src 解第几次成功」。
-// 每个槽都要报:副槽换了一张法线图,主槽的 src 一个字没动。
+// 每个槽都要报:副槽换了一张法线图,主槽的 src 一个字没动。报的是**整条 strip** 上所有链的槽 ——
+// 一枚容器的绑定换了图,另一枚没换,只有全部遍历才不会漏掉那一次重算。
 function fxMapStamp(l) {
     let s = '';
-    for (const e of (l.effects || [])) {
-        for (const slot of fxMapSlots(e)) {
-            const ref = fxMapRef(e, slot.key);
-            if (!ref) continue;
-            const found = fxMapSource(ref);
-            const hit = found ? fxMapDecoded.get(found.src) : null;
-            s += `${slot.key}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+    for (const chain of stripChains(l)) {
+        for (const e of chain) {
+            for (const slot of fxMapSlots(e)) {
+                const ref = fxMapRef(e, slot.key);
+                if (!ref) continue;
+                const found = fxMapSource(ref);
+                const hit = found ? fxMapDecoded.get(found.src) : null;
+                s += `${slot.key}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+            }
         }
     }
     return s;

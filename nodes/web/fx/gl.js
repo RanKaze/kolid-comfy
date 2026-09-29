@@ -298,10 +298,14 @@ function fxHexToRgb01(hex) {
     return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
 }
 
-// 就地跑完整条链,结果写回 surface。返回 false = 整链没跑(不支持 / 太大),surface 原样留着;
+// 就地跑一条链,结果写回 surface。返回 false = 整链没跑(不支持 / 太大),surface 原样留着;
 // fxgl.skip 带上原因,让状态栏能说清楚,而不是「特效静默地变成了没特效」。
-function applyLayerEffects(l, surface) {
-    const chain = activeEffects(l);
+// `opts.rec` = 这一枚 Effects attribute 的记录 (读它自己那条链), `opts.mask` = 它左边那些蒙版与起来的
+// 覆盖率。两个都不传 = 读图层上那三个老名字的最左边那一枚 (还没理解 strip 的调用点,见 attr/core.js)。
+function applyLayerEffects(l, surface, opts) {
+    const o = opts || {};
+    const chain = o.rec ? activeEffects(l, o.rec) : activeEffects(l);
+    const mask = ('mask' in o) ? o.mask : l.mask;
     fxgl.skip = '';
     if (!chain.length) return false;
     const gl = fxglInit();
@@ -311,8 +315,8 @@ function applyLayerEffects(l, surface) {
 
     fxglUploadCanvas(fxgl.texSrc, surface);
     fxgl.hasMask = 0;
-    if (l.mask && l.mask.width === w && l.mask.height === h) {
-        fxglUploadCanvas(fxgl.texMask, l.mask);
+    if (mask && mask.width === w && mask.height === h) {
+        fxglUploadCanvas(fxgl.texMask, mask);
         fxgl.hasMask = 1;
     }
     // 色彩链恒定在 off[0]/off[1] 之间乒乓;起点是 texSrc 的一次恒等拷贝(uIter=0)。
@@ -363,7 +367,7 @@ function applyLayerEffects(l, surface) {
 
 // ---- 图层表面的缓存 ----
 // 失效信号用 surface 的**对象身份** + 一个**落笔代次**,不用版本号:笔刷下落笔前会 detachPaintSurface()
-// 换上一份私有副本,stretch/resample/crop/bake 也都是整体替换 l.mask / l.decal,所以身份就是脏标记。
+// 换上一份私有副本,stretch/resample/crop/bake 也都是整体替换那枚 attribute 的面,所以身份就是脏标记。
 // 但身份只覆盖"换了对象":一笔之内的每一次 livePreviewStroke 都是**就地改写同一张 canvas**,起笔换过
 // 一次身份之后,后面整笔都命中旧缓存 —— 画布上摆的是落笔第一点那刻的合成图,墨要等下一次按下才显形。
 // 所以写表面的路径要 +1 l.paintGen (画笔/橡皮走 livePreviewStroke,油漆桶自己 +1)。
@@ -375,31 +379,171 @@ function applyLayerEffects(l, surface) {
 // 文本层也吃这条恒等式,而且这不是偷懒:链跑在 syncTextBuffer 烘出的**盒子(=画布像素)分辨率**
 // 缓冲上,特效结果和文字本身一样以显示分辨率光栅化,放大盒子绝不会糊。代价是 resize 帧缓冲换
 // 身份、链会重跑 —— 只发生在挂着启用链的文字层上,而特效参数按画布像素计正是这里要的读法。
+
+const FX_CUT_ALL = () => true;
+
+// 这枚 attribute 会在折叠出来的那张面上留下像素吗:空面 = 没装 (attr/core.js 的规矩三),空链 / 全旁路
+// = 不跑,而 cut 说了算的那些蒙版这一趟只当 silhouette 喂给右边的链,不当剪刀。
+function attrInks(r, l, i, cut) {
+    if (r.chain) return activeEffects(l, r).length > 0;
+    if (!r.surface || !r.surface.width || !r.surface.height) return false;
+    return cut(r, i);
+}
+
+// 分界线落在**最后一条会跑的链**上 (不是最后一枚做事的 attribute —— 贴片与蒙版本来就归后端重放)。
+function lastChainIndex(l, recs) {
+    for (let i = recs.length - 1; i >= 0; i--) if (recs[i].chain && activeEffects(l, recs[i]).length) return i;
+    return -1;
+}
+
+function sameFaces(a, b) {
+    return a.length === b.length && a.every((f, i) => f === b[i]);
+}
+
+// 把几张蒙版与成一张 (alpha 逐像素相乘),画进这块借用画布并归到 (w,h)。
+let fxMaskCov = null;
+function fxAndInto(masks, w, h) {
+    if (!fxMaskCov) fxMaskCov = document.createElement('canvas');
+    if (fxMaskCov.width !== w || fxMaskCov.height !== h) { fxMaskCov.width = w; fxMaskCov.height = h; }
+    const o = fxMaskCov.getContext('2d');
+    resetCtx(o);
+    o.clearRect(0, 0, w, h);
+    o.drawImage(masks[0], 0, 0, w, h);
+    for (let i = 1; i < masks.length; i++) {
+        o.globalCompositeOperation = 'destination-in';
+        o.drawImage(masks[i], 0, 0, w, h);
+        o.globalCompositeOperation = 'source-over';
+    }
+    return fxMaskCov;
+}
+
+// silhouette 用的那张覆盖率。尺寸与图层网格对不上的蒙版不参与 —— 沿用 applyLayerEffects 那条
+// 「贴图必须与网格同尺寸」的老规矩;一张都不剩就当纯白 (hasMask=0);只有一张就把原面交出去,
+// 不占那块借用画布。
+function stripCoverage(masks, w, h) {
+    const fit = masks.filter(s => s.width === w && s.height === h);
+    if (!fit.length) return null;
+    return fit.length === 1 ? fit[0] : fxAndInto(fit, w, h);
+}
+
+// ---- 条带折叠 (the fold) ----
+// 图层表面 = 最左那枚隐式面 (base,通常是 l.img,空白层是噪声) + 条带上从左到右每一枚 attribute。
+// 规矩全在这一个循环里:
+//   · decal 用 source-over 叠上去,蒙版用 destination-in 裁,各按**自己那个位置**发生,不再有谁是固定的
+//     前一步或后一步 (所以 `Mask·Decal` 与 `Decal·Mask` 是两张不同的图:后者贴片的墨会被裁掉)。
+//   · 每一枚蒙版同时是**它右边所有链**的 silhouette:一路攒着,交给下一条真跑的链与成的那张覆盖率。
+//     注意是"它左边的全部",不是"距上一条链以来的那几枚" —— `Mask·Effects·Effects` 里两条链读同一张图。
+//   · cut(r, i) 说这枚蒙版在这一趟里裁不裁。后端那两条通道把「最后一条启用链右边」的蒙版留给后端乘
+//     (见 fxSplitForBackend / fxSurfaceForGenerate),前端这一趟就不能替它乘掉。
+// 返回 false = 整趟没跑 (这层没什么可折的),surface 归调用方自己画。
+function fxDropStrip(l, surface, base, thru, cut) {
+    const recs = attrRecordsOf(l);
+    const n = thru < 0 ? recs.length : Math.min(thru + 1, recs.length);
+    if (!recs.some((r, i) => i < n && attrInks(r, l, i, cut))) return false;
+    const w = surface.width, h = surface.height;
+    const o = surface.getContext('2d');
+    resetCtx(o);
+    o.clearRect(0, 0, w, h);
+    if (base) o.drawImage(base, 0, 0, w, h);
+    const left = [];              // 这条链左边那些蒙版 (与起来才是它的 silhouette)
+    for (let i = 0; i < n; i++) {
+        const r = recs[i];
+        if (r.chain) {
+            if (!activeEffects(l, r).length) continue;
+            const prevSkip = fxgl.skip;         // 一条链跑不动不许盖掉前一条已经报过的原因
+            applyLayerEffects(l, surface, { rec: r, mask: stripCoverage(left, w, h) });
+            fxgl.skip = prevSkip || fxgl.skip;
+            continue;
+        }
+        const s = r.surface;
+        if (!s || !s.width || !s.height) continue;
+        if (r.type === 'mask') {
+            left.push(s);
+            if (!cut(r, i)) continue;
+        }
+        o.globalCompositeOperation = r.type === 'mask' ? 'destination-in' : 'source-over';
+        o.drawImage(s, 0, 0, w, h);
+        o.globalCompositeOperation = 'source-over';
+    }
+    return true;
+}
+
+function fxScratch(w, h) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+}
+
+// 画面那一趟:整条折完,蒙版一律裁。结果就是画布要盖的那张图,所以它带缓存 (注释见上)。
 function fxResolved(l) {
     if (!l || !l.img) return l && l.img;
-    if (!l.decal && !activeEffects(l).length) return l.img;
     const { w, h } = nativeSize(l.img);
     if (!w || !h) return l.img;
+    const recs = attrRecordsOf(l);
+    // 纯像素层 (条带空着,或只挂了空蒙版) 每帧都走到这里就收工:签名与贴图戳一次都不算。
+    if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return l.img;
     const sig = fxSignature(l);
     const maps = fxMapStamp(l);
     const ext = fxExternalStamp(l);
     const gen = l.paintGen | 0;
+    const faces = recs.map(r => r.surface || null);
     const c = l.fxCache;
-    if (c && c.w === w && c.h === h && c.img === l.img && c.decal === l.decal && c.mask === l.mask
+    if (c && c.w === w && c.h === h && c.img === l.img && sameFaces(c.faces, faces)
         && c.sig === sig && c.maps === maps && c.ext === ext && c.gen === gen) return c.surface;
     const reuse = !!(c && c.w === w && c.h === h && c.surface);
-    const surface = reuse ? c.surface : document.createElement('canvas');
-    if (!reuse) { surface.width = w; surface.height = h; }
-    const o = surface.getContext('2d');
-    resetCtx(o);
-    o.clearRect(0, 0, w, h);
-    o.drawImage(l.img, 0, 0, w, h);
-    if (l.decal) o.drawImage(l.decal, 0, 0, w, h);
-    if (activeEffects(l).length) applyLayerEffects(l, surface);
-    l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, maps, ext, gen, surface };
+    const surface = reuse ? c.surface : fxScratch(w, h);
+    if (!fxDropStrip(l, surface, l.img, -1, FX_CUT_ALL)) return l.img;
+    l.fxCache = { w, h, img: l.img, faces, sig, maps, ext, gen, surface };
     // 命中缓存时 surface 是**同一块画布原地重画**的,身份键察觉不到「这一层现在长这样了」。Stash 层
     // 要认这一点 (它抄的是以下所有层的合成图),所以每重算一次就换一个代次 —— 见 blend_node.html 的
-    // stashLayerKey。只有走了缓存路径 (有 decal 或有链) 的层才需要它:纯像素层的输入就是那张 img。
+    // stashLayerKey。只有走了缓存路径 (条带上真有事) 的层才需要它:纯像素层的输入就是那张 img。
     l.fxResolveGen = (l.fxResolveGen | 0) + 1;
     return surface;
+}
+
+// ---- 后端分界 (the split) ----
+// 链只有 WebGL 跑得动,所以「前端烘到哪、后端重放从哪起」这条线只能落在**最后一条启用的链**上:
+// 它左边 (含) 由前端折成一张结算面,它右边的 decal 与蒙版按序交给 Python 重放。默认那条
+// `Decal·Effects·Mask` 于是与这个功能出现之前逐像素相同 —— 贴片和链烘进 src,蒙版仍原样送出。
+// 折不出新面时 surface 就是 l.img 本身,调用方据此决定能不能走 l.src 那条免重编码的快路。
+function fxSplitForBackend(l) {
+    const recs = attrRecordsOf(l);
+    const thru = lastChainIndex(l, recs);
+    if (thru < 0) return { surface: l.img, rest: recs };
+    const { w, h } = nativeSize(l.img);
+    const surface = fxScratch(w, h);
+    if (!fxDropStrip(l, surface, l.img, thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
+    return { surface, rest: recs.slice(thru + 1) };
+}
+
+// Generate 那张图:整条折完,但**留给后端的那几枚蒙版不裁**。蒙版是覆盖率而不是剪刀时,后端还要乘
+// 一次;递一张已经裁过的图过去等于乘两次,而且模型会看见一个自己没挖的洞。
+// `base` 换掉最左那枚隐式面 —— 空白图层送出去的是噪声,链得跑在噪声上而不是跑在空的 img 上。
+// 没有任何 attribute 做事时返回 null:调用方宁可发原始 l.src,也别白白重编码一张同图。
+function fxSurfaceForGenerate(l, base) {
+    if (!l || !l.img) return null;
+    const recs = attrRecordsOf(l);
+    const thru = lastChainIndex(l, recs);
+    const cut = (r, i) => r.type !== 'mask' || i <= thru;
+    const { w, h } = nativeSize(base || l.img);
+    if (!w || !h) return null;
+    const surface = fxScratch(w, h);
+    if (!fxDropStrip(l, surface, base || l.img, -1, cut)) return null;
+    return surface;
+}
+
+// 后端那一次乘法该乘的是哪些蒙版:最后一条启用链**右边**的那些,全与起来。一条都不剩 = 前端已经
+// 裁进结算面了,后端乘全白 (调用方那侧的合成全白就是这个意思)。
+// 这里不按网格尺寸筛:蒙版本来就是按各自尺寸发过去、由后端 resample 的,筛掉会把一张画歪的蒙版
+// 变成「没有蒙版」。
+function fxDistributedMask(l, w, h) {
+    const recs = attrRecordsOf(l);
+    const thru = lastChainIndex(l, recs);
+    const list = [];
+    for (let i = thru + 1; i < recs.length; i++) {
+        const s = recs[i].type === 'mask' ? recs[i].surface : null;
+        if (s && s.width && s.height) list.push(s);
+    }
+    if (!list.length) return null;
+    return list.length === 1 ? list[0] : fxAndInto(list, w, h);
 }

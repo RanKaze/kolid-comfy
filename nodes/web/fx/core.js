@@ -1,5 +1,7 @@
 // ==================== 图层特效链 (layer effect chain) ====================
-// 一条挂在图层上的特效链,在 decal 之后、蒙版乘法之前执行。三条契约是整个模块的地基:
+// 特效链是图层 attribute 条带上的一类节点:它在**自己那个位置**执行,吃的是它左边那些 attribute 累加
+// 出来的那张面。整条管线因此不再有一条固定顺序 —— 顺序归图层排 (见 attr/core.js),链只在条带上说话。
+// 三条契约是整个模块的地基:
 //   * footprint-neutral —— 输出的像素尺寸 === 输入,一个像素都不外扩。图层的蒙版是按**自身像素
 //     网格**单独送到后端,并靠 layerCompositeForGenerate 的反解 transform 与图层对齐;外扩一次,
 //     那条对齐就废了。注意这条钉的是**网格**,不是"像素不许长到形状之外":外阴影、Outside 描边与锈蚀
@@ -7,12 +9,13 @@
 //     拖,这里不能) —— 想要那份余量就把该层自己的网格做大:文字层有 Padding,位图层目前没有旋钮。
 //   * alpha 跟着画面走 —— 低通/运动模糊/马赛克把 A 和 RGB 一起滤波(抽样预乘累加、直通色归一,
 //     alpha 输出同一组抽样的均值):对文字这类「形状就是 alpha」的层,不软化不透明度就等于没特效。
-//     出口 alpha 是该层**新的源不透明度**;蒙版仍独立存档,后端 `image * mask` 依旧只乘一次,
-//     不会把软边乘成平方。曲线/色调/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条);
+//     出口 alpha 是该层**新的源不透明度**;蒙版按它在条带上的位置各乘一次,后端不会再来第二次,
+//     所以软边不会被乘成平方。曲线/色调/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条);
 //     锈蚀则两头都动 —— 把 alpha 咬穿成洞,又在洞的四周长出锈色 (它同时是「重塑不透明度」那一族的一员)。
-//   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × 蒙版 alpha,特效据此计算,但结果
-//     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
-//     外阴影、描边与锈蚀的形状故意**只取图层 alpha**:蒙版链外还要整体乘一次,吃过一遍就成了平方。
+//   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × **该链左边那些蒙版与起来的**覆盖率,
+//     特效据此计算,但结果不额外往输出上裁。左边没有蒙版就当纯白 (= 图层自己的 alpha)。所以
+//     「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
+//     外阴影、描边与锈蚀的形状故意**只取图层 alpha**:它们要的是形状自己的轮廓,乘过蒙版就成了平方。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
 // + 虚化 + 裁回自身轮廓、描边 = jump flooding 出到自身轮廓的距离场再判 d ≤ Size、
 // 锈蚀 = 形状低通当边缘闸门 × 噪声场定破洞、再把破洞掩码低通成渗色圈、
@@ -22,8 +25,8 @@
 // 体积霾 = 沿视线步进到深度图报出的那个面,逐步按取样点的高度取浓度、前向累进吸收与散射 (朝向 Sun
 // 的 Henyey-Greenstein 相位)。
 // 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光/体积霾只写 RGB,外阴影与描边加 alpha,锈蚀
-// 既咬穿 alpha 又在破洞四周加 alpha;三条契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一
-// 换过之后重算一次(见 fxResolved)。
+// 既咬穿 alpha 又在破洞四周加 alpha;三条契约对全部特效成立。一条链只在它所属的 attribute (面、链、
+// 参数任一) 或整条 strip 的形状换过之后重算一次(见 fxResolved)。
 // 吃外部图的特效(dof / lighting / tone 的 External / corrosion 的 Texture)在 params 里只存一句
 // {key, name} 引用:图池 id 或本地池 id,像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
 //
@@ -125,14 +128,24 @@ let effectsBypass = false;
 const EFFECTS_BYPASS_KEY = 'blend.effectsBypass';
 try { effectsBypass = localStorage.getItem(EFFECTS_BYPASS_KEY) === '1'; } catch (e) { /* private mode: default off */ }
 
-function activeEffects(l) {
-    if (effectsBypass || !layerTakesEffects(l) || !l.effects || !l.effects.length) return [];
-    return l.effects.filter(e => e && e.enabled && EFFECT_TYPES[e.type]);
+// `rec` 是那条链所属的 Effects attribute 记录。传了它就读它自己那条链 (条带上可以挂着好几枚容器);
+// 不传读的是**最左边那一枚** —— 图层行的 UI 与所有老调用点都走这条,它们还不必理解 strip (S5 搬家)。
+function activeEffects(l, rec) {
+    if (effectsBypass || !layerTakesEffects(l)) return [];
+    const chain = rec ? rec.chain : l.effects;
+    if (!chain || !chain.length) return [];
+    return chain.filter(e => e && e.enabled && EFFECT_TYPES[e.type]);
 }
 
+// 缓存身份的「链 + 顺序」那一维:整条 strip 的形状 (哪几种、什么顺序、每枚启用与否、参数)。
+// 面不在这儿 —— 面按对象身份比 (见 fxResolved 的 attrs),所以拖顺序、换面、改参数都能各归各地脏。
 function fxSignature(l) {
-    if (!l.effects || !l.effects.length) return '';
-    return JSON.stringify([effectsBypass ? 0 : 1, l.effects.map(e => [e.type, e.enabled ? 1 : 0, e.params])]);
+    const recs = attrRecordsOf(l);
+    if (!recs.length) return '';
+    return JSON.stringify([effectsBypass ? 0 : 1, recs.map(r => [
+        r.type,
+        r.chain ? r.chain.map(e => [e.type, e.enabled ? 1 : 0, e.params]) : 0,
+    ])]);
 }
 
 // 有些特效的结果还取决于**链外**的状态:Canvas 对齐的深度 warp 读的是图层盒子在画布上的落点,而拖
@@ -140,9 +153,12 @@ function fxSignature(l) {
 // 真要它的那种模式才回字符串),缓存身份才不会被一份过期的位移钉住。
 function fxExternalStamp(l) {
     let s = '';
-    for (const e of activeEffects(l)) {
-        const spec = EFFECT_TYPES[e.type];
-        if (spec && spec.stamp) s += spec.stamp(e, l) + '|';
+    for (const r of attrRecordsOf(l)) {
+        if (!r.chain) continue;
+        for (const e of activeEffects(l, r)) {
+            const spec = EFFECT_TYPES[e.type];
+            if (spec && spec.stamp) s += spec.stamp(e, l) + '|';
+        }
     }
     return s;
 }
