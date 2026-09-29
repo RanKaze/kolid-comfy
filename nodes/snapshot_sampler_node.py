@@ -1490,6 +1490,14 @@ class SnapshotDetailerSamplerServer:
                 epi = getattr(inst, 'extra_pnginfo', None)
                 if isinstance(epi, list):
                     epi = epi[0] if epi else {}
+                # 显示用的类型来自 inst.extra_pnginfo —— 那是**上一次 run 图片里带的存档**,
+                # 不是画布上当前的图。改完连线没重新跑一次, 这里读到的就还是旧存档。
+                _wf = epi.get('workflow') if isinstance(epi, dict) else None
+                print("[InterfacePorts] /api/package epi=%s keys=%s wf_nodes=%s stored=%d"
+                      % ('yes' if epi else 'NO',
+                         sorted(epi.keys())[:4] if isinstance(epi, dict) else '-',
+                         len(_wf.get('nodes') or []) if isinstance(_wf, dict) else 'no-workflow',
+                         len(inst.interface_packages)))
 
                 interfaces = []
                 for pkg in inst.interface_packages:
@@ -1497,14 +1505,18 @@ class SnapshotDetailerSamplerServer:
 
                     # Get fresh package from extra_pnginfo for full port info
                     fresh_pkg = pkg
+                    _from = 'stored'
                     if epi and isinstance(epi, dict) and end_id:
                         pkg_node = InterfacePackageNode()
                         fresh = pkg_node.get_package(end_id, epi, None)
                         if fresh and fresh[0]:
                             fresh_pkg = fresh[0]
+                            _from = 'rebuilt-from-epi'
 
                     start_types = fresh_pkg.get('start_types', {})
                     end_types = fresh_pkg.get('types', {})
+                    print("[InterfacePorts] /api/package end=%s via=%s start_types=%s end_types=%s"
+                          % (end_id, _from, start_types or '{}', end_types or '{}'))
 
                     # Resolve COMBO candidate options from the upstream node that
                     # feeds this Start port (best-effort; falls back to []).
@@ -1515,6 +1527,11 @@ class SnapshotDetailerSamplerServer:
                     def get_combo_options(port_num):
                         link = start_inputs.get('value' + str(port_num))
                         if not isinstance(link, (list, tuple)) or len(link) < 1:
+                            # Start 的外部连线在建包时就被丢弃 (interface_node.py 里那段
+                            # "boundary injection"过滤), 所以这里几乎总是走进来 —— 记下来。
+                            print("[InterfacePorts] COMBO port=%s: sub_prompt 里 Start 没有 value%s "
+                                  "这条输入连线 (start_inputs keys=%s), 取不到候选项"
+                                  % (port_num, port_num, sorted(start_inputs.keys())[:8]))
                             return []
                         up_id = str(link[0])
                         up_node = sub_prompt.get(up_id, {})

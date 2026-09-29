@@ -138,15 +138,25 @@ class InterfaceStartNode:
 
         values = []
         interface_values = {}
+        _trace = []
         for i in range(1, MAX_INTERFACE_NUM + 1):
             if i in injections:
                 val = injections[i]
+                _src = 'inj'
             else:
                 val = kwargs.get("value%d" % i, None)
+                _src = 'kwargs' if val is not None else '-'
             values.append(val)
             # port_types 可能未被序列化到 prompt（隐藏 widget），为空时 passthrough 所有非 None 值
             if i in types or (not types and val is not None):
                 interface_values[i] = val
+                _kept = ''
+            else:
+                _kept = '(被 port_types 门掉, 不进 interface_values)' if val is not None else ''
+            if _src != '-' or _kept:
+                _trace.append("%d:%s%s%s" % (i, _src, type(val).__name__[:4] if val is not None else '', _kept))
+        print("[InterfacePorts] start#%s execute types_from_port_types=%d %s"
+              % (unique_id, len(types), " ".join(_trace) or "(全空)"))
 
         interface_data = {
             "name": interface_name,
@@ -796,6 +806,39 @@ class InterfacePackageNode:
         start_port_types = infer_port_types(start_node, from_outputs=True)
         end_port_types = infer_port_types(end_node)
 
+        # ── 端口类型诊断 ─────────────────────────────────────────────────
+        # 一份存档里能证明"这个口是什么类型"的一共四个地方: 输入槽 / 输入线 / 输出槽 /
+        # 输出线。逐口全打出来, 空口就能直接看出是前端没写、线冻在 `*`、还是这份存档
+        # 根本就不是当前那张图。
+        print("[InterfacePorts] build '%s' start=%s end=%s source=%s wf_nodes=%d links=%d subgraph=%d"
+              % (interface_name, start_node_id, node_id_str,
+                 "workflow" if "nodes" in workflow else "prompt",
+                 len(workflow.get("nodes") or []), len(links), len(sub_graph_ids)))
+
+        def _dump_port_types(node_obj, side, resolved):
+            by_name_in = {i.get("name"): i for i in (node_obj.get("inputs") or [])
+                          if isinstance(i, dict)}
+            by_name_out = {o.get("name"): o for o in (node_obj.get("outputs") or [])
+                           if isinstance(o, dict)}
+            names = [k for k in set(list(by_name_in) + list(by_name_out))
+                     if k and _re.match(r"value(\d+)$", k)]
+            for name in sorted(names, key=lambda n: int(n[5:])):
+                port = _re.match(r"value(\d+)$", name).group(1)
+                inp = by_name_in.get(name) or {}
+                out = by_name_out.get(name) or {}
+                in_link = link_by_id.get(inp.get("link"))
+                in_wire = str(in_link[5]) if in_link and len(in_link) >= 6 else "-"
+                out_wires = sorted({str(link_by_id[l][5]) for l in (out.get("links") or [])
+                                    if l in link_by_id and len(link_by_id[l]) >= 6})
+                print("[InterfacePorts]   %-5s %-7s in_slot=%-13s in_wire=%-13s "
+                      "out_slot=%-13s out_wire=%-13s => %s"
+                      % (side, name, inp.get("type") or "-", in_wire,
+                         out.get("type") or "-", ",".join(out_wires) or "-",
+                         resolved.get(port) or "MISSING"))
+
+        _dump_port_types(start_node, "START", start_port_types)
+        _dump_port_types(end_node, "END", end_port_types)
+
         # Collect subgraph node widget values and input definitions
         # These are used to resolve virtual inputs that aren't connected to Start
         sg_widget_values = {}  # {sg_node_id: widgets_values}
@@ -1109,14 +1152,18 @@ class InterfaceExecutor:
         """构建注入值字典 — 基于 Start 节点的端口类型"""
         injections = {}
         start_types = pkg.get('start_types', {})
+        manual_keys = sorted({str(k) for k in (manual_values or {})})
         for port_num_str, port_type in start_types.items():
             port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
             if port_type == 'MASK' and self.get_mask:
                 injections[port_num] = self.get_mask()
+                _src = 'mask(画面)'
             elif port_type == 'IMAGE' and self.get_image:
                 injections[port_num] = self.get_image()
+                _src = 'image(画面)'
             elif port_type == 'PIPELINE_DATA' and self.get_pipeline:
                 injections[port_num] = self.get_pipeline()
+                _src = 'pipeline(画面)'
             elif str(port_num) in manual_values or port_num in manual_values:
                 mv = manual_values.get(str(port_num), manual_values.get(port_num))
                 if port_type == 'INT' and mv is not None:
@@ -1127,8 +1174,18 @@ class InterfaceExecutor:
                     injections[port_num] = str(mv).lower() in ('true', '1', 'yes')
                 else:
                     injections[port_num] = mv
+                _src = 'manual'
             else:
                 injections[port_num] = None
+                _src = 'NONE(面板没送这个口)'
+            print("[InterfacePorts] inject start=%s port=%s type=%-13s <- %s"
+                  % (pkg.get('start_node_id'), port_num, port_type, _src))
+        # 面板送来的口与 start_types 完全对不上时, 上面的循环一个都不会走到 —— 只打差集
+        unused = [k for k in manual_keys
+                  if k not in {str(p) for p in start_types} and k.isdigit()]
+        if unused:
+            print("[InterfacePorts] inject start=%s manual_values 里有但 start_types 没有的口: %s"
+                  % (pkg.get('start_node_id'), ",".join(unused)))
         return injections
 
     def _map_all_widgets(self, sub_prompt):
