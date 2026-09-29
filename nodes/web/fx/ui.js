@@ -396,11 +396,14 @@ function fxChainEl(l, r) {
         if (step.params) steps.appendChild(step.params);
         steps.appendChild(step.chip);
     }
-    // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。
-    if (fxgl.skip) {
+    // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。读的是**这条记录
+    // 自己**那份原因:全局 fxgl.skip 是所有图层、所有容器共用的"最近一次跑链"读数,直接拿它说话,
+    // 绑好了图的那块容器也会挂上别处那句"no depth map bound"。
+    const why = fxChainSkipReason(r);
+    if (why) {
         const warn = document.createElement('div');
         warn.className = 'fx-warn';
-        warn.textContent = `Chain skipped — ${fxgl.skip}`;
+        warn.textContent = `Chain skipped — ${why}`;
         box.appendChild(warn);
     }
     return box;

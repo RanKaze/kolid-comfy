@@ -298,6 +298,13 @@ function fxHexToRgb01(hex) {
     return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
 }
 
+// 这条链最近一次跑不动的原因,按**记录**存一份。fxgl.skip 是全工程唯一那份「最近一次跑链」的读数,
+// 状态栏和 Apply 命令读它没问题,侧栏的容器不行:render 先把每个图层、每枚容器都折完,然后才建那批
+// DOM,于是最晚跑过的那条链把话说到所有容器头上 —— 绑好了深度图的那块也会写上 "no depth map bound"。
+// 键是记录对象本身 (条带上的记录跨 render 是同一个,见 fxResolved 拿面身份比缓存),层删了它就跟着没了。
+const fxChainSkip = new WeakMap();
+function fxChainSkipReason(r) { return (r && fxChainSkip.get(r)) || ''; }
+
 // 就地跑一条链,结果写回 surface。返回 false = 整链没跑(不支持 / 太大),surface 原样留着;
 // fxgl.skip 带上原因,让状态栏能说清楚,而不是「特效静默地变成了没特效」。
 // `opts.rec` = 这一枚 Effects attribute 的记录 (读它自己那条链), `opts.mask` = 它左边那些蒙版与起来的
@@ -307,11 +314,14 @@ function applyLayerEffects(l, surface, opts) {
     const chain = o.rec ? activeEffects(l, o.rec) : activeEffects(l);
     const mask = ('mask' in o) ? o.mask : l.mask;
     fxgl.skip = '';
+    if (o.rec) fxChainSkip.delete(o.rec);
+    // 全局那句照旧写 (状态栏要的是「最近一次」),这一枚记录那句同时写进 fxChainSkip。
+    const note = () => { if (o.rec && fxgl.skip) fxChainSkip.set(o.rec, fxgl.skip); };
     if (!chain.length) return false;
     const gl = fxglInit();
-    if (!gl) { fxgl.skip = fxgl.dead || 'WebGL2'; return false; }
+    if (!gl) { fxgl.skip = fxgl.dead || 'WebGL2'; note(); return false; }
     const w = surface.width, h = surface.height;
-    if (!w || !h || !fxglResize(gl, w, h)) return false;
+    if (!w || !h || !fxglResize(gl, w, h)) { note(); return false; }
 
     fxglUploadCanvas(fxgl.texSrc, surface);
     fxgl.hasMask = 0;
@@ -353,12 +363,14 @@ function applyLayerEffects(l, surface, opts) {
             fxglUploadCanvas(slot.key === 'map' ? fxgl.texMap : fxgl.texMap2, img);
             if (slot.key !== 'map') fxgl.hasMap2 = 1;
         }
-        if (mapMiss) { fxgl.skip = mapMiss; continue; }
+        if (mapMiss) { fxgl.skip = mapMiss; note(); continue; }
         // 跑不动的特效自己写 fxgl.skip (参数为 0 时直接原样返回),引擎只负责把贴图备好。
         // effect 一起传:绑定贴图的尺寸也是该特效的判断依据 (见 fx/tone_map.js 的布局识别)。
         // l 也一起传:有的特效吃的几何是**图层盒子在画布上的位置**,不只是它自己的网格 (见 fx/warp.js 的深度)。
         spec.run(col, p, effect, l);
     }
+    // 特效自己写在链上的那句也算这条记录的原因 (参数为 0 之类它自己决定不跑的情形)。
+    note();
     fxglRunPass(null, fxgl.progs.present, pr => fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0));
     const c2 = surface.getContext('2d');
     resetCtx(c2);
