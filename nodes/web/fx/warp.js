@@ -323,13 +323,15 @@ void main() {
     Frag = vec4(c.rgb, c.a * cov);
 }`;
 
-// 几何:透视重投影 (occlusion-correct relief mapping)。深度图的亮度读成「该处多高」(近=亮,深度估计
-// 那条子图的极性),然后从输出像素沿视线往下探:候选高度 λ 处的取样点 = 原点 + 视线偏移·(λ - Anchor),
-// 命中条件是 h(取样点) ≥ λ。从 λ=1 (最近) 往下走、取**第一个**命中,就是这条视线先撞到谁 —— 于是高起
-// 的形状挡住它背后的像素,而不是像朴素视差那样把后面那块一起拉上来。λ=0 时 h ≥ 0 恒成立,所以步进必然
-// 收敛,没有「打不中」这一支。命中点落在两步之间,还要精修一次:绑了法线图就用它给的坡度做一次 Newton
-// (坡度免费,但被夹回这一步的区间里,所以法线图的方向极性即使不对也只是少收敛一点);没绑就拿深度图自己
-// 二分 4 次 —— 副槽因此是真·可选,缺图只让边缘没那么锐。
+// 几何:透视重投影 (occlusion-correct relief mapping)。深度图读成「该处离相机多近」——Near 说哪一端
+// 算近(默认 bright,和这颗特效从无到有那一版逐字相同;depth 那一族估计图近=亮,而深度图本身是距离的
+// 那些近=暗,所以这一句必须是一颗钮)。翻过来之后高度场就是 h = near? d : 1-d,步进从 h=1 (最近) 往下走:
+// 候选高度 λ 处的取样点 = 原点 + 视线偏移·(λ - Anchor),命中条件是 h(取样点) ≥ λ。取**第一个**命中就是
+// 这条视线先撞到谁 —— 于是高起的形状挡住它背后的像素,而不是像朴素视差那样把后面那块一起拉上来。
+// λ=0 时 h ≥ 0 恒成立,所以步进必然收敛,没有「打不中」这一支。正因为 h 已经被 Near 归一化成「越大越近」,
+// Anchor 只管「哪一端钉在原地」,与极性无关,两个旋钮各说各的事。命中点落在两步之间,还要精修一次:绑了
+// 法线图就用它给的坡度做一次 Newton (坡度免费,但被夹回这一步的区间里,所以法线图的方向极性即使不对也
+// 只是少收敛一点);没绑就拿深度图自己二分 4 次 —— 副槽因此是真·可选,缺图只让边缘没那么锐。
 // 视线是**逐像素**的:off = 斜视那一份 + Bulge·(像素 - 视轴)。视轴取该层网格的中心,于是近处的面把
 // 画面朝外撑开、背面把画面压紧 (梯度进雅可比 = 跟着面的坡度走),而整块平移那种「一块平面压上来」的
 // 读法正是常数视线造成的。偏移不取贴图自己的轴,而是落在该层网格的 uv 上再过仿射基进贴图 uv —— 于是
@@ -349,9 +351,13 @@ uniform vec2 uShift;
 uniform vec2 uBulge;
 uniform vec2 uSlope;
 uniform float uAnchor;
+uniform float uNearBright;
 uniform int uSteps;
 uniform int uHasNormal;
-float warpHeight(vec2 muv) { return texture(uMap, muv).r; }
+float warpHeight(vec2 muv) {
+    float d = texture(uMap, muv).r;
+    return uNearBright > 0.5 ? d : 1.0 - d;
+}
 ${WARP_GLSL_SAMPLE}
 void main() {
     vec2 muv0 = uMapU * vUV.x + uMapV * vUV.y + uMapB;
@@ -451,6 +457,7 @@ function fxglWarp(col, p, effect, l) {
         gl.uniform2f(fxglU(pr, 'uBulge'), bx, by);
         gl.uniform2f(fxglU(pr, 'uSlope'), nnative ? nnative.w : 1, nnative ? nnative.h : 1);
         gl.uniform1f(fxglU(pr, 'uAnchor'), p.anchor === 'near' ? 1 : 0);
+        gl.uniform1f(fxglU(pr, 'uNearBright'), p.near === 'bright' ? 1 : 0);
         gl.uniform1i(fxglU(pr, 'uSteps'), Math.max(4, Math.min(32, p.steps | 0)));
         gl.uniform1i(fxglU(pr, 'uHasNormal'), fxgl.hasMap2);
     });
@@ -474,6 +481,8 @@ const WARP_PARAMS = [
     { key: 'shift', label: 'Slide', min: 0, max: 128, step: 1, def: 0, unit: 'px', when: p => p.mode === 'Geometry' },
     { key: 'bulge', label: 'Bulge', min: 0, max: 384, step: 1, def: 128, unit: 'px', when: p => p.mode === 'Geometry' },
     { key: 'anchor', label: 'Anchor', kind: 'enum', options: ['far', 'near'], def: 'far', when: p => p.mode === 'Geometry' },
+    // 极性:哪一端算「近」。默认 bright = 这一版以前硬编码的那个读法,老画面一个字都不变。
+    { key: 'near', label: 'Near', kind: 'enum', options: ['bright', 'dark'], def: 'bright', when: p => p.mode === 'Geometry' },
     { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.mode === 'Geometry' },
 ];
 
@@ -567,7 +576,7 @@ defineEffect({
     needsMap2: { key: 'normal', role: 'Normal' },
     needsMapWhen: p => p.mode === 'Geometry',
     needsMap2When: p => p.mode === 'Geometry',
-    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it. Every pixel gets its **own** line of sight, opening out from a view axis that runs through the middle of this layer: a face standing toward you spreads the picture outward, a face turned away packs it tighter, and a tall shape hides what sits behind it \u2014 that is what makes the picture lie over the form rather than slide across it. Bulge = how wide those sight lines open (how far the rim of the layer is pushed at full depth). Angle and Slide add one lean that every sight line shares, so the whole relief appears to be viewed from off to the side. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
+    desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it. Every pixel gets its **own** line of sight, opening out from a view axis that runs through the middle of this layer: a face standing toward you spreads the picture outward, a face turned away packs it tighter, and a tall shape hides what sits behind it \u2014 that is what makes the picture lie over the form rather than slide across it. Bulge = how wide those sight lines open (how far the rim of the layer is pushed at full depth). Angle and Slide add one lean that every sight line shares, so the whole relief appears to be viewed from off to the side. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Near says which end of the map is the near one \u2014 a depth *estimate* is usually bright-up-close, a raw distance pass is dark-up-close, and reading the wrong end turns the relief inside out. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
     params: WARP_PARAMS,
     editor: warpEditorEl,
     shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpGeometry: FX_FS_WARP_GEOMETRY },
@@ -585,11 +594,11 @@ defineEffect({
     },
     // Canvas 对齐的几何吃的还是「该层盒子落在画布哪儿」,而拖图层既不改像素也不改 params。缓存身份
     // 必须知道这一件事,否则挪完层还在用挪之前算好的那份视差 —— 注册表为此留了 stamp 这个口子。
+    // 那句话与光照阴影吃的是同一个,所以格式化收在 fx/maps.js 的 fxMapBoxStamp 里,两边一字不差。
     stamp(effect, l) {
         const p = effectParams(effect);
         if (p.mode !== 'Geometry' || p.align !== 'Canvas') return '';
-        const tr = effectiveTransform(l);
-        return `${tr.cx.toFixed(4)},${tr.cy.toFixed(4)},${tr.w.toFixed(4)},${tr.h.toFixed(4)},${tr.rotation.toFixed(3)}`;
+        return fxMapBoxStamp(l);
     },
     readout(p, n, effect) {
         if (p.mode === 'Noise') return `noise  s${n(p.scale)}  a${n(p.amount)}  o${p.octaves}  #${p.seed}`;
@@ -602,7 +611,9 @@ defineEffect({
         // 视线两份成分也都要报:s 是共享的那支斜视、b 是发散的张开,只报一颗的话另一颗被调了画面
         // 变了读数却不动。
         // 缺的是哪一张由 fxMapShort 按槽的角色报 (no depth / no normal),这里不再自己补字。
-        return `${fxMapShort(effect)} + ${fxMapShort(effect, 'normal')}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}  b${n(p.bulge)}${p.anchor === 'near' ? '  near' : ''}`;
+        // inv 与光照/景深那颗同名旋钮同一条读法:它说的是**那张图**的亮端是不是近处,不是「拧离了
+        // 本特效的默认」—— 所以 Warp 新建时也带着它 (本特效默认 bright-near, 老画面就是这么读的)。
+        return `${fxMapShort(effect)} + ${fxMapShort(effect, 'normal')}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}  b${n(p.bulge)}${p.anchor === 'near' ? '  near' : ''}${p.near === 'bright' ? '  inv' : ''}`;
     },
     thumb(g, box) {
         // 一格被按下去一角的方格网:虚线是格子原来占的框,实线是网格拖成什么样。

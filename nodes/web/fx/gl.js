@@ -225,11 +225,12 @@ function fxglUploadCanvas(tex, src) {
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 }
 
-// dst = null 即画进默认缓冲(那张用于读回的 GL canvas)。
-function fxglRunPass(dst, prog, setup) {
+// dst = null 即画进默认缓冲(那张用于读回的 GL canvas)。vp 是可选的「这一趟只渲染多大一块」:
+// 尺寸随级往下缩的那种面(光照的高度场金字塔)不必为此再写一条 pass 循环,默认照旧是整张面。
+function fxglRunPass(dst, prog, setup, vp) {
     const gl = fxgl.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fb : null);
-    gl.viewport(0, 0, fxgl.w, fxgl.h);
+    gl.viewport(0, 0, vp ? vp.w : fxgl.w, vp ? vp.h : fxgl.h);
     gl.useProgram(prog.p);
     gl.bindVertexArray(fxgl.vao);
     setup(prog);
