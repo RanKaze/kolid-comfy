@@ -1754,6 +1754,17 @@ const InterfaceTab: React.FC<{
     onExecuteInterface(idx, manualValues[idx] || {}, payload);
   };
 
+  // 忘掉这张卡上输入过的值：端口回到"从图里算出来的那一份"（存档里内部节点的 widget 值），
+  // 面板显示和执行走的是同一个兜底，所以清空 = 两边一起回到默认。
+  const resetDefaults = (idx: number) => {
+    setManualValues(prev => {
+      if (!prev[idx]) return prev;
+      const next = { ...prev };
+      delete next[idx];
+      return next;
+    });
+  };
+
   const showProgress = (idx: number) => detailStatusByIdx[idx] === 'running' && (detailProgressByIdx[idx]?.total ?? 0) > 0;
 
   // Evaluate a simple arithmetic expression (e.g. "1024*1024", "512*0.5") safely.
@@ -2053,7 +2064,16 @@ const InterfaceTab: React.FC<{
           {detailStatusByIdx[idx] === 'error' && (
             <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
           )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginTop: 12 }}>
+            {iface.start_ports?.some(p => p.category === 'manual') && (
+              <button
+                style={styles.resetBtn}
+                onClick={() => resetDefaults(idx)}
+                title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
+              >
+                Reset to defaults
+              </button>
+            )}
             <button
               style={{ ...styles.runBtn, opacity: detailStatusByIdx[idx] === 'running' ? 0.4 : 1, cursor: detailStatusByIdx[idx] === 'running' ? 'not-allowed' : 'pointer' }}
               onClick={() => handleExecute(idx)}
@@ -2201,6 +2221,13 @@ const styles: Record<string, React.CSSProperties> = {
 
 
   // Run button — bottom right
+  // 卡片级次要动作：中性墨色，明度低于 Execute，避免和动作蓝/绿抢注意力
+  resetBtn: {
+    padding: '8px 14px', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.45)',
+    background: 'transparent', border: '0.5px solid rgba(255,255,255,0.1)',
+    borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease',
+  },
+
   runBtn: {
     padding: '10px 28px', fontSize: 14, fontWeight: 700, color: '#fff',
     background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 10, cursor: 'pointer',

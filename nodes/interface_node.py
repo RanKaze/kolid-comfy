@@ -806,6 +806,57 @@ class InterfacePackageNode:
         start_port_types = infer_port_types(start_node, from_outputs=True)
         end_port_types = infer_port_types(end_node)
 
+        # ── 端口的展示名与默认值: 从"这一口喂到的那个内部节点输入"算出来 ──────────
+        # 不新存一份真值: 画布上你给内部节点设的那个输入(名字 + widget 值)就是这一口在
+        # Interface 里该显示的名字和默认值。widgets_values 与"带 widget 键的输入"同序对齐
+        # (既有连线又有 widget 的输入照样占一格), 两者数量对不上就说明这份存档的格子数不准,
+        # 宁可不给默认值也不猜。IMAGE/MASK 这类非 widget 输入没有默认值, 只有名字。
+        _no_widget_value = object()
+
+        def _widget_value_of_input(node_obj, entry_idx):
+            ins = node_obj.get("inputs") or []
+            wv = node_obj.get("widgets_values")
+            entry = ins[entry_idx] if 0 <= entry_idx < len(ins) else None
+            if not isinstance(entry, dict) or "widget" not in entry:
+                return _no_widget_value
+            if not isinstance(wv, list):
+                return _no_widget_value
+            widget_slots = [i for i, e in enumerate(ins)
+                            if isinstance(e, dict) and "widget" in e]
+            if len(widget_slots) != len(wv):
+                return _no_widget_value
+            pos = widget_slots.index(entry_idx)
+            return wv[pos]
+
+        start_labels = {}    # {port: 第一个被喂到的输入名}
+        start_defaults = {}  # {port: 第一个带 widget 的被喂输入的存档值}
+        start_targets = {}   # {port: {'class_type', 'input_name'}} 供 COMBO 取候选项
+        for out in (start_node.get("outputs") or []):
+            m = _re.match(r"value(\d+)$", out.get("name", "") or "")
+            if not m:
+                continue
+            port = m.group(1)
+            for link_id in (out.get("links") or []):
+                link = link_by_id.get(link_id)
+                if not link or len(link) < 5:
+                    continue
+                tgt = node_by_id.get(str(link[3]))
+                t_ins = (tgt or {}).get("inputs") or []
+                ti = link[4]
+                if not tgt or not (0 <= ti < len(t_ins)):
+                    continue
+                entry = t_ins[ti]
+                in_name = entry.get("name") if isinstance(entry, dict) else None
+                if not isinstance(in_name, str) or not in_name:
+                    continue
+                start_labels.setdefault(port, in_name)
+                if port not in start_targets and isinstance(entry, dict) and "widget" in entry:
+                    start_targets[port] = {"class_type": tgt.get("type", ""),
+                                           "input_name": in_name}
+                    val = _widget_value_of_input(tgt, ti)
+                    if val is not _no_widget_value:
+                        start_defaults[port] = val
+
         # ── 端口类型诊断 ─────────────────────────────────────────────────
         # 一份存档里能证明"这个口是什么类型"的一共四个地方: 输入槽 / 输入线 / 输出槽 /
         # 输出线。逐口全打出来, 空口就能直接看出是前端没写、线冻在 `*`、还是这份存档
@@ -815,7 +866,7 @@ class InterfacePackageNode:
                  "workflow" if "nodes" in workflow else "prompt",
                  len(workflow.get("nodes") or []), len(links), len(sub_graph_ids)))
 
-        def _dump_port_types(node_obj, side, resolved):
+        def _dump_port_types(node_obj, side, resolved, extras=None):
             by_name_in = {i.get("name"): i for i in (node_obj.get("inputs") or [])
                           if isinstance(i, dict)}
             by_name_out = {o.get("name"): o for o in (node_obj.get("outputs") or [])
@@ -831,12 +882,24 @@ class InterfacePackageNode:
                 out_wires = sorted({str(link_by_id[l][5]) for l in (out.get("links") or [])
                                     if l in link_by_id and len(link_by_id[l]) >= 6})
                 print("[InterfacePorts]   %-5s %-7s in_slot=%-13s in_wire=%-13s "
-                      "out_slot=%-13s out_wire=%-13s => %s"
+                      "out_slot=%-13s out_wire=%-13s => %s%s"
                       % (side, name, inp.get("type") or "-", in_wire,
                          out.get("type") or "-", ",".join(out_wires) or "-",
-                         resolved.get(port) or "MISSING"))
+                         resolved.get(port) or "MISSING",
+                         ("  " + extras[port]) if extras and port in extras else ""))
 
-        _dump_port_types(start_node, "START", start_port_types)
+        def _derived_note(port):
+            parts = []
+            if port in start_labels:
+                parts.append("name=%s" % start_labels[port])
+            if port in start_defaults:
+                parts.append("default=%r" % (start_defaults[port],))
+            else:
+                parts.append("default=-")
+            return " ".join(parts)
+
+        _dump_port_types(start_node, "START", start_port_types,
+                         {p: _derived_note(p) for p in start_labels})
         _dump_port_types(end_node, "END", end_port_types)
 
         # Collect subgraph node widget values and input definitions
@@ -858,6 +921,9 @@ class InterfacePackageNode:
             "name": interface_name,
             "types": end_port_types,
             "start_types": start_port_types,
+            "start_labels": start_labels,
+            "start_defaults": start_defaults,
+            "start_targets": start_targets,
             "values": {},
             "start_node_id": start_node_id,
             "end_node_id": node_id_str,
@@ -1176,8 +1242,13 @@ class InterfaceExecutor:
                     injections[port_num] = mv
                 _src = 'manual'
             else:
-                injections[port_num] = None
-                _src = 'NONE(面板没送这个口)'
+                # 面板没送这个口 —— 用你在画布上给这一口喂到的那个输入设的值, 而不是 None。
+                # 面板显示的默认值和实跑的值因此是同一次计算, 不会出现"看着 1、跑的是 None"。
+                dv = (pkg.get('start_defaults') or {}).get(str(port_num))
+                tgt = (pkg.get('start_targets') or {}).get(str(port_num)) or {}
+                injections[port_num] = dv
+                _src = ('存档默认值(%s.%s)' % (tgt.get('class_type', '?'), tgt.get('input_name', '?'))
+                        if dv is not None else 'NONE(面板没送, 存档也没设这个口)')
             print("[InterfacePorts] inject start=%s port=%s type=%-13s <- %s"
                   % (pkg.get('start_node_id'), port_num, port_type, _src))
         # 面板送来的口与 start_types 完全对不上时, 上面的循环一个都不会走到 —— 只打差集
