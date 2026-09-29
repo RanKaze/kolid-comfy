@@ -42,7 +42,10 @@ void main() {
         if (uMode == 2) {
             float d = texture(uMap, uMapU * vUV.x + uMapV * vUV.y + uMapB).r;
             d = uInv > 0.5 ? 1.0 - d : d;
-            float t = clamp(abs(d - uFocus) / max(1.0 - uThick * 0.5, 1e-3), 0.0, 1.0);
+            float band = uThick * 0.5;
+            // 先扣掉合焦带本身那半幅, 剩余量再按带外的量程 (1 − band) 归一化 —— 只除不扣的话 Thick
+            // 拧的就不是"多宽不偏"而是"多快偏满", 与这颗旋钮在景深里的叫法对不上。
+            float t = clamp((abs(d - uFocus) - band) / max(1.0 - band, 1e-3), 0.0, 1.0);
             sh *= t * (d >= uFocus ? 1.0 : -1.0);
         }
     }
