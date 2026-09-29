@@ -869,9 +869,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="panel-head">
                     <div class="panel-label" id="maskDecalLabel"><span id="maskDecalName">Mask / Decal</span> <span class="tool-key" title="The key for the mask: always paints the mask">`</span> <span class="tool-key" title="The key for the decal: always paints the decal">Tab</span></div>
                     <div class="mini-group">
-                        <button class="mini-btn" id="maskInvertBtn" title="Invert the mask: hidden areas become visible and the other way round">Invert</button>
+                        <button class="mini-btn" id="maskInvertBtn" title="Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round">Invert</button>
                         <button class="mini-btn" id="maskFullBtn" title="Cover the whole canvas with the Mask layer">Full</button>
-                        <button class="mini-btn" id="maskResetBtn" title="Reset the mask to fully visible">Reset</button>
+                        <button class="mini-btn" id="maskResetBtn" title="Reset the mask the brush is on to fully visible">Reset</button>
                     </div>
                 </div>
             </div>
@@ -2026,8 +2026,7 @@ function rasterResampleBuffer(l, w, h) {
     if (l.src) l.src = c.toDataURL('image/png');
     // Mask and decal live in layer space; for a raster layer that space IS the canvas, so they
     // stretch with it — exactly what the identity transform would do to them at composite time.
-    if (l.mask) l.mask = stretchSurfaceTo(l.mask, c.width, c.height);
-    if (l.decal) l.decal = stretchSurfaceTo(l.decal, c.width, c.height);
+    remapAttrFaces(l, s => stretchSurfaceTo(s, c.width, c.height));
 }
 
 // Smart object → raster: bakes the current transform into a canvas-sized buffer. One-way (PS
@@ -2049,8 +2048,7 @@ function rasterizeLayer(l) {
         if (!s) return null;
         return renderTransformedSurface(s, l.transform, canvasW, canvasH);
     };
-    if (l.mask) l.mask = remap(l.mask);
-    if (l.decal) l.decal = remap(l.decal);
+    remapAttrFaces(l, remap);
     l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
     // A cud layer detaches on the way in: from here the buffer IS the canvas, so a source refresh
     // would have nowhere to land — the picture is the file's, not the project's any more.
@@ -2539,8 +2537,7 @@ function syncTextBuffer(l) {
     // the mask the backend multiplies by must stay AT that grid, or image and mask arrive at two
     // different sizes and the alignment contract is gone.
     if (prev && (prev.width !== img.width || prev.height !== img.height)) {
-        if (l.mask) l.mask = stretchSurfaceTo(l.mask, img.width, img.height);
-        if (l.decal) l.decal = stretchSurfaceTo(l.decal, img.width, img.height);
+        remapAttrFaces(l, s => stretchSurfaceTo(s, img.width, img.height));
     }
     l.textCache = { key, w, h, img };
 }
@@ -5986,10 +5983,7 @@ function replaceLayerImage(id, item) {
             // 图层就是那块 patch 了：画布上的落点随之缩到 crop 子框（随源图层一起旋转）。
             if (placed) l.transform = { ...placed };
         }
-        if (!raster) {
-            if (l.mask) l.mask = resampleSurface(l.mask);
-            if (l.decal) l.decal = resampleSurface(l.decal);
-        }
+        if (!raster) remapAttrFaces(l, resampleSurface);
         layoutCanvas();
         renderLayerList();
         render();
@@ -6136,8 +6130,9 @@ function applyAttrToLayer(l, r) {
 // exactly where they are and stay 1:1, because the native grid and the frame narrow together —
 // placeTransform() with the layer's own transform as `frame` is the same composition drawLayer()
 // does, so a rotated or squashed layer fits correctly for free.
-// Ink the mask hides OUTSIDE the box is dropped along with the crop; the mask comes along cropped
-// rather than being reset to white, so partial coverage INSIDE the box is unchanged.
+// Ink the mask hides OUTSIDE the box is dropped along with the crop; every face on the strip comes
+// along cropped rather than being reset to white, so partial coverage INSIDE the box is unchanged.
+// 裁的是**这一层的全部面**:格子窄了一格,只搬最左那枚蒙版的话,右边那枚还按旧格子被拉伸。
 // Every surface is a NEW canvas (like applyAttrToLayer): the undo snapshot holds the old img/mask/
 // decal by reference, so nothing here may repaint them in place.
 // `opts.silent` is for the automatic path (Enable Fit at the end of a layer Generate): the caller
@@ -6188,14 +6183,13 @@ function fitLayerToMask(l, opts) {
     };
     l.img = crop(l.img);
     l.src = l.img.toDataURL('image/png');
-    if (l.mask) l.mask = crop(l.mask);
-    if (l.decal) l.decal = crop(l.decal);
+    remapAttrFaces(l, crop);
     l.transform = tr;
     if (!quiet) {
         layoutCanvas();
         renderLayerList();
         render();
-        setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, the mask came along`, 'success');
+        setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, every face on its strip came along`, 'success');
         pushHistory();
     }
     return true;
@@ -6341,13 +6335,13 @@ function syncPaintUI() {
     // layer itself instead of on whatever happens to be selected.
     document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
     document.getElementById('maskInvertBtn').title =
-        'Invert the mask: hidden areas become visible and the other way round';
+        'Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round';
     document.getElementById('maskFullBtn').style.display = 'none';
     document.getElementById('maskFullBtn').title = 'Fill the Mask layer — every pixel of the canvas covered';
     document.getElementById('maskResetBtn').textContent = decal ? 'Clear' : 'Reset';
     document.getElementById('maskResetBtn').title = decal
-        ? 'Clear this layer\'s decal (the painted colour)'
-        : 'Reset this layer\'s mask to fully visible';
+        ? 'Clear the decal the brush is on — the Decal chip you clicked, or the last Decal step after Tab'
+        : 'Reset the mask the brush is on to fully visible — on a strip that is the same state as taking that step off';
     // The label carries the two key badges, so the name is the inner span — writing the label's own
     // textContent would erase them.
     document.getElementById('maskDecalName').textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
@@ -7202,7 +7196,8 @@ function endExpandCommit() {
     const a21 = An21 * Ao11 + An22 * Ao21, a22 = An21 * Ao12 + An22 * Ao22;
     const bx = An11 * box + An12 * boy + bnx;
     const by = An21 * box + An22 * boy + bny;
-    const bake = fillWhite => {
+    // `src` 是这一趟要搬的那张面:图层自己的像素,或条带上某一枚面的覆盖率。同一个 A,只是画的东西不同。
+    const bake = (fillWhite, src) => {
         const nc = document.createElement('canvas');
         nc.width = tw; nc.height = th;
         const ctx = nc.getContext('2d');
@@ -7214,20 +7209,14 @@ function endExpandCommit() {
         }
         ctx.setTransform(a11, a21, a12, a22, bx, by);
         if (fillWhite) ctx.clearRect(0, 0, ow, oh);
-        ctx.drawImage(fillWhite ? l.mask : l.img, 0, 0);
+        ctx.drawImage(src, 0, 0);
         return nc;
     };
-    l.img = bake(false);
+    l.img = bake(false, l.img);
     l.src = l.img.toDataURL('image/png');
-    if (l.mask) l.mask = bake(true);
-    if (l.decal) {
-        const dc = document.createElement('canvas');
-        dc.width = tw; dc.height = th;
-        const dctx = dc.getContext('2d');
-        dctx.setTransform(a11, a21, a12, a22, bx, by);
-        dctx.drawImage(l.decal, 0, 0);
-        l.decal = dc;
-    }
+    // 条带上每一枚面都按同一个 A 搬过去 (Expand 与 Fit Mask 是同一件事的两个方向):只搬最左那枚,右边
+    // 那枚还停在旧格子里,画面看着对,合成时它却被拉伸到新格子。蒙版补满覆盖,贴片不补。
+    remapAttrFaces(l, (s, r) => bake(r.type === 'mask', s));
     renderLayerList();
     render();
     pushHistory();
@@ -7326,9 +7315,13 @@ function markPainted(l) {
     markAttrPainted(paintRecord(l, paintTarget, true));
 }
 
+// 反的是**笔尖那一枚**蒙版:点过 chip 就反那颗,只按过 ` 就反这一种最右那枚。一枚都没有时当场补一枚
+// 再反 —— 老规矩里"没有蒙版 = 全可见",反一下就是全不可见,所以那一步不是造东西,是把状态翻过去。
 function invertMask(l) {
     const { w, h } = nativeSize(l.img);
-    const src = l.mask;
+    const r = paintRecord(l, 'mask', true);
+    if (!r) return null;
+    const src = r.surface;
     const next = document.createElement('canvas');
     next.width = w; next.height = h;
     const nctx = next.getContext('2d');
@@ -7340,7 +7333,9 @@ function invertMask(l) {
         nctx.globalCompositeOperation = 'source-over';
     }
     // src === null means "fully visible", so the inverse is an empty (fully hidden) mask.
-    l.mask = next;
+    r.surface = next;
+    markAttrPainted(r);
+    return r;
 }
 
 // Maps canvas coordinates to the selected layer's pixel space, so brush strokes
@@ -9236,10 +9231,10 @@ document.getElementById('maskInvertBtn').addEventListener('click', () => {
     // The Mask layer never reaches this button: its own row owns Invert / Full / Clear.
     if (l.isMaskLayer) { runMaskRowAction('invert'); return; }
     if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
-    invertMask(l);
+    const flipped = invertMask(l);
     renderLayerList();
     render();
-    setStatus('Mask inverted');
+    setStatus(attrStepNote('Mask inverted', flipped, l));
     pushHistory();
 });
 document.getElementById('maskFullBtn').addEventListener('click', () => {
@@ -9251,19 +9246,12 @@ document.getElementById('maskResetBtn').addEventListener('click', () => {
     if (!l) { setStatus('Select a layer first', 'error'); return; }
     if (groupPaintBlocked()) return;
     if (l.isMaskLayer) { runMaskRowAction('clear'); return; }
-    if (isDecalTarget()) {
-        l.decal = null;
-        renderLayerList();
-        render();
-        setStatus('Decal cleared');
-        pushHistory();
-        return;
-    }
-    l.mask = null;
-    renderLayerList();
-    render();
-    setStatus('Mask reset (fully visible)');
-    pushHistory();
+    // Reset takes off the record the brush is ON, not the leftmost one of that kind — and with no
+    // such step there is nothing to take off, so no empty undo step either. Same verb as the chip's
+    // Remove: under a strip, "reset this mask" and "this mask is gone" are the one same state.
+    const r = paintRecord(l, isDecalTarget() ? 'decal' : 'mask', false);
+    if (!r) { setStatus(`No ${isDecalTarget() ? 'decal' : 'mask'} step on「${l.name}」to reset`, 'error'); return; }
+    removeAttrFromLayer(l, r);
 });
 
 
@@ -9811,7 +9799,7 @@ function openLayerMenu(l, clientX, clientY) {
         fit.setAttribute('role', 'menuitem');
         fit.textContent = 'Fit Mask';
         fit.disabled = !l.img;
-        fit.title = `Shrink「${l.name}」's own picture (${n.w} × ${n.h}) to the smallest box holding what its mask leaves visible — the image stays 1:1 and exactly where it is, the mask comes along cropped`;
+        fit.title = `Shrink「${l.name}」's own picture (${n.w} × ${n.h}) to the smallest box holding what its mask leaves visible — the image stays 1:1 and exactly where it is, and every face on its strip comes along cropped`;
         fit.addEventListener('click', ev => {
             ev.stopPropagation();
             closeLayerMenu();
@@ -10449,12 +10437,17 @@ function applyDetectMask(dataUrl) {
             const l = getLayer(pend.layerId);
             if (!l || l.isMaskLayer || !l.img) { setStatus('The layer that was selected is gone', 'error'); return; }
             const local = inLayerGrid ? detectSurfaceAt(img, l) : detectImageToLayerGrid(img, l);
-            l.mask = local;
-            markPainted(l);
+            // Detection lands on the Mask step the brush is on — the chip you clicked, or the rightmost
+            // one after ` — not silently on the leftmost. A layer may carry several, and "its own mask"
+            // stopped being a single answer the day the strip existed.
+            const r = paintRecord(l, 'mask', true);
+            if (!r) { setStatus('The layer that was selected is gone', 'error'); return; }
+            r.surface = local;
+            markAttrPainted(r);
             renderLayerList();
             render();
             pushHistory();
-            setStatus(`Detection landed on 「${l.name}」's own mask`, 'success');
+            setStatus(attrStepNote(`Detection landed on 「${l.name}」's own mask`, r, l), 'success');
         } else if (pend.dest === 'staging') {
             window.parent.postMessage({ type: 'blend-staging-upload', images: [surfaceDataUrl(onCanvas)], name: 'Detect' }, '*');
             setStatus('Detection mask sent to staging', 'success');
