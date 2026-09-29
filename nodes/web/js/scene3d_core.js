@@ -44,7 +44,11 @@ const Scene3D = {
         };
         if (kind === 'model') base.model = patch.model || { assetKey: null, name: '' };
         if (kind === 'primitive') base.shape = patch.shape || 'cube';
-        Object.assign(base, objDefaults(kind === 'light' ? patch.lightType : kind), patch.extra || {});
+        // objDefaults 认的是「哪一类东西」,而 patch.lightType 存的是 Unity 那个拼写(directional/point)。
+        // 原来把 'directional' 直接当 kind 传进去,它走到底线分支返回了网格默认值 —— 于是新建的
+        // Directional Light 记录里既没有 lightType 也没有 intensity,syncObject 把亮度写成了 0,
+        // 这盏灯从头到尾一点光都没发过。
+        Object.assign(base, objDefaults(kind === 'light' && patch.lightType === 'point' ? 'point' : kind), patch.extra || {});
         return Object.assign(base, patch.trs ? { trs: patch.trs } : {}, patch.id ? { id: patch.id } : {});
     };
 
@@ -238,8 +242,19 @@ const Scene3D = {
                 o.add(new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 8),
                     new THREE.MeshBasicMaterial({ color: 0xffee68 })));
             } else {
-                o.add(new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.35, 10),
-                    new THREE.MeshBasicMaterial({ color: 0xffee68 })));
+                // three 的平行光把「position 指向 target 的那条直线」当作光向,而它自带的 target 是一枚
+                // 从未进过场景图的 Object3D —— matrixWorld 一辈子不刷新,永远待在原点。于是光照只跟着
+                // Position 变、Rotation 拧了毫无反应,读起来就是一盏 point light。Unity 的读法是灯沿自己
+                // transform 的前方(+Z)照出去,所以把 target 挂成灯自己的孩子钉在本地 +Z:它随 position
+                // 平移、随 rotation 转向,又因为在场景图里才会被刷新世界矩阵。
+                const aim = new THREE.Object3D();
+                aim.position.set(0, 0, 10);
+                o.add(aim);
+                o.target = aim;
+                const cone = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.35, 10),
+                    new THREE.MeshBasicMaterial({ color: 0xffee68 }));
+                cone.rotation.x = Math.PI / 2;    // 锥尖默认朝 +Y,扳到 +Z 才和光真的照出去同向
+                o.add(cone);
             }
         } else if (desc.kind === 'camera') {
             o = new THREE.Group();
