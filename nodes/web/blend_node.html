@@ -500,19 +500,20 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 10px 32px rgba(0,0,0,0.45); }
 .tool-flyout-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tool-flyout .tool-body { display: flex; flex-direction: column; gap: 8px; }
-/* Processor 窗里一行就是一个端口，段与段、行与行只靠空白分，不画框。松的是纵向（行距 8→12、
-   段距 12→18）和控件的命中高度；横轴不动 —— 窗宽还是 320，别的工具窗也完全不走这一支。
+/* Processor 窗里一行就是一个端口，段与段、行与行只靠空白分，不画框。松只松在"分组"这一层，
+   段标题下面跟着的那些行本身收得比初版紧一点（行距 12→9、控件的字号与内边距各降一档），
+   这样一屏能多看几行；横轴同样不动 —— 窗宽还是 320，别的工具窗也完全不走这一支。
    端口名长短不一（local_structure_strength 那种），所以标签定宽对齐、超长省略，全名在 title 里。 */
-.proc-body { gap: 12px; }
-#processorPorts { display: flex; flex-direction: column; gap: 18px; }
-.proc-group { display: flex; flex-direction: column; gap: 12px; }
+.proc-body { gap: 10px; }
+#processorPorts { display: flex; flex-direction: column; gap: 14px; }
+.proc-group { display: flex; flex-direction: column; gap: 9px; }
 .proc-group > .panel-label { font-size: 10.5px; color: rgba(255,255,255,0.42); }
-.proc-body .control-row { gap: 10px; }
-.proc-body .control-row label { min-width: 88px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-body .control-row { gap: 8px; }
+.proc-body .control-row label { min-width: 72px; max-width: 116px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 四个来源按钮在 320 宽里放不下时让它们自己折行，别从行尾溢出去 —— 一行还是一个端口。 */
 .proc-body .control-row .mini-group { flex-wrap: wrap; }
-.proc-body input[type="number"], .proc-body input[type="text"] { padding: 5px 8px; font-size: 12px; }
-.proc-body select { padding: 4px 6px; font-size: 12px; }
+.proc-body input[type="number"], .proc-body input[type="text"] { padding: 4px 7px; font-size: 11.5px; }
+.proc-body select { padding: 3px 5px; font-size: 11.5px; }
 .control-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
@@ -1039,7 +1040,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 <div class="tool-body proc-body">
                     <div class="control-row"><label>Interface</label><select id="processorPick" title="Which processor-mode interface to run — the list is every interface with Processor mode on in the Interface tab"></select><span></span></div>
                     <div id="processorPorts"></div>
-                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button><button type="button" class="mini-btn" id="processorResetBtn" title="Forget every value typed in this window — each parameter goes back to the value the graph carries">Reset values</button></div>
+                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorResetBtn" title="Forget every value typed in this window — each parameter goes back to the value the graph carries">Reset values</button><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button></div>
                 </div>
             </div>
             <div class="panel-section">
@@ -13213,16 +13214,21 @@ function renderProcessorRows() {
             i.addEventListener('input', () => setParam(port, i.value === '' ? '' : Number(i.value)));
             r.appendChild(i);
         } else if (port.type === 'COMBO' && (port.options || []).length) {
-            const opts = port.options;
-            if (opts.length <= 3) {
+            // 绑定按字符串比，且当前值必须在候选里看得见：后端偶尔会推来一个不在候选表上的值
+            // （候选是现从类定义读的，存档那条可能来自改版前的节点）。让它落在 opts[0] 上，界面
+            // 的选中就和实跑的值不是同一个 —— 所以不在表里时把它自己补成一格，标注是图里带的。
+            const curStr = procNoValue(cur) ? '' : String(cur);
+            const opts = port.options.map(String);
+            const all = (curStr && !opts.includes(curStr)) ? [curStr, ...opts] : opts;
+            if (all.length <= 3) {
                 const g = document.createElement('div');
                 g.className = 'mini-group';
-                for (const o of opts) {
+                for (const o of all) {
                     const b = document.createElement('button');
                     b.type = 'button';
-                    b.className = 'mini-btn' + (String(cur) === String(o) ? ' active' : '');
+                    b.className = 'mini-btn' + (o === curStr ? ' active' : '');
                     b.textContent = o;
-                    b.title = o;
+                    b.title = opts.includes(o) ? o : `${o} — the value the graph carries`;
                     b.addEventListener('click', () => { setParam(port, o); renderProcessorRows(); });
                     g.appendChild(b);
                 }
@@ -13230,19 +13236,21 @@ function renderProcessorRows() {
             } else {
                 const sel = document.createElement('select');
                 sel.title = `Which value ${port.name} takes this run`;
-                if (procNoValue(cur)) {
+                if (!curStr) {
                     const blank = document.createElement('option');
                     blank.value = '';
                     blank.textContent = '— graph default —';
                     sel.appendChild(blank);
                 }
-                for (const o of opts) {
+                for (const o of all) {
                     const op = document.createElement('option');
                     op.value = o;
                     op.textContent = o;
-                    op.selected = String(cur) === String(o);
                     sel.appendChild(op);
                 }
+                // 先填选项再定 sel.value：逐项 option.selected 在脱管的 option 上不总成立，
+                // 而且谁都不匹配时浏览器会静默显示第一项，看起来像绑上了其实没有。
+                sel.value = curStr;
                 sel.addEventListener('change', () => setParam(port, sel.value));
                 r.appendChild(sel);
             }

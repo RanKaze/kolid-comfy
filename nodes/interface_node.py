@@ -823,6 +823,11 @@ class InterfacePackageNode:
                 it = cls.INPUT_TYPES() if cls else None
             except Exception:
                 return _no_widget_value
+            # 候选表写了、却没写 default 的 COMBO (像 sampler_node 的 preset / embeds_scaling
+            # 那种 ([...],) 写法, 节点作者很常这么写)。ComfyUI 自己的 widget 就是落在候选第一项,
+            # 所以这里也照第一项 —— 否则 COMBO 口会算出"没有默认值": 面板摆一个空框, 实跑注入
+            # None, 界面上看到的和图里跑的不是同一个值。
+            combo_first = None
             if not isinstance(it, dict):
                 return _no_widget_value
             for cat in ('required', 'optional'):
@@ -830,12 +835,14 @@ class InterfacePackageNode:
                 if not isinstance(ci, dict):
                     continue
                 spec = ci.get(input_name)
-                if not isinstance(spec, (tuple, list)) or len(spec) < 2:
+                if not isinstance(spec, (tuple, list)) or not len(spec):
                     continue
                 for extra in spec[1:]:
                     if isinstance(extra, dict) and 'default' in extra:
                         return extra['default']
-            return _no_widget_value
+                if combo_first is None and isinstance(spec[0], (list, tuple)) and len(spec[0]):
+                    combo_first = str(spec[0][0])
+            return combo_first if combo_first is not None else _no_widget_value
 
         def _widget_value_of_input(node_obj, entry_idx):
             # 存档里 widgets_values 是**一条无名字的数组**, 只能按"inputs[] 里带 widget 的
