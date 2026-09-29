@@ -876,22 +876,26 @@ class SnapshotDetailerSamplerServer:
                     return None
         return None
 
-    def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None):
+    def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None, attributes=None):
         """把图层栈合成成一张图（不写工作区），返回 (image, mask)。
 
-        layer_specs: [{'src': dataURL, 'attrs': [{'type','image'}], 'transform': {...}|None, 'visible': bool}]
+        layer_specs: [{'src': dataURL, 'attrs': [表键], 'transform': {...}|None, 'visible': bool}]
         列表自下而上（[0] 是最底层）。图层自带像素（data URL），不绑定任何图池 id。
         画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
 
         `attrs` 是图层条带上**归后端重放**的那一段，顺序即生效顺序（decal 叠、mask 裁，与前端画布
-        同一条「从左到右」的规矩）；特效链不会出现在这里，前端已经把它们烘进 src 了。旧负载没有
-        这个键，按它原本的 `decal` 再 `mask` 读 —— 那正是条带的默认顺序。
+        同一条「从左到右」的规矩）；特效链不会出现在这里，前端已经把它们烘进 src 了。面本身不跟着
+        每层重复编码 —— 它住在同包上来的 `attributes` 表里（`[{'id','type','image'}]`，一枚一份 PNG），
+        图层那条只剩表键，所以两层引用同一枚蒙版时后端拿到的是同一份像素（与 .cud v5 同一份账）。
+        旧负载没有 `attrs` 这个键，按它原本的 `decal` 再 `mask` 读 —— 那正是条带的默认顺序，那种形状
+        的面就内联在条目里。
 
         mask_data_url 是画布顶层的「纯 Mask 层」（alpha = 覆盖率，按画布尺寸栅格化），
         与图层自身的 coverage mask 无关 —— 返回的 mask 为 [1,H,W] float 或 None（无遮罩）。
         """
         if not layer_specs:
             raise ValueError('Missing layers')
+        table = {a.get('id'): a for a in (attributes or []) if a and a.get('id')}
         resolved = []
         for spec in layer_specs:
             src = spec.get('src')
@@ -910,9 +914,16 @@ class SnapshotDetailerSamplerServer:
                 attrs = [{'type': 'decal', 'image': spec.get('decal')},
                          {'type': 'mask', 'image': spec.get('mask')}]
             # 只认这两种:链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界。
-            pending = [{'type': a.get('type'), 'src': a.get('image')}
-                       for a in attrs
-                       if a and a.get('type') in ('decal', 'mask') and a.get('image')]
+            pending = []
+            for a in attrs:
+                # 图层那条只剩表键,值在同包的表里。键解不到就是包与表不同源（转发漏了或版本错位），
+                # 宁可在合成前抛，也不能悄悄少乘一层蒙版 —— 那正是一次合成与两次合成的语义漂移。
+                if isinstance(a, str):
+                    if a not in table:
+                        raise ValueError(f'layer keys attribute {a!r} but the payload carries no such face')
+                    a = table[a]
+                if a and a.get('type') in ('decal', 'mask') and a.get('image'):
+                    pending.append({'type': a.get('type'), 'src': a.get('image')})
             resolved.append({
                 'image': tensor,        # None = 空白图层，画布尺寸确定后补全透明
                 'transform': spec.get('transform'),
@@ -2061,6 +2072,7 @@ class SnapshotDetailerSamplerServer:
                             body.get('layers') or [],
                             width=body.get('width'), height=body.get('height'),
                             mask_data_url=body.get('mask'),
+                            attributes=body.get('attributes'),
                         )
 
                     if action == 'blend':
