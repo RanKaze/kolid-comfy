@@ -11712,7 +11712,7 @@ async function buildCudBlob() {
     };
     // 链里绑定的贴图存成自己的资产:图池 id 由宿主在导入时重新编号,文件里那句 key 出了这个会话
     // 就不作数,所以像素必须自带。同一份像素一次存档只写一个资产。还没解码完成的图不写资产 ——
-    // 那一层重开后显示成「missing」并跳过该特效,这比悄悄绑一张别的图诚实。
+    // 那一层重开后读数为那张图写下「depth gone」、按钮转红,并且跳过该特效 —— 这比悄悄绑一张别的图诚实。
     const mapAssets = new Map();
     const cudEffects = async list => {
         const out = cloneEffects(list);

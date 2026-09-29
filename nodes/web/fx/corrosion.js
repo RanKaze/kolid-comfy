@@ -39,7 +39,7 @@ const CORR_PARAMS = [
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0, when: p => p.mode !== 'Texture' },
     { key: 'oct', label: 'Oct', min: 1, max: 4, step: 1, def: 3, when: p => p.mode === 'FBM' },
     { key: 'smooth', label: 'Smooth', min: 0, max: 64, step: 1, def: 8, unit: 'px', when: p => p.mode === 'Gaussian' },
-    { key: 'map', label: 'Map', kind: 'map', def: null, when: p => p.mode === 'Texture' },
+    { key: 'map', kind: 'map', def: null, when: p => p.mode === 'Texture' },
     { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '°' },
     { key: 'scaleU', label: 'Scale Along', min: 1, max: 256, step: 1, def: 40, unit: 'px' },
     { key: 'scaleV', label: 'Scale Across', min: 1, max: 256, step: 1, def: 40, unit: 'px' },

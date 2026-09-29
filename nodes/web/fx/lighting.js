@@ -115,14 +115,14 @@ defineEffect({
     needsMap2When: p => p.shadow > 0,
     desc: 'Relights the layer through a bound tangent-space normal map \u2014 a diffuse term around the light direction plus an optional specular highlight, both taking the light\u2019s own colour. Bind a depth map as well and the same light is marched across it as a height field: whatever stands between the light and a pixel cuts it down, multiplied by the shadow tint. Colour only: the maps never show through, nothing moves, alpha untouched.',
     params: [
-        { key: 'map', label: 'Map', kind: 'map', def: null },
+        { key: 'map', kind: 'map', def: null },
         { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°' },
         { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°' },
         { key: 'intensity', label: 'Light', min: -100, max: 100, step: 1, def: 50, unit: '%' },
         { key: 'spec', label: 'Spec', min: 0, max: 100, step: 1, def: 25, unit: '%' },
         { key: 'gloss', label: 'Gloss', min: 0, max: 100, step: 1, def: 60, unit: '%' },
         { key: 'color', label: 'Color', kind: 'color', def: '#ffffff' },
-        { key: 'depth', label: 'Depth', kind: 'map', def: null },
+        { key: 'depth', kind: 'map', def: null },
         { key: 'shadow', label: 'Shadow', min: 0, max: 100, step: 1, def: 0, unit: '%' },
         { key: 'cast', label: 'Cast', min: 1, max: 64, step: 1, def: 16, unit: 'px' },
         { key: 'soft', label: 'Soft', min: 0, max: 50, step: 1, def: 15, unit: '%' },
@@ -135,10 +135,9 @@ defineEffect({
     readout(p, n, effect) {
         const base = `${fxMapShort(effect)}  ${n(p.angle)}°  ${n(p.elev)}°  ${n(p.intensity)}%  s${n(p.spec)}`;
         // 阴影开着却读不出影子 = 深度图没绑,把那张图的名字写出来 = 可见文本,不许静默降级。
-        // 这一行开头已经有一个「no map」(那是法线图),所以缺深度图时得说清缺的是哪一张。
+        // 两头缺的各说各的名字 (fxMapShort 按槽的角色报 no normal / no depth),不会混成一句。
         if (p.shadow <= 0) return base;
-        const depth = fxMapShort(effect, 'depth');
-        return `${base}  sh${n(p.shadow)}  ${depth === 'no map' ? 'no depth' : depth}`;
+        return `${base}  sh${n(p.shadow)}  ${fxMapShort(effect, 'depth')}`;
     },
     thumb(g, box) {
         const cx = box.x + box.w / 2, cy = box.y + box.h / 2, r = Math.min(box.w, box.h) / 2;

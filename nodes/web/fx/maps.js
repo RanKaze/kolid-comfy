@@ -95,11 +95,20 @@ function fxAddLocalMap(name, src) {
     return { key, name: nm };
 }
 
+// 这个槽装的是哪一类贴图 (Depth / Normal / Noise / Lookup) —— 面板上那行的名字、读数里缺图时的那
+// 三个字,全都从这里说一次。注册表里 needsMap / needsMap2.role 已经写过一遍,再在控件数据里手打
+// 一个 label 就是第二个答案,迟早和第一个漂开。
+function fxMapRole(effect, key) {
+    const slot = fxMapSlots(effect).find(s => s.key === (key || 'map'));
+    return ((slot && slot.role) || 'Map').toLowerCase();
+}
+
 function fxMapShort(effect, key) {
+    const role = fxMapRole(effect, key);
     const ref = fxMapRef(effect, key);
-    if (!ref) return 'no map';
+    if (!ref) return `no ${role}`;
     const found = fxMapSource(ref);
-    if (!found) return 'missing';
+    if (!found) return `${role} gone`;
     const nm = String(found.name || ref.key);
     return nm.length > 12 ? `${nm.slice(0, 11)}…` : nm;
 }

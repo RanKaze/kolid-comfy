@@ -65,7 +65,7 @@ defineEffect({
     needsMap: 'Depth',
     desc: 'A low-pass whose radius comes from a bound depth map: the plane at Focal stays sharp, and every pixel whose map distance exceeds Thick takes more Iris. The map is read, never drawn, and the radius is symmetric \u2014 nearer or farther both defocus.',
     params: [
-        { key: 'map', label: 'Map', kind: 'map', def: null },
+        { key: 'map', kind: 'map', def: null },
         { key: 'focus', label: 'Focal', min: 0, max: 100, step: 1, def: 35, unit: '%' },
         { key: 'thick', label: 'Thick', min: 0, max: 100, step: 1, def: 10, unit: '%' },
         { key: 'radius', label: 'Iris', min: 1, max: 64, step: 1, def: 16, unit: 'px' },
