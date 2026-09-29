@@ -10,7 +10,7 @@ defineAttrType({
     order: 1,
     at: { rel: 'before', of: 'mask' },
     // chip 是一枚魔棒图标:它标的是"顺序里有这么一步",不是内容预览 (链没有面可预览)。点它 = 往**这条**
-    // 链的右端加一步 —— 行头上那颗魔棒已经搬到这里,一个动作一个入口;链本身摊在这颗 chip 下面。
+    // 链的右端加一步 —— 行头上那颗魔棒已经搬到这里,一个动作一个入口;链本身摊在图层行的上方。
     chipClass: 'effects-thumb',
     title: (r, l) => {
         const n = (r.chain || []).length;
