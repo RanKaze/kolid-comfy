@@ -315,11 +315,11 @@ function attrStepNote(label, r, l) {
     return recs.length < 2 ? label : `${label} (step ${i + 1} of ${recs.length})`;
 }
 
-// 拖拽重排的那一份**缝位**算法:横向一条,落在第 k 颗的左半边 = 插到它的位置,右半边 = 它后面。
-// 下标一律按**摘之前**那个数组说,所以调用方不必知道自己会不会被摘掉 (摘掉之后它左边那道缝还是同一条)。
-// 条带和特效容器共用这一份 —— 两处都是"从左到右就是执行序",规矩不该有两套。列表里存的不是 id 本身
-// (链存的是特效对象) 就交一个 `idOf` 读出它的 id。落不到同一列表里 (拖的是被拖的那颗自己、或者目标
-// 根本不在这条里) 就回 -1,一行都不动。
+// 拖拽重排的那一份**缝位**算法:落在第 k 颗的哪一侧 = 插到它的位置,还是它后面。下标一律按**摘之前**
+// 那个数组说,所以调用方不必知道自己会不会被摘掉 (摘掉之后它左边那道缝还是同一条)。这一句与摆向无
+// 关 —— 横着排的条带和竖着排的特效链都是"数组序 = 执行序",差别只在下面 `dropSide` 认哪个轴。列表里
+// 存的不是 id 本身 (链存的是特效对象) 就交一个 `idOf` 读出它的 id。落不到同一列表里 (拖的是被拖的
+// 那颗自己、或者目标根本不在这条里) 就回 -1,一行都不动。
 function listSlot(refs, dragId, targetId, after, idOf) {
     const key = idOf || (v => v);
     const from = refs.findIndex(v => key(v) === dragId);
@@ -331,11 +331,13 @@ function listSlot(refs, dragId, targetId, after, idOf) {
     return refs.findIndex(v => key(v) === dragId);
 }
 
-// 横向一条列表的落点:第 k 颗的左半边 = 'before'、右半边 = 'after'。不是这一条里的、或者就是自己拖
-// 自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。条带与特效容器共用这一句,和 `listSlot` 是一对。
-function dropSide(ev, el, drag, layerId, ownId) {
+// 一条列表的落点:横排 (条带) 认左右 —— 第 k 颗的左半边 = 'before'、右半边 = 'after'。`axis` 交 'y'
+// 就是竖排**且越靠下越早** (特效容器从下往上读),于是上半 = 'after'、下半 = 'before'。不是这一条里
+// 的、或者就是自己拖自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。
+function dropSide(ev, el, drag, layerId, ownId, axis) {
     if (!drag || String(drag.layerId) !== String(layerId) || drag.ref === ownId) return '';
     const r = el.getBoundingClientRect();
+    if (axis === 'y') return (ev.clientY - r.top) < r.height / 2 ? 'after' : 'before';
     return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
 }
 

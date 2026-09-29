@@ -1,8 +1,9 @@
 // ==================== 图层特效链 UI ====================
-// 一条链是摊在**图层行上方**的一块容器,容器内从左到右读 = 执行序 (链序曾经是倒着竖排的,那套"因反转
-// 而反转"的插入索引数学已经跟着横向读法一起删了)。空链不占位,加特效的入口在条带上那枚 Effects chip 的
-// 魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器时,魔棒开的是**被点那枚**
-// 的选择器,而这两块容器谁管哪一步由竖排次序说 (贴近 head 的那块先执行),不另写一行说明。
+// 一条链是摊在**图层行上方**的一块容器,一步一行、**从下往上**读 = 执行序:紧挨着图层行那一步最先跑,
+// 往上一层一步。这样整摞只有一个读法 —— 同一种挂了两枚容器时,贴近 head 的那一段先跑,接着往上读它
+// 后面那一段 (DOM 里始终写链序,翻向交给 CSS 那一句 column-reverse)。空链不占位,加特效的入口在条带
+// 上那枚 Effects chip 的魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器
+// 时,魔棒开的是**被点那枚**的选择器,而这两块容器谁管哪一步由竖排次序说,不另写一行说明。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
 let dragFx = null;          // {layerId, ref} —— 链内重排序的进行中拖拽 (ref = 特效 id)
 const fxModalEl = document.getElementById('fxModal');
@@ -128,8 +129,8 @@ function fxStructuralChange(l) {
     pushHistory();
 }
 
-// 一步特效 = 容器里的一颗 chip (勾选 + 图标 + 名字 + 读数 + 移除),展开时另交一块参数区,由
-// fxChainEl 摆到整排 chip 的**下面**。读数照旧是可见文本,不折进 tooltip。
+// 一步特效 = 容器里的一行 chip (勾选 + 图标 + 名字 + 读数 + 移除),展开时另交一块参数区,由
+// fxChainEl 摆在这颗 chip 的**正上方**。读数照旧是可见文本,不折进 tooltip。
 function fxStepEl(l, r, effect) {
     const spec = EFFECT_TYPES[effect.type];
     const updaters = [];
@@ -194,9 +195,9 @@ function fxStepEl(l, r, effect) {
         renderLayerList();
     });
 
-    // 链内重排序:横向一条,左半边/右半边决定插在哪道缝上 —— 缝位算法与拖拽判定都是条带那一份
-    // (`dropSide` / `listSlot`),两处不该各写一遍"从左到右"。dragstart 必须停在这里,否则图层行的
-    // 重排序会跟着一起启动。
+    // 链内重排序:竖着一条、从下往上就是执行序,所以上半 = 插到它后面、下半 = 前面。缝位算法与落点
+    // 判定都是条带那一份 (`dropSide` / `listSlot`),只是交给它 'y' 这个轴 —— 两处不该各写一遍"插到
+    // 第几道缝"。dragstart 必须停在这里,否则图层行的重排序会跟着一起启动。
     chip.addEventListener('dragstart', ev => {
         dragFx = { layerId: l.id, ref: effect.id };
         chip.classList.add('dragging');
@@ -209,7 +210,7 @@ function fxStepEl(l, r, effect) {
         dragFx = null;
     });
     chip.addEventListener('dragover', ev => {
-        const side = dropSide(ev, chip, dragFx, l.id, effect.id);
+        const side = dropSide(ev, chip, dragFx, l.id, effect.id, 'y');
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
@@ -219,7 +220,7 @@ function fxStepEl(l, r, effect) {
     });
     chip.addEventListener('dragleave', () => chip.classList.remove('drop-before', 'drop-after'));
     chip.addEventListener('drop', ev => {
-        const side = dropSide(ev, chip, dragFx, l.id, effect.id);
+        const side = dropSide(ev, chip, dragFx, l.id, effect.id, 'y');
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
@@ -369,9 +370,9 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
     return row;
 }
 
-// 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,从左到右读就是执行序。链里没有步就不占位
-// (空容器由条带上那枚 chip 自己说话)。展开参数的那一步排在整排 chip 的下面:参数区要的是一整条宽度,
-// 不是那颗 chip 的那点宽。
+// 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,一步一行、**从下往上**读就是执行序 (紧挨着
+// 图层行那一步最先跑)。链里没有步就不占位 (空容器由条带上那枚 chip 自己说话)。展开参数的那一步,
+// 参数区排在它自己那颗 chip 的正上方 —— 挨着它,夹在该步与下一步之间。
 function fxChainEl(l, r) {
     if (!layerTakesEffects(l) || !r || !r.chain || !r.chain.length) return null;
     const box = document.createElement('div');
@@ -383,7 +384,8 @@ function fxChainEl(l, r) {
     for (const effect of r.chain) {
         const step = fxStepEl(l, r, effect);
         steps.appendChild(step.chip);
-        if (step.params) box.appendChild(step.params);
+        // 跟着它自己那一步走,不外挂到容器上:那一块是这一步的参数,不是整条链的。
+        if (step.params) steps.appendChild(step.params);
     }
     // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。
     if (fxgl.skip) {
@@ -395,8 +397,8 @@ function fxChainEl(l, r) {
     return box;
 }
 
-// `ref` 是那枚被点了魔棒的 Effects 记录:一步追加到**它**的链尾 (= 执行序末尾,画在右边)。同一种挂
-// 了两枚容器时,选中的那枚收下它,右边那枚不受影响。
+// `ref` 是那枚被点了魔棒的 Effects 记录:一步追加到**它**的链尾 (= 执行序末尾,画在这一摞的最上面)。
+// 同一种挂了两枚容器时,选中的那枚收下它,另一枚不受影响。
 function addEffectToLayer(layerId, ref, type) {
     const l = getLayer(layerId);
     const r = l && attrRecord(ref);
