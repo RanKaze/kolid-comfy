@@ -74,8 +74,6 @@ export const EMPTY_PIPELINE_SETTINGS: PipelineSettings = { selected: '', overrid
 export interface DetailerBlockParams {
   /** 'enable' = Random（加随机噪声）、'disable' = None、'invert' = DDIM 反演往返 */
   add_noise: string;
-  /** Invert 爬梯段的级数比例：乘上传入的 steps 就是爬梯步数（默认 0.3）。只在 add_noise='invert' 时读取。 */
-  inversion_rate?: number;
   start_step_rate: number;
   end_step_rate: number;
   pixels: number;

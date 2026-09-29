@@ -1165,13 +1165,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                             <option value="invert" style={{ background: '#1c1c1e', color: '#fff' }}>Invert</option>
                           </select>
                         </div>
-                        {dp.add_noise === 'invert' && (
-                          <div style={styles.paramRow}
-                            title="反演爬梯的级数比例：乘上传入的 steps 就是爬梯步数（0.3 × 20 步 ≈ 6 级）。级少 = 粗爬、省模型调用；级多 = 更贴 ODE、往返更干净。">
-                            <label style={styles.paramLabel}>Invert Rate</label>
-                            <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.inversion_rate ?? 0.3} onChange={e => updateBlockParam(block.id, 'inversion_rate', parseFloat(e.target.value))} />
-                          </div>
-                        )}
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Ctx Regex</label>
                           <input
