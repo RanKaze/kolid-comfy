@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 from ..libs.utils import AlwaysEqualProxy, ByPassTypeTuple
 
 from comfy_execution.graph_utils import is_link
@@ -1368,6 +1369,11 @@ class InterfaceExecutor:
                         inputs[name] = val
                         del pending_links[name]
 
+            # 3.5 送进节点前统一 IMAGE 输入的通道数：工作台合成的图是 RGBA，
+            #     第三方节点按 ComfyUI 的 [B,H,W,3] 契约做 normalize，拿到 4 通道
+            #     会在广播 mean/std 时直接崩（DepthAnything 等 preprocessor 典型）。
+            self._coerce_image_inputs(class_type, class_def, inputs)
+
             # 4. 执行节点
             _dbg = []
             for _k, _v in inputs.items():
@@ -1964,6 +1970,8 @@ class InterfaceExecutor:
                         inputs[rn] = rd[0][0]
         except Exception:
             pass
+        # 与子图内节点同一条规则：第三方节点只认 [B,H,W,3] 的 IMAGE
+        self._coerce_image_inputs(node_type, class_def, inputs)
         print(f"[InterfaceExecutor] External: {node_id} ({target.get('type')}) inputs={{{', '.join(f'{k}={type(v).__name__}' for k, v in inputs.items())}}}")
         try:
             obj = class_def()
@@ -1989,6 +1997,113 @@ class InterfaceExecutor:
             import traceback
             traceback.print_exc()
             raise RuntimeError(f"External node {node_id} ({target.get('type', '?')}) failed: {e}")
+
+    # ---- IMAGE 输入通道归一化（RGBA → RGB）----
+
+    _own_pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    @staticmethod
+    def _port_io_type(spec):
+        """从 INPUT_TYPES 的端口声明里取出 io 类型字符串。
+
+        兼容三种写法：老式字符串 "IMAGE"、老式元组 ("IMAGE", {...})、以及
+        ComfyUI v3 schema 的 IO.IMAGE 对象（io_type 属性 / get_io_type()）。
+        """
+        if isinstance(spec, str):
+            return spec
+        if isinstance(spec, (tuple, list)):
+            return InterfaceExecutor._port_io_type(spec[0]) if spec else None
+        v = getattr(spec, 'io_type', None)
+        if isinstance(v, str):
+            return v
+        getter = getattr(spec, 'get_io_type', None)
+        if callable(getter):
+            try:
+                v = getter()
+            except Exception:
+                v = None
+            if isinstance(v, str):
+                return v
+        return None
+
+    @classmethod
+    def _image_input_names(cls, class_def):
+        """节点声明里类型为 IMAGE 的输入名集合；取不到/没有则返回 None。"""
+        try:
+            it = class_def.INPUT_TYPES()
+        except Exception:
+            return None
+        if not isinstance(it, dict):
+            return None
+        names = set()
+        for section in ('required', 'optional'):
+            sec = it.get(section)
+            if not isinstance(sec, dict):
+                continue
+            for name, spec in sec.items():
+                if cls._port_io_type(spec) == 'IMAGE':
+                    names.add(name)
+        return names or None
+
+    @classmethod
+    def _is_own_node(cls, class_def):
+        """本项目自带的节点 —— alpha VAE 链路刻意保留 4 通道，不做压平。"""
+        try:
+            src = os.path.abspath(inspect.getfile(class_def))
+        except Exception:
+            return False
+        return src.startswith(cls._own_pkg_root + os.sep)
+
+    @staticmethod
+    def _flatten_alpha_on_white(img):
+        """[B,H,W,4] → [B,H,W,3]：透明区按白底合成。
+
+        与 libs.image_utils.flatten_alpha_on_white 同语义（vision 塔/打标看到
+        的就是这张白底图），就地实现以免给这个文件多加一条 import。
+        """
+        return img[..., :3] * img[..., 3:4] + (1.0 - img[..., 3:4])
+
+    @classmethod
+    def _coerce_one_image(cls, val, label=""):
+        """单张图：4 通道压成 3 通道，其余原样返回（None 表示无需改动）。"""
+        shape = getattr(val, 'shape', None)
+        if shape is None or len(shape) != 4 or shape[-1] != 4:
+            return None
+        new = cls._flatten_alpha_on_white(val)
+        print(f"[InterfaceExecutor]   IMAGE input RGBA → RGB (alpha flattened on white): "
+              f"{label or 'image'} {tuple(shape)} → {tuple(new.shape)}")
+        return new
+
+    def _coerce_image_inputs(self, class_type, class_def, inputs):
+        """把声明为 IMAGE 的输入里的 RGBA 压成 RGB。
+
+        ComfyUI 的 IMAGE 契约是 [B,H,W,3]，而工作台合成出来的工作图是 RGBA
+        （alpha 承载蒙版/透明区）。第三方节点（preprocessor、ControlNet 等）
+        按 3 通道写死 normalize，拿到 4 通道就会在广播 mean/std 时崩：
+        "operands could not be broadcast together with shapes (518,518,4) (3,)"。
+        只在把值交给节点的这一刻压平，pipeline 内部的 alpha 语义不受影响。
+        """
+        if class_def is None or self._is_own_node(class_def):
+            return
+        names = self._image_input_names(class_def)
+        if not names:
+            return
+        for name in names:
+            if name not in inputs:
+                continue
+            val = inputs[name]
+            label = f"{class_type}.{name}"
+            if isinstance(val, (list, tuple)):
+                # INPUT_IS_LIST：逐元素压平（注意别用 `or`，tensor 的真值判定会抛）
+                coerced = []
+                for v in val:
+                    nv = self._coerce_one_image(v, label)
+                    coerced.append(nv if nv is not None else v)
+                inputs[name] = type(val)(coerced)
+                continue
+            new = self._coerce_one_image(val, label)
+            if new is not None:
+                inputs[name] = new
 
     def _normalize_image_value(self, val):
         """把 ComfyUI 节点的 IMAGE 输出统一归一化为 tensor 列表。
@@ -2064,7 +2179,7 @@ class InterfaceExecutor:
             elif ptype == 'IMAGE':
                 # 归一化 IMAGE 输出：ComfyUI 节点可能返回 tensor / numpy / list / 或
                 # 含 'result'/'images' 字段的 preview dict（如部分自定义节点的返回结构）。
-                tensors = _normalize_image_value(val)
+                tensors = self._normalize_image_value(val)
                 for img in tensors:
                     results.append(('IMAGE', img, name))
                     self.result_ports.append(port_num)

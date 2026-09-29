@@ -204,6 +204,31 @@ const App: React.FC = () => {
     }, '*');
   }, [staging]);
 
+  // Processor 工具的可选接口（Interface tab 里开着 Processor 模式的那些）→ 工作台。
+  // 两个时机都必须推，缺一个就会「枚举看起来不刷新」：
+  //   (a) 列表本身变了 —— 开关 / 改名 / 端口改动（见下面那个 effect）；
+  //   (b) 工作台 iframe load 完来要 init 时（见 blend-request-init 分支）—— 首次进前端
+  //       时 (a) 常常跑在 iframe 的 document 就绪之前，那条消息会打进 about:blank 里丢掉，
+  //       Processor 的 Interface 枚举就一直空着，只有回 Interface tab 重拨一下开关才刷出来。
+  // modes 以 interfaceMeta 为准：开关一拨，前端这份 meta 立刻是真值，而 interfaces 是后端
+  // 快照（toggle 只 POST 配置、不重拉 /api/package），照它过滤会把刚打开的接口又滤掉。
+  const pushProcessors = useCallback(() => {
+    const win = blendIframeRef.current?.contentWindow;
+    if (!win) return;
+    const processors = interfaces
+      .filter(itf => {
+        const modes = interfaceMeta[itf.name]?.modes;
+        return modes ? !!modes.processor : !!itf.modes?.processor;
+      })
+      .map(itf => ({
+        name: itf.name,
+        index: interfaces.indexOf(itf),
+        start_ports: itf.start_ports,
+        end_ports: itf.end_ports,
+      }));
+    win.postMessage({ type: 'blend-processors', processors }, '*');
+  }, [interfaces, interfaceMeta]);
+
   // Leaving the prompt tab flushes the prompt editor into prompt_server first.
   const handleTabChange = useCallback((newTab: Tab) => {
     const needPromptSync = tab === 'prompt' && newTab !== 'prompt';
@@ -670,6 +695,9 @@ const App: React.FC = () => {
           })),
           active_id: activeBlockSetId,
         }, '*');
+        // Processor 的 Interface 枚举同理：iframe 只在 load 时要一次，列表推送若早于它
+        // 就绪就已经丢在 about:blank 里了 —— 这里补一次，等于和 presets 一样对齐 init。
+        pushProcessors();
         seedBlendCanvas();
       } else if (event.data?.type === 'blend-staging-upload') {
         // 工作台拖文件/CUD 导入恢复：批量进图池（后端建 tensor 引用），随后镜像回工作台。
@@ -708,7 +736,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, pushLog]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, pushLog, pushProcessors]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
@@ -730,18 +758,8 @@ const App: React.FC = () => {
   // Push processor-mode interfaces to the workbench whenever they change: the Processor tool's
   // enum picks from this list, and its source/destination pickers read the (renamed) ports.
   useEffect(() => {
-    const iframe = blendIframeRef.current;
-    if (!iframe?.contentWindow) return;
-    const processors = interfaces
-      .filter(itf => !!itf.modes?.processor)
-      .map(itf => ({
-        name: itf.name,
-        index: interfaces.indexOf(itf),
-        start_ports: itf.start_ports,
-        end_ports: itf.end_ports,
-      }));
-    iframe.contentWindow.postMessage({ type: 'blend-processors', processors }, '*');
-  }, [interfaces, interfaceMeta]);
+    pushProcessors();
+  }, [pushProcessors, interfaces, interfaceMeta]);
 
   // Processor 轮询：interface_status 每跳一次就同步给工作台（进度条走 blend-run-status 同款
   // 语义），done 时按 interface_result_meta 把隐藏条目逐端口发回去。started 后第一次 status
