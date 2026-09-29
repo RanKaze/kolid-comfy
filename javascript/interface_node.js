@@ -144,11 +144,28 @@ function setupInterfaceStart(node) {
         }
     }
 
+    // 下游端口常常是在它自己那条 onConnectionsChange(INPUT) 里才把自己定成具体类型,
+    // 而 connectSlots 是先发我们这条 OUTPUT、再发它的 INPUT。同步读到的永远是它定型前的
+    // `*`, 之后没有任何东西再来提醒我们 —— 等这次调用栈退掉再收口一遍。
+    let deferredResolve = false;
+    function resolveAfterDownstream() {
+        if (deferredResolve) return;
+        deferredResolve = true;
+        queueMicrotask(() => {
+            deferredResolve = false;
+            if (!node.graph) return;
+            syncValueOutputs();
+            updatePortTypesWidget(node, true);
+            node.setDirtyCanvas(true, true);
+        });
+    }
+
     node.onConnectionsChange = function (type, slot, connected) {
         if (type !== LiteGraph.INPUT) {
             // 输出端的连线变了: 只重解析输出类型, 输入端口自己的类型不动
             if (type === LiteGraph.OUTPUT) syncValueOutputs();
             updatePortTypesWidget(node, true);
+            resolveAfterDownstream();
             node.setDirtyCanvas(true, true);
             return;
         }
@@ -169,6 +186,7 @@ function setupInterfaceStart(node) {
             syncValueOutputs();
         }
         updatePortTypesWidget(node, true);
+        resolveAfterDownstream();
         node.setDirtyCanvas(true, true);
     };
 
@@ -176,6 +194,7 @@ function setupInterfaceStart(node) {
     ensureInputSlots();
     syncValueOutputs(); // Now only ADDS missing outputs, never removes
     updatePortTypesWidget(node, true);
+    resolveAfterDownstream();
 }
 
 
