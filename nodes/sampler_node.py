@@ -117,7 +117,7 @@ def _euler_unsampled_head(model, x, sigmas, extra_args=None, callback=None, disa
 def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
               latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None,
               force_full_denoise=False, sigmas=None, model_negative=None,
-              inversion_rate=None, invert_info=None):
+              invert=False, invert_info=None):
     """统一采样函数：支持 custom sigmas、dual model CFG 和反演往返（invert）"""
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(
@@ -173,26 +173,18 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
     # 但这个 0 只是"恒等入口"的旗子，**不能拿去求导**（0/0=NaN，画面纯黑）。RES4LYF 同款：
     # beta/samplers.py:348 把 flip 后的梯子原样带 0 交给下游，rk_sampler_beta.py:336 再把它
     # 塞回 index 0 并 start_step=1 —— 跳过这一级、x 不动。euler 不会跳级，所以换采样函数。
-    climb_steps = 0
     peak_index = -1
     pad_rung = 0          # 梯子首级当旗子时，真正要走的第一级在它后面
-    if inversion_rate is not None:
-        # 下降段就是本块原本要跑的那截梯子；爬梯从它的最低非零级回到它的最高级（σ_peak）。
-        # 级别数 = rate * steps（不足一级按一级），级少 = 粗爬（省调用），级多 = 细爬（更贴 ODE）。
-        # 数的是**要求导的级**：0 那级只当入口旗子，不占 rate 的额度。
-        climb_steps = max(1, int(inversion_rate * actual_steps))
+    if invert:
+        # 爬梯 = 本块那截下降梯的**整张倒影**（Shark unsample 的形状：级由 scheduler 定，
+        # 不自作主张粗化）。代价是这一块的模型调用翻倍：上去几级，就下来几级。
         asc = torch.flip(sigmas, dims=[0])
         if float(asc[0]) != 0.0:
             # 外部 sigmas 可能不收尾于 0 —— 补一级 0，保证 σ₀=0 恒等进。
             asc = torch.cat([torch.zeros(1, dtype=asc.dtype, device=asc.device), asc])
-        nz = asc[1:]                       # 可以拿去求导的级，全 > 0，末级 = σ_peak
-        span = len(nz) - 1
-        rungs = sorted({round(k * span / climb_steps) for k in range(climb_steps + 1)})
-        climb = nz[rungs]
-        # 旗子 + 爬梯 + 本块原来的下行段（climb 的末级 == sigmas[0]，接 sigmas[1:] 就是
-        # "爬到顶再顺原路解回来"）。
-        sigmas = torch.cat([asc[:1], climb, sigmas[1:]])
-        peak_index = len(climb)            # 0 占了 index 0，峰是 climb 的末级
+        # asc 的末级 == sigmas[0]（峰），接上 sigmas[1:] 就是"爬到顶再顺原路解回来"。
+        sigmas = torch.cat([asc, sigmas[1:]])
+        peak_index = len(asc) - 1          # 0 占 index 0，峰是 asc 的末级
         pad_rung = 1                       # 由 _euler_unsampled_head 摘掉
         # 全程零噪声：爬梯段靠 σ₀=0 恒等进，重绘段的噪声已经在 latent 里（就是爬出来的那份）。
         noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype,
@@ -200,8 +192,7 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
         # 往返必须同一个采样器，而爬梯段要求确定性一阶；dpmpp 这类多步法跨峰会带着
         # 单调假设的历史，反向一踩就散。所以 invert 块整段走（摘旗子的）euler。
         if invert_info is not None:
-            invert_info['climb_steps'] = climb_steps
-            invert_info['climb_rungs'] = len(climb) - 1
+            invert_info['climb_rungs'] = len(asc) - 2      # 摘掉旗子后的上行级数
             invert_info['sigma_peak'] = float(sigmas[peak_index])
             invert_info['steps_total'] = len(sigmas) - 1 - pad_rung
 
@@ -209,7 +200,7 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
                    else comfy.samplers.sampler_object(sampler_name))
     # 进度条总步数：非 invert 保持原样（actual_steps），invert 才是真的多走了爬梯段。
     callback = latent_preview.prepare_callback(
-        model, len(sigmas) - 1 - pad_rung if inversion_rate is not None else actual_steps)
+        model, len(sigmas) - 1 - pad_rung if invert else actual_steps)
     if peak_index >= 0 and invert_info is not None:
         # 峰那一刻的 x 就是"这张图配的那份噪声"——它不是随机数，而是能沿 ODE 解回本图的状态。
         # 采样器报的 step 是**摘了旗子之后**的梯子上标，所以要减 pad_rung。

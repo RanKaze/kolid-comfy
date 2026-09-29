@@ -70,7 +70,6 @@ const App: React.FC = () => {
 
   const defaultBlockParams: DetailerBlockParams = {
     add_noise: 'enable',
-    inversion_rate: 0.3,
     start_step_rate: 0.8,
     end_step_rate: 1.0,
     pixels: 1048576,

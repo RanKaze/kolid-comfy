@@ -532,7 +532,6 @@ class SnapshotDetailerSamplerServer:
                 'name': 'Detailer',
                 'params': {
                     'add_noise': 'enable',
-                    'inversion_rate': 0.3,
                     'start_step_rate': 0.8,
                     'end_step_rate': 1.0,
                     'pixels': self.pixels,
@@ -3164,8 +3163,6 @@ class SnapshotDetailerSamplerNode:
                 # Detailer block params (support both nested 'params' dict and flat)
                 bp = block.get('params', block)
                 add_noise = bp.get('add_noise', 'enable')
-                # Invert（DDIM 反演往返）：爬梯段的级数 = rate * steps（0.3 默认 ≈ 20 步爬 6 级）。
-                inversion_rate = float(bp.get('inversion_rate', 0.3))
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
                 enable_edit = bp.get('enable_edit', False)
@@ -3198,13 +3195,11 @@ class SnapshotDetailerSamplerNode:
                 block_seed = seed
                 seed = next_seed(seed)
 
-                invert_suffix = (f", invert_rate={inversion_rate}" if add_noise == 'invert' else '')
-                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, seed={block_seed}{invert_suffix}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, seed={block_seed}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
                 dbg.record_block(i + 1, f'Block {i+1} · Detailer',
                                  f'{block.get("name", "")}',
                                  add_noise=add_noise,
                                  seed=block_seed,
-                                 inversion_rate=(inversion_rate if add_noise == 'invert' else None),
                                  start_step_rate=start_step_rate,
                                  end_step_rate=end_step_rate,
                                  enable_edit=enable_edit,
@@ -3521,7 +3516,7 @@ class SnapshotDetailerSamplerNode:
                     force_full_denoise=True,
                     sigmas=next_pipeline.config.get("sigmas"),
                     model_negative=model_negative_to_use,
-                    inversion_rate=(inversion_rate if add_noise == 'invert' else None),
+                    invert=(add_noise == 'invert'),
                     invert_info=invert_info,
                 )[0]
 
@@ -3541,8 +3536,6 @@ class SnapshotDetailerSamplerNode:
                                   f"σ_peak={invert_info.get('sigma_peak', 0.0):.4f}")
                     print(f"[Block {i+1}] Invert: {detail}")
                     dbg.record_stage('Invert 往返', detail, block=i + 1,
-                                     inversion_rate=inversion_rate,
-                                     climb_steps=invert_info.get('climb_steps'),
                                      steps_total=invert_info.get('steps_total'),
                                      sigma_peak=invert_info.get('sigma_peak'),
                                      sampler='euler',
