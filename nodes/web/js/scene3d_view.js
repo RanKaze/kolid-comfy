@@ -25,10 +25,12 @@
         scene.add(root);
         ambient = new THREE.AmbientLight(0xffffff, 0.35);
         scene.add(ambient);
-        grid = new THREE.GridHelper(20, 20, 0x505052, 0x2c2c2e);
+        // 底盘是 #1b1b1d,原来那两档灰(0x505052 / 0x2c2c2e)再乘 0.55 的不透明度,落到屏幕上
+        // 就是「看不见」—— 而这枚 Grid 的全部意义就是让用户读出水平面在哪,所以线要压得过背景。
+        grid = new THREE.GridHelper(20, 20, 0x8e8e93, 0x48484d);
         axes = new THREE.AxesHelper(1.2);
         grid.material.transparent = true;
-        grid.material.opacity = 0.55;
+        grid.material.opacity = 0.9;
         scene.add(grid);
         scene.add(axes);
         cam = new THREE.PerspectiveCamera(60, 1, 0.01, 4000);
@@ -72,7 +74,7 @@
         // 朝向永远慢一帧,飞起来能看出它在后面拖。
         cam.updateMatrixWorld(true);
         syncAxisWidget();
-        if (controls) controls.update();
+        // 这里不调 controls.update():随场景遍历它会自己 updateMatrixWorld,把手自然跟着附着的物体。
     }
 
     // 一条 rAF 积分按键,而不是在 pointermove/keydown 里直接挪相机:按住 W 时帧率就是移动
