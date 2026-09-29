@@ -116,8 +116,9 @@ function fxglAo(col, p, effect, l) {
 }
 
 const FX_AO_PARAMS = [
-    { key: 'map', label: 'Map', kind: 'map', def: null },
-    { key: 'normal', label: 'Normal', kind: 'map', def: null },
+    // 行首那个名字由注册表的角色查出来 (needsMap / needsMap2.role),不在这里手打第二遍。
+    { key: 'map', kind: 'map', def: null },
+    { key: 'normal', kind: 'map', def: null },
     { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas' },
     { key: 'radius', label: 'Radius', min: 1, max: 64, step: 1, def: 16, unit: 'px' },
