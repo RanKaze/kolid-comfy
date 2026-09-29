@@ -66,20 +66,28 @@ function fxMapImage(ref) {
     return null;
 }
 
-// 图池条目会在 id 不变的情况下原地换像素(Guidance 卡重发布就是这样),而解码到位的先后也不在
-// params 里 —— 所以缓存身份除了引用 key 还要带上「解析到哪一份 src」和「这份 src 解第几次成功」。
-// 每个槽都要报:副槽换了一张法线图,主槽的 src 一个字没动。报的是**整条 strip** 上所有链的槽 ——
-// 一枚容器的绑定换了图,另一枚没换,只有全部遍历才不会漏掉那一次重算。
+// 一个槽的「像素身份」= 引用 key + 解析到哪一份 src + 这份 src 解第几次成功。图池条目会在 id 不变
+// 的情况下原地换像素(Guidance 卡重发布就是这样),而解码到位的先后也不在 params 里,所以这三样
+// 缺一都会把缓存钉在旧图上。谁都可以单点取它(fx/lighting.js 的那张 shadow mask 就按它判重烘),
+// 所以写在这里,别处不许再凑一份近似式。
+function fxMapIdentity(effect, key) {
+    const id = key || 'map';
+    const ref = fxMapRef(effect, id);
+    if (!ref) return `${id}:0#0`;
+    const found = fxMapSource(ref);
+    const hit = found ? fxMapDecoded.get(found.src) : null;
+    return `${id}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}`;
+}
+
+// 整条 strip 上所有槽的身份串成一句,进链的缓存身份。一枚容器的绑定换了图,另一枚没换,
+// 只有全部遍历才不会漏掉那一次重算。
 function fxMapStamp(l) {
     let s = '';
     for (const chain of stripChains(l)) {
         for (const e of chain) {
             for (const slot of fxMapSlots(e)) {
-                const ref = fxMapRef(e, slot.key);
-                if (!ref) continue;
-                const found = fxMapSource(ref);
-                const hit = found ? fxMapDecoded.get(found.src) : null;
-                s += `${slot.key}:${ref.key}@${found ? fxSrcId(found.src) : 0}#${hit && hit.tag ? hit.tag : 0}|`;
+                if (!fxMapRef(e, slot.key)) continue;
+                s += `${slot.key}:${fxMapIdentity(e, slot.key).slice(slot.key.length + 1)}|`;
             }
         }
     }
@@ -132,6 +140,14 @@ function fxMapFrame(align, l) {
         v: [-2 * nv[0], 2 * nv[1]],
         b: [tr.cx - nu[0] + nv[0], 1 - tr.cy + nu[1] - nv[1]],
     };
+}
+
+// Canvas 对齐的贴图读的是「图层盒子落在画布哪儿」,而拖图层既不改像素也不改 params ⇒ 链的缓存身份
+// 看不见它。凡是把 fxMapFrame 取成 Canvas 的特效都要自己报这一句 (见 fx/warp.js 与 fx/lighting.js
+// 的 stamp),所以算式只写在这里一份 —— 两处各写一遍迟早会漂开,而漂开的那一侧只是不再重算。
+function fxMapBoxStamp(l) {
+    const tr = effectiveTransform(l);
+    return `${tr.cx.toFixed(4)},${tr.cy.toFixed(4)},${tr.w.toFixed(4)},${tr.h.toFixed(4)},${tr.rotation.toFixed(3)}`;
 }
 
 // .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
