@@ -207,7 +207,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    the three working chips on the second line (result preview, Decal, Mask). */
 .layer-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
 .layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.layer-row-thumbs { display: flex; align-items: center; gap: 5px; }
+/* The strip grows by user action (a layer can hold several Masks), so a narrow panel wraps the
+   chips onto another line instead of overflowing out of the row. */
+.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .layer-row:hover { background: rgba(255,255,255,0.08); }
 .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
 .layer-row.dragging { opacity: 0.4; }
@@ -231,6 +233,18 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
 .layer-thumb.decal-thumb canvas { width: 100%; height: 100%; display: block; }
 .layer-thumb.active { box-shadow: inset 0 0 0 2px #fff; }
+/* 条带上的每一枚 chip 就是执行序里的一步,从左到右排。拖它的左半边/右半边决定插在哪道缝上,插入线
+   画在内缘 (.layer-thumb 的 overflow 会剪掉外沿)。 */
+.layer-thumb.attr-chip { cursor: pointer; }
+.layer-thumb.effects-thumb { background: #171717; color: rgba(255,255,255,0.72); }
+.layer-thumb.effects-thumb svg { width: 15px; height: 15px; display: block; }
+.layer-thumb.attr-chip.dragging { opacity: 0.4; }
+.layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
+.layer-thumb.attr-chip.drop-before::before { left: 0; }
+.layer-thumb.attr-chip.drop-after::after { right: 0; }
+/* `+` 与 chip 同尺寸同圆角,但它是按钮不是缩略图:虚线边说"这一步还没有东西",正是它该有的样子。 */
+.attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+.attr-add:hover { border-color: rgba(0,122,255,0.9); color: #fff; background: rgba(0,122,255,0.16); }
 .layer-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .layer-type-badge svg { width: 9px; height: 9px; display: block; }
 .layer-type-badge.smart { color: #9ecbff; }
@@ -1603,10 +1617,9 @@ let maskLayer = ownSource({
     transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
     mask: null,
     maskCtx: null,
-    maskThumbEl: null,
     decal: null,               // the mask surface itself — opaque where covered, transparent elsewhere
     decalCtx: null,
-    decalThumbEl: null,
+    decalThumbEl: null,        // the one chip on its own row, painted by paintMaskLayerThumb
     canvasThumbEl: null,
     // Never a chain host (layerTakesEffects() says no for the Mask layer), but it keeps the
     // layer object shape so nothing downstream has to special-case it.
@@ -1676,7 +1689,10 @@ let eraserEdge = 0.0;
 let eraserGamma = 2.0;
 
 // Both tools paint onto the same surface, chosen here: the layer's mask (coverage) or its decal (colour).
-let paintTarget = 'mask';      // 'mask' | 'decal'
+let paintTarget = 'mask';      // 'mask' | 'decal' —— 落的还是"哪一种" (和 attribute 的类型同名)
+// 同一种可以装好几枚,所以"落在哪一枚"要单独记:点某颗 chip 就点名那一枚;没点过 (按键直接武装) 就是
+// null,读作"这一种里最右的那一枚" —— 画笔该落在执行序末尾那一刀上,不是最早那一枚上。
+let paintRef = null;
 // The canvas-level pixel selection (see the 像素选区 section): shapes are the source of truth,
 // everything else about it is derived. 'rect' / 'lasso' join the mode list as its two tools.
 let selection = null;   // { shapes:[{kind:'rect'|'poly', mode, ...}] } + derived mask/box/count/contours
@@ -1693,6 +1709,9 @@ let backHue = 0;
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
 let dragRowId = null;
+// 条带内部的重排:一次只拖一颗 chip,{layerId, ref} 就是它的全部状态 —— 别的行的 chip 不接受它,
+// 图层那一套重排序 (dragRowId) 也不会在它起拖时被误触发。
+let attrDrag = null;
 // Dynamic Layer: after Add ▸ Dynamic Layer the next left-drag on the canvas sweeps out a
 // rectangle in canvas pixels. The rect is only a spec for a new layer, so it lives in doc
 // space and is thrown away (or taken to the modal) on release.
@@ -1944,7 +1963,7 @@ function stashLayerKey(l) {
     for (const r of attrRecordsOf(l)) surf += ':' + stashSurfId(r.surface);
     return l.id + ':' + (l.visible ? 1 : 0)
         + ':' + stashSurfId(l.img) + surf
-        + ':' + (l.paintGen | 0) + ':' + (l.fxResolveGen | 0)
+        + ':' + (l.paintGen | 0) + attrPaintGens(l) + ':' + (l.fxResolveGen | 0)
         + ':' + tr.cx + ',' + tr.cy + ',' + tr.w + ',' + tr.h + ',' + tr.rotation + ';';
 }
 
@@ -2595,7 +2614,7 @@ function ensureMaskLayer(reanchor) {
 }
 
 function refreshMaskLayerThumb() {
-    if (maskLayer.decalThumbEl && maskLayer.decalThumbEl.isConnected) paintDecalThumb(maskLayer.decalThumbEl, maskLayer);
+    if (maskLayer.decalThumbEl && maskLayer.decalThumbEl.isConnected) paintMaskLayerThumb(maskLayer.decalThumbEl, maskLayer);
 }
 
 // The three whole-layer Mask actions (invert / full / clear) are one move: swap in a fresh
@@ -3410,8 +3429,7 @@ function refreshCanvasThumb(l) {
 function refreshCanvasThumbs() {
     for (const l of layers) {
         refreshCanvasThumb(l);
-        refreshMaskThumb(l);
-        refreshDecalThumb(l);
+        refreshAttrChips(l);
     }
     refreshMaskLayerThumb();
 }
@@ -4274,8 +4292,7 @@ function fillSelection() {
     markPainted(l);
     pushHistory();
     if (isMaskLayerTarget()) refreshMaskLayerThumb();
-    else if (toMask) refreshMaskThumb(l);
-    else refreshDecalThumb(l);
+    else refreshAttrChips(l, toMask ? 'mask' : 'decal');
     syncPaintUI();
     render();
     setStatus(`Fill — ${selection.count.toLocaleString()} px poured into ${l.name}'s ${toMask ? 'mask (coverage ' + Math.round(brushAlpha * 255) + '/255)' : 'decal'}`);
@@ -4824,8 +4841,6 @@ function restoreState(s, opts) {
         // 这三样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
         // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
         attrs: adoptAttrPayloads(ls.attrs, byAttr),
-        maskThumbEl: null,
-        decalThumbEl: null,
         canvasThumbEl: null,
         // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
         fxCache: null,
@@ -4937,10 +4952,12 @@ function resetHistory() {
 // Copy-on-write for the surface a stroke is about to modify: the snapshot on top of the
 // stack holds that exact canvas by reference, so the stroke gets a private copy instead. The
 // history keeps the untouched original; this stroke owns the new one.
+// 换的是**那一枚 attribute 的面**。共享蒙版被 A 层这么一走,B 层手里那枚还指着旧画布 —— 这正是
+// 引用档该有的行为 (两枚独立记录各写各的),而 paintGen 负责让两边都知道画面变了。
 function detachPaintSurface(l) {
     const maskTarget = isMaskLayerTarget();
-    const key = isDecalTarget() ? 'decal' : 'mask';
-    const old = maskTarget ? maskLayer.decal : l[key];
+    const r = maskTarget ? null : paintRecord(l, paintTarget, false);
+    const old = maskTarget ? maskLayer.decal : (r && r.surface);
     if (!old || !old.width || !old.height) return;
     const copy = document.createElement('canvas');
     copy.width = old.width;
@@ -4950,7 +4967,7 @@ function detachPaintSurface(l) {
         maskLayer.decal = copy;
         maskLayer.decalCtx = copy.getContext('2d');
     } else {
-        l[key] = copy;
+        r.surface = copy;
     }
 }
 
@@ -5079,25 +5096,9 @@ function startRenameLayer(l, nameEl) {
     input.addEventListener('dblclick', ev => ev.stopPropagation());
 }
 
-function paintMaskThumb(el, l) {
-    const w = el.width, h = el.height;
-    const c = el.getContext('2d');
-    resetCtx(c);
-    c.fillStyle = l.mask ? '#000' : '#fff';
-    c.fillRect(0, 0, w, h);
-    if (!l.mask) return;
-    const src = nativeSize(l.img);
-    const s = Math.min(w / src.w, h / src.h);
-    const dw = src.w * s, dh = src.h * s;
-    c.drawImage(l.mask, (w - dw) / 2, (h - dh) / 2, dw, dh);
-}
-
-function refreshMaskThumb(l) {
-    if (l.maskThumbEl && l.maskThumbEl.isConnected) paintMaskThumb(l.maskThumbEl, l);
-}
-
-// The decal alone (transparent where nothing was painted — the CSS checkerboard shows through).
-function paintDecalThumb(el, l) {
+// 条带上的 chip 由 attr/core.js 画 (每种 attribute 自己那一颗缩略图画法住在它的 spec 里),
+// 所以这里只剩 Mask 层那一颗 —— 它不属于任何条带:那张层只有一个覆盖面,attachAttrView 也不给它装 attribute。
+function paintMaskLayerThumb(el, l) {
     const w = el.width, h = el.height;
     const c = el.getContext('2d');
     resetCtx(c);
@@ -5109,8 +5110,196 @@ function paintDecalThumb(el, l) {
     c.drawImage(l.decal, (w - dw) / 2, (h - dh) / 2, dw, dh);
 }
 
-function refreshDecalThumb(l) {
-    if (l.decalThumbEl && l.decalThumbEl.isConnected) paintDecalThumb(l.decalThumbEl, l);
+// ==================== 条带 (attribute strip) ====================
+// 一颗 chip 就是条带上的一步。缩略图**只在 attribute 存在时**才存在 —— 不给没装的能力画占位,也没有
+// "装了但停用"这一态;要它消失只有 Remove。`+` 钉在最右边,永远追加到最后一步。
+function attrStripEls(l) {
+    const out = [];
+    for (const r of attrRecordsOf(l)) out.push(attrChip(l, r));
+    out.push(attrAddChip(l));
+    return out;
+}
+
+// 这颗 chip 是不是"笔现在落在它上面"。点名过就亮那一枚;只按键没点名,亮的就是这一种最右那枚
+// (paintRecord 自己会这么退让,所以这里不必重算一遍)。笔一次只落在**一个**面上,所以只问被武装
+// 的那一种: 否则 Decal 与 Mask 各亮一枚,四颗 chip 亮三颗,高亮就等于什么都没说。
+function isArmedChip(l, r) {
+    return l.id === selectedId && mode === 'mask' && r.type === paintTarget
+        && paintRecord(l, r.type, false) === r;
+}
+
+function attrChip(l, r) {
+    const spec = ATTR_TYPES[r.type];
+    const el = document.createElement('div');
+    el.className = 'layer-thumb attr-chip ' + (spec.chipClass || '');
+    el.dataset.attr = r.id;
+    el.title = (spec.title ? spec.title(r, l) : spec.label);
+    el.draggable = true;
+    // 面画在自己那块 canvas 上 (它才是会被重画的东西);链没有面,图标直接摆进这颗 chip。
+    const paint = spec.kind === 'surface' ? document.createElement('canvas') : el;
+    if (spec.kind === 'surface') {
+        paint.width = 84; paint.height = 56; paint.draggable = false;
+        el.appendChild(paint);
+    }
+    bindAttrChip(paint, r, l);
+    if (isArmedChip(l, r)) el.classList.add('active');
+    el.addEventListener('click', ev => { ev.stopPropagation(); spec.open(l, r); });
+    el.addEventListener('contextmenu', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (selectedId !== l.id) selectLayer(l.id, mode);
+        openAttrMenu(l, r, ev.clientX, ev.clientY);
+    });
+    // 拖动重排:这一枚自己就是拖拽源,所以 dragstart 必须停在这里 —— 让它冒到行上,行的那套 (图层
+    // 重排序) 会把它当成整层被拖走。落点只在这一条条带里,所以跨层/跨栈一律不参与。
+    el.addEventListener('dragstart', ev => {
+        ev.stopPropagation();
+        attrDrag = { layerId: l.id, ref: r.id };
+        el.classList.add('dragging');
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/plain', r.id);
+    });
+    el.addEventListener('dragend', () => {
+        el.classList.remove('dragging', 'drop-before', 'drop-after');
+        attrDrag = null;
+    });
+    el.addEventListener('dragover', ev => {
+        const side = attrDropSide(ev, el, l);
+        if (!side) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        ev.dataTransfer.dropEffect = 'move';
+        el.classList.toggle('drop-before', side === 'before');
+        el.classList.toggle('drop-after', side === 'after');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+    el.addEventListener('drop', ev => {
+        const side = attrDropSide(ev, el, l);
+        if (!side) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        el.classList.remove('drop-before', 'drop-after');
+        // 缝位用**摘之前**那个数组的下标说:落在第 k 颗的左半边就是插到 k,右半边就是 k+1。
+        const slot = attrRefList(l).indexOf(r.id) + (side === 'before' ? 0 : 1);
+        const moved = attrRecord(attrDrag.ref);
+        if (moveAttr(l, attrDrag.ref, slot)) {
+            setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length} — it runs there`);
+            pushHistory();
+        }
+        attrDrag = null;
+        renderLayerList();
+        render();
+    });
+    return el;
+}
+
+// 这一条拖拽该不该被这颗 chip 接住,以及接在它的左半边还是右半边。不是这一条条带里的、或者就是
+// 自己拖自己,都回一个空串 —— 行的那套 (图层重排序) 因此照常接管。
+function attrDropSide(ev, el, l) {
+    if (!attrDrag || String(attrDrag.layerId) !== String(l.id)) return '';
+    if (attrDrag.ref === el.dataset.attr) return '';
+    const r = el.getBoundingClientRect();
+    return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
+}
+
+function attrAddChip(l) {
+    const b = document.createElement('button');
+    b.className = 'attr-add';
+    b.type = 'button';
+    b.draggable = false;
+    b.title = 'Add an attribute to「' + l.name + '」— it runs as the last step of this layer';
+    b.innerHTML = plusSvg();
+    b.addEventListener('click', ev => {
+        ev.stopPropagation();
+        if (selectedId !== l.id) selectLayer(l.id, mode);
+        openAttrAddMenu(l, ev.clientX, ev.clientY);
+    });
+    return b;
+}
+
+// plusSvg 的兄弟:行上那三颗按钮都是 14px 描边 SVG,这颗加号不能是字符。
+function plusSvg() {
+    return '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">'
+        + '<path d="M8 3.4v9.2M3.4 8h9.2"/></svg>';
+}
+
+// `+` 菜单 = 注册表里**所有**种类,一律追加到最后一步 (`insertAttr` 的 'tail')。注册数据里那套默认落点
+// (`at`)只管迁移和老入口,不再参与用户排出来的顺序 —— 用户自己拖过的位置不能被一次新增打乱。
+function openAttrAddMenu(l, clientX, clientY) {
+    const menu = ensureLayerMenu();
+    menu.innerHTML = '';
+    for (const type of Object.keys(ATTR_TYPES)) {
+        const spec = ATTR_TYPES[type];
+        layerMenuItem('Add ' + spec.label, spec.addTitle || `Add a ${spec.label.toLowerCase()} as this layer's last step — what its left steps leave is what it gets.`,
+            () => addAttrToLayer(l, type));
+    }
+    positionLayerMenu(clientX, clientY);
+    layerMenuLayerId = l.id;
+}
+
+function addAttrToLayer(l, type) {
+    const spec = ATTR_TYPES[type];
+    const r = insertAttr(l, type, 'tail');
+    if (!r) return;
+    setStatus(`「${spec.label}」is now ${l.name}'s last step (${attrRefList(l).length})`);
+    pushHistory();
+    // 装上一枚面就该能画它 —— 空面和没装在读法上是一回事 ("蒙版还没画"),所以这一句不是额外状态,
+    // 只是把笔尖放到用户刚点名的那一步上。链没有面可画,由行上那根魔棒开口子。
+    if (spec.kind === 'surface') setPaintTarget(type, l, r.id);
+    else { renderLayerList(); syncPaintUI(); }
+}
+
+// chip 右键:Remove / Shallow Duplicate / Apply。没有 enable/disable 这一档 —— 装了就是装了。
+function openAttrMenu(l, r, clientX, clientY) {
+    const spec = ATTR_TYPES[r.type];
+    const menu = ensureLayerMenu();
+    menu.innerHTML = '';
+    const step = attrRefList(l).indexOf(r.id);
+    layerMenuItem('Remove', `Take this ${spec.label.toLowerCase()} off「${l.name}」— its data leaves with it unless another layer shares it (a shared face stays painted wherever it is used).`,
+        () => removeAttrFromLayer(l, r));
+    layerMenuItem('Shallow Duplicate', spec.kind === 'chain'
+        ? `Add a second ${spec.label.toLowerCase()} step right after this one, carrying the same effects as its own copy — editing one chain leaves the other alone.`
+        : `Add a second ${spec.label.toLowerCase()} step right after this one, sharing THIS face — one stroke paints both (to paint them apart, Remove first and Add a fresh one).`,
+        () => shallowDuplicateAttr(l, r));
+    // Apply 只在最左边那一枚上出现:bake 是把它折进 `l.img`,前面还挂着别的东西就会改画面。
+    if (step === 0) {
+        layerMenuItem('Apply', applyAttrTitle(l, r), () => applyAttrToLayer(l, r));
+    }
+    positionLayerMenu(clientX, clientY);
+    layerMenuLayerId = l.id;
+}
+
+function removeAttrFromLayer(l, r) {
+    removeAttr(l, r.id);
+    if (paintRef === r.id) paintRef = null;
+    renderLayerList();
+    render();
+    pushHistory();
+    setStatus(`「${ATTR_TYPES[r.type].label}」removed from「${l.name}」`);
+}
+
+function shallowDuplicateAttr(l, r) {
+    const copy = dupAttrShallow(l, r.id);
+    if (!copy) return;
+    renderLayerList();
+    render();
+    pushHistory();
+    setStatus(`「${ATTR_TYPES[r.type].label}」duplicated right after itself — ${ATTR_TYPES[r.type].kind === 'chain'
+        ? 'its own chain, edited apart from the first'
+        : 'the same face, so one stroke paints both'}`);
+}
+
+// Apply 的措辞按种类说清"折进去的是什么",以及这一步之后就不在了 (单向,跟 Rasterize 同一类命令)。
+function applyAttrTitle(l, r) {
+    const name = `「${l.name}」`;
+    if (r.chain) {
+        const armed = (r.chain || []).filter(e => e && e.enabled).length;
+        return `Bake${name}'s ${armed} effect${armed === 1 ? '' : 's'} into its own pixels at its own resolution — the placement and everything to the right of this step stay exactly as they are, and this step is gone after. One-way${isCudLayer(l) ? '; a later Refresh from file repaints these pixels from the linked file' : ''}.`;
+    }
+    if (r.type === 'mask') {
+        return `Bake this mask into${name}'s own pixels: what it hides becomes real transparency, then the step is gone. One-way — the surface cannot tell you afterwards what it hid.`;
+    }
+    return `Fold this decal's colour into${name}'s own pixels: what was painted on top becomes the image, then the step is gone. One-way — the decal cannot be repainted or moved afterwards.`;
 }
 
 // A fixed row pinned above the stack: not draggable, not removable, single surface.
@@ -5128,7 +5317,7 @@ function renderMaskLayerRow() {
     const c = document.createElement('canvas');
     c.width = 84;
     c.height = 56;
-    paintDecalThumb(c, maskLayer);
+    paintMaskLayerThumb(c, maskLayer);
     maskLayer.decalThumbEl = c;
     thumb.appendChild(c);
 
@@ -5234,7 +5423,7 @@ function renderStackList(listEl, stack) {
 
         const thumb = document.createElement('div');
         thumb.className = 'layer-thumb';
-        thumb.title = '1 · Original image — click to transform this layer';
+        thumb.title = 'Original image — click to transform this layer';
         if (l.id === selectedId && mode === 'transform') thumb.classList.add('active');
         // A hand-made layer (Default / Dynamic) is a blank scratch canvas with `src === ''`, so it
         // has no file to show. An <img src=""> would render the browser's broken-image glyph, so it
@@ -5297,39 +5486,9 @@ function renderStackList(listEl, stack) {
                     : 'Smart layer — transform is non-destructive and keeps the native image';
         thumb.appendChild(badge);
 
-        const maskThumb = document.createElement('div');
-        maskThumb.className = 'layer-thumb mask-thumb';
-        maskThumb.title = '5 · Mask — click to paint coverage (the key for this surface is `)';
-        if (l.id === selectedId && mode === 'mask' && paintTarget === 'mask') maskThumb.classList.add('active');
-        const maskCanvasEl = document.createElement('canvas');
-        maskCanvasEl.width = 84;
-        maskCanvasEl.height = 56;
-        paintMaskThumb(maskCanvasEl, l);
-        l.maskThumbEl = maskCanvasEl;
-        maskThumb.appendChild(maskCanvasEl);
-        maskThumb.addEventListener('click', ev => {
-            ev.stopPropagation();
-            setPaintTarget('mask', l);
-        });
-
-        const decalThumb = document.createElement('div');
-        decalThumb.className = 'layer-thumb decal-thumb';
-        decalThumb.title = '4 · Decal — click to paint colour on top of the image (the key for this surface is Tab)';
-        if (l.id === selectedId && mode === 'mask' && paintTarget === 'decal') decalThumb.classList.add('active');
-        const decalCanvasEl = document.createElement('canvas');
-        decalCanvasEl.width = 84;
-        decalCanvasEl.height = 56;
-        paintDecalThumb(decalCanvasEl, l);
-        l.decalThumbEl = decalCanvasEl;
-        decalThumb.appendChild(decalCanvasEl);
-        decalThumb.addEventListener('click', ev => {
-            ev.stopPropagation();
-            setPaintTarget('decal', l);
-        });
-
         const canvasThumb = document.createElement('div');
         canvasThumb.className = 'layer-thumb canvas-thumb';
-        canvasThumb.title = '3 · Result preview — this layer as it sits on the canvas; click to transform';
+        canvasThumb.title = 'Result preview — this layer as it sits on the canvas; click to transform';
         const canvasThumbEl = document.createElement('canvas');
         canvasThumbEl.width = 84;
         canvasThumbEl.height = 56;
@@ -5437,13 +5596,12 @@ function renderStackList(listEl, stack) {
         head.appendChild(eye);
         head.appendChild(del);
 
-        // Second line — the three working chips, in the order they are used:
-        // 3 · result preview (this layer as it sits on the canvas), 4 · Decal, 5 · Mask.
+        // Second line — 结果缩略图先摆着 (它是这一层现在的样子,不是条带上的一步),然后是从左到右
+        // 每一枚 attribute,末尾钉一颗 `+`。缩略图只在 attribute 存在时才存在,不给缺席的能力画占位。
         const chips = document.createElement('div');
         chips.className = 'layer-row-thumbs';
         chips.appendChild(canvasThumb);
-        chips.appendChild(decalThumb);
-        chips.appendChild(maskThumb);
+        for (const el of attrStripEls(l)) chips.appendChild(el);
 
         // 特效子行块在 head 之上:它属于这个图层,但执行发生在图层把自己的像素交出去之前。
         const fxChain = fxChainEl(l);
@@ -5632,8 +5790,6 @@ function addLayer(item, stack) {
             img,
             visible: true,
             transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-            maskThumbEl: null,
-            decalThumbEl: null,
             canvasThumbEl: null,
             fxCache: null,
             stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
@@ -5704,8 +5860,6 @@ function spawnGeneratedLayer(id, item, opts) {
             // raster 分支保持恒等：它的位置要烘进画布尺寸的 buffer，transform 动不得。
             transform: (placed && !raster) ? { ...placed } : { ...t },
             raster,
-            maskThumbEl: null,
-            decalThumbEl: null,
             canvasThumbEl: null,
             // 和 attribute 一样:生成出来的是新图层,不继承源图层的蒙版、贴片和链。
             fxCache: null,
@@ -5838,8 +5992,6 @@ function replaceLayerImage(id, item) {
         layoutCanvas();
         renderLayerList();
         render();
-        refreshMaskThumb(l);
-        refreshDecalThumb(l);
         pushHistory();               // one Generate = one undo step
         setStatus(placed
             ? 'Generated result written back onto the layer — placed on its masked region'
@@ -5883,8 +6035,6 @@ function cloneLayerFields(l, name) {
         raster: !!l.raster,
         // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
         stash: !!l.stash,
-        maskThumbEl: null,
-        decalThumbEl: null,
         canvasThumbEl: null,
         // attribute 一律浅拷贝:strip 的顺序照搬,每枚自己的数据另立一份 (面是新画布、链是深拷贝),
         // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。改成引用/深拷贝是 S6 那枚 modal 的事。
@@ -5918,21 +6068,36 @@ function duplicateLayer(l) {
     pushHistory();
 }
 
-// Right-click "Apply Mask": the mask stops being a selection and becomes pixels. Its coverage is
-// stored in its ALPHA channel (the eraser is destination-out), so `destination-in` is the exact
-// inverse of what layerSource() does for display: whatever the mask hid turns into real
-// transparency in the layer's own image, and the mask resets to full white (= whole layer).
-// One-way, like Rasterize. Both surfaces are NEW canvases, never repainted in place: the snapshot
-// on top of the undo stack holds the old img/mask BY REFERENCE (see detachPaintSurface), so
-// mutating them would rewrite history as well as the present.
-function applyMaskToLayer(l) {
-    if (!l || !l.mask || !l.img) return;
-    if (isTextLayer(l)) {
-        setStatus(`「${l.name}」is text — its mask applies live on every draw, and a baked one would be wiped by the next re-render. Rasterize first if you want to bake it in`, 'error');
+// chip 右键的 Apply:把这**一步**折进图层自己的像素,然后它就离开条带。
+// 为什么只给 index 0:bake 的落点是 `l.img`,而"这一枚画在什么之上"等于它左边那些步骤的结果 ——
+// 前面还挂着东西时把它烘进像素,等于替左边那几步做了它们没被要求的事。所以要 bake 就从左往右一路 Apply,
+// 或者把这颗 chip 拖到最左边。
+// 单向,跟 Rasterize 同一类命令:进了像素就回不去。写的是**新画布**,绝不在原地改 —— undo 栈顶那份
+// 快照还按引用攥着旧的 img。共享的那枚面也不动别层:removeAttr 只摘本层这一条引用。
+function applyAttrToLayer(l, r) {
+    if (!l || !r || !l.img) return;
+    const label = ATTR_TYPES[r.type].label;
+    const i = attrRefList(l).indexOf(r.id);
+    if (i !== 0) {
+        setStatus(`Apply ${label} — it runs as step ${i + 1}, so its pixels are not what「${l.name}」draws on its own. Apply the steps before it first, or drag this chip to the left.`, 'error');
         return;
     }
-    if (isDirectionLayer(l)) {
-        setStatus(`「${l.name}」is a direction layer — its mask applies live on every draw, and a baked one would be wiped by the next handle drag. Rasterize first if you want to bake it in`, 'error');
+    // 画面每帧重生的层不接受 bake:文字被下一次敲键抹掉、方向被下一次拖把手抹掉、Stash 被下一次抄写抹掉。
+    if (isTextLayer(l) || isDirectionLayer(l) || isStashLayer(l)) {
+        const what = isTextLayer(l) ? 'text' : isDirectionLayer(l) ? 'a direction layer' : 'a Stash layer';
+        const why = isTextLayer(l) ? 'its picture is re-rendered from the descriptor on every draw, so a baked step would be wiped by the next keystroke. Rasterize first if you want it baked in'
+            : isDirectionLayer(l) ? 'its picture is re-rendered from the three angles on every draw, so a baked step would be wiped by the next handle drag. Rasterize first if you want it baked in'
+            : 'its picture is re-copied from the layers under it on every draw, so a baked step would be wiped by the next one. Duplicate the stack below into a plain layer first if you want it baked in';
+        setStatus(`「${l.name}」is ${what} — ${why}`, 'error');
+        return;
+    }
+    const armed = r.chain ? r.chain.filter(e => e && e.enabled) : null;
+    if (armed) {
+        if (!armed.length) { setStatus(`「${l.name}」has no enabled effect — nothing to apply`, 'error'); return; }
+        // 旁路是**视图**开关:链此刻在哪儿都没画,现在 bake 等于删掉一条用户从没见过的链。说明白,不做别的。
+        if (effectsBypass) { setStatus('Apply — the chains are suspended, resume them (⏸ in the Effects panel) first', 'error'); return; }
+    } else if (!r.surface || !r.surface.width || !r.surface.height) {
+        setStatus(`「${l.name}」has nothing on this ${label} — nothing to apply`, 'error');
         return;
     }
     const { w, h } = nativeSize(l.img);
@@ -5940,68 +6105,27 @@ function applyMaskToLayer(l) {
     img.width = w; img.height = h;
     const g = img.getContext('2d');
     g.drawImage(l.img, 0, 0, w, h);
-    g.globalCompositeOperation = 'destination-in';
-    g.drawImage(l.mask, 0, 0, w, h);
-    const mask = document.createElement('canvas');
-    mask.width = w; mask.height = h;
-    const mctx = mask.getContext('2d');
-    mctx.fillStyle = '#fff';
-    mctx.fillRect(0, 0, w, h);
+    if (armed) {
+        // 这一枚在最左边 = 它左边没有蒙版,silhouette 是纯白 (mask: null 而不是去读老名字那一张)。
+        // 链跑不动就整步不动、原因留在 fxgl.skip:宁可什么都不发生,也不要"链没了但画面没变"。
+        if (!applyLayerEffects(l, img, { rec: r, mask: null })) {
+            setStatus(`Apply ${label} — ${fxgl.skip || 'the chain could not be run'}`, 'error');
+            return;
+        }
+    } else {
+        // 蒙版的覆盖度存在它自己的 ALPHA 里,所以 destination-in 正是显示时那一刀的逆;贴片是普通叠色。
+        g.globalCompositeOperation = r.type === 'mask' ? 'destination-in' : 'source-over';
+        g.drawImage(r.surface, 0, 0, w, h);
+        g.globalCompositeOperation = 'source-over';
+    }
     l.img = img;
     l.src = img.toDataURL('image/png');
-    l.mask = mask;
+    removeAttr(l, r.id);
+    if (paintRef === r.id) paintRef = null;
     layoutCanvas();
     renderLayerList();
     render();
-    setStatus(`「${l.name}」mask applied — the hidden area is transparent now, the mask is clear again`, 'success');
-    pushHistory();
-}
-
-// Right-click "Apply Effect": the chain stops being a live description and becomes the layer's own
-// pixels, at its OWN resolution — the box on canvas, the transform and the mask all stay exactly as
-// they are, because only the buffer underneath them changes. What gets baked is precisely what
-// fxResolved() hands the composite (img + decal + chain, before the mask cuts), so the pixels the
-// menu promises are the pixels on screen rather than a second approximation of them — and that is
-// also why the decal folds in: the chain runs on the decal-topped picture, so keeping the decal live
-// on top of a bake that already contains it would draw it twice.
-// One-way, like Apply Mask and Rasterize. The buffer is a NEW canvas and the resolved surface is
-// never adopted: the snapshot on top of the undo stack holds the old img BY REFERENCE, and
-// fxResolved's own result is a surface its cache owns and repaints in place on the next stroke.
-function applyEffectsToLayer(l) {
-    if (!l || !layerTakesEffects(l)) return;
-    if (isTextLayer(l)) {
-        setStatus(`「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize first if you want to bake it in`, 'error');
-        return;
-    }
-    if (!l.img) { setStatus(`「${l.name}」has no picture for its chain to run on`, 'error'); return; }
-    const armed = (l.effects || []).filter(e => e && e.enabled);
-    if (!armed.length) { setStatus(`「${l.name}」has no enabled effect — nothing to apply`, 'error'); return; }
-    // The bypass is a VIEW switch: with it on, the chain is drawn nowhere, so baking now would clear
-    // a chain the user has never seen applied. Say so instead of doing something else.
-    if (effectsBypass) { setStatus('Apply Effect — the chains are suspended, resume them (⏸ in the Effects panel) first', 'error'); return; }
-    const { w, h } = nativeSize(l.img);
-    const img = document.createElement('canvas');
-    img.width = w; img.height = h;
-    const g = img.getContext('2d');
-    g.drawImage(l.img, 0, 0, w, h);
-    if (l.decal) g.drawImage(l.decal, 0, 0, w, h);
-    // It runs the whole chain IN PLACE and returns false without touching the surface when it cannot
-    // (no WebGL2, over the texture limit), the reason left in fxgl.skip. Nothing is cleared on that
-    // path — the chain stays live rather than silently vanishing.
-    if (!applyLayerEffects(l, img)) {
-        setStatus(`Apply Effect — ${fxgl.skip || 'the chain could not be run'}`, 'error');
-        return;
-    }
-    const hadDecal = !!l.decal;
-    l.img = img;
-    l.src = img.toDataURL('image/png');
-    l.decal = null;
-    l.effects = [];
-    l.fxCache = null;
-    layoutCanvas();
-    renderLayerList();
-    render();
-    setStatus(`「${l.name}」effects applied — ${armed.length} baked into its pixels${hadDecal ? ', its decal folded in' : ''}, the chain is clear again`, 'success');
+    setStatus(`「${l.name}」— ${armed ? `${armed.length} effect${armed.length === 1 ? '' : 's'} baked into its pixels` : `its ${label.toLowerCase()} baked into its pixels`}, that step is off the strip now`, 'success');
     pushHistory();
 }
 
@@ -6013,7 +6137,7 @@ function applyEffectsToLayer(l) {
 // does, so a rotated or squashed layer fits correctly for free.
 // Ink the mask hides OUTSIDE the box is dropped along with the crop; the mask comes along cropped
 // rather than being reset to white, so partial coverage INSIDE the box is unchanged.
-// Every surface is a NEW canvas (like applyMaskToLayer): the undo snapshot holds the old img/mask/
+// Every surface is a NEW canvas (like applyAttrToLayer): the undo snapshot holds the old img/mask/
 // decal by reference, so nothing here may repaint them in place.
 // `opts.silent` is for the automatic path (Enable Fit at the end of a layer Generate): the caller
 // owns the status line, the re-render and the single pushHistory() of its own action, so this
@@ -6070,8 +6194,6 @@ function fitLayerToMask(l, opts) {
         layoutCanvas();
         renderLayerList();
         render();
-        refreshMaskThumb(l);
-        refreshDecalThumb(l);
         setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, the mask came along`, 'success');
         pushHistory();
     }
@@ -6230,14 +6352,15 @@ function syncPaintUI() {
     document.getElementById('maskDecalName').textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
     const target = decal ? 'the decal' : 'the mask';
     // Each key names a fixed destination (Tab = the decal, ` = the mask), so one sentence serves both
-    // readings: neither key means "whatever is on the other side" the way a toggle key would.
-    const keyNote = 'Tab paints the decal, ` paints the mask';
+    // readings: neither key means "whatever is on the other side" the way a toggle key would. A kind
+    // can carry several attributes now, so the sentence has to say WHICH one the key lands on.
+    const keyNote = 'Tab paints the last Decal step, ` the last Mask step';
     const selNote = hasSelection() ? ' A selection is live: it clips this tool, so nothing lands outside the ants.' : '';
     maskDecalLabel.title = maskLayerSel
         ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer. It has one surface, so neither Tab nor ` has anywhere to put it.'
         : decal
-        ? `Paint the decal (${keyNote}): colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.`
-        : `Paint the mask (coverage) (${keyNote}): white shows the image, black hides it. The Color’s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask / Decal thumbs in the Layers list are the same switch.`;
+        ? `Paint the decal (${keyNote}): colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Decal chips on this layer's strip are the same switch, and clicking one names WHICH decal the brush lands on.`
+        : `Paint the mask (coverage) (${keyNote}): white shows the image, black hides it. The Color’s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask chips on this layer's strip are the same switch, and clicking one names WHICH mask the brush lands on.`;
     brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
     updateCursorMode();
@@ -7121,36 +7244,39 @@ function cancelExpand() {
 }
 
 // ==================== 蒙版 / Decal ====================
-// Masks and decals are stored at the layer's native resolution and are cut out before the
-// transform, so scaling/rotating a layer moves them with it. A decal is a separate colour
-// surface painted on top of the image; the mask then cuts both.
-// The mask starts OPAQUE WHITE — a fresh layer's mask IS the full mask (coverage starts at 1
-// everywhere), so the first brush stroke adds to a full mask instead of replacing "implicitly
-// everything" with "just the stroke". Erasing carves it down; painting fills it back in.
-// (This reverses the earlier empty-canvas rule, which existed only because the old Generate
-// gate scanned pixels and read a white canvas as "already masked". The gate is
-// layerMaskIsMeaningful() now — it never looks at pixels, so the pre-fill is safe.)
+// 两面都存成图层自身分辨率的画布,合成时才被裁进盒子 (见 fx/gl.js 的条带折叠)。
+// 落笔的面住在 attribute 记录里,所以"要画哪一枚"先定,再谈它有没有面 —— 造面只此一个口子。
+// 点过 chip 就认那颗 chip 那枚 (还得真挂在这层上,换层之后旧点名一律作废);按键武装时没有点名,
+// 落在**这一种最右那枚**上 = 执行序的最后一步。一枚都没有时 `create` 当场追加一枚:开始画本身就等于装上这一步。
+function paintRecord(l, type, create) {
+    if (!l || l.isMaskLayer) return null;
+    const kind = type || paintTarget;
+    const named = attrRecord(paintRef);
+    if (named && named.type === kind && attrRefList(l).indexOf(named.id) >= 0) return named;
+    return lastAttr(l, kind) || (create ? insertAttr(l, kind, 'tail') : null);
+}
+
+// 第一张面长什么样是各类型的知识 (蒙版满幅白 = 覆盖从 1 起,贴片留空 = 没画就是透明),所以它住在
+// attr/<type>.js 的 firstFace 里,这里只负责按图层自己的网格把面造出来。
+function ensureAttrFace(l, r) {
+    if (r.surface && r.surface.width && r.surface.height) return r.surface;
+    const { w, h } = nativeSize(l.img);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const spec = ATTR_TYPES[r.type];
+    if (spec.firstFace) spec.firstFace(c.getContext('2d'), w, h);
+    r.surface = c;
+    return c;
+}
+
 function ensureMask(l) {
-    if (!l.mask) {
-        const { w, h } = nativeSize(l.img);
-        const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        const ctx = c.getContext('2d');
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(0, 0, w, h);
-        l.mask = c;
-    }
-    return l.mask;
+    const r = paintRecord(l, 'mask', true);
+    return r ? ensureAttrFace(l, r) : null;
 }
 
 function ensureDecal(l) {
-    if (!l.decal) {
-        const { w, h } = nativeSize(l.img);
-        const c = document.createElement('canvas');
-        c.width = w; c.height = h;
-        l.decal = c;
-    }
-    return l.decal;
+    const r = paintRecord(l, 'decal', true);
+    return r ? ensureAttrFace(l, r) : null;
 }
 
 // What the tools paint right now (and the surface a stroke composites into).
@@ -7158,34 +7284,45 @@ function ensureDecal(l) {
 // so paintTarget keeps its value and switching back to a real layer behaves as before.
 const isDecalTarget = () => paintTarget === 'decal';
 
-// One entry for the switch the two Layers thumbs and the Tab key all make: pick the surface, arm
-// the paint mode on that layer, then let the two dependent reads (the chip outlines in the list,
-// the target wording in the tooltips) re-derive from it.
-function setPaintTarget(which, l) {
+// One entry for the switch the strip's chips and the Tab/` keys all make: pick the surface (and,
+// from a chip, WHICH one of that kind), arm the paint mode on that layer, then let the two
+// dependent reads (the chip outlines in the list, the target wording in the tooltips) re-derive.
+// A key press hands no ref — that is the rule the keys answer to: they arm the RIGHTMOST attribute
+// of that kind, i.e. the last step this layer takes, never the one clicked minutes ago.
+function setPaintTarget(which, l, ref) {
     paintTarget = which;
+    paintRef = ref || null;
     selectLayer(l.id, 'mask');
     renderLayerList();          // repaint the chip outlines even when the layer was already selected
     syncPaintUI();
 }
 function ensurePaintSurface(l) {
     if (isMaskLayerTarget()) return ensureMaskLayer();
-    return isDecalTarget() ? ensureDecal(l) : ensureMask(l);
+    const r = paintRecord(l, paintTarget, true);
+    return r ? ensureAttrFace(l, r) : null;
+}
+function paintRecordOf(l) {
+    if (isMaskLayerTarget()) return null;
+    return paintRecord(l, paintTarget, false);
 }
 function paintSurface(l) {
     if (isMaskLayerTarget()) return maskLayer.decal;
-    return isDecalTarget() ? l.decal : l.mask;
+    const r = paintRecordOf(l);
+    return r ? r.surface : null;
 }
 function paintSurfaceCtx(l) {
-    if (isMaskLayerTarget()) return maskLayer.decalCtx;
-    return isDecalTarget() ? l.decalCtx : l.maskCtx;
+    const s = paintSurface(l);
+    return s ? s.getContext('2d') : null;
 }
 // A stroke or a flood rewrites the surface canvas IN PLACE, which the effect chain's cache cannot
 // see (its key is surface identity, which only changes at detach). The generation counter is how the
-// paint path says "same object, different pixels" — see fxResolved. The Mask layer owns its own
-// coverage canvas, so a Ctrl-draw onto it invalidates that layer, not the selected one.
+// paint path says "same object, different pixels" — see fxResolved. It sits on the ATTRIBUTE record,
+// not on the layer: a shared face that another layer just painted has to dirty this layer's fold too,
+// and the layer's own counter cannot know that. The Mask layer owns its single coverage canvas, so a
+// Ctrl-draw onto it invalidates that layer, not the selected one.
 function markPainted(l) {
-    const owner = isMaskLayerTarget() ? maskLayer : l;
-    owner.paintGen = (owner.paintGen | 0) + 1;
+    if (isMaskLayerTarget()) { maskLayer.paintGen = (maskLayer.paintGen | 0) + 1; return; }
+    markAttrPainted(paintRecord(l, paintTarget, true));
 }
 
 function invertMask(l) {
@@ -7459,7 +7596,8 @@ function livePreviewStroke() {
     }
     if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
-    if (isDecalTarget()) refreshDecalThumb(l); else refreshMaskThumb(l);
+    if (isMaskLayerTarget()) refreshMaskLayerThumb();
+    else refreshAttrChips(l, isDecalTarget() ? 'decal' : 'mask');
     render();
 }
 
@@ -7467,7 +7605,7 @@ function commitStroke() {
     previewQueued = false;         // this call draws the finished stroke itself
     livePreviewStroke();
     const l = getSelected();
-    if (l) { refreshMaskThumb(l); refreshDecalThumb(l); }
+    if (l) refreshAttrChips(l);
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
     pushHistory();               // one stroke = one undo step (also clears any old anchor)
@@ -7583,8 +7721,7 @@ function bucketFillAt(pos) {
     markPainted(l);
     pushHistory();
     if (isMaskLayerTarget()) refreshMaskLayerThumb();
-    else if (toMask) refreshMaskThumb(l);
-    else refreshDecalThumb(l);
+    else refreshAttrChips(l, toMask ? 'mask' : 'decal');
     syncPaintUI();
     render();
     setStatus(`Bucket — filled ${(count - skipped).toLocaleString()} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`
@@ -8608,8 +8745,6 @@ function addSurfaceLayer(opts) {
         // 蒙版交给 strip:这里只是"这张层生下来就带一份覆盖图"的入口,立记录的是 attachAttrView 里的
         // 迁移那一步 (见 attr/core.js),它按 opts.mask 有没有内容决定装不装 Mask attribute。
         mask: opts.mask || null,
-        maskThumbEl: null,
-        decalThumbEl: null,
         canvasThumbEl: null,
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
@@ -8706,7 +8841,6 @@ function addTextLayer(box) {
         text: desc,
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        maskThumbEl: null, decalThumbEl: null,
         canvasThumbEl: null,
         fxCache: null,
         stack: WORK_STACK,
@@ -8755,7 +8889,6 @@ function addDirectionLayer(box) {
         dirCache: null,
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        maskThumbEl: null, decalThumbEl: null,
         canvasThumbEl: null,
         fxCache: null,
         stack: WORK_STACK,
@@ -9647,31 +9780,6 @@ function openLayerMenu(l, clientX, clientY) {
             openFxModal(l.id);
         });
         menu.appendChild(fx);
-
-        // Apply Effect: the counterpart of the entry above — it takes the chain that runs on every
-        // draw and turns it into the layer's own pixels, once. Offered to the same layers that can
-        // carry a chain, which excludes the Mask overlay (layerTakesEffects) and, like Apply Mask,
-        // text layers, whose picture is re-rendered from a descriptor on every draw.
-        const armed = (l.effects || []).filter(e => e && e.enabled).length;
-        const bake = document.createElement('button');
-        bake.className = 'layer-menu-item';
-        bake.type = 'button';
-        bake.setAttribute('role', 'menuitem');
-        bake.textContent = 'Apply Effect';
-        bake.disabled = !armed || !l.img || isTextLayer(l) || isDirectionLayer(l) || isStashLayer(l) || effectsBypass;
-        bake.title = !armed ? `「${l.name}」has no enabled effect — nothing to bake in`
-            : !l.img ? `「${l.name}」has no picture yet — the chain has nothing to run on`
-            : isTextLayer(l) ? `「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize the layer first if you want to bake it in.`
-                : isDirectionLayer(l) ? `「${l.name}」is a direction layer — its picture is re-rendered from the three angles on every draw, so a baked chain would be wiped by the next handle drag. Rasterize the layer first if you want to bake it in.`
-                : isStashLayer(l) ? `「${l.name}」is a Stash — its picture is re-copied from the layers under it on every draw, so a baked chain would be wiped by the next one. Duplicate the stack below into a plain layer first if you want it baked in.`
-                : effectsBypass ? 'The effect chains are suspended (the ⏸ in the Effects panel) — resume them first: applying now would drop the chain without ever drawing it.'
-                : `Bake「${l.name}」's ${armed} effect${armed === 1 ? '' : 's'} into its own pixels at its own resolution — the placement and the mask stay exactly as they are. Its decal folds in too (the chain runs on the decal-topped picture), and the chain is removed after. One-way${isCudLayer(l) ? '; a later Refresh from file repaints these pixels from the linked file' : ''}.`;
-        bake.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            applyEffectsToLayer(l);
-        });
-        menu.appendChild(bake);
     }
 
     // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
@@ -9753,26 +9861,9 @@ function openLayerMenu(l, clientX, clientY) {
     });
     menu.appendChild(dup);
 
-    // Apply Mask: bake this layer's own mask into its pixels, then clear the mask. One-way — the
-    // mask surface cannot tell you afterwards what it hid.
-    const applyMask = document.createElement('button');
-    applyMask.className = 'layer-menu-item';
-    applyMask.type = 'button';
-    applyMask.setAttribute('role', 'menuitem');
-    applyMask.textContent = 'Apply Mask';
-    // A text layer's pixels are re-rendered from its descriptor on every draw, so a baked mask
-    // would evaporate on the next keystroke — the mask stays a live multiplier there.
-    applyMask.disabled = !l.mask || isTextLayer(l) || isDirectionLayer(l);
-    applyMask.title = !l.mask ? `「${l.name}」has no mask yet — the whole layer is already covered, nothing to apply`
-        : isTextLayer(l) ? `「${l.name}」is text — its mask already applies live, and a baked one would be wiped by the next re-render. Rasterize the layer first if you want to bake it in.`
-        : isDirectionLayer(l) ? `「${l.name}」is a direction layer — its mask already applies live, and a baked one would be wiped by the next handle drag. Rasterize the layer first if you want to bake it in.`
-        : `Bake「${l.name}」's mask into its own pixels: what it hides becomes real transparency, then the mask resets to pure white (whole layer). One-way.`;
-    applyMask.addEventListener('click', ev => {
-        ev.stopPropagation();
-        closeLayerMenu();
-        applyMaskToLayer(l);
-    });
-    menu.appendChild(applyMask);
+    // No Apply entry here any more: applying is a per-attribute command, and its one visible entry
+    // is the chip's own right-click menu (see openAttrMenu). A row-level "Apply Mask" would read
+    // only the leftmost Mask and silently disagree with the strip.
 
     // A cud row gets its own two entries: pull the saved file back in, or hand the row a document
     // again after a reload broke the link. Opening the project is not here — the row's own button
@@ -10882,15 +10973,16 @@ window.addEventListener('keydown', e => {
     if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); swapPaintColors(); return; }
     // Each key names the surface it lands on: Tab is always the decal, ` is always the mask. Neither
     // flips, so a press means the same thing from every mode — nothing painted yet, Transform, a
-    // marquee, or mid-stroke on the other surface. One entry with the two Layers thumbs; and since a
-    // press lights no chip, the status line says which surface is live now.
+    // marquee, or mid-stroke on the other surface. One entry with the strip's chips; and because a
+    // kind can carry several attributes, a press carries no ref — it lands on the RIGHTMOST one of
+    // that kind, i.e. this layer's last step, which is the one a key is meant to repeat.
     if ((e.key === 'Tab' || e.key === '`') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (modalOpen()) return;             // a modal keeps its own focus traversal
         e.preventDefault();
         if (!l) { setStatus('No layer selected to paint', 'error'); return; }
         if (isMaskLayerTarget()) { setStatus('The Mask layer has one surface — neither key does anything here', 'error'); return; }
-        setPaintTarget(e.key === 'Tab' ? 'decal' : 'mask', l);
-        setStatus(isDecalTarget() ? 'Paint target — the decal' : 'Paint target — the mask');
+        setPaintTarget(e.key === 'Tab' ? 'decal' : 'mask', l, null);
+        setStatus(isDecalTarget() ? 'Paint target — the last Decal step' : 'Paint target — the last Mask step');
         return;
     }
     // PS's own letters: M is the marquee family, L the lasso family. Both are canvas-level tools,
@@ -11116,7 +11208,7 @@ function blankMaskLayer() {
     return ownSource({
         id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output',
         visible: true, transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        mask: null, maskCtx: null, maskThumbEl: null,
+        mask: null, maskCtx: null,
         decal: null, decalCtx: null, decalThumbEl: null, canvasThumbEl: null,
         // The singleton Mask layer never takes a chain (layerTakesEffects() says so),
         // but it shares the layer object shape so nothing has to special-case it.
@@ -13209,10 +13301,11 @@ function finishProcessorRun(d) {
                     px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = v;
                 }
                 cx.putImageData(data, 0, 0);
-                ensureMask(l);
-                l.maskCtx.clearRect(0, 0, l.mask.width, l.mask.height);
-                l.maskCtx.drawImage(cov, 0, 0);
-                refreshMaskThumb(l);
+                // 交一枚**新**画布给这一枚 attribute,而不是把旧的那张擦干净重画 —— undo 栈顶那份快照
+                // 还按引用攥着它 (见 detachPaintSurface 那套 copy-on-write)。
+                const rec = paintRecord(l, 'mask', true);
+                rec.surface = cov;
+                markAttrPainted(rec);
                 renderLayerList();
                 render();
                 pushHistory();
