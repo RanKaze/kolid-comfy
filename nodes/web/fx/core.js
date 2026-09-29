@@ -2,36 +2,39 @@
 // 一条挂在图层上的特效链,在 decal 之后、蒙版乘法之前执行。三条契约是整个模块的地基:
 //   * footprint-neutral —— 输出的像素尺寸 === 输入,一个像素都不外扩。图层的蒙版是按**自身像素
 //     网格**单独送到后端,并靠 layerCompositeForGenerate 的反解 transform 与图层对齐;外扩一次,
-//     那条对齐就废了。注意这条钉的是**网格**,不是"像素不许长到形状之外":外阴影与 Outside 描边都
-//     是把 alpha 长进同一张网格里本来透明的像素,合法,但一到图层框边就被切掉(PS 能无限往外拖,
-//     这里不能) —— 想要那份余量就把该层自己的网格做大:文字层有 Padding,位图层目前没有旋钮。
+//     那条对齐就废了。注意这条钉的是**网格**,不是"像素不许长到形状之外":外阴影、Outside 描边与锈蚀
+//     的漏色都是把 alpha 长进同一张网格里本来透明的像素,合法,但一到图层框边就被切掉(PS 能无限往外
+//     拖,这里不能) —— 想要那份余量就把该层自己的网格做大:文字层有 Padding,位图层目前没有旋钮。
 //   * alpha 跟着画面走 —— 低通/运动模糊/马赛克把 A 和 RGB 一起滤波(抽样预乘累加、直通色归一,
 //     alpha 输出同一组抽样的均值):对文字这类「形状就是 alpha」的层,不软化不透明度就等于没特效。
 //     出口 alpha 是该层**新的源不透明度**;蒙版仍独立存档,后端 `image * mask` 依旧只乘一次,
-//     不会把软边乘成平方。曲线/色调/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条)。
+//     不会把软边乘成平方。曲线/色调/内阴影/光照/泛光不碰 alpha;外阴影与 Outside 描边会加 alpha(见上一条);
+//     锈蚀则两头都动 —— 把 alpha 咬穿成洞,又在洞的四周长出锈色 (它同时是「重塑不透明度」那一族的一员)。
 //   * 蒙版只当输入读、不当输出用 —— silhouette = 图层 alpha × 蒙版 alpha,特效据此计算,但结果
 //     不裁进输出。所以「阴影只出现在蒙版内的边缘」是这三条的推论,不是一个可以关掉的选项。
-//     外阴影与描边的形状故意**只取图层 alpha**:蒙版链外还要整体乘一次,吃过一遍就成了平方。
+//     外阴影、描边与锈蚀的形状故意**只取图层 alpha**:蒙版链外还要整体乘一次,吃过一遍就成了平方。
 // 计算走 WebGL2:dual-filtering(Kawase)近似低通、沿方向的定长抽样运动模糊、内阴影 = 轮廓偏移
 // + 虚化 + 裁回自身轮廓、描边 = jump flooding 出到自身轮廓的距离场再判 d ≤ Size、
+// 锈蚀 = 形状低通当边缘闸门 × 噪声场定破洞、再把破洞掩码低通成渗色圈、
 // 马赛克 = 折进格心的 3×3 平色块、曲线 = 显示值空间的一张 PS 式点曲线查表、
 // 色调映射 = 线性光上的一张单调响应曲线(Neutral/ACES/Custom)或一张外部查找表、
 // 景深 = 深度图驱动的三档低通按像素混档、光照 = 切线空间法线图上的漫反射 + Blinn-Phong 高光、
-// 体积雾 = 沿视线步进到深度图报出的那个面,逐步按取样点的高度取浓度、前向累进吸收与散射 (朝向 Sun
+// 体积霾 = 沿视线步进到深度图报出的那个面,逐步按取样点的高度取浓度、前向累进吸收与散射 (朝向 Sun
 // 的 Henyey-Greenstein 相位)。
-// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光/体积雾只写 RGB,外阴影与描边加 alpha;三条
-// 契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一换过之后重算一次(见 fxResolved)。
-// 吃外部图的特效(dof / lighting / tone 的 External)在 params 里只存一句 {key, name} 引用:图池 id
-// 或本地池 id,像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
+// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光/体积霾只写 RGB,外阴影与描边加 alpha,锈蚀
+// 既咬穿 alpha 又在破洞四周加 alpha;三条契约对全部特效成立。整链只在图层的 img/decal/mask/参数任一
+// 换过之后重算一次(见 fxResolved)。
+// 吃外部图的特效(dof / lighting / tone 的 External / corrosion 的 Texture)在 params 里只存一句
+// {key, name} 引用:图池 id 或本地池 id,像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
 //
 // 文件切分:本文件只装「链的模型」(注册表容器 + 参数/克隆/签名/旁路)。每类特效自己一个
 // fx/<effect>.js,里面齐活:注册数据 + 着色器 + pass + 子行读数 + picker 缩略图;引擎在 fx/gl.js,
 // 绑定贴图在 fx/maps.js,行/弹窗在 fx/ui.js。加一类特效 = 写一个文件 + 在页面里加一行 <script src>。
 
 // 注册表由 fx/<effect>.js 的 defineEffect() 填。picker 里的顺序 = 注册顺序,所以页面的 <script>
-// 列表按组排 (Shadow → Blur → Pixelate → Color → Light)。字段约定:
+// 列表按组排 (实际注册序:Shadow → Blur → Pixelate → Color → Distort → Grunge → Light)。字段约定:
 //   type/label/group/icon/desc/params —— 注册数据 (参数行、默认值、白名单迁移都读它)
-//   needsMap: 'Depth' | 'Normal' | 'Lookup' —— 主绑定槽 params.map,引擎上传到 fxgl.texMap
+//   needsMap: 'Depth' | 'Normal' | 'Lookup' | 'Noise' —— 主绑定槽 params.map,引擎上传到 fxgl.texMap
 //   needsMapWhen(p) —— 可选:该模式是否真的需要主槽贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
 //   needsMap2: { key, role, optional } —— 第二张外部图 (params[key] → fxgl.texMap2,fxgl.hasMap2 说它
 //     到没到位)。optional 缺省当可缺:主槽缺图整条跳过,副槽缺图照样 run,由特效自己退化。

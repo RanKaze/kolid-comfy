@@ -331,12 +331,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-curve-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .fx-curve-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 .fx-curve-reset svg { width: 14px; height: 14px; }
-/* 色调映射 (fx/tone_map.js):模式一行,下面只铺该模式要用的参数行。 */
-.fx-tone { display: flex; flex-direction: column; gap: 5px; }
-.fx-tone-tail { display: flex; flex-direction: column; gap: 5px; }
-/* 扭曲 (fx/warp.js):同一个 Mode 分段钮铺三种参数;lattice 的把手提示走通用 foot 样式。 */
-.fx-warp { display: flex; flex-direction: column; gap: 5px; }
-.fx-warp-tail { display: flex; flex-direction: column; gap: 5px; }
+/* 靠 Mode 分段钮铺行的那几家 (fx/tone_map.js、fx/warp.js、fx/corrosion.js):模式一行,下面只铺
+   该模式要用的参数行 —— 三种情况版式完全一致,所以规则也只有一条。 */
+.fx-tone, .fx-tone-tail, .fx-warp, .fx-warp-tail, .fx-corrosion, .fx-corrosion-tail { display: flex; flex-direction: column; gap: 5px; }
 .fx-warp-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .fx-warp-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 /* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
@@ -1367,6 +1364,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/curves.js"></script>
 <script src="fx/tone_map.js"></script>
 <script src="fx/warp.js"></script>
+<script src="fx/corrosion.js"></script>
 <script src="fx/dof.js"></script>
 <script src="fx/lighting.js"></script>
 <script src="fx/bloom.js"></script>

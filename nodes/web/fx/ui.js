@@ -72,6 +72,13 @@ function fxIconSvg(icon) {
             + '<path d="M3.1 7.1c2.6-.5 5.3-.6 7.9.1" opacity="0.5"/>'
             + '<circle cx="6.9" cy="7.1" r="1.4" fill="currentColor" stroke="none"/></svg>';
     }
+    if (icon === 'corrosion') {
+        // 一块边被咬出两个缺口的方块,缺口旁各点一颗蚀坑:锈吃的是轮廓,不是整张画面。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">'
+            + '<path d="M2.6 1.9h8.8c.4 0 .7.3.7.7v1.9l-2.3.4.5 1.9-2.1.9.8 1.7-1.9 1.5.6 1.5c.2.4 0 .6-.4.6H2.6c-.4 0-.7-.3-.7-.7V2.6c0-.4.3-.7.7-.7z"/>'
+            + '<circle cx="9.1" cy="8.6" r="0.95" fill="currentColor" stroke="none"/>'
+            + '<circle cx="4.9" cy="5.4" r="0.6" fill="currentColor" stroke="none" opacity="0.7"/></svg>';
+    }
     if (icon === 'light') {
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
             + '<circle cx="7" cy="7" r="2.5"/>'

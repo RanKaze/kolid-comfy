@@ -2,8 +2,8 @@
 // 特效链的执行内核:缓冲/纹理、三份共享着色器、Kawase 低通原语、链的调度与表面缓存。
 // 各类特效的着色器与 pass 不在这里 —— 它们在自己的 fx/<effect>.js 里注册进来 (见 core.js)。
 // 2/3/4 号缓冲是「公共借用区」:silhouette 特效 (内/外阴影) 用它们存形状与虚化,描边用 3/4 做距离场
-// 乒乓、景深与泛光用它们存低通档位 —— 同一条链里这些面每趟都重算,所以互不污染,一套五张缓冲的显存
-// 预算也就不会随特效种类增长。
+// 乒乓、景深与泛光用它们存低通档位、锈蚀在三张之间轮换闸门/噪声场/破洞掩码 —— 同一条链里这些面每趟
+// 都重算,所以互不污染,一套五张缓冲的显存预算也就不会随特效种类增长。
 // 五张离屏缓冲按当前图层尺寸复用:0/1 = 色彩乒乓,2 = silhouette 原样,3/4 = 借用乒乓。
 // 图层之间尺寸通常一致,所以一帧里多个图层走特效也不会反复分配。
 const FX_MAX_PIXELS = 12e6;              // 5 × RGBA16F ≈ 480 MB 的地板,超过就整链跳过并说明原因
@@ -274,11 +274,14 @@ function fxglGauss(dst, srcTex, mid, radius) {
     fxglBox(dst, mid.tex, step * (n - 1), -step, n, false, 1);         // up
 }
 
-function fxglSilGauss(radius) {
+// 借用面 (2/3/4) 之间的 alpha 低通,默认「形状 2 → 中转 3 → 结果 4」:内/外阴影的虚化、描边与锈蚀
+// 的闸门都走这一条。一条链里想把别的中间量也糊一下 (锈蚀糊噪声场、糊破洞掩码) 就点名 src/mid/dst,
+// 不必再写一份近似函数 —— 显存预算还是那五张面。
+function fxglSilGauss(radius, src = 2, mid = 3, dst = 4) {
     const n = fxglKawaseIters(radius);
     const step = (2 * radius) / (n * (n + 1));
-    fxglBox(fxgl.off[3], fxgl.off[2].tex, step, step, n, true, 0);        // down
-    fxglBox(fxgl.off[4], fxgl.off[3].tex, step * (n - 1), -step, n, true, 1);   // up
+    fxglBox(fxgl.off[mid], fxgl.off[src].tex, step, step, n, true, 0);                     // down
+    fxglBox(fxgl.off[dst], fxgl.off[mid].tex, step * (n - 1), -step, n, true, 1);          // up
 }
 
 // 画布坐标(0°=右、90°=下,y 向下增长)→ 纹理 UV(GL 的 y 向上,上传时已翻)。
