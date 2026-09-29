@@ -12,7 +12,7 @@
 // Rise 是给法线图那一路的量纲尺:深度图满幅 = 多少个 px 高,默认 100% 即「满幅深度 ≈ 画面宽」,
 // 那正是归一化深度图(MiDaS/Zoe 那一族)天生的比例。导数那一路里这把尺自己约掉了。
 // 只写 RGB、alpha 原样、不位移、不读蒙版 —— 光照/泛光/体积霾那一族。
-const FX_AO_MAX_DIRS = 16;      // 方向数上界:常数循环上界是 ESSL 的规矩,实际次数由 uDirs 说
+const FX_AO_MAX_DIRS = 32;      // 方向数上界:常数循环上界是 ESSL 的规矩,实际次数由 uDirs 说
 const FX_AO_MAX_RINGS = 4;      // 每个方向走几步的上界 ⇒ 最多 64 次抽样/像素,单趟
 
 const FX_FS_AO = `#version 300 es
@@ -121,11 +121,11 @@ const FX_AO_PARAMS = [
     { key: 'normal', kind: 'map', def: null },
     { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas' },
-    { key: 'radius', label: 'Radius', min: 1, max: 64, step: 1, def: 16, unit: 'px' },
-    { key: 'dirs', label: 'Dirs', min: 4, max: 16, step: 1, def: 8 },
+    { key: 'radius', label: 'Radius', min: 1, max: 256, step: 1, def: 16, unit: 'px' },
+    { key: 'dirs', label: 'Dirs', min: 4, max: 32, step: 1, def: 8 },
     { key: 'rings', label: 'Rings', min: 1, max: 4, step: 1, def: 3 },
     { key: 'rise', label: 'Rise', min: 5, max: 200, step: 5, def: 100, unit: '%' },
-    { key: 'soft', label: 'Soft', min: 0, max: 50, step: 1, def: 15, unit: '%' },
+    { key: 'soft', label: 'Soft', min: 0, max: 100, step: 1, def: 15, unit: '%' },
     { key: 'strength', label: 'AO', min: 0, max: 100, step: 1, def: 60, unit: '%' },
     { key: 'tint', label: 'Tint', kind: 'color', def: '#000000' },
     // 没有法线图时 Green 一个字都不参与计算(斜面是深度导数给的),所以这一行不许挂着当摆设
