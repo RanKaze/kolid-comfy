@@ -111,7 +111,7 @@ defineEffect({
     needsMap: 'Depth',
     desc: 'Marches the view ray from the eye to the surface a bound depth map reports, integrating extinction that thins exponentially with height above Floor and adding in-scatter toward Sun through a Henyey-Greenstein phase. Near pixels march a shorter path, so they clear on their own \u2014 no start/stop band to fake. Steps is the march\u0027s sample count. Colour only: alpha untouched, nothing moves.',
     params: [
-        { key: 'map', label: 'Map', kind: 'map', def: null },
+        { key: 'map', kind: 'map', def: null },
         { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
         { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas' },
         { key: 'reach', label: 'Reach', min: 1, max: 100, step: 1, def: 60, unit: '%' },

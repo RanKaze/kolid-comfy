@@ -26,7 +26,7 @@ const FX_TONE_PARAMS = [
     { key: 'shoulderLength', label: 'Shldr Len', min: 0, max: 50, step: 1, def: 30, unit: '%', when: p => p.mode === 'custom' },
     { key: 'shoulderAngle', label: 'Shldr Ang', min: 0, max: 45, step: 1, def: 20, unit: '°', when: p => p.mode === 'custom' },
     { key: 'gamma', label: 'Gamma', min: 0.2, max: 3, step: 0.05, def: 1, unit: '×', when: p => p.mode === 'custom' },
-    { key: 'map', label: 'Lookup', kind: 'map', def: null, when: p => p.mode === 'external' },
+    { key: 'map', kind: 'map', def: null, when: p => p.mode === 'external' },
     { key: 'mapping', label: 'Mapping', kind: 'enum', options: ['auto', 'strip', 'tile'], def: 'auto', when: p => p.mode === 'external' },
     { key: 'contribution', label: 'Contribution', min: 0, max: 100, step: 1, def: 100, unit: '%', when: p => p.mode === 'external' },
 ];

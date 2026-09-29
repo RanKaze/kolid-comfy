@@ -467,8 +467,8 @@ const WARP_PARAMS = [
     { key: 'octaves', label: 'Oct', min: 1, max: 4, step: 1, def: 2, when: p => p.mode === 'Noise' },
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0, when: p => p.mode === 'Noise' },
     { key: 'lattice', label: 'Grid', def: null, when: p => p.mode === 'Lattice' },
-    { key: 'map', label: 'Depth', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
-    { key: 'normal', label: 'Normal', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
+    { key: 'map', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
+    { key: 'normal', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Geometry' },
     { key: 'dir', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '\u00b0', when: p => p.mode === 'Geometry' },
     { key: 'shift', label: 'Slide', min: 0, max: 128, step: 1, def: 0, unit: 'px', when: p => p.mode === 'Geometry' },
@@ -601,8 +601,8 @@ defineEffect({
         // 两张绑图都要在可见文本里报出来:法线图缺了不是错误,但「它在退化成二分」必须看得见。
         // 视线两份成分也都要报:s 是共享的那支斜视、b 是发散的张开,只报一颗的话另一颗被调了画面
         // 变了读数却不动。
-        const nrm = fxMapRef(effect, 'normal') ? fxMapShort(effect, 'normal') : 'no normal';
-        return `${fxMapShort(effect)} + ${nrm}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}  b${n(p.bulge)}${p.anchor === 'near' ? '  near' : ''}`;
+        // 缺的是哪一张由 fxMapShort 按槽的角色报 (no depth / no normal),这里不再自己补字。
+        return `${fxMapShort(effect)} + ${fxMapShort(effect, 'normal')}  ${p.align === 'Local' ? 'local' : 'canvas'}  ${p.dir | 0}\u00b0  s${n(p.shift)}  b${n(p.bulge)}${p.anchor === 'near' ? '  near' : ''}`;
     },
     thumb(g, box) {
         // 一格被按下去一角的方格网:虚线是格子原来占的框,实线是网格拖成什么样。

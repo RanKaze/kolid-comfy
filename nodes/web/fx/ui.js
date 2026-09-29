@@ -257,8 +257,14 @@ function fxParamsEl(l, effect, spec, syncRead, updaters) {
 function fxControlRow(l, effect, def, syncRead, updaters) {
     const row = document.createElement('div');
     row.className = 'control-row';
+    // 贴图那一行叫什么不写死在控件数据里:这行的 key 去问注册表 (needsMap / needsMap2.role),
+    // 答出来的是「Depth」「Normal」「Noise」「Lookup」—— 一颗写着 "Map" 的按钮等于没回答
+    // 「我该喂哪张图」。同一个 slot 下面还要用一次 (清除按钮的 title、按钮上的提示)。
+    const mapSlot = def.kind === 'map'
+        ? (fxMapSlots(effect).find(s => s.key === def.key) || { key: def.key, role: 'Map' })
+        : null;
     const label = document.createElement('label');
-    label.textContent = def.label;
+    label.textContent = mapSlot ? mapSlot.role : def.label;
     row.appendChild(label);
     const get = () => {
         const v = effect.params && effect.params[def.key];
@@ -309,11 +315,11 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
         return row;
     }
     if (def.kind === 'map') {
-        // 这一行绑的是一张外部图(深度 / 法线)。哪个槽由这行自己的 key 说 —— 一条特效可以占两个槽
-        // (几何 warp 读「深度 + 法线」),两行长得一模一样、各写各的 params[def.key]。
+        // 这一行绑的是一张外部图,种类已经写进行首那个 label 上 (上面那次查表)。一条特效可以占两个
+        // 槽 (几何 warp 读「深度 + 法线」),两行长得一模一样、各写各的 params[def.key]。
         // 名字直接写在按钮上 = 可见文本,不塞 tooltip;解析不到像素时按钮转红,链上也会写出跳过
         // 原因 —— 静默降级是最难发现的那种 bug。
-        const slot = (fxMapSlots(effect).find(s => s.key === def.key)) || { key: def.key, role: def.label };
+        const slot = mapSlot;
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'fx-map-btn';
@@ -328,7 +334,8 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
             btn.textContent = ref ? fxMapShort(effect, slot.key) : 'not bound';
             btn.classList.toggle('unset', !ref);
             btn.classList.toggle('gone', !!ref && !fxMapSource(ref));
-            btn.title = ref ? `${slot.role}: ${ref.name || ref.key} — click to pick another`
+            // 按钮上那截名字被截断过,所以 title 补全名 —— 行首已经写着这张图的种类,不必再说一遍。
+            btn.title = ref ? `${ref.name || ref.key} — click to pick another`
                 : `Pick a ${slot.role.toLowerCase()} map${slot.optional ? ' (optional)' : ''}`;
             clr.style.display = ref ? '' : 'none';
         };
@@ -480,13 +487,12 @@ function bindFxMap(ref) {
     const e = l && effectById(l, t.effectId);
     if (!e) return;
     const slot = t.slot || 'map';
-    const role = ((fxMapSlots(e).find(s => s.key === slot)) || { role: 'map' }).role;
     // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,槽对象在 undo 快照之间是共享的。
     e.params[slot] = ref;
     closeFxMapModal();
     fxStructuralChange(l);
-    setStatus(ref ? `Bound「${ref.name}」as the ${role.toLowerCase()} map`
-        : `Unbound the ${role.toLowerCase()} map`, 'success');
+    setStatus(ref ? `Bound「${ref.name}」as the ${fxMapRole(e, slot)} map`
+        : `Unbound the ${fxMapRole(e, slot)} map`, 'success');
 }
 
 function fxMapCardGroup(title, items) {

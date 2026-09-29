@@ -339,13 +339,15 @@ function applyLayerEffects(l, surface, opts) {
             const img = fxMapImage(ref);
             if (!img) {
                 if (slot.optional) continue;
-                const nm = slot.key === 'map' ? 'map' : `${slot.role.toLowerCase()} map`;
+                // 说的是哪一张图 = 注册表里那个角色。泛写 "map" 在占两个槽的特效上说不清缺的是深度
+                // 还是法线,而这条原因就写在链上,是用户唯一的线索。
+                const nm = `${slot.role.toLowerCase()} map`;
                 mapMiss = `${spec.label}: ${ref ? `${nm} not ready` : `no ${nm} bound`}`;
                 break;
             }
             const n = nativeSize(img);
             if (n.w > fxgl.maxTex || n.h > fxgl.maxTex) {
-                mapMiss = `${spec.label}: map is ${n.w}×${n.h}, over the texture limit`;
+                mapMiss = `${spec.label}: ${slot.role.toLowerCase()} map is ${n.w}×${n.h}, over the texture limit`;
                 break;
             }
             fxglUploadCanvas(slot.key === 'map' ? fxgl.texMap : fxgl.texMap2, img);
