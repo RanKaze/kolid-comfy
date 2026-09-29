@@ -369,9 +369,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-curve-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .fx-curve-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 .fx-curve-reset svg { width: 14px; height: 14px; }
-/* 靠 Mode 分段钮铺行的那几家 (fx/tone_map.js、fx/warp.js、fx/corrosion.js、fx/chromatic_aberration.js):
+/* 靠 Mode 分段钮铺行的那几家 (fx/tone_map.js、fx/warp.js、fx/corrosion.js、fx/chromatic_aberration.js、
+   fx/pixel_sort.js、fx/data_bend.js、fx/rgb_split.js):
    模式一行,下面只铺该模式要用的参数行 —— 四种情况版式完全一致,所以规则也只有一条。 */
-.fx-tone, .fx-tone-tail, .fx-warp, .fx-warp-tail, .fx-corrosion, .fx-corrosion-tail, .fx-chroma, .fx-chroma-tail { display: flex; flex-direction: column; gap: 5px; }
+.fx-tone, .fx-tone-tail, .fx-warp, .fx-warp-tail, .fx-corrosion, .fx-corrosion-tail, .fx-chroma, .fx-chroma-tail,
+.fx-sort, .fx-sort-tail, .fx-bend, .fx-bend-tail, .fx-split, .fx-split-tail { display: flex; flex-direction: column; gap: 5px; }
 .fx-warp-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .fx-warp-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
 /* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
@@ -1470,6 +1472,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="fx/ao.js"></script>
 <script src="fx/bloom.js"></script>
 <script src="fx/volumetric_fog.js"></script>
+<script src="fx/pixel_sort.js"></script>
+<script src="fx/data_bend.js"></script>
+<script src="fx/rgb_split.js"></script>
 <script src="fx/ui.js"></script>
 
 <!-- 3D 图层的引擎: three.js + FBX/glTF/OBJ 加载器 + TransformControls 打成的一个离线包,
