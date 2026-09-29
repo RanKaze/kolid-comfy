@@ -238,7 +238,10 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.cud { color: #8be3b6; }
 .layer-type-badge.cud.unlinked { color: #ff9d5c; }
 .layer-type-badge.text { color: #d9b8ff; }
+.layer-type-badge.direction { color: #ff9ec4; }
 .layer-type-badge.model { color: #7ee0d0; }
+/* Direction 小窗里那颗轨道球: 深色底才压得住 magenta/cyan 那三条轨道, 高度与 JS 里的 DIR_GIZMO_H 一致。 */
+#dirGizmo { display: block; width: 100%; height: 176px; background: #0b0d14; border: 1px solid #2a2f3d; border-radius: 6px; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -943,6 +946,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
             </div>
+            <!-- Direction 工具: 图层自己的像素就是这颗轨道球 (地平环 + 仰角弧 + 箭头 + 滚转环),
+                 小窗画的是同一次绘制的结果, 只多三颗可拖的把手 —— 拖到的就是烘进去的。
+                 选中的不是 Direction 层时整颗转暗, 那本身就是"没人在编辑"的话, 不再占一行说明。 -->
+            <div class="panel-section tool-section foldable collapsed" id="directionSection">
+                <div class="panel-head">
+                    <div class="panel-label" id="dirLabel" title="Direction (D) — a layer whose picture IS this orientation gizmo. Drag the ring handle for Yaw (0° right, 90° down — the same reading as the lighting Angle), the tip for Pitch (0 = grazing the canvas plane, 90 = straight at the camera), the fin for Roll. Shift snaps to 15°. Click the header to open or close its settings window."><span class="fold-caret"></span>Direction <span class="tool-key">D</span></div>
+                </div>
+                <div class="tool-body">
+                    <canvas id="dirGizmo" width="288" height="176"></canvas>
+                    <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The arrow's own colour — the ring, arc and fin keep theirs"><span id="dirColorValue">#FF2E88</span></div>
+                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Point this layer back at the default orientation (135° yaw, 25° pitch, no roll)">Default</button><span></span></div>
+                </div>
+            </div>
             <!-- The Detector section only exists when the node's detector input is actually
                  connected (blend-config's hasDetector): the tool has nothing to do otherwise, so
                  it ships hidden and the config is what unfolds it. The prompt speaks the mask
@@ -1164,6 +1180,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-title">Text Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas — the text fills that box.</span>
                         </button>
+                        <button class="io-menu-item" id="addDirectionLayerBtn" role="menuitem"
+                                title="Drag a rectangle on the canvas — the layer's picture is an orientation gizmo (ring, arc, arrow) drawn at whatever size that box is. Its three handles live in the Direction tool window (D).">
+                            <span class="io-menu-title">Direction Layer</span>
+                            <span class="io-menu-sub">Drag a rectangle on the canvas — an arrow you point by dragging its handles.</span>
+                        </button>
                         <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
                             <span class="io-menu-title">Cud Project</span>
@@ -1380,6 +1401,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="js/scene3d_core.js"></script>
 <script src="js/scene3d_view.js"></script>
 <script src="js/scene3d_panel.js"></script>
+<!-- Direction 图层: 姿态数学 + 那一次绘制 (图层像素与工具小窗共用) + 把手交互。
+     它只在运行时调页面本体的 render/pushHistory/getLayer, 加载时一个都不碰。 -->
+<script src="js/direction.js"></script>
 
 <script>
 const canvasArea = document.getElementById('canvasArea');
@@ -1841,6 +1865,9 @@ function rasterizeLayer(l) {
     // and nothing re-sharpens it any more (PS "Rasterize Type").
     l.text = null;
     l.textCache = null;
+    // 方向层同理: 箭头烘进画布像素之后, 那三颗把手就没有东西可指了 (它不再是"一个朝向")。
+    l.dir = null;
+    l.dirCache = null;
     return true;
 }
 
@@ -2204,6 +2231,9 @@ function textFontLabel(stack) {
 }
 
 function isTextLayer(l) { return !!l && !!l.text && !l.isMaskLayer; }
+// A Direction layer is the same kind of animal as a text layer: a descriptor owns the picture, the
+// buffer is re-rendered from it at whatever size the box is, and the file stores the descriptor.
+function isDirectionLayer(l) { return !!l && !!l.dir && !l.isMaskLayer; }
 // Which layer's editor is open right now (null = none). Declared with the model: applyView and
 // drawOverlay consult it, and a `let` may not be read before its declaration has run.
 let textEditingId = null;
@@ -2587,9 +2617,10 @@ function noiseImageForGenerate(l) {
 function layerSourceForGenerate(l) {
     if (!l.img) return null;
     if (isTextLayer(l)) syncTextBuffer(l);
+    else if (isDirectionLayer(l)) syncDirectionBuffer(l);
     // Rendered text carries no `src`, but it is not a blank surface either: the pixels the
     // detailer sees ARE the glyphs (+ the decal), not noise. An EMPTY text layer stays blank.
-    const textInk = isTextLayer(l) && !!String(l.text.content);
+    const textInk = (isTextLayer(l) && !!String(l.text.content)) || isDirectionLayer(l);
     // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
     if (!hasLayerImage(l) && !textInk) return noiseImageForGenerate(l);
     // 特效链一旦生效,送出去的就必须是「img + decal + 链」这张结算面 —— 直发 l.src 那条快路会绕过
@@ -3109,6 +3140,7 @@ function updateHoverCursor(sp, docPos) {
 function layerSource(l) {
     // Text first: its buffer IS the render, and it must be current before the chain reads it.
     if (isTextLayer(l)) syncTextBuffer(l);
+    else if (isDirectionLayer(l)) syncDirectionBuffer(l);
     const src = fxResolved(l);
     if (!l.mask) return src;
     const { w, h } = nativeSize(l.img);
@@ -3337,12 +3369,14 @@ function armRectDrag(stack, kind) {
         return false;
     }
     rectTargetStack = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
-    rectTargetKind = kind === 'text' ? 'text' : 'dynamic';
+    rectTargetKind = kind === 'text' ? 'text' : (kind === 'direction' ? 'direction' : 'dynamic');
     rectArmed = true;
     setCursor(DYNAMIC_CURSOR);
     setStatus(rectTargetKind === 'text'
         ? 'Drag a rectangle on the canvas — the new text layer fills exactly the box you draw (Esc cancels)'
-        : rectTargetStack === GUIDANCE_STACK
+        : rectTargetKind === 'direction'
+            ? 'Drag a rectangle on the canvas — the new direction layer fills exactly the box you draw (Esc cancels)'
+            : rectTargetStack === GUIDANCE_STACK
             ? 'Drag a rectangle on the canvas to place the new guidance'
             : 'Drag a rectangle on the canvas to place the new layer');
     return true;
@@ -3375,6 +3409,7 @@ function endRectDrag() {
         return false;
     }
     if (textTarget) { addTextLayer(box); return true; }
+    if (rectTargetKind === 'direction') { addDirectionLayer(box); return true; }
     openDynamicModal(box);
     return true;
 }
@@ -3385,9 +3420,11 @@ function cancelRectDrag(silent) {
     rectDrag = null;
     if (!wasArmed) return false;
     const wasText = rectTargetKind === 'text';
+    const wasDirection = rectTargetKind === 'direction';
     refreshCursor();
     render();
-    if (!silent) setStatus(wasText ? 'New text layer cancelled' : 'Dynamic Layer cancelled');
+    if (!silent) setStatus(wasText ? 'New text layer cancelled'
+        : wasDirection ? 'New direction layer cancelled' : 'Dynamic Layer cancelled');
     return true;
 }
 
@@ -4522,6 +4559,7 @@ function snapshot2D() {
             // Same rule for a text descriptor — patchTextLayer swaps it, never edits it. The
             // rendered buffer travels as `img`, so the snapshot draws without re-rendering.
             text: l.text || null,
+            dir: l.dir || null,
             transform: cloneTransform(l.transform),
             mask: l.mask, decal: l.decal,
             // 链是可变结构(参数就地改),所以进快照的是深拷贝;两张 surface 仍按引用共享。
@@ -4576,6 +4614,7 @@ function restoreState(s, opts) {
         stack: ls.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         cud: ls.cud || null,
         text: ls.text || null,
+        dir: ls.dir || null,
         transform: cloneTransform(ls.transform),
         mask: ls.mask,
         maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
@@ -4776,6 +4815,11 @@ function layerTypeBadgeSvg(l) {
     if (isTextLayer(l)) {
         return '<svg viewBox="0 0 10 10"><path d="M1.6 2.2h6.8 M5 2.2v6.6 M3.4 8.8h3.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square"/></svg>';
     }
+    if (isDirectionLayer(l)) {
+        // 一枚躺平的环加一支抬起的箭头 —— 图层画面本身就是这颗轨道球, 徽章照它画。
+        return '<svg viewBox="0 0 10 10"><ellipse cx="4.6" cy="7" rx="3.9" ry="1.7" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+            + '<path d="M4.6 7 8 2.4 M5.5 2.4H8V4.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square"/></svg>';
+    }
     if (isRasterLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
             + '<rect x="5.6" y="1" width="3.4" height="3.4" fill="currentColor" opacity="0.5"/>'
@@ -4950,6 +4994,7 @@ function renderLayerList() {
     renderStackList(guidanceListEl, GUIDANCE_STACK);
     renderStackList(layerListEl, WORK_STACK);
     updateTextPanel();
+    updateDirectionPanel();
 }
 
 // One row builder for both palettes: a guidance is not a different kind of object, it is the same
@@ -4988,9 +5033,10 @@ function renderStackList(listEl, stack) {
             img.src = l.src;
             img.draggable = false;
             thumb.appendChild(img);
-        } else if (isTextLayer(l) && String(l.text.content)) {
+        } else if ((isTextLayer(l) && String(l.text.content)) || isDirectionLayer(l)) {
             // A text layer has no `src` to point an <img> at — show its current render instead,
-            // letterboxed into the chip the way the canvas draws it onto the box.
+            // letterboxed into the chip the way the canvas draws it onto the box. A direction
+            // layer's gizmo render takes the very same branch for the same reason.
             const c = document.createElement('canvas');
             c.width = 84; c.height = 56;
             c.style.width = '100%';
@@ -5017,6 +5063,7 @@ function renderStackList(listEl, stack) {
             + (is3DLayer(l) ? 'model'
                 : isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
                 : isTextLayer(l) ? 'text'
+                : isDirectionLayer(l) ? 'direction'
                 : isRasterLayer(l) ? 'raster' : 'smart');
         badge.innerHTML = layerTypeBadgeSvg(l);
         badge.title = is3DLayer(l)
@@ -5027,7 +5074,9 @@ function renderStackList(listEl, stack) {
                 : `Cud layer — its picture is a flattened copy of「${l.cud.name}」, but the link did not survive the page reload. The pixels are this file's own; right-click the row to Relink.`)
             : isTextLayer(l)
                 ? 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit'
-                : isRasterLayer(l)
+                : isDirectionLayer(l)
+                    ? 'Direction layer — the picture is the orientation gizmo; drag its handles in the Direction tool (D)'
+                    : isRasterLayer(l)
                     ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
                     : 'Smart layer — transform is non-destructive and keeps the native image';
         thumb.appendChild(badge);
@@ -5080,7 +5129,8 @@ function renderStackList(listEl, stack) {
         name.className = 'layer-name';
         name.textContent = l.name + (is3DLayer(l) ? ' · 3D'
             : isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
-            : isTextLayer(l) ? ' · text' : isRasterLayer(l) ? ' · raster' : '')
+            : isTextLayer(l) ? ' · text' : isDirectionLayer(l) ? ' · direction'
+            : isRasterLayer(l) ? ' · raster' : '')
             + (layerTakesEffects(l) && l.effects && l.effects.length ? ' · fx' : '');
         name.title = 'Double-click to rename';
         name.addEventListener('dblclick', ev => {
@@ -5114,7 +5164,7 @@ function renderStackList(listEl, stack) {
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
         // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
         // renderMaskLayerRow() builds its own head.
-        const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text ? l.text.content : ''));
+        const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text ? l.text.content : '')) || isDirectionLayer(l);
         const canGen = layerMaskIsMeaningful(l);
         const run = document.createElement('button');
         run.className = 'icon-btn';
@@ -5646,6 +5696,7 @@ function cloneLayerFields(l, name) {
         // Same for the text descriptor — but the buffer is a fresh render (l.img was cloned
         // above), so the copy keeps its own cache slot and the two never fight over one canvas.
         text: l.text || null,
+        dir: l.dir || null,
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
     if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
@@ -5678,6 +5729,10 @@ function applyMaskToLayer(l) {
     if (!l || !l.mask || !l.img) return;
     if (isTextLayer(l)) {
         setStatus(`「${l.name}」is text — its mask applies live on every draw, and a baked one would be wiped by the next re-render. Rasterize first if you want to bake it in`, 'error');
+        return;
+    }
+    if (isDirectionLayer(l)) {
+        setStatus(`「${l.name}」is a direction layer — its mask applies live on every draw, and a baked one would be wiped by the next handle drag. Rasterize first if you want to bake it in`, 'error');
         return;
     }
     const { w, h } = nativeSize(l.img);
@@ -5771,6 +5826,10 @@ function fitLayerToMask(l, opts) {
     if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
     if (isTextLayer(l)) {
         say(`「${l.name}」is text — its picture is re-rendered from the text itself; trim the box with the transform (T) instead`, 'error');
+        return false;
+    }
+    if (isDirectionLayer(l)) {
+        say(`「${l.name}」is a direction — its picture is re-rendered from the three angles; trim the box with the transform (T) instead`, 'error');
         return false;
     }
     if (guardAdjustMode()) return false;
@@ -6770,6 +6829,7 @@ function startExpand(l) {
     // Expand changes a layer's own resolution; a text buffer is re-rendered at whatever size its
     // box has (syncTextBuffer), so the gesture is meaningless — the transform box is the tool.
     if (isTextLayer(l)) { setStatus('A text layer renders sharp at any size — scale it with the transform box (T) instead', 'error'); return; }
+    if (isDirectionLayer(l)) { setStatus('A direction layer renders sharp at any size — scale it with the transform box (T) instead', 'error'); return; }
     if (guardAdjustMode()) return;
     // Expand previews one layer's own border, so the gesture that follows is single-target: the
     // group is dropped rather than left dangling under a one-layer mode.
@@ -8072,6 +8132,7 @@ const addLayerMenu = document.getElementById('addLayerMenu');
 const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
 const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
 const addTextLayerBtn = document.getElementById('addTextLayerBtn');
+const addDirectionLayerBtn = document.getElementById('addDirectionLayerBtn');
 const addGuidanceBtn = document.getElementById('addGuidanceBtn');
 const addGuidanceMenu = document.getElementById('addGuidanceMenu');
 const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
@@ -8114,6 +8175,7 @@ document.addEventListener('mousedown', e => {
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
 addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'text'); });
+addDirectionLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'direction'); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
@@ -8441,6 +8503,53 @@ function addTextLayer(box) {
                   : 'Text Layer added — type it in · Enter commits · the Text panel restyles it');
     pushHistory();
     openTextEditor(l.id, true);
+    return l;
+}
+
+// A Direction layer is the same trick as a text layer: the descriptor is the whole document, the
+// pixels are a render of it, and nothing about the render is ever stored. `box` from the armed
+// rectangle welds the transform to it, so the gizmo lands where the user swept.
+function addDirectionLayer(box) {
+    const desc = Object.assign({}, DIR_DEFAULTS);
+    const nat = dirNaturalBox();
+    const l = {
+        id: ++layerSeq,
+        name: 'Direction ' + (layers.filter(isDirectionLayer).length + 1),
+        src: '',                                   // the render is the picture, never a file
+        img: renderDirectionBuffer(desc, nat.w, nat.h),
+        dir: desc,
+        dirCache: null,
+        visible: true,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        mask: null, maskCtx: null, maskThumbEl: null,
+        decal: null, decalCtx: null, decalThumbEl: null,
+        canvasThumbEl: null,
+        effects: [], fxCache: null,
+        stack: WORK_STACK,
+        fragment: false,
+        cud: null,
+    };
+    insertAtStackTop(l);
+    selectedId = l.id;
+    groupIds = new Set([l.id]);
+    if (box) {
+        l.transform = {
+            cx: (box.x + box.w / 2) / canvasW,
+            cy: (box.y + box.h / 2) / canvasH,
+            w: box.w / canvasW,
+            h: box.h / canvasH,
+            rotation: 0,
+        };
+    } else {
+        applyCanvasSize();
+        fitLayerToCanvas(l);
+    }
+    syncDirectionBuffer(l);
+    setMode('transform');                          // renders the list + canvas
+    layoutCanvas();
+    setStatus(box ? `Direction Layer added — the gizmo is ${box.w} × ${box.h}; drag it in the Direction window`
+                  : 'Direction Layer added — drag the ring, tip or fin in the Direction window to point it');
+    pushHistory();
     return l;
 }
 
@@ -8825,7 +8934,7 @@ document.getElementById('viewFlipBtn').addEventListener('click', () => flipView(
 // the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
 // header while the panel scrolls or the column is dragged wider, and stack in list order so two of
 // them cannot sit on top of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'detectorSection', 'processorSection'];
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'detectorSection', 'processorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -8982,6 +9091,7 @@ function layerSpecs() {
         // empty, so TRUSTED_SRC fails and toPng encodes the fresh buffer) — the backend composites
         // pixels and knows nothing about descriptors.
         if (isTextLayer(l)) syncTextBuffer(l);
+        else if (isDirectionLayer(l)) syncDirectionBuffer(l);
         // 特效链生效时,decal 与链一起已经烘进这张结算面了,所以 src 发结算面、decal 发 null。
         // 蒙版仍照原样发:链从不吃蒙版(silhouette 只是读它),后端那一次 `image * mask` 依旧只乘
         // 一次;滤波类重塑 alpha 时,重塑的是图层自身的源不透明度,与蒙版各乘各的。
@@ -9240,7 +9350,7 @@ function openLayerMenu(l, clientX, clientY) {
     // See layerMaskIsMeaningful() for why neither "the mask canvas exists" nor "the mask has ink"
     // is the right question. An image-less layer is fine too: Generate synthesises a noise image
     // at the layer's own resolution, so a blank Default/Dynamic layer is a legitimate start.
-    const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text.content));
+    const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text.content)) || isDirectionLayer(l);
     const canGenerate = layerMaskIsMeaningful(l);
     const disabled = !canGenerate;
 
@@ -9304,10 +9414,11 @@ function openLayerMenu(l, clientX, clientY) {
         bake.type = 'button';
         bake.setAttribute('role', 'menuitem');
         bake.textContent = 'Apply Effect';
-        bake.disabled = !armed || !l.img || isTextLayer(l) || effectsBypass;
+        bake.disabled = !armed || !l.img || isTextLayer(l) || isDirectionLayer(l) || effectsBypass;
         bake.title = !armed ? `「${l.name}」has no enabled effect — nothing to bake in`
             : !l.img ? `「${l.name}」has no picture yet — the chain has nothing to run on`
             : isTextLayer(l) ? `「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize the layer first if you want to bake it in.`
+                : isDirectionLayer(l) ? `「${l.name}」is a direction layer — its picture is re-rendered from the three angles on every draw, so a baked chain would be wiped by the next handle drag. Rasterize the layer first if you want to bake it in.`
                 : effectsBypass ? 'The effect chains are suspended (the ⏸ in the Effects panel) — resume them first: applying now would drop the chain without ever drawing it.'
                 : `Bake「${l.name}」's ${armed} effect${armed === 1 ? '' : 's'} into its own pixels at its own resolution — the placement and the mask stay exactly as they are. Its decal folds in too (the chain runs on the decal-topped picture), and the chain is removed after. One-way${isCudLayer(l) ? '; a later Refresh from file repaints these pixels from the linked file' : ''}.`;
         bake.addEventListener('click', ev => {
@@ -9321,9 +9432,9 @@ function openLayerMenu(l, clientX, clientY) {
     // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
     // canvas stay put — the new box only decides how many pixels the layer gets. Raster layers
     // have no native resolution left to change — their buffer is the canvas — so no entry. A text
-    // layer's native resolution is recomputed from its descriptor on every draw, so there is
-    // nothing to expand — and Fit Mask would rewrite the buffer the descriptor owns.
-    if (!l.isMaskLayer && !isRasterLayer(l) && !isTextLayer(l)) {
+    // or direction layer's native resolution is recomputed from its descriptor on every draw, so
+    // there is nothing to expand — and Fit Mask would rewrite the buffer the descriptor owns.
+    if (!l.isMaskLayer && !isRasterLayer(l) && !isTextLayer(l) && !isDirectionLayer(l)) {
         const expand = document.createElement('button');
         expand.className = 'layer-menu-item';
         expand.type = 'button';
@@ -9365,7 +9476,8 @@ function openLayerMenu(l, clientX, clientY) {
         rast.textContent = 'Rasterize';
         rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`
             + (isCudLayer(l) ? ` This row's link is dropped on the way in: a baked buffer has nothing for a refresh to repaint.` : '')
-            + (isTextLayer(l) ? ` The text descriptor is destroyed — you cannot type into this layer again.` : '');
+            + (isTextLayer(l) ? ` The text descriptor is destroyed — you cannot type into this layer again.` : '')
+            + (isDirectionLayer(l) ? ` The three angles are destroyed — this row becomes a plain picture and the Direction window stops editing it.` : '');
         rast.disabled = !canvasW || !l.img;
         rast.addEventListener('click', ev => {
             ev.stopPropagation();
@@ -9405,9 +9517,10 @@ function openLayerMenu(l, clientX, clientY) {
     applyMask.textContent = 'Apply Mask';
     // A text layer's pixels are re-rendered from its descriptor on every draw, so a baked mask
     // would evaporate on the next keystroke — the mask stays a live multiplier there.
-    applyMask.disabled = !l.mask || isTextLayer(l);
+    applyMask.disabled = !l.mask || isTextLayer(l) || isDirectionLayer(l);
     applyMask.title = !l.mask ? `「${l.name}」has no mask yet — the whole layer is already covered, nothing to apply`
         : isTextLayer(l) ? `「${l.name}」is text — its mask already applies live, and a baked one would be wiped by the next re-render. Rasterize the layer first if you want to bake it in.`
+        : isDirectionLayer(l) ? `「${l.name}」is a direction layer — its mask already applies live, and a baked one would be wiped by the next handle drag. Rasterize the layer first if you want to bake it in.`
         : `Bake「${l.name}」's mask into its own pixels: what it hides becomes real transparency, then the mask resets to pure white (whole layer). One-way.`;
     applyMask.addEventListener('click', ev => {
         ev.stopPropagation();
@@ -10540,6 +10653,15 @@ window.addEventListener('keydown', e => {
     // so unlike B/E/G they need no selected layer.
     if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
     if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('lasso'); return; }
+    // D opens the Direction window. It is a settings window, not a canvas mode — the layers are
+    // made from the Add menu — so it only folds the panel out, exactly like clicking its header.
+    // (Alt+D is not used: Chrome eats it for the address bar before the page ever sees it.)
+    if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleToolWindow('directionSection');
+        return;
+    }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
     // T shows the transform box; Alt+T arms the rectangle drag that draws a NEW text layer —
     // the layer lands in the box the user sweeps, not at a default size. Ctrl+T is kept as an
@@ -11315,6 +11437,9 @@ async function buildCudBlob() {
             // buffer has no src, so it encodes as `image: null` like every hand-made surface): the
             // fields + transform rebuild the editable layer on Load, and the pixels follow.
             text: l.text ? Object.assign({}, l.text) : null,
+            // Same deal as a text descriptor: the gizmo's render is never stored, the three angles
+            // and the colour are the whole document, and the pixels are rebuilt from them on Load.
+            dir: l.dir ? Object.assign({}, l.dir) : null,
             // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
             // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
             effects: await cudEffects(l.effects),
@@ -11661,6 +11786,7 @@ async function openCudDocument(file, doc) {
         for (const rec of header.layers) {
             const hasImage = rec && rec.image !== null && rec.image !== undefined;
             const textDesc = rec && !rec.raster ? sanitizeTextDescriptor(rec.text) : null;
+            const dirDesc = rec && !rec.raster ? sanitizeDirectionDescriptor(rec.dir) : null;
             let img = null, url = '';
             if (!hasImage) {
                 // `image: null` is a layer that has no image — the row shows the red ×. Rebuild the
@@ -11672,9 +11798,11 @@ async function openCudDocument(file, doc) {
                 const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
                 // A text row rebuilds as an editable layer instead: the descriptor (a corrupt one
                 // degrades to an empty text layer) renders its natural box, and the first paint
-                // re-sharpens it onto the saved transform.
+                // re-sharpens it onto the saved transform. A direction row is the same kind of
+                // layer — the angles are the document, the arrow is a render of them.
                 img = textDesc ? renderTextBuffer(textDesc, textLayerBox(textDesc),
                     textLayerBox(textDesc).w, textLayerBox(textDesc).h)
+                    : dirDesc ? renderDirectionBuffer(dirDesc, dirNaturalBox().w, dirNaturalBox().h)
                     : makeBlankCanvas(pw, ph);
             } else {
                 const imgBlob = blobs.get(rec.image);
@@ -11708,6 +11836,8 @@ async function openCudDocument(file, doc) {
                 stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
                 // Text descriptor rebuilt above; a raster/`false` record never carries one.
                 text: textDesc,
+                dir: dirDesc,
+                dirCache: null,
                 transform: rec.raster
                     // Old files could carry a non-identity raster transform; the invariant is identity.
                     ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
@@ -12892,7 +13022,7 @@ window.addEventListener('message', event => {
         // An empty one is a blank surface and takes the in-place refill (which drops its
         // descriptor on the way in, see replaceLayerImage).
         const hasPixels = srcLayer && (hasLayerImage(srcLayer)
-            || (isTextLayer(srcLayer) && !!String(srcLayer.text.content)));
+            || (isTextLayer(srcLayer) && !!String(srcLayer.text.content)) || isDirectionLayer(srcLayer));
         if (hasPixels) spawnGeneratedLayer(d.layer_id, item, { fit });
         else replaceLayerImage(d.layer_id, item);
         return;
