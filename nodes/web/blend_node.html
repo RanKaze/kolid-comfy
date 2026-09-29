@@ -11073,8 +11073,10 @@ const CUD_MAGIC = 'CUD1';
 // v2 给每条链加了 `effects` 字段(链缺省 = 没有特效,所以旧文件读进来不必迁移);v3 多了一类
 // role='map' 的资产,因为特效绑定的深度/法线图必须随文件走 —— 图池的 id 是宿主在导入时重新
 // mint 的,文件里那句 key 重开就认不出了;v4 把每层的 mask/decal/effects 三个平字段换成有序的
-// `attrs` 列表 (attribute 的应用顺序从此是用户排的,不再由字段名固定)。读端两种形状都认。
-const CUD_VERSION = 4;
+// `attrs` 列表 (attribute 的应用顺序从此是用户排的,不再由字段名固定);v5 把这些列表从"每层各存一份
+// 值"换成"文件级一张表 + 每层一串表键" —— 两层引用同一枚 attribute 时,文件里也只有一个它,重开之后
+// 引用还是引用。读端一进就把 v5 展开成带分组标签的条目,后面所有读者只认一种形状。
+const CUD_VERSION = 5;
 let cudBusy = false;
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
@@ -11729,14 +11731,26 @@ async function buildCudBlob() {
         }
         return out;
     };
-    // attribute 按 strip 顺序入档,面各写一个资产 (role 只是给人看的,读档只认 id)。
+    // v5:attribute 的值搬到文件级那张表上 (下面的 `header.attributes`),图层记录里只剩一串表键。
+    // 这不是为了省字节 —— 共享的那一枚 (S6 那档"引用") 从前在每层各存一份,重开就散成几枚各写各的;
+    // 表存一份、引用按键回放,共享便在保存往返之后还活着 (读的两侧都走 adoptAttrPayloads 那个分组标签)。
+    // 顺带:同一枚面只编码一次。
+    const attrTable = [];
+    const attrSeen = new Map();          // 记录 guid -> 入档那条 (空面记成 null = 不入档)
     // 没有像素的面不入档:空蒙版与"没装蒙版"按规矩是同一件事,写进去就等于往文件里塞一枚幽灵 attribute。
     const cudAttrs = async l => {
         const out = [];
         for (const r of attrRecordsOf(l)) {
-            if (r.type === 'effects') { out.push({ type: 'effects', chain: await cudEffects(r.chain) }); continue; }
-            const s = r.surface;
-            if (s && s.width && s.height) out.push({ type: r.type, surface: await addAsset(r.type, s, s.width, s.height) });
+            if (!attrSeen.has(r.id)) {
+                let e = null;
+                if (r.type === 'effects') e = { id: r.id, type: 'effects', chain: await cudEffects(r.chain) };
+                else if (r.surface && r.surface.width && r.surface.height)
+                    e = { id: r.id, type: r.type,
+                        surface: await addAsset(r.type, r.surface, r.surface.width, r.surface.height) };
+                attrSeen.set(r.id, e);
+                if (e) attrTable.push(e);
+            }
+            if (attrSeen.get(r.id)) out.push(r.id);
         }
         return out;
     };
@@ -11803,6 +11817,8 @@ async function buildCudBlob() {
         // then publish a second card on top of that.
         staging: stagingItems.filter(s => s && s.id !== GUIDANCE_CARD_ID),     // 图池随文档走：导入时原样恢复到宿主工作区
         assets: assetList,
+        // 文件级那张 attribute 表:一枚 attribute 一条,图层按 key 引用它。
+        attributes: attrTable,
     };
     const headerBytes = new TextEncoder().encode(JSON.stringify(header));
     const size = new Uint8Array(4);
@@ -11944,6 +11960,15 @@ function decodeCud(buffer) {
         if (!a || !Number.isFinite(len) || len <= 0 || cursor + len > bytes.length) throw new Error('the .cud payload is truncated');
         blobs.set(a.id, new Blob([bytes.subarray(cursor, cursor + len)], { type: 'image/png' }));
         cursor += len;
+    }
+    // v5 的图层记录只剩一串表键,值住在这张表里。就地展开成"带 id 标签的条目":id 是 adoptAttrPayloads
+    // 的分组标签,同一枚在两层之间只立一条记录 —— 文件里的引用因此活得过重开。v3/v4 没有这张表,那句
+    // 判断便什么都不做,老形状本来就是条目。
+    if (Array.isArray(header.attributes)) {
+        const table = new Map(header.attributes.filter(a => a && a.id).map(a => [a.id, a]));
+        for (const rec of (Array.isArray(header.layers) ? header.layers : []))
+            if (Array.isArray(rec.attrs))
+                rec.attrs = rec.attrs.map(k => table.get(typeof k === 'string' ? k : null)).filter(Boolean);
     }
     return { header, blobs };
 }
@@ -12097,16 +12122,21 @@ function attrChainsOf(rec) {
 // 面在文件里是一个资产 id,回来才是画布;链还要过 restoreFxMaps,绑定才接得上这次导入的那份像素。
 // 指不到像素的面 attribute 就地丢掉 (旧文件里那枚空的 Mask 与"没有 Mask"同义),链则连空容器一起留 ——
 // 那是"这条链清过但还挂着"的意思,S5 的 UI 要读它。
-async function resolveRecAttrs(rec, blobs) {
+async function resolveRecAttrs(rec, blobs, cache) {
     const out = [];
     for (const a of recAttrEntries(rec)) {
+        const key = a.id || null;        // v4 及更早的条目没有标签,那它们本来就该各解一份
+        if (cache && key && cache.has(key)) { out.push(cache.get(key)); continue; }
+        let e = null;
         if (a.type === 'effects') {
-            out.push({ type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs) });
-            continue;
+            e = { id: key, type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs) };
+        } else {
+            const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
+            if (blob) e = { id: key, type: a.type, surface: await blobToCanvas(blob) };
         }
-        const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
-        if (!blob) continue;
-        out.push({ type: a.type, surface: await blobToCanvas(blob) });
+        if (!e) continue;
+        if (cache && key) cache.set(key, e);
+        out.push(e);
     }
     return out;
 }
@@ -12149,6 +12179,8 @@ async function openCudDocument(file, doc) {
     try {
         const { header, blobs } = decodeCud(await file.arrayBuffer());
         const records = [];
+        // 共享的那枚面在两层之间只解一次:表键就是这份缓存的索引 (见 resolveRecAttrs)。
+        const attrDecoded = new Map();
         let skipped = 0;
         for (const rec of header.layers) {
             const hasImage = rec && rec.image !== null && rec.image !== undefined;
@@ -12223,7 +12255,7 @@ async function openCudDocument(file, doc) {
                     : null,
                 // attribute 的面在文件里是资产 id,回来才是画布;链过一遍 restoreFxMaps,绑定才接回
                 // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
-                attrs: await resolveRecAttrs(rec, blobs),
+                attrs: await resolveRecAttrs(rec, blobs, attrDecoded),
             });
         }
         if (!records.length) throw new Error('the .cud holds no readable layers');
