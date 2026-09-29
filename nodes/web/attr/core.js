@@ -169,18 +169,44 @@ function dupAttrShallow(l, ref) {
     const src = attrRecord(ref);
     if (!src || attrRefList(l).indexOf(ref) < 0) return null;
     const spec = ATTR_TYPES[src.type];
-    let face = null;
-    if (src.surface) {
-        face = document.createElement('canvas');
-        face.width = src.surface.width;
-        face.height = src.surface.height;
-        face.getContext('2d').drawImage(src.surface, 0, 0);
-    }
     const copy = newAttrRecord(src.type, spec.kind === 'chain'
-        ? { chain: cloneEffects(src.chain) } : { surface: face });
+        ? { chain: cloneEffects(src.chain) } : { surface: cloneCanvasSurface(src.surface) });
     if (!copy) return null;
     l.attrs.splice(attrRefList(l).indexOf(ref) + 1, 0, copy.id);
     return copy;
+}
+
+// 图层自己的网格变了 (换画布尺寸、rasterize、Expand、Fit Mask 裁边),条带上**每一枚面**都得跟着走:只搬
+// 最左那一枚,右边那枚就留在旧尺寸上,合成时它被拉伸到新的格子里 —— 画面看着对,后端拿到的 mask 与 src
+// 却是两个尺寸。fn 拿到面连同它所属的记录 (蒙版要在新空间补满覆盖,贴片不补 —— 分流是种类的知识),
+// 交回新画布才替换 (没人改就不动身份)。
+// 换的是**本层那一条引用**,不是那张面:这一枚还有别的持有者 (另一层、或剪贴板) 时,本层改握一枚新记录,
+// 旧记录连它那张面原样留给对方 —— 裁自己的边不能顺着共享引用漏进别人的图层。同一层把一枚挂两次,两条
+// 引用一起搬到同一枚新记录上,否则"乘两次"会在一次裁边之后散成两张各画各的面。
+function remapAttrFaces(l, fn) {
+    const refs = attrRefList(l);
+    const done = new Map();               // 旧 guid -> 本层现在该握的那枚 guid (不换身份时就是它自己)
+    for (let i = 0; i < refs.length; i++) {
+        const r = attrRecord(refs[i]);
+        if (!r || !r.surface) continue;
+        // 一枚挂两次 = 同一步走两遍,它只该被裁一遍:第二遍拿第一遍的结果再裁一次,边就缩了两回。
+        if (done.has(r.id)) { refs[i] = done.get(r.id); continue; }
+        const next = fn(r.surface, r);
+        if (!next || next === r.surface) continue;
+        const cb = clipboardRecord && clipboardRecord.layer !== l ? clipboardRecord.layer : null;
+        const shared = layers.some(o => o !== l && attrRefList(o).indexOf(r.id) >= 0)
+            || !!(cb && attrRefList(cb).indexOf(r.id) >= 0);
+        if (shared) {
+            const own = newAttrRecord(r.type, { surface: next });
+            refs[i] = own.id;
+            done.set(r.id, own.id);
+            markAttrPainted(own);
+        } else {
+            r.surface = next;
+            done.set(r.id, r.id);
+            markAttrPainted(r);
+        }
+    }
 }
 
 function removeAttr(l, ref) {
