@@ -753,8 +753,9 @@ class InterfacePackageNode:
             if isinstance(link, list) and len(link) >= 5:
                 link_by_id[link[0]] = link
 
-        def infer_port_types(node_obj):
-            """从节点的 inputs 数组推断 {port_num_str: type_str}"""
+        def infer_port_types(node_obj, from_outputs=False):
+            """从节点的 inputs 数组推断 {port_num_str: type_str}。
+            from_outputs: 输入侧说不出具体类型时, 认这个节点自己的输出槽类型。"""
             result = {}
             for inp in (node_obj.get("inputs") or []):
                 if not isinstance(inp, dict):
@@ -772,9 +773,27 @@ class InterfacePackageNode:
                     lt = link[5]
                     if lt and lt != "*":
                         result[port_num] = lt
+            # Start 的 value 端口类型是前端算出来的, 规则是"输入侧优先, 输入侧是任意
+            # 类型时借下游端口那条线的类型"。上游是 AnyPass 这类 `*` 输出口时, 输入侧
+            # 连线冻在 `*` (前端建线时 commonType 把 `*` 剔掉后只剩下游的类型, 而这里
+            # 两边都是 `*`), 于是这份类型只存在于 Start 自己的输出槽上 —— 它同样进存档。
+            # 输入侧能说话时仍然输入侧赢, 与前端 resolveStartPortType 的优先级一致。
+            if from_outputs:
+                for out in (node_obj.get("outputs") or []):
+                    if not isinstance(out, dict):
+                        continue
+                    m = _re.match(r"value(\d+)", out.get("name", ""))
+                    if not m:
+                        continue
+                    port_num = m.group(1)
+                    if port_num in result:
+                        continue
+                    ot = out.get("type")
+                    if ot and ot != "*":
+                        result[port_num] = ot
             return result
 
-        start_port_types = infer_port_types(start_node)
+        start_port_types = infer_port_types(start_node, from_outputs=True)
         end_port_types = infer_port_types(end_node)
 
         # Collect subgraph node widget values and input definitions
