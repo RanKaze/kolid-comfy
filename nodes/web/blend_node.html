@@ -245,6 +245,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #dirGizmo { display: block; width: 100%; height: 176px; background: #0b0d14; border: 1px solid #2a2f3d; border-radius: 6px; }
 .dir-angles { margin-top: 2px; }
 .dir-angles input:disabled { opacity: 0.4; cursor: default; }
+/* Stash 的暖黄: direction 已经占了那支粉 (#ff9ec4), 两枚徽章并排时必须一眼分得开。 */
+.layer-type-badge.stash { color: #e3d17a; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -1179,6 +1181,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-title">Default Layer</span>
                             <span class="io-menu-sub">Canvas sized and 1:1 with it — a transparent surface to paint on.</span>
                         </button>
+                        <button class="io-menu-item" id="addStashLayerBtn" role="menuitem"
+                                title="A live merged copy of every layer under it, re-read on each draw: an effect on this row is an effect on the whole stack below. It has no pixels of its own until it samples, it follows the layers underneath as you edit them, and its grid is the canvas — so it cannot be moved, scaled or rotated.">
+                            <span class="io-menu-title">Stash Layer</span>
+                            <span class="io-menu-sub">The layers under it, merged on every draw — effects here act on that stack.</span>
+                        </button>
                         <button class="io-menu-item" id="addDynamicLayerBtn" role="menuitem"
                                 title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
                             <span class="io-menu-title">Dynamic Layer</span>
@@ -1796,6 +1803,58 @@ function sizeCanvasElement() {
 // definition) is a destructive resample of that buffer — the "smart object" layers keep their
 // original pixels and map them through `transform`, raster layers have nothing left to preserve.
 function isRasterLayer(l) { return !!l && !!l.raster && !l.isMaskLayer; }
+
+// ==================== Stash 图层 ====================
+// 一张**活着**的栅格层:它的像素不是文件,也不是自己画出来的,而是「它以下所有可见层叠到一起」的
+// 那张图 —— 每合成一次重新抄一遍。于是挂在它身上的特效链,吃的就是下面整叠叠完的结果;它的网格就是
+// 画布,所以特效参数按画布像素计,与栅格层同一个读法。
+//   · 为什么不必另走一遍合成:render() 从最下面往上画,轮到这一层那一刻,目标画布里摆好的恰好就是它
+//     以下那一叠 ⇒ 抄下来就是「以下合成图」。它永远看不到自己,也永远看不到自己上面的层。
+//   · 只算可见的层 (PS「合并可见图层」的读法);guidance 与 working 各抄各自那条栈 —— 层在哪条栈里
+//     就抄哪块画布,和它自己将被画进去的那块一致。
+//   · 几何焊死画布 (l.raster 一起为真,继承栅格层那整套身份):变换、Expand、nudge 一律不适用。挪它
+//     等于挪下面那一叠,而下面那一叠本来就在那儿,那不是这一层要表达的语义。
+//   · 没挂特效时它与下面逐像素相同,画面看不出变化;挂了特效就盖住下面那份,特效把 alpha 咬穿的透明
+//     处仍透出下层原图。蒙版照旧只在链外乘一次 (契约③),契约①②也不改:它不改谁的网格,只是读。
+//   · 在它上面落笔是允许的:墨进 decal,抄写只重写 img,「合成图 + 自己的墨」两者都留得住。
+function isStashLayer(l) { return !!l && !!l.stash && !l.isMaskLayer; }
+
+// canvas 对象 → 小整数:脏指纹要认「下面某层换了表面」,而字符串化 canvas 只会得到同一个前缀。
+// WeakMap 跟着对象回收,不牵住任何一块画布。
+const stashSurfIds = new WeakMap();
+let stashSurfSeq = 0;
+function stashSurfId(c) {
+    if (!c) return 0;
+    let id = stashSurfIds.get(c);
+    if (id === undefined) { id = ++stashSurfSeq; stashSurfIds.set(c, id); }
+    return id;
+}
+
+// 一个层「这一帧往画布上盖的是哪张图」的指纹 = 表面身份 + 就地改墨的代次 + 链重算的代次 + 落点。
+// 这四样正好是 drawLayer 的全部输入 (落点用**存档的** transform:栅格层静止时它就是恒等,而一笔拖动的
+// 每一帧它就是要预览的那个盒子,所以既准又不用去扫 alphaBounds)。宁可过触发 (多抄一次),绝不漏触发。
+function stashLayerKey(l) {
+    const tr = l.transform || { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+    return l.id + ':' + (l.visible ? 1 : 0)
+        + ':' + stashSurfId(l.img) + ':' + stashSurfId(l.mask) + ':' + stashSurfId(l.decal)
+        + ':' + (l.paintGen | 0) + ':' + (l.fxResolveGen | 0)
+        + ':' + tr.cx + ',' + tr.cy + ',' + tr.w + ',' + tr.h + ',' + tr.rotation + ';';
+}
+
+// 抄写。指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。就地重写 img 之后按既有
+// 约定 +1 paintGen (「写表面的路径要 +1 paintGen」,见 fx/gl.js 的缓存注释),链的缓存才认这份新墨。
+function stashResample(l, ctx, key) {
+    const same = l.stashKey === key && !!l.img && l.img.width === canvasW && l.img.height === canvasH;
+    l.stashKey = key;
+    if (same) return;
+    // 画布换了尺寸 = 该层自己的网格也换了,换一张新画布 (身份变了,fxResolved 自然重算)。
+    if (!l.img || l.img.width !== canvasW || l.img.height !== canvasH) l.img = makeBlankCanvas(canvasW, canvasH);
+    const c = l.img.getContext('2d');
+    resetCtx(c);
+    c.clearRect(0, 0, canvasW, canvasH);
+    c.drawImage(ctx.canvas, 0, 0);
+    l.paintGen = (l.paintGen | 0) + 1;
+}
 
 // ==================== 3D 图层 ====================
 // 在 2D 这边,3D 图层就是一张正常的智能图层:它的像素是场景烘出来的图,变换、mask、特效链一律照旧。
@@ -4422,9 +4481,16 @@ function render() {
         c.clearRect(0, 0, canvasW, canvasH);
     }
     if (canvasW > 0 && canvasH > 0) {
+        // 两条栈各带一份「到目前为止叠了些什么」的指纹:Stash 层轮到自己那一刻抄的就是它,而它上面的
+        // 层轮到时指纹已经晚了 —— 于是「挪上面那层」不会让它重抄、更不会让它那条链重跑。画布尺寸也在
+        // 指纹里 ⇒ 改画布必然重抄 (栅格层的重采样只是过渡,下一帧就被这份新抄写覆盖)。
+        let belowWork = canvasW + 'x' + canvasH + ';', belowGuide = belowWork;
         for (let i = layers.length - 1; i >= 0; i--) {
             const l = layers[i];
-            drawLayer(l, isGuidanceLayer(l) ? guidanceCtx : blendCtx);
+            const guidance = isGuidanceLayer(l);
+            if (isStashLayer(l) && l.visible) stashResample(l, guidance ? guidanceCtx : blendCtx, guidance ? belowGuide : belowWork);
+            drawLayer(l, guidance ? guidanceCtx : blendCtx);
+            if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
         }
     }
     updateTransformReadout();
@@ -4557,6 +4623,7 @@ function snapshot2D() {
             visible: l.visible,
             fragment: !!l.fragment,
             raster: !!l.raster,
+            stash: !!l.stash,
             // 3D 图层的身份和它那块场景 tab 的 uid。合成不看它们;它们只保证一次 undo、一次 tab
             // 往返之后,行上的跳转按钮还认得原来那个场景。
             three: !!l.three,
@@ -4616,6 +4683,7 @@ function restoreState(s, opts) {
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
+        stash: !!ls.stash,
         three: !!ls.three,
         sceneUid: ls.sceneUid || null,
         // An undo step from before the Guidances stack existed (or from a hand-written snapshot)
@@ -4828,6 +4896,12 @@ function layerTypeBadgeSvg(l) {
         // 一枚躺平的环加一支抬起的箭头 —— 图层画面本身就是这颗轨道球, 徽章照它画。
         return '<svg viewBox="0 0 10 10"><ellipse cx="4.6" cy="7" rx="3.9" ry="1.7" fill="none" stroke="currentColor" stroke-width="1.1"/>'
             + '<path d="M4.6 7 8 2.4 M5.5 2.4H8V4.9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square"/></svg>';
+    }
+    if (isStashLayer(l)) {
+        // 一张纸,底下那条线是它以下那一叠,箭头把整叠并上来 —— 「下面的合成图就是它自己的图」。
+        return '<svg viewBox="0 0 10 10"><rect x="1.2" y="1.1" width="7.6" height="5.1" rx="1" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+            + '<path d="M2.2 9.1h5.6" fill="none" stroke="currentColor" stroke-width="1.1"/>'
+            + '<path d="M5 8.5V4.5M3.5 6 5 4.4 6.5 6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
     }
     if (isRasterLayer(l)) {
         return '<svg viewBox="0 0 10 10"><rect x="1" y="1" width="3.4" height="3.4" fill="currentColor"/>'
@@ -5042,10 +5116,12 @@ function renderStackList(listEl, stack) {
             img.src = l.src;
             img.draggable = false;
             thumb.appendChild(img);
-        } else if ((isTextLayer(l) && String(l.text.content)) || isDirectionLayer(l)) {
+        } else if ((isTextLayer(l) && String(l.text.content)) || isDirectionLayer(l) || isStashLayer(l)) {
             // A text layer has no `src` to point an <img> at — show its current render instead,
             // letterboxed into the chip the way the canvas draws it onto the box. A direction
-            // layer's angle-diagram render takes the very same branch for the same reason.
+            // layer's angle-diagram render takes the very same branch for the same reason, and so
+            // does a Stash: its picture is re-copied from the stack below on every draw, so the
+            // newest copy is all there is to show, and the chip never reads "no image yet".
             const c = document.createElement('canvas');
             c.width = 84; c.height = 56;
             c.style.width = '100%';
@@ -5073,6 +5149,7 @@ function renderStackList(listEl, stack) {
                 : isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
                 : isTextLayer(l) ? 'text'
                 : isDirectionLayer(l) ? 'direction'
+                : isStashLayer(l) ? 'stash'
                 : isRasterLayer(l) ? 'raster' : 'smart');
         badge.innerHTML = layerTypeBadgeSvg(l);
         badge.title = is3DLayer(l)
@@ -5085,7 +5162,9 @@ function renderStackList(listEl, stack) {
                 ? 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit'
                 : isDirectionLayer(l)
                     ? 'Direction layer — the picture is the canvas view of a direction; point it in the Direction tool (D)'
-                    : isRasterLayer(l)
+                : isStashLayer(l)
+                    ? 'Stash layer — its picture is the layers under it, merged again on every draw; an effect here runs on that whole stack. Welded to the canvas, so it does not move, scale or rotate.'
+                : isRasterLayer(l)
                     ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
                     : 'Smart layer — transform is non-destructive and keeps the native image';
         thumb.appendChild(badge);
@@ -5138,7 +5217,7 @@ function renderStackList(listEl, stack) {
         name.className = 'layer-name';
         name.textContent = l.name + (is3DLayer(l) ? ' · 3D'
             : isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
-            : isTextLayer(l) ? ' · text' : isDirectionLayer(l) ? ' · direction'
+            : isTextLayer(l) ? ' · text' : isDirectionLayer(l) ? ' · direction' : isStashLayer(l) ? ' · stash'
             : isRasterLayer(l) ? ' · raster' : '')
             + (layerTakesEffects(l) && l.effects && l.effects.length ? ' · fx' : '');
         name.title = 'Double-click to rename';
@@ -5687,6 +5766,8 @@ function cloneLayerFields(l, name) {
         visible: l.visible,
         transform: cloneTransform(l.transform),
         raster: !!l.raster,
+        // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
+        stash: !!l.stash,
         mask: cloneSurface(l.mask),
         maskCtx: null,
         maskThumbEl: null,
@@ -7833,7 +7914,11 @@ viewport.addEventListener('mousedown', e => {
             const hit = pickLayer(pos);
             if (hit) { selectLayer(hit.id, mode, true); refreshCursor(); return; }
         }
-        const members = dragGroupMembers();
+        // A Stash member never travels with a group drag (its picture is re-copied from the stack
+        // under it on every draw), so it is left out of the set — which also leaves its area out of
+        // the union box, and that is what stops the press from grabbing it.
+        const group = dragGroupMembers();
+        const members = group && group.filter(m => !isStashLayer(m));
         if (members) {
             // A group owns the press: its handles and its union box are what the pointer meets.
             // Raster members are promoted for the gesture and reverted when the press grabs
@@ -7851,21 +7936,27 @@ viewport.addEventListener('mousedown', e => {
             return;
         }
         const l = getSelected();
-        // The Mask layer is canvas-locked: its transform must stay the identity.
+        // The Mask layer is canvas-locked: its transform must stay the identity. A Stash is locked
+        // the same way — and refusing it here is not refusing the press: the pointer still falls
+        // through to the pick below, so a click on a Stash selects whatever it is standing on.
         if (l && l.visible && !l.isMaskLayer) {
-            // A raster layer's drag works on its CONTENT box: promote the cached bbox into
-            // l.transform so the drag machinery moves/resizes the box the user sees. If the
-            // press grabs nothing, undo the promotion — at rest the stored transform must stay
-            // the identity.
-            const rasterGrab = isRasterLayer(l);
-            if (rasterGrab) l.transform = cloneTransform(effectiveTransform(l));
-            const h = hitHandleScreen(sp, pos, l);
-            if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
-            if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
-            if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
-            // Nothing was grabbed: un-promote the bbox unless this layer's box is a live preview
-            // that Enter still owns.
-            if (rasterGrab && !transformIsPending(l.id)) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            if (isStashLayer(l) && (hitHandleScreen(sp, pos, l) || pointInBox(pos, l))) {
+                setStatus('A Stash layer IS the composite under it — it cannot be moved, scaled or rotated', 'error');
+            } else {
+                // A raster layer's drag works on its CONTENT box: promote the cached bbox into
+                // l.transform so the drag machinery moves/resizes the box the user sees. If the
+                // press grabs nothing, undo the promotion — at rest the stored transform must stay
+                // the identity.
+                const rasterGrab = isRasterLayer(l);
+                if (rasterGrab) l.transform = cloneTransform(effectiveTransform(l));
+                const h = hitHandleScreen(sp, pos, l);
+                if (h === 'rotate') { beginRotateDrag(pos, l); e.preventDefault(); return; }
+                if (h) { beginScaleDrag(h, pos, l); e.preventDefault(); return; }
+                if (pointInBox(pos, l)) { beginMoveDrag(pos, l); e.preventDefault(); return; }
+                // Nothing was grabbed: un-promote the bbox unless this layer's box is a live preview
+                // that Enter still owns.
+                if (rasterGrab && !transformIsPending(l.id)) l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+            }
         }
     }
     const picked = pickLayer(pos);
@@ -8030,7 +8121,8 @@ viewport.addEventListener('touchstart', e => {
         drawDot(pos.x, pos.y);
         livePreviewStroke();
     } else {
-        const members = dragGroupMembers();
+        const group = dragGroupMembers();
+        const members = group && group.filter(m => !isStashLayer(m));   // same lock as the mouse press
         if (members) {
             for (const m of members) if (isRasterLayer(m)) m.transform = cloneTransform(effectiveTransform(m));
             const box = groupBox(members);
@@ -8039,7 +8131,7 @@ viewport.addEventListener('touchstart', e => {
             return;
         }
         const l = getSelected();
-        if (l && l.visible && pointInBox(pos, l)) beginMoveDrag(pos, l);
+        if (l && l.visible && !isStashLayer(l) && pointInBox(pos, l)) beginMoveDrag(pos, l);
     }
 }, { passive: false });
 viewport.addEventListener('touchmove', e => {
@@ -8149,6 +8241,7 @@ const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
 const addCudLayerBtn = document.getElementById('addCudLayerBtn');
 const addCudGuidanceBtn = document.getElementById('addCudGuidanceBtn');
 const add3DLayerBtn = document.getElementById('add3DLayerBtn');
+const addStashLayerBtn = document.getElementById('addStashLayerBtn');
 const ADD_MENUS = {
     [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
     [GUIDANCE_STACK]: { btn: addGuidanceBtn, menu: addGuidanceMenu },
@@ -8182,6 +8275,7 @@ document.addEventListener('mousedown', e => {
 });
 
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
+addStashLayerBtn.addEventListener('click', () => { closeAddMenu(); addStashLayer(WORK_STACK); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
 addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'text'); });
 addDirectionLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'direction'); });
@@ -8420,6 +8514,11 @@ function addSurfaceLayer(opts) {
         // 3D 图层的身份由 add3DLayer 从外面交进来:同一条建层路、同一条 undo。
         three: !!opts.three,
         sceneUid: opts.sceneUid || null,
+        // Stash 层的两面身份也从外面交进来:stash 是「像素每帧从下面抄」,raster 是「网格焊死在画布上」
+        // —— 后者让它白拿到栅格层那一整套规矩 (恒等变换、没有 Expand/Rasterize、后端看见的是画布尺寸
+        // 的像素),前者只多管抄写、缩略图和那几处该拒绝的手势。
+        raster: !!opts.raster,
+        stash: !!opts.stash,
     };
     insertAtStackTop(l);            // top of its own stack, never above the guidance block
     selectedId = l.id;
@@ -8448,6 +8547,28 @@ function addDefaultLayer(stack) {
     });
     if (l) setStatus(guidance ? `Guidance added — ${canvasW} × ${canvasH}, composited over the layers`
                               : `Default Layer added — ${canvasW} × ${canvasH}, 1:1 with the canvas`);
+    return l;
+}
+
+// Stash Layer: the stack underneath it, re-copied on every composite (see the Stash section above).
+// It arrives at the top of its own stack, so the usual aim is the whole Layers picture; drop it lower
+// and it stashes just what sits under that row. Its pixels start empty because the very next render
+// fills them — the row is built before that first copy, so it must not read "no image" (see 图层行).
+function addStashLayer(stack) {
+    const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
+    if (!canvasW || !canvasH) {
+        setStatus('Set a canvas size before adding a Stash', 'error');
+        return null;
+    }
+    const l = addSurfaceLayer({
+        pw: canvasW, ph: canvasH,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        stack: st,
+        raster: true,
+        stash: true,
+        name: `Stash ${stackLayers(st).filter(isStashLayer).length + 1}`,
+    });
+    if (l) setStatus(`Stash added — its picture is the ${canvasW} × ${canvasH} composite of the layers under it, re-read on every draw`);
     return l;
 }
 
@@ -9423,11 +9544,12 @@ function openLayerMenu(l, clientX, clientY) {
         bake.type = 'button';
         bake.setAttribute('role', 'menuitem');
         bake.textContent = 'Apply Effect';
-        bake.disabled = !armed || !l.img || isTextLayer(l) || isDirectionLayer(l) || effectsBypass;
+        bake.disabled = !armed || !l.img || isTextLayer(l) || isDirectionLayer(l) || isStashLayer(l) || effectsBypass;
         bake.title = !armed ? `「${l.name}」has no enabled effect — nothing to bake in`
             : !l.img ? `「${l.name}」has no picture yet — the chain has nothing to run on`
             : isTextLayer(l) ? `「${l.name}」is text — its picture is re-rendered from the descriptor on every draw, so a baked chain would be wiped by the next keystroke. Rasterize the layer first if you want to bake it in.`
                 : isDirectionLayer(l) ? `「${l.name}」is a direction layer — its picture is re-rendered from the three angles on every draw, so a baked chain would be wiped by the next handle drag. Rasterize the layer first if you want to bake it in.`
+                : isStashLayer(l) ? `「${l.name}」is a Stash — its picture is re-copied from the layers under it on every draw, so a baked chain would be wiped by the next one. Duplicate the stack below into a plain layer first if you want it baked in.`
                 : effectsBypass ? 'The effect chains are suspended (the ⏸ in the Effects panel) — resume them first: applying now would drop the chain without ever drawing it.'
                 : `Bake「${l.name}」's ${armed} effect${armed === 1 ? '' : 's'} into its own pixels at its own resolution — the placement and the mask stay exactly as they are. Its decal folds in too (the chain runs on the decal-topped picture), and the chain is removed after. One-way${isCudLayer(l) ? '; a later Refresh from file repaints these pixels from the linked file' : ''}.`;
         bake.addEventListener('click', ev => {
@@ -10700,12 +10822,16 @@ window.addEventListener('keydown', e => {
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && l && !l.isMaskLayer) { e.preventDefault(); removeLayer(l.id); return; }
     if (!l || l.isMaskLayer || mode !== 'transform') return;
+    // A Stash is welded to the canvas (see the press handlers): an arrow nudge would only be undone
+    // by the next re-copy, so it takes no part in one — alone or inside a group.
+    if (isStashLayer(l)) return;
     const step = (e.shiftKey ? 10 : 1) / (canvasW || 1);
     const stepY = (e.shiftKey ? 10 : 1) / (canvasH || 1);
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         // The arrow keys drive the whole group — nudging a set is the same gesture, one step.
-        const targets = dragGroupMembers() || [l];
+        const targets = (dragGroupMembers() || [l]).filter(t => !isStashLayer(t));
+        if (!targets.length) return;
         const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
         const dy = e.key === 'ArrowUp' ? -stepY : e.key === 'ArrowDown' ? stepY : 0;
         for (const t of targets) {
@@ -11432,6 +11558,11 @@ async function buildCudBlob() {
         records.push({
             id: l.id, name: l.name, visible: l.visible, fragment: !!l.fragment,
             raster: !!l.raster,
+            // A Stash owns no pixels to store (its `src` is empty, so `blank` above files it with
+            // `image: null` like every hand-made surface) — the one flag is all the file needs, and
+            // the first draw after a load re-copies the stack under it. Storing the sample would
+            // only ever be a stale copy of layers the file already carries.
+            stash: !!l.stash,
             // Which palette this row belongs to. The file keeps `layers` order verbatim, so an
             // older document (no `stack` on its records) decodes as an all-Layers stack.
             stack: stackOf(l),
@@ -11840,6 +11971,8 @@ async function openCudDocument(file, doc) {
                 visible: rec.visible !== false,
                 fragment: !!rec.fragment,
                 raster: !!rec.raster,
+                // 老文件没这个字段 —— 没有它就不是 Stash,而它存档的那张空面照旧当一张普通栅格层画。
+                stash: !!rec.stash,
                 // A document saved before the Guidances stack existed has no `stack` on its rows —
                 // every one of them is a working layer, which is also what it looked like then.
                 stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
