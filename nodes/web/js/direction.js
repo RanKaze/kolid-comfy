@@ -16,6 +16,9 @@ const DIR_FIN = '#f5c542';
 const DIR_HANDLE_R = 6.5;         // 把手在屏幕上恒定大小, 不随图层盒子/缩放变 (与 warp 把手同一条)
 const DIR_HIT_R = 11;
 const DIR_GIZMO_H = 176;
+// 箭头尖端与仰角弧走的是比地平环更大的那颗球 (环 1.0 : 弧 1.3)。参照图里弧之所以卷到环外、
+// 两者不挤成一团, 就是这个半径差; 箭头因此也比纯按环长投影出来的那一截更认得出来。
+const DIR_POSE_R = 1.3;
 
 function dirRad(d) { return d * Math.PI / 180; }
 function dirDeg(r) { return r * 180 / Math.PI; }
@@ -65,25 +68,33 @@ function dirRollBasis(pose) {
     const cn = Math.hypot(c.x, c.y, c.z) || 1;
     return { b1, b2: { x: c.x / cn, y: c.y / cn, z: c.z / cn } };
 }
-function dirRollDir(pose) {
+// 环的半径: 外面那圈姿态球是它的 1.3 倍 (DIR_POSE_R), 所以 0.34 而不是更大 —— 箭头尖不能出画。
+function gizmoRadius(W, H) { return Math.min(W, H) * 0.34; }
+
+// 滚转环上角度 a 处的点 (像素, 以小窗中心为原点)。环心沿箭头走到 60% 处, 环本身垂直于箭头。
+// 画这颗环、放这颗把手、以及探针回读像素都从这里取点 —— 不在别处重算一遍同一颗环。
+function dirFinPoint(pose, R, a) {
     const { b1, b2 } = dirRollBasis(pose);
-    const r = dirRad(pose.roll);
-    const co = Math.cos(r), si = Math.sin(r);
-    return dirProject({ x: b1.x * co + b2.x * si, y: b1.y * co + b2.y * si, z: b1.z * co + b2.z * si }, 1);
+    const v = dirVecOf(pose);
+    const co = Math.cos(a), si = Math.sin(a);
+    const c = 0.6 * DIR_POSE_R * R;
+    const f = 0.17 * R;
+    return dirProject({
+        x: v.x * c + (b1.x * co + b2.x * si) * f,
+        y: v.y * c + (b1.y * co + b2.y * si) * f,
+        z: v.z * c + (b1.z * co + b2.z * si) * f,
+    }, 1);
 }
-function gizmoRadius(W, H) { return Math.min(W, H) * 0.42; }
 
 // 三颗把手在画布上的落点 (CSS 像素, 以小窗画布中心为原点)。
 function dirHandlePoints(W, H, pose) {
     const R = gizmoRadius(W, H);
-    const tip = dirTip(pose, R);
-    const fin = 0.6 * R;
-    const roll = dirRollDir(pose);
+    const tip = dirTip(pose, R * DIR_POSE_R);
     return {
         R,
         yaw: dirOnRing(pose.yaw, R),
         pitch: tip,
-        roll: { x: tip.x * 0.6 + roll.x * R * 0.17, y: tip.y * 0.6 + roll.y * R * 0.17 },
+        roll: dirFinPoint(pose, R, dirRad(pose.roll)),
         finCentre: { x: tip.x * 0.6, y: tip.y * 0.6 },
         finR: R * 0.17,
     };
@@ -110,7 +121,9 @@ function drawDirectionGizmo(ctx, W, H, pose, opts) {
     ctx.stroke();
 
     // 箭头落在地面上的投影: 没有它, pitch 就只是"短了一点", 读不出抬起来了。
-    const foot = dirOnRing(pose.yaw, R * Math.cos(dirRad(pose.pitch)));
+    // 长度跟着姿态球那圈走 (Rt·cosφ), 所以虚线的端点正落在箭头尖底下, 而不是环上。
+    const Rt = R * DIR_POSE_R;
+    const foot = dirOnRing(pose.yaw, Rt * Math.cos(dirRad(pose.pitch)));
     ctx.setLineDash([lw * 1.6, lw * 1.8]);
     ctx.globalAlpha = dim * 0.55;
     ctx.beginPath();
@@ -120,21 +133,33 @@ function drawDirectionGizmo(ctx, W, H, pose, opts) {
     ctx.setLineDash([]);
     ctx.globalAlpha = dim;
 
-    // 仰角弧: 从地平环沿当前方位往上卷的那条轨道。
+    // 仰角弧: 先淡淡描出整条 -90..90 的轨道 (参照图里那道扫出环外的长弧), 再沿当前方位把亮色
+    // 那段画到现在的仰角 —— 只看亮段读得出"抬了多少", 只看整条才读得出"还能往哪儿拖"。
     const steps = 28;
     ctx.strokeStyle = DIR_ARC;
     ctx.lineWidth = lw;
+    const arcAt = t => dirProject({
+        x: Math.cos(t) * Math.cos(dirRad(pose.yaw)),
+        y: Math.sin(t),
+        z: Math.cos(t) * Math.sin(dirRad(pose.yaw)),
+    }, Rt);
+    ctx.globalAlpha = dim * 0.26;
+    ctx.beginPath();
+    for (let i = 0; i <= 36; i++) {
+        const p = arcAt(dirRad(-90 + i * 5));
+        if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = dim;
     ctx.beginPath();
     for (let i = 0; i <= steps; i++) {
-        const t = dirRad(pose.pitch) * i / steps;
-        const c = Math.cos(t);
-        const p = dirProject({ x: c * Math.cos(dirRad(pose.yaw)), y: Math.sin(t), z: c * Math.sin(dirRad(pose.yaw)) }, R);
+        const p = arcAt(dirRad(pose.pitch) * i / steps);
         if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
     }
     ctx.stroke();
 
     // 箭头本体 (图层颜色) + 头部两片倒钩, 都在屏幕上量, 所以粗细与盒子同步缩放。
-    const tip = dirTip(pose, R);
+    const tip = dirTip(pose, Rt);
     const len = Math.hypot(tip.x, tip.y) || 1;
     const ux = tip.x / len, uy = tip.y / len;
     const head = Math.max(6, R * 0.2);
@@ -156,21 +181,12 @@ function drawDirectionGizmo(ctx, W, H, pose, opts) {
 
     // 滚转环: 垂直于箭头的一个圆, 加一根指向 up 的短刻度 —— 没有它, 第三个自由度在画面上不存在。
     const pts = dirHandlePoints(W, H, pose);
-    const fin = pts.finR;
-    const v = dirVecOf(pose);
-    const { b1, b2 } = dirRollBasis(pose);
     ctx.strokeStyle = DIR_FIN;
     ctx.lineWidth = lw;
     ctx.globalAlpha = dim * 0.9;
     ctx.beginPath();
     for (let i = 0; i <= 24; i++) {
-        const a = i / 24 * Math.PI * 2;
-        const co = Math.cos(a), si = Math.sin(a);
-        const p = dirProject({
-            x: v.x * 0.6 + (b1.x * co + b2.x * si) * fin / R,
-            y: v.y * 0.6 + (b1.y * co + b2.y * si) * fin / R,
-            z: v.z * 0.6 + (b1.z * co + b2.z * si) * fin / R,
-        }, R);
+        const p = dirFinPoint(pose, R, i / 24 * Math.PI * 2);
         if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
     }
     ctx.stroke();
@@ -295,7 +311,10 @@ function dirAxisDelta(axis, W, H, pose, pt, prev) {
         return { yaw: next };
     }
     const tan = axis === 'pitch' ? dirArcTangent(pose) : dirRollTangent(pose);
-    const arc = ((pt.x - prev.pt.x) * tan.x + (pt.y - prev.pt.y) * tan.y) / R;
+    // 增量按各自轨道自己的半径折算, 把手才真正走在指针底下: 仰角弧在 Rt 那圈上, 滚转把手在
+    // 0.17R 的滚转环上 (环小, 所以滚转天然比另外两轴快 —— 与它画出来的那颗小环一致)。
+    const track = axis === 'pitch' ? R * DIR_POSE_R : R * 0.17;
+    const arc = ((pt.x - prev.pt.x) * tan.x + (pt.y - prev.pt.y) * tan.y) / track;
     const key = axis === 'pitch' ? 'pitch' : 'roll';
     let next = pose[key] + dirDeg(arc);
     if (prev && prev.shiftKey) next = Math.round(next / 15) * 15;
