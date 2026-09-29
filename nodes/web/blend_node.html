@@ -312,16 +312,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 
 /* ---- 特效容器：摊在图层行的**上方** ----
    它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
+   同一种挂了两枚时两块各占一行，贴近 head 的那一行先执行 —— 竖排的次序就是它管条带上哪一步的答案，
+   不另写说明行。
    容器内一步一颗 chip，从左到右就是执行序 —— 跟条带同一条读法，所以缝位算法、插入线样式两边共用一份。
    展开参数的那一步排在整排 chip 的下面（参数区要的是宽度，这一条给不了两遍宽度）。空链不占位。 */
 .fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
     padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
 .fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
 .fx-chain.bypassed .fx-steps { opacity: 0.5; }
-/* 同一种挂了两枚容器时，行之上这几块谁也不是谁的邻居，所以这一行点名它管的是条带上第几步。
-   只挂一枚时不画 —— 那块容器本身就在这条链的位置上，再写一句是把同一件事说两遍。 */
-.fx-lane-title { font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.55);
-    font-variant-numeric: tabular-nums; padding: 0 2px; }
 .fx-steps { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
 .fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
     background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
