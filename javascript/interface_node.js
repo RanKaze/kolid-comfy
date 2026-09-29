@@ -35,6 +35,31 @@ function inferTypeFromOutput(node, output) {
     return "*";
 }
 
+// Interface 真正读的那份类型记录在**线**上, 不在槽上: 前端建线时把 `input.type ||
+// output.type` 冻进 link.type (LGraphNode.ts:2798), 之后没有任何东西回头看槽位
+// (全量前端里给 link.type 重新赋值的只有 setOutputDataType 这一处, LGraphNode.ts:1032,
+// 且它没有任何调用者); 后端 infer_port_types 读的正是序列化出来的 link[5]
+// (nodes/interface_node.py:756)。value 口自己的槽类型是字符串 "*", 它在 `||` 左边就是真值,
+// 所以冻进去的永远是 "*" —— 只改 out.type / inp.type 永远到不了 Interface。
+function setOutputSlotType(node, out, type) {
+    if (node.graph && typeof node.setOutputDataType === "function") {
+        node.setOutputDataType(node.outputs.indexOf(out), type);
+        return;
+    }
+    out.type = type;
+    for (const id of out.links || []) {
+        const link = getLink(node.graph, id);
+        if (link && link.type !== type) link.type = type;
+    }
+}
+
+// 输入侧同理: 这条线上的类型应当等于上游那个输出口的类型, 也就是我们刚算出来的值。
+function setInputSlotType(node, inp, type) {
+    inp.type = type;
+    const link = getLink(node.graph, inp.link);
+    if (link && link.type !== type) link.type = type;
+}
+
 // Start 的 value 端口类型: 输入侧优先 (上游输出是什么就是什么); 只有输入侧是任意类型时,
 // 才跟着这条输出连到的下游端口走。输入端口本身始终是它自己的类型, 不会被下游改写。
 function resolveStartPortType(node, input, output) {
@@ -163,7 +188,9 @@ function setupInterfaceStart(node) {
             if (!isValuePort(out.name)) continue;
             const inp = dynamicInputs.find(i => i.name === out.name);
             const t = resolveStartPortType(node, inp, out);
-            if (out.type !== t) out.type = t;
+            // 不比 `out.type !== t` 再决定要不要写: 线可能比槽更旧 (下游刚刚才把自己定型,
+            // 或者这份改动本身才落地), 每拍都推一遍才收敛。
+            setOutputSlotType(node, out, t);
         }
         // 这一拍刚 addOutput 出来的口, Vue 还没渲染出那一行 (它排在我们的微任务之后),
         // 涂不到就下一帧补一次 —— 只在连线变化时发生, 不进每帧。
@@ -189,6 +216,9 @@ function setupInterfaceStart(node) {
             if (!node.graph) return;
             syncValueOutputs();
             updatePortTypesWidget(node, true);
+            // 这一拍已经在宿主那次 connectSlots 的 afterChange 之后了, 不补一声改动,
+            // 刚写进线里的类型就不会进存档。
+            node.graph.afterChange?.();
             node.setDirtyCanvas(true, true);
         });
     }
@@ -210,11 +240,11 @@ function setupInterfaceStart(node) {
 
         if (connected) {
             const t = inferTypeFromInput(node, inp);
-            inp.type = t;
+            setInputSlotType(node, inp, t);
             ensureInputSlots();
             syncValueOutputs();
         } else {
-            inp.type = "*";
+            setInputSlotType(node, inp, "*");
             ensureInputSlots();
             syncValueOutputs();
         }
@@ -302,12 +332,12 @@ function setupInterfaceEnd(node) {
         if (connected) {
             // Infer type and set on the input
             const t = inferTypeFromInput(node, inp);
-            inp.type = t;
+            setInputSlotType(node, inp, t);
             ensureInputSlots();
             syncValueOutputs();
         } else {
             // Reset type to * but DON'T remove the input
-            inp.type = "*";
+            setInputSlotType(node, inp, "*");
             ensureInputSlots();
             syncValueOutputs();
         }
