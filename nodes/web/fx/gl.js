@@ -397,5 +397,9 @@ function fxResolved(l) {
     if (l.decal) o.drawImage(l.decal, 0, 0, w, h);
     if (activeEffects(l).length) applyLayerEffects(l, surface);
     l.fxCache = { w, h, img: l.img, decal: l.decal, mask: l.mask, sig, maps, ext, gen, surface };
+    // 命中缓存时 surface 是**同一块画布原地重画**的,身份键察觉不到「这一层现在长这样了」。Stash 层
+    // 要认这一点 (它抄的是以下所有层的合成图),所以每重算一次就换一个代次 —— 见 blend_node.html 的
+    // stashLayerKey。只有走了缓存路径 (有 decal 或有链) 的层才需要它:纯像素层的输入就是那张 img。
+    l.fxResolveGen = (l.fxResolveGen | 0) + 1;
     return surface;
 }
