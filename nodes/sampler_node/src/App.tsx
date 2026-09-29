@@ -16,8 +16,6 @@ const App: React.FC = () => {
 
   const [promptReady, setPromptReady] = useState(false);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [interfaceStatusByIdx, setInterfaceStatusByIdx] = useState<Record<number, 'idle' | 'running' | 'done' | 'error'>>({});
-  const [interfaceProgressByIdx, setInterfaceProgressByIdx] = useState<Record<number, { progress: number; current: number; total: number }>>({});
   const [staging, setStaging] = useState<StagingItem[]>([]);
   const [showFinishDialog, setShowFinishDialog] = useState(false);
   const [finished, setFinished] = useState(false);
@@ -34,14 +32,12 @@ const App: React.FC = () => {
   const [interfaceMeta, setInterfaceMeta] = useState<InterfaceMeta>({});
   /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条 = [Default]） */
   const [loadedPipelineName, setLoadedPipelineName] = useState('');
-  const [executedInterfaceIdx, setExecutedInterfaceIdx] = useState<number | null>(null);
-  // Processor 运行（工作台 Tools → Processor 发起）：与 Interface tab 的 Execute 共用
-  // 后端的 interface_status，但有自己的轮询与回程通道 —— 结果按端口送回工作台落位。
+  // Processor 运行（工作台 Tools → Processor 发起，现在也是 interface 唯一的执行入口）：
+  // 走后端的 interface_status，有自己的轮询与回程通道 —— 结果按端口送回工作台落位。
   const [processorRunning, setProcessorRunning] = useState(false);
   const processorRunRef = useRef<number | null>(null);
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
-  const [interfaceResults, setInterfaceResults] = useState<Record<number, StagingItem[]>>({});
   /**
    * 最近 32 条行为记录。工作台画布顶部那颗常显的状态药丸已经撤掉，它每次说话都改发一条
    * 'blend-log' 到这里；本页自己触发的动作（跑 preset / Execute / 取消 / 载入 / Query）也写进
@@ -355,55 +351,6 @@ const App: React.FC = () => {
     return () => { cancelled = true; clearInterval(interval); };
   }, [detailStatus, refreshStaging]);
 
-  // Poll status when interface is running (mutual exclusion: only one runs at a time)
-  useEffect(() => {
-    if (tab !== 'interface' || executedInterfaceIdx === null || interfaceStatusByIdx[executedInterfaceIdx] !== 'running') return;
-    const execIdx = executedInterfaceIdx;
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const res = await fetch('/api/status');
-        const data: StatusResponse = await res.json();
-        if (cancelled) return;
-        const st = data.interface_status || 'idle';
-        setInterfaceStatusByIdx(prev => ({ ...prev, [execIdx]: st }));
-        setInterfaceProgressByIdx(prev => ({
-          ...prev,
-          [execIdx]: {
-            progress: data.interface_progress || 0,
-            current: data.interface_current_step || 0,
-            total: data.interface_total_steps || 0,
-          },
-        }));
-        if (st === 'done') {
-          const resultIds = (data.interface_result_keys || []) as string[];
-          refreshStaging();
-          if (resultIds.length > 0) {
-            // 接口产出条目是 hidden 的（不进工作区镜像）—— 从全量列表按 id 取。
-            void (async () => {
-              try {
-                const r = await fetch('/api/staging').then(rr => rr.json());
-                const full = (r?.staging || []) as StagingItem[];
-                const results = resultIds
-                  .map((id: string) => full.find((s: StagingItem) => s.id === id))
-                  .filter((s): s is StagingItem => !!s);
-                setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: results }));
-              } catch {
-                setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
-              }
-            })();
-          } else {
-            setInterfaceResults(prevMap => ({ ...prevMap, [execIdx]: [] }));
-          }
-        } else if (st === 'error') {
-          setError(data.interface_error || 'Interface execution failed');
-        }
-      } catch { /* ignore */ }
-    };
-    const interval = setInterval(poll, POLL_INTERVAL);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [tab, executedInterfaceIdx, interfaceStatusByIdx, refreshStaging]);
-
   // Flush the prompt editor into prompt_server. The detailer reads the prompt from there, so a
   // A run must not start while the prompt editor still holds unsaved edits.
   const syncPrompt = useCallback((): Promise<void> => {
@@ -595,7 +542,7 @@ const App: React.FC = () => {
     if (!win) return;
     const idx = typeof data.interface_index === 'number' ? data.interface_index : -1;
     const inputs = Array.isArray(data.inputs) ? data.inputs : [];
-    if (processorRunRef.current !== null || executedInterfaceIdx !== null) {
+    if (processorRunRef.current !== null) {
       win.postMessage({ type: 'blend-processor-result', ok: false, error: 'Another interface execution is already running' }, '*');
       return;
     }
@@ -636,7 +583,7 @@ const App: React.FC = () => {
       processorRunRef.current = null;
       win.postMessage({ type: 'blend-processor-result', ok: false, error: e?.message || String(e) }, '*');
     }
-  }, [executedInterfaceIdx, interfaces, pushLog]);
+  }, [interfaces, pushLog]);
 
   // Listen for postMessage from the prompt iframe and the Blend workbench.
   // Declared after the handlers so the listener always closes over the current ones.
@@ -814,29 +761,6 @@ const App: React.FC = () => {
     const interval = setInterval(poll, POLL_INTERVAL);
     return () => { cancelled = true; clearInterval(interval); };
   }, [processorRunning, pushLog]);
-
-  const handleExecuteInterface = useCallback(async (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => {
-    setError(null);
-    pushLog(`Execute interface 「${interfaces[interfaceIndex]?.name || '#' + interfaceIndex}」`);
-    // Mutual exclusion: if another interface is currently running, ignore this request.
-    if (executedInterfaceIdx !== null && interfaceStatusByIdx[executedInterfaceIdx] === 'running') {
-      return;
-    }
-    setExecutedInterfaceIdx(interfaceIndex);
-    setInterfaceStatusByIdx(prev => ({ ...prev, [interfaceIndex]: 'running' }));
-    setInterfaceProgressByIdx(prev => ({ ...prev, [interfaceIndex]: { progress: 0, current: 0, total: 0 } }));
-    try {
-      await fetch('/api/execute_interface', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ interface_index: interfaceIndex, manual_values: manualValues, exec_options: execOptions || {} }),
-      });
-    } catch (e: any) {
-      setError('Failed to start interface execution: ' + e.message);
-      setInterfaceStatusByIdx(prev => ({ ...prev, [interfaceIndex]: 'idle' }));
-      setExecutedInterfaceIdx(null);
-    }
-  }, [executedInterfaceIdx, interfaceStatusByIdx, interfaces, pushLog]);
 
   const handleSwitchPipeline = useCallback(async (packageIdx: number, pipelineIdx: number) => {
     setError(null);
@@ -1158,10 +1082,6 @@ const App: React.FC = () => {
         interfaces={interfaces}
         interfaceMeta={interfaceMeta}
         onChangeInterfaceMeta={handleChangeInterfaceMeta}
-        onExecuteInterface={handleExecuteInterface}
-        interfaceResults={interfaceResults}
-        interfaceStatusByIdx={interfaceStatusByIdx}
-        interfaceProgressByIdx={interfaceProgressByIdx}
         pipelinePackages={pipelinePackages}
         pipelineSettings={pipelineSettings}
         loadedPipelineName={loadedPipelineName}
