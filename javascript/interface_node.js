@@ -48,6 +48,29 @@ function isValuePort(name) {
     return name && /^value\d+$/.test(name);
 }
 
+// 前端那颗端口圆点的颜色是在组件 setup 里一次算定的 (SlotConnectionDot.vue:
+// `const types = getTypes()`, 不是 computed; NodeSlots.vue 的 key 又是 output-${index}),
+// 所以运行时改 out.type 永远不重绘 —— 只有整棵子树 remount 才重算, 载入时看着对恰恰是因为
+// 那时组件才新建。这里按它自己的取色表达式 (getSlotColor) 补一次内联样式, 不另建色表。
+function paintStartPortDots(node) {
+    const rows = document.querySelectorAll('[data-node-id="' + node.id + '"] .lg-slot--output');
+    if (!rows.length) return false;
+    let allPainted = true;
+    for (const out of node.outputs) {
+        if (!isValuePort(out.name)) continue;
+        let row = null;
+        for (const r of rows) { if ((r.textContent || "").trim() === out.name) { row = r; break; } }
+        const dot = row && row.querySelector('[data-testid="slot-dot"]');
+        if (!dot) { allPainted = false; continue; }
+        const type = String(out.type || "*");
+        // 多类型口前端画的是叠层小图标 (--type1/2/3), 不是单个 background-color, 别去动它
+        if (type.includes(",")) continue;
+        dot.style.setProperty("background-color",
+            "var(--color-datatype-" + type.toUpperCase() + ", #AAA)");
+    }
+    return allPainted;
+}
+
 function updatePortTypesWidget(node, fromOutput) {
     const ports = {};
     for (const inp of node.inputs || []) {
@@ -142,7 +165,17 @@ function setupInterfaceStart(node) {
             const t = resolveStartPortType(node, inp, out);
             if (out.type !== t) out.type = t;
         }
+        // 这一拍刚 addOutput 出来的口, Vue 还没渲染出那一行 (它排在我们的微任务之后),
+        // 涂不到就下一帧补一次 —— 只在连线变化时发生, 不进每帧。
+        if (!paintStartPortDots(node) && !dotRepaintQueued) {
+            dotRepaintQueued = true;
+            requestAnimationFrame(() => {
+                dotRepaintQueued = false;
+                if (node.graph) paintStartPortDots(node);
+            });
+        }
     }
+    let dotRepaintQueued = false;
 
     // 下游端口常常是在它自己那条 onConnectionsChange(INPUT) 里才把自己定成具体类型,
     // 而 connectSlots 是先发我们这条 OUTPUT、再发它的 INPUT。同步读到的永远是它定型前的
