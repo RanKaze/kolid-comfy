@@ -25,12 +25,19 @@
 // 从深度图烘出的高度场沿光源方向走线得到的 shadow mask(影长 = Δh·Scale/tan(Elev),Soft 是它的半影半径)、
 // 体积霾 = 沿视线步进到深度图报出的那个面,逐步按取样点的高度取浓度、前向累进吸收与散射 (朝向 Sun
 // 的 Henyey-Greenstein 相位、色散 = 红与蓝各从偏开半幅的位置取样而绿留在原地 (径向 / 方向 / 离焦
-// 三路共用同一个偏移式子)。
-// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光/体积霾/色散只写 RGB,外阴影与描边加 alpha,锈蚀
-// 既咬穿 alpha 又在破洞四周加 alpha;三条契约对全部特效成立。一条链只在它所属的 attribute (面、链、
+// 三路共用同一个偏移式子)、
+// 像素排序 = 沿轴 (或沿射线) 在定长窗口内给 run 里的每个像素数一次名次再搬过去 (probe 面先烘 key 与
+// 闸门, 排序那一趟每格只读一个纹素)、
+// 数据弯曲 = 四种字节腐蚀模型在 GPU 上重建"解码器被喂了错字节"的结果 (行错位 / 块搬移 + 色度错位 /
+// 参考行相加 / 按平面翻色)、
+// 分色 = 分色点阵或 8×8 有序抖动驱动的通道位移 (与色散的分工: 那一家是连续的彩边, 这一家是碎开的网点)。
+// 模糊类 (含景深) 同时吃 RGB 与 A,曲线/色调/内阴影/光照/泛光/体积霾/色散/分色只写 RGB,外阴影与描边加 alpha,锈蚀
+// 既咬穿 alpha 又在破洞四周加 alpha;像素排序搬整颗像素所以不透明度跟着拖走,数据弯曲按模型分两头
+// (Raw 与 Xor 动的就是含 A 的那个字节流 ⇒ 一起搬/一起翻,JPEG 与 PNG 保住本像素自己的不透明度);
+// 三条契约对全部特效成立。一条链只在它所属的 attribute (面、链、
 // 参数任一) 或整条 strip 的形状换过之后重算一次(见 fxResolved)。
 // 吃外部图的特效(dof / fog / lighting / warp 的 Geometry / tone 的 External / corrosion 的 Texture /
-// chromatic_aberration 的 Depth)在 params 里只存一句
+// chromatic_aberration 的 Depth / pixel_sort、data_bend、rgb_split 的 By map)在 params 里只存一句
 // {key, name} 引用:图池 id 或本地池 id,像素永远不进 params —— 那玩意儿要进签名、进 undo 深拷贝、进存档。
 //
 // 文件切分:本文件只装「链的模型」(注册表容器 + 参数/克隆/签名/旁路)。每类特效自己一个
@@ -38,7 +45,7 @@
 // 绑定贴图在 fx/maps.js,行/弹窗在 fx/ui.js。加一类特效 = 写一个文件 + 在页面里加一行 <script src>。
 
 // 注册表由 fx/<effect>.js 的 defineEffect() 填。picker 里的顺序 = 注册顺序,所以页面的 <script>
-// 列表按组排 (实际注册序:Shadow → Blur → Pixelate → Color → Distort → Grunge → Light)。字段约定:
+// 列表按组排 (实际注册序:Shadow → Blur → Pixelate → Color → Distort → Grunge → Light → Glitch)。字段约定:
 //   type/label/group/icon/desc/params —— 注册数据 (参数行、默认值、白名单迁移都读它)
 //   needsMap: 'Depth' | 'Normal' | 'Lookup' | 'Noise' —— 主绑定槽 params.map,引擎上传到 fxgl.texMap
 //   needsMapWhen(p) —— 可选:该模式是否真的需要主槽贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。

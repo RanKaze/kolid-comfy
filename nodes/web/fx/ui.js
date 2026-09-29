@@ -120,6 +120,29 @@ function fxIconSvg(icon) {
             + '<path d="M4.3 9.5h7.1" opacity="0.7"/>'
             + '<path d="M1.9 11.8h5.7"/></svg>';
     }
+    if (icon === 'sort') {
+        // 三条 run 各自往右错开一档、并且由暗到亮排开:分块重排读出来的就是「同一段内容, 阶梯状接起来」。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="1.9" y="2.3" width="4.6" height="2.3" rx="0.6" fill="currentColor" fill-opacity="0.25"/>'
+            + '<rect x="4.6" y="5.9" width="4.6" height="2.3" rx="0.6" fill="currentColor" fill-opacity="0.5"/>'
+            + '<rect x="7.4" y="9.5" width="4.6" height="2.3" rx="0.6" fill="currentColor" fill-opacity="0.8"/></svg>';
+    }
+    if (icon === 'bend') {
+        // 一张文件的中间一行被整行推出去、捅破了右边框:改的是连续一段字节, 所以错位是一条带, 不是雪花。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="2.3" y="1.9" width="7.4" height="10.2" rx="1.2"/>'
+            + '<path d="M3.7 4.5h4.4M3.7 9.5h4.4" opacity="0.5"/>'
+            + '<rect x="5.9" y="6.1" width="6.3" height="1.9" rx="0.5" fill="currentColor" fill-opacity="0.35"/></svg>';
+    }
+    if (icon === 'split') {
+        // 点阵的底线上三颗点各自偏开、各自朝不同方向:分色点阵读出来是「一个边, 三颗点三个位置」,
+        // 而不是 chromatic 那「一个边, 三条竖线」。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<path d="M1.9 7h10.2M7 1.9v10.2" opacity="0.22"/>'
+            + '<circle cx="4.1" cy="4.4" r="1.6" opacity="0.45"/>'
+            + '<circle cx="9.6" cy="4.6" r="1.5" opacity="0.7"/>'
+            + '<circle cx="6.4" cy="9.8" r="1.8"/></svg>';
+    }
     return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
         + '<path d="M1.9 4.3h5.4M1.9 9.7h5.4" stroke-width="1" opacity="0.55"/>'
         + '<path d="M2.2 7h5.1"/><path d="M7.1 3.9 10.4 7l-3.3 3.1"/></svg>';
@@ -304,6 +327,9 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     const label = document.createElement('label');
     label.textContent = mapSlot ? mapSlot.role : def.label;
     row.appendChild(label);
+    // 代价/模式这类说明性的一句话挂在行首那个名字上:读数那格永远只写效果,账单进 tooltip。
+    // 分段钮自己那颗 title 已经在报「哪个选项被选中」,所以这里不跟它抢。
+    if (def.tip) label.title = def.tip;
     const get = () => {
         const v = effect.params && effect.params[def.key];
         return v === undefined || v === null ? def.def : v;
