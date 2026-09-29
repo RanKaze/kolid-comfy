@@ -22,11 +22,15 @@ function inferTypeFromInput(node, input) {
 
 function inferTypeFromOutput(node, output) {
     if (!output || !output.links || output.links.length === 0) return "*";
-    const link = getLink(node.graph, output.links[0]);
-    if (!link) return "*";
-    const downstream = node.graph.getNodeById(link.target_id);
-    if (downstream && downstream.inputs && link.target_slot < downstream.inputs.length) {
-        return downstream.inputs[link.target_slot].type;
+    // 一条输出可以喂好几个端口。取第一个说得出具体类型的那个, 而不是只看 links[0] ——
+    // 否则先接到一个任意类型的口 (reroute、AnyPass 这类) 就把整条判成 *。
+    for (const linkId of output.links) {
+        const link = getLink(node.graph, linkId);
+        if (!link) continue;
+        const downstream = node.graph.getNodeById(link.target_id);
+        if (!downstream || !downstream.inputs || link.target_slot >= downstream.inputs.length) continue;
+        const t = downstream.inputs[link.target_slot].type;
+        if (t && t !== "*") return t;
     }
     return "*";
 }
