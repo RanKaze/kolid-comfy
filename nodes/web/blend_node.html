@@ -314,7 +314,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
    容器内一步一行，**越贴近图层行的那一步越先执行** —— 从下往上就是执行序。同一种挂了两枚时两块各占
    一段，贴近 head 的那一段先跑，于是整摞从下往上一路读到底，不另写说明行。
-   展开参数的那一步，参数区排在它自己那颗 chip 的正上方（紧挨着，夹在该步与下一步之间）。空链不占位。
+   展开参数的那一步，参数区排在它自己那颗 chip 的**下方**（= 朝图层行那一侧）。空链不占位。
    拖拽落在某颗的上半 = 插到它后面、下半 = 前面 —— 插入线因此是横的。 */
 .fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
     padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
@@ -341,9 +341,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-read { flex: 1; min-width: 0; font-size: 10.5px; color: rgba(255,255,255,0.55);
     font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
-/* 参数区紧挨在该步 chip 的上方 ⇒ 圆角翻到上边来。 */
-.fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 0 5px;
-    border-left: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); border-radius: 7px 7px 0 0; }
+/* 参数区紧挨在该步 chip 的下方 ⇒ 圆角留在下边，最底那一步的参数还与图层行隔 3px。 */
+.fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 3px 5px;
+    border-left: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); border-radius: 0 0 7px 7px; }
 .fx-params .control-row { font-size: 11px; gap: 6px; }
 .fx-params .control-row label { min-width: 40px; font-size: 10.5px; }
 .fx-params .control-row span { min-width: 46px; font-size: 10.5px; }

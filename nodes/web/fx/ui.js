@@ -130,7 +130,7 @@ function fxStructuralChange(l) {
 }
 
 // 一步特效 = 容器里的一行 chip (勾选 + 图标 + 名字 + 读数 + 移除),展开时另交一块参数区,由
-// fxChainEl 摆在这颗 chip 的**正上方**。读数照旧是可见文本,不折进 tooltip。
+// fxChainEl 摆在这颗 chip 的**下方**。读数照旧是可见文本,不折进 tooltip。
 function fxStepEl(l, r, effect) {
     const spec = EFFECT_TYPES[effect.type];
     const updaters = [];
@@ -372,7 +372,7 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
 
 // 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,一步一行、**从下往上**读就是执行序 (紧挨着
 // 图层行那一步最先跑)。链里没有步就不占位 (空容器由条带上那枚 chip 自己说话)。展开参数的那一步,
-// 参数区排在它自己那颗 chip 的正上方 —— 挨着它,夹在该步与下一步之间。
+// 参数区排在它自己那颗 chip 的**下方** (= 朝图层行那一侧)。
 function fxChainEl(l, r) {
     if (!layerTakesEffects(l) || !r || !r.chain || !r.chain.length) return null;
     const box = document.createElement('div');
@@ -383,9 +383,10 @@ function fxChainEl(l, r) {
     box.appendChild(steps);
     for (const effect of r.chain) {
         const step = fxStepEl(l, r, effect);
-        steps.appendChild(step.chip);
-        // 跟着它自己那一步走,不外挂到容器上:那一块是这一步的参数,不是整条链的。
+        // 那一块是这一步的参数,不是整条链的,所以跟着它自己那一步走。column-reverse 把后写的往**上**画,
+        // 于是想落在 chip 下方就得先写出去 —— 链序仍然只由 chip 的先后说。
         if (step.params) steps.appendChild(step.params);
+        steps.appendChild(step.chip);
     }
     // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。
     if (fxgl.skip) {
