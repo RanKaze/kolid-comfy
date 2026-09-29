@@ -1413,6 +1413,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
+<!-- 复制图层问一句:副本带走多少。两档都另立 attribute (新的面、新的链、新的 guid),差别只在源图。
+     没有"引用"这一档 —— 拍板过的规矩:一个 attribute 只待在一个写处,可写的东西不许被两层共指。 -->
+<div class="modal-overlay" id="dupModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Duplicate the layer">
+        <div class="modal-title">Duplicate this layer?</div>
+        <div class="modal-sub" id="dupModalSub">&#8212;</div>
+        <div class="modal-hint">Either way the copy gets its own mask, decal and effects — a copy never writes into the original's steps. What differs is the layer's own picture: a shallow copy keeps reading from the same source, so the two stay in step until one of them is edited; a deep copy takes a private copy of it.</div>
+        <div class="modal-actions">
+            <button class="modal-btn ghost" id="dupCancelBtn">Cancel</button>
+            <div style="flex:1;"></div>
+            <button class="modal-btn ghost" id="dupDeepBtn">Deep copy</button>
+            <button class="modal-btn primary" id="dupShallowBtn">Shallow copy</button>
+        </div>
+    </div>
+</div>
 <!-- 图层 attribute 按种类拆在 attr/ 下:一类一个文件 (标签 + 默认落点 + 老字段名 + 缩略图),引擎只
      遍历注册表。跟 fx/ 同一个规矩:与页面本体共用全局作用域,静态文件由 /attr/ 路由提供。 -->
 <script src="attr/core.js"></script>
@@ -6005,7 +6020,7 @@ function removeLayer(id) {
 // descriptors every writer replaces wholesale (patchTextLayer builds a new object, it never mutates
 // one), so a shared reference is immutable here. No id: the caller assigns one at the moment the
 // copy becomes a layer — the clipboard record passes through here too, and a record is not a layer.
-function cloneLayerFields(l, name) {
+function cloneLayerFields(l, name, deep) {
     const copy = {
         name: name || l.name,
         src: l.src,
@@ -6017,7 +6032,8 @@ function cloneLayerFields(l, name) {
         stash: !!l.stash,
         canvasThumbEl: null,
         // attribute 一律浅拷贝:strip 的顺序照搬,每枚自己的数据另立一份 (面是新画布、链是深拷贝),
-        // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。改成引用/深拷贝是 S6 那枚 modal 的事。
+        // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。可写的 attribute 不许被两层共指,
+        // 所以复制从来没有"引用"这一档 (拍板过的设计标准,不是运行时要防的事)。
         attrs: cloneAttrList(l),
         fxCache: null,
         stack: stackOf(l),           // the copy joins the stack its source lives in
@@ -6030,23 +6046,61 @@ function cloneLayerFields(l, name) {
         text: l.text || null,
         dir: l.dir || null,
     };
-    return shareSourceWith(copy, l);
+    // 深拷贝那一档就是"源图也自己拿一份":跳过共享,直接另立一条资产记录。光栅/文本/方向/Stash 的
+    // 缓冲本来就是上面 cloneCanvasSurface 复制出来的私有画布,shareSourceWith 对它们只会回退成
+    // 「自己拿一份」,所以这一档只对智能图层 (源是一张解码出来的 <img>) 有区别。
+    return deep ? ownSource(copy, copy.img, copy.src) : shareSourceWith(copy, l);
 }
 
 // Right-click "Duplicate": a copy stacked directly above its source, same placement.
-function duplicateLayer(l) {
+function duplicateLayer(l, deep) {
     const i = layers.findIndex(x => x.id === l.id);
     if (i < 0) return;
-    const copy = cloneLayerFields(l, `${l.name} copy`);
+    const copy = cloneLayerFields(l, `${l.name} copy`, deep);
     copy.id = ++layerSeq;
     layers.splice(i, 0, copy);       // index 0 is the top, so this sits above the source
     selectedId = copy.id;
     layoutCanvas();
     renderLayerList();
     render();
-    setStatus(`Duplicated 「${l.name}」— same size and position`, 'success');
+    // 报的是**实际**共享上了没有,不是用户点的那一档:浅拷贝碰到一张私有缓冲 (光栅层) 也只能各拿一份。
+    setStatus(`Duplicated 「${l.name}」— ${deep ? 'deep copy' : 'shallow copy'}: `
+        + (sourceRefs(copy.srcRef) > 1 ? 'the two layers read the same source' : 'the copy holds its own pixels'), 'success');
     pushHistory();
 }
+
+// 复制之前问一句 (拍板:每次都问,默认高亮浅拷贝,取消或 Esc 就一次复制都不发生)。
+// Ctrl+C/V 不在这儿问 —— 剪贴板那份记录本来就是表外的私有副本,粘贴时再各立一份,天生只有浅/深这一条路。
+const dupModalEl = document.getElementById('dupModal');
+const dupModalSub = document.getElementById('dupModalSub');
+const dupCancelBtn = document.getElementById('dupCancelBtn');
+const dupDeepBtn = document.getElementById('dupDeepBtn');
+const dupShallowBtn = document.getElementById('dupShallowBtn');
+let dupPendingLayerId = null;
+
+function dupModalOpen() { return dupModalEl.classList.contains('open'); }
+function closeDupModal() { dupModalEl.classList.remove('open'); dupPendingLayerId = null; }
+function openDupModal(l) {
+    if (!l) return;
+    dupPendingLayerId = l.id;
+    dupModalSub.textContent = `「${l.name}」— how much of it comes along?`;
+    dupModalEl.classList.add('open');
+    dupShallowBtn.focus();
+}
+function confirmDupModal(deep) {
+    const id = dupPendingLayerId;
+    closeDupModal();
+    const l = layers.find(x => x.id === id);
+    if (l) duplicateLayer(l, deep);
+}
+
+dupCancelBtn.addEventListener('click', closeDupModal);
+dupDeepBtn.addEventListener('click', () => confirmDupModal(true));
+dupShallowBtn.addEventListener('click', () => confirmDupModal(false));
+dupModalEl.addEventListener('mousedown', e => { if (e.target === dupModalEl) closeDupModal(); });
+dupModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeDupModal(); }
+});
 
 // chip 右键的 Apply:把这**一步**折进图层自己的像素,然后它就离开条带。
 // 为什么只给 index 0:bake 的落点是 `l.img`,而"这一枚画在什么之上"等于它左边那些步骤的结果 ——
@@ -9811,11 +9865,11 @@ function openLayerMenu(l, clientX, clientY) {
     dup.type = 'button';
     dup.setAttribute('role', 'menuitem');
     dup.textContent = 'Duplicate';
-    dup.title = `Copy「${l.name}」— image, mask, decal and placement all come along, on a new layer right above it.`;
+    dup.title = `Copy「${l.name}」— image, mask, decal and placement all come along, on a new layer right above it. It asks how much of the source that copy keeps.`;
     dup.addEventListener('click', ev => {
         ev.stopPropagation();
         closeLayerMenu();
-        duplicateLayer(l);
+        openDupModal(l);
     });
     menu.appendChild(dup);
 
@@ -10495,7 +10549,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen() || detectModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen() || detectModalOpen() || dupModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
@@ -10806,6 +10860,12 @@ window.addEventListener('keydown', e => {
         // action can never fire twice off one keypress.
         if (docCloseModalOpen()) {
             if (e.key === 'Escape') { e.preventDefault(); closeDocCloseModal(); }
+            return;
+        }
+        // 复制那一问同样只认 Esc = 取消。Enter 留给聚焦的那颗按钮 (跟关闭提示同一做法):两边各答一次
+        // 会把图层凭空复制两遍。
+        if (dupModalOpen()) {
+            if (e.key === 'Escape') { e.preventDefault(); closeDupModal(); }
             return;
         }
         if (e.key === 'Escape') { e.preventDefault(); closeCanvasModal(); }
@@ -11716,9 +11776,9 @@ async function buildCudBlob() {
         return out;
     };
     // v5:attribute 的值搬到文件级那张表上 (下面的 `header.attributes`),图层记录里只剩一串表键。
-    // 这不是为了省字节 —— 共享的那一枚 (S6 那档"引用") 从前在每层各存一份,重开就散成几枚各写各的;
-    // 表存一份、引用按键回放,共享便在保存往返之后还活着 (读的两侧都走 adoptAttrPayloads 那个分组标签)。
-    // 顺带:同一枚面只编码一次。
+    // 这不是为了省字节 —— 同一枚 attribute 从前在每层各存一份,两层共指时重开就散成几枚各写各的;
+    // 表存一份、引用按键回放,共指便在保存往返之后还活着 (读的两侧都走 adoptAttrPayloads 那个分组标签)。
+    // 顺带:同一枚面只编码一次。界面如今发不出这种共指 (复制只有浅/深两档),这张表管的是读端认得它。
     const attrTable = [];
     const attrSeen = new Map();          // 记录 guid -> 入档那条 (空面记成 null = 不入档)
     // 没有像素的面不入档:空蒙版与"没装蒙版"按规矩是同一件事,写进去就等于往文件里塞一枚幽灵 attribute。
