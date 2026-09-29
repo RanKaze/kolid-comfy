@@ -1852,7 +1852,9 @@ const InterfaceTab: React.FC<{
           port.options && port.options.length > 0 ? (
             <select style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
               value={mv ?? port.options[0]} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))}>
-              {port.options.map(o => <option key={o} value={o}>{o}</option>)}
+              {/* 展开的那截列表是原生绘制的：不自己涂底就会跟着白底 + 继承 select 的白字，
+                  和 block 端口那两颗 select 同一份写法。 */}
+              {port.options.map(o => <option key={o} value={o} style={{ background: '#1c1c1e', color: '#fff' }}>{o}</option>)}
             </select>
           ) : (
             <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
