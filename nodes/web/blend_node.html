@@ -676,6 +676,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
    scope (the singleton Mask layer vs the selected layer) is what the group heading says, so the
    card names repeat; the sentence each mode used to carry is now its hover title. */
 .tag-modal { width: 430px; }
+/* 谁的内容会随注册表一直变长, 谁挂这一档: 特效 picker 每加一类特效就多一张卡, 而 Tag / 字体 /
+   贴图那几家每组摆什么数是自己写死的。宽度放开到能铺 5 列, 列数跟着宽度走 (auto-fill + minmax),
+   所以窗口再宽一档它自己就多铺一列, 不必回来改数; 卡片尺寸与 430 那档的三列一致 (~126px)。 */
+.tag-modal.picker-wide { width: 700px; }
+.tag-modal.picker-wide .tag-cards { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
 .tag-groups { display: flex; flex-direction: column; gap: 12px; min-height: 0; max-height: 62vh;
     overflow-y: auto; }
 .tag-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
@@ -1388,7 +1393,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     </div>
 </div>
 <div class="modal-overlay" id="fxModal">
-    <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Add a layer effect">
+    <div class="modal tag-modal picker-wide" role="dialog" aria-modal="true" aria-label="Add a layer effect">
         <div class="modal-title">Add effect</div>
         <div class="modal-sub" id="fxModalSub">Runs on this layer only, after its decal and before its mask. The chain executes from the one closest to the layer upwards.</div>
         <div class="tag-groups" id="fxGroups"></div>
