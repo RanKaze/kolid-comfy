@@ -28,7 +28,7 @@ function defineAttrType(spec) {
     }
     const kind = ATTR_KINDS[spec.kind];
     // 没自带的算法从 kind 那里拿 —— spec 只写它跟兄弟不一样的那部分。
-    for (const fn of ['init', 'fromLegacy', 'snap', 'load', 'clone']) {
+    for (const fn of ['init', 'fromLegacy', 'snap', 'load', 'clone', 'chip', 'open']) {
         if (!spec[fn]) spec[fn] = kind[fn];
     }
     ATTR_TYPES[spec.type] = spec;
@@ -44,6 +44,26 @@ const ATTR_KINDS = {
         snap: r => ({ surface: r.surface }),
         load: raw => ({ surface: raw.surface || null }),
         clone: (r, dup) => ({ surface: dup(r.surface) }),
+        // chip = 条带上那颗缩略图。它只负责**画**,节点本身由 blend_node 的那颗 chip 造好交进来 ——
+        // 因为"有没有这颗 chip"归条带管,"这颗 chip 上摆什么"才归 attribute 管。
+        // 蒙版与贴片画的是同一件事 (把自己那张面按图层网格的比例摆进这块小画布),规矩只有一处不同:
+        // 贴片留空 (CSS 的棋盘格透出 = 没画),蒙版得自己填底色 —— 说在各自 spec 的 `chipBg` 里。
+        // 点这颗 chip = 把笔落到**这一枚**上 (不是"最左那枚",也不是"这一种")。
+        open(l, r) { setPaintTarget(r.type, l, r.id); },
+        chip(el, r, l) {
+            const w = el.width, h = el.height, c = el.getContext('2d');
+            resetCtx(c);
+            const bg = ATTR_TYPES[r.type].chipBg;
+            const fill = typeof bg === 'function' ? bg(r) : bg;
+            if (fill) { c.fillStyle = fill; c.fillRect(0, 0, w, h); }
+            const s = r.surface;
+            if (!s || !s.width || !s.height) return;
+            const src = nativeSize(l.img);
+            if (!src.w || !src.h) return;
+            const k = Math.min(w / src.w, h / src.h);
+            const dw = src.w * k, dh = src.h * k;
+            c.drawImage(s, (w - dw) / 2, (h - dh) / 2, dw, dh);
+        },
     },
     chain: {
         init: () => ({ chain: [] }),
@@ -54,6 +74,14 @@ const ATTR_KINDS = {
         // undo 便回不到当初那一步。面 (canvas) 不必 —— 它是 copy-on-write 的。
         load: raw => ({ chain: cloneEffects(raw.chain) }),
         clone: r => ({ chain: cloneEffects(r.chain) }),
+        // 链没有面可画,所以这条 chip 是一枚**图标** —— 它是"顺序里的一步"的记号,不是内容预览。
+        // 点它做什么 (展开它自己那条链) 是 S5 的事;今天它不另开入口,行头上那颗魔棒才是。
+        chip(el) {
+            if (el.dataset.icon !== 'chain') { el.innerHTML = fxWandSvg(); el.dataset.icon = 'chain'; }
+        },
+        // 链上的特效不靠"点 chip"进 (那是 S5 的容器),所以这里只把行选中 —— 让整条条带点了都还在
+        // 讲这个图层,而不是顺手改了工具。
+        open(l) { selectLayer(l.id); },
     },
 };
 
@@ -82,6 +110,14 @@ function findAttr(l, type) {
     for (const r of attrRecordsOf(l)) if (r.type === type) return r;
     return null;
 }
+// 同一种装了多枚时,**最右**那枚是"这个图层自己那一步的最后一次"。落笔的快捷键点的是它:画笔要落在
+// 执行序末尾那一刀上,而不是落在最早那一枚上 (老语义里只有一枚,两种读法没有区别)。
+function lastAttr(l, type) {
+    let hit = null;
+    for (const r of attrRecordsOf(l)) if (r.type === type) hit = r;
+    return hit;
+}
+function attrRecord(ref) { return ref ? attrRecords.get(ref) || null : null; }
 // 条带上**全部**链,按应用顺序。老名字 `l.effects` 只是最左边那一枚的视图,所以缓存签名、贴图戳这类
 // 「整层重算不算」的判据一律读这一串 —— 只看最左那一条会漏掉右边那枚容器。
 function stripChains(l) {
@@ -113,12 +149,29 @@ function attrInsertIndex(l, type) {
     return at.rel === 'before' ? anchor : anchor + 1;
 }
 
-function insertAttr(l, type) {
+// `where` 是调用方点名的落点,盖过注册表里的默认 (`'tail'` = `+` 菜单的那句"加在最后一步")。没有它才
+// 走 `at` 的策略 —— 那套策略只为迁移与老入口存在,用户自己排的顺序不能被一次新增打乱,更不能被"种类"打断。
+function insertAttr(l, type, where) {
     const r = newAttrRecord(type);
     if (!r) return null;
     if (!Array.isArray(l.attrs)) l.attrs = [];
-    l.attrs.splice(attrInsertIndex(l, type), 0, r.id);
+    const i = where === 'tail' ? l.attrs.length : attrInsertIndex(l, type);
+    l.attrs.splice(i, 0, r.id);
     return r;
+}
+
+// chip 右键的 Shallow Duplicate:另立一枚同类型的记录,排在原本那枚**右边** (在它之后生效)。
+// 面是共享的那一份 —— 这正是这一档的意义:两枚蒙版要永远同步。链不能这么办:链里那颗 effect 对象
+// 是就地改参数的,共享出去就等于两个 chip 后面永远拖着同一根绳子,而面上没有这种绳子 (落笔会 detach)。
+function dupAttrShallow(l, ref) {
+    const src = attrRecord(ref);
+    if (!src || attrRefList(l).indexOf(ref) < 0) return null;
+    const spec = ATTR_TYPES[src.type];
+    const copy = newAttrRecord(src.type, spec.kind === 'chain'
+        ? { chain: cloneEffects(src.chain) } : { surface: src.surface });
+    if (!copy) return null;
+    l.attrs.splice(attrRefList(l).indexOf(ref) + 1, 0, copy.id);
+    return copy;
 }
 
 function removeAttr(l, ref) {
@@ -163,6 +216,60 @@ function setAttrChain(l, list) {
     const r = findAttr(l, 'effects') || insertAttr(l, 'effects');
     r.chain = list;
     return list;
+}
+
+// ---- 记录身上的三笔账 ----
+// · chips:同一枚 attribute 可以被两层引用,于是它的面同时画在两颗 chip 上。"谁的缩略图"记在
+//   记录身上而不是图层身上 —— 图层只该管它自己那串引用,而落笔要重画的正是这一枚。每颗 chip 连它
+//   所属的图层一起存:比例是**那个图层**的网格,共享面在两层上摆的大小可以不同。
+// · paintGen:面是**就地改写**的 (落笔在同一个 canvas 上画),身份不变,折叠缓存只看身份就看不见新墨。
+//   图层那个 l.paintGen 只说图层自己的像素;共享面被 A 改一笔时 B 的缓存也必须脏,所以这一笔记在记录上。
+// · 顺序归图层:拖完改的是图层的 `l.attrs`,不是记录 (见 moveAttr)。
+function attrChips(r) { return r.chips || (r.chips = []); }
+function bindAttrChip(el, r, l) {
+    const chips = attrChips(r);
+    for (let i = chips.length - 1; i >= 0; i--) if (!chips[i].el.isConnected) chips.splice(i, 1);
+    chips.push({ el, l });
+    ATTR_TYPES[r.type].chip(el, r, l);
+}
+// 把这一层身上某一 kinds 的 chip 全部重画 (type 省略 = 全部)。落一笔之后要喊的是这一句,不是"那一颗":
+// 同一种装了两枚时,点名哪一枚是 paintRecord 的事,而共享的那张面在两颗 chip 上都得显出这滴墨。
+function refreshAttrChips(l, type) {
+    // Mask 层没有条带 (attachAttrView 不给它装 attribute),它那一颗覆盖率缩略图归 blend_node 画。
+    // 认在这里而不是让每个调用点各判一次,是因为"这层有没有 chip"本来就是同一个问题。
+    if (!l || l.isMaskLayer) return;
+    for (const r of attrRecordsOf(l)) {
+        if (type && r.type !== type) continue;
+        for (const c of attrChips(r)) if (c.l === l && c.el.isConnected) ATTR_TYPES[r.type].chip(c.el, r, l);
+    }
+}
+// 缓存的落笔判据:每枚记录自己的代次,按条带顺序串成一个键。图层那个 paintGen 只说自己那份像素,
+// 它盖不住"共享面被别的层改了一笔"这件事 —— 那必须是这一串里的某一格变了。
+function attrPaintGens(l) {
+    let s = '';
+    for (const r of attrRecordsOf(l)) s += ':' + (r.paintGen | 0);
+    return s;
+}
+function markAttrPainted(r) { if (r) r.paintGen = (r.paintGen | 0) + 1; }
+
+// chip 的 tooltip 要说清"这一枚是第几步",因为顺序现在归用户。只挂了一枚时不必报数 —— 那串括号
+// 没有信息量,而条带上本来就只有一颗 chip 可读。
+function attrStepNote(label, r, l) {
+    const recs = attrRecordsOf(l);
+    const i = recs.indexOf(r);
+    return recs.length < 2 ? label : `${label} (step ${i + 1} of ${recs.length})`;
+}
+
+// 拖拽重排:把 `ref` 挪进条带。`slot` 是**摘它之前**那个数组里的插入位 (落在第 k 颗的左半边就是 k,
+// 右半边就是 k+1),所以调用方只管报"我要插在哪两道缝之间",不必知道自己会不会被摘掉。
+function moveAttr(l, ref, slot) {
+    const refs = attrRefList(l);
+    const from = refs.indexOf(ref);
+    if (from < 0) return false;
+    const to = Math.max(0, Math.min(slot > from ? slot - 1 : slot, refs.length - 1));
+    if (to === from) return false;
+    refs.splice(to, 0, refs.splice(from, 1)[0]);
+    return true;
 }
 
 // ---- 出厂、迁移与视图 ----

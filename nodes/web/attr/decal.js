@@ -8,4 +8,10 @@ defineAttrType({
     ctx: 'decalCtx',
     order: 0,
     at: { rel: 'head' },
+    chipClass: 'decal-thumb',
+    // 没有底色:没画过就是全透明,CSS 那块棋盘格透出来说"这里还没有颜色"。
+    chipBg: null,
+    title: (r, l) => attrStepNote('Decal', r, l)
+        + ' — click to paint colour on this one; the Tab key arms the rightmost Decal',
+    addTitle: `Add a Decal as this layer's last step — an empty sheet over everything to its left, and the brush lands on it right away.`,
 });

@@ -370,7 +370,8 @@ function applyLayerEffects(l, surface, opts) {
 // 换上一份私有副本,stretch/resample/crop/bake 也都是整体替换那枚 attribute 的面,所以身份就是脏标记。
 // 但身份只覆盖"换了对象":一笔之内的每一次 livePreviewStroke 都是**就地改写同一张 canvas**,起笔换过
 // 一次身份之后,后面整笔都命中旧缓存 —— 画布上摆的是落笔第一点那刻的合成图,墨要等下一次按下才显形。
-// 所以写表面的路径要 +1 l.paintGen (画笔/橡皮走 livePreviewStroke,油漆桶自己 +1)。
+// 所以写表面的路径要 +1 那一枚 attribute 的 paintGen (画笔/橡皮走 livePreviewStroke,油漆桶自己 +1),
+// 缓存键把条带上每一枚的代次都串进去 —— 见下面 fxResolved 的 gen。
 // 代次不同而身份全同 = 只有墨变了 → 复用同一块缓存画布重画重跑,绝不新建 canvas:一笔几百帧就是一次
 // 几百张画布的 GC。surface 只被这条缓存持有(快照存的是链的深拷贝,fxCache 从不进快照),接管它安全。
 // 拖 transform 时身份、参数签名与代次都不变 → 命中缓存,特效链一帧都不会重跑 —— 这是绝大多数
@@ -485,7 +486,9 @@ function fxResolved(l) {
     const sig = fxSignature(l);
     const maps = fxMapStamp(l);
     const ext = fxExternalStamp(l);
-    const gen = l.paintGen | 0;
+    // 落笔代次 = 图层自己那份像素的 + 条带上**每一枚面**的。共享的一面被别的层落一笔时,这一层的
+    // l.paintGen 一动不动,而它这一串里的那一格变了 —— 只看图层自己就会把这层钉在旧结果上。
+    const gen = (l.paintGen | 0) + attrPaintGens(l);
     const faces = recs.map(r => r.surface || null);
     const c = l.fxCache;
     if (c && c.w === w && c.h === h && c.img === l.img && sameFaces(c.faces, faces)

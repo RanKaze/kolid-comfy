@@ -8,4 +8,13 @@ defineAttrType({
     legacy: 'effects',
     order: 1,
     at: { rel: 'before', of: 'mask' },
+    // chip 是一枚图标:它标的是"顺序里有这么一步",不是内容预览 (链没有面可预览)。点开它自己那条链
+    // 是 S5 的事,今天添加特效仍然只走行上那根魔棒 —— 一个动作一个入口。
+    chipClass: 'effects-thumb',
+    title: (r, l) => {
+        const n = (r.chain || []).length;
+        return attrStepNote('Effects', r, l) + ` — ${n} effect${n === 1 ? '' : 's'} running on what the steps to its left leave`
+            + (n ? ' · the wand on this row adds another on top of the chain' : ' · the wand on this row starts the chain');
+    },
+    addTitle: `Add an Effects container as this layer's last step — it starts empty (the wand on the row puts the first effect in), and it runs its own chain on whatever the steps to its left leave.`,
 });
