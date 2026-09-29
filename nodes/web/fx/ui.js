@@ -2,7 +2,7 @@
 // 一条链是摊在**图层行上方**的一块容器,容器内从左到右读 = 执行序 (链序曾经是倒着竖排的,那套"因反转
 // 而反转"的插入索引数学已经跟着横向读法一起删了)。空链不占位,加特效的入口在条带上那枚 Effects chip 的
 // 魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器时,魔棒开的是**被点那枚**
-// 的选择器,而这两块容器各自写一行"我是条带上第几步"。
+// 的选择器,而这两块容器谁管哪一步由竖排次序说 (贴近 head 的那块先执行),不另写一行说明。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
 let dragFx = null;          // {layerId, ref} —— 链内重排序的进行中拖拽 (ref = 特效 id)
 const fxModalEl = document.getElementById('fxModal');
@@ -370,14 +370,6 @@ function fxChainEl(l, r) {
     const box = document.createElement('div');
     box.className = 'fx-chain' + (effectsBypass ? ' bypassed' : '');
     box.dataset.fxLane = r.id;   // 这块容器是谁的链,按 guid 认 —— 数它是行里第几块答不了这个问题
-    // 行之上摆着好几块容器时,它们不再是条带上某颗 chip 的邻居,所以"这块管的是第几步"得写在容器上。
-    // 只有一块时不写 —— 它站在哪儿就是答案,再点一次名是把同一件事说两遍。
-    if (attrRecordsOf(l).filter(x => x.chain && x.chain.length).length > 1) {
-        const title = document.createElement('div');
-        title.className = 'fx-lane-title';
-        title.textContent = attrStepNote('Effects', r, l);
-        box.appendChild(title);
-    }
     const steps = document.createElement('div');
     steps.className = 'fx-steps';
     box.appendChild(steps);
