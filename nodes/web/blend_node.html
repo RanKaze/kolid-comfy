@@ -1495,18 +1495,103 @@ let selectedId = null;
 let groupIds = new Set();
 let mode = 'transform';        // 'transform' | 'mask' | 'zoom' | 'pan' | 'rotate' | 'expand' | 'canvasModify' | 'rect' | 'lasso' | 'none'
 
+// ==================== 源图资产表 ====================
+// 图层不再自己持有源图像素:它持有一枚 guid (`l.srcRef`),像素住在文档级的 `assets` 表里。这张表存在
+// 的理由只有一条 —— 共享需要一个**数得出来**的对象:复制一个智能图层时副本与原层引用同一条记录
+// (Photoshop 的 smart object 语义),而任何一方换掉自己的像素都必须自动把这份共享断开。
+//
+// 三条规矩:
+//   · 只有智能图层之间允许共享一张源图;光栅/文本/方向/Stash/3D 一律私有。这条由**结构**保证而不是
+//     一串类型判断:可共享的记录里那张缓冲必须是解码出来的 <img> (JS 侧不可变、没有 getContext),而上
+//     面那些私有图层的 img 全是一张 canvas —— 于是「就地改写一张正被共享的源」在这套数据形式下写不出来。
+//   · refs 一律**扫**出来,不落字段:undo 重放和 tab 切换都会整批改写图层数组,存下来的计数在那种重放下
+//     必然漂移。
+//   · 换像素 = 没人共享时写自己那条记录,有人共享时先换一条只属于自己的再写。历史快照存的仍是每层自己
+//     的 img/src **值** 加 srcRef 这个分组标签,表因此是派生态:重放时按标签把同组的第一份值立成记录。
+//     这样历史里那条记录永远不会被就地改掉 —— 「img 只换不改」的既有约定搬到表上而已。
+let assetSeq = 0;                     // 同 layerSeq:永不清零,guid 在会话内唯一就够
+const assets = new Map();             // 'img_N' -> { id, img, src }
+
+function newAssetRecord(img, src) {
+    const a = { id: 'img_' + (++assetSeq), img: img || null, src: src || '' };
+    assets.set(a.id, a);
+    return a;
+}
+function sourceAsset(l) { return l && l.srcRef ? assets.get(l.srcRef) || null : null; }
+// 只有活图层 (在 layers 里,或者就是那张 Mask) 的 srcRef 才指向这张表。背景文档 ctx.layers 里那些快照
+// 记录带的是**标签**而不是视图,认不得它们的 ref —— 共享一律回退成「自己拿一份」。
+function liveSourceAsset(l) {
+    const a = sourceAsset(l);
+    return a && (layers.includes(l) || l === maskLayer) ? a : null;
+}
+function sourceRefs(ref) {
+    if (!ref) return 0;
+    let n = 0;
+    for (const l of layers) if (l.srcRef === ref) n++;
+    if (maskLayer && maskLayer.srcRef === ref) n++;
+    // 剪贴板是表外的持有者 (复制一个图层之后把它删掉,再粘贴必须还有像素可贴),所以它也算一次引用。
+    if (clipboardRecord && clipboardRecord.layer && clipboardRecord.layer.srcRef === ref) n++;
+    return n;
+}
+// 能被共享的只有解码图;canvas 缓冲一律私有 (见上面那条结构性不变量)。
+function shareableSourceBuffer(buf) { return !!buf && !buf.getContext; }
+
+// 写源的**唯一**出口。
+function writeSource(l, field, value) {
+    let a = sourceAsset(l);
+    if (!a || sourceRefs(a.id) > 1) {
+        a = newAssetRecord(field === 'img' ? value : (a ? a.img : null),
+            field === 'src' ? value : (a ? a.src : ''));
+        l.srcRef = a.id;
+    } else a[field] = value;
+}
+
+// 每个图层对象出厂都要过一次:把 img/src 从自带字段换成读写表格的视图。建层路径一律走下面两个包装。
+function attachSourceView(l) {
+    for (const field of ['img', 'src']) Object.defineProperty(l, field, {
+        configurable: true,
+        get() { const a = sourceAsset(this); return a ? a[field] : (field === 'src' ? '' : null); },
+        set(v) { writeSource(this, field, v); },
+    });
+    return l;
+}
+function ownSource(l, img, src) {
+    l.srcRef = newAssetRecord(img, src).id;
+    return attachSourceView(l);
+}
+// 副本与 from 指向同一条记录 —— 仅当那条记录属于一张活图层、且缓冲不可变时成立。否则退回「自己拿一
+// 份」,用的就是调用方已经放进副本身上的那份值 (cloneLayerFields 对 canvas 缓冲做过深拷贝,绝不能拿
+// 回原层那张,否则两个图层共用一张会被重画的画布)。
+function shareSourceWith(l, from) {
+    const a = liveSourceAsset(from);
+    if (!a || !shareableSourceBuffer(a.img)) return ownSource(l, l.img, l.src);
+    l.srcRef = a.id;
+    return attachSourceView(l);
+}
+// 重放一张历史记录:同一个 srcRef 标签只立一次记录,让共享活过 undo 与 tab 往返。
+function restoreSource(l, ls, byRef) {
+    if (!ls.srcRef) return ownSource(l, ls.img, ls.src);
+    let a = byRef.get(ls.srcRef);
+    if (!a) { a = newAssetRecord(ls.img, ls.src); byRef.set(ls.srcRef, a); }
+    l.srcRef = a.id;
+    return attachSourceView(l);
+}
+// 这张表只给活图层当视图用,不是仓库:没人指的记录当场放手,否则换过一次的那张画布会被表永久扣住
+// (历史里的记录各自存着 img 值,不需要表替它们保管)。
+function pruneAssets() {
+    for (const ref of [...assets.keys()]) if (sourceRefs(ref) === 0) assets.delete(ref);
+}
+
 // The pure Mask layer. It deliberately does NOT live in `layers`: ordering, deletion,
 // transform, composition and thumbnails all stay untouched, and `render()` never draws it
 // into the composite — its rasterised alpha is only ever handed to the backend.
 const MASK_LAYER_ID = 0;
-let maskLayer = {
+let maskLayer = ownSource({
     id: MASK_LAYER_ID,
     isMaskLayer: true,
     name: 'Mask',
     note: 'output',
 
-    src: '',
-    img: null,                 // scratch canvas at canvasW × canvasH (keeps the paint engine happy)
     visible: true,
     transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
     mask: null,
@@ -1519,7 +1604,7 @@ let maskLayer = {
     // Never a chain host (layerTakesEffects() says no for the Mask layer), but it keeps the
     // layer object shape so nothing downstream has to special-case it.
     effects: [], fxCache: null,
-};
+}, null, '');                   // img 是一块画布尺寸的 scratch,由 adoptMaskSurface 换进来
 let actionBusy = false;
 let actionBusyLabel = '';
 let hasTagger = true;
@@ -4649,6 +4734,9 @@ function snapshot2D() {
         maskVisible: maskLayer.visible,
         layers: layers.map(l => ({
             id: l.id, name: l.name, src: l.src, img: l.img,
+            // 共享以标签的形式进快照:两条记录写同一个 srcRef,重放时同组只立一条记录。缓冲值本身照旧
+            // 逐层存 (img 只换不改的老规矩),表因此永远不必替历史保管任何东西。
+            srcRef: l.srcRef,
             visible: l.visible,
             fragment: !!l.fragment,
             raster: !!l.raster,
@@ -4707,8 +4795,10 @@ function restoreState(s, opts) {
     canvasH = s.canvasH;
     canvasCustom = s.canvasCustom;
     sizeCanvasElement();
-    layers = s.layers.map(ls => ({
-        id: ls.id, name: ls.name, src: ls.src, img: ls.img,
+    // 源图记录按快照里的 srcRef 分组重建:同组只立一条,共享就此活过 undo 与 tab 往返 (见源图资产表)。
+    const byRef = new Map();
+    layers = s.layers.map(ls => restoreSource({
+        id: ls.id, name: ls.name,
         visible: ls.visible,
         fragment: !!ls.fragment,
         raster: !!ls.raster,
@@ -4733,7 +4823,7 @@ function restoreState(s, opts) {
         // 进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
         effects: ls.effects || [],
         fxCache: null,
-    }));
+    }, ls, byRef));
     // A replay can land on an uncommitted gesture: a raster layer only ever stores a non-identity
     // transform while a preview owns it, and the one box its unbaked buffer can be read at is its
     // own content box. Re-opening the session here is what makes undo/redo and a tab switch draw
@@ -4758,6 +4848,8 @@ function restoreState(s, opts) {
     maskLayer.decalThumbEl = null;
     maskLayer.canvasThumbEl = null;
     adoptMaskSurface(s.maskDecal);
+    // 重放换掉了整批活图层,上一批的源记录到此没人指了 —— 表只给活图层当视图用,不替历史保管画布。
+    pruneAssets();
     dragRowId = null;
     if (asDocument) {
         mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
@@ -5549,6 +5641,7 @@ function addLayer(item, stack) {
             // The pointer a cud layer carries (see the cud link section). An image drop never has one.
             cud: item.cud || null,
         };
+        ownSource(l, img, item.src);        // 每张源图先各立一条记录;共享只在复制那一步建立
         insertAtStackTop(l);        // new images land on top of their own stack
         selectedId = l.id;
         applyCanvasSize();
@@ -5660,7 +5753,7 @@ function spawnGeneratedLayer(id, item, opts) {
             copy.maskCtx = m.getContext('2d');
             fitted = fitLayerToMask(copy, { silent: true });
         }
-        insertAtStackTop(copy);     // the generated variant lands on top of its own stack
+        insertAtStackTop(ownSource(copy, copy.img, copy.src));     // the generated variant lands on top of its own stack
         selectedId = copy.id;
         applyCanvasSize();
         layoutCanvas();
@@ -5762,6 +5855,7 @@ function removeLayer(id) {
     if (i < 0) return;              // the Mask layer is not in `layers`, so it can never be removed here
     if (textEditingId === id) closeTextEditor();   // the editor cannot outlive its layer
     layers.splice(i, 1);
+    pruneAssets();                // 没人指的那条源记录当场放手,别替历史保管画布
     groupIds.delete(id);            // the set must never hold a layer that no longer exists
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
     applyCanvasSize();
@@ -5775,8 +5869,9 @@ function removeLayer(id) {
 // What "a copy of this layer" carries, in one place so the right-click Duplicate and Ctrl+V can
 // never disagree about it. The paint surfaces are CLONED — two layers sharing one mask canvas would
 // make every later stroke land on both, and detachPaintSurface only ever detaches the layer being
-// painted. A smart layer's `img` is a decoded image nobody mutates, so it (and its src) is shared
-// as-is; a raster buffer is a canvas the layer repaints, so it must be copied. `cud` and `text` are
+// painted. 源图按层型走 (拍板过的规则):智能图层的源是一张解码出来的 <img>,副本与原层**引用同一条资
+// 产记录** (共享数得出来,谁换像素谁自动断开);光栅/文本/方向/Stash 的缓冲是一张会被重画的 canvas,
+// 上面那句 cloneSurface 已经复制过,副本就此独占一条新记录。`cud` and `text` are
 // descriptors every writer replaces wholesale (patchTextLayer builds a new object, it never mutates
 // one), so a shared reference is immutable here. No id: the caller assigns one at the moment the
 // copy becomes a layer — the clipboard record passes through here too, and a record is not a layer.
@@ -5819,7 +5914,7 @@ function cloneLayerFields(l, name) {
     };
     if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
     if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
-    return copy;
+    return shareSourceWith(copy, l);
 }
 
 // Right-click "Duplicate": a copy stacked directly above its source, same placement.
@@ -8549,7 +8644,7 @@ function addSurfaceLayer(opts) {
         raster: !!opts.raster,
         stash: !!opts.stash,
     };
-    insertAtStackTop(l);            // top of its own stack, never above the guidance block
+    insertAtStackTop(ownSource(l, l.img, l.src));   // top of its own stack, never above the guidance block
     selectedId = l.id;
     layoutCanvas();
     renderLayerList();
@@ -8640,6 +8735,8 @@ function addTextLayer(box) {
         fragment: false,
         cud: null,
     };
+    // 文本层的像素是渲染出来的那张 canvas:天生私有,永远不参与共享 (见源图资产表的结构性不变量)。
+    ownSource(l, l.img, l.src);
     insertAtStackTop(l);
     selectedId = l.id;
     groupIds = new Set([l.id]);
@@ -8688,6 +8785,7 @@ function addDirectionLayer(box) {
         fragment: false,
         cud: null,
     };
+    ownSource(l, l.img, l.src);           // 同文本层:渲染出来的 canvas,天生私有
     insertAtStackTop(l);
     selectedId = l.id;
     groupIds = new Set([l.id]);
@@ -11035,15 +11133,15 @@ let pendingCloseUid = null;   // the tab waiting behind the unsaved-changes prom
 let docSwapping = false;
 
 function blankMaskLayer() {
-    return {
-        id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output', src: '', img: null,
+    return ownSource({
+        id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output',
         visible: true, transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         mask: null, maskCtx: null, maskThumbEl: null,
         decal: null, decalCtx: null, decalThumbEl: null, canvasThumbEl: null,
         // The singleton Mask layer never takes a chain (layerTakesEffects() says so),
         // but it shares the layer object shape so nothing has to special-case it.
         effects: [], fxCache: null,
-    };
+    }, null, '');
 }
 
 // A tab context is a history snapshot widened with everything else a document owns.
