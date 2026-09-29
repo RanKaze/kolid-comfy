@@ -1678,8 +1678,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 };
 
 // ── InterfaceTab ──
-// 这一页只负责**描述**接口（端口名字/默认值/模式/block 绑定），不再负责执行：
-// 执行只有一个入口 —— 工作台的 Tools → Processor（它自带图片注入与 crop 选项）。
+// 这一页只负责**描述**接口：端口改名、模式开关、block 端口绑定，外加把 widget 口的默认值摆成
+// 一行读数。值不在这里改，也不在这里跑 —— 执行与参数都归工作台的 Tools → Processor 那一扇窗。
 // 卡片宽度与行距/列距写在这里：装箱读的“可见高度”和真正画出来的间距必须是同一份数字。
 const IFACE_CARD_W = 340;
 const IFACE_GAP = 16;
@@ -1689,7 +1689,6 @@ const InterfaceTab: React.FC<{
   interfaceMeta: InterfaceMeta;
   onChangeInterfaceMeta: (next: InterfaceMeta) => void;
 }> = ({ interfaces, interfaceMeta, onChangeInterfaceMeta }) => {
-  const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
   // 端口改名：哪个卡片的哪个端口的行内输入框正开着
   const [renamingPort, setRenamingPort] = useState<{ iface: string; side: 'start' | 'end'; num: number } | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -1755,37 +1754,7 @@ const InterfaceTab: React.FC<{
     return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
   }
 
-  // 忘掉这张卡上输入过的值：端口回到"从图里算出来的那一份"（存档里内部节点的 widget 值），
-  // 面板显示和执行走的是同一个兜底，所以清空 = 两边一起回到默认。
-  const resetDefaults = (idx: number) => {
-    setManualValues(prev => {
-      if (!prev[idx]) return prev;
-      const next = { ...prev };
-      delete next[idx];
-      return next;
-    });
-  };
-
-  // Evaluate a simple arithmetic expression (e.g. "1024*1024", "512*0.5") safely.
-  // Only digits, operators (+-*/), parentheses, dots, spaces and 'x'/'.' are allowed.
-  // Returns a number, or null if the expression is invalid/unsafe.
-  const safeEvalExpr = (raw: string): number | null => {
-    const expr = raw.replace(/x/gi, '*').replace(/\s+/g, '');
-    if (!/^[\d+\-*/().]+$/.test(expr)) return null;
-    if (expr === '' || /[+\-*/.]$/.test(expr) || /[+\-*/.]{2,}/.test(expr)) return null;
-    try {
-      // eslint-disable-next-line no-new-func
-      const fn = new Function('"use strict"; return (' + expr + ');');
-      const r = fn();
-      if (typeof r !== 'number' || !isFinite(r)) return null;
-      return r;
-    } catch {
-      return null;
-    }
-  };
-
-  const renderPort = (port: InterfacePort, idx: number, isStart: boolean, ifaceName: string) => {
-    const mv = manualValues[idx]?.[String(port.num)] ?? port.value ?? '';
+  const renderPort = (port: InterfacePort, isStart: boolean, ifaceName: string) => {
     const cat = port.category;
     const badgeColor = cat === 'inject' ? 'rgba(48,209,88,0.15)' : cat === 'manual' ? 'rgba(10,132,255,0.15)' : 'rgba(255,255,255,0.08)';
     const badgeText = cat === 'inject' ? '#30d158' : cat === 'manual' ? '#0a84ff' : 'rgba(255,255,255,0.3)';
@@ -1824,41 +1793,15 @@ const InterfaceTab: React.FC<{
         {/* Category label */}
         <span style={{ fontSize: 10, color: badgeText, fontWeight: 500, minWidth: 50, flexShrink: 0 }}>{label}</span>
 
-        {/* Input controls for manual types */}
-        {isStart && port.type === 'STRING' && (
-          <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-            value={mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))} />
-        )}
-        {isStart && (port.type === 'INT' || port.type === 'FLOAT') && (
-          <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-            value={mv}
-            placeholder={port.type === 'FLOAT' ? 'e.g. 1.5 or 512*0.5' : 'e.g. 1024*1024'}
-            onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))}
-            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
-            onBlur={e => {
-              const raw = e.target.value.trim();
-              const v = raw === '' ? (port.type === 'FLOAT' ? 0 : 0) : safeEvalExpr(raw);
-              if (v !== null) {
-                setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: port.type === 'FLOAT' ? v : Math.round(v) } }));
-              }
-            }}
-          />
-        )}
-        {isStart && port.type === 'BOOLEAN' && (
-          <input type="checkbox" checked={!!mv} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.checked } }))} />
-        )}
-        {isStart && port.type === 'COMBO' && (
-          port.options && port.options.length > 0 ? (
-            <select style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-              value={mv ?? port.options[0]} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))}>
-              {/* 展开的那截列表是原生绘制的：不自己涂底就会跟着白底 + 继承 select 的白字，
-                  和 block 端口那两颗 select 同一份写法。 */}
-              {port.options.map(o => <option key={o} value={o} style={{ background: '#1c1c1e', color: '#fff' }}>{o}</option>)}
-            </select>
-          ) : (
-            <input style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '4px 8px', color: '#fff', fontSize: 12, outline: 'none' }}
-              value={mv ?? ''} onChange={e => setManualValues(prev => ({ ...prev, [idx]: { ...prev[idx], [String(port.num)]: e.target.value } }))} />
-          )
+        {/* widget 口的值在这一页只读：这里是"描述"接口，值摆的是图里派生出来的那一份；
+            要拧它去工作台的 Processor 窗 —— 那扇窗里的值才是报给执行的。没有默认值就不摆读数。 */}
+        {isStart && cat === 'manual' && port.value !== null && port.value !== undefined && (
+          <span
+            style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'rgba(255,255,255,0.7)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={`${port.name} (${port.type}) — the value the graph carries. Change it in the Blend workbench: Tools → Processor.`}
+          >
+            {String(port.value)}
+          </span>
         )}
 
         {/* Inject 口不再往里塞图 —— 注入哪张图是工作台 Processor 那趟执行的事。 */}
@@ -1900,18 +1843,7 @@ const InterfaceTab: React.FC<{
               <div key={idx}
                    ref={el => { if (el) cardEls.current.set(idx, el); else cardEls.current.delete(idx); }}
                    style={{ width: IFACE_CARD_W, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iface.name || `Interface ${idx + 1}`}</div>
-                  {iface.start_ports?.some(p => p.category === 'manual') && (
-                    <button
-                      style={styles.resetBtn}
-                      onClick={() => resetDefaults(idx)}
-                      title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
-                    >
-                      Reset to defaults
-                    </button>
-                  )}
-                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iface.name || `Interface ${idx + 1}`}</div>
 
                 {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
                     开关受形状校验：不满足就拒开并在下方说一句话。 */}
@@ -1985,7 +1917,7 @@ const InterfaceTab: React.FC<{
                   <div style={{ marginBottom: 12 }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Start (Inputs)</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {iface.start_ports.map(port => renderPort(port, idx, true, iface.name))}
+                      {iface.start_ports.map(port => renderPort(port, true, iface.name))}
                     </div>
                   </div>
                 )}
@@ -1995,7 +1927,7 @@ const InterfaceTab: React.FC<{
                   <div style={{ marginBottom: 12 }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>End (Outputs)</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {iface.end_ports.map(port => renderPort(port, idx, false, iface.name))}
+                      {iface.end_ports.map(port => renderPort(port, false, iface.name))}
                     </div>
                   </div>
                 )}
@@ -2097,13 +2029,6 @@ const styles: Record<string, React.CSSProperties> = {
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 
-
-  // 卡片级次要动作：中性墨色，明度低于动作绿，别和它抢注意力
-  resetBtn: {
-    padding: '8px 14px', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.45)',
-    background: 'transparent', border: '0.5px solid rgba(255,255,255,0.1)',
-    borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease', flexShrink: 0,
-  },
 
   // History (used in finish dialog)
   historyCard: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 6, background: 'rgba(28,28,30,0.6)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 12, cursor: 'pointer', transition: 'all 0.2s ease' },
