@@ -5257,9 +5257,10 @@ function openAttrMenu(l, r, clientX, clientY) {
     const step = attrRefList(l).indexOf(r.id);
     layerMenuItem('Remove', `Take this ${spec.label.toLowerCase()} off「${l.name}」— its data leaves with it unless another layer shares it (a shared face stays painted wherever it is used).`,
         () => removeAttrFromLayer(l, r));
-    layerMenuItem('Shallow Duplicate', spec.kind === 'chain'
-        ? `Add a second ${spec.label.toLowerCase()} step right after this one, carrying the same effects as its own copy — editing one chain leaves the other alone.`
-        : `Add a second ${spec.label.toLowerCase()} step right after this one, sharing THIS face — one stroke paints both (to paint them apart, Remove first and Add a fresh one).`,
+    layerMenuItem('Shallow Duplicate', `Add a second ${spec.label.toLowerCase()} step right after this one, `
+        + (spec.kind === 'chain'
+            ? `carrying the same effects as its own copy — editing one chain leaves the other alone.`
+            : `starting on the same pixels but owning a face of its own — the next stroke lands on one of them, not both.`),
         () => shallowDuplicateAttr(l, r));
     // Apply 只在最左边那一枚上出现:bake 是把它折进 `l.img`,前面还挂着别的东西就会改画面。
     if (step === 0) {
@@ -5286,7 +5287,7 @@ function shallowDuplicateAttr(l, r) {
     pushHistory();
     setStatus(`「${ATTR_TYPES[r.type].label}」duplicated right after itself — ${ATTR_TYPES[r.type].kind === 'chain'
         ? 'its own chain, edited apart from the first'
-        : 'the same face, so one stroke paints both'}`);
+        : 'the same pixels on a face of its own, so the next stroke lands on one chip'}`);
 }
 
 // Apply 的措辞按种类说清"折进去的是什么",以及这一步之后就不在了 (单向,跟 Rasterize 同一类命令)。
