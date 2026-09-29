@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
@@ -1680,6 +1680,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 // ── InterfaceTab ──
 // 这一页只负责**描述**接口（端口名字/默认值/模式/block 绑定），不再负责执行：
 // 执行只有一个入口 —— 工作台的 Tools → Processor（它自带图片注入与 crop 选项）。
+// 卡片宽度与行距/列距写在这里：装箱读的“可见高度”和真正画出来的间距必须是同一份数字。
+const IFACE_CARD_W = 340;
+const IFACE_GAP = 16;
+
 const InterfaceTab: React.FC<{
   interfaces: InterfaceInfo[];
   interfaceMeta: InterfaceMeta;
@@ -1691,6 +1695,34 @@ const InterfaceTab: React.FC<{
   const [renameDraft, setRenameDraft] = useState('');
   // 形状不满足时点模式开关给的一句话说明（按卡片索引记）
   const [modeHint, setModeHint] = useState<Record<number, string>>({});
+
+  // 装箱只能看真实 DOM：卡片高度是端口数量堆出来的，量不出来就没法排。
+  // 卡片每次渲染后现量（这一页里高度的每一次变化都出自某一次渲染），容器的可见高度另外
+  // 交给 ResizeObserver —— 设置面板可以被拖宽拖窄，一列能塞多高是它说了算。
+  const boxRef = useRef<HTMLDivElement>(null);
+  const cardEls = useRef<Map<number, HTMLDivElement>>(new Map());
+  const [heights, setHeights] = useState<Record<number, number>>({});
+  const [availH, setAvailH] = useState(0);
+
+  useLayoutEffect(() => {
+    const next: Record<number, number> = {};
+    cardEls.current.forEach((el, idx) => { next[idx] = el.offsetHeight; });
+    setHeights(prev => {
+      const ks = Object.keys(next);
+      if (ks.length !== Object.keys(prev).length) return next;
+      return ks.every(k => prev[+k] === next[+k]) ? prev : next;
+    });
+  });
+
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const read = () => setAvailH(Math.max(0, box.clientHeight - IFACE_GAP * 2));
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, []);
 
   const metaFor = (name: string): InterfaceMeta[string] => interfaceMeta[name] || {};
   const patchMeta = (name: string, patch: Partial<NonNullable<InterfaceMeta[string]>>) => {
@@ -1842,112 +1874,135 @@ const InterfaceTab: React.FC<{
     );
   };
 
-  return (
-    // 网格按可用宽度分列：先塞满一行的列数，放不下就换下一行，卡片再把自己那一列填满 ——
-    // 旧的固定 360px 卡片在窄面板里既不能缩也不会换行，只能整页横向滚动。
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16, alignItems: 'start', alignContent: 'start' }}>
-      {interfaces.map((iface, idx) => (
-        <div key={idx} style={{ minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iface.name || `Interface ${idx + 1}`}</div>
-            {iface.start_ports?.some(p => p.category === 'manual') && (
-              <button
-                style={styles.resetBtn}
-                onClick={() => resetDefaults(idx)}
-                title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
-              >
-                Reset to defaults
-              </button>
-            )}
-          </div>
+  // 贪心装箱：照接口顺序往当前列里放，放不下下一张就起新列。一列至少装一张 —— 面板再矮也
+  // 不把卡片切开；首帧还没读到可见高度时全留在一列里，量到以后重排。
+  const cols: number[][] = [];
+  let openCol: number[] = [];
+  let openH = 0;
+  for (let idx = 0; idx < interfaces.length; idx++) {
+    const h = heights[idx] ?? 0;
+    if (openCol.length && availH > 0 && openH + IFACE_GAP + h > availH) { cols.push(openCol); openCol = []; openH = 0; }
+    if (openCol.length) openH += IFACE_GAP;
+    openH += h;
+    openCol.push(idx);
+  }
+  if (openCol.length) cols.push(openCol);
 
-          {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
-              开关受形状校验：不满足就拒开并在下方说一句话。 */}
-          {(() => {
-            const meta = metaFor(iface.name);
-            const modes = { block: false, processor: false, ...(meta.modes || {}) };
-            const pipelineIn = iface.start_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
-            const pipelineOut = iface.end_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
-            const mediaIn = iface.start_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
-            const mediaOut = iface.end_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
-            const canBlock = pipelineIn.length > 0 && pipelineOut.length > 0;
-            const canProcessor = mediaIn.length > 0 && mediaOut.length > 0;
-            const toggleRow = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } as React.CSSProperties;
-            const toggleLabel = { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.65)' } as React.CSSProperties;
+  return (
+    // 列是竖着排的 flex，整页横向滚动 —— 卡片宽度恒定、高度随端口数量不等，按行排的话
+    // 矮卡片会把高卡片挤成一行里的两条断行，剩下的全是空白。
+    <div ref={boxRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: IFACE_GAP, display: 'flex', alignItems: 'flex-start', gap: IFACE_GAP }}>
+      {cols.map((col, ci) => (
+        <div key={ci} style={{ display: 'flex', flexDirection: 'column', gap: IFACE_GAP, flexShrink: 0 }}>
+          {col.map(idx => {
+            const iface = interfaces[idx];
             return (
-              <div style={{ marginBottom: 12, padding: 10, background: 'rgba(191,90,242,0.06)', borderRadius: 8, border: '0.5px solid rgba(191,90,242,0.18)' }}>
-                <div style={toggleRow}>
-                  <span style={toggleLabel} title="Block 模式：作为 pipeline 链中的一环，吃进 pipeline 吐出 pipeline。开启后才会出现在 Draw 面板的 Interface 块下拉里。">Block</span>
-                  <IOSToggle checked={modes.block} onChange={v => {
-                    if (v && !canBlock) { setModeHint(prev => ({ ...prev, [idx]: 'Block mode needs at least one PIPELINE input port and one PIPELINE output port.' })); return; }
-                    setModeHint(prev => ({ ...prev, [idx]: '' }));
-                    setIfaceMode(iface.name, 'block', v);
-                  }} />
-                  <span style={{ ...toggleLabel, marginLeft: 12 }} title="Processor 模式：在 Blend 工作台 Tools → Processor 里以图层/蒙版为输入离线执行，不接力 pipeline。">Processor</span>
-                  <IOSToggle checked={modes.processor} onChange={v => {
-                    if (v && !canProcessor) { setModeHint(prev => ({ ...prev, [idx]: 'Processor mode needs at least one image/mask input port and one on the output side.' })); return; }
-                    setModeHint(prev => ({ ...prev, [idx]: '' }));
-                    setIfaceMode(iface.name, 'processor', v);
-                  }} />
+              <div key={idx}
+                   ref={el => { if (el) cardEls.current.set(idx, el); else cardEls.current.delete(idx); }}
+                   style={{ width: IFACE_CARD_W, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iface.name || `Interface ${idx + 1}`}</div>
+                  {iface.start_ports?.some(p => p.category === 'manual') && (
+                    <button
+                      style={styles.resetBtn}
+                      onClick={() => resetDefaults(idx)}
+                      title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
+                    >
+                      Reset to defaults
+                    </button>
+                  )}
                 </div>
-                {modeHint[idx] && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 4 }}>{modeHint[idx]}</div>}
-                {modes.block && pipelineIn.length > 0 && pipelineOut.length > 0 && (() => {
-                  const blockPorts = meta.block_ports || {};
-                  const inNum = blockPorts.in && pipelineIn.some(p => p.num === blockPorts.in) ? blockPorts.in : pipelineIn[0].num;
-                  const outNum = blockPorts.out && pipelineOut.some(p => p.num === blockPorts.out) ? blockPorts.out : pipelineOut[0].num;
-                  const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
-                  const portLabel = (p: InterfacePort, side: 'start' | 'end') =>
-                    `${portDisplay(iface.name, side, p)}（value${p.num}）`;
+
+                {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
+                    开关受形状校验：不满足就拒开并在下方说一句话。 */}
+                {(() => {
+                  const meta = metaFor(iface.name);
+                  const modes = { block: false, processor: false, ...(meta.modes || {}) };
+                  const pipelineIn = iface.start_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
+                  const pipelineOut = iface.end_ports?.filter(p => p.type === 'PIPELINE_DATA') ?? [];
+                  const mediaIn = iface.start_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
+                  const mediaOut = iface.end_ports?.filter(p => ['IMAGE', 'MASK', 'PIPELINE_DATA'].includes(p.type)) ?? [];
+                  const canBlock = pipelineIn.length > 0 && pipelineOut.length > 0;
+                  const canProcessor = mediaIn.length > 0 && mediaOut.length > 0;
+                  const toggleRow = { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } as React.CSSProperties;
+                  const toggleLabel = { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.65)' } as React.CSSProperties;
                   return (
-                    <>
-                      <div style={{ ...toggleRow, marginBottom: 0 }}>
-                        <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline In</span>
-                        <select style={{ ...styles.paramSelect, flex: 1 }} value={inNum}
-                          onChange={e => setBlockPort(iface.name, 'in', parseInt(e.target.value, 10))}
-                          title="chain 跑到这块时，pipeline 数据从这个 start 端口进。">
-                          {pipelineIn.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'start')}</option>)}
-                        </select>
+                    <div style={{ marginBottom: 12, padding: 10, background: 'rgba(191,90,242,0.06)', borderRadius: 8, border: '0.5px solid rgba(191,90,242,0.18)' }}>
+                      <div style={toggleRow}>
+                        <span style={toggleLabel} title="Block 模式：作为 pipeline 链中的一环，吃进 pipeline 吐出 pipeline。开启后才会出现在 Draw 面板的 Interface 块下拉里。">Block</span>
+                        <IOSToggle checked={modes.block} onChange={v => {
+                          if (v && !canBlock) { setModeHint(prev => ({ ...prev, [idx]: 'Block mode needs at least one PIPELINE input port and one PIPELINE output port.' })); return; }
+                          setModeHint(prev => ({ ...prev, [idx]: '' }));
+                          setIfaceMode(iface.name, 'block', v);
+                        }} />
+                        <span style={{ ...toggleLabel, marginLeft: 12 }} title="Processor 模式：在 Blend 工作台 Tools → Processor 里以图层/蒙版为输入离线执行，不接力 pipeline。">Processor</span>
+                        <IOSToggle checked={modes.processor} onChange={v => {
+                          if (v && !canProcessor) { setModeHint(prev => ({ ...prev, [idx]: 'Processor mode needs at least one image/mask input port and one on the output side.' })); return; }
+                          setModeHint(prev => ({ ...prev, [idx]: '' }));
+                          setIfaceMode(iface.name, 'processor', v);
+                        }} />
                       </div>
-                      <div style={{ ...toggleRow, marginBottom: 0 }}>
-                        <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline Out</span>
-                        <select style={{ ...styles.paramSelect, flex: 1 }} value={outNum}
-                          onChange={e => setBlockPort(iface.name, 'out', parseInt(e.target.value, 10))}
-                          title="这块执行完，pipeline 数据从这个 end 端口出去，交给链上的下一块。">
-                          {pipelineOut.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'end')}</option>)}
-                        </select>
-                      </div>
-                    </>
+                      {modeHint[idx] && <div style={{ fontSize: 11, color: '#ff9f0a', marginBottom: 4 }}>{modeHint[idx]}</div>}
+                      {modes.block && pipelineIn.length > 0 && pipelineOut.length > 0 && (() => {
+                        const blockPorts = meta.block_ports || {};
+                        const inNum = blockPorts.in && pipelineIn.some(p => p.num === blockPorts.in) ? blockPorts.in : pipelineIn[0].num;
+                        const outNum = blockPorts.out && pipelineOut.some(p => p.num === blockPorts.out) ? blockPorts.out : pipelineOut[0].num;
+                        const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
+                        const portLabel = (p: InterfacePort, side: 'start' | 'end') =>
+                          `${portDisplay(iface.name, side, p)}（value${p.num}）`;
+                        return (
+                          <>
+                            <div style={{ ...toggleRow, marginBottom: 0 }}>
+                              <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline In</span>
+                              <select style={{ ...styles.paramSelect, flex: 1 }} value={inNum}
+                                onChange={e => setBlockPort(iface.name, 'in', parseInt(e.target.value, 10))}
+                                title="chain 跑到这块时，pipeline 数据从这个 start 端口进。">
+                                {pipelineIn.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'start')}</option>)}
+                              </select>
+                            </div>
+                            <div style={{ ...toggleRow, marginBottom: 0 }}>
+                              <span style={{ ...toggleLabel, minWidth: 74 }}>Pipeline Out</span>
+                              <select style={{ ...styles.paramSelect, flex: 1 }} value={outNum}
+                                onChange={e => setBlockPort(iface.name, 'out', parseInt(e.target.value, 10))}
+                                title="这块执行完，pipeline 数据从这个 end 端口出去，交给链上的下一块。">
+                                {pipelineOut.map(p => <option key={p.num} value={p.num} style={opt}>{portLabel(p, 'end')}</option>)}
+                              </select>
+                            </div>
+                          </>
+                        );
+                      })()}
+                      {modes.processor && (
+                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
+                          Runs from the Blend workbench — Tools → Processor.
+                        </div>
+                      )}
+                    </div>
                   );
                 })()}
-                {modes.processor && (
-                  <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                    Runs from the Blend workbench — Tools → Processor.
+
+                {/* Start ports (inputs) */}
+                {iface.start_ports && iface.start_ports.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Start (Inputs)</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {iface.start_ports.map(port => renderPort(port, idx, true, iface.name))}
+                    </div>
                   </div>
                 )}
+
+                {/* End ports (outputs) */}
+                {iface.end_ports && iface.end_ports.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>End (Outputs)</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {iface.end_ports.map(port => renderPort(port, idx, false, iface.name))}
+                    </div>
+                  </div>
+                )}
+
               </div>
             );
-          })()}
-
-          {/* Start ports (inputs) */}
-          {iface.start_ports && iface.start_ports.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Start (Inputs)</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {iface.start_ports.map(port => renderPort(port, idx, true, iface.name))}
-              </div>
-            </div>
-          )}
-
-          {/* End ports (outputs) */}
-          {iface.end_ports && iface.end_ports.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>End (Outputs)</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                {iface.end_ports.map(port => renderPort(port, idx, false, iface.name))}
-              </div>
-            </div>
-          )}
-
+          })}
         </div>
       ))}
     </div>
