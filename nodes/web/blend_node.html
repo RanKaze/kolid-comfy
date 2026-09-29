@@ -310,35 +310,40 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
 .layer-thumb.masklayer-thumb canvas { width: 100%; height: 100%; display: block; }
 
-/* ---- 特效容器：摊在图层行的**上方** ----
+/* ---- 特效容器：摊在图层行的**上方**，链从下往上读 ----
    它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
-   同一种挂了两枚时两块各占一行，贴近 head 的那一行先执行 —— 竖排的次序就是它管条带上哪一步的答案，
-   不另写说明行。
-   容器内一步一颗 chip，从左到右就是执行序 —— 跟条带同一条读法，所以缝位算法、插入线样式两边共用一份。
-   展开参数的那一步排在整排 chip 的下面（参数区要的是宽度，这一条给不了两遍宽度）。空链不占位。 */
+   容器内一步一行，**越贴近图层行的那一步越先执行** —— 从下往上就是执行序。同一种挂了两枚时两块各占
+   一段，贴近 head 的那一段先跑，于是整摞从下往上一路读到底，不另写说明行。
+   展开参数的那一步，参数区排在它自己那颗 chip 的正上方（紧挨着，夹在该步与下一步之间）。空链不占位。
+   拖拽落在某颗的上半 = 插到它后面、下半 = 前面 —— 插入线因此是横的。 */
 .fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
     padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
 .fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
-.fx-chain.bypassed .fx-steps { opacity: 0.5; }
-.fx-steps { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+/* 倒过来排只靠这一句:DOM 里仍然写着链序 (params[0] 第一个),读法整个交给 CSS —— 于是缝位算法、
+   按 id 找回那一步、以及探针里的显示序都不必跟着翻。 */
+.fx-steps { display: flex; flex-direction: column-reverse; gap: 3px; min-width: 0; }
 .fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
     background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
 .fx-chip:hover { background: rgba(255,255,255,0.09); }
 .fx-chip.open { background: rgba(0,122,255,0.16); }
 .fx-chip.disabled { opacity: 0.42; }
 .fx-chip.dragging { opacity: 0.4; }
-.fx-chip.drop-before::before, .fx-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
-.fx-chip.drop-before::before { left: 0; }
-.fx-chip.drop-after::after { right: 0; }
+/* 整链旁路时暗下去的是那几步,不是展开着的参数区 (它照旧要点得动)。 */
+.fx-chain.bypassed > .fx-steps > .fx-chip { opacity: 0.5; }
+/* before = 更早 = 朝图层行那一侧,所以插入线落在**下沿**;条带上那颗 chip 是同一条规矩的横排版本。 */
+.fx-chip.drop-before::after, .fx-chip.drop-after::before { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: rgba(0,122,255,0.95); }
+.fx-chip.drop-before::after { bottom: 0; }
+.fx-chip.drop-after::before { top: 0; }
 .fx-chip input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: #0a84ff; cursor: pointer; }
 .fx-icon { width: 14px; height: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #9ecbff; }
 .fx-icon svg { width: 14px; height: 14px; display: block; }
 .fx-name { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.85); white-space: nowrap; }
-.fx-read { min-width: 0; max-width: 96px; font-size: 10.5px; color: rgba(255,255,255,0.55);
+.fx-read { flex: 1; min-width: 0; font-size: 10.5px; color: rgba(255,255,255,0.55);
     font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
-.fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 3px 5px;
-    border-left: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); border-radius: 0 0 7px 7px; }
+/* 参数区紧挨在该步 chip 的上方 ⇒ 圆角翻到上边来。 */
+.fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 0 5px;
+    border-left: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); border-radius: 7px 7px 0 0; }
 .fx-params .control-row { font-size: 11px; gap: 6px; }
 .fx-params .control-row label { min-width: 40px; font-size: 10.5px; }
 .fx-params .control-row span { min-width: 46px; font-size: 10.5px; }
