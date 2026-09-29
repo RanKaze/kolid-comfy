@@ -813,17 +813,53 @@ class InterfacePackageNode:
         # 宁可不给默认值也不猜。IMAGE/MASK 这类非 widget 输入没有默认值, 只有名字。
         _no_widget_value = object()
 
+        def _class_input_default(class_type, input_name):
+            """第二档: 类定义 INPUT_TYPES 里写着的 default —— 新建节点时空着的那格
+            ComfyUI 自己就是填的这个。存档那条读不到时才用它, 且只在类确实声明了
+            default 时用; 没有就仍然留空, 不编数字。"""
+            try:
+                import nodes as comfy_nodes
+                cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(class_type or '')
+                it = cls.INPUT_TYPES() if cls else None
+            except Exception:
+                return _no_widget_value
+            if not isinstance(it, dict):
+                return _no_widget_value
+            for cat in ('required', 'optional'):
+                ci = it.get(cat)
+                if not isinstance(ci, dict):
+                    continue
+                spec = ci.get(input_name)
+                if not isinstance(spec, (tuple, list)) or len(spec) < 2:
+                    continue
+                for extra in spec[1:]:
+                    if isinstance(extra, dict) and 'default' in extra:
+                        return extra['default']
+            return _no_widget_value
+
         def _widget_value_of_input(node_obj, entry_idx):
+            # 存档里 widgets_values 是**一条无名字的数组**, 只能按"inputs[] 里带 widget 的
+            # 槽位顺序"对齐去读。对齐一旦不成立就宁可不给默认值 —— 猜错数字比没有数字更坏。
+            # 三种失败各有各的说法, 面板上"框里只有 placeholder"时打的就是这几行。
+            who = "%s#%s value-input[%s]" % (node_obj.get('type', '?'), node_obj.get('id', '?'), entry_idx)
             ins = node_obj.get("inputs") or []
             wv = node_obj.get("widgets_values")
             entry = ins[entry_idx] if 0 <= entry_idx < len(ins) else None
             if not isinstance(entry, dict) or "widget" not in entry:
+                print("[InterfacePorts] 默认值缺席 %s: 这条输入在存档里没有 widget (%s), "
+                      "它是个连线口" % (who, 'no entry' if not isinstance(entry, dict) else 'widget key missing'))
                 return _no_widget_value
             if not isinstance(wv, list):
+                print("[InterfacePorts] 默认值缺席 %s: 存档里没有 widgets_values 数组 (是 %s)"
+                      % (who, type(wv).__name__))
                 return _no_widget_value
             widget_slots = [i for i, e in enumerate(ins)
                             if isinstance(e, dict) and "widget" in e]
             if len(widget_slots) != len(wv):
+                print("[InterfacePorts] 默认值缺席 %s: 带 widget 的输入槽 %d 个, widgets_values "
+                      "%d 项, 对不齐 (槽=%s / 值=%s)"
+                      % (who, len(widget_slots), len(wv), widget_slots,
+                         [type(x).__name__ for x in wv][:12]))
                 return _no_widget_value
             pos = widget_slots.index(entry_idx)
             return wv[pos]
@@ -854,8 +890,14 @@ class InterfacePackageNode:
                     start_targets[port] = {"class_type": tgt.get("type", ""),
                                            "input_name": in_name}
                     val = _widget_value_of_input(tgt, ti)
+                    _src = '存档'
+                    if val is _no_widget_value:
+                        val = _class_input_default(tgt.get('type', ''), in_name)
+                        _src = '类默认'
                     if val is not _no_widget_value:
                         start_defaults[port] = val
+                        print("[InterfacePorts] 默认值 value%s <- %s#%s.%s (%s)"
+                              % (port, tgt.get('type', '?'), tgt.get('id', '?'), in_name, _src))
 
         # ── 端口类型诊断 ─────────────────────────────────────────────────
         # 一份存档里能证明"这个口是什么类型"的一共四个地方: 输入槽 / 输入线 / 输出槽 /

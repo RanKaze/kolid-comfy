@@ -1523,6 +1523,11 @@ class SnapshotDetailerSamplerServer:
                     start_labels = fresh_pkg.get('start_labels', {}) or {}
                     start_defaults = fresh_pkg.get('start_defaults', {}) or {}
                     start_targets = fresh_pkg.get('start_targets', {}) or {}
+                    # 面板上每个框里的数字就该等于这里的一个值; 空 dict = 后端这次没算出
+                    # 任何默认值 (上面 get_package 的"默认值缺席 ..."会说明为什么)。
+                    print("[InterfacePorts] /api/package '%s' 名字=%s 默认值=%s 候选来源=%s"
+                          % (fresh_pkg.get('name', pkg.get('name', '')),
+                             sorted(start_labels), sorted(start_defaults), sorted(start_targets)))
 
                     def get_combo_options(port_num):
                         tgt = start_targets.get(str(port_num)) or {}
