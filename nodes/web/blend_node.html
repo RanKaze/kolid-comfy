@@ -4499,6 +4499,7 @@ function render() {
         // image, 唯独不含正在编辑的这张方向层自己 (guidance 本来也不进 context)。跳过它是因为箭头若被
         // 抄进自己的参考面, 拖一下就变成两个箭头, 而那两个说的不是同一件事。
         const dirRef = dirRefTarget();
+        let dirPainted = false;
         // 两条栈各带一份「到目前为止叠了些什么」的指纹:Stash 层轮到自己那一刻抄的就是它,而它上面的
         // 层轮到时指纹已经晚了 —— 于是「挪上面那层」不会让它重抄、更不会让它那条链重跑。画布尺寸也在
         // 指纹里 ⇒ 改画布必然重抄 (栅格层的重采样只是过渡,下一帧就被这份新抄写覆盖)。
@@ -4511,7 +4512,12 @@ function render() {
             drawLayer(l, target);
             // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
             // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
-            if (dirRef && !guidance && l.id !== dirRef.skip) drawLayer(l, dirRef.ctx);
+            // 一条例外: Stash 若在"正在编辑的那支箭"之后才轮到自己 (它压着那支箭), 它的快照里就带着那支
+            // 箭, 抄进参考面就又长出第二个箭头。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
+            // 各自进来了 —— 也不许"两个箭头"这件事发生。
+            if (dirRef && !guidance && l.id !== dirRef.skip
+                && !(isStashLayer(l) && dirPainted)) drawLayer(l, dirRef.ctx);
+            if (dirRef && l.id === dirRef.skip && l.visible && l.img) dirPainted = true;
             if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
