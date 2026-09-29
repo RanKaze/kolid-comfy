@@ -1,8 +1,9 @@
 // ==================== 图层特效链 UI ====================
-// 子行挂在图层行的**上方**,左侧竖线标归属;链里越贴近图层者越先执行,所以显示序是执行序的倒序
-// (effects[0] 正好紧挨着 head 行)。空链不占位 —— 加特效走图层右键菜单,或链存在时子行块末尾的 +。
+// 一条链是**它自己那枚 Effects chip 下面**的一块容器,从左到右读 = 执行序,和条带同一条规矩 (链序以前
+// 是倒着竖排的,那套"因反转而反转"的插入索引数学跟着搬家一起删了)。空链不占位,加特效的入口在那枚
+// chip 的魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
-let dragFx = null;          // {layerId, id} —— 链内重排序的进行中拖拽
+let dragFx = null;          // {layerId, ref} —— 链内重排序的进行中拖拽 (ref = 特效 id)
 const fxModalEl = document.getElementById('fxModal');
 const fxGroupsEl = document.getElementById('fxGroups');
 const fxBypassBtn = document.getElementById('fxBypassBtn');
@@ -126,15 +127,16 @@ function fxStructuralChange(l) {
     pushHistory();
 }
 
-// 一条特效 = 一行读数 + (展开时)一块参数区。两者一起返回,由 fxChainEl 顺序插入。
-function fxRowEl(l, effect) {
+// 一步特效 = 容器里的一颗 chip (勾选 + 图标 + 名字 + 读数 + 移除),展开时另交一块参数区,由
+// fxChainEl 摆到整排 chip 的**下面**。读数照旧是可见文本,不折进 tooltip。
+function fxStepEl(l, r, effect) {
     const spec = EFFECT_TYPES[effect.type];
-    const box = document.createDocumentFragment();
     const updaters = [];
 
-    const row = document.createElement('div');
-    row.className = 'fx-row' + (effect.enabled ? '' : ' disabled') + (fxOpenId === effect.id ? ' open' : '');
-    row.draggable = true;
+    const chip = document.createElement('div');
+    chip.className = 'fx-chip' + (effect.enabled ? '' : ' disabled') + (fxOpenId === effect.id ? ' open' : '');
+    chip.draggable = true;
+    chip.dataset.fx = effect.id;
 
     const read = document.createElement('div');
     read.className = 'fx-read';
@@ -152,7 +154,7 @@ function fxRowEl(l, effect) {
     chk.addEventListener('change', ev => {
         ev.stopPropagation();
         effect.enabled = chk.checked;
-        row.classList.toggle('disabled', !effect.enabled);
+        chip.classList.toggle('disabled', !effect.enabled);
         chk.title = effect.enabled ? 'Bypass this effect' : 'Enable this effect';
         fxLiveUpdate(l);
         pushHistory();
@@ -174,73 +176,64 @@ function fxRowEl(l, effect) {
     del.title = 'Remove this effect';
     del.addEventListener('click', ev => {
         ev.stopPropagation();
-        const i = l.effects.findIndex(e => e.id === effect.id);
-        if (i >= 0) l.effects.splice(i, 1);
+        const i = r.chain.findIndex(e => e.id === effect.id);
+        if (i >= 0) r.chain.splice(i, 1);
         if (fxOpenId === effect.id) fxOpenId = null;
         fxStructuralChange(l);
     });
 
-    row.appendChild(chk);
-    row.appendChild(icon);
-    row.appendChild(name);
-    row.appendChild(read);
-    row.appendChild(del);
-    row.addEventListener('click', ev => {
+    chip.appendChild(chk);
+    chip.appendChild(icon);
+    chip.appendChild(name);
+    chip.appendChild(read);
+    chip.appendChild(del);
+    chip.addEventListener('click', ev => {
         ev.stopPropagation();
         fxOpenId = fxOpenId === effect.id ? null : effect.id;
         renderLayerList();
     });
 
-    // 链内重排序:整行可拖,落在别行上按插入线决定新执行序。拖的是特效而不是图层,所以
-    // dragstart 必须 stopPropagation —— 否则图层行的重排序会跟着一起启动。
-    row.addEventListener('dragstart', ev => {
-        dragFx = { layerId: l.id, id: effect.id };
-        row.classList.add('dragging');
+    // 链内重排序:横向一条,左半边/右半边决定插在哪道缝上 —— 缝位算法与拖拽判定都是条带那一份
+    // (`dropSide` / `listSlot`),两处不该各写一遍"从左到右"。dragstart 必须停在这里,否则图层行的
+    // 重排序会跟着一起启动。
+    chip.addEventListener('dragstart', ev => {
+        dragFx = { layerId: l.id, ref: effect.id };
+        chip.classList.add('dragging');
         ev.dataTransfer.effectAllowed = 'move';
         ev.dataTransfer.setData('text/plain', 'fx:' + effect.id);
         ev.stopPropagation();
     });
-    row.addEventListener('dragend', () => {
-        row.classList.remove('dragging', 'drop-above', 'drop-below');
+    chip.addEventListener('dragend', () => {
+        chip.classList.remove('dragging', 'drop-before', 'drop-after');
         dragFx = null;
     });
-    row.addEventListener('dragover', ev => {
-        if (!dragFx || dragFx.layerId !== l.id || dragFx.id === effect.id) return;
+    chip.addEventListener('dragover', ev => {
+        const side = dropSide(ev, chip, dragFx, l.id, effect.id);
+        if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
         ev.dataTransfer.dropEffect = 'move';
-        const r = row.getBoundingClientRect();
-        const above = (ev.clientY - r.top) < r.height / 2;
-        row.classList.toggle('drop-above', above);
-        row.classList.toggle('drop-below', !above);
+        chip.classList.toggle('drop-before', side === 'before');
+        chip.classList.toggle('drop-after', side === 'after');
     });
-    row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
-    row.addEventListener('drop', ev => {
-        if (!dragFx || dragFx.layerId !== l.id || dragFx.id === effect.id) return;
+    chip.addEventListener('dragleave', () => chip.classList.remove('drop-before', 'drop-after'));
+    chip.addEventListener('drop', ev => {
+        const side = dropSide(ev, chip, dragFx, l.id, effect.id);
+        if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
-        const above = row.classList.contains('drop-above');
-        row.classList.remove('drop-above', 'drop-below');
-        moveEffect(l, dragFx.id, effect.id, above);
+        chip.classList.remove('drop-before', 'drop-after');
+        const movedId = dragFx.ref;
         dragFx = null;
+        const at = listSlot(r.chain, movedId, effect.id, side === 'after', e => e && e.id);
+        if (at < 0) return;
+        const moved = r.chain[at];
+        setStatus(`「${EFFECT_TYPES[moved.type].label}」is now step ${at + 1} of ${r.chain.length} in this chain — it runs there`);
+        fxStructuralChange(l);
     });
 
-    box.appendChild(row);
-    if (fxOpenId === effect.id) box.appendChild(fxParamsEl(l, effect, spec, syncRead, updaters));
     syncRead();
-    return box;
-}
-
-// 视觉上落在 target 之上 = 数组里排在 target **之后**(显示是倒序的)。
-function moveEffect(l, dragId, targetId, above) {
-    const chain = l.effects;
-    const from = chain.findIndex(e => e.id === dragId);
-    const to = chain.findIndex(e => e.id === targetId);
-    if (from < 0 || to < 0 || from === to) return;
-    const at = above ? to + 1 : to;
-    const [item] = chain.splice(from, 1);
-    chain.splice(at > from ? at - 1 : at, 0, item);
-    fxStructuralChange(l);
+    return { chip, params: fxOpenId === effect.id ? fxParamsEl(l, effect, spec, syncRead, updaters) : null };
 }
 
 function fxParamsEl(l, effect, spec, syncRead, updaters) {
@@ -368,14 +361,22 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
     return row;
 }
 
-function fxChainEl(l) {
-    if (!layerTakesEffects(l)) return null;
-    const chain = l.effects || [];
-    if (!chain.length) return null;
+// 一枚 Effects 记录 = 它自己那块容器,挂在那颗 chip 下面,从左到右读就是执行序。链里没有步就不占位
+// (空容器由那枚 chip 自己说话)。展开参数的那一步排在整排 chip 的下面:参数区要的是宽度,而这条给不了
+// 两遍宽度。
+function fxChainEl(l, r) {
+    if (!layerTakesEffects(l) || !r || !r.chain || !r.chain.length) return null;
     const box = document.createElement('div');
     box.className = 'fx-chain' + (effectsBypass ? ' bypassed' : '');
-    for (let i = chain.length - 1; i >= 0; i--) box.appendChild(fxRowEl(l, chain[i]));
-    // 内核跳过整链时把原因写在行上 —— 读数用可见文本,不塞 tooltip,更不能静默。
+    const steps = document.createElement('div');
+    steps.className = 'fx-steps';
+    box.appendChild(steps);
+    for (const effect of r.chain) {
+        const step = fxStepEl(l, r, effect);
+        steps.appendChild(step.chip);
+        if (step.params) box.appendChild(step.params);
+    }
+    // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。
     if (fxgl.skip) {
         const warn = document.createElement('div');
         warn.className = 'fx-warn';
@@ -385,16 +386,19 @@ function fxChainEl(l) {
     return box;
 }
 
-function addEffectToLayer(layerId, type) {
+// `ref` 是那枚被点了魔棒的 Effects 记录:一步追加到**它**的链尾 (= 执行序末尾,画在右边)。同一种挂
+// 了两枚容器时,选中的那枚收下它,右边那枚不受影响。
+function addEffectToLayer(layerId, ref, type) {
     const l = getLayer(layerId);
-    if (!l || !layerTakesEffects(l) || !EFFECT_TYPES[type]) return;
-    if (!l.effects) l.effects = [];
+    const r = l && attrRecord(ref);
+    if (!l || !layerTakesEffects(l) || !EFFECT_TYPES[type] || !r || r.type !== 'effects'
+        || attrRefList(l).indexOf(ref) < 0) return;
+    if (!Array.isArray(r.chain)) r.chain = [];
     const e = makeEffect(type);
-    // 追加在链尾 = 最后执行 = 显示在最上面一层。
-    l.effects.push(e);
+    r.chain.push(e);
     fxOpenId = e.id;
     fxStructuralChange(l);
-    setStatus(`Added ${EFFECT_TYPES[type].label} to「${l.name}」`);
+    setStatus(`Added ${EFFECT_TYPES[type].label} to「${l.name}」as step ${r.chain.length} of its chain`);
 }
 
 // picker 卡片:这里只铺底色并给出取景框,画面内容交给该特效自己的 thumb。
@@ -408,9 +412,12 @@ function drawFxThumb(c, type) {
     if (spec && spec.thumb) spec.thumb(g, box);
 }
 
-function openFxModal(layerId) {
+function openFxModal(layerId, ref) {
     const l = getLayer(layerId);
-    if (!l || !layerTakesEffects(l)) return;
+    const r = attrRecord(ref);
+    // 认的是**那一枚** Effects 记录:它必须还挂在这个图层的条带上,否则这一步就没人接。
+    if (!l || !layerTakesEffects(l) || !r || r.type !== 'effects'
+        || attrRefList(l).indexOf(ref) < 0) return;
     fxGroupsEl.innerHTML = '';
     const groups = new Map();
     for (const type of Object.keys(EFFECT_TYPES)) {
@@ -430,7 +437,7 @@ function openFxModal(layerId) {
         for (const type of types) {
             const spec = EFFECT_TYPES[type];
             cards.appendChild(makeTagCard(spec.label, spec.desc,
-                () => { closeFxModal(); addEffectToLayer(layerId, type); },
+                () => { closeFxModal(); addEffectToLayer(layerId, ref, type); },
                 c => drawFxThumb(c, type)));
         }
         group.appendChild(head);
@@ -466,7 +473,9 @@ function bindFxMap(ref) {
     const t = fxMapTarget;
     if (!t) { setStatus('The picker was closed — that map is not bound', 'error'); return; }
     const l = getLayer(t.layerId);
-    const e = l && (l.effects || []).find(x => x.id === t.effectId);
+    // 按 id 找它所属的那枚记录:老名字 `l.effects` 只看最左边那一枚容器,右边那枚里的一步绑图会
+    // 静默什么都不发生。
+    const e = l && effectById(l, t.effectId);
     if (!e) return;
     const slot = t.slot || 'map';
     const role = ((fxMapSlots(e).find(s => s.key === slot)) || { role: 'map' }).role;

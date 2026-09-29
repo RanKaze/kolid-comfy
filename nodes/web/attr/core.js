@@ -8,8 +8,9 @@
 //     (decal → effects → mask,也就是这个功能出现之前那条固定管线的顺序);建好之后顺序归用户拖,
 //     表里再没有第二个"顺序"。
 //   · 同一种可以装多个 (多张 Mask 互相叠、多个 Effects 容器各管它右边那一段链)。图层上那三个老名字
-//     (`l.mask` / `l.decal` / `l.effects`) 是**最左边那一个**的视图 —— 全篇几十处读写先不必理解
-//     strip,语义仍然只有一处;真正的折叠在引擎里按整串走 (见 blend_node 的 layerSource)。
+//     (`l.mask` / `l.decal` / `l.effects`) 是**最左边那一个**的视图 —— 迁移、快照、剪贴板那一类调用
+//     先不必理解 strip;会同时存在好几枚的那两样 (落笔、链 UI) 一律**点名**到哪一枚 (paintRecord /
+//     chainOwnerRecord),否则"这一步的哪一条链"就没有唯一答案。真正的折叠在引擎里按整串走。
 //   · **有 attribute 才有数据**:装上一个空的 Mask 就是"蒙版还没画",跟没装等价,所以迁移只在字段真
 //     有内容时才立记录。反过来 `l.mask = null` 是把这一枚摘掉,而不是留着它装空。
 //   · refs 一律**扫**出来,不落字段;快照存值 + id 只当分组标签 (跟源图资产表同一套做法),所以表永远
@@ -74,14 +75,13 @@ const ATTR_KINDS = {
         // undo 便回不到当初那一步。面 (canvas) 不必 —— 它是 copy-on-write 的。
         load: raw => ({ chain: cloneEffects(raw.chain) }),
         clone: r => ({ chain: cloneEffects(r.chain) }),
-        // 链没有面可画,所以这条 chip 是一枚**图标** —— 它是"顺序里的一步"的记号,不是内容预览。
-        // 点它做什么 (展开它自己那条链) 是 S5 的事;今天它不另开入口,行头上那颗魔棒才是。
+        // 链没有面可画,所以这条 chip 是一枚**魔棒** —— 它是"顺序里有这么一步"的记号,不是内容预览。
         chip(el) {
             if (el.dataset.icon !== 'chain') { el.innerHTML = fxWandSvg(); el.dataset.icon = 'chain'; }
         },
-        // 链上的特效不靠"点 chip"进 (那是 S5 的容器),所以这里只把行选中 —— 让整条条带点了都还在
-        // 讲这个图层,而不是顺手改了工具。
-        open(l) { selectLayer(l.id); },
+        // chip 上那根魔棒 = 这条链的**添加**入口 (行头上那颗已经搬走了 —— 一个动作一个入口)。
+        // 它开的是**这一枚**记录的选择器:同一种挂了两枚容器时,选中的那个容器收下这一步。
+        open(l, r) { openFxModal(l.id, r.id); },
     },
 };
 
@@ -122,6 +122,26 @@ function attrRecord(ref) { return ref ? attrRecords.get(ref) || null : null; }
 // 「整层重算不算」的判据一律读这一串 —— 只看最左那一条会漏掉右边那枚容器。
 function stripChains(l) {
     return attrRecordsOf(l).filter(r => r.chain).map(r => r.chain);
+}
+// 从**特效 id** 出发的读法一律走这一句:一枚 id 住在某一条链里,而那条链属于哪一枚 Effects 记录不是
+// 图层能凭老名字答的 (`l.effects` 只看最左那枚)。右边那枚容器里的一步 warp / 一次绑图,查不到就
+// 什么都不会发生 —— 静默失败比报错更难查。
+function chainOwnerRecord(l, effectId) {
+    for (const r of attrRecordsOf(l)) {
+        if (r.chain && r.chain.some(e => e && e.id === effectId)) return r;
+    }
+    return null;
+}
+function effectById(l, effectId) {
+    const r = chainOwnerRecord(l, effectId);
+    return r ? r.chain.find(e => e && e.id === effectId) : null;
+}
+// 整条条带上"还挂着、且开着"的特效。状态文案与"这层到底有没有链"那一类读数都该问这一句:问最左边
+// 那一枚容器会漏掉右边那枚,而那句话说的正是这一层。
+function liveEffects(l) {
+    const out = [];
+    for (const chain of stripChains(l)) for (const e of chain) if (e && e.enabled) out.push(e);
+    return out;
 }
 
 function attrRefs(ref) {
@@ -295,16 +315,34 @@ function attrStepNote(label, r, l) {
     return recs.length < 2 ? label : `${label} (step ${i + 1} of ${recs.length})`;
 }
 
-// 拖拽重排:把 `ref` 挪进条带。`slot` 是**摘它之前**那个数组里的插入位 (落在第 k 颗的左半边就是 k,
-// 右半边就是 k+1),所以调用方只管报"我要插在哪两道缝之间",不必知道自己会不会被摘掉。
-function moveAttr(l, ref, slot) {
-    const refs = attrRefList(l);
-    const from = refs.indexOf(ref);
-    if (from < 0) return false;
-    const to = Math.max(0, Math.min(slot > from ? slot - 1 : slot, refs.length - 1));
-    if (to === from) return false;
-    refs.splice(to, 0, refs.splice(from, 1)[0]);
-    return true;
+// 拖拽重排的那一份**缝位**算法:横向一条,落在第 k 颗的左半边 = 插到它的位置,右半边 = 它后面。
+// 下标一律按**摘之前**那个数组说,所以调用方不必知道自己会不会被摘掉 (摘掉之后它左边那道缝还是同一条)。
+// 条带和特效容器共用这一份 —— 两处都是"从左到右就是执行序",规矩不该有两套。列表里存的不是 id 本身
+// (链存的是特效对象) 就交一个 `idOf` 读出它的 id。落不到同一列表里 (拖的是被拖的那颗自己、或者目标
+// 根本不在这条里) 就回 -1,一行都不动。
+function listSlot(refs, dragId, targetId, after, idOf) {
+    const key = idOf || (v => v);
+    const from = refs.findIndex(v => key(v) === dragId);
+    const to = refs.findIndex(v => key(v) === targetId);
+    if (from < 0 || to < 0 || from === to) return -1;
+    const at = to + (after ? 1 : 0);
+    const [item] = refs.splice(from, 1);
+    refs.splice(at > from ? at - 1 : at, 0, item);
+    return refs.findIndex(v => key(v) === dragId);
+}
+
+// 横向一条列表的落点:第 k 颗的左半边 = 'before'、右半边 = 'after'。不是这一条里的、或者就是自己拖
+// 自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。条带与特效容器共用这一句,和 `listSlot` 是一对。
+function dropSide(ev, el, drag, layerId, ownId) {
+    if (!drag || String(drag.layerId) !== String(layerId) || drag.ref === ownId) return '';
+    const r = el.getBoundingClientRect();
+    return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
+}
+
+// 拖拽重排:把 `dragRef` 插到同一条里 `targetRef` 那一颗的左边还是右边。缝位算法住在 `listSlot`，
+// 特效容器排它自己那条链走的是同一句。
+function moveAttr(l, dragRef, targetRef, after) {
+    return listSlot(attrRefList(l), dragRef, targetRef, after) >= 0;
 }
 
 // ---- 出厂、迁移与视图 ----
