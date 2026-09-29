@@ -240,8 +240,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-type-badge.text { color: #d9b8ff; }
 .layer-type-badge.direction { color: #ff9ec4; }
 .layer-type-badge.model { color: #7ee0d0; }
-/* Direction 小窗里那颗轨道球: 深色底才压得住 magenta/cyan 那三条轨道, 高度与 JS 里的 DIR_GIZMO_H 一致。 */
+/* Direction 小窗里那颗世界观察: 深色底才压得住 magenta/cyan 那三条轨道, 高度与 JS 里的 DIR_GIZMO_H 一致。
+   三格角度 field 借 RGBA 那四格的皮肤 (.rgba-fields/.rgba-cell), 只补一条没人在编辑时的暗态。 */
 #dirGizmo { display: block; width: 100%; height: 176px; background: #0b0d14; border: 1px solid #2a2f3d; border-radius: 6px; }
+.dir-angles { margin-top: 2px; }
+.dir-angles input:disabled { opacity: 0.4; cursor: default; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -946,15 +949,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
             </div>
-            <!-- Direction 工具: 图层自己的像素就是这颗轨道球 (地平环 + 仰角弧 + 箭头 + 滚转环),
-                 小窗画的是同一次绘制的结果, 只多三颗可拖的把手 —— 拖到的就是烘进去的。
-                 选中的不是 Direction 层时整颗转暗, 那本身就是"没人在编辑"的话, 不再占一行说明。 -->
+            <!-- Direction 工具: 小窗是**世界里的观察** (画布平面躺在方位环里 + 三根轨道 + 三颗把手),
+                 图层自己的像素是**画布空间的观察** (正面看画布: 平面 + 箭头 + 从 +X 量到箭头的角弧,
+                 度数烘进像素)。两边同一套姿态数学, 不是同一次绘制 —— 相机本来就不同。
+                 选中的不是 Direction 层时整颗转暗、三格 field 禁用, 那本身就是"没人在编辑"的话。 -->
             <div class="panel-section tool-section foldable collapsed" id="directionSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="dirLabel" title="Direction (D) — a layer whose picture IS this orientation gizmo. Drag the ring handle for Yaw (0° right, 90° down — the same reading as the lighting Angle), the tip for Pitch (0 = grazing the canvas plane, 90 = straight at the camera), the fin for Roll. Shift snaps to 15°. Click the header to open or close its settings window."><span class="fold-caret"></span>Direction <span class="tool-key">D</span></div>
+                    <div class="panel-label" id="dirLabel" title="Direction (D) — a layer that draws where a direction sits relative to the canvas. The window is the world view: the canvas plane lying inside the 360° azimuth ring, with the pitch arc and the roll ring on top. Drag the ring handle for Yaw (0° right, 90° down — the same reading as the lighting Angle), the tip for Pitch (0 = flat on the canvas plane, 90 = out of it toward you), the fin for Roll, or type the three angles directly. Shift snaps to 15°. The layer's own pixels are the canvas view of the same pose. Click the header to open or close its settings window."><span class="fold-caret"></span>Direction <span class="tool-key">D</span></div>
                 </div>
                 <div class="tool-body">
                     <canvas id="dirGizmo" width="288" height="176"></canvas>
+                    <div class="rgba-fields dir-angles" title="The three angles, typed directly — they read and write the same pose the handles drag. Yaw is measured in the canvas plane from its +X edge, Pitch lifts the direction off that plane, Roll banks it about itself. Values are folded, not clamped: 999° yaw lands on 279°.">
+                        <span class="rgba-cell"><label>Yaw</label><input id="dirYawNum" type="number" min="0" max="359" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell"><label>Pitch</label><input id="dirPitchNum" type="number" min="-90" max="90" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell"><label>Roll</label><input id="dirRollNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
+                    </div>
                     <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The arrow's own colour — the ring, arc and fin keep theirs"><span id="dirColorValue">#FF2E88</span></div>
                     <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Point this layer back at the default orientation (135° yaw, 25° pitch, no roll)">Default</button><span></span></div>
                 </div>
@@ -1181,9 +1190,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-sub">Drag a rectangle on the canvas — the text fills that box.</span>
                         </button>
                         <button class="io-menu-item" id="addDirectionLayerBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas — the layer's picture is an orientation gizmo (ring, arc, arrow) drawn at whatever size that box is. Its three handles live in the Direction tool window (D).">
+                                title="Drag a rectangle on the canvas — the layer's picture is the canvas's own view of a direction: the canvas plane, the arrow, and the angle swept from the canvas's +X edge with its degrees baked in. You point it from the Direction tool window (D), where the same pose is drawn as the world view.">
                             <span class="io-menu-title">Direction Layer</span>
-                            <span class="io-menu-sub">Drag a rectangle on the canvas — an arrow you point by dragging its handles.</span>
+                            <span class="io-menu-sub">Drag a rectangle on the canvas — an angle diagram of where a direction sits.</span>
                         </button>
                         <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
@@ -5036,7 +5045,7 @@ function renderStackList(listEl, stack) {
         } else if ((isTextLayer(l) && String(l.text.content)) || isDirectionLayer(l)) {
             // A text layer has no `src` to point an <img> at — show its current render instead,
             // letterboxed into the chip the way the canvas draws it onto the box. A direction
-            // layer's gizmo render takes the very same branch for the same reason.
+            // layer's angle-diagram render takes the very same branch for the same reason.
             const c = document.createElement('canvas');
             c.width = 84; c.height = 56;
             c.style.width = '100%';
@@ -5075,7 +5084,7 @@ function renderStackList(listEl, stack) {
             : isTextLayer(l)
                 ? 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit'
                 : isDirectionLayer(l)
-                    ? 'Direction layer — the picture is the orientation gizmo; drag its handles in the Direction tool (D)'
+                    ? 'Direction layer — the picture is the canvas view of a direction; point it in the Direction tool (D)'
                     : isRasterLayer(l)
                     ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
                     : 'Smart layer — transform is non-destructive and keeps the native image';
@@ -8508,7 +8517,7 @@ function addTextLayer(box) {
 
 // A Direction layer is the same trick as a text layer: the descriptor is the whole document, the
 // pixels are a render of it, and nothing about the render is ever stored. `box` from the armed
-// rectangle welds the transform to it, so the gizmo lands where the user swept.
+// rectangle welds the transform to it, so the diagram lands where the user swept.
 function addDirectionLayer(box) {
     const desc = Object.assign({}, DIR_DEFAULTS);
     const nat = dirNaturalBox();
@@ -8547,8 +8556,8 @@ function addDirectionLayer(box) {
     syncDirectionBuffer(l);
     setMode('transform');                          // renders the list + canvas
     layoutCanvas();
-    setStatus(box ? `Direction Layer added — the gizmo is ${box.w} × ${box.h}; drag it in the Direction window`
-                  : 'Direction Layer added — drag the ring, tip or fin in the Direction window to point it');
+    setStatus(box ? `Direction Layer added — ${box.w} × ${box.h}, pointing ${Math.round(l.dir.yaw)}° / ${Math.round(l.dir.pitch)}°`
+                  : `Direction Layer added — full canvas, pointing ${Math.round(l.dir.yaw)}° / ${Math.round(l.dir.pitch)}°`);
     pushHistory();
     return l;
 }
@@ -11437,7 +11446,7 @@ async function buildCudBlob() {
             // buffer has no src, so it encodes as `image: null` like every hand-made surface): the
             // fields + transform rebuild the editable layer on Load, and the pixels follow.
             text: l.text ? Object.assign({}, l.text) : null,
-            // Same deal as a text descriptor: the gizmo's render is never stored, the three angles
+            // Same deal as a text descriptor: the render is never stored, the three angles
             // and the colour are the whole document, and the pixels are rebuilt from them on Load.
             dir: l.dir ? Object.assign({}, l.dir) : null,
             // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
