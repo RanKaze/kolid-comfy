@@ -1,18 +1,23 @@
-// Direction 图层 —— 图层自己的像素就是这颗姿态把手图: 地平环 + 仰角弧 + 箭头 + 滚转环。
-// 面板小窗里画的是同一个 drawDirectionGizmo, 只多画几颗可拖的把手 —— 小窗看到的与烘进图层的
-// 是同一次绘制, 不存在两套几何。
+// Direction 图层 —— 同一个姿态, 两种观察。
+//   小窗 = **世界里的观察**: 画布是躺在世界里的一张平面 (按 canvasW:canvasH 的真实比例画出来,
+//          铺在 360° 方位环里), 环 = 绕平面一圈的 yaw 轨道, 青绿弧 = pitch 轨道, 琥珀环 = roll 轨道,
+//          三颗把手就长在这上面。相机是一条固定 25° 俯角的正交视线, 地平环因此压成 ry = R·sin ε 的椭圆。
+//   图层像素 = **画布空间的观察**: 顺着画布法线正面看过去 —— 画布平面铺满画面, 箭头是世界方向落在
+//          画布里的投影 (pitch 越大它越短, 90° 时只剩箭头尖在中心 = "正对画布外"), 角弧从画布 +X
+//          量到箭头, 度数直接烘进像素。
+// 两边共用同一套姿态数学 (dirVecOf / dirRollBasis / dirProject) 与同一批颜色, 但**不是同一次绘制**:
+// 观察的相机本来就不同, 把它们画成一张图反而读不出"相对画布的角度"这句话。
 //
-// 角度读法跟着特效链已有的那条规矩: Yaw 0° = 画布右、90° = 画布下 (与 Lighting 的 Angle、
-// fxglDirUV 同一个基); Pitch 是抬离画布平面的角度 (0 = 贴着平面, 90 = 正对相机);
+// 角度基跟着特效链已有的那条规矩: Yaw 0° = 画布右、90° = 画布下 (与 Lighting 的 Angle、
+// fxglDirUV 同一个基); Pitch 是抬离画布平面的角度 (0 = 贴着平面, 90 = 顺着法线朝观察者);
 // Roll 是箭头绕自身轴转 (从"鳍朝上"起算)。
-// 相机是一条固定的 25° 俯角正交视线: 地平环因此压成 ry = R·sin(tilt) 的椭圆 —— 截图里那颗环
-// 就是这么来的, 也是"为什么环是个椭圆"的一句话答案。
 
 const DIR_DEFAULTS = { yaw: 135, pitch: 25, roll: 0, color: '#ff2e88' };
 const DIR_TILT = 25 * Math.PI / 180;
 const DIR_RING = '#e0247a';
 const DIR_ARC = '#19e0bc';
 const DIR_FIN = '#f5c542';
+const DIR_PLANE = '#8b93a7';      // 画布平面本身: 中性灰蓝, 不跟任何一根轨道抢颜色
 const DIR_HANDLE_R = 6.5;         // 把手在屏幕上恒定大小, 不随图层盒子/缩放变 (与 warp 把手同一条)
 const DIR_HIT_R = 11;
 const DIR_GIZMO_H = 176;
@@ -71,6 +76,18 @@ function dirRollBasis(pose) {
 // 环的半径: 外面那圈姿态球是它的 1.3 倍 (DIR_POSE_R), 所以 0.34 而不是更大 —— 箭头尖不能出画。
 function gizmoRadius(W, H) { return Math.min(W, H) * 0.34; }
 
+// 画布平面的比例永远取自画布自己; 图层盒子与小窗都只是取景框, 不许把平面拉扁。
+function dirCanvasAspect() { return canvasW && canvasH ? canvasW / canvasH : 1; }
+
+// 世界观察里画布平面的四角 (屏幕像素, 中心为原点)。半对角线取 0.92R, 于是四角正好落在方位环内侧
+// —— "画布就是躺在这个世界里的那张矩形"是靠它与环的比例关系读出来的, 不靠文字说明。
+function dirPlaneCorners(R) {
+    const a = dirCanvasAspect(), d = 0.92 * R, n = Math.hypot(a, 1);
+    const hw = d * a / n, hd = d / n;
+    return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]
+        .map(([x, z]) => dirProject({ x, y: 0, z }, 1));
+}
+
 // 滚转环上角度 a 处的点 (像素, 以小窗中心为原点)。环心沿箭头走到 60% 处, 环本身垂直于箭头。
 // 画这颗环、放这颗把手、以及探针回读像素都从这里取点 —— 不在别处重算一遍同一颗环。
 function dirFinPoint(pose, R, a) {
@@ -100,20 +117,43 @@ function dirHandlePoints(W, H, pose) {
     };
 }
 
-// ---- 绘制 ----
-// opts.chrome = 画那几颗可拖把手 (只有小窗要); opts.state = 哪一颗正被按下/悬停。
-function drawDirectionGizmo(ctx, W, H, pose, opts) {
+// ---- 观察一: 世界里的姿态把手图 (只有小窗画它) ----
+// opts.chrome = 画那几颗可拖把手; opts.state = 哪一颗正被按下/悬停; opts.dim = 没人在编辑。
+function drawDirectionWorld(ctx, W, H, pose, opts) {
     const o = opts || {};
     const R = gizmoRadius(W, H);
     const dim = o.dim ? 0.32 : 1;
     const lw = Math.max(1.4, R * 0.035);
     ctx.save();
     ctx.translate(W / 2, H / 2);
-    ctx.globalAlpha = dim;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    // 地平环: 画布平面自己。
+    // 画布平面: 躺在地上的一张真比例矩形, 加一条 0° 参考边 (画布 +X, 即中心到右边缘中点)。
+    // 没有它, 环上的角度就只是"绕一圈", 读不出是相对谁绕的。
+    const corners = dirPlaneCorners(R);
+    const hw = corners[1].x;                     // 画布右半宽 (屏幕上就是它, 正交投影不改变 x)
+    ctx.globalAlpha = dim * 0.1;
+    ctx.fillStyle = DIR_PLANE;
+    ctx.beginPath();
+    corners.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = dim * 0.5;
+    ctx.strokeStyle = DIR_PLANE;
+    ctx.lineWidth = lw * 0.7;
+    ctx.stroke();
+    ctx.setLineDash([lw * 1.2, lw * 1.4]);
+    ctx.globalAlpha = dim * 0.62;
+    ctx.strokeStyle = DIR_RING;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(hw, 0);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 地平环: 绕这张平面一圈的 360° 方位轨道。
+    ctx.globalAlpha = dim;
     ctx.strokeStyle = DIR_RING;
     ctx.lineWidth = lw;
     ctx.beginPath();
@@ -228,9 +268,108 @@ function drawDirectionGizmo(ctx, W, H, pose, opts) {
     ctx.restore();
 }
 
+// ---- 观察二: 画布空间的正面图 (图层自己的像素) ----
+// 顺着画布法线看过去: 画布平面 = 铺满画面的那张真比例矩形, 角度全在矩形里量。
+// 箭头是世界方向落进画布的投影 ⇒ 长度天然乘 cos(pitch) (抬头到 90° 就只剩箭头尖在中心, 那正是
+// "方向冲着画布外来"); 后面那条等长的淡虚线是它的真长参照, 没有它短掉的一截只会被读成"箭头短了"。
+function drawDirectionPlan(ctx, W, H, pose) {
+    const a = dirCanvasAspect();
+    let pw = W * 0.94, ph = pw / a;
+    if (ph > H * 0.94) { ph = H * 0.94; pw = ph * a; }
+    const Rp = Math.min(pw, ph) / 2 * 0.86;
+    const lw = Math.max(1.4, Rp * 0.045);
+    const t = dirRad(pose.yaw), co = Math.cos(dirRad(pose.pitch));
+    const ux = Math.cos(t), uy = Math.sin(t);
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = DIR_PLANE;
+    ctx.fillRect(-pw / 2, -ph / 2, pw, ph);
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = DIR_PLANE;
+    ctx.lineWidth = lw * 0.7;
+    ctx.strokeRect(-pw / 2, -ph / 2, pw, ph);
+
+    // 0° 参考边 = 画布 +X (中心到右边缘中点)。角弧从这条边起量, 所以两者必须同色。
+    ctx.setLineDash([lw * 1.2, lw * 1.4]);
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = DIR_RING;
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(pw / 2, 0);
+    ctx.stroke();
+    // 真长参照: 同一方向上一直画到 Rp。
+    ctx.globalAlpha = 0.28;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(ux * Rp, uy * Rp);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 角弧 + 度数: 这张图要说的话就是"相对画布转了多少度", 所以度数烘进像素, 不留在面板里。
+    const Ra = Rp * 0.44;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.arc(0, 0, Ra, 0, t, false);
+    ctx.stroke();
+    const fs = Math.max(11, Rp * 0.15);
+    const mid = t / 2;
+    ctx.font = `600 ${fs}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#f2f2f6';
+    ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+    ctx.lineWidth = fs * 0.18;
+    const label = `${Math.round(pose.yaw)}\u00b0`;
+    ctx.strokeText(label, Math.cos(mid) * Ra * 1.34, Math.sin(mid) * Ra * 1.34);
+    ctx.fillText(label, Math.cos(mid) * Ra * 1.34, Math.sin(mid) * Ra * 1.34);
+
+    // 箭头本体 (图层颜色)。
+    const col = pose.color || DIR_DEFAULTS.color;
+    const tip = { x: ux * Rp * co, y: uy * Rp * co };
+    const head = Math.max(6, Rp * 0.22);
+    const shaftEnd = { x: tip.x - ux * head * 0.62, y: tip.y - uy * head * 0.62 };
+    ctx.strokeStyle = col;
+    ctx.fillStyle = col;
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = lw * 1.6;
+    ctx.beginPath();
+    ctx.moveTo(shaftEnd.x, shaftEnd.y);
+    ctx.lineTo(0, 0);
+    ctx.stroke();
+    const px = -uy, py = ux;
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(shaftEnd.x + px * head * 0.44, shaftEnd.y + py * head * 0.44);
+    ctx.lineTo(shaftEnd.x - px * head * 0.44, shaftEnd.y - py * head * 0.44);
+    ctx.closePath();
+    ctx.fill();
+
+    // 滚转: 箭头自己那根"鳍"在画布里的朝向 (把垂直于箭头的侧向基投影到画布平面上)。
+    // 画在箭头之后是必须的: b1 是 up 去掉沿箭头分量得到的, 而 up 在画布平面里没有投影,
+    // 所以 roll=0 时这根鳍正好**叠在箭杆上** —— 先画就会被箭杆盖成"没有滚转这回事"。
+    const { b1, b2 } = dirRollBasis(pose);
+    const r = dirRad(pose.roll);
+    const rx = (b1.x * Math.cos(r) + b2.x * Math.sin(r)) * Rp * 0.26;
+    const ry = (b1.z * Math.cos(r) + b2.z * Math.sin(r)) * Rp * 0.26;
+    const shoulder = { x: ux * Rp * co * 0.55, y: uy * Rp * co * 0.55 };
+    ctx.strokeStyle = DIR_FIN;
+    ctx.lineWidth = lw;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.moveTo(shoulder.x, shoulder.y);
+    ctx.lineTo(shoulder.x + rx, shoulder.y + ry);
+    ctx.stroke();
+    ctx.restore();
+}
+
 // ---- 图层像素 ----
 // 与文字层同一条规矩: 描述符 + 盒子决定像素, 存档只存描述符, 渲染从不入档。
-// 盒子是 1:1 的正方参考盒 (箭头是个记号, 不该被各向异性的盒子拉扁), 所以 nat 与 w/h 无关。
+// 盒子只是取景框: 平面按画布比例 contain 进去, 所以拉扁盒子拉不扁画布。
 function dirNaturalBox() { return { w: 256, h: 256 }; }
 
 function renderDirectionBuffer(desc, w, h) {
@@ -238,7 +377,7 @@ function renderDirectionBuffer(desc, w, h) {
     c.width = Math.max(1, Math.round(w));
     c.height = Math.max(1, Math.round(h));
     const ctx = c.getContext('2d');
-    if (ctx) drawDirectionGizmo(ctx, c.width, c.height, desc, {});
+    if (ctx) drawDirectionPlan(ctx, c.width, c.height, desc);
     return c;
 }
 
@@ -250,7 +389,8 @@ function syncDirectionBuffer(l) {
     if (!canvasW || !canvasH || !desc || !tr) return;
     const w = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.w * canvasW)));
     const h = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.h * canvasH)));
-    const key = JSON.stringify([desc.yaw, desc.pitch, desc.roll, desc.color]);
+    // 画布比例现在也是画面的一部分 (那张平面按它画), 所以改画布尺寸必须重烘 —— key 里带上它。
+    const key = JSON.stringify([desc.yaw, desc.pitch, desc.roll, desc.color, canvasW / canvasH]);
     if (l.dirCache && l.dirCache.key === key && l.dirCache.img === l.img
         && l.dirCache.w === w && l.dirCache.h === h) return;
     const prev = l.img;
@@ -337,6 +477,13 @@ const dirGizmoCanvas = document.getElementById('dirGizmo');
 const dirGizmoColor = document.getElementById('dirColorInput');
 const dirGizmoColorValue = document.getElementById('dirColorValue');
 const dirGizmoReset = document.getElementById('dirResetBtn');
+// 三格直接填数字的角度 field, 与 RGBA 那四格同一套词汇。填进来的值仍旧过
+// sanitizeDirectionDescriptor 那道唯一的形状裁定: 打 999 是绕到 279°, 不是把读数卡死在边界上。
+const dirAngleFields = [
+    { key: 'yaw', input: document.getElementById('dirYawNum') },
+    { key: 'pitch', input: document.getElementById('dirPitchNum') },
+    { key: 'roll', input: document.getElementById('dirRollNum') },
+];
 let dirDrag = null;
 let dirHover = null;
 
@@ -367,13 +514,14 @@ function drawDirGizmo() {
     const readout = dirDrag
         ? `${dirDrag.axis === 'yaw' ? 'Yaw' : dirDrag.axis === 'roll' ? 'Roll' : 'Pitch'} ${Math.round(pose[dirDrag.axis])}°`
         : null;
-    drawDirectionGizmo(ctx, W, H, pose, {
+    drawDirectionWorld(ctx, W, H, pose, {
         chrome: true,
         dim: !target,
         hover: dirDrag ? dirDrag.axis : dirHover,
         state: dirDrag && dirDrag.axis,
         readout,
     });
+    syncDirectionFields();
 }
 
 function dirGizmoPoint(ev) {
@@ -472,5 +620,40 @@ if (dirGizmoReset) {
         if (!l) return;
         patchDirectionLayer(l, { yaw: DIR_DEFAULTS.yaw, pitch: DIR_DEFAULTS.pitch, roll: DIR_DEFAULTS.roll });
         setStatus(`「${l.name}」pointed back to the default`, 'success');
+    });
+}
+
+// 拖把手与填数字读写的是同一份 l.dir, 所以两边都得能改写对方: 每帧画完小窗就把三格读数跟上。
+// 正在打字那一格除外 —— 拖一圈把手不该把用户刚敲进去的"13"变成"135"。
+function syncDirectionFields() {
+    const l = dirGizmoTarget();
+    const pose = l ? l.dir : null;
+    for (const f of dirAngleFields) {
+        if (!f.input) continue;
+        f.input.disabled = !l;
+        if (!pose || document.activeElement === f.input) continue;
+        const v = String(Math.round(pose[f.key]));
+        if (f.input.value !== v) f.input.value = v;
+    }
+}
+
+for (const f of dirAngleFields) {
+    if (!f.input) continue;
+    f.input.addEventListener('input', () => {
+        const l = dirGizmoTarget();
+        if (!l) return;
+        const n = Number(f.input.value);
+        if (f.input.value === '' || !Number.isFinite(n)) return;
+        const next = sanitizeDirectionDescriptor(Object.assign({}, l.dir, { [f.key]: n }));
+        if (next[f.key] === l.dir[f.key]) return;
+        patchDirectionLayer(l, { [f.key]: next[f.key] }, { live: true });
+        drawDirGizmo();
+    });
+    f.input.addEventListener('change', () => {
+        const l = dirGizmoTarget();
+        if (!l) return;
+        f.input.value = String(Math.round(l.dir[f.key]));   // 回读被折回/夹断之后的实际读数
+        renderLayerList();
+        pushHistory();
     });
 }
