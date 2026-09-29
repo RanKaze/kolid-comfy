@@ -161,14 +161,23 @@ function insertAttr(l, type, where) {
 }
 
 // chip 右键的 Shallow Duplicate:另立一枚同类型的记录,排在原本那枚**右边** (在它之后生效)。
-// 面是共享的那一份 —— 这正是这一档的意义:两枚蒙版要永远同步。链不能这么办:链里那颗 effect 对象
-// 是就地改参数的,共享出去就等于两个 chip 后面永远拖着同一根绳子,而面上没有这种绳子 (落笔会 detach)。
+// 面**另起一张**,像素照抄当下 —— 共享一面在这条路上活不过第一笔: detachPaintSurface 在落笔之前就把
+// 这一层的面换成私有副本,对面那枚仍指着旧画布,于是"两枚永远同步"只成立到第一次作画为止。与其让一
+// 个看不见的引用在两笔之间悄悄变了名分,不如 duplicate 那一刻就各拿一张面。链同理:effect 对象是就地
+// 改参数的,所以带过来的也是它自己的一份。
 function dupAttrShallow(l, ref) {
     const src = attrRecord(ref);
     if (!src || attrRefList(l).indexOf(ref) < 0) return null;
     const spec = ATTR_TYPES[src.type];
+    let face = null;
+    if (src.surface) {
+        face = document.createElement('canvas');
+        face.width = src.surface.width;
+        face.height = src.surface.height;
+        face.getContext('2d').drawImage(src.surface, 0, 0);
+    }
     const copy = newAttrRecord(src.type, spec.kind === 'chain'
-        ? { chain: cloneEffects(src.chain) } : { surface: src.surface });
+        ? { chain: cloneEffects(src.chain) } : { surface: face });
     if (!copy) return null;
     l.attrs.splice(attrRefList(l).indexOf(ref) + 1, 0, copy.id);
     return copy;
