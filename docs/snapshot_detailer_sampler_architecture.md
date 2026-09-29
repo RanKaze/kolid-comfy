@@ -269,6 +269,12 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 ### 4. Draw 采样
 - Context 预览 (Image + Mask 竖向排列)
 - Sampling Parameters: AddNoise, StartStep, EndStep, Pixels, Align, CropReserve
+- Add Noise 三态 (`enable`=Random / `disable`=None / `invert`=Invert; 值不变, 只有标签换成人话): Invert = **DDIM 反演往返** —— 不加随机噪声, 而是把本块那截梯子倒着爬回它的入口 σ_peak, 再顺原路解回来 (RES4LYF SharkSampler 的 unsample/resample 那一招, 但不吃它的实现)。
+  - 爬梯段与重绘段合成**一次** `guider.sample`: 拼出来的梯子非单调 (`[0 … σ_peak … 0]`), 而 euler 每步只读 `sigmas[i]` 与 `sigmas[i+1]`, `dt` 自己变号就是反向。分两次调用反而错 —— Comfy 的入口是 `noise_scaling(σ₀, noise, latent)`, 喂已加噪的 x_σ 进去, CONST 系 (Flux/Anima/FLOW) 会再乘一次 `(1-σ₀)`; 这里让 σ₀ 恒等于 0, `noise_scaling` 退化成恒等, 干净 latent 原样进、爬出来的 x_σ 原样往下走。**推论: invert 块整段走 euler** (dpmpp 那类多步法带着单调假设的历史, 跨峰一踩就散), 块的 sampler_name 只在 invert 时被覆盖。
+  - 爬梯级数 = `int(inversion_rate * steps)` (默认 0.3), 再按本块梯长去重封顶 (`rate=1.0` 配 5 级梯只会爬 4 级, 不产生重复级)。`config["sigmas"]` 存在时按那张外部梯子反演, 尾巴不收 0 就自动补一级 0。`start_step` 越界时不静默: `invert_info['noop']` 立起来, Debug 里写明"未执行"。
+  - 峰那一刻的 x 从 `latent_preview` 的 callback 里截 (`callback(step, x0, x, total)`, `step == peak_index` 时的那个 `x` 就是顶点状态) —— 它不是随机数, 而是"这张图配的那份噪声", 随 `{**tmp_latent, 'samples': peak}` 进 `SamplerCache` (`set_inverted_latent(块序)` + `'latest'`), 下游想跳过自己那趟爬梯就直接取。
+  - **seed 链条**: 全局 seed 只是链条第一格, 每个 detailer block 用 `block_seed` 采样、并把 `seed = next_seed(seed)` 留给下一块。为什么是哈希不是 +1: 链里块数能到十几, 连号 seed 在 torch 的 randn 流里首段噪声并不"长得开"。
+  - UI 侧 `Invert Rate` 那行被 `dp.add_noise === 'invert'` gate 住 —— 选了 Random/None 不该看到 Invert 专属旋钮。Debug: 块头记 `add_noise/seed/inversion_rate`, 采样后一条 `Invert 往返` stage 报爬梯级数、总步数、σ_peak。
 - Enable Edit (IOSToggle)
   - Context Reference (IOSToggle) + Reference Image 选择器
   - Krea2: apply_model_patch (fit_mode, ref_boost, pixel_state)

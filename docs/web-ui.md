@@ -62,7 +62,8 @@
 | seed | INT | ✅ | 随机种子 |
 | lora_regex | STRING | ✅ | LoRA 正则过滤表达式 |
 | context_regex | STRING | ✅ | 上下文匹配正则（默认 ".+"） |
-| add_noise | COMBO | ✅ | 加噪模式：enable/disable |
+| add_noise | COMBO | ✅ | 加噪模式：enable (Random) / disable (None) / invert (DDIM 反演往返，详见架构文档 §4) |
+| inversion_rate | FLOAT | ❌ | invert 时爬梯级数比例 0.0-1.0（乘 steps，默认 0.3）；非 invert 不显示也不读 |
 | start_step_rate | FLOAT | ✅ | 起始步数比例 0.0-1.0（默认 0.8） |
 | end_step_rate | FLOAT | ✅ | 结束步数比例 0.0-1.0（默认 1.0） |
 | pixels | INT | ✅ | 像素限制（默认 1048576） |

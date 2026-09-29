@@ -1156,13 +1156,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {block.type === 'detailer' && (() => {
                       const dp = block.params as DetailerBlockParams;
                       return (<>
-                        <div style={styles.paramRow}>
+                        <div style={styles.paramRow}
+                          title="Random：按采样步数加随机噪声。None：不加噪，从干净 latent 直接进梯子。Invert：不加随机噪声，而是先把本块那截梯子倒着爬回 σ_peak（DDIM 反演），再顺原路解回来——爬出来的就是“这张图配的那份噪声”，往返整段走 euler。">
                           <label style={styles.paramLabel}>Add Noise</label>
                           <select style={styles.paramSelect} value={dp.add_noise} onChange={e => updateBlockParam(block.id, 'add_noise', e.target.value)}>
-                            <option value="enable" style={{ background: '#1c1c1e', color: '#fff' }}>enable</option>
-                            <option value="disable" style={{ background: '#1c1c1e', color: '#fff' }}>disable</option>
+                            <option value="enable" style={{ background: '#1c1c1e', color: '#fff' }}>Random</option>
+                            <option value="disable" style={{ background: '#1c1c1e', color: '#fff' }}>None</option>
+                            <option value="invert" style={{ background: '#1c1c1e', color: '#fff' }}>Invert</option>
                           </select>
                         </div>
+                        {dp.add_noise === 'invert' && (
+                          <div style={styles.paramRow}
+                            title="反演爬梯的级数比例：乘上传入的 steps 就是爬梯步数（0.3 × 20 步 ≈ 6 级）。级少 = 粗爬、省模型调用；级多 = 更贴 ODE、往返更干净。">
+                            <label style={styles.paramLabel}>Invert Rate</label>
+                            <input style={styles.paramInput} type="number" min={0} max={1} step={0.01} value={dp.inversion_rate ?? 0.3} onChange={e => updateBlockParam(block.id, 'inversion_rate', parseFloat(e.target.value))} />
+                          </div>
+                        )}
                         <div style={styles.paramRow}>
                           <label style={styles.paramLabel}>Ctx Regex</label>
                           <input
