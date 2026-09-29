@@ -1403,12 +1403,12 @@ class SnapshotDetailerSamplerServer:
                     self.send_error(404, "blend_node.html not found")
                 return
 
-            # 图层特效链按特效拆在 web/fx/ 下,3D 图层的 three.js 内置包放在 web/js/ 下,
-            # blend_node.html 都用 <script src> 引它们,所以工作台得能送这些文件。只认这两个
-            # 目录直属的 .js:realpath 之后再验归属,../ 与绝对路径都翻不出去。禁缓存是开发
-            # 回路的命门 —— 否则改了特效文件刷新页面还是旧的。
+            # 图层特效链按特效拆在 web/fx/ 下,图层 attribute 拆在 web/attr/ 下,3D 图层的 three.js
+            # 内置包放在 web/js/ 下,blend_node.html 都用 <script src> 引它们,所以工作台得能送这些
+            # 文件。只认这三个目录直属的 .js:realpath 之后再验归属,../ 与绝对路径都翻不出去。禁缓存
+            # 是开发回路的命门 —— 否则改了特效文件刷新页面还是旧的。
             req_path = urlparse(self.path).path
-            for sub in ('fx', 'js'):
+            for sub in ('fx', 'js', 'attr'):
                 prefix = '/' + sub + '/'
                 if not req_path.startswith(prefix):
                     continue

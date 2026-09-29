@@ -438,8 +438,10 @@ function syncDirectionBuffer(l) {
     const img = renderDirectionBuffer(desc, w, h);
     l.img = img;
     if (prev && (prev.width !== img.width || prev.height !== img.height)) {
-        if (l.mask) { l.mask = stretchSurfaceTo(l.mask, img.width, img.height); l.maskCtx = l.mask.getContext('2d'); }
-        if (l.decal) { l.decal = stretchSurfaceTo(l.decal, img.width, img.height); l.decalCtx = l.decal.getContext('2d'); }
+        // 只换面本身: maskCtx/decalCtx 是那枚 attribute 的派生读口 (面的 getContext 只有一个),
+        // 重新赋 l.mask 就把它带走了; 在这里再写一次 ctx 要么静默失败、要么在 strict 下抛。
+        if (l.mask) l.mask = stretchSurfaceTo(l.mask, img.width, img.height);
+        if (l.decal) l.decal = stretchSurfaceTo(l.decal, img.width, img.height);
     }
     l.dirCache = { key, w, h, img };
 }

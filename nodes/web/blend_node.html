@@ -1396,6 +1396,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div>
     </div>
 </div>
+<!-- 图层 attribute 按种类拆在 attr/ 下:一类一个文件 (标签 + 默认落点 + 老字段名 + 缩略图),引擎只
+     遍历注册表。跟 fx/ 同一个规矩:与页面本体共用全局作用域,静态文件由 /attr/ 路由提供。 -->
+<script src="attr/core.js"></script>
+<script src="attr/decal.js"></script>
+<script src="attr/effects.js"></script>
+<script src="attr/mask.js"></script>
 <!-- 图层特效链按特效拆在 fx/ 下: 一类特效一个文件 (注册数据 + 着色器 + pass + 读数 + 缩略图)。
      这些文件与页面本体同一个全局作用域, 顺序即依赖方向: core / maps / gl -> 特效 -> ui -> 页面。
      静态文件由工作台服务器的 /fx/ 路由提供 (snapshot_sampler_node.py), 改后端要重启。 -->
@@ -1546,14 +1552,15 @@ function writeSource(l, field, value) {
     } else a[field] = value;
 }
 
-// 每个图层对象出厂都要过一次:把 img/src 从自带字段换成读写表格的视图。建层路径一律走下面两个包装。
+// 每个图层对象出厂都要过一次:源图字段与 attribute 字段都换成各自表格的视图 (蒙版/贴片/链的老名字
+// 从此读的是 strip 里最左边那一枚,见 attr/core.js)。建层路径一律走下面三个包装。
 function attachSourceView(l) {
     for (const field of ['img', 'src']) Object.defineProperty(l, field, {
         configurable: true,
         get() { const a = sourceAsset(this); return a ? a[field] : (field === 'src' ? '' : null); },
         set(v) { writeSource(this, field, v); },
     });
-    return l;
+    return attachAttrView(l);
 }
 function ownSource(l, img, src) {
     l.srcRef = newAssetRecord(img, src).id;
@@ -1999,8 +2006,8 @@ function rasterResampleBuffer(l, w, h) {
     if (l.src) l.src = c.toDataURL('image/png');
     // Mask and decal live in layer space; for a raster layer that space IS the canvas, so they
     // stretch with it — exactly what the identity transform would do to them at composite time.
-    if (l.mask) { l.mask = stretchSurfaceTo(l.mask, c.width, c.height); l.maskCtx = l.mask.getContext('2d'); }
-    if (l.decal) { l.decal = stretchSurfaceTo(l.decal, c.width, c.height); l.decalCtx = l.decal.getContext('2d'); }
+    if (l.mask) l.mask = stretchSurfaceTo(l.mask, c.width, c.height);
+    if (l.decal) l.decal = stretchSurfaceTo(l.decal, c.width, c.height);
 }
 
 // Smart object → raster: bakes the current transform into a canvas-sized buffer. One-way (PS
@@ -2022,8 +2029,8 @@ function rasterizeLayer(l) {
         if (!s) return null;
         return renderTransformedSurface(s, l.transform, canvasW, canvasH);
     };
-    if (l.mask) { l.mask = remap(l.mask); l.maskCtx = l.mask.getContext('2d'); }
-    if (l.decal) { l.decal = remap(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+    if (l.mask) l.mask = remap(l.mask);
+    if (l.decal) l.decal = remap(l.decal);
     l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
     // A cud layer detaches on the way in: from here the buffer IS the canvas, so a source refresh
     // would have nowhere to land — the picture is the file's, not the project's any more.
@@ -2512,8 +2519,8 @@ function syncTextBuffer(l) {
     // the mask the backend multiplies by must stay AT that grid, or image and mask arrive at two
     // different sizes and the alignment contract is gone.
     if (prev && (prev.width !== img.width || prev.height !== img.height)) {
-        if (l.mask) { l.mask = stretchSurfaceTo(l.mask, img.width, img.height); l.maskCtx = l.mask.getContext('2d'); }
-        if (l.decal) { l.decal = stretchSurfaceTo(l.decal, img.width, img.height); l.decalCtx = l.decal.getContext('2d'); }
+        if (l.mask) l.mask = stretchSurfaceTo(l.mask, img.width, img.height);
+        if (l.decal) l.decal = stretchSurfaceTo(l.decal, img.width, img.height);
     }
     l.textCache = { key, w, h, img };
 }
@@ -4361,15 +4368,16 @@ function copyToClipboard() {
                 g.fillStyle = '#fff';
                 g.fillRect(0, 0, w, h);
                 rec.mask = c;
-                rec.maskCtx = g;
             }
-            rec.maskCtx.globalCompositeOperation = 'destination-in';
-            rec.maskCtx.drawImage(sm.cv, sm.x, sm.y);   // a shared cache canvas: blit it, never keep it
-            rec.maskCtx.globalCompositeOperation = 'source-over';
+            // rec 已经带着 attribute 视图,所以蒙版面写进去之后要读回来才拿得到那张画布的上下文。
+            const mctx = rec.maskCtx;
+            mctx.globalCompositeOperation = 'destination-in';
+            mctx.drawImage(sm.cv, sm.x, sm.y);   // a shared cache canvas: blit it, never keep it
+            mctx.globalCompositeOperation = 'source-over';
         }
     }
     clipboardRecord = { layer: rec, canvasW, canvasH };
-    const n = rec.effects.filter(e => e && e.enabled).length;
+    const n = (rec.effects || []).filter(e => e && e.enabled).length;
     setStatus(`Copied — 「${l.name}」${n ? ` with ${n} live effect${n === 1 ? '' : 's'}` : ''}`
         + `${sel ? ', selection cut into its mask' : ''}`);
 }
@@ -4402,7 +4410,7 @@ function pasteFromClipboard() {
     renderLayerList();
     render();
     pushHistory();
-    setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${l.effects.filter(e => e && e.enabled).length ? ' and live effects' : ''}`);
+    setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${(l.effects || []).filter(e => e && e.enabled).length ? ' and live effects' : ''}`);
 }
 
 // ---- gestures ----
@@ -4754,9 +4762,9 @@ function snapshot2D() {
             text: l.text || null,
             dir: l.dir || null,
             transform: cloneTransform(l.transform),
-            mask: l.mask, decal: l.decal,
-            // 链是可变结构(参数就地改),所以进快照的是深拷贝;两张 surface 仍按引用共享。
-            effects: cloneEffects(l.effects),
+            // Attribute 存成"值 + 一枚分组标签"的有序列表 (跟 srcRef 同一做法):strip 的顺序因此活过
+            // undo 与 tab 往返,而表仍然只是派生态 —— 面按引用共享,链按深拷贝带走。
+            attrs: snapshotAttrs(l),
         })),
         maskDecal: maskLayer.decal,
     };
@@ -4797,6 +4805,8 @@ function restoreState(s, opts) {
     sizeCanvasElement();
     // 源图记录按快照里的 srcRef 分组重建:同组只立一条,共享就此活过 undo 与 tab 往返 (见源图资产表)。
     const byRef = new Map();
+    // attribute 同一个做法:快照里那枚 id 只是分组标签,重放时按标签各立一条新记录。
+    const byAttr = new Map();
     layers = s.layers.map(ls => restoreSource({
         id: ls.id, name: ls.name,
         visible: ls.visible,
@@ -4812,16 +4822,13 @@ function restoreState(s, opts) {
         text: ls.text || null,
         dir: ls.dir || null,
         transform: cloneTransform(ls.transform),
-        mask: ls.mask,
-        maskCtx: ls.mask ? ls.mask.getContext('2d') : null,
+        // 这三样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
+        // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
+        attrs: adoptAttrPayloads(ls.attrs, byAttr),
         maskThumbEl: null,
-        decal: ls.decal,
-        decalCtx: ls.decal ? ls.decal.getContext('2d') : null,
         decalThumbEl: null,
         canvasThumbEl: null,
-        // 快照里存的是链的**深拷贝**(它必须能被后续编辑改写),所以恢复时直接接管;fxCache 从不
-        // 进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
-        effects: ls.effects || [],
+        // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
         fxCache: null,
     }, ls, byRef));
     // A replay can land on an uncommitted gesture: a raster layer only ever stores a non-identity
@@ -4848,8 +4855,10 @@ function restoreState(s, opts) {
     maskLayer.decalThumbEl = null;
     maskLayer.canvasThumbEl = null;
     adoptMaskSurface(s.maskDecal);
-    // 重放换掉了整批活图层,上一批的源记录到此没人指了 —— 表只给活图层当视图用,不替历史保管画布。
+    // 重放换掉了整批活图层,上一批的源记录与 attribute 到此没人指了 —— 两张表都只给活图层当视图用,
+    // 不替历史保管画布。
     pruneAssets();
+    pruneAttrs();
     dragRowId = null;
     if (asDocument) {
         mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
@@ -4943,7 +4952,6 @@ function detachPaintSurface(l) {
         maskLayer.decalCtx = copy.getContext('2d');
     } else {
         l[key] = copy;
-        l[key + 'Ctx'] = copy.getContext('2d');
     }
 }
 
@@ -5625,14 +5633,9 @@ function addLayer(item, stack) {
             img,
             visible: true,
             transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-            mask: null,
-            maskCtx: null,
             maskThumbEl: null,
-            decal: null,
-            decalCtx: null,
             decalThumbEl: null,
             canvasThumbEl: null,
-            effects: [],
             fxCache: null,
             stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
             // A detailer patch that came back with a crop rect: it is a piece OF this canvas, not
@@ -5702,15 +5705,10 @@ function spawnGeneratedLayer(id, item, opts) {
             // raster 分支保持恒等：它的位置要烘进画布尺寸的 buffer，transform 动不得。
             transform: (placed && !raster) ? { ...placed } : { ...t },
             raster,
-            mask: null,
-            maskCtx: null,
             maskThumbEl: null,
-            decal: null,
-            decalCtx: null,
             decalThumbEl: null,
             canvasThumbEl: null,
-            // 和 mask/decal 一样:生成出来的是新图层,不继承源图层的链。
-            effects: [],
+            // 和 attribute 一样:生成出来的是新图层,不继承源图层的蒙版、贴片和链。
             fxCache: null,
             // A generated variant belongs to its source's stack — refining a guidance image must
             // not silently drop the result into the working layers (and the other way round).
@@ -5749,8 +5747,8 @@ function spawnGeneratedLayer(id, item, opts) {
                 p.x * (from.w / p.ow), p.y * (from.h / p.oh),
                 p.w * (from.w / p.ow), p.h * (from.h / p.oh),
                 0, 0, to.w, to.h);
+            // 还没 attach 的那一句普通字段赋值:下面的 ownSource 会把它迁进 strip。
             copy.mask = m;
-            copy.maskCtx = m.getContext('2d');
             fitted = fitLayerToMask(copy, { silent: true });
         }
         insertAtStackTop(ownSource(copy, copy.img, copy.src));     // the generated variant lands on top of its own stack
@@ -5835,8 +5833,8 @@ function replaceLayerImage(id, item) {
             if (placed) l.transform = { ...placed };
         }
         if (!raster) {
-            if (l.mask) { l.mask = resampleSurface(l.mask); l.maskCtx = l.mask.getContext('2d'); }
-            if (l.decal) { l.decal = resampleSurface(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+            if (l.mask) l.mask = resampleSurface(l.mask);
+            if (l.decal) l.decal = resampleSurface(l.decal);
         }
         layoutCanvas();
         renderLayerList();
@@ -5856,6 +5854,7 @@ function removeLayer(id) {
     if (textEditingId === id) closeTextEditor();   // the editor cannot outlive its layer
     layers.splice(i, 1);
     pruneAssets();                // 没人指的那条源记录当场放手,别替历史保管画布
+    pruneAttrs();                 // attribute 同一套规矩
     groupIds.delete(id);            // the set must never hold a layer that no longer exists
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
     applyCanvasSize();
@@ -5876,31 +5875,21 @@ function removeLayer(id) {
 // one), so a shared reference is immutable here. No id: the caller assigns one at the moment the
 // copy becomes a layer — the clipboard record passes through here too, and a record is not a layer.
 function cloneLayerFields(l, name) {
-    const cloneSurface = surface => {
-        if (!surface) return null;
-        const c = document.createElement('canvas');
-        c.width = surface.width; c.height = surface.height;
-        c.getContext('2d').drawImage(surface, 0, 0);
-        return c;
-    };
     const copy = {
         name: name || l.name,
         src: l.src,
-        img: l.img && l.img.getContext ? cloneSurface(l.img) : l.img,
+        img: l.img && l.img.getContext ? cloneCanvasSurface(l.img) : l.img,
         visible: l.visible,
         transform: cloneTransform(l.transform),
         raster: !!l.raster,
         // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
         stash: !!l.stash,
-        mask: cloneSurface(l.mask),
-        maskCtx: null,
         maskThumbEl: null,
-        decal: cloneSurface(l.decal),
-        decalCtx: null,
         decalThumbEl: null,
         canvasThumbEl: null,
-        // 副本带一条自己的链(深拷贝),改其一不牵动另一条。
-        effects: cloneEffects(l.effects),
+        // attribute 一律浅拷贝:strip 的顺序照搬,每枚自己的数据另立一份 (面是新画布、链是深拷贝),
+        // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。改成引用/深拷贝是 S6 那枚 modal 的事。
+        attrs: cloneAttrList(l),
         fxCache: null,
         stack: stackOf(l),           // the copy joins the stack its source lives in
         fragment: !!l.fragment,
@@ -5912,8 +5901,6 @@ function cloneLayerFields(l, name) {
         text: l.text || null,
         dir: l.dir || null,
     };
-    if (copy.mask) copy.maskCtx = copy.mask.getContext('2d');
-    if (copy.decal) copy.decalCtx = copy.decal.getContext('2d');
     return shareSourceWith(copy, l);
 }
 
@@ -5964,7 +5951,6 @@ function applyMaskToLayer(l) {
     l.img = img;
     l.src = img.toDataURL('image/png');
     l.mask = mask;
-    l.maskCtx = mctx;
     layoutCanvas();
     renderLayerList();
     render();
@@ -6011,7 +5997,6 @@ function applyEffectsToLayer(l) {
     l.img = img;
     l.src = img.toDataURL('image/png');
     l.decal = null;
-    l.decalCtx = null;
     l.effects = [];
     l.fxCache = null;
     layoutCanvas();
@@ -6079,8 +6064,8 @@ function fitLayerToMask(l, opts) {
     };
     l.img = crop(l.img);
     l.src = l.img.toDataURL('image/png');
-    if (l.mask) { l.mask = crop(l.mask); l.maskCtx = l.mask.getContext('2d'); }
-    if (l.decal) { l.decal = crop(l.decal); l.decalCtx = l.decal.getContext('2d'); }
+    if (l.mask) l.mask = crop(l.mask);
+    if (l.decal) l.decal = crop(l.decal);
     l.transform = tr;
     if (!quiet) {
         layoutCanvas();
@@ -7111,14 +7096,14 @@ function endExpandCommit() {
     };
     l.img = bake(false);
     l.src = l.img.toDataURL('image/png');
-    if (l.mask) { l.mask = bake(true); l.maskCtx = l.mask.getContext('2d'); }
+    if (l.mask) l.mask = bake(true);
     if (l.decal) {
         const dc = document.createElement('canvas');
         dc.width = tw; dc.height = th;
         const dctx = dc.getContext('2d');
         dctx.setTransform(a11, a21, a12, a22, bx, by);
         dctx.drawImage(l.decal, 0, 0);
-        l.decal = dc; l.decalCtx = dctx;
+        l.decal = dc;
     }
     renderLayerList();
     render();
@@ -7155,7 +7140,6 @@ function ensureMask(l) {
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, w, h);
         l.mask = c;
-        l.maskCtx = ctx;
     }
     return l.mask;
 }
@@ -7166,7 +7150,6 @@ function ensureDecal(l) {
         const c = document.createElement('canvas');
         c.width = w; c.height = h;
         l.decal = c;
-        l.decalCtx = c.getContext('2d');
     }
     return l.decal;
 }
@@ -7221,7 +7204,6 @@ function invertMask(l) {
     }
     // src === null means "fully visible", so the inverse is an empty (fully hidden) mask.
     l.mask = next;
-    l.maskCtx = nctx;
 }
 
 // Maps canvas coordinates to the selected layer's pixel space, so brush strokes
@@ -8624,14 +8606,12 @@ function addSurfaceLayer(opts) {
         img: opts.img || makeBlankCanvas(pw, ph),
         visible: true,
         transform: cloneTransform(transform),
+        // 蒙版交给 strip:这里只是"这张层生下来就带一份覆盖图"的入口,立记录的是 attachAttrView 里的
+        // 迁移那一步 (见 attr/core.js),它按 opts.mask 有没有内容决定装不装 Mask attribute。
         mask: opts.mask || null,
-        maskCtx: opts.mask ? opts.mask.getContext('2d') : null,
         maskThumbEl: null,
-        decal: null,
-        decalCtx: null,
         decalThumbEl: null,
         canvasThumbEl: null,
-        effects: [],
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
@@ -8727,10 +8707,9 @@ function addTextLayer(box) {
         text: desc,
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        mask: null, maskCtx: null, maskThumbEl: null,
-        decal: null, decalCtx: null, decalThumbEl: null,
+        maskThumbEl: null, decalThumbEl: null,
         canvasThumbEl: null,
-        effects: [], fxCache: null,
+        fxCache: null,
         stack: WORK_STACK,
         fragment: false,
         cud: null,
@@ -8777,10 +8756,9 @@ function addDirectionLayer(box) {
         dirCache: null,
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        mask: null, maskCtx: null, maskThumbEl: null,
-        decal: null, decalCtx: null, decalThumbEl: null,
+        maskThumbEl: null, decalThumbEl: null,
         canvasThumbEl: null,
-        effects: [], fxCache: null,
+        fxCache: null,
         stack: WORK_STACK,
         fragment: false,
         cud: null,
@@ -9142,7 +9120,6 @@ document.getElementById('maskResetBtn').addEventListener('click', () => {
     if (l.isMaskLayer) { runMaskRowAction('clear'); return; }
     if (isDecalTarget()) {
         l.decal = null;
-        l.decalCtx = null;
         renderLayerList();
         render();
         setStatus('Decal cleared');
@@ -9150,7 +9127,6 @@ document.getElementById('maskResetBtn').addEventListener('click', () => {
         return;
     }
     l.mask = null;
-    l.maskCtx = null;
     renderLayerList();
     render();
     setStatus('Mask reset (fully visible)');
@@ -10378,7 +10354,6 @@ function applyDetectMask(dataUrl) {
             if (!l || l.isMaskLayer || !l.img) { setStatus('The layer that was selected is gone', 'error'); return; }
             const local = inLayerGrid ? detectSurfaceAt(img, l) : detectImageToLayerGrid(img, l);
             l.mask = local;
-            l.maskCtx = local.getContext('2d');
             markPainted(l);
             renderLayerList();
             render();
@@ -11022,8 +10997,9 @@ window.addEventListener('keyup', e => {
 const CUD_MAGIC = 'CUD1';
 // v2 给每条链加了 `effects` 字段(链缺省 = 没有特效,所以旧文件读进来不必迁移);v3 多了一类
 // role='map' 的资产,因为特效绑定的深度/法线图必须随文件走 —— 图池的 id 是宿主在导入时重新
-// mint 的,文件里那句 key 重开就认不出了。
-const CUD_VERSION = 3;
+// mint 的,文件里那句 key 重开就认不出了;v4 把每层的 mask/decal/effects 三个平字段换成有序的
+// `attrs` 列表 (attribute 的应用顺序从此是用户排的,不再由字段名固定)。读端两种形状都认。
+const CUD_VERSION = 4;
 let cudBusy = false;
 // The file this project is bound to, the way a document is bound in Photoshop: Load sets it, Save
 // As moves it, Ctrl+S overwrites it without asking again. null means "no file we can write to" —
@@ -11643,11 +11619,12 @@ async function buildCudBlob() {
     // A file writes a raster layer at the identity (its buffer IS its picture), so a released
     // gesture has to become pixels before the bytes are assembled.
     applyTransformPending();
-    const assets = [], payload = [];
+    // `assetList` 是文件里那份资产表 (header.assets),跟文档级的源图表 `assets` 没关系 —— 同名会遮住它。
+    const assetList = [], payload = [];
     const addAsset = async (role, source, w, h) => {
         const bytes = await surfaceToPng(source, w, h);
-        const id = assets.length;
-        assets.push({ id, role, w: Math.round(w), h: Math.round(h), length: bytes.byteLength });
+        const id = assetList.length;
+        assetList.push({ id, role, w: Math.round(w), h: Math.round(h), length: bytes.byteLength });
         payload.push(bytes);
         return id;
     };
@@ -11674,6 +11651,17 @@ async function buildCudBlob() {
                 }
                 e.params[slot.key] = Object.assign({}, ref, { asset: id });
             }
+        }
+        return out;
+    };
+    // attribute 按 strip 顺序入档,面各写一个资产 (role 只是给人看的,读档只认 id)。
+    // 没有像素的面不入档:空蒙版与"没装蒙版"按规矩是同一件事,写进去就等于往文件里塞一枚幽灵 attribute。
+    const cudAttrs = async l => {
+        const out = [];
+        for (const r of attrRecordsOf(l)) {
+            if (r.type === 'effects') { out.push({ type: 'effects', chain: await cudEffects(r.chain) }); continue; }
+            const s = r.surface;
+            if (s && s.width && s.height) out.push({ type: r.type, surface: await addAsset(r.type, s, s.width, s.height) });
         }
         return out;
     };
@@ -11716,10 +11704,9 @@ async function buildCudBlob() {
             dir: l.dir ? Object.assign({}, l.dir) : null,
             // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
             // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
-            effects: await cudEffects(l.effects),
+            // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
+            attrs: await cudAttrs(l),
             image: blank ? null : await addAsset('image', l.img, n.w, n.h),
-            mask: l.mask ? await addAsset('mask', l.mask, l.mask.width, l.mask.height) : null,
-            decal: l.decal ? await addAsset('decal', l.decal, l.decal.width, l.decal.height) : null,
         });
     }
     const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
@@ -11740,7 +11727,7 @@ async function buildCudBlob() {
         // not travel as a workspace image too — reloading would resurrect it as a plain entry and
         // then publish a second card on top of that.
         staging: stagingItems.filter(s => s && s.id !== GUIDANCE_CARD_ID),     // 图池随文档走：导入时原样恢复到宿主工作区
-        assets,
+        assets: assetList,
     };
     const headerBytes = new TextEncoder().encode(JSON.stringify(header));
     const size = new Uint8Array(4);
@@ -12018,6 +12005,37 @@ function routeImportFiles(files, stack) {
 
 // A .cud opens as a tab of its own; nothing is replaced any more, so opening one can never throw a
 // project away and the old "replace the current project?" prompt has no reason to exist.
+// 文件记录里的 attribute 列表。v4 写成有序的 `attrs`;更早的文件是 mask/decal/effects 三个平字段,
+// 顺序由那条固定管线定死 (decal → 链 → mask)。折算只在这一处,读端后面的代码从此只认一种形状。
+function recAttrEntries(rec) {
+    if (Array.isArray(rec.attrs)) return rec.attrs.filter(a => a && ATTR_TYPES[a.type]);
+    const out = [];
+    if (rec.decal !== null && rec.decal !== undefined) out.push({ type: 'decal', surface: rec.decal });
+    if (Array.isArray(rec.effects) && rec.effects.length) out.push({ type: 'effects', chain: rec.effects });
+    if (rec.mask !== null && rec.mask !== undefined) out.push({ type: 'mask', surface: rec.mask });
+    return out;
+}
+// 一条记录里所有链。记录这时还是"值"的形状 (面还没换成药),所以 fxSeq 的顶号能读得到。
+function attrChainsOf(rec) {
+    return recAttrEntries(rec).filter(a => a.type === 'effects' && Array.isArray(a.chain)).map(a => a.chain);
+}
+// 面在文件里是一个资产 id,回来才是画布;链还要过 restoreFxMaps,绑定才接得上这次导入的那份像素。
+// 指不到像素的面 attribute 就地丢掉 (旧文件里那枚空的 Mask 与"没有 Mask"同义),链则连空容器一起留 ——
+// 那是"这条链清过但还挂着"的意思,S5 的 UI 要读它。
+async function resolveRecAttrs(rec, blobs) {
+    const out = [];
+    for (const a of recAttrEntries(rec)) {
+        if (a.type === 'effects') {
+            out.push({ type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs) });
+            continue;
+        }
+        const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
+        if (!blob) continue;
+        out.push({ type: a.type, surface: await blobToCanvas(blob) });
+    }
+    return out;
+}
+
 function cudContext(header, records, maskSurface) {
     const c = header.canvas || {}, sel = header.selection || {}, ml = header.maskLayer || {}, v = header.view || {};
     const cw = Math.round(Number(c.w) || 0), ch = Math.round(Number(c.h) || 0);
@@ -12095,8 +12113,6 @@ async function openCudDocument(file, doc) {
                     url = decoded.url;
                 }
             }
-            const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
-            const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
             const tr = rec.transform || {};
             records.push({
                 id: (Number.isInteger(rec.id) && rec.id > 0) ? rec.id : ++layerSeq,
@@ -12130,9 +12146,9 @@ async function openCudDocument(file, doc) {
                 cud: (rec.cud && typeof rec.cud.link === 'string' && rec.cud.link)
                     ? { link: rec.cud.link, name: typeof rec.cud.name === 'string' ? rec.cud.name : '', path: typeof rec.cud.path === 'string' ? rec.cud.path : '' }
                     : null,
-                mask, decal,
-                // v1 文件里没有这个字段 —— 空白链就是「没有特效」,不是「特效坏了」。
-                effects: await restoreFxMaps(normalizeEffects(rec.effects), blobs),
+                // attribute 的面在文件里是资产 id,回来才是画布;链过一遍 restoreFxMaps,绑定才接回
+                // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
+                attrs: await resolveRecAttrs(rec, blobs),
             });
         }
         if (!records.length) throw new Error('the .cud holds no readable layers');
@@ -12142,7 +12158,8 @@ async function openCudDocument(file, doc) {
         // Layer ids must stay unique for the rest of the session, so the counter only ever grows.
         layerSeq = records.reduce((m, r) => Math.max(m, r.id), layerSeq);
         // 特效 id 同理:文件里带来的链占用的号也要把计数器顶上去。
-        fxSeq = records.reduce((m, r) => Math.max(m, (r.effects || []).reduce((x, e) => Math.max(x, e.id), 0)), fxSeq);
+        fxSeq = records.reduce((m, r) => Math.max(m, attrChainsOf(r).reduce(
+            (x, chain) => Math.max(x, chain.reduce((y, e) => Math.max(y, (e && e.id) | 0), 0)), 0)), fxSeq);
         const ctx = cudContext(header, records, maskSurface);
 
         // 工作区恢复：条目直接同步到宿主（后端张量由宿主重新上传建立）。
@@ -12243,22 +12260,27 @@ async function flattenCudStack(header, blobs) {
         if (!blobs.has(rec.image)) continue;
         let src = await blobToCanvas(blobs.get(rec.image));
         const w = src.width, h = src.height;
-        const mask = rec.mask !== null && rec.mask !== undefined && blobs.has(rec.mask) ? await blobToCanvas(blobs.get(rec.mask)) : null;
-        const decal = rec.decal !== null && rec.decal !== undefined && blobs.has(rec.decal) ? await blobToCanvas(blobs.get(rec.decal)) : null;
-        if (mask || decal) {
-            if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
-            const sc = scratch.getContext('2d');
-            resetCtx(sc);
-            sc.clearRect(0, 0, w, h);
-            sc.drawImage(src, 0, 0, w, h);
-            if (decal) sc.drawImage(decal, 0, 0, w, h);                 // the decal sits over the image
-            if (mask) {
-                sc.globalCompositeOperation = 'destination-in';
-                sc.drawImage(mask, 0, 0, w, h);
-                sc.globalCompositeOperation = 'source-over';
+        // attribute 按文件里那份顺序过一遍:贴片往画面上盖,蒙版往画面上乘。链在这里不算 ——
+        // 这份合成只是那条链接的预览,特效链要 WebGL,而它画的从来就是"链跑之前"的那张图。
+        let sc = null;
+        for (const a of recAttrEntries(rec)) {
+            if (a.type === 'effects') continue;
+            const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
+            if (!blob) continue;
+            const s = await blobToCanvas(blob);
+            if (!sc) {
+                if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
+                sc = scratch.getContext('2d');
+                resetCtx(sc);
+                sc.clearRect(0, 0, w, h);
+                sc.drawImage(src, 0, 0, w, h);
             }
-            src = scratch;
+            if (a.type === 'decal') { sc.drawImage(s, 0, 0, w, h); continue; }    // the decal sits over the image
+            sc.globalCompositeOperation = 'destination-in';
+            sc.drawImage(s, 0, 0, w, h);
+            sc.globalCompositeOperation = 'source-over';
         }
+        if (sc) src = scratch;
         if (rec.raster) { ctx.drawImage(src, 0, 0); continue; }          // buffer IS the canvas, 1:1
         const tr = rec.transform || {};
         const tw = (Number.isFinite(tr.w) ? tr.w : 1) * cw;
