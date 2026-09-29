@@ -458,18 +458,20 @@ defineEffect({
         { key: 'spec', label: 'Spec', min: 0, max: 100, step: 1, def: 25, unit: '%' },
         { key: 'gloss', label: 'Gloss', min: 0, max: 100, step: 1, def: 60, unit: '%' },
         { key: 'color', label: 'Color', kind: 'color', def: '#ffffff' },
-        { key: 'depth', kind: 'map', def: null },
+        // Shadow=0 时整条走线根本不跑 (引擎连副槽都不取),所以它之后那一批旋钮只在影子开着时出现 ——
+        // 与读数行同一口径 (readout 在 shadow<=0 就只报光照那半截)。它自己排在最前 = 这一组开关的门。
         { key: 'shadow', label: 'Shadow', min: 0, max: 100, step: 1, def: 0, unit: '%' },
-        { key: 'tint', label: 'Tint', kind: 'color', def: '#000000' },
+        { key: 'depth', kind: 'map', def: null, when: p => p.shadow > 0 },
+        { key: 'tint', label: 'Tint', kind: 'color', def: '#000000', when: p => p.shadow > 0 },
         // 深度铺在谁身上是那张深度图的事,法线图永远按本层网格读 —— 与几何 Warp 那颗同名旋钮同词。
-        { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas' },
-        { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
+        { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.shadow > 0 },
+        { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark', when: p => p.shadow > 0 },
         // Scale = 整张图的深度满幅值多少个图高。没有它,「影长」这件事在单位上就没有定义
         // (满幅深度与像素之间没有任何东西把它们连起来)。
-        { key: 'scale', label: 'Scale', min: 10, max: 400, step: 1, def: 100, unit: '%' },
-        { key: 'soft', label: 'Soft', min: 0, max: 64, step: 1, def: 6, unit: 'px' },
-        { key: 'cast', label: 'Cast', min: 16, max: 1024, step: 8, def: 1024, unit: 'px' },
-        { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16 },
+        { key: 'scale', label: 'Scale', min: 10, max: 400, step: 1, def: 100, unit: '%', when: p => p.shadow > 0 },
+        { key: 'soft', label: 'Soft', min: 0, max: 64, step: 1, def: 6, unit: 'px', when: p => p.shadow > 0 },
+        { key: 'cast', label: 'Cast', min: 16, max: 1024, step: 8, def: 1024, unit: 'px', when: p => p.shadow > 0 },
+        { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.shadow > 0 },
         { key: 'green', label: 'Green', kind: 'enum', options: ['up', 'down'], def: 'up' },
     ],
     // 参数换形状:旧存档里 Cast 是「走线总长(1..64px)」,和它现在的意思(推进上限)没有忠实换算,

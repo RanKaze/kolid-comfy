@@ -260,7 +260,25 @@ function fxParamsEl(l, effect, spec, syncRead, updaters) {
     body.className = 'fx-params';
     // 有专用编辑面的特效自己出整块面板(曲线就是这样);其余按注册表逐行铺控件。
     if (spec.editor) body.appendChild(spec.editor(l, effect, syncRead, updaters));
-    else for (const def of spec.params) body.appendChild(fxControlRow(l, effect, def, syncRead, updaters));
+    else {
+        // 开关/模式专属的旋钮只在条件成立时出现 —— 这条过滤各编辑面都在走 (见 fx/corrosion.js),
+        // 通用面板以前漏了,所以光照那 8 行阴影旋钮在 Shadow=0 时照样铺满一排,而读数行早就不报它们了。
+        const visible = () => {
+            const p = effectParams(effect);
+            return spec.params.filter(d => !d.when || d.when(p));
+        };
+        // 重铺只认「这一批行换没换」,而且只挂在**提交**上:拖动途中每个 input 都会同步读数,
+        // 那时候换掉 DOM 等于把正在拖的滑块从指头底下拆走 (与 fxLiveUpdate 同一理由)。
+        let shown = '';
+        const pump = () => {
+            const rows = visible();
+            const key = rows.map(d => d.key).join(',');
+            if (key === shown) return;
+            shown = key;
+            body.replaceChildren(...rows.map(d => fxControlRow(l, effect, d, syncRead, updaters, pump)));
+        };
+        pump();
+    }
     // 参数区里的任何点击都不该顺带选中图层(那会重建列表)。
     body.addEventListener('click', ev => ev.stopPropagation());
     // 图层行是 draggable 的,滑块就压在它里面:从 handle 上起手按住再动,浏览器会往上找最近
@@ -272,7 +290,9 @@ function fxParamsEl(l, effect, spec, syncRead, updaters) {
 }
 
 // 参数行的读数一律可见(值直接写在滑块右边),不是 tooltip。
-function fxControlRow(l, effect, def, syncRead, updaters) {
+// `onCommit` 只有通用面板会传:某个旋钮落定后问一句「可见的那批行换了吗」。它挂在 undoable 那一支
+// (松手/点定)而不是每次 input,原因见 fxParamsEl。
+function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     const row = document.createElement('div');
     row.className = 'control-row';
     // 贴图那一行叫什么不写死在控件数据里:这行的 key 去问注册表 (needsMap / needsMap2.role),
@@ -295,6 +315,7 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
         syncRead();
         fxLiveUpdate(l);
         if (undoable) pushHistory();
+        if (undoable && onCommit) onCommit();
     };
 
     if (def.kind === 'color') {
