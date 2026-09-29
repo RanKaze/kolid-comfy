@@ -1,12 +1,16 @@
 // Direction 图层 —— 同一个姿态, 两种观察。
-//   小窗 = **世界里的观察**: 画布是躺在世界里的一张平面 (按 canvasW:canvasH 的真实比例画出来,
-//          铺在 360° 方位环里), 环 = 绕平面一圈的 yaw 轨道, 青绿弧 = pitch 轨道, 琥珀环 = roll 轨道,
-//          三颗把手就长在这上面。相机是一条固定 25° 俯角的正交视线, 地平环因此压成 ry = R·sin ε 的椭圆。
+//   小窗 = **世界里的观察**: 一张 three.js 场景 (js/direction_view.js, 引擎仍是仓库里 vendored 的
+//          window.K3D)。画布是躺在地面上的一张平面 mesh, 上面贴着**此刻的 context image** (除这张
+//          方向层自己 —— 否则它的箭头会烘进自己的参考面里), 方位环 / 仰角弧 / 滚转环和箭头是挂在它
+//          上面的实体, 三颗把手长在自己那根轨道上。按住中键拖动转的是**眼睛** (相机绕原点轨道),
+//          不是姿态; 左键拖把手才改姿态。K3D 没进来或建不起 WebGL 上下文时, 退到本文件里那张
+//          drawDirectionWorld 的 2D 世界图 (固定 25° 俯角的正交视线) —— 同一套世界坐标, 两种画法。
 //   图层像素 = **画布空间的观察**: 顺着画布法线正面看过去 —— 画布平面铺满画面, 箭头是世界方向落在
 //          画布里的投影 (pitch 越大它越短, 90° 时只剩箭头尖在中心 = "正对画布外"), 角弧从画布 +X
 //          量到箭头, 度数直接烘进像素。
-// 两边共用同一套姿态数学 (dirVecOf / dirRollBasis / dirProject) 与同一批颜色, 但**不是同一次绘制**:
-// 观察的相机本来就不同, 把它们画成一张图反而读不出"相对画布的角度"这句话。
+// 两边共用下面这一套世界坐标 (dirVecOf / dirWorldPose / dirRollBasis) 与同一批颜色: 2D 世界图把它们过
+// dirProject, three.js 场景把它们过相机投影, 图层像素把它们过画布基 —— 公式只有一份, 三处才读不出三个
+// 姿态。观察本身仍各不相同: 相机本来就不同, 把它们画成一张图反而读不出"相对画布的角度"这句话。
 //
 // 角度基跟着特效链已有的那条规矩: Yaw 0° = 画布右、90° = 画布下 (与 Lighting 的 Angle、
 // fxglDirUV 同一个基); Pitch 是抬离画布平面的角度 (0 = 贴着平面, 90 = 顺着法线朝观察者);
@@ -20,14 +24,21 @@ const DIR_FIN = '#f5c542';
 const DIR_PLANE = '#8b93a7';      // 画布平面本身: 中性灰蓝, 不跟任何一根轨道抢颜色
 const DIR_HANDLE_R = 6.5;         // 把手在屏幕上恒定大小, 不随图层盒子/缩放变 (与 warp 把手同一条)
 const DIR_HIT_R = 11;
-const DIR_GIZMO_H = 176;
+const DIR_STAGE_W = 496;          // 小窗舞台的 CSS 尺寸 (520 的窗减去左右 12 的内边距): 加大是因为这格
+const DIR_STAGE_H = 300;          // 现在要能转着看, 176 高的那条横带里三根轨道全糊在一起
 // 箭头尖端与仰角弧走的是比地平环更大的那颗球 (环 1.0 : 弧 1.3)。参照图里弧之所以卷到环外、
 // 两者不挤成一团, 就是这个半径差; 箭头因此也比纯按环长投影出来的那一截更认得出来。
 const DIR_POSE_R = 1.3;
+// 滚转环: 环心沿箭头走到姿态球的 0.6 处, 环自己的半径是地平环的 0.17 —— 都是"环半径 = 1"这套
+// 世界单位里的比例, 所以 2D 世界图与 three.js 场景挂的是同一个位置、同一个大小。
+const DIR_FIN_C = 0.6;
+const DIR_FIN_R = 0.17;
 
 function dirRad(d) { return d * Math.PI / 180; }
 function dirDeg(r) { return r * 180 / Math.PI; }
 function dirWrap360(d) { return ((d % 360) + 360) % 360; }
+// Roll 是绕箭头的一圈, 但它的读数写在 [-180,180) (与格子里那句一致), 所以折法与 yaw 不同。
+function dirWrap180(d) { return ((d + 180) % 360 + 360) % 360 - 180; }
 
 // 唯一的一处形状裁定: .cud 读回来或面板 patch 进来的东西先过这里, 坏字段退化到默认值,
 // 而不是退化成一张画不出来的图层。
@@ -57,9 +68,48 @@ function dirProject(p, R) {
     return { x: p.x * R, y: (p.z * Math.sin(DIR_TILT) - p.y * Math.cos(DIR_TILT)) * R };
 }
 function dirTip(pose, R) { return dirProject(dirVecOf(pose), R); }
-function dirOnRing(azDeg, R) {
+// ---- 世界坐标 (地平环半径 = 1 个单位) ----
+// 这一组是小窗两种画法与图层像素共同的唯一一份真相: 2D 世界图把下面的点过 dirProject 乘上屏幕半径 R,
+// three.js 场景直接把同样的点当成 mesh 的位置 (那里的环半径就是 1 个世界单位)。谁都不许再抄一遍公式。
+function dirWorldAz(azDeg) {
     const t = dirRad(azDeg);
-    return dirProject({ x: Math.cos(t), y: 0, z: Math.sin(t) }, R);
+    return { x: Math.cos(t), y: 0, z: Math.sin(t) };
+}
+function dirScale(p, k) { return { x: p.x * k, y: p.y * k, z: p.z * k }; }
+// 滚转环上角度 a 处的世界点: 环心沿箭头走到 DIR_FIN_C 处, 环半径 DIR_FIN_R (都是相对地平环的比例)。
+function dirWorldFin(pose, a) {
+    const v = dirVecOf(pose), { b1, b2 } = dirRollBasis(pose);
+    const co = Math.cos(a), si = Math.sin(a);
+    const c = dirScale(v, DIR_FIN_C * DIR_POSE_R), f = DIR_FIN_R;
+    return {
+        x: c.x + (b1.x * co + b2.x * si) * f,
+        y: c.y + (b1.y * co + b2.y * si) * f,
+        z: c.z + (b1.z * co + b2.z * si) * f,
+    };
+}
+// 画布平面在世界里的半宽/半高 (y=0 那张平面上)。比例永远取自画布自己; 图层盒子与小窗都只是取景框,
+// 不许把平面拉扁。
+function dirPlaneHalf() {
+    const a = dirCanvasAspect(), n = Math.hypot(a, 1);
+    return { hw: 0.92 * a / n, hd: 0.92 / n };
+}
+// 一个姿态在世界里的全部落点。画布平面也在里面: 半对角线取 0.92 ⇒ 四角正好落在方位环内侧,
+// "画布就是躺在这个世界里的那张矩形"靠它与环的比例关系读出来, 不靠文字说明。
+function dirWorldPose(pose) {
+    const v = dirVecOf(pose);
+    return {
+        dir: v,
+        tip: dirScale(v, DIR_POSE_R),
+        yaw: dirWorldAz(pose.yaw),
+        roll: dirWorldFin(pose, dirRad(pose.roll)),
+        finCentre: dirScale(v, DIR_FIN_C * DIR_POSE_R),
+        finR: DIR_FIN_R,
+        poseR: DIR_POSE_R,
+        plane: dirPlaneHalf(),
+    };
+}
+function dirOnRing(azDeg, R) {
+    return dirProject(dirWorldAz(azDeg), R);
 }
 // 箭头自己那组"侧向"基: b1 取世界 up 去掉沿箭头的分量, b2 与它一起垂直于箭头。
 // pitch → ±90° 时 up 与箭头平行, 那一条退化就换 x 轴顶上 (滚转读数在那一极点本来也无所谓方向)。
@@ -79,46 +129,37 @@ function gizmoRadius(W, H) { return Math.min(W, H) * 0.34; }
 // 画布平面的比例永远取自画布自己; 图层盒子与小窗都只是取景框, 不许把平面拉扁。
 function dirCanvasAspect() { return canvasW && canvasH ? canvasW / canvasH : 1; }
 
-// 世界观察里画布平面的四角 (屏幕像素, 中心为原点)。半对角线取 0.92R, 于是四角正好落在方位环内侧
-// —— "画布就是躺在这个世界里的那张矩形"是靠它与环的比例关系读出来的, 不靠文字说明。
+// 世界观察里画布平面的四角 (屏幕像素, 中心为原点) —— 就是 dirPlaneHalf 那张平面过一遍 dirProject。
 function dirPlaneCorners(R) {
-    const a = dirCanvasAspect(), d = 0.92 * R, n = Math.hypot(a, 1);
-    const hw = d * a / n, hd = d / n;
+    const { hw, hd } = dirPlaneHalf();
     return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]
-        .map(([x, z]) => dirProject({ x, y: 0, z }, 1));
+        .map(([x, z]) => dirProject({ x, y: 0, z }, R));
 }
 
-// 滚转环上角度 a 处的点 (像素, 以小窗中心为原点)。环心沿箭头走到 60% 处, 环本身垂直于箭头。
+// 滚转环上角度 a 处的点 (像素, 以小窗中心为原点)。
 // 画这颗环、放这颗把手、以及探针回读像素都从这里取点 —— 不在别处重算一遍同一颗环。
 function dirFinPoint(pose, R, a) {
-    const { b1, b2 } = dirRollBasis(pose);
-    const v = dirVecOf(pose);
-    const co = Math.cos(a), si = Math.sin(a);
-    const c = 0.6 * DIR_POSE_R * R;
-    const f = 0.17 * R;
-    return dirProject({
-        x: v.x * c + (b1.x * co + b2.x * si) * f,
-        y: v.y * c + (b1.y * co + b2.y * si) * f,
-        z: v.z * c + (b1.z * co + b2.z * si) * f,
-    }, 1);
+    return dirProject(dirWorldFin(pose, a), R);
 }
 
 // 三颗把手在画布上的落点 (CSS 像素, 以小窗画布中心为原点)。
 function dirHandlePoints(W, H, pose) {
     const R = gizmoRadius(W, H);
-    const tip = dirTip(pose, R * DIR_POSE_R);
+    const w = dirWorldPose(pose);
     return {
         R,
-        yaw: dirOnRing(pose.yaw, R),
-        pitch: tip,
-        roll: dirFinPoint(pose, R, dirRad(pose.roll)),
-        finCentre: { x: tip.x * 0.6, y: tip.y * 0.6 },
-        finR: R * 0.17,
+        yaw: dirProject(w.yaw, R),
+        pitch: dirProject(w.tip, R),
+        roll: dirProject(w.roll, R),
+        finCentre: dirProject(w.finCentre, R),
+        finR: R * DIR_FIN_R,
     };
 }
 
 // ---- 观察一: 世界里的姿态把手图 (只有小窗画它) ----
-// opts.chrome = 画那几颗可拖把手; opts.state = 哪一颗正被按下/悬停; opts.dim = 没人在编辑。
+// 正常情况下这块归 three.js 视图 (js/direction_view.js); 这张 2D 世界图是 K3D 缺席或 WebGL 上下文
+// 起不来时的退路, 吃的是同一份 dirWorldPose 世界坐标过 dirProject, 所以读数与 3D 那一版一致。
+// opts.chrome = 画那几颗可拖把手; opts.state = 哪一颗正被按下; opts.dim = 没人在编辑。
 function drawDirectionWorld(ctx, W, H, pose, opts) {
     const o = opts || {};
     const R = gizmoRadius(W, H);
@@ -412,10 +453,11 @@ function patchDirectionLayer(l, patch, opts) {
     }
 }
 
-// ---- Direction 工具小窗 ----
-// 把手的拖动是**受约束**的: yaw 直接按指针在地平环上取角, pitch / roll 沿各自轨道的切线走
-// (正交俯视相机在 yaw 90°/270° 处把仰角那条弧投成一条竖线, 那里"从指针反解 pitch"根本不可逆;
-// 切线增量没有奇点, 指针沿轨道走多少把手就走多少)。
+// ---- Direction 工具小窗: 2D 退路那条指针算法 ----
+// 只有 three.js 视图建不起来时走这里。把手的拖动是**受约束**的: yaw 直接按指针在地平环上取角,
+// pitch / roll 沿各自轨道的切线走 (固定 25° 俯角的正交相机在 yaw 90°/270° 处把仰角那条弧投成一条竖线,
+// 那里"从指针反解 pitch"根本不可逆; 切线增量没有奇点, 指针沿轨道走多少把手就走多少)。
+// 3D 视图不用这一套: 它有真的相机, 射线打回轨道所在的那个面就能取绝对角 (见 direction_view.js)。
 function dirRingAngleAt(W, H, pt) {
     const R = gizmoRadius(W, H);
     return dirWrap360(dirDeg(Math.atan2(pt.y / Math.sin(DIR_TILT), pt.x)));
@@ -452,19 +494,21 @@ function dirAxisDelta(axis, W, H, pose, pt, prev) {
     }
     const tan = axis === 'pitch' ? dirArcTangent(pose) : dirRollTangent(pose);
     // 增量按各自轨道自己的半径折算, 把手才真正走在指针底下: 仰角弧在 Rt 那圈上, 滚转把手在
-    // 0.17R 的滚转环上 (环小, 所以滚转天然比另外两轴快 —— 与它画出来的那颗小环一致)。
-    const track = axis === 'pitch' ? R * DIR_POSE_R : R * 0.17;
+    // DIR_FIN_R 的滚转环上 (环小, 所以滚转天然比另外两轴快 —— 与它画出来的那颗小环一致)。
+    const track = axis === 'pitch' ? R * DIR_POSE_R : R * DIR_FIN_R;
     const arc = ((pt.x - prev.pt.x) * tan.x + (pt.y - prev.pt.y) * tan.y) / track;
     const key = axis === 'pitch' ? 'pitch' : 'roll';
     let next = pose[key] + dirDeg(arc);
     if (prev && prev.shiftKey) next = Math.round(next / 15) * 15;
     if (key === 'pitch') next = Math.max(-90, Math.min(90, next));
-    else next = ((next + 180) % 360 + 360) % 360 - 180;
+    else next = dirWrap180(next);
     return { [key]: next };
 }
 
-function dirHitHandle(W, H, pose, pt) {
-    const pts = dirHandlePoints(W, H, pose);
+function dirHitHandle(W, H, pose, pt, pts) {
+    // pts 给的就是"三颗把手在屏幕上的落点" —— 2D 退路自己算 (dirHandlePoints), three.js 视图给相机
+    // 投影出来的那份 (DirView.handlePoints)。命中代码只有一份, 两种画法才点得着同一颗把手。
+    pts = pts || dirHandlePoints(W, H, pose);
     let best = null, bestD = DIR_HIT_R;
     for (const key of ['pitch', 'roll', 'yaw']) {
         const d = Math.hypot(pt.x - pts[key].x, pt.y - pts[key].y);
@@ -473,7 +517,44 @@ function dirHitHandle(W, H, pose, pt) {
     return best;
 }
 
+// ---- 平面上的那张参考图 (只有小窗开着、且有人在编辑时才合成) ----
+// 它不是图层像素, 只是小窗里那张画布平面的贴图: 此刻的 context image, 唯独**不含正在编辑的这张方向层**
+// —— 否则箭头会被抄进自己的参考面里, 拖一下就看到两个箭头。
+let dirRefCanvas = null, dirRefCtx = null, dirRefVersion = 0;
+
+// render() 的每一趟复合来这里问一句要不要顺手再抄一张; 给目标就必须在同一趟里画完 (它吃的是循环顺序)。
+function dirRefTarget() {
+    if (!toolWindows.has('directionSection')) return null;
+    const l = dirGizmoTarget();
+    if (!l || !canvasW || !canvasH) return null;
+    // 拖把手期间不重抄: 那时唯一在变的就是这张方向层自己的像素, 而参考图本来就把它排除在外。
+    if (dirDrag) return null;
+    if (!dirRefCanvas) { dirRefCanvas = document.createElement('canvas'); dirRefCtx = dirRefCanvas.getContext('2d'); }
+    if (dirRefCanvas.width !== canvasW || dirRefCanvas.height !== canvasH) {
+        dirRefCanvas.width = canvasW; dirRefCanvas.height = canvasH;
+    }
+    resetCtx(dirRefCtx);
+    dirRefCtx.clearRect(0, 0, canvasW, canvasH);
+    return { ctx: dirRefCtx, skip: l.id };
+}
+function dirRefDone() {
+    dirRefVersion++;
+    // 参考图换了就得催一次重绘: 别的图层改了像素时并不会走到小窗, 而纹理只认这个版本号。
+    if (DirView.live()) DirView.invalidate();
+}
+
+// three.js 视图 (js/direction_view.js) 先于本文件加载, 所以这里要么确定地拿到它, 要么确定地拿不到:
+// 节点进程还跑着没有 /js/ 路由的旧代码时它就整个缺席, 那时每个入口都回 false/null, 面板自然退回
+// 本文件那张 2D 世界图 —— 而不是在第一次拖把手时炸在一个未定义的变量上。
+const DirView = window.DirView || {
+    available: () => false, live: () => false, begin: () => false, frame: () => false,
+    handlePoints: () => null, axisDelta: () => null, project: () => null, orbit: () => {},
+    setAzEl: () => {}, invalidate: () => {}, state: () => ({ live: false, broken: true }),
+};
+
+const dirStage = document.getElementById('dirStage');
 const dirGizmoCanvas = document.getElementById('dirGizmo');
+const dirViewCanvas = document.getElementById('dirView');
 const dirGizmoColor = document.getElementById('dirColorInput');
 const dirGizmoColorValue = document.getElementById('dirColorValue');
 const dirGizmoReset = document.getElementById('dirResetBtn');
@@ -486,6 +567,7 @@ const dirAngleFields = [
 ];
 let dirDrag = null;
 let dirHover = null;
+let dirOrbit = null;
 
 function dirGizmoPose() {
     const l = dirGizmoTarget();
@@ -495,12 +577,50 @@ function dirGizmoTarget() {
     const l = typeof getLayer === 'function' ? getLayer(selectedId) : null;
     return isDirectionLayer(l) ? l : null;
 }
+// 舞台的尺寸从 #dirStage 量, 不从两块 canvas 量: 此刻藏着的那块 clientWidth 是 0, 而两种画法吃的
+// 必须是同一块取景框, 否则指针落点与画面就对不上。
+function dirStageSize() {
+    const box = dirStage || dirGizmoCanvas;
+    return { W: (box && box.clientWidth) || DIR_STAGE_W, H: (box && box.clientHeight) || DIR_STAGE_H };
+}
+function dirGizmoPoint(ev) {
+    const box = dirStage || dirGizmoCanvas;
+    const r = box.getBoundingClientRect();
+    const { W, H } = dirStageSize();
+    // clientLeft/Top = 舞台那圈 1px 边框: getBoundingClientRect 从边框外沿算起, 而两块 canvas 是
+    // inset:0 贴在边框**以内**的, 所以不减掉这 1px, 指针空间就整体比画面偏右下 (把手差 1px 打不中,
+    // 拖到的角也差一点 —— 滚转那颗只有 15px 半径, 1px 就是 4°)。
+    return { x: ev.clientX - r.left - box.clientLeft - W / 2,
+        y: ev.clientY - r.top - box.clientTop - H / 2 };
+}
+function dirScreenHandles(pose) {
+    const { W, H } = dirStageSize();
+    return (DirView.live() && DirView.handlePoints(pose)) || dirHandlePoints(W, H, pose);
+}
+function dirPatchFromDrag(axis, pose, pt, prev) {
+    if (DirView.live()) return DirView.axisDelta(axis, pose, pt, prev);
+    const { W, H } = dirStageSize();
+    return dirAxisDelta(axis, W, H, pose, pt, prev);
+}
 
 function drawDirGizmo() {
-    if (!dirGizmoCanvas) return;
+    if (!dirStage) return;
+    const pose = dirGizmoPose();
+    const target = dirGizmoTarget();
+    const opts = {
+        chrome: true,
+        dim: !target,
+        hover: dirDrag ? dirDrag.axis : dirHover,
+        state: dirDrag && dirDrag.axis,
+    };
+    // three.js 视图建不起来 (K3D 缺席 / WebGL 上下文起不来) 就退回下面那张 2D 世界图, 两块 canvas 谁在
+    // 显示由这一刻的成败决定 —— 退路只改画法, 不改姿态的读法。
+    const live = DirView.frame(dirViewCanvas, pose, opts);
+    dirViewCanvas.style.display = live ? 'block' : 'none';
+    dirGizmoCanvas.style.display = live ? 'none' : 'block';
+    if (live) { syncDirectionFields(); return; }
     const dpr = window.devicePixelRatio || 1;
-    const W = dirGizmoCanvas.clientWidth || 288;
-    const H = DIR_GIZMO_H;
+    const { W, H } = dirStageSize();
     if (dirGizmoCanvas.width !== Math.round(W * dpr) || dirGizmoCanvas.height !== Math.round(H * dpr)) {
         dirGizmoCanvas.width = Math.round(W * dpr);
         dirGizmoCanvas.height = Math.round(H * dpr);
@@ -509,68 +629,87 @@ function drawDirGizmo() {
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    const pose = dirGizmoPose();
-    const target = dirGizmoTarget();
-    const readout = dirDrag
-        ? `${dirDrag.axis === 'yaw' ? 'Yaw' : dirDrag.axis === 'roll' ? 'Roll' : 'Pitch'} ${Math.round(pose[dirDrag.axis])}°`
-        : null;
-    drawDirectionWorld(ctx, W, H, pose, {
-        chrome: true,
-        dim: !target,
-        hover: dirDrag ? dirDrag.axis : dirHover,
-        state: dirDrag && dirDrag.axis,
-        readout,
-    });
+    drawDirectionWorld(ctx, W, H, pose, Object.assign({
+        readout: dirDrag
+            ? `${dirDrag.axis === 'yaw' ? 'Yaw' : dirDrag.axis === 'roll' ? 'Roll' : 'Pitch'} ${Math.round(pose[dirDrag.axis])}°`
+            : null,
+    }, opts));
     syncDirectionFields();
 }
 
-function dirGizmoPoint(ev) {
-    const r = dirGizmoCanvas.getBoundingClientRect();
-    const W = dirGizmoCanvas.clientWidth || 288;
-    return { x: ev.clientX - r.left - W / 2, y: ev.clientY - r.top - DIR_GIZMO_H / 2 };
-}
-
-if (dirGizmoCanvas) {
-    dirGizmoCanvas.addEventListener('mousedown', ev => {
+if (dirStage) {
+    dirStage.addEventListener('mousedown', ev => {
+        // 中键 = 只转眼睛。姿态一个字节都不动, 所以它跟左键拖把手是两个动作, 不是一件事。
+        if (ev.button === 1 && DirView.live()) {
+            ev.preventDefault();            // 中键在浏览器里还会开 autoscroll, 这里按掉
+            dirOrbit = { x: ev.clientX, y: ev.clientY };
+            dirStage.style.cursor = 'move';
+            return;
+        }
         const l = dirGizmoTarget();
         if (!l || ev.button !== 0) return;
         const pt = dirGizmoPoint(ev);
-        const axis = dirHitHandle(dirGizmoCanvas.clientWidth || 288, DIR_GIZMO_H, l.dir, pt);
+        const { W, H } = dirStageSize();
+        const axis = dirHitHandle(W, H, l.dir, pt, dirScreenHandles(l.dir));
         if (!axis) return;
         ev.preventDefault();
         dirDrag = { axis, pt, layerId: l.id, moved: false, shiftKey: ev.shiftKey };
         drawDirGizmo();
     });
+    dirStage.addEventListener('auxclick', ev => { if (ev.button === 1) ev.preventDefault(); });
+    dirStage.addEventListener('mousemove', ev => {
+        if (dirDrag || dirOrbit) return;
+        const l = dirGizmoTarget();
+        let hit = null;
+        if (l) {
+            const { W, H } = dirStageSize();
+            hit = dirHitHandle(W, H, l.dir, dirGizmoPoint(ev), dirScreenHandles(l.dir));
+        }
+        if (hit === dirHover) return;
+        dirHover = hit;
+        dirStage.style.cursor = hit ? 'grab' : 'default';
+        drawDirGizmo();
+    });
+    dirStage.addEventListener('mouseleave', () => {
+        if (dirHover === null) return;
+        dirHover = null;
+        drawDirGizmo();
+    });
     window.addEventListener('mousemove', ev => {
+        if (dirOrbit) {
+            DirView.orbit(ev.clientX - dirOrbit.x, ev.clientY - dirOrbit.y);
+            dirOrbit = { x: ev.clientX, y: ev.clientY };
+            return;
+        }
         if (dirDrag && ev.buttons === 0) endDirGizmoDrag(ev);
         if (!dirDrag) return;
         const l = getLayer(dirDrag.layerId);
         if (!l) { dirDrag = null; return; }
-        const W = dirGizmoCanvas.clientWidth || 288;
         const pt = dirGizmoPoint(ev);
         // 吸附加在**这一帧**的 Shift 上, 不是上一帧: 先记下按键再算增量, 而从按下起就按着 Shift
-        // 拖第一下就该吸住 (dirAxisDelta 要的是 prev.pt, 所以只有它留在赋值之前)。
+        // 拖第一下就该吸住 (两条算法要的都是 prev.pt, 所以只有它留在赋值之前)。
         dirDrag.shiftKey = ev.shiftKey;
-        const patch = dirAxisDelta(dirDrag.axis, W, DIR_GIZMO_H, l.dir, pt, dirDrag);
+        const patch = dirPatchFromDrag(dirDrag.axis, l.dir, pt, dirDrag);
         dirDrag.pt = pt;
+        // 交不出角 (视线与那条轨道的面平行) 就这一帧不动, 而不是把角甩到一个假值上。
+        if (!patch) { drawDirGizmo(); return; }
         dirDrag.moved = true;
         patchDirectionLayer(l, patch, { live: true });
         drawDirGizmo();
     });
-    window.addEventListener('mouseup', ev => { if (dirDrag) endDirGizmoDrag(ev); });
-    dirGizmoCanvas.addEventListener('mousemove', ev => {
-        if (dirDrag) return;
-        const l = dirGizmoTarget();
-        const hit = l ? dirHitHandle(dirGizmoCanvas.clientWidth || 288, DIR_GIZMO_H, l.dir, dirGizmoPoint(ev)) : null;
-        if (hit === dirHover) return;
-        dirHover = hit;
-        dirGizmoCanvas.style.cursor = hit ? 'grab' : 'default';
-        drawDirGizmo();
+    window.addEventListener('mouseup', ev => {
+        if (ev.button === 1 && dirOrbit) {
+            dirOrbit = null;
+            dirStage.style.cursor = dirHover ? 'grab' : 'default';
+            return;
+        }
+        if (dirDrag) endDirGizmoDrag(ev);
     });
-    dirGizmoCanvas.addEventListener('mouseleave', () => {
-        if (dirHover === null) return;
-        dirHover = null;
-        drawDirGizmo();
+    // 眼睛跑掉 (切窗、按 Alt+Tab) 时中键的 mouseup 永远收不到, 轨道状态就留在那儿了。
+    window.addEventListener('blur', () => {
+        if (!dirOrbit) return;
+        dirOrbit = null;
+        dirStage.style.cursor = 'default';
     });
 }
 
