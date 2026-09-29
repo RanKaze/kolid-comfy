@@ -75,6 +75,15 @@ function fxIconSvg(icon) {
             + '<path d="M3.1 7.1c2.6-.5 5.3-.6 7.9.1" opacity="0.5"/>'
             + '<circle cx="6.9" cy="7.1" r="1.4" fill="currentColor" stroke="none"/></svg>';
     }
+    if (icon === 'chromatic') {
+        // 一幅画面里同一条硬边被画在三个位置上:中间那条是绿的 (原地), 两侧淡的是红与蓝各偏开的那份 ——
+        // 色散读出来的就是「一个边, 三个位置」, 而不是 dof 那三块由清到糊的砖。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="2.1" y="2.1" width="9.8" height="9.8" rx="1.5" opacity="0.45"/>'
+            + '<path d="M7 4.3v5.4"/>'
+            + '<path d="M4.9 4.3v5.4" stroke-width="1" opacity="0.45"/>'
+            + '<path d="M9.1 4.3v5.4" stroke-width="1" opacity="0.45"/></svg>';
+    }
     if (icon === 'corrosion') {
         // 一块边被咬出两个缺口的方块,缺口旁各点一颗蚀坑:锈吃的是轮廓,不是整张画面。
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">'
