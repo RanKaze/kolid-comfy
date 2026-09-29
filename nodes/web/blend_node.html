@@ -871,7 +871,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="mini-group">
                         <button class="mini-btn" id="maskInvertBtn" title="Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round">Invert</button>
                         <button class="mini-btn" id="maskFullBtn" title="Cover the whole canvas with the Mask layer">Full</button>
-                        <button class="mini-btn" id="maskResetBtn" title="Reset the mask the brush is on to fully visible">Reset</button>
                     </div>
                 </div>
             </div>
@@ -6329,19 +6328,17 @@ function syncToolUI() {
 function syncPaintUI() {
     const maskLayerSel = isMaskLayerTarget();
     const decal = isDecalTarget() && !maskLayerSel;
-    // Two buttons on this line, and the third slot changes with the target: a layer's own mask
-    // gets Reset-to-fully-visible, a decal gets Clear, the Mask layer gets Clear-only — its
-    // whole-layer actions moved onto the Mask row in the Layers list, where they act on the
-    // layer itself instead of on whatever happens to be selected.
+    // One verb lives on this line: Invert, and only while the brush is on a mask. (maskFullBtn is
+    // kept hidden here — the Mask layer's own Invert / Full / Clear live on its row in the Layers
+    // list, where they act on the layer itself instead of on whatever happens to be selected.)
+    // There used to be a third slot that read Reset / Clear depending on the target: taking a step
+    // off is the chip menu's Remove now, and a sidebar button could not say WHICH step it cleared
+    // the way the chip you clicked can.
     document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
     document.getElementById('maskInvertBtn').title =
         'Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round';
     document.getElementById('maskFullBtn').style.display = 'none';
     document.getElementById('maskFullBtn').title = 'Fill the Mask layer — every pixel of the canvas covered';
-    document.getElementById('maskResetBtn').textContent = decal ? 'Clear' : 'Reset';
-    document.getElementById('maskResetBtn').title = decal
-        ? 'Clear the decal the brush is on — the Decal chip you clicked, or the last Decal step after Tab'
-        : 'Reset the mask the brush is on to fully visible — on a strip that is the same state as taking that step off';
     // The label carries the two key badges, so the name is the inner span — writing the label's own
     // textContent would erase them.
     document.getElementById('maskDecalName').textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
@@ -9240,18 +9237,6 @@ document.getElementById('maskInvertBtn').addEventListener('click', () => {
 document.getElementById('maskFullBtn').addEventListener('click', () => {
     if (!isMaskLayerTarget()) { setStatus('The Mask layer carries Full — select it in the Layers list', 'error'); return; }
     runMaskRowAction('full');
-});
-document.getElementById('maskResetBtn').addEventListener('click', () => {
-    const l = getSelected();
-    if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (groupPaintBlocked()) return;
-    if (l.isMaskLayer) { runMaskRowAction('clear'); return; }
-    // Reset takes off the record the brush is ON, not the leftmost one of that kind — and with no
-    // such step there is nothing to take off, so no empty undo step either. Same verb as the chip's
-    // Remove: under a strip, "reset this mask" and "this mask is gone" are the one same state.
-    const r = paintRecord(l, isDecalTarget() ? 'decal' : 'mask', false);
-    if (!r) { setStatus(`No ${isDecalTarget() ? 'decal' : 'mask'} step on「${l.name}」to reset`, 'error'); return; }
-    removeAttrFromLayer(l, r);
 });
 
 
