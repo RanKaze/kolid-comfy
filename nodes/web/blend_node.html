@@ -498,6 +498,19 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 10px 32px rgba(0,0,0,0.45); }
 .tool-flyout-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tool-flyout .tool-body { display: flex; flex-direction: column; gap: 8px; }
+/* Processor 窗里一行就是一个端口，段与段、行与行只靠空白分，不画框。松的是纵向（行距 8→12、
+   段距 12→18）和控件的命中高度；横轴不动 —— 窗宽还是 320，别的工具窗也完全不走这一支。
+   端口名长短不一（local_structure_strength 那种），所以标签定宽对齐、超长省略，全名在 title 里。 */
+.proc-body { gap: 12px; }
+#processorPorts { display: flex; flex-direction: column; gap: 18px; }
+.proc-group { display: flex; flex-direction: column; gap: 12px; }
+.proc-group > .panel-label { font-size: 10.5px; color: rgba(255,255,255,0.42); }
+.proc-body .control-row { gap: 10px; }
+.proc-body .control-row label { min-width: 88px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 四个来源按钮在 320 宽里放不下时让它们自己折行，别从行尾溢出去 —— 一行还是一个端口。 */
+.proc-body .control-row .mini-group { flex-wrap: wrap; }
+.proc-body input[type="number"], .proc-body input[type="text"] { padding: 5px 8px; font-size: 12px; }
+.proc-body select { padding: 4px 6px; font-size: 12px; }
 .control-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
@@ -1014,15 +1027,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             </div>
             <!-- Processor 工具：把 Interface tab 里开了 Processor 模式的 interface 当离线图像处理器
                  跑 —— pipeline 的当前图不动，输入按行收集、输出按行落位。行由 JS 依所选 interface
-                 的端口动态填（#processorPorts），枚举照工作台惯例用 mini-group 分段按钮。 -->
+                 的端口动态填（#processorPorts），分三段：Inputs（image/mask 来源）、Parameters
+                 （这个接口带的 widget 值）、Outputs（结果落位）。枚举照工作台惯例用 mini-group
+                 分段按钮；这一支的 .proc-body 只是把行距和列宽松开，别的工具窗不受影响。 -->
             <div class="panel-section tool-section foldable collapsed" id="processorSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="processorLabel" title="Processor — runs an interface that has Processor mode on (toggle it in the Interface tab) as a fully offline pass: the pipeline's current image is never touched. Each image input reads the Layers composite, the selected layer or a staging entry; each mask input reads the main Mask, the selected layer's mask, its alpha, or mask AND alpha; outputs land as a new layer, back into the selected layer or its mask, or in the workspace. Click the header to open its window."><span class="fold-caret"></span>Processor</div>
+                    <div class="panel-label" id="processorLabel" title="Processor — runs an interface that has Processor mode on (toggle it in the Interface tab) as a fully offline pass: the pipeline's current image is never touched. Each image input reads the Layers composite, the selected layer or a staging entry; each mask input reads the main Mask, the selected layer's mask, its alpha, or mask AND alpha. The interface's own parameters (preset, strengths, switches) are set here too and travel with the run; leave one empty and the graph's own value runs. Outputs land as a new layer, back into the selected layer or its mask, or in the workspace. Click the header to open its window."><span class="fold-caret"></span>Processor</div>
                 </div>
-                <div class="tool-body">
+                <div class="tool-body proc-body">
                     <div class="control-row"><label>Interface</label><select id="processorPick" title="Which processor-mode interface to run — the list is every interface with Processor mode on in the Interface tab"></select><span></span></div>
                     <div id="processorPorts"></div>
-                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button><span></span></div>
+                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button><button type="button" class="mini-btn" id="processorResetBtn" title="Forget every value typed in this window — each parameter goes back to the value the graph carries">Reset values</button></div>
                 </div>
             </div>
             <div class="panel-section">
@@ -13015,9 +13030,10 @@ if (stagingStripEl) {
 renderStaging();
 
 // ==================== Processor 工具 ====================
-// Interface tab 里开了 Processor 模式的 interface 在这里当离线处理器跑。这里只负责两件事：
-// 按每行枚举收集输入 PNG（blend-processor-run 发给宿主）、按每行枚举摆放结果
-// （宿主跑完 blend-processor-result 发回来）。真正的执行与轮询都在宿主（sampler App）。
+// Interface tab 里开了 Processor 模式的 interface 在这里当离线处理器跑。这里负责三件事：
+// 按每行枚举收集输入 PNG、按每行收集这个接口的 widget 值（两者一起以 blend-processor-run 发给
+// 宿主）、按每行枚举摆放结果（宿主跑完 blend-processor-result 发回来）。真正的执行与轮询都在
+// 宿主（sampler App）。
 let processorList = [];            // [{name, index, start_ports, end_ports}] —— 宿主推送
 let processorChoice = -1;          // processorList 下标，-1 = 还没有可选的
 let processorSel = new Map();      // '<ifaceIndex>:in|out:<port>' -> 枚举值（跨重渲染记住）
@@ -13062,6 +13078,17 @@ function procPick(ifaceIdx, side, port, table, fallback) {
     return processorSel.get(k);
 }
 function procDstTable(type) { return type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE; }
+
+// 参数值：只有"在这扇窗里拧过的"才存进 processorSel（键 <iface>:manual:<port>）；没拧过的每次
+// 现读后端推来那份（它和实跑用的是同一次派生），所以图里的默认值一改，窗里的读数跟着改。
+// 存成空串 = 这一口这次不报值，后端继续沿用图里的，而不是拿 0 顶上去。
+function procNoValue(v) { return v === null || v === undefined || v === ''; }
+function procParamValue(ifaceIdx, port) {
+    const k = procSelKey(ifaceIdx, 'manual', port.num);
+    if (processorSel.has(k)) return processorSel.get(k);
+    return procNoValue(port.value) ? '' : port.value;
+}
+function procSetParam(ifaceIdx, port, v) { processorSel.set(procSelKey(ifaceIdx, 'manual', port.num), v); }
 
 // 一个 surface（canvas 或解码后的 img）按原生尺寸重编码成 PNG dataURL —— 输入侧统一从这里走。
 function processorEncodePng(surface) {
@@ -13132,6 +13159,17 @@ function renderProcessorRows() {
         r.appendChild(lb);
         return r;
     };
+    // 一段 = 一个小标题 + 它的行。段标题用面板那套大写小字（.panel-label），没有行的段不出现。
+    const group = (title) => {
+        const g = document.createElement('div');
+        g.className = 'proc-group';
+        const h = document.createElement('div');
+        h.className = 'panel-label';
+        h.textContent = title;
+        g.appendChild(h);
+        host.appendChild(g);
+        return g;
+    };
     const choiceGroup = (side, port, table) => {
         const g = document.createElement('div');
         g.className = 'mini-group';
@@ -13150,48 +13188,129 @@ function renderProcessorRows() {
         }
         return g;
     };
-    // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多一行工作区条目选择。
-    for (const port of p.start_ports) {
-        if (port.type !== 'IMAGE' && port.type !== 'MASK') continue;
-        const table = port.type === 'MASK' ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
-        const r = row(port.name, `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`);
-        r.appendChild(choiceGroup('in', port, table));
-        r.appendChild(document.createElement('span'));
-        host.appendChild(r);
-        if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table) === 'staging') {
-            const sr = row('', 'Which workspace entry feeds this input');
-            const sel = document.createElement('select');
-            sel.title = 'Which workspace entry feeds this input';
-            if (!stagingItems.length) {
-                const o = document.createElement('option');
-                o.textContent = '— workspace is empty —';
-                sel.appendChild(o);
-                sel.disabled = true;
-            } else {
-                const cur = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
-                for (const s of stagingItems) {
-                    const o = document.createElement('option');
-                    o.value = s.id;
-                    o.textContent = s.name;
-                    if (cur ? cur === s.id : s === stagingItems[stagingItems.length - 1]) o.selected = true;
-                    sel.appendChild(o);
+    // 参数行的值走 procParamValue/procSetParam（存在 processorSel 那条 map 里）：重渲染、换
+    // interface、宿主重推端口都不会把拧过的值冲掉。
+    const paramVal = port => procParamValue(p.index, port);
+    const setParam = (port, v) => procSetParam(p.index, port, v);
+
+    // 控件跟着类型走：开关 checkbox、数字 number、文字 text；枚举候选 ≤3 用分段按钮（和来源/
+    // 落位那些行同一套词汇），候选多到一行铺不开才退成 select（和 Interface、staging 那两处同一
+    // 套）。COMBO 没读到候选（后端认不到那个消费节点）时跟着 STRING 走，由用户自己打字。
+    const paramRow = (port) => {
+        const cur = paramVal(port);
+        const r = row(port.name,
+            `${port.name} — ${port.type}; the graph carries ${procNoValue(port.value) ? 'no value, so an empty field runs as unset' : port.value}`);
+        if (port.type === 'BOOLEAN') {
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = cur === true || cur === 'true';
+            cb.addEventListener('change', () => setParam(port, cb.checked));
+            r.appendChild(cb);
+        } else if (port.type === 'INT' || port.type === 'FLOAT') {
+            const i = document.createElement('input');
+            i.type = 'number';
+            if (port.type === 'INT') i.step = '1';
+            if (!procNoValue(cur)) i.value = String(cur);
+            i.placeholder = 'graph default';
+            i.addEventListener('input', () => setParam(port, i.value === '' ? '' : Number(i.value)));
+            r.appendChild(i);
+        } else if (port.type === 'COMBO' && (port.options || []).length) {
+            const opts = port.options;
+            if (opts.length <= 3) {
+                const g = document.createElement('div');
+                g.className = 'mini-group';
+                for (const o of opts) {
+                    const b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'mini-btn' + (String(cur) === String(o) ? ' active' : '');
+                    b.textContent = o;
+                    b.title = o;
+                    b.addEventListener('click', () => { setParam(port, o); renderProcessorRows(); });
+                    g.appendChild(b);
                 }
-                sel.addEventListener('change', () =>
-                    processorSel.set(procSelKey(p.index, 'in:staging', port.num), sel.value));
+                r.appendChild(g);
+            } else {
+                const sel = document.createElement('select');
+                sel.title = `Which value ${port.name} takes this run`;
+                if (procNoValue(cur)) {
+                    const blank = document.createElement('option');
+                    blank.value = '';
+                    blank.textContent = '— graph default —';
+                    sel.appendChild(blank);
+                }
+                for (const o of opts) {
+                    const op = document.createElement('option');
+                    op.value = o;
+                    op.textContent = o;
+                    op.selected = String(cur) === String(o);
+                    sel.appendChild(op);
+                }
+                sel.addEventListener('change', () => setParam(port, sel.value));
+                r.appendChild(sel);
             }
-            sr.appendChild(sel);
-            sr.appendChild(document.createElement('span'));
-            host.appendChild(sr);
+        } else {
+            const i = document.createElement('input');
+            i.type = 'text';
+            if (!procNoValue(cur)) i.value = String(cur);
+            i.placeholder = port.type === 'COMBO' ? 'no candidates read from the graph' : '';
+            i.addEventListener('input', () => setParam(port, i.value));
+            r.appendChild(i);
+        }
+        return r;
+    };
+
+    const inPorts = p.start_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK');
+    const paramPorts = p.start_ports.filter(x => x.category === 'manual');
+    const outPorts = p.end_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK' || x.type === 'PIPELINE_DATA');
+
+    // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多一行工作区条目选择。
+    if (inPorts.length) {
+        const g = group('Inputs');
+        for (const port of inPorts) {
+            const table = port.type === 'MASK' ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
+            const r = row(port.name, `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`);
+            r.appendChild(choiceGroup('in', port, table));
+            g.appendChild(r);
+            if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table) === 'staging') {
+                const sr = row('', 'Which workspace entry feeds this input');
+                const sel = document.createElement('select');
+                sel.title = 'Which workspace entry feeds this input';
+                if (!stagingItems.length) {
+                    const o = document.createElement('option');
+                    o.textContent = '— workspace is empty —';
+                    sel.appendChild(o);
+                    sel.disabled = true;
+                } else {
+                    const cur = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
+                    for (const s of stagingItems) {
+                        const o = document.createElement('option');
+                        o.value = s.id;
+                        o.textContent = s.name;
+                        if (cur ? cur === s.id : s === stagingItems[stagingItems.length - 1]) o.selected = true;
+                        sel.appendChild(o);
+                    }
+                    sel.addEventListener('change', () =>
+                        processorSel.set(procSelKey(p.index, 'in:staging', port.num), sel.value));
+                }
+                sr.appendChild(sel);
+                g.appendChild(sr);
+            }
         }
     }
+    // 参数行：这个接口带的 widget 值，一行一个口。
+    if (paramPorts.length) {
+        const g = group('Parameters');
+        for (const port of paramPorts) g.appendChild(paramRow(port));
+    }
     // 输出行：image 与 pipeline 出口落 New Layer/Staging，mask 出口另有写回两档。
-    for (const port of p.end_ports) {
-        if (port.type !== 'IMAGE' && port.type !== 'MASK' && port.type !== 'PIPELINE_DATA') continue;
-        const dstTable = port.type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE;
-        const r = row(port.name, `${PROCESSOR_HINTS.out[port.type] || 'Output'} — ${port.name}`);
-        r.appendChild(choiceGroup('out', port, dstTable));
-        r.appendChild(document.createElement('span'));
-        host.appendChild(r);
+    if (outPorts.length) {
+        const g = group('Outputs');
+        for (const port of outPorts) {
+            const dstTable = port.type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE;
+            const r = row(port.name, `${PROCESSOR_HINTS.out[port.type] || 'Output'} — ${port.name}`);
+            r.appendChild(choiceGroup('out', port, dstTable));
+            g.appendChild(r);
+        }
     }
 }
 
@@ -13255,10 +13374,30 @@ function runProcessor() {
         inputs.push({ port: port.num, dataUrl });
     }
     if (!inputs.length) { setStatus('That processor takes no image or mask inputs', 'error'); return; }
+    // 参数只报"填过的"那些口：空着 = 这一口不报，后端拿它在图里派生出来的默认值跑。
+    const manual_values = {};
+    for (const port of p.start_ports) {
+        if (port.category !== 'manual') continue;
+        const v = procParamValue(p.index, port);
+        if (procNoValue(v)) continue;
+        manual_values[String(port.num)] = v;
+    }
     processorBusy = true;
     processorRunIdx = p.index;
-    window.parent.postMessage({ type: 'blend-processor-run', interface_index: p.index, inputs }, '*');
+    window.parent.postMessage({ type: 'blend-processor-run', interface_index: p.index, inputs, manual_values }, '*');
     setStatus('Running processor…');
+}
+
+// 忘掉这扇窗里拧过的参数值：processorSel 里这颗 interface 的 manual 键全删掉，行重新渲染时
+// 读数就回到后端推来的那一份（= 画布上这一口喂到的输入的值）。来源/落位的选择不动。
+function resetProcessorValues() {
+    const p = processorCurrent();
+    if (!p) { setStatus('No processor interface — enable Processor mode on one in the Interface tab', 'error'); return; }
+    for (const port of p.start_ports) {
+        if (port.category === 'manual') processorSel.delete(procSelKey(p.index, 'manual', port.num));
+    }
+    renderProcessorRows();
+    setStatus('Parameter values are back to what the graph carries', 'success');
 }
 
 // 结果落位。image 出口：新图层或工作区（隐藏条目复制一份可见的）；mask 出口：写回选中图层的
@@ -13327,6 +13466,7 @@ document.getElementById('processorPick').addEventListener('change', () => {
     renderProcessorRows();
 });
 document.getElementById('processorRunBtn').addEventListener('click', runProcessor);
+document.getElementById('processorResetBtn').addEventListener('click', resetProcessorValues);
 renderProcessorPick();
 renderProcessorRows();
 
