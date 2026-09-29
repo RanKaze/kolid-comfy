@@ -94,6 +94,14 @@ function fxIconSvg(icon) {
             + '<circle cx="7" cy="7" r="4.5" opacity="0.35" stroke-dasharray="1.4 1.7"/>'
             + '<path d="M7 2.1v1.5M7 10.4v1.5M2.1 7h1.5M10.4 7h1.5" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/></svg>';
     }
+    if (icon === 'ao') {
+        // 两块砖相接,接缝那条暗带就是它:挡光的是身边的几何,不是某一盏灯 —— 所以这颗图标里
+        // 既没有 'light' 的八道射线,也没有 'bloom' 的芒。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="1.8" y="3.1" width="4.4" height="7.8" rx="1"/>'
+            + '<rect x="8" y="5.4" width="4.2" height="5.5" rx="1"/>'
+            + '<path d="M6.7 4.1v6.3M7.4 6.4v4.2" stroke-width="2.1" stroke-linecap="round" opacity="0.45"/></svg>';
+    }
     if (icon === 'fog') {
         // 长短不齐的三道雾带压在下半幅,上面一根短斜光:雾条既不是 'blur' 的同心圆也不是 'light'
         // 的八道射线 —— 浓度随高度变薄才是它的样子。
