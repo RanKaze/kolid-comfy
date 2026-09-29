@@ -287,10 +287,6 @@ interface EditPhaseProps {
   /** Interface tab 的持久化配置（端口改名 / 模式开关 / block 端口绑定），按 interface 名字索引 */
   interfaceMeta: InterfaceMeta;
   onChangeInterfaceMeta: (next: InterfaceMeta) => void;
-  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: Record<number, StagingItem[]>;
-  interfaceStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
-  interfaceProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
   /** 所有可选 pipeline —— Draw 页 enum 与 preset ⚙ 的选项来源。绑定按名字（重名取第一条）。 */
   pipelinePackages: PipelinePackageInfo[];
   /** Draw 页 Pipeline Settings 的全部状态：选中项 + 按 pipeline 名字绑定的九个 override */
@@ -318,7 +314,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   blendIframeRef,
-  interfaces, interfaceMeta, onChangeInterfaceMeta, onExecuteInterface, interfaceResults, interfaceStatusByIdx, interfaceProgressByIdx,
+  interfaces, interfaceMeta, onChangeInterfaceMeta,
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   actionLog,
 }) => {
@@ -1457,7 +1453,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Interface — package-driven sub-graph execution */}
         {tab === 'interface' && (
-          <InterfaceTab interfaces={interfaces} interfaceMeta={interfaceMeta} onChangeInterfaceMeta={onChangeInterfaceMeta} detailStatusByIdx={interfaceStatusByIdx} detailProgressByIdx={interfaceProgressByIdx} onExecuteInterface={onExecuteInterface} interfaceResults={interfaceResults} staging={staging} />
+          <InterfaceTab interfaces={interfaces} interfaceMeta={interfaceMeta} onChangeInterfaceMeta={onChangeInterfaceMeta} />
         )}
       </div>
 
@@ -1682,20 +1678,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 };
 
 // ── InterfaceTab ──
+// 这一页只负责**描述**接口（端口名字/默认值/模式/block 绑定），不再负责执行：
+// 执行只有一个入口 —— 工作台的 Tools → Processor（它自带图片注入与 crop 选项）。
 const InterfaceTab: React.FC<{
   interfaces: InterfaceInfo[];
   interfaceMeta: InterfaceMeta;
   onChangeInterfaceMeta: (next: InterfaceMeta) => void;
-  detailStatusByIdx: Record<number, 'idle' | 'running' | 'done' | 'error'>;
-  detailProgressByIdx: Record<number, { progress: number; current: number; total: number }>;
-  onExecuteInterface: (interfaceIndex: number, manualValues: Record<string, any>, execOptions?: Record<string, any>) => void;
-  interfaceResults: Record<number, StagingItem[]>;
-  staging: StagingItem[];
-}> = ({ interfaces, interfaceMeta, onChangeInterfaceMeta, detailStatusByIdx, detailProgressByIdx, onExecuteInterface, interfaceResults, staging }) => {
+}> = ({ interfaces, interfaceMeta, onChangeInterfaceMeta }) => {
   const [manualValues, setManualValues] = useState<Record<number, Record<string, any>>>({});
-  // 每个 interface 的执行选项: operation 和 crop_reserve 是卡片级, image_keys 是端口级
-  const [execOptions, setExecOptions] = useState<Record<number, { operation: 'default' | 'crop'; crop_reserve: number; image_keys: Record<number, string | null> }>>({});
-  const [showImageSelect, setShowImageSelect] = useState<{ ifaceIdx: number; portNum: number } | null>(null);
   // 端口改名：哪个卡片的哪个端口的行内输入框正开着
   const [renamingPort, setRenamingPort] = useState<{ iface: string; side: 'start' | 'end'; num: number } | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -1733,27 +1723,6 @@ const InterfaceTab: React.FC<{
     return <div style={{ padding: 20, color: 'rgba(255,255,255,0.3)', fontSize: 14 }}>No interfaces connected.</div>;
   }
 
-  const updateOpts = (idx: number, patch: Partial<typeof execOptions[number]>) => {
-    setExecOptions(prev => ({ ...prev, [idx]: { ...prev[idx], ...patch } }));
-  };
-
-  const setImageKey = (idx: number, portNum: number, key: string | null) => {
-    setExecOptions(prev => {
-      const cur = prev[idx] || { operation: 'default' as const, crop_reserve: 32, image_keys: {} };
-      return { ...prev, [idx]: { ...cur, image_keys: { ...cur.image_keys, [portNum]: key } } };
-    });
-  };
-
-  const handleExecute = (idx: number) => {
-    const opts = execOptions[idx] || { operation: 'default', crop_reserve: 32, image_keys: {} };
-    const payload = {
-      operation: opts.operation,
-      crop_reserve: opts.crop_reserve,
-      image_keys: opts.image_keys || {},
-    };
-    onExecuteInterface(idx, manualValues[idx] || {}, payload);
-  };
-
   // 忘掉这张卡上输入过的值：端口回到"从图里算出来的那一份"（存档里内部节点的 widget 值），
   // 面板显示和执行走的是同一个兜底，所以清空 = 两边一起回到默认。
   const resetDefaults = (idx: number) => {
@@ -1764,8 +1733,6 @@ const InterfaceTab: React.FC<{
       return next;
     });
   };
-
-  const showProgress = (idx: number) => detailStatusByIdx[idx] === 'running' && (detailProgressByIdx[idx]?.total ?? 0) > 0;
 
   // Evaluate a simple arithmetic expression (e.g. "1024*1024", "512*0.5") safely.
   // Only digits, operators (+-*/), parentheses, dots, spaces and 'x'/'.' are allowed.
@@ -1862,41 +1829,8 @@ const InterfaceTab: React.FC<{
           )
         )}
 
-        {/* IMAGE port: per-port image selector with preview */}
-        {isStart && cat === 'inject' && port.type === 'IMAGE' && (() => {
-          const selectedKey = execOptions[idx]?.image_keys?.[port.num] ?? null;
-          const selItem = selectedKey ? staging.find(s => s.id === selectedKey) : null;
-          const previewSrc = selItem?.src ?? null;
-          const previewLabel = selItem ? selItem.name : 'Pipeline image';
-          return (
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <div
-                style={{ position: 'relative', width: 40, height: 40, borderRadius: 6, overflow: 'hidden', cursor: 'pointer', background: '#1a1a1a', border: selectedKey ? '1.5px solid #0a84ff' : '0.5px solid rgba(255,255,255,0.1)', flexShrink: 0 }}
-                onClick={() => setShowImageSelect({ ifaceIdx: idx, portNum: port.num })}
-                title={previewLabel}
-              >
-                {previewSrc ? (
-                  <img src={previewSrc} alt={previewLabel} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                ) : (
-                  <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.2)', fontSize: 9 }}>No img</div>
-                )}
-              </div>
-              <span style={{ fontSize: 10, color: selectedKey ? '#0a84ff' : 'rgba(255,255,255,0.4)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{previewLabel}</span>
-              {selectedKey && (
-                <button
-                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 14, padding: '2px 4px', flexShrink: 0 }}
-                  onClick={() => setImageKey(idx, port.num, null)}
-                  title="Reset to context image"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* Inject label for non-IMAGE auto types */}
-        {isStart && cat === 'inject' && port.type !== 'IMAGE' && (
+        {/* Inject 口不再往里塞图 —— 注入哪张图是工作台 Processor 那趟执行的事。 */}
+        {isStart && cat === 'inject' && (
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
             {port.type === 'MASK' ? '← Mask' : '← Pipeline'}
           </span>
@@ -1909,13 +1843,23 @@ const InterfaceTab: React.FC<{
   };
 
   return (
-    // Wrap + vertical scroll: cards stack into rows as the panel allows and nothing is ever
-    // clipped — the old single-row + overflowY:hidden layout cut everything below the fold
-    // (ports, results, the Execute button) off without any way to reach it.
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'flex', flexWrap: 'wrap', gap: 16, alignContent: 'flex-start', alignItems: 'flex-start' }}>
+    // 网格按可用宽度分列：先塞满一行的列数，放不下就换下一行，卡片再把自己那一列填满 ——
+    // 旧的固定 360px 卡片在窄面板里既不能缩也不会换行，只能整页横向滚动。
+    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16, alignItems: 'start', alignContent: 'start' }}>
       {interfaces.map((iface, idx) => (
-        <div key={idx} style={{ width: 360, maxWidth: '100%', flexShrink: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', marginBottom: 12 }}>{iface.name || `Interface ${idx + 1}`}</div>
+        <div key={idx} style={{ minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 16, border: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#fff', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{iface.name || `Interface ${idx + 1}`}</div>
+            {iface.start_ports?.some(p => p.category === 'manual') && (
+              <button
+                style={styles.resetBtn}
+                onClick={() => resetDefaults(idx)}
+                title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
+              >
+                Reset to defaults
+              </button>
+            )}
+          </div>
 
           {/* 模式开关（两个独立 toggle，一个 interface 可以同时是 block 和 processor）。
               开关受形状校验：不满足就拒开并在下方说一句话。 */}
@@ -1994,25 +1938,6 @@ const InterfaceTab: React.FC<{
             </div>
           )}
 
-          {/* Operation options (card-level) */}
-          {iface.start_ports && iface.start_ports.some(p => p.type === 'IMAGE' || p.type === 'MASK') && (
-            <div style={{ marginBottom: 12, padding: 10, background: 'rgba(10,132,255,0.06)', borderRadius: 8, border: '0.5px solid rgba(10,132,255,0.15)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', rowGap: 6, gap: 8, marginBottom: 6 }}>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 70 }}>Operation</label>
-                <select style={styles.paramSelect} value={execOptions[idx]?.operation ?? 'default'} onChange={e => updateOpts(idx, { operation: e.target.value as 'default' | 'crop' })}>
-                  <option value="default" style={{ background: '#1c1c1e', color: '#fff' }}>默认 (整图)</option>
-                  <option value="crop" style={{ background: '#1c1c1e', color: '#fff' }}>Crop Mask 区域</option>
-                </select>
-                {execOptions[idx]?.operation === 'crop' && (
-                  <>
-                    <label style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', minWidth: 50 }}>Reserve</label>
-                    <input type="number" min={0} max={256} style={{ ...styles.paramInput, width: 70, flex: 'none' }} value={execOptions[idx]?.crop_reserve ?? 32} onChange={e => updateOpts(idx, { crop_reserve: parseInt(e.target.value) || 0 })} />
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* End ports (outputs) */}
           {iface.end_ports && iface.end_ports.length > 0 && (
             <div style={{ marginBottom: 12 }}>
@@ -2023,106 +1948,8 @@ const InterfaceTab: React.FC<{
             </div>
           )}
 
-          {detailStatusByIdx[idx] === 'running' && (
-            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={styles.spinner} />
-              <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 600 }}>Running…</span>
-              {showProgress(idx) && <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>{detailProgressByIdx[idx]?.current} / {detailProgressByIdx[idx]?.total}</span>}
-            </div>
-          )}
-          {(() => {
-            const ifaceResults = interfaceResults[idx] || [];
-            const showIfaceResults = detailStatusByIdx[idx] === 'done' || ifaceResults.length > 0;
-            if (!showIfaceResults) return null;
-            if (ifaceResults.length === 0) {
-              return detailStatusByIdx[idx] === 'done' ? (
-                <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>✓ Done — no images generated</div>
-              ) : null;
-            }
-            return (
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Results</div>
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                  {ifaceResults.map(r => {
-                    return (
-                      <div
-                        key={r.id}
-                        style={{
-                          ...styles.resultCard,
-                          width: '100%', flex: '1 1 100%',
-                          borderColor: 'rgba(255,255,255,0.08)',
-                        }}
-                      >
-                        <div style={styles.resultLabel}>{r.name}</div>
-                        <img src={r.src} alt={r.name} style={{ width: '100%', height: 'auto', maxHeight: 200, objectFit: 'contain', borderRadius: 8 }} />
-                      </div>
-                    );
-                  })}
-                </div>
-                <div style={{ marginTop: 8, fontSize: 11, color: 'rgba(255,255,255,0.35)' }}>Results also land in the staging pool (Blend workbench) and can be used as references</div>
-              </div>
-            );
-          })()}
-          {detailStatusByIdx[idx] === 'error' && (
-            <div style={{ marginTop: 8, fontSize: 12, color: '#ff453a', fontWeight: 600 }}>✗ Error</div>
-          )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginTop: 12 }}>
-            {iface.start_ports?.some(p => p.category === 'manual') && (
-              <button
-                style={styles.resetBtn}
-                onClick={() => resetDefaults(idx)}
-                title="Reset to defaults — forget what you typed on this card; every port goes back to the value the graph carries."
-              >
-                Reset to defaults
-              </button>
-            )}
-            <button
-              style={{ ...styles.runBtn, opacity: detailStatusByIdx[idx] === 'running' ? 0.4 : 1, cursor: detailStatusByIdx[idx] === 'running' ? 'not-allowed' : 'pointer' }}
-              onClick={() => handleExecute(idx)}
-              disabled={detailStatusByIdx[idx] === 'running'}
-            >
-              {detailStatusByIdx[idx] === 'running' ? 'Running…' : 'Execute'}
-            </button>
-          </div>
         </div>
       ))}
-
-      {/* 从工作区选择图片 modal — per-port image selection */}
-      {showImageSelect !== null && (() => {
-        const { ifaceIdx, portNum } = showImageSelect;
-        const currentSel = execOptions[ifaceIdx]?.image_keys?.[portNum] ?? null;
-        const eligible = staging.filter(s => s.id !== currentSel);
-        return (
-          <div style={styles.overlay}>
-            <div style={styles.dialog}>
-              <div style={styles.dialogTitle}>Select Image for Port {portNum}</div>
-              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 12 }}>
-                Select a staging image to inject into this IMAGE port. Close to use the pipeline image.
-              </div>
-              {eligible.length === 0 ? (
-                <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 12 }}>No staging items available.</div>
-              ) : (
-                <div style={styles.dialogHistoryGrid}>
-                  {eligible.map(s => (
-                    <button key={s.id} style={styles.historyCard} onClick={() => {
-                      setImageKey(ifaceIdx, portNum, s.id);
-                      setShowImageSelect(null);
-                    }}>
-                      <div style={styles.historyImgWrap}>
-                        <img src={s.src} alt={s.name} style={styles.historyImg} />
-                      </div>
-                      <div style={styles.historyName}>{s.name}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div style={styles.dialogActions}>
-                <button style={styles.cancelBtn} onClick={() => setShowImageSelect(null)}>Cancel</button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 };
@@ -2216,40 +2043,19 @@ const styles: Record<string, React.CSSProperties> = {
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 
 
-  // Progress bar — iOS style
-
-  resultCard: { display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0, background: 'rgba(28,28,30,0.6)', borderRadius: 12, padding: 8, border: '0.5px solid rgba(255,255,255,0.08)' },
-  resultLabel: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)' },
-
-
-  // Run button — bottom right
-  // 卡片级次要动作：中性墨色，明度低于 Execute，避免和动作蓝/绿抢注意力
+  // 卡片级次要动作：中性墨色，明度低于动作绿，别和它抢注意力
   resetBtn: {
     padding: '8px 14px', fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.45)',
     background: 'transparent', border: '0.5px solid rgba(255,255,255,0.1)',
-    borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease',
+    borderRadius: 8, cursor: 'pointer', transition: 'all 0.2s ease', flexShrink: 0,
   },
-
-  runBtn: {
-    padding: '10px 28px', fontSize: 14, fontWeight: 700, color: '#fff',
-    background: 'rgba(48,209,88,0.85)', border: 'none', borderRadius: 10, cursor: 'pointer',
-    transition: 'all 0.2s ease', letterSpacing: '0.3px',
-    boxShadow: '0 2px 12px rgba(48,209,88,0.2)',
-  },
-
-  // Draw tab — right side two-column: mask iframe (left) + result cards (right)
-
-  // Quick tag buttons row (left of Run Detailer)
 
   // History (used in finish dialog)
-  dialogHistoryGrid: { display: 'flex', flexWrap: 'wrap', gap: 12, alignContent: 'flex-start' },
   historyCard: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, padding: 6, background: 'rgba(28,28,30,0.6)', border: '0.5px solid rgba(255,255,255,0.08)', borderRadius: 12, cursor: 'pointer', transition: 'all 0.2s ease' },
   historyImgWrap: { position: 'relative', width: 200, height: 200 },
   historyImg: { width: 200, height: 200, objectFit: 'cover', borderRadius: 8 },
   historyCheck: { position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: '50%', background: '#0a84ff', color: '#fff', fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(0,0,0,0.3)' },
   historyName: { fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.7)' },
-
-  spinner: { width: 24, height: 24, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.08)', borderTopColor: '#0a84ff', animation: 'spin 1s linear infinite', flexShrink: 0 },
 
   // Dialog
   overlay: { position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)', zIndex: 100 },
