@@ -31,13 +31,33 @@ function inferTypeFromOutput(node, output) {
     return "*";
 }
 
-function updatePortTypesWidget(node) {
-    const types = {};
-    for (const inp of node.inputs) {
+// Start 的 value 端口类型: 输入侧优先 (上游输出是什么就是什么); 只有输入侧是任意类型时,
+// 才跟着这条输出连到的下游端口走。输入端口本身始终是它自己的类型, 不会被下游改写。
+function resolveStartPortType(node, input, output) {
+    const fromInput = inferTypeFromInput(node, input);
+    if (fromInput && fromInput !== "*") return fromInput;
+    const fromOutput = inferTypeFromOutput(node, output);
+    return fromOutput && fromOutput !== "*" ? fromOutput : "*";
+}
+
+function isValuePort(name) {
+    return name && /^value\d+$/.test(name);
+}
+
+function updatePortTypesWidget(node, fromOutput) {
+    const ports = {};
+    for (const inp of node.inputs || []) {
         const m = inp.name && inp.name.match(/^value(\d+)$/);
-        if (!m) continue;
-        const portNum = parseInt(m[1]);
-        const t = inferTypeFromInput(node, inp);
+        if (m) (ports[m[1]] ||= {}).input = inp;
+    }
+    for (const out of node.outputs || []) {
+        const m = out.name && out.name.match(/^value(\d+)$/);
+        if (m) (ports[m[1]] ||= {}).output = out;
+    }
+    const types = {};
+    for (const [portNum, { input, output }] of Object.entries(ports)) {
+        const t = fromOutput ? resolveStartPortType(node, input, output)
+                             : inferTypeFromInput(node, input);
         if (t && t !== "*") types[portNum] = t;
     }
     const widget = node.widgets?.find(w => w.name === "port_types");
@@ -100,41 +120,36 @@ function setupInterfaceStart(node) {
         }
     }
 
-    // Add output for a connected input if it doesn't already exist.
-    // NEVER removes existing outputs — this preserves output links on reload.
-    function ensureOutputForInput(inp) {
-        const existing = node.outputs.find(o => o.name === inp.name);
-        if (existing) {
-            // Update type if needed
-            const t = inferTypeFromInput(node, inp);
-            if (existing.type !== t) existing.type = t;
-            return;
-        }
-        const t = inferTypeFromInput(node, inp);
-        node.addOutput(inp.name, t);
-    }
-
+    // Rebuild the value outputs' TYPES. NEVER adds/removes per-port presence beyond the
+    // ADD-only rule below — removing an output would drop its links on reload.
     function syncValueOutputs() {
         // Only ADD missing outputs for connected inputs. Don't remove existing.
         const dynamicInputs = getValueInputs();
         const connectedInputs = dynamicInputs.filter(inp => inp.link != null);
         for (const inp of connectedInputs) {
-            ensureOutputForInput(inp);
+            if (!node.outputs.some(o => o.name === inp.name)) node.addOutput(inp.name, "*");
+        }
+        // 输入侧优先; 输入侧是任意类型时这条输出端口跟着它连到的下游端口。
+        // 这里遍历全部 value 输出, 因为断开输入不会删掉输出 (见上面的 ADD-only),
+        // 那条留着的老输出也该跟着自己的下游走。
+        for (const out of node.outputs) {
+            if (!isValuePort(out.name)) continue;
+            const inp = dynamicInputs.find(i => i.name === out.name);
+            const t = resolveStartPortType(node, inp, out);
+            if (out.type !== t) out.type = t;
         }
     }
 
     node.onConnectionsChange = function (type, slot, connected) {
         if (type !== LiteGraph.INPUT) {
-            // Output connection changed — just update type, don't rebuild
-            if (type === LiteGraph.OUTPUT && slot > 0) {
-                const inp = getValueInputs().find(i => i.name === node.outputs[slot]?.name);
-                if (inp) inp.type = inferTypeFromInput(node, node.outputs[slot]);
-            }
+            // 输出端的连线变了: 只重解析输出类型, 输入端口自己的类型不动
+            if (type === LiteGraph.OUTPUT) syncValueOutputs();
+            updatePortTypesWidget(node, true);
             node.setDirtyCanvas(true, true);
             return;
         }
         const inp = node.inputs[slot];
-        if (!inp || !inp.name || !inp.name.match(/^value\d+$/)) {
+        if (!inp || !isValuePort(inp.name)) {
             node.setDirtyCanvas(true, true);
             return;
         }
@@ -149,14 +164,14 @@ function setupInterfaceStart(node) {
             ensureInputSlots();
             syncValueOutputs();
         }
-        updatePortTypesWidget(node);
+        updatePortTypesWidget(node, true);
         node.setDirtyCanvas(true, true);
     };
 
     // Process existing connections (graph load) — preserve existing outputs
     ensureInputSlots();
     syncValueOutputs(); // Now only ADDS missing outputs, never removes
-    updatePortTypesWidget(node);
+    updatePortTypesWidget(node, true);
 }
 
 
