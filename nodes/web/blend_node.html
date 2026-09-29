@@ -209,7 +209,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
 /* The strip grows by user action (a layer can hold several Masks), so a narrow panel wraps the
    chips onto another line instead of overflowing out of the row. */
-.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+/* 顶部对齐而不是居中:一条里某一格可以往下挂一块自己的容器 (Effects 的链),那条线的高度归它,而所有
+   chip 还得排在同一条横线上 —— 居中会让挂了容器的格把自己的 chip 顶到线外去。 */
+.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 5px; }
 .layer-row:hover { background: rgba(255,255,255,0.08); }
 .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
 .layer-row.dragging { opacity: 0.4; }
@@ -310,25 +312,27 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
 .layer-thumb.masklayer-thumb canvas { width: 100%; height: 100%; display: block; }
 
-/* ---- Layer effect chain ----
-   特效子行挂在图层行的**上方**（.layer-row 的第一个子元素），左侧竖线标归属。链里越贴近图层
-   者越先执行，所以显示序是执行序的倒序 —— effects[0] 正好紧挨着 head 行。空链不占位。 */
-.fx-chain { display: flex; flex-direction: column; gap: 3px; margin: 0 2px 1px 5px; padding-left: 8px;
-    border-left: 1px solid rgba(255,255,255,0.18); }
-.fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
-.fx-row { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
-    background: rgba(255,255,255,0.03); cursor: pointer; user-select: none; }
-.fx-row:hover { background: rgba(255,255,255,0.09); }
-.fx-row.open { background: rgba(0,122,255,0.16); }
-.fx-row.disabled { opacity: 0.42; }
-.fx-row.dragging { opacity: 0.4; }
-.fx-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
-.fx-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
-.fx-row input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: #0a84ff; cursor: pointer; }
+/* ---- 特效容器：挂在**所属那颗 chip 下面** ----
+   一步一颗 chip，从左到右就是执行序 —— 跟条带同一条读法，所以缝位算法、插入线样式两边共用一份。
+   展开参数的那一步排在整排 chip 的下面（参数区要的是宽度，这一条给不了两遍宽度）。空链不占位。 */
+.attr-slot { display: flex; flex-direction: column; align-items: stretch; gap: 3px; min-width: 0; }
+.fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fx-steps { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+.fx-chain.bypassed .fx-steps { opacity: 0.5; }
+.fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
+    background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
+.fx-chip:hover { background: rgba(255,255,255,0.09); }
+.fx-chip.open { background: rgba(0,122,255,0.16); }
+.fx-chip.disabled { opacity: 0.42; }
+.fx-chip.dragging { opacity: 0.4; }
+.fx-chip.drop-before::before, .fx-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
+.fx-chip.drop-before::before { left: 0; }
+.fx-chip.drop-after::after { right: 0; }
+.fx-chip input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: #0a84ff; cursor: pointer; }
 .fx-icon { width: 14px; height: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #9ecbff; }
 .fx-icon svg { width: 14px; height: 14px; display: block; }
 .fx-name { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.85); white-space: nowrap; }
-.fx-read { flex: 1; min-width: 0; font-size: 10.5px; color: rgba(255,255,255,0.55);
+.fx-read { min-width: 0; max-width: 96px; font-size: 10.5px; color: rgba(255,255,255,0.55);
     font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
 .fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 3px 5px;
@@ -4389,7 +4393,7 @@ function copyToClipboard() {
         }
     }
     clipboardRecord = { layer: rec, canvasW, canvasH };
-    const n = (rec.effects || []).filter(e => e && e.enabled).length;
+    const n = liveEffects(rec).length;
     setStatus(`Copied — 「${l.name}」${n ? ` with ${n} live effect${n === 1 ? '' : 's'}` : ''}`
         + `${sel ? ', selection cut into its mask' : ''}`);
 }
@@ -4422,7 +4426,7 @@ function pasteFromClipboard() {
     renderLayerList();
     render();
     pushHistory();
-    setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${(l.effects || []).filter(e => e && e.enabled).length ? ' and live effects' : ''}`);
+    setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${liveEffects(l).length ? ' and live effects' : ''}`);
 }
 
 // ---- gestures ----
@@ -5109,9 +5113,18 @@ function paintMaskLayerThumb(el, l) {
 // ==================== 条带 (attribute strip) ====================
 // 一颗 chip 就是条带上的一步。缩略图**只在 attribute 存在时**才存在 —— 不给没装的能力画占位,也没有
 // "装了但停用"这一态;要它消失只有 Remove。`+` 钉在最右边,永远追加到最后一步。
+// 每一步外面套一格 `.attr-slot`:chip 自己占第一行,它那块**属于自己**的容器 (今天只有 Effects 的链)
+// 挂在同一格里、也就是这颗 chip 的正下方。条带因此还是横向一条,而容器不必挤在图层行的那点宽度里。
 function attrStripEls(l) {
     const out = [];
-    for (const r of attrRecordsOf(l)) out.push(attrChip(l, r));
+    for (const r of attrRecordsOf(l)) {
+        const slot = document.createElement('div');
+        slot.className = 'attr-slot';
+        slot.appendChild(attrChip(l, r));
+        const chain = r.chain ? fxChainEl(l, r) : null;
+        if (chain) slot.appendChild(chain);
+        out.push(slot);
+    }
     out.push(attrAddChip(l));
     return out;
 }
@@ -5160,7 +5173,7 @@ function attrChip(l, r) {
         attrDrag = null;
     });
     el.addEventListener('dragover', ev => {
-        const side = attrDropSide(ev, el, l);
+        const side = dropSide(ev, el, attrDrag, l.id, r.id);
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
@@ -5170,15 +5183,13 @@ function attrChip(l, r) {
     });
     el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
     el.addEventListener('drop', ev => {
-        const side = attrDropSide(ev, el, l);
+        const side = dropSide(ev, el, attrDrag, l.id, r.id);
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
         el.classList.remove('drop-before', 'drop-after');
-        // 缝位用**摘之前**那个数组的下标说:落在第 k 颗的左半边就是插到 k,右半边就是 k+1。
-        const slot = attrRefList(l).indexOf(r.id) + (side === 'before' ? 0 : 1);
         const moved = attrRecord(attrDrag.ref);
-        if (moveAttr(l, attrDrag.ref, slot)) {
+        if (moveAttr(l, attrDrag.ref, r.id, side === 'after')) {
             setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length} — it runs there`);
             pushHistory();
         }
@@ -5187,15 +5198,6 @@ function attrChip(l, r) {
         render();
     });
     return el;
-}
-
-// 这一条拖拽该不该被这颗 chip 接住,以及接在它的左半边还是右半边。不是这一条条带里的、或者就是
-// 自己拖自己,都回一个空串 —— 行的那套 (图层重排序) 因此照常接管。
-function attrDropSide(ev, el, l) {
-    if (!attrDrag || String(attrDrag.layerId) !== String(l.id)) return '';
-    if (attrDrag.ref === el.dataset.attr) return '';
-    const r = el.getBoundingClientRect();
-    return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
 }
 
 function attrAddChip(l) {
@@ -5499,11 +5501,12 @@ function renderStackList(listEl, stack) {
 
         const name = document.createElement('div');
         name.className = 'layer-name';
+        // 名字后面的 "· fx" 撤了:条带上那颗 Effects chip 就是"这层挂着链"的读数,同一件事不该在
+        // 一行里说两遍。
         name.textContent = l.name + (is3DLayer(l) ? ' · 3D'
             : isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
             : isTextLayer(l) ? ' · text' : isDirectionLayer(l) ? ' · direction' : isStashLayer(l) ? ' · stash'
-            : isRasterLayer(l) ? ' · raster' : '')
-            + (layerTakesEffects(l) && l.effects && l.effects.length ? ' · fx' : '');
+            : isRasterLayer(l) ? ' · raster' : '');
         name.title = 'Double-click to rename';
         name.addEventListener('dblclick', ev => {
             ev.stopPropagation();
@@ -5547,21 +5550,6 @@ function renderStackList(listEl, stack) {
                 : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
         run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
 
-        // Effects button on the row: the picker entry every layer with a chain gets, a detailer
-        // patch included (the chain runs on its own grid like any other layer). Only the pinned
-        // Mask row never renders it — it isn't a content layer.
-        let fxBtn = null;
-        if (layerTakesEffects(l)) {
-            fxBtn = document.createElement('button');
-            fxBtn.className = 'icon-btn';
-            fxBtn.innerHTML = fxWandSvg();
-            const fxN = (l.effects || []).length;
-            fxBtn.title = fxN
-                ? `Effects on「${l.name}」(${fxN}) — pick another to add it on top of the chain`
-                : `Add an effect to「${l.name}」`;
-            fxBtn.addEventListener('click', ev => { ev.stopPropagation(); openFxModal(l.id); });
-        }
-
         const eye = document.createElement('button');
         eye.className = 'icon-btn';
         eye.title = l.visible ? 'Hide layer' : 'Show layer';
@@ -5588,7 +5576,6 @@ function renderStackList(listEl, stack) {
         head.appendChild(thumb);
         head.appendChild(name);
         if (jump) head.appendChild(jump);
-        if (fxBtn) head.appendChild(fxBtn);
         head.appendChild(run);
         head.appendChild(eye);
         head.appendChild(del);
@@ -5600,9 +5587,8 @@ function renderStackList(listEl, stack) {
         chips.appendChild(canvasThumb);
         for (const el of attrStripEls(l)) chips.appendChild(el);
 
-        // 特效子行块在 head 之上:它属于这个图层,但执行发生在图层把自己的像素交出去之前。
-        const fxChain = fxChainEl(l);
-        if (fxChain) row.appendChild(fxChain);
+        // 链不再摊在 head 之上:它属于**它自己那枚 chip 下面** (见 attrStripEls),条带上第几步
+        // 与容器是谁的链因此是同一个问题,不必两处各答一遍。
         row.appendChild(head);
         row.appendChild(chips);
 
@@ -7873,7 +7859,7 @@ function endWarpEdit() {
 function warpTarget() {
     if (!warpEdit) return null;
     const l = getLayer(warpEdit.layerId);
-    const effect = l && l.effects && l.effects.find(e => e && e.id === warpEdit.effectId);
+    const effect = l && effectById(l, warpEdit.effectId);
     const lat = effect && effect.enabled && effect.type === 'warp'
         ? warpLatticeOf(effectParams(effect).lattice) : null;
     // 卡片折起来 = 那张卡的按钮不见了,画布上却还摊着一套没人能收的把手:网格只在参数区摊开时留在
@@ -9751,23 +9737,8 @@ function openLayerMenu(l, clientX, clientY) {
         menu.appendChild(edit);
     }
 
-    // Effects: the entry point for a chain a row does not have yet (once it has one, the sub-row
-    // block above the head carries its own +). A detailer fragment gets it like any other layer:
-    // the chain runs on that patch's own grid, which is the same contract everywhere else.
-    if (layerTakesEffects(l)) {
-        const fx = document.createElement('button');
-        fx.className = 'layer-menu-item';
-        fx.type = 'button';
-        fx.setAttribute('role', 'menuitem');
-        fx.textContent = l.effects && l.effects.length ? 'Add effect' : 'Effects';
-        fx.title = `Attach an effect chain to「${l.name}」— it runs after the decal and before the mask, on this layer's own pixels`;
-        fx.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            openFxModal(l.id);
-        });
-        menu.appendChild(fx);
-    }
+    // 这里不再有 "Effects / Add effect" 那一项:挂链的入口是条带上那颗 `+` (Add Effects),往那条链里
+    // 加一步的入口是那枚 chip 上的魔棒。同一个动作留一个可见入口,而这两件都不是右键菜单的活。
 
     // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
     // canvas stay put — the new box only decides how many pixels the layer gets. Raster layers
