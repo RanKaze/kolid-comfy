@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import hashlib
 import mimetypes
 import threading
 import queue
@@ -39,6 +40,20 @@ from ..libs import debug_trace as dbg
 from ..architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
 import gc
 import uuid
+
+
+# =============================================================================
+# detailer block 之间的 seed 传递
+# =============================================================================
+def next_seed(prev):
+    """由上一个 seed 生成下一个 seed。
+
+    哈希而不是 +1：链里块数可能到十几，逐个加一会全挤在相邻整数上，而
+    torch 的 randn 是逐位取随机数，相邻 seed 的首段噪声并不"长得开"。
+    取 sha256 前 8 字节压回 ComfyUI 的 INT 上限，纯函数、跨进程可复现。
+    """
+    digest = hashlib.sha256(str(int(prev) & 0xFFFFFFFFFFFFFFFF).encode()).digest()
+    return int.from_bytes(digest[:8], 'big') & 0xFFFFFFFFFFFFFFFF
 
 
 # =============================================================================
@@ -517,6 +532,7 @@ class SnapshotDetailerSamplerServer:
                 'name': 'Detailer',
                 'params': {
                     'add_noise': 'enable',
+                    'inversion_rate': 0.3,
                     'start_step_rate': 0.8,
                     'end_step_rate': 1.0,
                     'pixels': self.pixels,
@@ -3148,6 +3164,8 @@ class SnapshotDetailerSamplerNode:
                 # Detailer block params (support both nested 'params' dict and flat)
                 bp = block.get('params', block)
                 add_noise = bp.get('add_noise', 'enable')
+                # Invert（DDIM 反演往返）：爬梯段的级数 = rate * steps（0.3 默认 ≈ 20 步爬 6 级）。
+                inversion_rate = float(bp.get('inversion_rate', 0.3))
                 start_step_rate = float(bp.get('start_step_rate', 0.8))
                 end_step_rate = float(bp.get('end_step_rate', 1.0))
                 enable_edit = bp.get('enable_edit', False)
@@ -3175,10 +3193,18 @@ class SnapshotDetailerSamplerNode:
                 # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
                 block_context_regex = bp.get('context_regex', context_regex) or '.+'
 
-                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                # seed 链条：全局 seed 只是第一格，之后每格由前一格哈希出来（见 next_seed）。
+                # 共用同一个 seed 意味着每个块拿到**同一个**噪声张量，链子就成了自我重复。
+                block_seed = seed
+                seed = next_seed(seed)
+
+                invert_suffix = (f", invert_rate={inversion_rate}" if add_noise == 'invert' else '')
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, seed={block_seed}{invert_suffix}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
                 dbg.record_block(i + 1, f'Block {i+1} · Detailer',
                                  f'{block.get("name", "")}',
                                  add_noise=add_noise,
+                                 seed=block_seed,
+                                 inversion_rate=(inversion_rate if add_noise == 'invert' else None),
                                  start_step_rate=start_step_rate,
                                  end_step_rate=end_step_rate,
                                  enable_edit=enable_edit,
@@ -3476,9 +3502,12 @@ class SnapshotDetailerSamplerNode:
                         _edit_pixel_state["px_cache"] = {}
 
                 from .sampler_node import _ksampler
+                # Invert：噪声这一路彻底交给反演（_ksampler 把爬梯段和重绘段拼成一张
+                # 非单调梯子，一趟跑完），随机噪声不再叠加，所以 disable_noise 也一并成立。
+                invert_info = {} if add_noise == 'invert' else None
                 sampled_latent = _ksampler(
                     model=model_to_use,
-                    seed=seed,
+                    seed=block_seed,
                     steps=steps,
                     cfg=cfg,
                     sampler_name=sampler_name,
@@ -3486,13 +3515,39 @@ class SnapshotDetailerSamplerNode:
                     positive=positive_condition,
                     negative=negative_condition,
                     latent=tmp_latent,
-                    disable_noise=(add_noise == "disable"),
+                    disable_noise=(add_noise != "enable"),
                     start_step=start_at_step,
                     last_step=end_at_step,
                     force_full_denoise=True,
                     sigmas=next_pipeline.config.get("sigmas"),
                     model_negative=model_negative_to_use,
+                    inversion_rate=(inversion_rate if add_noise == 'invert' else None),
+                    invert_info=invert_info,
                 )[0]
+
+                if invert_info is not None:
+                    peak = invert_info.get('peak')
+                    if peak is not None:
+                        # 噪声 latent 进 pipeline cache：它是"这张图配的那份噪声"，
+                        # 下游块/节点想跳过自己那趟爬梯就直接取，不必再反演一次。
+                        inverted = dict(tmp_latent)
+                        inverted['samples'] = peak
+                        next_pipeline.cache.set_inverted_latent(i + 1, inverted)
+                    if invert_info.get('noop'):
+                        detail = '未执行（start_step 越界，本块梯子是空的）'
+                    else:
+                        detail = (f"爬 {invert_info.get('climb_rungs', 0)} 级 / 共 "
+                                  f"{invert_info.get('steps_total', 0)} 步（euler）· "
+                                  f"σ_peak={invert_info.get('sigma_peak', 0.0):.4f}")
+                    print(f"[Block {i+1}] Invert: {detail}")
+                    dbg.record_stage('Invert 往返', detail, block=i + 1,
+                                     inversion_rate=inversion_rate,
+                                     climb_steps=invert_info.get('climb_steps'),
+                                     steps_total=invert_info.get('steps_total'),
+                                     sigma_peak=invert_info.get('sigma_peak'),
+                                     sampler='euler',
+                                     peak_captured=(peak is not None),
+                                     noop=bool(invert_info.get('noop')))
 
                 decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
 

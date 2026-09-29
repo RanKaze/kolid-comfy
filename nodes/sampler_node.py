@@ -104,8 +104,9 @@ class DualModelCFGGuider(comfy.samplers.CFGGuider):
 
 def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative,
               latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None,
-              force_full_denoise=False, sigmas=None, model_negative=None):
-    """统一采样函数：支持 custom sigmas 和 dual model CFG"""
+              force_full_denoise=False, sigmas=None, model_negative=None,
+              inversion_rate=None, invert_info=None):
+    """统一采样函数：支持 custom sigmas、dual model CFG 和反演往返（invert）"""
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(
         model, latent_image,
@@ -143,14 +144,59 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
         if start_step < (len(sigmas) - 1):
             sigmas = sigmas[start_step:]
         else:
+            if invert_info is not None:
+                invert_info['noop'] = True
             out = latent.copy()
             out.pop("downscale_ratio_spacial", None)
             out.pop("downscale_ratio_temporal", None)
             out["samples"] = latent_image
             return (out,)
 
+    # ================= invert（DDIM 反演往返）=================
+    # 爬梯段和重绘段合成**一次** guider.sample：sigmas = [0 … σ_peak … 0]，euler 只读
+    # sigmas[i] 与 sigmas[i+1]，dt 变号就自然反向，所以一张非单调的梯子就是一次往返。
+    # 分成两次调用反而不对：Comfy 的入口是 noise_scaling(σ₀, noise, latent)，喂进去的若是
+    # 已加噪的 x_σ，CONST 系（Flux/Anima）会再乘一次 (1-σ₀)。这里让 σ₀ 恒等于 0，
+    # noise_scaling 退化成恒等，干净 latent 原样进、爬到的 x_σ 原样继续往下走。
+    climb_steps = 0
+    peak_index = -1
+    if inversion_rate is not None:
+        # 下降段就是本块原本要跑的那截梯子；爬梯从它的最低级回到它的最高级（σ_peak）。
+        # 级别数 = rate * steps（不足一级按一级），级少 = 粗爬（省调用），级多 = 细爬（更贴 ODE）。
+        climb_steps = max(1, int(inversion_rate * actual_steps))
+        asc = torch.flip(sigmas, dims=[0])
+        if float(asc[0]) != 0.0:
+            # 外部 sigmas 可能不收尾于 0 —— 补一级 0，保证 σ₀=0 恒等进。
+            asc = torch.cat([torch.zeros(1, dtype=asc.dtype, device=asc.device), asc])
+        span = len(asc) - 1
+        rungs = sorted({round(k * span / climb_steps) for k in range(climb_steps + 1)})
+        climb = asc[rungs]
+        peak_index = len(climb) - 1
+        # climb 的末级 == sigmas[0]（峰），接上 sigmas[1:] 就是"爬到顶再顺原路解回来"。
+        sigmas = torch.cat([climb, sigmas[1:]])
+        # 全程零噪声：爬梯段靠 σ₀=0 恒等进，重绘段的噪声已经在 latent 里（就是爬出来的那份）。
+        noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype,
+                            layout=latent_image.layout, device="cpu")
+        # 往返必须同一个采样器，而爬梯段要求确定性一阶；dpmpp 这类多步法跨峰会带着
+        # 单调假设的历史，反向一踩就散。所以 invert 块整段走 euler。
+        sampler_name = 'euler'
+        if invert_info is not None:
+            invert_info['climb_steps'] = climb_steps
+            invert_info['climb_rungs'] = len(climb) - 1
+            invert_info['sigma_peak'] = float(sigmas[peak_index])
+            invert_info['steps_total'] = len(sigmas) - 1
+
     sampler_obj = comfy.samplers.sampler_object(sampler_name)
-    callback = latent_preview.prepare_callback(model, actual_steps)
+    # 进度条总步数：非 invert 保持原样（actual_steps），invert 才是真的多走了爬梯段。
+    callback = latent_preview.prepare_callback(
+        model, len(sigmas) - 1 if inversion_rate is not None else actual_steps)
+    if peak_index >= 0 and invert_info is not None:
+        # 峰那一刻的 x 就是"这张图配的那份噪声"——它不是随机数，而是能沿 ODE 解回本图的状态。
+        def _callback(step, x0, x, total_steps, _cb=callback, _info=invert_info, _peak=peak_index):
+            if step == _peak:
+                _info['peak'] = x.detach().to(device='cpu', dtype=torch.float32).clone()
+            _cb(step, x0, x, total_steps)
+        callback = _callback
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
 
     if model_negative is not None:
@@ -416,6 +462,17 @@ class SamplerCache:
         new = SamplerCache()
         new._cache = self._cache.copy()
         return new
+
+    # ---- 反演噪声 latent（add_noise = Invert 的块在梯子顶点那一刻的 x）----
+    # 它不是随机数，而是"这张工作图配的那份噪声"：随 pipeline 一起往下游走，
+    # 后面的块/节点想省掉自己那趟爬梯，就从这里取。
+    def set_inverted_latent(self, block_index, latent):
+        self._cache[('inverted_latent', block_index)] = latent
+        self._cache[('inverted_latent', 'latest')] = latent
+
+    def get_inverted_latent(self, block_index=None):
+        key = 'latest' if block_index is None else block_index
+        return self._cache.get(('inverted_latent', key))
 
     @staticmethod
     def _apply_loras(model_patcher, clip_patcher, loras):
