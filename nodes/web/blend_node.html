@@ -209,9 +209,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
 /* The strip grows by user action (a layer can hold several Masks), so a narrow panel wraps the
    chips onto another line instead of overflowing out of the row. */
-/* 顶部对齐而不是居中:一条里某一格可以往下挂一块自己的容器 (Effects 的链),那条线的高度归它,而所有
-   chip 还得排在同一条横线上 —— 居中会让挂了容器的格把自己的 chip 顶到线外去。 */
-.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 5px; }
+.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .layer-row:hover { background: rgba(255,255,255,0.08); }
 .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
 .layer-row.dragging { opacity: 0.4; }
@@ -312,13 +310,19 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     background-size: 8px 8px; background-position: 0 0, 4px 4px; }
 .layer-thumb.masklayer-thumb canvas { width: 100%; height: 100%; display: block; }
 
-/* ---- 特效容器：挂在**所属那颗 chip 下面** ----
-   一步一颗 chip，从左到右就是执行序 —— 跟条带同一条读法，所以缝位算法、插入线样式两边共用一份。
+/* ---- 特效容器：摊在图层行的**上方** ----
+   它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
+   容器内一步一颗 chip，从左到右就是执行序 —— 跟条带同一条读法，所以缝位算法、插入线样式两边共用一份。
    展开参数的那一步排在整排 chip 的下面（参数区要的是宽度，这一条给不了两遍宽度）。空链不占位。 */
-.attr-slot { display: flex; flex-direction: column; align-items: stretch; gap: 3px; min-width: 0; }
-.fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.fx-steps { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
+.fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
+    padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
+.fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
 .fx-chain.bypassed .fx-steps { opacity: 0.5; }
+/* 同一种挂了两枚容器时，行之上这几块谁也不是谁的邻居，所以这一行点名它管的是条带上第几步。
+   只挂一枚时不画 —— 那块容器本身就在这条链的位置上，再写一句是把同一件事说两遍。 */
+.fx-lane-title { font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.55);
+    font-variant-numeric: tabular-nums; padding: 0 2px; }
+.fx-steps { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
 .fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
     background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
 .fx-chip:hover { background: rgba(255,255,255,0.09); }
@@ -5128,18 +5132,10 @@ function paintMaskLayerThumb(el, l) {
 // ==================== 条带 (attribute strip) ====================
 // 一颗 chip 就是条带上的一步。缩略图**只在 attribute 存在时**才存在 —— 不给没装的能力画占位,也没有
 // "装了但停用"这一态;要它消失只有 Remove。`+` 钉在最右边,永远追加到最后一步。
-// 每一步外面套一格 `.attr-slot`:chip 自己占第一行,它那块**属于自己**的容器 (今天只有 Effects 的链)
-// 挂在同一格里、也就是这颗 chip 的正下方。条带因此还是横向一条,而容器不必挤在图层行的那点宽度里。
+// 条带只管"这个图层按序挂着哪几枚",容器 (今天只有 Effects 的链) 摊在图层行的**上方** —— 见 renderStackList。
 function attrStripEls(l) {
     const out = [];
-    for (const r of attrRecordsOf(l)) {
-        const slot = document.createElement('div');
-        slot.className = 'attr-slot';
-        slot.appendChild(attrChip(l, r));
-        const chain = r.chain ? fxChainEl(l, r) : null;
-        if (chain) slot.appendChild(chain);
-        out.push(slot);
-    }
+    for (const r of attrRecordsOf(l)) out.push(attrChip(l, r));
     out.push(attrAddChip(l));
     return out;
 }
@@ -5602,8 +5598,12 @@ function renderStackList(listEl, stack) {
         chips.appendChild(canvasThumb);
         for (const el of attrStripEls(l)) chips.appendChild(el);
 
-        // 链不再摊在 head 之上:它属于**它自己那枚 chip 下面** (见 attrStripEls),条带上第几步
-        // 与容器是谁的链因此是同一个问题,不必两处各答一遍。
+        // 特效容器摊在 head **之上**:它属于这个图层,但执行发生在图层把自己的像素交出去之前。同一种挂了
+        // 两枚容器时,条带上越靠左 (越先执行) 的那一块排得越贴近 head —— 与链里"越贴近图层者越先执行"同向。
+        for (const r of attrRecordsOf(l).reverse()) {
+            const lane = r.chain ? fxChainEl(l, r) : null;
+            if (lane) row.appendChild(lane);
+        }
         row.appendChild(head);
         row.appendChild(chips);
 

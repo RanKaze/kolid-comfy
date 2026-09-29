@@ -1,7 +1,8 @@
 // ==================== 图层特效链 UI ====================
-// 一条链是**它自己那枚 Effects chip 下面**的一块容器,从左到右读 = 执行序,和条带同一条规矩 (链序以前
-// 是倒着竖排的,那套"因反转而反转"的插入索引数学跟着搬家一起删了)。空链不占位,加特效的入口在那枚
-// chip 的魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口。
+// 一条链是摊在**图层行上方**的一块容器,容器内从左到右读 = 执行序 (链序曾经是倒着竖排的,那套"因反转
+// 而反转"的插入索引数学已经跟着横向读法一起删了)。空链不占位,加特效的入口在条带上那枚 Effects chip 的
+// 魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器时,魔棒开的是**被点那枚**
+// 的选择器,而这两块容器各自写一行"我是条带上第几步"。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
 let dragFx = null;          // {layerId, ref} —— 链内重排序的进行中拖拽 (ref = 特效 id)
 const fxModalEl = document.getElementById('fxModal');
@@ -361,13 +362,22 @@ function fxControlRow(l, effect, def, syncRead, updaters) {
     return row;
 }
 
-// 一枚 Effects 记录 = 它自己那块容器,挂在那颗 chip 下面,从左到右读就是执行序。链里没有步就不占位
-// (空容器由那枚 chip 自己说话)。展开参数的那一步排在整排 chip 的下面:参数区要的是宽度,而这条给不了
-// 两遍宽度。
+// 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,从左到右读就是执行序。链里没有步就不占位
+// (空容器由条带上那枚 chip 自己说话)。展开参数的那一步排在整排 chip 的下面:参数区要的是一整条宽度,
+// 不是那颗 chip 的那点宽。
 function fxChainEl(l, r) {
     if (!layerTakesEffects(l) || !r || !r.chain || !r.chain.length) return null;
     const box = document.createElement('div');
     box.className = 'fx-chain' + (effectsBypass ? ' bypassed' : '');
+    box.dataset.fxLane = r.id;   // 这块容器是谁的链,按 guid 认 —— 数它是行里第几块答不了这个问题
+    // 行之上摆着好几块容器时,它们不再是条带上某颗 chip 的邻居,所以"这块管的是第几步"得写在容器上。
+    // 只有一块时不写 —— 它站在哪儿就是答案,再点一次名是把同一件事说两遍。
+    if (attrRecordsOf(l).filter(x => x.chain && x.chain.length).length > 1) {
+        const title = document.createElement('div');
+        title.className = 'fx-lane-title';
+        title.textContent = attrStepNote('Effects', r, l);
+        box.appendChild(title);
+    }
     const steps = document.createElement('div');
     steps.className = 'fx-steps';
     box.appendChild(steps);
