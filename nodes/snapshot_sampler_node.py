@@ -879,9 +879,13 @@ class SnapshotDetailerSamplerServer:
     def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None):
         """把图层栈合成成一张图（不写工作区），返回 (image, mask)。
 
-        layer_specs: [{'src': dataURL, 'mask': dataURL|None, 'decal': dataURL|None, 'transform': {...}|None, 'visible': bool}]
+        layer_specs: [{'src': dataURL, 'attrs': [{'type','image'}], 'transform': {...}|None, 'visible': bool}]
         列表自下而上（[0] 是最底层）。图层自带像素（data URL），不绑定任何图池 id。
         画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
+
+        `attrs` 是图层条带上**归后端重放**的那一段，顺序即生效顺序（decal 叠、mask 裁，与前端画布
+        同一条「从左到右」的规矩）；特效链不会出现在这里，前端已经把它们烘进 src 了。旧负载没有
+        这个键，按它原本的 `decal` 再 `mask` 读 —— 那正是条带的默认顺序。
 
         mask_data_url 是画布顶层的「纯 Mask 层」（alpha = 覆盖率，按画布尺寸栅格化），
         与图层自身的 coverage mask 无关 —— 返回的 mask 为 [1,H,W] float 或 None（无遮罩）。
@@ -901,11 +905,18 @@ class SnapshotDetailerSamplerServer:
                       f"({len(src)} chars, head={src[:48]!r}) — treating as a transparent blank layer")
             if tensor is not None and tensor.dim() == 4:
                 tensor = tensor[0]
+            attrs = spec.get('attrs')
+            if attrs is None:
+                attrs = [{'type': 'decal', 'image': spec.get('decal')},
+                         {'type': 'mask', 'image': spec.get('mask')}]
+            # 只认这两种:链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界。
+            pending = [{'type': a.get('type'), 'src': a.get('image')}
+                       for a in attrs
+                       if a and a.get('type') in ('decal', 'mask') and a.get('image')]
             resolved.append({
                 'image': tensor,        # None = 空白图层，画布尺寸确定后补全透明
                 'transform': spec.get('transform'),
-                'mask': spec.get('mask'),
-                'decal': spec.get('decal'),
+                'attrs': pending,
                 'visible': spec.get('visible', True),
             })
         canvas_w = int(width or 0)
@@ -921,8 +932,11 @@ class SnapshotDetailerSamplerServer:
         for layer in resolved:
             # 蒙版与 decal 都在图层自身尺寸下生效，随图层一起被 transform（缩放/旋转）
             layer_h, layer_w = layer['image'].shape[0], layer['image'].shape[1]
-            layer['mask'] = decode_mask_alpha(layer['mask'], layer_w, layer_h)
-            layer['decal'] = decode_decal_rgba(layer['decal'], layer_w, layer_h)
+            layer['attrs'] = [{'type': a['type'],
+                               'image': (decode_mask_alpha(a['src'], layer_w, layer_h)
+                                         if a['type'] == 'mask' else
+                                         decode_decal_rgba(a['src'], layer_w, layer_h))}
+                              for a in layer['attrs']]
         blended = composite_layers(resolved, canvas_w, canvas_h)
         # composite_layers 刻意返回**预乘 alpha**（整栈 source-over 在预乘空间做），
         # 但这一层往后的一切图像空间消费方都是**直通 alpha** 语义：staging/预览 PNG、

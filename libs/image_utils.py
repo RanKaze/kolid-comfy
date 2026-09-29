@@ -212,11 +212,14 @@ def decode_image_dataurl(image_data_url):
 def composite_layers(layers, canvas_w, canvas_h):
     """自下而上合成图层，返回 [1,H,W,C]。
 
-    layers: [{'image': [H,W,C] float, 'transform': {...}|None, 'mask': dataURL|None,
-              'decal': dataURL|None, 'visible': bool}]
-    每个图层先在自身尺寸下合成 decal（source-over 叠在原图之上），再乘蒙版
-    （蒙版跟随 transform，同时裁切原图与 decal），然后按 transform 采样
-    （用预乘 alpha 避免缩放/旋转边缘出现黑边），最后 source-over 叠加。
+    layers: [{'image': [H,W,C] float, 'transform': {...}|None, 'attrs': [{'type','image'}],
+              'visible': bool}]
+    `attrs` 是前端图层条带上**归后端重放的那一段**,按列表顺序逐个生效 (与画布同源的同一条规矩:
+    从左到右 = 先应用的在前)。`decal` 用 source-over 叠在当前图之上,`mask` 把当前图裁掉;
+    所以 `[decal, mask]` 与 `[mask, decal]` 是两张不同的图 —— 贴片在蒙版右边就不受蒙版裁切。
+    特效链不会出现在这里: 只有 WebGL 跑得动,前端已经烘进 `image` 了 (见 blend_node 的 fxSplitForBackend)。
+    旧负载 (只有 `mask`/`decal` 两个键) 仍按这个先后读: 那正是条带默认的那条 `Decal·Mask`。
+    然后按 transform 采样（用预乘 alpha 避免缩放/旋转边缘出现黑边），最后 source-over 叠加。
     结果全部不透明时返回 3 通道，否则返回 4 通道。
 
     ⚠️ 返回值是**预乘 alpha**（`rgb` 已经乘过自己的 `alpha`），不是直通 alpha —— 
@@ -244,22 +247,32 @@ def composite_layers(layers, canvas_w, canvas_h):
         image = ensure_rgba(layer['image'])
         if image.dim() == 3:
             image = image.unsqueeze(0)
-        decal = layer.get('decal')
-        if decal is not None:
+        attrs = layer.get('attrs')
+        if attrs is None:
+            attrs = [{'type': 'decal', 'image': layer.get('decal')},
+                     {'type': 'mask', 'image': layer.get('mask')}]
+        for attr in attrs:
+            a = attr.get('image')
+            if a is None:
+                continue
+            if attr.get('type') == 'mask':
+                image = image * a
+                continue
+            if attr.get('type') != 'decal':
+                # 链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界;认不出的类型
+                # 就当没这一步,绝不当成贴片盖一下 —— 那会把一句描述画成一块墨。
+                continue
             # 直通 alpha 的 source-over。旧公式 rgb' = d_rgb*d_a + dst_rgb*(1-d_a)
             # 只在 dst 不透明时等价；dst 透明（空白图层/透明 PNG 区域）时 decal
             # 颜色会被按 d_a 再压暗一次（软边发暗）。out_rgb 分母是 out_a，
             # 两者都透明时分子为 0，clamp 后安全。
-            d_a = decal[..., 3:4]
+            d_a = a[..., 3:4]
             dst_a = image[..., 3:4]
             # 注意别叫 out_a —— 那是下面的画布 alpha 累加器，遮蔽会把 decal alpha
             # 错当成已合成结果参与 source-over。
             blend_a = d_a + dst_a * (1.0 - d_a)
-            blend_rgb = (decal[..., :3] * d_a + image[..., :3] * dst_a * (1.0 - d_a)) / blend_a.clamp_min(1e-6)
+            blend_rgb = (a[..., :3] * d_a + image[..., :3] * dst_a * (1.0 - d_a)) / blend_a.clamp_min(1e-6)
             image = torch.cat([blend_rgb, blend_a], dim=-1)
-        mask = layer.get('mask')
-        if mask is not None:
-            image = image * mask
         premultiplied = torch.cat([image[..., :3] * image[..., 3:4], image[..., 3:4]], dim=-1)
         warped = warp_layer(premultiplied, layer.get('transform'), canvas_w, canvas_h)
         rgb, alpha = warped[..., :3], warped[..., 3:4]

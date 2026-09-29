@@ -82,6 +82,11 @@ function findAttr(l, type) {
     for (const r of attrRecordsOf(l)) if (r.type === type) return r;
     return null;
 }
+// 条带上**全部**链,按应用顺序。老名字 `l.effects` 只是最左边那一枚的视图,所以缓存签名、贴图戳这类
+// 「整层重算不算」的判据一律读这一串 —— 只看最左那一条会漏掉右边那枚容器。
+function stripChains(l) {
+    return attrRecordsOf(l).filter(r => r.chain).map(r => r.chain);
+}
 
 function attrRefs(ref) {
     if (!ref) return 0;
