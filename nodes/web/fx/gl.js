@@ -398,17 +398,22 @@ function applyLayerEffects(l, surface, opts) {
 
 const FX_CUT_ALL = () => true;
 
-// 这枚 attribute 会在折叠出来的那张面上留下像素吗:空面 = 没装 (attr/core.js 的规矩三),空链 / 全旁路
-// = 不跑,而 cut 说了算的那些蒙版这一趟只当 silhouette 喂给右边的链,不当剪刀。
+// 这枚 attribute 会在折叠出来的那张面上留下像素吗:停用的步骤不算 (数据还在,只是这一趟不出墨),
+// 空面 = 没装 (attr/core.js 的规矩三),空链 / 全旁路 = 不跑,而 cut 说了算的那些蒙版这一趟只当
+// silhouette 喂给右边的链,不当剪刀。
 function attrInks(r, l, i, cut) {
+    if (!attrEnabled(r)) return false;
     if (r.chain) return activeEffects(l, r).length > 0;
     if (!r.surface || !r.surface.width || !r.surface.height) return false;
     return cut(r, i);
 }
 
 // 分界线落在**最后一条会跑的链**上 (不是最后一枚做事的 attribute —— 贴片与蒙版本来就归后端重放)。
+// 停用的容器不算:它这一趟不跑,前端不必替它折,后端也不必等它。
 function lastChainIndex(l, recs) {
-    for (let i = recs.length - 1; i >= 0; i--) if (recs[i].chain && activeEffects(l, recs[i]).length) return i;
+    for (let i = recs.length - 1; i >= 0; i--) {
+        if (recs[i].chain && attrEnabled(recs[i]) && activeEffects(l, recs[i]).length) return i;
+    }
     return -1;
 }
 
@@ -464,6 +469,7 @@ function fxDropStrip(l, surface, base, thru, cut) {
     const left = [];              // 这条链左边那些蒙版 (与起来才是它的 silhouette)
     for (let i = 0; i < n; i++) {
         const r = recs[i];
+        if (!attrEnabled(r)) continue;      // 停用 = 整枚跳过:不叠、不裁、也不给右边的链当 silhouette
         if (r.chain) {
             if (!activeEffects(l, r).length) continue;
             const prevSkip = fxgl.skip;         // 一条链跑不动不许盖掉前一条已经报过的原因
@@ -493,6 +499,9 @@ function fxScratch(w, h) {
 // 画面那一趟:整条折完,蒙版一律裁。结果就是画布要盖的那张图,所以它带缓存 (注释见上)。
 function fxResolved(l) {
     if (!l || !l.img) return l && l.img;
+    // 生成器的面先同步 (attr/core.js):ownsGrid 的文字/方向可能当场换底换格子,必须发生在
+    // nativeSize 与早退判据**之前**,否则一枚还没算过面的记录会被当成"没装"。
+    syncGeneratorFaces(l);
     const { w, h } = nativeSize(l.img);
     if (!w || !h) return l.img;
     const recs = attrRecordsOf(l);
@@ -525,6 +534,7 @@ function fxResolved(l) {
 // `Decal·Effects·Mask` 于是与这个功能出现之前逐像素相同 —— 贴片和链烘进 src,蒙版仍原样送出。
 // 折不出新面时 surface 就是 l.img 本身,调用方据此决定能不能走 l.src 那条免重编码的快路。
 function fxSplitForBackend(l) {
+    syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
     const thru = lastChainIndex(l, recs);
     if (thru < 0) return { surface: l.img, rest: recs };
@@ -540,6 +550,7 @@ function fxSplitForBackend(l) {
 // 没有任何 attribute 做事时返回 null:调用方宁可发原始 l.src,也别白白重编码一张同图。
 function fxSurfaceForGenerate(l, base) {
     if (!l || !l.img) return null;
+    syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
     const thru = lastChainIndex(l, recs);
     const cut = (r, i) => r.type !== 'mask' || i <= thru;

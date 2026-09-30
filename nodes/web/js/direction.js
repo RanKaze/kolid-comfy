@@ -424,26 +424,11 @@ function renderDirectionBuffer(desc, w, h) {
 
 // 盒子→缓冲: 每次判两下, 没动就原样返回。换的是新画布, 从不就地重画,
 // 于是一步 undo 指着的那块缓冲永远还是它当时看到的样子。
+// 数据搬家之后这里只剩**点名**: 方向面住在条带上那枚 Direction 记录里 (attr/direction.js 的 sync
+// 拥有全部算法), 这一 shim 是老调用点的读法。折叠的三个入口自己会先喊 syncGeneratorFaces。
 function syncDirectionBuffer(l) {
-    const desc = l.dir;
-    const tr = l.transform;
-    if (!canvasW || !canvasH || !desc || !tr) return;
-    const w = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.w * canvasW)));
-    const h = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.h * canvasH)));
-    // 画布比例现在也是画面的一部分 (那张平面按它画), 所以改画布尺寸必须重烘 —— key 里带上它。
-    const key = JSON.stringify([desc.yaw, desc.pitch, desc.roll, desc.color, canvasW / canvasH]);
-    if (l.dirCache && l.dirCache.key === key && l.dirCache.img === l.img
-        && l.dirCache.w === w && l.dirCache.h === h) return;
-    const prev = l.img;
-    const img = renderDirectionBuffer(desc, w, h);
-    l.img = img;
-    if (prev && (prev.width !== img.width || prev.height !== img.height)) {
-        // 只换面本身: maskCtx/decalCtx 是那枚 attribute 的派生读口 (面的 getContext 只有一个),
-        // 重新赋 l.mask 就把它带走了; 在这里再写一次 ctx 要么静默失败、要么在 strict 下抛。
-        if (l.mask) l.mask = stretchSurfaceTo(l.mask, img.width, img.height);
-        if (l.decal) l.decal = stretchSurfaceTo(l.decal, img.width, img.height);
-    }
-    l.dirCache = { key, w, h, img };
+    const r = typeof findAttr === 'function' ? findAttr(l, 'direction') : null;
+    if (r && ATTR_TYPES.direction.sync) ATTR_TYPES.direction.sync(l, r);
 }
 
 function patchDirectionLayer(l, patch, opts) {

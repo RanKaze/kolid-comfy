@@ -140,9 +140,12 @@ try { effectsBypass = localStorage.getItem(EFFECTS_BYPASS_KEY) === '1'; } catch 
 
 // `rec` 是那条链所属的 Effects attribute 记录。传了它就读它自己那条链 (条带上可以挂着好几枚容器);
 // 不传读的是**最左边那一枚** —— 图层行的 UI 与所有老调用点都走这条,它们还不必理解 strip (S5 搬家)。
+// 记录整枚停用 (ctrl+click,见 attr/core.js 的 toggleAttrEnabled) 时这条链一步都不跑,两条读法同认。
 function activeEffects(l, rec) {
     if (effectsBypass || !layerTakesEffects(l)) return [];
-    const chain = rec ? rec.chain : l.effects;
+    if (!rec) rec = findAttr(l, 'effects') || undefined;
+    if (!rec || !attrEnabled(rec)) return [];
+    const chain = rec.chain;
     if (!chain || !chain.length) return [];
     return chain.filter(e => e && e.enabled && EFFECT_TYPES[e.type]);
 }
@@ -154,6 +157,7 @@ function fxSignature(l) {
     if (!recs.length) return '';
     return JSON.stringify([effectsBypass ? 0 : 1, recs.map(r => [
         r.type,
+        r.enabled === false ? 0 : 1,
         r.chain ? r.chain.map(e => [e.type, e.enabled ? 1 : 0, e.params]) : 0,
     ])]);
 }

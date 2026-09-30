@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -1747,6 +1747,16 @@ const InterfaceTab: React.FC<{
     const cur = metaFor(iface);
     patchMeta(iface, { block_ports: { ...(cur.block_ports || {}), [side]: num } });
   };
+  // image/mask 出口的默认落位与入口的默认来源（键 = 端口号字符串）：Processor 小窗里对应行的
+  // 初值，随 interface_meta 持久化到 blocks_sets.json。
+  const setOutputTarget = (iface: string, num: number, dst: ProcessorDst) => {
+    const cur = metaFor(iface);
+    patchMeta(iface, { output_targets: { ...(cur.output_targets || {}), [String(num)]: dst } });
+  };
+  const setInputSource = (iface: string, num: number, src: ProcessorSrc) => {
+    const cur = metaFor(iface);
+    patchMeta(iface, { input_sources: { ...(cur.input_sources || {}), [String(num)]: src } });
+  };
   const portDisplay = (iface: string, side: 'start' | 'end', port: InterfacePort) =>
     metaFor(iface).names?.[side]?.[String(port.num)] || port.name;
 
@@ -1903,11 +1913,62 @@ const InterfaceTab: React.FC<{
                           </>
                         );
                       })()}
-                      {modes.processor && (
-                        <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                          Runs from the Blend workbench — Tools → Processor.
-                        </div>
-                      )}
+                      {modes.processor && (() => {
+                        // 每枚 image/mask 出入口的默认源/落位：IMAGE 与 MASK 各自的候选与工作台
+                        // Processor 小窗的表同一套词汇（PROCESSOR_SRC_* / PROCESSOR_DST_*）。
+                        const mediaOut = (iface.end_ports ?? []).filter(p => p.type === 'IMAGE' || p.type === 'MASK');
+                        const mediaIn = (iface.start_ports ?? []).filter(p => p.type === 'IMAGE' || p.type === 'MASK');
+                        if (!mediaOut.length && !mediaIn.length) return null;
+                        const targets = meta.output_targets || {};
+                        const sources = meta.input_sources || {};
+                        const dstTables: Record<string, [ProcessorDst, string][]> = {
+                          IMAGE: [['new_layer', 'New Layer'], ['staging', 'Staging']],
+                          MASK: [['selected_mask', 'Sel. Mask'], ['selected_layer', 'Sel. Layer'], ['staging', 'Staging']],
+                        };
+                        const srcTables: Record<string, [ProcessorSrc, string][]> = {
+                          IMAGE: [['layers', 'Layers'], ['selected', 'Sel. Layer'], ['staging', 'Staging']],
+                          MASK: [['main_mask', 'Main Mask'], ['selected_mask', 'Sel. Mask'], ['selected_alpha', 'Sel. Alpha'], ['mask_alpha', 'Mask&Alpha']],
+                        };
+                        const opt = { background: '#1c1c1e', color: '#fff' } as React.CSSProperties;
+                        const portRow = (p: InterfacePort, side: 'end' | 'start', table: [string, string][], cur: string | undefined, onPick: (num: number, v: string) => void, title: string) => (
+                          <div key={`${side}-${p.num}`} style={{ ...toggleRow, marginBottom: 0 }}>
+                            <span style={{ ...toggleLabel, minWidth: 74 }}>{portDisplay(iface.name, side, p)}</span>
+                            <select style={{ ...styles.paramSelect, flex: 1 }} value={cur || table[0][0]}
+                              onChange={e => onPick(p.num, e.target.value)} title={title}>
+                              {table.map(([v, text]) => <option key={v} value={v} style={opt}>{text}</option>)}
+                            </select>
+                          </div>
+                        );
+                        return (
+                          <>
+                            {mediaIn.length > 0 && (
+                              <>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.65)', margin: '6px 0 2px' }}>
+                                  Default inputs
+                                </div>
+                                {mediaIn.map(p => portRow(p, 'start', srcTables[p.type],
+                                  sources[String(p.num)],
+                                  (num, v) => setInputSource(iface.name, num, v as ProcessorSrc),
+                                  `Where the ${portDisplay(iface.name, 'start', p)} input reads from at the start of a Processor run in the Blend workbench (value${p.num}).`))}
+                              </>
+                            )}
+                            {mediaOut.length > 0 && (
+                              <>
+                                <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.65)', margin: '6px 0 2px' }}>
+                                  Default outputs
+                                </div>
+                                {mediaOut.map(p => portRow(p, 'end', dstTables[p.type],
+                                  targets[String(p.num)],
+                                  (num, v) => setOutputTarget(iface.name, num, v as ProcessorDst),
+                                  `Where the ${portDisplay(iface.name, 'end', p)} output lands after a Processor run in the Blend workbench (value${p.num}).`))}
+                              </>
+                            )}
+                            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>
+                              Runs from the Blend workbench — Tools → Processor.
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   );
                 })()}

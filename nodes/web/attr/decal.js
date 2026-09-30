@@ -9,6 +9,7 @@ defineAttrType({
     order: 0,
     at: { rel: 'head' },
     chipClass: 'decal-thumb',
+    badge: { class: 'decal', svg: '<svg viewBox="0 0 10 10"><path d="M5 1.4C6.6 3.4 7.5 4.8 7.5 6A2.5 2.5 0 1 1 2.5 6C2.5 4.8 3.4 3.4 5 1.4Z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>' },
     // 没有底色:没画过就是全透明,CSS 那块棋盘格透出来说"这里还没有颜色"。
     chipBg: null,
     title: (r, l) => attrStepNote('Decal', r, l)

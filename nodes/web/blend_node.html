@@ -242,6 +242,28 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
 .layer-thumb.attr-chip.drop-before::before { left: 0; }
 .layer-thumb.attr-chip.drop-after::after { right: 0; }
+/* 启用角标:启用时什么都不显示 —— chip 本身就是"这一步在跑"的样子。停用时整颗 chip 罩一枚
+   居中的叉 (红,与告警色同一支),内容暗淡 (.attr-off) 照旧,两笔一起读才分得清"停用的面"
+   和"没画的面"。badge 元素常驻,只有 .attr-off 时才显形。 */
+.layer-thumb.attr-chip .attr-badge { display: none; pointer-events: none; }
+.layer-thumb.attr-chip.attr-off .attr-badge { display: block; position: absolute; inset: 0; }
+.layer-thumb.attr-chip.attr-off .attr-badge::before,
+.layer-thumb.attr-chip.attr-off .attr-badge::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 2px; border-radius: 1px; background: #ff453a; transform: translate(-50%, -50%) rotate(45deg); }
+.layer-thumb.attr-chip.attr-off .attr-badge::after { transform: translate(-50%, -50%) rotate(-45deg); }
+.layer-thumb.attr-chip.attr-off canvas, .layer-thumb.attr-chip.attr-off > svg { opacity: 0.32; }
+/* chip 的类型角标:与图层行那枚 (.layer-type-badge) 同款几何,SVG 与配色由各 attribute 的 spec
+   报上来 (spec.badge)。停用的叉 (.attr-badge) 在 DOM 里排它后面,叉永远压在类型角标之上。 */
+.attr-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.attr-type-badge svg { width: 9px; height: 9px; display: block; }
+.attr-type-badge.decal { color: #ffb86e; }
+.attr-type-badge.mask { color: #9ecbff; }
+.attr-type-badge.effects { color: #ffd76e; }
+.attr-type-badge.text { color: #d9b8ff; }
+.attr-type-badge.direction { color: #ff9ec4; }
+.attr-type-badge.model { color: #7ee0d0; }
+/* 生成器 (文字/方向/3D) 的 chip:面画在自己那块 canvas 上,空面 = 底色透出 (停用另有角标说话)。 */
+.layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb { cursor: pointer; background-color: #1b1d24; }
+.layer-thumb.text-attr-thumb canvas, .layer-thumb.direction-attr-thumb canvas, .layer-thumb.scene3d-attr-thumb canvas { width: 100%; height: 100%; display: block; }
 /* `+` 与 chip 同尺寸同圆角,但它是按钮不是缩略图:虚线边说"这一步还没有东西",正是它该有的样子。 */
 .attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
 .attr-add:hover { border-color: rgba(0,122,255,0.9); color: #fff; background: rgba(0,122,255,0.16); }
@@ -981,23 +1003,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <!-- The Text section folds like the other tool sections and stays folded until its
                  header is clicked — selecting a text layer only lights the row up and refills the
                  controls, it never opens the window for you. -->
+            <!-- Text 的样式编辑器搬进了条带上方那条 lane (attr/text.js 的 spec.lane),侧栏不再有
+                 Text 段;画布上的 inline 编辑器与全局字体 picker (lane 的 Font 按钮开它) 留在原处。 -->
+            <!-- Text 的样式编辑回到工具小窗 (选中带 Text 步骤的层时点亮)。Size/Align 不给控件:
+                 这套渲染是"字填满盒子",字号由盒子尺寸驱动、对齐在贴内容盒子上没有可见差异。 -->
             <div class="panel-section tool-section foldable collapsed" id="textSection">
                 <div class="panel-head">
-                    <div class="panel-label" id="textLabel" title="Text (Alt+T) — Alt+T drags out a brand-new text layer. One stays editable vectors until Rasterized: the pixels you see are re-rendered from these settings at whatever size the transform box is. Double-click the text on the canvas or press Enter to retype it. Click the header to open or close its settings window."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
+                    <div class="panel-label" id="textLabel" title="Text — the settings of the selected layer's Text step. Edit the words themselves on the canvas: double-click the text (or press Enter with the row selected). Alt+T drags out a fresh text step of its own. Click the header to open or close its settings window."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
                     <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
                 </div>
                 <div class="tool-body">
                     <div class="control-row"><label>Font</label><button type="button" class="text-font-btn" id="textFontBtn" title="Font — opens the picker: every name is drawn in its own face, grouped by family, with the fonts you loaded from disk at the bottom. Rendered by this browser, so the .cud shows whatever these fonts give on the machine that opens it">Arial</button><span></span></div>
-                    <div class="control-row"><label>Size</label><input type="range" id="textSizeRange" min="4" max="512" step="1" value="64" title="Font size in layer pixels — the render re-sharpens at any transform scale"><span id="textSizeValue">64</span></div>
                     <div class="control-row"><label>Padding</label><input type="range" id="textPaddingRange" min="0" max="256" step="1" value="0" title="Clear space around the text, in layer pixels at the authored font size — the box grows outward and the glyphs keep their size. Outer effects (drop shadow, glow) need that room: they are cut at the layer's own edge"><span id="textPaddingValue">0</span></div>
                     <div class="control-row"><label>Weight</label><div class="mini-group">
                         <button class="mini-btn text-choice-btn active" id="textWeightNormal" title="Normal weight">Normal</button>
                         <button class="mini-btn text-choice-btn" id="textWeightBold" title="Bold weight">Bold</button>
-                    </div><span></span></div>
-                    <div class="control-row"><label>Align</label><div class="mini-group">
-                        <button class="mini-btn text-choice-btn active" id="textAlignLeft" title="Align the lines to the left edge of the layer">Left</button>
-                        <button class="mini-btn text-choice-btn" id="textAlignCenter" title="Centre the lines in the layer">Center</button>
-                        <button class="mini-btn text-choice-btn" id="textAlignRight" title="Align the lines to the right edge of the layer">Right</button>
                     </div><span></span></div>
                     <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
                 </div>
@@ -1024,6 +1044,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     </div>
                     <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The arrow's own colour — the ring, arc and fin keep theirs"><span id="dirColorValue">#FF2E88</span></div>
                     <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Point this layer back at the default orientation (135° yaw, 25° pitch, no roll)">Default</button><span></span></div>
+                </div>
+            </div>
+            <!-- 3D 工具小窗:选中带 3D 步骤的层时点亮。跳转与状态在这里;完整编辑 (fly、inspector、
+                 Render to Layer) 仍在场景 tab 的 #scenePanel 里 —— 它是另一个视口,不是一排参数。 -->
+            <div class="panel-section tool-section foldable collapsed" id="scene3dSection">
+                <div class="panel-head">
+                    <div class="panel-label" id="scene3dLabel" title="3D — the scene behind the selected layer's 3D step. Open the scene as a tab, fly it, then Render to Layer bakes the frame onto that step of the strip. Click the header to open or close its window."><span class="fold-caret"></span>3D</div>
+                </div>
+                <div class="tool-body">
+                    <div class="control-row"><label>Scene</label><button type="button" class="mini-btn" id="scene3dOpenBtn" title="Open the 3D scene behind the selected layer's 3D step as a tab — fly it, then Render to Layer bakes the frame onto that step">Open Scene</button><span></span></div>
+                    <div class="s3d-note" id="scene3dNote">—</div>
                 </div>
             </div>
             <!-- The Detector section only exists when the node's detector input is actually
@@ -1232,7 +1263,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <button class="mini-btn" id="clearBtn" title="Remove every layer (guidances stay)">Clear All</button>
                     <button class="mini-btn" id="addLayerBtn" aria-haspopup="menu" aria-expanded="false"
                             title="Add a layer: one the size of the canvas, or one you draw out at any resolution">Add<span class="add-caret">&#9662;</span></button>
-                    <!-- Anchored to the Layers dock, so it unfolds upward over the palette. -->
+                    <!-- Anchored to the Layers dock, so it unfolds upward over the palette.
+                         Text / Direction / 3D 不在这里 —— 它们是 attribute,不是图层种类:
+                         入口在每一行条带末尾的 `+` 菜单里。 -->
                     <div class="io-menu add-menu" id="addLayerMenu" role="menu" hidden>
                         <button class="io-menu-item" id="addDefaultLayerBtn" role="menuitem"
                                 title="A blank layer covering the canvas, one image pixel per canvas pixel.">
@@ -1249,25 +1282,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <span class="io-menu-title">Dynamic Layer</span>
                             <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
                         </button>
-                        <button class="io-menu-item" id="addTextLayerBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas (Alt+T) — the text layer lands in exactly that box. It stays vector until Rasterized: double-click it to retype, and the pixels re-render sharp at any transform scale.">
-                            <span class="io-menu-title">Text Layer</span>
-                            <span class="io-menu-sub">Drag a rectangle on the canvas — the text fills that box.</span>
-                        </button>
-                        <button class="io-menu-item" id="addDirectionLayerBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas — the layer's picture is the canvas's own view of a direction: the canvas plane, the arrow, and the angle swept from the canvas's +X edge with its degrees baked in. You point it from the Direction tool window (D), where the same pose is drawn as the world view.">
-                            <span class="io-menu-title">Direction Layer</span>
-                            <span class="io-menu-sub">Drag a rectangle on the canvas — an angle diagram of where a direction sits.</span>
-                        </button>
                         <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
                                 title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
                             <span class="io-menu-title">Cud Project</span>
                             <span class="io-menu-sub">Another .cud as one linked layer that follows its file.</span>
-                        </button>
-                        <button class="io-menu-item" id="add3DLayerBtn" role="menuitem"
-                                title="A scene of your own: models, lights and a camera you fly around Unity-style. The row keeps the picture you Render to Layer, and its jump button opens the scene again as a tab.">
-                            <span class="io-menu-title">3D Layer</span>
-                            <span class="io-menu-sub">A 3D scene you bake into this row's pixels.</span>
                         </button>
                         <button class="io-menu-item" id="addRasterToggleBtn" role="menuitemcheckbox" aria-checked="false"
                                 title="When on, images added from here on — dropped files, Import picks and history injections — become raster layers: their buffer is the canvas, 1:1, and every transform resamples the pixels in place. One-way; rasterize a smart layer from its right-click menu instead.">
@@ -1450,6 +1468,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="attr/decal.js"></script>
 <script src="attr/effects.js"></script>
 <script src="attr/mask.js"></script>
+<script src="attr/text.js"></script>
+<script src="attr/direction.js"></script>
+<script src="attr/3d.js"></script>
 <!-- 图层特效链按特效拆在 fx/ 下: 一类特效一个文件 (注册数据 + 着色器 + pass + 读数 + 缩略图)。
      这些文件与页面本体同一个全局作用域, 顺序即依赖方向: core / maps / gl -> 特效 -> ui -> 页面。
      静态文件由工作台服务器的 /fx/ 路由提供 (snapshot_sampler_node.py), 改后端要重启。 -->
@@ -2078,9 +2099,27 @@ function rasterizeLayer(l) {
     // gesture the button released is folded into that same step rather than left pointing at a
     // placement that no longer exists. Quiet: the caller owns the undo entry.
     applyTransformPending(true);
-    l.img = renderTransformedSurface(l.img, l.transform, canvasW, canvasH);
+    // 生成器先折进底:文字/方向/3D 的面来自描述符/场景,栅格化之后它们就是像素了 —— 底 + 条带上
+    // 每一枚生成器的面按 strip 顺序叠成一张,跟着 base 一起烘进画布格子。decal/蒙版/链照旧活下来
+    // (记录留在条带上);生成器的记录退场 —— 没什么可再算的了。(条带里蒙版插在生成器左边的那种
+    // 交错序,栅格化后蒙版会连烘进来的生成器一起裁 —— 与栅格化前的画面略有出入,属已知取舍。)
+    syncGeneratorFaces(l);
+    let bake = l.img;
+    const gens = attrRecordsOf(l).filter(r => ATTR_TYPES[r.type].kind === 'generator' && r.surface);
+    if (gens.length) {
+        const { w: gw, h: gh } = nativeSize(l.img);
+        const c0 = document.createElement('canvas');
+        c0.width = Math.max(1, gw); c0.height = Math.max(1, gh);
+        const g0 = c0.getContext('2d');
+        g0.drawImage(l.img, 0, 0, c0.width, c0.height);
+        for (const r of gens) g0.drawImage(r.surface, 0, 0, c0.width, c0.height);
+        bake = c0;
+    }
+    l.img = renderTransformedSurface(bake, l.transform, canvasW, canvasH);
     l.raster = true;
     l.src = l.img.toDataURL('image/png');
+    // 生成器的记录退场 (描述符已变像素);贴片/蒙版/链留在条带上。
+    for (const r of attrRecordsOf(l)) if (ATTR_TYPES[r.type].kind === 'generator') removeAttr(l, r.id);
     // Paint surfaces resample into the layer's new (canvas) space so existing strokes keep
     // their on-canvas position; painting from here on is 1:1.
     const remap = s => {
@@ -2092,13 +2131,6 @@ function rasterizeLayer(l) {
     // A cud layer detaches on the way in: from here the buffer IS the canvas, so a source refresh
     // would have nowhere to land — the picture is the file's, not the project's any more.
     l.cud = null;
-    // A text layer loses its descriptor the same way: the render is frozen into canvas pixels,
-    // and nothing re-sharpens it any more (PS "Rasterize Type").
-    l.text = null;
-    l.textCache = null;
-    // 方向层同理: 箭头烘进画布像素之后, 那三颗把手就没有东西可指了 (它不再是"一个朝向")。
-    l.dir = null;
-    l.dirCache = null;
     return true;
 }
 
@@ -2393,9 +2425,10 @@ async function addTextFontFile(file) {
     return { name, label, stored };
 }
 // 字体是异步装进来的: 装完之前按回落脸量过的每一张文字缓冲都得重画一次, 否则 .cud 里的名字会一直
-// 顶着 Arial 的脸。一次作废、一次重绘, 不逐条字体各来一遍。
+// 顶着 Arial 的脸。一次作废、一次重绘, 不逐条字体各来一遍。面现在住在记录上 (genCache),作废 =
+// 丢缓存,下一次 sync 按新脸重算。
 function invalidateAllTextBuffers() {
-    for (const l of layers) if (isTextLayer(l)) l.textCache = null;
+    for (const l of layers) for (const r of attrRecordsOf(l)) if (r.type === 'text') r.genCache = null;
     renderLayerList();
     render();
 }
@@ -2556,48 +2589,41 @@ function renderTextBuffer(desc, nat, w, h) {
 }
 
 // The buffer-vs-box sync: cheap to call from the render path (two compares when nothing moved).
-// Swaps l.img for a fresh canvas — never repaints it — so every undo step keeps the buffer it saw.
+// 数据搬家之后这里只剩**点名**:文字面住在条带上那枚 Text 记录里 (attr/text.js 的 sync 拥有全部
+// 算法 —— ownsGrid 的格子折算、键比对、换新画布),这一句只是老调用点的读法。折叠的三个入口自己
+// 也会先喊一遍 syncGeneratorFaces,所以这里的调用是"显式点名",不是唯一的同步时机。
 function syncTextBuffer(l) {
-    const desc = l.text;
-    const tr = l.transform;
-    if (!canvasW || !canvasH || !desc || !tr) return;
-    const w = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.w * canvasW)));
-    const h = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(tr.h * canvasH)));
-    // padding must be IN the key: it re-sizes the box without touching a single glyph metric, so
-    // without it a padding change would look right in the panel and never reach the pixels.
-    const key = JSON.stringify([desc.content, desc.fontFamily, desc.fontSize, desc.fontWeight, desc.color, desc.align, desc.padding]);
-    if (l.textCache && l.textCache.key === key && l.textCache.img === l.img
-        && l.textCache.w === w && l.textCache.h === h) return;
-    const prev = l.img;
-    const img = renderTextBuffer(desc, measureTextNatural(desc), w, h);
-    l.img = img;
-    // The grid moved (a retype, or the padding ring growing): resample the two paint surfaces onto
-    // it. Visually nothing shifts — the composite already stretches them over the native grid — but
-    // the mask the backend multiplies by must stay AT that grid, or image and mask arrive at two
-    // different sizes and the alignment contract is gone.
-    if (prev && (prev.width !== img.width || prev.height !== img.height)) {
-        remapAttrFaces(l, s => stretchSurfaceTo(s, img.width, img.height));
-    }
-    l.textCache = { key, w, h, img };
+    const r = findAttr(l, 'text');
+    if (r && ATTR_TYPES.text.sync) ATTR_TYPES.text.sync(l, r);
 }
 
 // The authored display box of the descriptor (glyph box + padding ring, at font size 1:1), which a
 // text layer's transform always carries.
 function textLayerBox(desc) { return measureTextNatural(desc); }
 
+// 拥有格子的文字:换字之后重折 transform 盒子,让渲染出来的字号保持当下的画布像素大小。
+// 照片上的那批没有盒子可折 —— 面按图层网格现算。
+function refitTextBox(l, oldNat, newNat) {
+    const tr = l.transform;
+    if (!tr || !canvasW || !canvasH || !oldNat || !newNat || !oldNat.w || !oldNat.h) return;
+    const kx = (tr.w * canvasW) / oldNat.w;
+    const ky = (tr.h * canvasH) / oldNat.h;
+    l.transform = Object.assign({}, tr, { w: newNat.w * kx / canvasW, h: newNat.h * ky / canvasH });
+}
+
 // Swap the descriptor and re-fit the box so the RENDERED font size keeps its current on-canvas
 // pixel size: editing 'Text' to 'Longer copy' grows the box, not shrinks the glyphs. The same ratio
 // holds for `padding` because the ring is part of the box measureTextNatural returns — raise it and
 // the box widens outward by exactly that much on each side, while sy = box/nat.h stays put.
+// 描述符住在条带上那枚记录里 (老名字 l.text 的 setter 也是同一枚),所以 patch = 换记录的 desc +
+// 代次 +1;格子归它管的那批再折一次 transform。
 function patchTextLayer(l, patch, opts) {
-    const next = Object.assign({}, l.text, patch);
-    const oldNat = measureTextNatural(l.text);
-    const nat = measureTextNatural(next);
-    l.text = next;
-    const tr = l.transform;
-    const kx = (tr.w * canvasW) / oldNat.w;
-    const ky = (tr.h * canvasH) / oldNat.h;
-    l.transform = Object.assign({}, tr, { w: nat.w * kx / canvasW, h: nat.h * ky / canvasH });
+    const r = findAttr(l, 'text');
+    if (!r || !r.desc) return;
+    const oldNat = measureTextNatural(r.desc);
+    r.desc = sanitizeTextDescriptor(Object.assign({}, r.desc, patch));
+    markAttrPainted(r);
+    if (r.ownsGrid) refitTextBox(l, oldNat, measureTextNatural(r.desc));
     syncTextBuffer(l);
     if (!(opts && opts.silent)) {
         layoutCanvas();
@@ -2851,13 +2877,12 @@ function noiseImageForGenerate(l) {
 // would vanish silently.
 function layerSourceForGenerate(l) {
     if (!l.img) return null;
-    if (isTextLayer(l)) syncTextBuffer(l);
-    else if (isDirectionLayer(l)) syncDirectionBuffer(l);
-    // Rendered text carries no `src`, but it is not a blank surface either: the pixels the
-    // detailer sees ARE the glyphs (+ the decal), not noise. An EMPTY text layer stays blank.
-    const textInk = (isTextLayer(l) && !!String(l.text.content)) || isDirectionLayer(l);
+    syncGeneratorFaces(l);
+    // 渲染出来的字/方向/3D 烘焙没有 `src`,但它们不是空白面:模型看到的像素就是这些步骤出的墨,
+    // 不是噪声。空文字、停用的步骤不算墨 (老 textInk 的语义,搬进注册表读)。
+    const genInk = stripGeneratorInk(l);
     // No file behind the layer (hand-made blank surface): synthesise noise at its own resolution.
-    if (!hasLayerImage(l) && !textInk) return noiseImageForGenerate(l);
+    if (!hasLayerImage(l) && !genInk) return noiseImageForGenerate(l);
     // 条带一旦做事,送出去的就必须是折好的那张面 —— 直发 l.src 那条快路会绕过贴片与整条链,模型看到
     // 的和画布上的就不是同一张图。这里给的是**留给后端的那些蒙版还没裁**的结算面:链会改 alpha
     // (模糊类软化它、外阴影往外长), 而那份覆盖率仍按 generateMaskDataUrl 单独同尺寸送出,后端那一次
@@ -3376,9 +3401,8 @@ function updateHoverCursor(sp, docPos) {
 // fxDropStrip in fx/gl.js). The chain reads the masks to its left as silhouette but never consumes
 // a surface those masks already cut; the cut is just another step in that same order.
 function layerSource(l) {
-    // Text first: its buffer IS the render, and it must be current before the chain reads it.
-    if (isTextLayer(l)) syncTextBuffer(l);
-    else if (isDirectionLayer(l)) syncDirectionBuffer(l);
+    // 生成器 (文字/方向/3D) 的面由 fxResolved 开头那句 syncGeneratorFaces 负责同步 —— 它必须
+    // 发生在早退判据之前,见 fx/gl.js。
     return fxResolved(l);
 }
 
@@ -4830,6 +4854,19 @@ function snapshot2D() {
 // the Mask layer object, the mode/paint target, the view framing and the tool settings: a document
 // carries more than an undo step, and both replays must share one implementation of the layer and
 // canvas core.
+// text/dir/three 这几样从图层字段搬进 strip 的那一次合并:strip 里已有同类记录时老字段只是死重
+// (读档/快照两代格式并存的那段时间),没有时补一条 —— 描述符按引用进记录,ownsGrid 照旧 (它们
+// 当年就是这一层)。restoreState 与 .cud 读档共用这一句。
+function mergeLegacyGenerators(ls) {
+    const attrs = Array.isArray(ls.attrs) ? ls.attrs.slice() : [];
+    const has = t => attrs.some(a => a && a.type === t);
+    if (ls.text && !has('text')) attrs.push({ type: 'text', desc: sanitizeTextDescriptor(ls.text) || ls.text, ownsGrid: true });
+    if (ls.dir && !has('direction')) attrs.push({ type: 'direction', desc: sanitizeDirectionDescriptor(ls.dir) || ls.dir, ownsGrid: true });
+    if (ls.three && !has('3d')) attrs.push({ type: '3d', sceneUid: ls.sceneUid || null, ownsGrid: true });
+    ls.attrs = attrs;
+    return ls;
+}
+
 function restoreState(s, opts) {
     const asDocument = !!(opts && opts.document);
     // 一份带 `scene` 的记录就是整个 3D tab:进出视口、换记录一律交给 Scene3D,2D 那套一步都不走
@@ -4859,7 +4896,9 @@ function restoreState(s, opts) {
     const byRef = new Map();
     // attribute 同一个做法:快照里那枚 id 只是分组标签,重放时按标签各立一条新记录。
     const byAttr = new Map();
-    layers = s.layers.map(ls => restoreSource({
+    layers = s.layers.map(ls => {
+        mergeLegacyGenerators(ls);
+        return restoreSource({
         id: ls.id, name: ls.name,
         visible: ls.visible,
         fragment: !!ls.fragment,
@@ -4874,13 +4913,14 @@ function restoreState(s, opts) {
         text: ls.text || null,
         dir: ls.dir || null,
         transform: cloneTransform(ls.transform),
-        // 这三样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
+        // 这几样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
         // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
         attrs: adoptAttrPayloads(ls.attrs, byAttr),
         canvasThumbEl: null,
         // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
         fxCache: null,
-    }, ls, byRef));
+    }, ls, byRef);
+    });
     // A replay can land on an uncommitted gesture: a raster layer only ever stores a non-identity
     // transform while a preview owns it, and the one box its unbaked buffer can be read at is its
     // own content box. Re-opening the session here is what makes undo/redo and a tab switch draw
@@ -5165,22 +5205,63 @@ function isArmedChip(l, r) {
         && paintRecord(l, r.type, false) === r;
 }
 
+// 启用态的两笔账:整颗 chip 的暗淡 (attr-off) 加右上角那枚角标。角标是 attrChip 在 chip 绘制之后
+// 追加的同一枚 <i>,这里只翻它的 class —— 重画 chip 内容的路径 (refreshAttrChips) 不经过这里,
+// 但也动不到角标,两不相扰。
+function attrBadgeEl(r) {
+    const b = document.createElement('i');
+    b.className = 'attr-badge';
+    return b;
+}
+function syncAttrChipState(el, r) {
+    const off = !attrEnabled(r);
+    el.classList.toggle('attr-off', off);
+    const badge = el.querySelector('.attr-badge');
+    if (badge) badge.classList.toggle('off', off);
+}
+
 function attrChip(l, r) {
     const spec = ATTR_TYPES[r.type];
     const el = document.createElement('div');
     el.className = 'layer-thumb attr-chip ' + (spec.chipClass || '');
     el.dataset.attr = r.id;
-    el.title = (spec.title ? spec.title(r, l) : spec.label);
+    el.title = (spec.title ? spec.title(r, l) : spec.label)
+        + ` · Ctrl+click turns this step ${attrEnabled(r) ? 'off (its data stays, the fold just skips it)' : 'back on'}`;
     el.draggable = true;
     // 面画在自己那块 canvas 上 (它才是会被重画的东西);链没有面,图标直接摆进这颗 chip。
-    const paint = spec.kind === 'surface' ? document.createElement('canvas') : el;
-    if (spec.kind === 'surface') {
+    // 生成器有面 (派生的那张),与 surface 同一套画法。
+    const paint = (spec.kind === 'surface' || spec.kind === 'generator') ? document.createElement('canvas') : el;
+    if (paint !== el) {
         paint.width = 84; paint.height = 56; paint.draggable = false;
         el.appendChild(paint);
     }
     bindAttrChip(paint, r, l);
+    // 类型角标:与图层行那枚同款 (右下 12×12),这一步是什么 attribute,不看面也认得出 —— 空面、
+    // 停用的暗面都还挂着这枚名牌。排在停用叉之前,叉永远压在它上面。
+    if (spec.badge) {
+        const tb = document.createElement('span');
+        tb.className = 'attr-type-badge ' + (spec.badge.class || '');
+        tb.innerHTML = spec.badge.svg;
+        el.appendChild(tb);
+    }
+    // 启用角标:挂在每个 kind 的 chip 绘制**之后** (链的那次会整块重写 innerHTML,先挂会被抹掉)。
+    el.appendChild(attrBadgeEl(r));
+    syncAttrChipState(el, r);
     if (isArmedChip(l, r)) el.classList.add('active');
-    el.addEventListener('click', ev => { ev.stopPropagation(); spec.open(l, r); });
+    // ctrl+左键 = 启用/停用这一步 (全体 attribute 同一套手势);普通点击才是 spec.open。
+    el.addEventListener('click', ev => {
+        ev.stopPropagation();
+        if (ev.ctrlKey || ev.metaKey) {
+            toggleAttrEnabled(r);
+            setStatus(`「${spec.label}」step ${attrRefList(l).indexOf(r.id) + 1} of「${l.name}」is now `
+                + (attrEnabled(r) ? 'enabled' : 'disabled — its data stays, the fold just skips it'));
+            pushHistory();
+            renderLayerList();
+            render();
+            return;
+        }
+        spec.open(l, r);
+    });
     el.addEventListener('contextmenu', ev => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -5272,15 +5353,34 @@ function addAttrToLayer(l, type) {
     // 装上一枚面就该能画它 —— 空面和没装在读法上是一回事 ("蒙版还没画"),所以这一句不是额外状态,
     // 只是把笔尖放到用户刚点名的那一步上。链没有面可画,由行上那根魔棒开口子。
     if (spec.kind === 'surface') setPaintTarget(type, l, r.id);
-    else { renderLayerList(); syncPaintUI(); }
+    // 到场动作 (3D 开一枚场景 tab 并写 sceneUid) 必须发生在 UI 刷新**之前**——工具小窗的面板
+    // 读的是记录的最终形状,刷新完再动记录,面板就定格在旧读数上 (Open Scene 灰成一排的教训)。
+    if (spec.onAdded) spec.onAdded(l, r);
+    // 生成器 (文字/方向/3D) 当场就有面可出 —— renderLayerList 只重修行上的缩略图 (它们各自走
+    // layerSource),主画布的合成必须在这里喊一遍 render(),不然新步骤要等下一记任何 render
+    // (transform 回车之类) 才显形。
+    renderLayerList();
+    syncPaintUI();
+    render();
 }
 
-// chip 右键:Remove / Shallow Duplicate / Apply。没有 enable/disable 这一档 —— 装了就是装了。
+// chip 右键:Enable/Disable / Remove / Shallow Duplicate / Apply。启用那档与 chip 的 ctrl+click
+// 是同一个状态 (toggleAttrEnabled),菜单里再摆一份是给不记得手势的人留的入口。
 function openAttrMenu(l, r, clientX, clientY) {
     const spec = ATTR_TYPES[r.type];
     const menu = ensureLayerMenu();
     menu.innerHTML = '';
     const step = attrRefList(l).indexOf(r.id);
+    const on = attrEnabled(r);
+    layerMenuItem(on ? 'Disable' : 'Enable',
+        (on ? 'The fold skips this step' : 'The fold runs this step again')
+        + ' — its data stays exactly where it is either way. Same as Ctrl+clicking the chip.',
+        () => {
+            toggleAttrEnabled(r);
+            pushHistory();
+            renderLayerList();
+            render();
+        });
     layerMenuItem('Remove', `Take this ${spec.label.toLowerCase()} off「${l.name}」— its data leaves with it unless another layer shares it (a shared face stays painted wherever it is used).`,
         () => removeAttrFromLayer(l, r));
     layerMenuItem('Shallow Duplicate', `Add a second ${spec.label.toLowerCase()} step right after this one, `
@@ -5422,6 +5522,7 @@ function renderLayerList() {
     renderStackList(layerListEl, WORK_STACK);
     updateTextPanel();
     updateDirectionPanel();
+    update3DPanel();
 }
 
 // One row builder for both palettes: a guidance is not a different kind of object, it is the same
@@ -5460,12 +5561,26 @@ function renderStackList(listEl, stack) {
             img.src = l.src;
             img.draggable = false;
             thumb.appendChild(img);
-        } else if ((isTextLayer(l) && String(l.text.content)) || isDirectionLayer(l) || isStashLayer(l)) {
-            // A text layer has no `src` to point an <img> at — show its current render instead,
-            // letterboxed into the chip the way the canvas draws it onto the box. A direction
-            // layer's angle-diagram render takes the very same branch for the same reason, and so
-            // does a Stash: its picture is re-copied from the stack below on every draw, so the
-            // newest copy is all there is to show, and the chip never reads "no image yet".
+        } else if ((isTextLayer(l) || isDirectionLayer(l)) && stripGeneratorInk(l) && layerSource(l)) {
+            // A text/direction layer has no `src` to point an <img> at — its base is a blank
+            // scratch since the descriptor moved into the strip, so show the FOLDED strip (the
+            // render the canvas actually draws) letterboxed into the chip. An EMPTY text keeps
+            // the red × below ("double-click to type"): no ink, nothing to preview. A Stash
+            // keeps the branch below that: its picture is re-copied from the stack below on
+            // every draw, so the newest copy is all there is to show.
+            const s = layerSource(l);
+            const c = document.createElement('canvas');
+            c.width = 84; c.height = 56;
+            c.style.width = '100%';
+            c.style.height = '100%';
+            const cx2d = c.getContext('2d');
+            const k = Math.min(c.width / s.width, c.height / s.height);
+            const dw = Math.max(1, s.width * k), dh = Math.max(1, s.height * k);
+            cx2d.drawImage(s, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
+            thumb.appendChild(c);
+        } else if (isStashLayer(l) && l.img) {
+            // A Stash: its picture is re-copied from the stack below on every draw, so the newest
+            // copy is all there is to show, and the chip never reads "no image yet".
             const c = document.createElement('canvas');
             c.width = 84; c.height = 56;
             c.style.width = '100%';
@@ -5567,7 +5682,7 @@ function renderStackList(listEl, stack) {
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
         // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
         // renderMaskLayerRow() builds its own head.
-        const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text ? l.text.content : '')) || isDirectionLayer(l);
+        const hasImg = hasLayerImage(l) || stripGeneratorInk(l);
         const canGen = layerMaskIsMeaningful(l);
         const run = document.createElement('button');
         run.className = 'icon-btn';
@@ -5615,10 +5730,12 @@ function renderStackList(listEl, stack) {
         chips.appendChild(canvasThumb);
         for (const el of attrStripEls(l)) chips.appendChild(el);
 
-        // 特效容器摊在 head **之上**:它属于这个图层,但执行发生在图层把自己的像素交出去之前。同一种挂了
-        // 两枚容器时,条带上越靠左 (越先执行) 的那一块排得越贴近 head —— 与链里"越贴近图层者越先执行"同向。
+        // 特效容器、文字/方向/3D 的编辑 lane 摊在 head **之上**:它们属于这个图层,但执行发生在图层
+        // 把自己的像素交出去之前/由 spec.lane 自己说话。同一种挂了两枚容器时,条带上越靠左 (越先执行)
+        // 的那一块排得越贴近 head —— 与链里"越贴近图层者越先执行"同向。
         for (const r of attrRecordsOf(l).reverse()) {
-            const lane = r.chain ? fxChainEl(l, r) : null;
+            const spec = ATTR_TYPES[r.type];
+            const lane = spec.lane ? spec.lane(l, r) : null;
             if (lane) row.appendChild(lane);
         }
         row.appendChild(head);
@@ -5993,10 +6110,11 @@ function replaceLayerImage(id, item) {
         } else {
             l.img = img;
             l.src = item.src;
-            // An in-place refill writes over the whole surface: if this was an (empty) text layer,
-            // the generated pixels ARE the layer now — the descriptor must not re-render on top.
-            l.text = null;
-            l.textCache = null;
+            // An in-place refill writes over the whole surface: if this carried a text/direction
+            // step, the generated pixels ARE the layer now — the step must not re-render on top.
+            for (const r of attrRecordsOf(l)) {
+                if (ATTR_TYPES[r.type].kind === 'generator') removeAttr(l, r.id);
+            }
             // 图层就是那块 patch 了：画布上的落点随之缩到 crop 子框（随源图层一起旋转）。
             if (placed) l.transform = { ...placed };
         }
@@ -7264,7 +7382,18 @@ function paintRecord(l, type, create) {
     const kind = type || paintTarget;
     const named = attrRecord(paintRef);
     if (named && named.type === kind && attrRefList(l).indexOf(named.id) >= 0) return named;
-    return lastAttr(l, kind) || (create ? insertAttr(l, kind, 'tail') : null);
+    const hit = lastAttr(l, kind);
+    if (hit) return hit;
+    if (!create) return null;
+    const r = insertAttr(l, kind, 'tail');
+    if (r) {
+        // 当场立的这一枚要立刻在行上挂出名牌:落笔路径 (beginStroke/油漆桶) 从不重铺列表,不喊
+        // 这一句,` / Tab 进模式的第一笔要等下一记 renderLayerList 才看得见 chip。插入只发生在
+        // 第一次 (此后 lastAttr 直接命中),所以这不会跑在拖动笔画的路径上;renderStackList 里
+        // 的 isArmedChip 走 create=false,也绝无递归。
+        renderLayerList();
+    }
+    return r;
 }
 
 // 第一张面长什么样是各类型的知识 (蒙版满幅白 = 覆盖从 1 起,贴片留空 = 没画就是透明),所以它住在
@@ -8491,15 +8620,12 @@ const addLayerBtn = document.getElementById('addLayerBtn');
 const addLayerMenu = document.getElementById('addLayerMenu');
 const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
 const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
-const addTextLayerBtn = document.getElementById('addTextLayerBtn');
-const addDirectionLayerBtn = document.getElementById('addDirectionLayerBtn');
 const addGuidanceBtn = document.getElementById('addGuidanceBtn');
 const addGuidanceMenu = document.getElementById('addGuidanceMenu');
 const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
 const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
 const addCudLayerBtn = document.getElementById('addCudLayerBtn');
 const addCudGuidanceBtn = document.getElementById('addCudGuidanceBtn');
-const add3DLayerBtn = document.getElementById('add3DLayerBtn');
 const addStashLayerBtn = document.getElementById('addStashLayerBtn');
 const ADD_MENUS = {
     [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
@@ -8536,13 +8662,10 @@ document.addEventListener('mousedown', e => {
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
 addStashLayerBtn.addEventListener('click', () => { closeAddMenu(); addStashLayer(WORK_STACK); });
 addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
-addTextLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'text'); });
-addDirectionLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK, 'direction'); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
 addCudGuidanceBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(GUIDANCE_STACK); });
-add3DLayerBtn.addEventListener('click', () => { closeAddMenu(); add3DLayer(); });
 
 // A drop on the list ITSELF (below the last row, or on the empty hint) means "go to the bottom of
 // this stack". Rows stop propagation, so this only ever sees the gaps — and it is the only way into
@@ -8766,9 +8889,6 @@ function addSurfaceLayer(opts) {
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
-        // 3D 图层的身份由 add3DLayer 从外面交进来:同一条建层路、同一条 undo。
-        three: !!opts.three,
-        sceneUid: opts.sceneUid || null,
         // Stash 层的两面身份也从外面交进来:stash 是「像素每帧从下面抄」,raster 是「网格焊死在画布上」
         // —— 后者让它白拿到栅格层那一整套规矩 (恒等变换、没有 Expand/Rasterize、后端看见的是画布尺寸
         // 的像素),前者只多管抄写、缩略图和那几处该拒绝的手势。
@@ -8832,30 +8952,92 @@ function addStashLayer(stack) {
 // box on canvas (same centre, same screen angle, font size scaled by the box), while the composite
 // underneath keeps drawing the last committed render. Enter commits / Shift+Enter wraps / Esc
 // rewinds / a click anywhere else commits first — one committed edit is one undo step.
+// 文字的样式调节住在工具栏的 Text 小窗 (它作用于**选中层**最左那枚 Text 记录,与 lane 时代同一
+// 套点名);字本身在画布上双击改。Size/Align 不设控件 —— "字填满盒子"的渲染里它们没有读数。
 const textEditorEl = document.getElementById('textEditor');
 const textFontBtn = document.getElementById('textFontBtn');
-const textSizeRange = document.getElementById('textSizeRange');
-const textSizeValue = document.getElementById('textSizeValue');
 const textPaddingRange = document.getElementById('textPaddingRange');
 const textPaddingValue = document.getElementById('textPaddingValue');
 const TEXT_WEIGHT_CHOICES = [['normal', 'textWeightNormal'], ['bold', 'textWeightBold']];
-const TEXT_ALIGN_CHOICES = [['left', 'textAlignLeft'], ['center', 'textAlignCenter'], ['right', 'textAlignRight']];
 const textSwatch = document.getElementById('textSwatch');
 const textColorInput = document.getElementById('textColorInput');
 const textColorValue = document.getElementById('textColorValue');
 
+function setTextChoice(choices, value) {
+    for (const [v, id] of choices) document.getElementById(id).classList.toggle('active', v === value);
+}
+
+// A text step lights the section up the way an active paint tool does — the fold state itself
+// is the user's to change, never ours.
+function updateTextPanel() {
+    const l = getSelected();
+    const on = !!l && isTextLayer(l);
+    document.getElementById('textSection').classList.toggle('active-tool', on);
+    textSwatch.style.display = on ? '' : 'none';
+    if (!on) return;
+    const t = l.text;
+    // 按钮上那几个字用的就是它自己那张脸; 本机没有这个字体时转红 (与缺失贴图同一套告警色) —— 文字
+    // 仍旧在, 只是顶着栈尾的回落脸画, 而 .cud 里存的还是这个名字。
+    textFontBtn.textContent = textFontLabel(t.fontFamily);
+    textFontBtn.style.fontFamily = t.fontFamily;
+    textFontBtn.classList.toggle('gone', !fontAvailable(t.fontFamily));
+    textPaddingRange.value = Math.min(256, t.padding);
+    textPaddingValue.textContent = String(t.padding);
+    setTextChoice(TEXT_WEIGHT_CHOICES, t.fontWeight);
+    textColorInput.value = TEXT_HEX6(t.color);
+    textColorValue.textContent = t.color.toUpperCase();
+    textSwatch.style.background = textColorInput.value;
+}
+textFontBtn.addEventListener('click', () => openTextFontModal());
+textPaddingRange.addEventListener('input', () => {
+    textPaddingValue.textContent = textPaddingRange.value;
+    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding');
+});
+for (const [v, id] of TEXT_WEIGHT_CHOICES) {
+    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
+}
+textColorInput.addEventListener('input', () => {
+    textColorValue.textContent = textColorInput.value.toUpperCase();
+    patchSelectedText({ color: textColorInput.value }, 'text-color');
+});
+
+// ==================== 3D 工具小窗 ====================
+// 选中层那枚 3D 记录的跳转与状态。完整编辑仍在场景 tab 的 #scenePanel —— 这里只是"哪枚记录、
+// 烘了没有、进去"这三句话。
+const scene3dOpenBtn = document.getElementById('scene3dOpenBtn');
+const scene3dNote = document.getElementById('scene3dNote');
+function update3DPanel() {
+    const l = getSelected();
+    const r = l ? findAttr(l, '3d') : null;
+    document.getElementById('scene3dSection').classList.toggle('active-tool', !!r);
+    scene3dOpenBtn.disabled = !r || !r.sceneUid;
+    scene3dNote.textContent = !r
+        ? 'No 3D step on the selected layer — add one from the + chip on its row'
+        : r.surface && r.surface.width
+            ? (r.sceneUid ? `Baked ${r.surface.width} × ${r.surface.height} — re-render from the scene any time`
+                          : `Baked ${r.surface.width} × ${r.surface.height} — the scene tab was closed, these pixels are all that is left`)
+            : (r.sceneUid ? 'Not baked yet — open the scene, then press Render to Layer'
+                          : 'Scene tab was closed and nothing was ever baked');
+}
+scene3dOpenBtn.addEventListener('click', () => {
+    const l = getSelected();
+    if (!l || !findAttr(l, '3d')) { setStatus('Select a layer that carries a 3D step', 'error'); return; }
+    open3DSceneDocument(l);
+});
+
 // `box` (canvas px, from the armed rectangle) welds the layer's transform to that rectangle;
 // without it the new text falls back to the contain-fit rule every new entry obeys.
+// 文字现在是条带上的一枚 Text attribute:底是空白画布,像素住在记录的面里 (attr/text.js 的 sync)。
+// ownsGrid = 老文字层的语义 —— 格子跟着 transform 盒子走。
 function addTextLayer(box) {
     if (textEditingId !== null) commitTextEditor();
-    const desc = Object.assign({}, TEXT_DEFAULTS, { content: 'Text' });
+    const desc = sanitizeTextDescriptor(Object.assign({}, TEXT_DEFAULTS, { content: 'Text' }));
     const nat = textLayerBox(desc);
     const l = {
         id: ++layerSeq,
         name: 'Text ' + (layers.filter(isTextLayer).length + 1),
         src: '',                                   // the render is the picture, never a file
-        img: renderTextBuffer(desc, nat, nat.w, nat.h),
-        text: desc,
+        img: makeBlankCanvas(nat.w, nat.h),
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         canvasThumbEl: null,
@@ -8864,8 +9046,10 @@ function addTextLayer(box) {
         fragment: false,
         cud: null,
     };
-    // 文本层的像素是渲染出来的那张 canvas:天生私有,永远不参与共享 (见源图资产表的结构性不变量)。
+    // 文字层的底是空白画布:天生私有,永远不参与共享 (见源图资产表的结构性不变量)。
     ownSource(l, l.img, l.src);
+    const r = insertAttr(l, 'text');
+    if (r) { r.desc = desc; r.ownsGrid = true; markAttrPainted(r); }
     insertAtStackTop(l);
     selectedId = l.id;
     groupIds = new Set([l.id]);
@@ -8884,26 +9068,24 @@ function addTextLayer(box) {
     syncTextBuffer(l);
     setMode('transform');                          // renders the list + canvas
     layoutCanvas();
-    setStatus(box ? `Text Layer added — the box is ${box.w} × ${box.h}; type it in · Enter commits`
-                  : 'Text Layer added — type it in · Enter commits · the Text panel restyles it');
+    setStatus(box ? `Text added — the box is ${box.w} × ${box.h}; type it in · Enter commits`
+                  : 'Text added — type it in · Enter commits · the Text lane restyles it');
     pushHistory();
     openTextEditor(l.id, true);
     return l;
 }
 
-// A Direction layer is the same trick as a text layer: the descriptor is the whole document, the
+// A Direction attribute is the same trick as a text attribute: the descriptor is the document, the
 // pixels are a render of it, and nothing about the render is ever stored. `box` from the armed
 // rectangle welds the transform to it, so the diagram lands where the user swept.
 function addDirectionLayer(box) {
-    const desc = Object.assign({}, DIR_DEFAULTS);
+    const desc = sanitizeDirectionDescriptor(Object.assign({}, DIR_DEFAULTS));
     const nat = dirNaturalBox();
     const l = {
         id: ++layerSeq,
         name: 'Direction ' + (layers.filter(isDirectionLayer).length + 1),
         src: '',                                   // the render is the picture, never a file
-        img: renderDirectionBuffer(desc, nat.w, nat.h),
-        dir: desc,
-        dirCache: null,
+        img: makeBlankCanvas(nat.w, nat.h),
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         canvasThumbEl: null,
@@ -8912,7 +9094,9 @@ function addDirectionLayer(box) {
         fragment: false,
         cud: null,
     };
-    ownSource(l, l.img, l.src);           // 同文本层:渲染出来的 canvas,天生私有
+    ownSource(l, l.img, l.src);           // 同文字:底是空白画布,天生私有
+    const r = insertAttr(l, 'direction');
+    if (r) { r.desc = desc; r.ownsGrid = true; markAttrPainted(r); }
     insertAtStackTop(l);
     selectedId = l.id;
     groupIds = new Set([l.id]);
@@ -8957,16 +9141,32 @@ function openTextEditor(id, selectAll) {
     setStatus('Editing text — Shift+Enter for a new line · Enter commits · Esc cancels');
 }
 
-// The editor's screen box comes from the SAME localToCanvas/docToScreen chain the transform
-// handles use, so rotation, flip and zoom cannot drift it away from the layer.
+// The editor's screen box: for a grid-owning text step (the old text layer) it is the layer's own
+// transform box; for a text step sitting on a layer with its own pixels it is that step's box
+// (r.box, grid-normalized) folded through the SAME localToCanvas chain — so rotation, flip and
+// zoom cannot drift it away from where the face actually lands.
 function positionTextEditor() {
     if (textEditingId === null) return;
     const l = getLayer(textEditingId);
     if (!l || !isTextLayer(l)) { closeTextEditor(); return; }
     const tr = effectiveTransform(l);
-    const c = docToScreen({ x: tr.cx * canvasW, y: tr.cy * canvasH });
-    const r = docToScreen(localToCanvas(l, 1, 0));     // centre → right edge
-    const t = docToScreen(localToCanvas(l, 0, -1));    // centre → top edge
+    const rec = findAttr(l, 'text');
+    let c, r, t, boxW, boxH;                       // 盒子中点/右缘中点/顶缘中点 (屏幕) + 盒子的画布像素
+    if (rec && !rec.ownsGrid && rec.box) {
+        const bx = rec.box;
+        const cu = 2 * (bx.x + bx.w / 2) - 1, cv = 2 * (bx.y + bx.h / 2) - 1;
+        c = docToScreen(localToCanvas(l, cu, cv));
+        r = docToScreen(localToCanvas(l, cu + bx.w, cv));
+        t = docToScreen(localToCanvas(l, cu, cv - bx.h));
+        boxW = bx.w * tr.w * canvasW;
+        boxH = bx.h * tr.h * canvasH;
+    } else {
+        c = docToScreen({ x: tr.cx * canvasW, y: tr.cy * canvasH });
+        r = docToScreen(localToCanvas(l, 1, 0));     // centre → right edge
+        t = docToScreen(localToCanvas(l, 0, -1));    // centre → top edge
+        boxW = tr.w * canvasW;
+        boxH = tr.h * canvasH;
+    }
     const w = Math.max(8, Math.hypot(r.x - c.x, r.y - c.y) * 2);
     const h = Math.max(8, Math.hypot(t.x - c.x, t.y - c.y) * 2);
     const ang = Math.atan2(t.y - c.y, t.x - c.x) + Math.PI / 2;
@@ -8975,7 +9175,7 @@ function positionTextEditor() {
     // horizontal CSS scale reproduces the width axis, so a box dragged out of the text's own
     // aspect still shows what the canvas shows.
     const nat = measureTextNatural(l.text);
-    const sx = (tr.w * canvasW) / nat.w, sy = (tr.h * canvasH) / nat.h;
+    const sx = boxW / nat.w, sy = boxH / nat.h;
     const kx = sx / sy;
     const fs = Math.max(1, l.text.fontSize * sy * view.zoom);
     // +4px slack: the longest line is exactly the content width, and DOM text metrics can sit a
@@ -9128,7 +9328,6 @@ function openTextFontModal() {
     textFontModalEl.focus();           // Esc 归这张模态自己收, 不指望上一次点的是哪颗按钮
     syncBrushCursor();
 }
-textFontBtn.addEventListener('click', openTextFontModal);
 textFontModalEl.addEventListener('mousedown', e => { if (e.target === textFontModalEl) closeTextFontModal(); });
 textFontModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeTextFontModal(); }
@@ -9161,58 +9360,11 @@ textFontFileInput.addEventListener('change', async () => {
 });
 const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '#ffffff';
 
-function setTextChoice(choices, value) {
-    for (const [v, id] of choices) document.getElementById(id).classList.toggle('active', v === value);
-}
-
-function updateTextPanel() {
-    const l = getSelected();
-    const on = !!l && isTextLayer(l);
-    // A text layer lights the section up the way an active paint tool does — the fold state itself
-    // is the user's to change, never ours.
-    document.getElementById('textSection').classList.toggle('active-tool', on);
-    textSwatch.style.display = on ? '' : 'none';
-    if (!on) return;
-    const t = l.text;
-    // 按钮上那几个字用的就是它自己那张脸; 本机没有这个字体时转红 (与缺失贴图同一套告警色) —— 文字
-    // 仍旧在, 只是顶着栈尾的回落脸画, 而 .cud 里存的还是这个名字。
-    textFontBtn.textContent = textFontLabel(t.fontFamily);
-    textFontBtn.style.fontFamily = t.fontFamily;
-    textFontBtn.classList.toggle('gone', !fontAvailable(t.fontFamily));
-    textSizeRange.value = Math.min(512, t.fontSize);
-    textSizeValue.textContent = String(t.fontSize);
-    textPaddingRange.value = Math.min(256, t.padding);
-    textPaddingValue.textContent = String(t.padding);
-    setTextChoice(TEXT_WEIGHT_CHOICES, t.fontWeight);
-    setTextChoice(TEXT_ALIGN_CHOICES, t.align);
-    textColorInput.value = TEXT_HEX6(t.color);
-    textColorValue.textContent = t.color.toUpperCase();
-    textSwatch.style.background = textColorInput.value;
-}
-
 function patchSelectedText(patch, historyKey) {
     const l = getSelected();
     if (!isTextLayer(l)) return;
     patchTextLayer(l, patch, { historyKey });
 }
-for (const [v, id] of TEXT_WEIGHT_CHOICES) {
-    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
-}
-for (const [v, id] of TEXT_ALIGN_CHOICES) {
-    document.getElementById(id).addEventListener('click', () => patchSelectedText({ align: v }));
-}
-textSizeRange.addEventListener('input', () => {
-    textSizeValue.textContent = textSizeRange.value;
-    patchSelectedText({ fontSize: Number(textSizeRange.value) || 1 }, 'text-size');
-});
-textPaddingRange.addEventListener('input', () => {
-    textPaddingValue.textContent = textPaddingRange.value;
-    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding');
-});
-textColorInput.addEventListener('input', () => {
-    textColorValue.textContent = textColorInput.value.toUpperCase();
-    patchSelectedText({ color: textColorInput.value }, 'text-color');
-});
 
 // ==================== 拖入本地图片 ====================
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
@@ -9297,7 +9449,7 @@ document.getElementById('viewFlipBtn').addEventListener('click', () => flipView(
 // the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
 // header while the panel scrolls or the column is dragged wider, and stack in list order so two of
 // them cannot sit on top of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'detectorSection', 'processorSection'];
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'scene3dSection', 'detectorSection', 'processorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -11449,23 +11601,8 @@ function markDocumentClean() {
 // 一个 3D 图层 = documents[] 里一枚 `kind: 'scene'` 的 tab:自己的 undo 分支、自己的名字、关掉
 // 就没了。它不是工程文档的缩略图,所以永远不与 .cud 抢一条 Save 的路。
 
-// 建层走 addSurfaceLayer 那一条路(一张画布大小、带 src 的面):图层的 img 一旦为 null,
-// nativeSize 与行渲染里那些「总有一张图」的假设就会踩空。
-function add3DLayer() {
-    if (!Scene3D.available) { setStatus('The 3D engine (js/3d-bundle.js) did not load', 'error'); return null; }
-    if (!canvasW || !canvasH) { setStatus('Set a canvas size before adding a 3D layer', 'error'); return null; }
-    const name = `3D Layer ${stackLayers(WORK_STACK).length + 1}`;
-    const entry = createDocument(name, null, { scene: Scene3D.blankRecord(name) }, false,
-        { kind: 'scene', hostUid: activeDoc ? activeDoc.uid : null });
-    const l = addSurfaceLayer({
-        pw: canvasW, ph: canvasH,
-        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        name, three: true, sceneUid: entry.uid,
-    });
-    if (!l) { dropDocument(entry); return null; }
-    open3DSceneDocument(l);
-    return l;
-}
+// 3D 的入场只有一条路:某一行条带上的 `+` → Add 3D (attr/3d.js 的 onAdded 开一枚场景 tab 交给
+// 那一层的记录)。它不是图层种类,所以 Layers 的 Add 菜单里没有它的位置。
 
 // 跳转:和 cud 那枚按钮同一个分寸 —— 已经在这一枚 tab 上就什么也不做,否则正常走 tab 切换的闸门。
 function open3DSceneDocument(l) {
@@ -11478,13 +11615,20 @@ function open3DSceneDocument(l) {
     return true;
 }
 
-// 烘给谁:场景 tab 自己不认识像素,它只交出 GL 画布。宿主那一行按 `sceneUid` 反查 —— 3D tab
-// 开着的时候宿主的 ctx 早已收进 documents[],所以这里查的是那份存好的记录,而不是全局。
+// 烘给谁:场景 tab 自己不认识像素,它只交出 GL 画布。宿主那一行按记录里的 sceneUid 反查 ——
+// 3D tab 开着的时候 `layers` 还是宿主那批活图层 (进场景不走 restoreState 的 2D 分支),先查它们;
+// 查不到 (宿主 tab 已关) 再扫各文档存好的 ctx 快照,那条路只能改快照、改不了活记录。
 function sceneHostRow(entry) {
+    for (const l of layers) {
+        const r = findAttr(l, '3d');
+        if (r && r.sceneUid === entry.uid) return { doc: documents.find(d => d.uid === entry.hostUid) || null, layer: l, rec: r };
+    }
     for (const d of documents) {
         if (d === entry || !d.ctx || !Array.isArray(d.ctx.layers)) continue;
-        const row = d.ctx.layers.find(r => r.sceneUid === entry.uid);
-        if (row) return { doc: d, row };
+        for (const row of d.ctx.layers) {
+            const a = (row.attrs || []).find(x => x && x.type === '3d' && x.sceneUid === entry.uid);
+            if (a) return { doc: d, row, attr: a };
+        }
     }
     return null;
 }
@@ -11493,6 +11637,7 @@ function bake3DLayer() {
     if (!Scene3D.active || !Scene3D.entry) return false;
     const host = sceneHostRow(Scene3D.entry);
     if (!host) { setStatus('This scene has no 3D layer to render into', 'error'); return false; }
+    if (!host.doc) { setStatus('The project this scene belongs to is gone', 'error'); return false; }
     const W = Math.round(host.doc.ctx.canvasW), H = Math.round(host.doc.ctx.canvasH);
     let canvas;
     try {
@@ -11501,28 +11646,32 @@ function bake3DLayer() {
         setStatus(`Could not render the scene: ${err.message || err}`, 'error');
         return false;
     }
-    canvasToLayerRow(host, canvas);
-    setStatus(`Rendered to「${host.row.name}」at ${W} × ${H}`, 'success');
+    bake3DToRecord(host, canvas, W, H);
+    setStatus(`Rendered to「${host.layer ? host.layer.name : host.row.name}」at ${W} × ${H}`, 'success');
     return true;
 }
 
-// 写像素只写记录,不重画 2D:3D tab 开着的时候视口本就是藏起来的,回到宿主 tab 时 restoreState
-// 自然按新记录重画。宿主文档要在这里标脏(它才是被改了像素的那一枚),还要把它 undo 栈的顶换掉
-// —— 那条不变量是「栈顶就是现在」,而它的旧顶记的还是烘之前那张图。
-function canvasToLayerRow(host, canvas) {
-    const src = canvas.toDataURL('image/png');
-    host.row.img = canvas;
-    host.row.src = src;
-    // 全局此刻往往正拿着宿主的活图层对象(3D tab 多半就是从它跳过来的),一并同步,免得两份各写各的。
-    const live = getLayer(host.row.id);
-    if (live) { live.img = canvas; live.src = src; }
+// 烘焙写的是**记录的面** (条带上的 3D attribute),不再是图层的 img/src —— 底保持空白,面才是内容。
+// 活记录与存好的 ctx 两边都写 (老 canvasToLayerRow 的同一课):3D tab 开着时 undo 栈顶还记着烘之前
+// 的样子,快照里那枚 attribute 也要跟着换面,「栈顶就是现在」这条不变量才守得住。
+function bake3DToRecord(host, canvas, W, H) {
+    if (host.rec && host.layer) {
+        host.rec.surface = canvas;
+        markAttrPainted(host.rec);
+        // 底的格子对不齐烘焙时 (画布后来改过尺寸),当场补齐 —— 面在折叠里 1:1 落位。
+        const cur = nativeSize(host.layer.img);
+        if (!host.layer.img || cur.w !== W || cur.h !== H) host.layer.img = makeBlankCanvas(W, H);
+    }
+    if (host.attr) host.attr.surface = canvas;
     if (!host.doc.dirty) { host.doc.dirty = true; renderDocTabs(); }
     const top = host.doc.undo;
     if (Array.isArray(top) && top.length) top[top.length - 1] = host.doc.ctx;
+    const live = host.layer || (host.row && getLayer(host.row.id));
+    if (live) { renderLayerList(); }
 }
 
-// 场景 tab 关了把它带进来的模型字节放手:每张模型只被一个场景 tab 拥有(add3DLayer 一律新建),
-// 所以这里删得干净。正在显示的那一枚还要连 live 记录一起查,它可能比存好的 ctx 新。
+// 场景 tab 关了把它带进来的模型字节放手:每张模型只被一个场景 tab 拥有(每一枚 3D 记录入场时
+// 一律新建 tab,见 attr/3d.js 的 onAdded),所以这里删得干净。正在显示的那一枚还要连 live 记录一起查,它可能比存好的 ctx 新。
 function releaseSceneAssets(entry) {
     const recs = [entry.ctx && entry.ctx.scene, Scene3D.entry === entry ? Scene3D.rec : null];
     for (const rec of recs) {
@@ -11766,6 +11915,19 @@ async function buildCudBlob() {
             if (!attrSeen.has(r.id)) {
                 let e = null;
                 if (r.type === 'effects') e = { id: r.id, type: 'effects', chain: await cudEffects(r.chain) };
+                else if (ATTR_TYPES[r.type].kind === 'generator') {
+                    // 生成器入档的是描述符,不是派生面 —— 重开还要能改字、拖把手 (像素由 sync 重算)。
+                    // 3D 例外:bake 是算不回来的唯一真相,照 surface 资产走;没烘过的记录没得存,
+                    // 整枚不入档 (与"没有像素的面不入档"同一条)。
+                    if (r.type === '3d') {
+                        e = (r.surface && r.surface.width && r.surface.height)
+                            ? { id: r.id, type: '3d', surface: await addAsset('3d', r.surface, r.surface.width, r.surface.height) }
+                            : null;
+                    } else {
+                        e = r.desc ? { id: r.id, type: r.type, desc: Object.assign({}, r.desc),
+                            box: r.box ? Object.assign({}, r.box) : null, ownsGrid: !!r.ownsGrid } : null;
+                    }
+                }
                 else if (r.surface && r.surface.width && r.surface.height)
                     e = { id: r.id, type: r.type,
                         surface: await addAsset(r.type, r.surface, r.surface.width, r.surface.height) };
@@ -12152,6 +12314,9 @@ async function resolveRecAttrs(rec, blobs, cache) {
         let e = null;
         if (a.type === 'effects') {
             e = { id: key, type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs) };
+        } else if (a.desc !== undefined && a.desc !== null) {
+            // 生成器 (文字/方向):入档的是描述符,回来原样接住 —— 面由 sync 在第一次折叠前重算。
+            e = { id: key, type: a.type, desc: a.desc, box: a.box || null, ownsGrid: !!a.ownsGrid };
         } else {
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
             if (blob) e = { id: key, type: a.type, surface: await blobToCanvas(blob) };
@@ -12217,14 +12382,9 @@ async function openCudDocument(file, doc) {
                 // separate asset and still lands below.
                 const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.pw) || 1)));
                 const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec && rec.ph) || 1)));
-                // A text row rebuilds as an editable layer instead: the descriptor (a corrupt one
-                // degrades to an empty text layer) renders its natural box, and the first paint
-                // re-sharpens it onto the saved transform. A direction row is the same kind of
-                // layer — the angles are the document, the arrow is a render of them.
-                img = textDesc ? renderTextBuffer(textDesc, textLayerBox(textDesc),
-                    textLayerBox(textDesc).w, textLayerBox(textDesc).h)
-                    : dirDesc ? renderDirectionBuffer(dirDesc, dirNaturalBox().w, dirNaturalBox().h)
-                    : makeBlankCanvas(pw, ph);
+                // 文字/方向/3D 行重建的也是一张空白底:描述符 (或烘好的面) 走 attrs 那张表回来,像素由
+                // 各自的 sync 在第一次折叠前重算 —— 底不再是渲染,它只是格子。
+                img = makeBlankCanvas(pw, ph);
             } else {
                 const imgBlob = blobs.get(rec.image);
                 if (!imgBlob) { skipped++; continue; }        // a genuinely unreadable asset
@@ -12256,9 +12416,10 @@ async function openCudDocument(file, doc) {
                 // every one of them is a working layer, which is also what it looked like then.
                 stack: rec.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
                 // Text descriptor rebuilt above; a raster/`false` record never carries one.
+                // (text/dir 只是 mergeLegacyGenerators 的迁移原料 —— 老文件走这条,新文件的描述符
+                // 已经在 attrs 表里,这两个字段随后被 attachAttrView 的 getter 遮成死重。)
                 text: textDesc,
                 dir: dirDesc,
-                dirCache: null,
                 transform: rec.raster
                     // Old files could carry a non-identity raster transform; the invariant is identity.
                     ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
@@ -12279,6 +12440,8 @@ async function openCudDocument(file, doc) {
                 // 这次导入带来的那份像素。v1 文件里没这些字段 —— 空白链就是「没有特效」,不是「特效坏了」。
                 attrs: await resolveRecAttrs(rec, blobs, attrDecoded),
             });
+            // 老文件的 text/dir 还是图层字段:strip 里没有同类记录时补一条 (新文件直接读 attrs)。
+            mergeLegacyGenerators(records[records.length - 1]);
         }
         if (!records.length) throw new Error('the .cud holds no readable layers');
         const ml = header.maskLayer || {};
@@ -13095,6 +13258,18 @@ function procPick(ifaceIdx, side, port, table, fallback) {
     return processorSel.get(k);
 }
 function procDstTable(type) { return type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE; }
+// 端口的默认源/落位:Interface tab 里为这枚 interface 存的 input_sources / output_targets（键 =
+// 端口号字符串，随 interface_meta 持久化到 blocks_sets.json）。出入口行都用它当初值;取值是否
+// 合法不用这里管 —— procPick 的 fallback 本来就只认候选表里有的那几枚，类型对不上（老配置 /
+// 改过端口）自动退回表第一项。
+function procDefaultPick(ifaceIdx, port) {
+    const p = processorList.find(x => x.index === ifaceIdx);
+    if (!p) return undefined;
+    const o = p.output_targets ? p.output_targets[String(port)] : null;
+    if (typeof o === 'string') return o;
+    const i = p.input_sources ? p.input_sources[String(port)] : null;
+    return typeof i === 'string' ? i : undefined;
+}
 
 // 参数值：只有"在这扇窗里拧过的"才存进 processorSel（键 <iface>:manual:<port>）；没拧过的每次
 // 现读后端推来那份（它和实跑用的是同一次派生），所以图里的默认值一改，窗里的读数跟着改。
@@ -13190,7 +13365,7 @@ function renderProcessorRows() {
     const choiceGroup = (side, port, table) => {
         const g = document.createElement('div');
         g.className = 'mini-group';
-        const cur = procPick(p.index, side, port.num, table);
+        const cur = procPick(p.index, side, port.num, table, procDefaultPick(p.index, port.num));
         for (const [val, text, tip] of table) {
             const b = document.createElement('button');
             b.type = 'button';
@@ -13295,7 +13470,7 @@ function renderProcessorRows() {
             const r = row(port.name, `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`);
             r.appendChild(choiceGroup('in', port, table));
             g.appendChild(r);
-            if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table) === 'staging') {
+            if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table, procDefaultPick(p.index, port.num)) === 'staging') {
                 const sr = row('', 'Which workspace entry feeds this input');
                 const sel = document.createElement('select');
                 sel.title = 'Which workspace entry feeds this input';
@@ -13342,7 +13517,7 @@ function renderProcessorRows() {
 function processorCollectInput(port, ifaceIdx) {
     const isMask = port.type === 'MASK';
     const table = isMask ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
-    const choice = procPick(ifaceIdx, 'in', port.num, table);
+    const choice = procPick(ifaceIdx, 'in', port.num, table, procDefaultPick(ifaceIdx, port.num));
     if (choice === 'staging') {
         const id = processorSel.get(procSelKey(ifaceIdx, 'in:staging', port.num));
         const it = stagingItems.find(s => s.id === id) || stagingItems[stagingItems.length - 1];
@@ -13444,7 +13619,8 @@ function finishProcessorRun(d) {
     for (const r of results) {
         if (!r || typeof r.port !== 'number' || !r.src) continue;
         const isMask = r.type === 'MASK';
-        const dst = procPick(ifaceIdx, 'out', r.port, procDstTable(isMask ? 'MASK' : 'IMAGE'));
+        const dst = procPick(ifaceIdx, 'out', r.port, procDstTable(isMask ? 'MASK' : 'IMAGE'),
+            procDefaultPick(ifaceIdx, r.port));
         if (dst === 'staging') { staged.push({ src: r.src, name: r.name || 'Processed' }); continue; }
         const l = getSelected();
         if (!l || l.isMaskLayer) { hitLayerTrouble = true; continue; }
@@ -13649,7 +13825,7 @@ loadTextFontLibrary();
 
 // js/scene3d_*.js 没进来时 —— 典型是节点进程还跑着没有 /js/ 路由的旧代码 —— 3D 模块整体缺席,
 // 裸引用 Scene3D 会一路 ReferenceError 把启动尾部炸掉。顶一枚「永不可用」的占位,跟 FX 链在引擎
-// 缺失时的降级同一个分寸:2D 一切照常,Add 3D 入口收掉(真点也只会得到 available=false 的说明)。
+// 缺失时的降级同一个分寸:2D 一切照常,`+` 菜单装 3D 时由 onAdded 的 available 守卫说明原因。
 if (typeof Scene3D === 'undefined') {
     window.Scene3D = {
         available: false, active: false, entry: null, rec: null, models: new Map(),
@@ -13658,7 +13834,6 @@ if (typeof Scene3D === 'undefined') {
         onKeyDown: () => false, onKeyUp: () => {}, wirePanel: () => {},
         isModelFile: () => false, importFiles: () => {}, dropTemplate: () => {},
     };
-    add3DLayerBtn.style.display = 'none';
 }
 // 3D 右栏的把手在这一刻接好:它整个活在 js/scene3d_panel.js 里,这里只负责给它接上 DOM。
 Scene3D.wirePanel();

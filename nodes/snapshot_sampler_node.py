@@ -1098,12 +1098,20 @@ class SnapshotDetailerSamplerServer:
 
         {<interface name>: {'names':   {'start': {<port num>: label}, 'end': {...}},
                             'modes':   {'block': bool, 'processor': bool},
-                            'block_ports': {'in': <start port num>, 'out': <end port num>}}}
+                            'block_ports': {'in': <start port num>, 'out': <end port num>},
+                            'output_targets': {<port num>: 'new_layer'|'selected_layer'|
+                                               'selected_mask'|'staging'},
+                            'input_sources': {<port num>: 'layers'|'selected'|'staging'|
+                                               'main_mask'|'selected_mask'|'selected_alpha'|'mask_alpha'}}}
         端口号一律收成 str（JSON 键本就是字符串），label 去空白、空 label 视为没改。
+        output_targets / input_sources = image/mask 出口的默认落位与入口的默认来源（Processor
+        小窗的初值），取值出枚举就丢。
         """
         out = {}
         if not isinstance(raw, dict):
             return out
+        dst_enum = {'new_layer', 'selected_layer', 'selected_mask', 'staging'}
+        src_enum = {'layers', 'selected', 'staging', 'main_mask', 'selected_mask', 'selected_alpha', 'mask_alpha'}
         for name, entry in raw.items():
             if not isinstance(name, str) or not name or not isinstance(entry, dict):
                 continue
@@ -1137,6 +1145,22 @@ class SnapshotDetailerSamplerServer:
                         ports[side] = v
                 if ports:
                     one['block_ports'] = ports
+            targets = entry.get('output_targets')
+            if isinstance(targets, dict):
+                clean_targets = {}
+                for num, dst in targets.items():
+                    if isinstance(num, str) and num.isdigit() and dst in dst_enum:
+                        clean_targets[str(int(num))] = dst
+                if clean_targets:
+                    one['output_targets'] = clean_targets
+            sources = entry.get('input_sources')
+            if isinstance(sources, dict):
+                clean_sources = {}
+                for num, src in sources.items():
+                    if isinstance(num, str) and num.isdigit() and src in src_enum:
+                        clean_sources[str(int(num))] = src
+                if clean_sources:
+                    one['input_sources'] = clean_sources
             if one:
                 out[name] = one
         return out
@@ -1635,6 +1659,9 @@ class SnapshotDetailerSamplerServer:
                         'end_ports': end_ports,
                         'modes': meta.get('modes') or {'block': False, 'processor': False},
                         'block_ports': meta.get('block_ports') or {},
+                        # image/mask 出口的默认落位与入口的默认来源（Processor 小窗的初值），没有就是空表。
+                        'output_targets': meta.get('output_targets') or {},
+                        'input_sources': meta.get('input_sources') or {},
                     })
                 self._send_json({'interfaces': interfaces})
                 return
