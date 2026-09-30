@@ -10,7 +10,7 @@
           "name": "Detailer",
           "params": {
             "add_noise": "enable",
-            "start_step_rate": 0.4,
+            "start_step_rate": 0.6,
             "end_step_rate": 1,
             "pixels": 1548576,
             "align": 16,
@@ -28,7 +28,8 @@
             "enable_mask": true,
             "enable_text_generate": false,
             "enable_limit": true,
-            "enable_fit": true
+            "enable_fit": true,
+            "inversion_rate": 0.4
           }
         }
       ],
