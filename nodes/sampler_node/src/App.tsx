@@ -221,6 +221,10 @@ const App: React.FC = () => {
         index: interfaces.indexOf(itf),
         start_ports: itf.start_ports,
         end_ports: itf.end_ports,
+        // image/mask 出口的默认落位与入口的默认来源:工作台拿它们当 Processor 小窗里对应行的
+        // 初值 (meta 里的 output_targets / input_sources,/api/package 已按名字合并进 itf)。
+        output_targets: itf.output_targets || interfaceMeta[itf.name]?.output_targets || {},
+        input_sources: itf.input_sources || interfaceMeta[itf.name]?.input_sources || {},
       }));
     win.postMessage({ type: 'blend-processors', processors }, '*');
   }, [interfaces, interfaceMeta]);

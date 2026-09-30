@@ -281,8 +281,8 @@
           "type": "detailer",
           "name": "Detailer",
           "params": {
-            "add_noise": "enable",
-            "start_step_rate": 0,
+            "add_noise": "disable",
+            "start_step_rate": 0.2,
             "end_step_rate": 1,
             "pixels": 2048576,
             "align": 32,
@@ -308,7 +308,7 @@
       "pipeline_name": "[QwenImage21] Base"
     }
   ],
-  "active_block_set": "set-12",
+  "active_block_set": "set-20",
   "global_params": {
     "pixels": 2048576,
     "align": 16,
@@ -480,6 +480,17 @@
         "end": {
           "1": "输出深度贴图",
           "2": "输出法线贴图"
+        }
+      },
+      "modes": {
+        "block": false,
+        "processor": true
+      }
+    },
+    "颜色匹配": {
+      "names": {
+        "start": {
+          "1": "image_ref"
         }
       },
       "modes": {

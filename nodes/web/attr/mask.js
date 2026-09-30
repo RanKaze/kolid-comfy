@@ -10,6 +10,7 @@ defineAttrType({
     order: 2,
     at: { rel: 'tail' },
     chipClass: 'mask-thumb',
+    badge: { class: 'mask', svg: '<svg viewBox="0 0 10 10"><rect x="1.4" y="1.4" width="7.2" height="7.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M5 2.1h2.5a1 1 0 0 1 1 1v4.8H5z" fill="currentColor" opacity="0.75"/></svg>' },
     // 底色说的就是"这枚蒙版现在盖住多少":没有面 = 整层都盖住 = 白;有了面,黑底才是"没画=隐藏",
     // 白墨是覆盖。所以这颗 chip 不能像贴片那样留空透出棋盘格 —— 空面与满面的读法正好相反。
     chipBg: r => (r.surface ? '#000' : '#fff'),

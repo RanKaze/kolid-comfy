@@ -54,6 +54,10 @@ const ATTR_KINDS = {
         chip(el, r, l) {
             const w = el.width, h = el.height, c = el.getContext('2d');
             resetCtx(c);
+            // 先清空再画:擦皮 (destination-out) 只削面自己的 alpha,重画是"叠"不是"换" —— 不清
+            // 的话擦掉的部分在 chip 上永远是旧墨。蒙版看不出来是因为它每帧都铺满 chipBg 底色,
+            // 恰好盖住上一帧;贴片没有底色,吃的就是这个亏。
+            c.clearRect(0, 0, w, h);
             const bg = ATTR_TYPES[r.type].chipBg;
             const fill = typeof bg === 'function' ? bg(r) : bg;
             if (fill) { c.fillStyle = fill; c.fillRect(0, 0, w, h); }
@@ -83,6 +87,28 @@ const ATTR_KINDS = {
         // 它开的是**这一枚**记录的选择器:同一种挂了两枚容器时,选中的那个容器收下这一步。
         open(l, r) { openFxModal(l.id, r.id); },
     },
+
+    // 第三种数据形状:**生成器**。描述符在档,面是派生 —— 描述符 (不可变,patch 一律整只换) 与
+    // 盒子在档,像素由 spec.sync 惰性重算 (键比对,换新画布从不就地重画,undo 安全)。文字、方向、
+    // 3D 烘焙都是这一种:`ownsGrid` 的那批 (老文字/方向/3D 层迁来的) 连图层格子都归它管 —— 格子
+    // 跟着 transform 盒子走,底换成透明画布,面才是内容;不 ownsGrid 的那批 (挂在照片层上的) 面
+    // 按图层网格现算,box 说明它占格子的哪一块。
+    generator: {
+        init: () => ({ desc: null, surface: null, genCache: null }),
+        // 描述符按引用进快照 (不可变,与 cud 描述符同一条规矩);面不进 —— 它是派生数据,sync 会
+        // 重算。3D 例外:bake 出来的面算不回来,由它自己的 spec 覆盖 snap 把面带上。
+        snap: r => ({ desc: r.desc, box: r.box || null, ownsGrid: !!r.ownsGrid, sceneUid: r.sceneUid || null }),
+        load: raw => ({ desc: raw.desc, box: raw.box || null, ownsGrid: !!raw.ownsGrid, sceneUid: raw.sceneUid || null }),
+        // desc 按引用共享 (不可变);sceneUid 同理 —— 副本与原本跳进同一个场景。面不带:sync 自己算。
+        clone: r => ({ desc: r.desc, box: r.box || null, ownsGrid: !!r.ownsGrid, sceneUid: r.sceneUid || null }),
+        // chip 画的就是那张派生面 (它本来就是图层网格的形状,拉满即可);还没算出来时留空 ——
+        // 空不等于停用,停用有角标说话。
+        chip(el, r) {
+            const c = el.getContext('2d');
+            resetCtx(c);
+            if (r.surface && r.surface.width && r.surface.height) c.drawImage(r.surface, 0, 0, el.width, el.height);
+        },
+    },
 };
 
 let attrSeq = 0;
@@ -91,7 +117,8 @@ const attrRecords = new Map();          // 'attr_N' -> { id, type, ...payload }
 function newAttrRecord(type, fields) {
     const spec = ATTR_TYPES[type];
     if (!spec) return null;
-    const r = Object.assign({ id: 'attr_' + (++attrSeq), type }, spec.init(), fields || {});
+    // enabled = 这一步参不参与折叠。缺席读作 true (见 attrEnabled),所以快照里只有 false 才落字段。
+    const r = Object.assign({ id: 'attr_' + (++attrSeq), type, enabled: true }, spec.init(), fields || {});
     attrRecords.set(r.id, r);
     return r;
 }
@@ -118,6 +145,9 @@ function lastAttr(l, type) {
     return hit;
 }
 function attrRecord(ref) { return ref ? attrRecords.get(ref) || null : null; }
+// 停用的一步 = 数据原地留着,折叠跳过它 (fx/gl.js 的 fxDropStrip 与 attrInks 都认这一句)。
+// 缺席也算开:老快照、克隆路上没带这个字段的记录不会被误停。
+function attrEnabled(r) { return !r || r.enabled !== false; }
 // 条带上**全部**链,按应用顺序。老名字 `l.effects` 只是最左边那一枚的视图,所以缓存签名、贴图戳这类
 // 「整层重算不算」的判据一律读这一串 —— 只看最左那一条会漏掉右边那枚容器。
 function stripChains(l) {
@@ -136,12 +166,38 @@ function effectById(l, effectId) {
     const r = chainOwnerRecord(l, effectId);
     return r ? r.chain.find(e => e && e.id === effectId) : null;
 }
-// 整条条带上"还挂着、且开着"的特效。状态文案与"这层到底有没有链"那一类读数都该问这一句:问最左边
-// 那一枚容器会漏掉右边那枚,而那句话说的正是这一层。
+// 整条条带上"还挂着、且开着"的特效 (停用的容器整枚不算)。状态文案与"这层到底有没有链"那一类读数
+// 都该问这一句:问最左边那一枚容器会漏掉右边那枚,而那句话说的正是这一层。
 function liveEffects(l) {
     const out = [];
-    for (const chain of stripChains(l)) for (const e of chain) if (e && e.enabled) out.push(e);
+    for (const r of attrRecordsOf(l)) {
+        if (!r.chain || !attrEnabled(r)) continue;
+        for (const e of r.chain) if (e && e.enabled) out.push(e);
+    }
     return out;
+}
+
+// ---- 生成器的惰性同步 ----
+// 面是派生的,所以在**折叠之前**每一枚 generator 记录都要过一遍 spec.sync:键没变就两下比对比过去了,
+// 变了才重算。折叠的三个入口 (fxResolved / fxSplitForBackend / fxSurfaceForGenerate) 开头都喊这一句
+// —— fxResolved 的早退判据 (attrInks) 读的是面,同步必须发生在它**之前**,否则一枚还没算过面的
+// 文字记录会被当成"没装"。
+function syncGeneratorFaces(l) {
+    if (!l || l.isMaskLayer) return;
+    for (const r of attrRecordsOf(l)) {
+        const spec = ATTR_TYPES[r.type];
+        if (spec.kind === 'generator' && spec.sync && attrEnabled(r)) spec.sync(l, r);
+    }
+}
+// 条带上"会出图的生成器":Generate 通道那句「这层到底有没有墨」问的是它 —— 空文字、停用的步骤
+// 都不算。每类生成器自己报一句 (spec.ink),注册表不认得具体类型。
+function stripGeneratorInk(l) {
+    for (const r of attrRecordsOf(l)) {
+        if (!attrEnabled(r)) continue;
+        const spec = ATTR_TYPES[r.type];
+        if (spec.kind === 'generator' && spec.ink && spec.ink(r)) return true;
+    }
+    return false;
 }
 
 function attrRefs(ref) {
@@ -189,9 +245,11 @@ function dupAttrShallow(l, ref) {
     const src = attrRecord(ref);
     if (!src || attrRefList(l).indexOf(ref) < 0) return null;
     const spec = ATTR_TYPES[src.type];
-    const copy = newAttrRecord(src.type, spec.kind === 'chain'
-        ? { chain: cloneEffects(src.chain) } : { surface: cloneCanvasSurface(src.surface) });
+    // payload 一律问 spec.clone:面 (surface kind) 另起一张,链深拷,生成器带描述符不带走派生面
+    // (sync 自己算),3D 把烘好的面 dup 一份 (它算不回来)。
+    const copy = newAttrRecord(src.type, spec.clone(src, cloneCanvasSurface));
     if (!copy) return null;
+    copy.enabled = attrEnabled(src);
     l.attrs.splice(attrRefList(l).indexOf(ref) + 1, 0, copy.id);
     return copy;
 }
@@ -209,6 +267,9 @@ function remapAttrFaces(l, fn) {
     for (let i = 0; i < refs.length; i++) {
         const r = attrRecord(refs[i]);
         if (!r || !r.surface) continue;
+        // 生成器的面是派生数据,不跟着格子搬:格子变了由 sync 按新网格现算 (3D 的 bake 折叠时
+        // 自动拉伸)。搬它反而会把一张按旧网格算好的面钉在新格子上。
+        if (ATTR_TYPES[r.type].kind === 'generator') continue;
         // 一枚挂两次 = 同一步走两遍,它只该被裁一遍:第二遍拿第一遍的结果再裁一次,边就缩了两回。
         if (done.has(r.id)) { refs[i] = done.get(r.id); continue; }
         const next = fn(r.surface, r);
@@ -307,6 +368,15 @@ function attrPaintGens(l) {
 }
 function markAttrPainted(r) { if (r) r.paintGen = (r.paintGen | 0) + 1; }
 
+// chip 的 ctrl+click 调这一句:翻转这一步的启用状态。翻转本身不改任何像素与数据 —— 面的身份、描述符、
+// 链都原地不动,折叠缓存 (fxResolved) 却必须知道结果变了,所以代次 +1 就是这里唯一要干的"脏活"。
+function toggleAttrEnabled(r) {
+    if (!r) return;
+    r.enabled = !attrEnabled(r);
+    markAttrPainted(r);
+    return r;
+}
+
 // chip 的 tooltip 要说清"这一枚是第几步",因为顺序现在归用户。只挂了一枚时不必报数 —— 那串括号
 // 没有信息量,而条带上本来就只有一颗 chip 可读。
 function attrStepNote(label, r, l) {
@@ -354,7 +424,8 @@ function migrateAttrs(l) {
     const found = [];
     for (const type of Object.keys(ATTR_TYPES)) {
         const spec = ATTR_TYPES[type];
-        const payload = spec.fromLegacy(l[spec.legacy]);
+        // 第二个参数是图层本体:有的老字段是一对 (3D 的 three + sceneUid),fromLegacy 要两个一起读。
+        const payload = spec.fromLegacy(l[spec.legacy], l);
         if (payload) found.push({ type, payload, order: spec.order });
     }
     found.sort((a, b) => a.order - b.order);
@@ -390,6 +461,31 @@ function attachAttrView(l) {
                 get() { return attrChain(this); },
                 set(v) { setAttrChain(this, v); },
             });
+        } else if (spec.kind === 'generator') {
+            // 生成器的老名字读的是描述符 (文字的 l.text、方向的 l.dir);3D 的老名字是 `l.three`
+            // 布尔 + `l.sceneUid` 一对,由 spec 自己说 (uidField)。写 null = 摘掉这一枚。
+            Object.defineProperty(l, spec.legacy, {
+                configurable: true,
+                get() {
+                    const r = findAttr(this, type);
+                    if (!r) return null;
+                    return spec.legacyGet ? spec.legacyGet(r) : r.desc;
+                },
+                set(v) {
+                    let r = findAttr(this, type);
+                    if (!v) { if (r) removeAttr(this, r.id); return; }
+                    if (!r) r = insertAttr(this, type);
+                    if (!r) return;
+                    if (spec.legacySet) spec.legacySet(r, v);
+                    else r.desc = v;
+                    markAttrPainted(r);
+                },
+            });
+            if (spec.uidField) Object.defineProperty(l, spec.uidField, {
+                configurable: true,
+                get() { const r = findAttr(this, type); return r ? (r.sceneUid || null) : null; },
+                set(v) { const r = findAttr(this, type); if (r) r.sceneUid = v || null; },
+            });
         }
     }
     return l;
@@ -398,7 +494,11 @@ function attachAttrView(l) {
 // ---- 快照、克隆、读档 ----
 // 存的是值 + 一个 id 标签:同一个标签在**一次重放**里只立一条记录,共享就此活过 undo 与 tab 往返。
 function snapshotAttrs(l) {
-    return attrRecordsOf(l).map(r => Object.assign({ id: r.id, type: r.type }, ATTR_TYPES[r.type].snap(r)));
+    return attrRecordsOf(l).map(r => {
+        const s = Object.assign({ id: r.id, type: r.type }, ATTR_TYPES[r.type].snap(r));
+        if (!attrEnabled(r)) s.enabled = false;   // 稀疏:开着的不落字段,老读法也读得懂
+        return s;
+    });
 }
 
 // `list` 里的每一项是 `{ type, surface|chain }` (+ 可选的分组 id 标签)。读 .cud 与恢复快照共用这一条
@@ -413,7 +513,10 @@ function adoptAttrPayloads(list, byId) {
             r = newAttrRecord(spec.type, spec.load(raw));
             if (byId && raw.id) byId.set(raw.id, r);
         }
-        if (r) refs.push(r.id);
+        if (r) {
+            if (raw && raw.enabled === false) r.enabled = false;
+            refs.push(r.id);
+        }
     }
     return refs;
 }
@@ -430,7 +533,9 @@ function cloneAttrList(l) {
     const refs = [];
     for (const r of attrRecordsOf(l)) {
         const copy = newAttrRecord(r.type, ATTR_TYPES[r.type].clone(r, cloneCanvasSurface));
-        if (copy) refs.push(copy.id);
+        if (!copy) continue;
+        copy.enabled = attrEnabled(r);
+        refs.push(copy.id);
     }
     return refs;
 }

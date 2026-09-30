@@ -342,7 +342,17 @@ export interface InterfaceInfo {
   /** Interface tab 贴在包上的标注（/api/package 已按名字合并）。 */
   modes?: { block: boolean; processor: boolean };
   block_ports?: { in?: number; out?: number };
+  /** image/mask 出口的默认落位（键 = 端口号字符串），Processor 小窗拿它当初值。 */
+  output_targets?: Record<string, string>;
+  /** image/mask 入口的默认来源（键 = 端口号字符串），Processor 小窗拿它当初值。 */
+  input_sources?: Record<string, string>;
 }
+
+/** Processor 输出落位的四个去处（blend_node 的 PROCESSOR_DST_* 表同名）。 */
+export type ProcessorDst = 'new_layer' | 'selected_layer' | 'selected_mask' | 'staging';
+
+/** Processor 输入来源的七个去处（blend_node 的 PROCESSOR_SRC_* 表同名）。 */
+export type ProcessorSrc = 'layers' | 'selected' | 'staging' | 'main_mask' | 'selected_mask' | 'selected_alpha' | 'mask_alpha';
 
 /** 一个 interface 的持久化配置（blocks_sets.json 的 interface_meta 键，按包名索引）。
  *  端口名只是展示 —— 执行全程按端口号走。names 的键是端口号字符串。 */
@@ -350,6 +360,10 @@ export interface InterfaceMetaEntry {
   names?: { start?: Record<string, string>; end?: Record<string, string> };
   modes?: { block: boolean; processor: boolean };
   block_ports?: { in?: number; out?: number };
+  /** image/mask 出口的默认落位（键 = 端口号字符串），后端归一化时按枚举收敛。 */
+  output_targets?: Partial<Record<string, ProcessorDst>>;
+  /** image/mask 入口的默认来源（键 = 端口号字符串），后端归一化时按枚举收敛。 */
+  input_sources?: Partial<Record<string, ProcessorSrc>>;
 }
 
 export type InterfaceMeta = Record<string, InterfaceMetaEntry>;
