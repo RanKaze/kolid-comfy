@@ -409,8 +409,9 @@ function lightRetire(gl, ent) {
 
 // ---- 光向:一枚四元数出全部 ----
 // 光的向量只有一个来源 —— 姿态四元数把 +X 送到哪儿 (js/direction.js 的基:x、z 铺在画布平面上,
-// y 抬离画布朝镜头)。绑了 Direction 就用它自己的四元数,没绑就把 Angle/Elev 两颗旋钮折成同一枚
-// (qFromEuler),于是两条路共用一次 qApply,不再各写一遍三角式去重画同一个方向。
+// y 抬离画布朝镜头,+Y 就是画布正面)。绑了 Direction 就用它自己的四元数在 local 系里自转半圈
+// (箭头读作**光行进方向**,光源在箭头反侧 ⇒ 光向量 = 箭头取负:方位 +180°、仰角变号),没绑就把
+// Angle/Elev 两颗旋钮折成同一枚 (qFromEuler),于是两条路共用一次 qApply,不再各写一遍三角式。
 // 落进 shader 的基与 fxglDirUV 同规矩 (uv 的 y 朝上):v = (f.x, -f.z, f.y)。
 // 实测它与老写法在同一条地面上等价 (gl-probe/light_vec_gl.mjs:八个方位量到的来向与旋钮面值差 ≤1.2°,
 // roll 不动这束光),差别全在仰角的定义域:老写法先钳进 [0,90] 再取 sin/cos,方向被压到画布平面之下时
@@ -422,11 +423,16 @@ function fxLightPose(effect, p) {
     const ref = effect && effect.params && effect.params.dirRef;
     const r = attrRecord(ref);
     if (r && r.type === 'direction' && r.desc && r.desc.rotation) {
+        // 箭头读作**光行进方向**, 光源在箭头反侧 —— 真反演: 光向量 = 箭头向量取负, 即方位 +180°
+        // **且仰角变号**。只翻方位、不翻仰角的旧读法在"箭头扎向画布"这一档是错的: 箭头指向 -Y
+        // (扎进画布正面) 时灯明明在正面 +Y 迎面照, 仰角不翻就把灯算到了画布背后, 漫反射全黑
+        // (用户实测)。四元数在 local 系里自转半圈 (+X → -X), 光向量与读数同源同翻。
         const eu = geoEuler(r.desc.rotation);
-        const out = { q: r.desc.rotation, angle: dirWrap360(eu.yaw),
-            elev: Math.max(-90, Math.min(90, eu.pitch)), bound: true };
+        const q = qMul(r.desc.rotation, qFromAxisAngle({ x: 0, y: 1, z: 0 }, Math.PI));
+        const out = { q, angle: dirWrap360(eu.yaw + 180),
+            elev: Math.max(-90, Math.min(90, -eu.pitch)), bound: true };
         console.log('[dirLight] follow ref:', ref, 'yaw->angle:', out.angle.toFixed(2),
-            'pitch->elev:', eu.pitch.toFixed(2), '->', out.elev.toFixed(2));
+            'pitch->elev:', (-eu.pitch).toFixed(2), '->', out.elev.toFixed(2));
         return out;
     }
     console.log('[dirLight] no follow — ref:', ref, 'record:', r ? r.type + '/desc?' : 'null (fallback to manual knobs)');

@@ -25,6 +25,7 @@
     const DIST_MAX = 12;            // 拉远的上限: 再远环就糊成一枚点了
     const TUBE = 0.012;             // 轨道在世界里的粗细
     const HEAD_H = 0.2;             // 箭头那顶锥子的高度 (世界单位)
+    const ARROW_HEAD_H = HEAD_H * 0.72; // 对象箭的锥头实际高度 (用户要求箭头小一号细一号)
     const ARM_HEAD = HEAD_H * 0.5;  // 移动臂的锥子比对象的箭小一档: 箭是读数, 臂只是把手
     const ORBIT_K = 0.55;           // 中键拖动: 每像素转多少度 (与 3D tab 那套"拖多少转多少"同一个分寸)
     const EL_MAX = 85;              // 相机俯仰夹在这里: 正好从边上或正下方看, 三根轨道会糊成一条线
@@ -130,10 +131,11 @@
         scene.add(parts.arcGroup);
 
         // 箭头本体: 杆 + 头, 颜色跟着描述符走。direction/ray 是全长姿态箭, plane 借同一对 mesh
-        // 画短的法线刻箭 (长短在 sync 里按类型定)。
-        parts.shaft = new T.Mesh(new T.CylinderGeometry(TUBE * 1.6, TUBE * 1.6, 1, 10),
+        // 画短的法线刻箭 (长短在 sync 里按类型定)。杆与头都比三向轴把手粗一档就够了 —— 用户要的是
+        // 一根细箭, 不是一根柱子; 头高单独记常数, sync 里摆位与 build 共用这一份。
+        parts.shaft = new T.Mesh(new T.CylinderGeometry(TUBE * 1.0, TUBE * 1.0, 1, 10),
             material(T, DIR_DEFAULTS.color, 1));
-        parts.head = new T.Mesh(new T.ConeGeometry(HEAD_H * 0.34, HEAD_H, 16), material(T, DIR_DEFAULTS.color, 1));
+        parts.head = new T.Mesh(new T.ConeGeometry(HEAD_H * 0.25, ARROW_HEAD_H, 16), material(T, DIR_DEFAULTS.color, 1));
         parts.shaft.renderOrder = parts.head.renderOrder = 3;
         scene.add(parts.shaft, parts.head);
 
@@ -334,21 +336,25 @@
         }
 
         // 箭头 (direction/ray 全长; plane 借同一对 mesh 画法线短箭): 杆从对象点走到头前, 头补上
-        // 最后那一截。方向向量来自 dirVecOf, 长度按类型定。
+        // 最后那一截。方向向量来自 dirVecOf, 长度按类型定。direction 的杆穿过原点往**负方向**也
+        // 延伸一整段 —— 方向是根轴线, 两头都能读, 光源在反侧这件事一眼可见; ray 是射线 (只有
+        // 去程), plane 的法线刻箭保持单侧。
         const hasArrow = kind !== 'point';
         parts.shaft.visible = parts.head.visible = hasArrow;
         if (hasArrow) {
             const v = fwd;
             const L = kind === 'plane' ? DIR_POSE_R * 0.42 : DIR_POSE_R;
+            const back = kind === 'direction' ? L : 0;
             const q = new T.Quaternion().setFromUnitVectors(parts.up, new T.Vector3(v.x, v.y, v.z));
+            // 杆沿 v 铺在 [-back, L - ARROW_HEAD_H]: 长度 = 两端之和, 中心 = 两端的中点。
             parts.shaft.quaternion.copy(q);
-            parts.shaft.position.set(pos.x + v.x * (L - HEAD_H) / 2,
-                pos.y + v.y * (L - HEAD_H) / 2, pos.z + v.z * (L - HEAD_H) / 2);
-            parts.shaft.scale.set(1, L - HEAD_H, 1);
+            parts.shaft.position.set(pos.x + v.x * (L - ARROW_HEAD_H - back) / 2,
+                pos.y + v.y * (L - ARROW_HEAD_H - back) / 2, pos.z + v.z * (L - ARROW_HEAD_H - back) / 2);
+            parts.shaft.scale.set(1, L - ARROW_HEAD_H + back, 1);
             parts.shaft.material.color.setHex(col);
             parts.head.quaternion.copy(q);
-            parts.head.position.set(pos.x + v.x * (L - HEAD_H / 2),
-                pos.y + v.y * (L - HEAD_H / 2), pos.z + v.z * (L - HEAD_H / 2));
+            parts.head.position.set(pos.x + v.x * (L - ARROW_HEAD_H / 2),
+                pos.y + v.y * (L - ARROW_HEAD_H / 2), pos.z + v.z * (L - ARROW_HEAD_H / 2));
             parts.head.material.color.setHex(col);
         }
 
