@@ -464,7 +464,7 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
             clr.style.display = ref ? '' : 'none';
         };
         updaters.push(show);
-        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect); });
+        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect, def.key); });
         clr.addEventListener('click', ev => {
             ev.stopPropagation();
             effect.params[def.key] = null;
@@ -751,17 +751,18 @@ function bindFxDir(ref) {
     const l = getLayer(t.layerId);
     const e = l && effectById(l, t.effectId);
     if (!e) return;
-    e.params.dirRef = ref || null;
+    // 键由发起绑定的那行参数带来 (Lighting 的 dirRef、雾的 gravRef/sunRef 都是同一扇窗的客人)。
+    e.params[t.key || 'dirRef'] = ref || null;
     closeFxDirModal();
     fxStructuralChange(l);
     const where = ref ? fxDirSourceName(ref) : null;
-    setStatus(ref ? `Lighting now points where「${where}」's Direction points (Angle = yaw, Elev = pitch)`
-        : 'Lighting is back on its own Angle/Elev knobs', 'success');
+    setStatus(ref ? `「${where}」's Direction now drives this step`
+        : 'Unbound — the step is back on its own knobs', 'success');
 }
 
-function openFxDirModal(l, effect) {
+function openFxDirModal(l, effect, key) {
     if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
-    fxDirTarget = { layerId: l.id, effectId: effect.id };
+    fxDirTarget = { layerId: l.id, effectId: effect.id, key: key || 'dirRef' };
     fxDirTitleEl.textContent = 'Bind a Direction';
     fxDirGroupsEl.textContent = '';
     const hits = fxDirInventory();
@@ -773,6 +774,7 @@ function openFxDirModal(l, effect) {
     }
     // 分组小标题 = 文档 (作用域),卡上短名 = 图层;缩略图从描述符现烘 (inactive 文档的面不在档)。
     let lastDoc = null, group = null, cards = null;
+    const cur = fxDirTarget.key;
     for (const hit of hits) {
         if (hit.docName !== lastDoc) {
             lastDoc = hit.docName;
@@ -790,7 +792,7 @@ function openFxDirModal(l, effect) {
         const e = geoEuler(hit.r.desc.rotation);
         const card = document.createElement('button');
         card.type = 'button';
-        card.className = 'tag-mode-item' + (hit.r.id === effect.params.dirRef ? ' active' : '');
+        card.className = 'tag-mode-item' + (hit.r.id === effect.params[cur] ? ' active' : '');
         card.title = `${Math.round(dirWrap360(e.yaw))}\u00b0 / ${Math.round(e.pitch)}\u00b0 — ${hit.docName} \u00b7 ${hit.l.name}`;
         const cv = document.createElement('canvas');
         cv.className = 'tag-mode-thumb';
