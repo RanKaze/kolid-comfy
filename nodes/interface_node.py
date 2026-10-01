@@ -439,6 +439,7 @@ class InterfacePackageNode:
                 "class_type": sn_type,
                 "inputs": sn_inputs,
                 "_widgets_values": sn.get("widgets_values", []),
+                "mode": sn.get("mode", 0),
             }
 
         # Resolve subgraph input connections (proxy node or virtual negative IDs)
@@ -661,6 +662,7 @@ class InterfacePackageNode:
                 "class_type": node_type,
                 "inputs": inputs,
                 "_widgets_values": wv,
+                "mode": n.get("mode", 0),
             }
 
         # Resolve GetNode references: replace any link pointing to a GetNode
@@ -716,6 +718,7 @@ class InterfacePackageNode:
                                         "class_type": rn.get("type", ""),
                                         "inputs": r_inputs,
                                         "_widgets_values": rn.get("widgets_values", []),
+                                        "mode": rn.get("mode", 0),
                                     }
                             resolved = True
                             break
@@ -1451,6 +1454,21 @@ class InterfaceExecutor:
                 output_values[nid] = ()
                 return output_values[nid]
 
+            # 节点 mode（前端工作流原样带过来）：4 = Bypass（不执行函数，输入按类型
+            # 穿透到输出，与前端 graphToPrompt 的重连规则一致）；2 = Mute（不执行）。
+            # 之前不看 mode，bypass 掉的 LoRA/guidance 节点在子图里照样执行并打补丁。
+            _mode = node.get("mode", 0)
+            if _mode == 4:
+                output_values[nid] = self._bypass_passthrough(
+                    nid, node, class_def, sub_prompt, start_id, end_id, pkg, output_values)
+                print(f"[InterfaceExecutor]   BYPASS {nid} ({class_type}) → "
+                      f"passthrough {[(type(v).__name__ if v is not None else 'None') for v in output_values[nid]]}")
+                return output_values[nid]
+            if _mode == 2:
+                print(f"[InterfaceExecutor]   SKIP {nid} ({class_type}): muted (mode=2)")
+                output_values[nid] = ()
+                return output_values[nid]
+
             self._eval_count += 1
             if self.on_progress:
                 self.on_progress(self._eval_count, self._eval_total)
@@ -1640,6 +1658,52 @@ class InterfaceExecutor:
         return output_values[nid]
 
     # ---- link 解析辅助 ----
+
+    def _bypass_passthrough(self, nid, node, class_def, sub_prompt, start_id, end_id, pkg, output_values):
+        """mode=4（Bypass）：不执行节点函数，把连接的输入按类型穿透到对应输出。
+
+        与前端 graphToPrompt 对被 bypass 节点的重连规则一致：每个输出槽找第一个
+        **类型相同**的未占用连线输入；类型对不上时回退到第一个未占用的连线输入。
+        （KSampler bypass 时 LATENT 输出接的是 latent_image 而不是第一个输入 model，
+        证明前端是按类型而非按序号穿透。）
+        """
+        input_types = {}
+        try:
+            it = class_def.INPUT_TYPES()
+            for _cat in ("required", "optional"):
+                for _name, _rd in (it.get(_cat) or {}).items():
+                    if isinstance(_rd, tuple) and len(_rd) >= 1 and isinstance(_rd[0], str):
+                        input_types[_name] = _rd[0]
+        except Exception:
+            pass
+        aliases = sub_prompt.get("_subgraph_output_aliases", {})
+        used = set()
+        node_inputs = node.get("inputs", {})
+        result = []
+        for _slot, out_type in enumerate(getattr(class_def, "RETURN_TYPES", ()) or ()):
+            picked = None
+            for _name, _val in node_inputs.items():
+                if is_link(_val) and _name not in used and input_types.get(_name) == out_type:
+                    picked = _name
+                    break
+            if picked is None:
+                for _name, _val in node_inputs.items():
+                    if is_link(_val) and _name not in used and _name in input_types:
+                        picked = _name
+                        break
+            if picked is None:
+                result.append(None)
+                continue
+            used.add(picked)
+            _link = node_inputs[picked]
+            origin_id, output_slot = str(_link[0]), int(_link[1])
+            _alias_key = f"{origin_id}:{output_slot}"
+            if _alias_key in aliases:
+                origin_id, output_slot = aliases[_alias_key], 0
+            self._eval_link(origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid)
+            _v = self._get_output(origin_id, output_slot, output_values)
+            result.append(None if _v is _UNRESOLVED else _v)
+        return tuple(result)
 
     def _resolve_link(self, origin_id, output_slot, sub_prompt, start_id, end_id, pkg, output_values, nid, name):
         """尝试从缓存解析 link 输出，返回值或 _UNRESOLVED"""
@@ -1881,6 +1945,7 @@ class InterfaceExecutor:
                 "class_type": n_type,
                 "inputs": n_inputs,
                 "_widgets_values": n.get("widgets_values", []),
+                "mode": n.get("mode", 0),
             }
 
         # Map nested subgraph outputs to its internal output proxy's inputs
@@ -2023,6 +2088,7 @@ class InterfaceExecutor:
                 "class_type": sn_type,
                 "inputs": sn_inputs,
                 "_widgets_values": sn.get("widgets_values", []),
+                "mode": sn.get("mode", 0),
             }
 
         # Find the output proxy node to determine which internal node produces each output

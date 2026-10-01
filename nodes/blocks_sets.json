@@ -281,8 +281,8 @@
           "type": "detailer",
           "name": "Detailer",
           "params": {
-            "add_noise": "disable",
-            "start_step_rate": 0.2,
+            "add_noise": "enable",
+            "start_step_rate": 0,
             "end_step_rate": 1,
             "pixels": 2048576,
             "align": 32,
@@ -317,7 +317,7 @@
     "mask_blur": 32
   },
   "pipeline_settings": {
-    "selected": "[Anima] LizAnima",
+    "selected": "[QwenImage21] Base",
     "overrides": {
       "[Anima] LizAnima": {
         "mask_grow": {
@@ -359,7 +359,7 @@
           "enabled": true
         },
         "align": {
-          "value": 32,
+          "value": 16,
           "enabled": true
         },
         "ref_pixels": {
@@ -367,7 +367,7 @@
           "enabled": true
         },
         "ref_align": {
-          "value": 32,
+          "value": 16,
           "enabled": true
         },
         "tgen_pixels": {
@@ -375,7 +375,7 @@
           "enabled": true
         },
         "tgen_align": {
-          "value": 32,
+          "value": 16,
           "enabled": true
         }
       },
