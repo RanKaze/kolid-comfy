@@ -120,6 +120,14 @@ function fxIconSvg(icon) {
             + '<path d="M4.3 9.5h7.1" opacity="0.7"/>'
             + '<path d="M1.9 11.8h5.7"/></svg>';
     }
+    if (icon === 'reflect') {
+        // 一面横镜,入射箭头从左上打下来、反射箭头对称地折回左下:反射读的就是「同一根轴,
+        // 两个对称方向」,和 'light'(光源辐射)与 'bloom'(自己发光)都不是一回事。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">'
+            + '<path d="M1.9 7h10.2" opacity="0.45"/>'
+            + '<path d="M3.9 2.3 6.3 5.7M4.7 5.9 6.3 5.7 6.1 4.1"/>'
+            + '<path d="M6.3 8.3 3.9 11.7M3.7 10.3 3.9 11.7 5.3 11.5" opacity="0.7"/></svg>';
+    }
     if (icon === 'sort') {
         // 三条 run 各自往右错开一档、并且由暗到亮排开:分块重排读出来的就是「同一段内容, 阶梯状接起来」。
         return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
