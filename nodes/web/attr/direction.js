@@ -14,16 +14,20 @@ defineAttrType({
     badge: { class: 'direction', svg: '<svg viewBox="0 0 10 10"><path d="M2 8.2 7.6 2.6 M3.6 2.2H8V6.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="square"/></svg>' },
     fromLegacy: raw => (raw ? { desc: raw, ownsGrid: true } : null),
     init: () => ({ desc: sanitizeDirectionDescriptor(Object.assign({}, DIR_DEFAULTS)), ownsGrid: false, box: null }),
+    // 家族 (direction/point/ray/plane) 共用的 patch/Reset 路径从注册表拿这两样 —— 与
+    // attr/geometry.js 同一套词汇。defaults 用 getter:本文件比 js/direction.js 先加载,
+    // DIR_DEFAULTS 要到运行时才存在。
+    sanitize: raw => sanitizeDirectionDescriptor(raw),
+    get defaults() { return Object.assign({}, DIR_DEFAULTS); },
     // 方向总有图可出 (空姿态也是一张图),它不需要"空内容"那一档。
     ink: r => !!r.desc,
-    title: (r, l) => attrStepNote('Direction', r, l)
-        + (r.desc ? ` — ${Math.round(r.desc.yaw)}° / ${Math.round(r.desc.pitch)}° / ${Math.round(r.desc.roll)}°` : ''),
+    title: (r, l) => attrStepNote('Direction', r, l) + (r.desc ? (() => {
+        const e = geoEuler(r.desc.rotation);
+        return ` — ${Math.round(dirWrap360(e.yaw))}° / ${Math.round(e.pitch)}° / ${Math.round(dirWrap180(e.roll))}°`;
+    })() : ''),
     addTitle: `Add a Direction step — the canvas-space view of a pose, rendered onto this layer's grid. Point it in the Direction tool (D).`,
-    // 点 chip = 把 Direction 工具小窗对准这一枚 (小窗吃的是"选中的层",所以先点名再开窗)。
-    open(l, r) {
-        selectLayer(l.id, 'transform');
-        toggleToolWindow('directionSection');
-    },
+    // 点 chip = 把 3D 小窗对准**这一枚** (家族四个类型共用一扇窗,窗点名编辑,不翻转已开的窗)。
+    open(l, r) { dirPinTarget(l, r); },
 
     // ---- 惰性同步 (与 attr/text.js 同一套规矩) ----
     sync(l, r) {

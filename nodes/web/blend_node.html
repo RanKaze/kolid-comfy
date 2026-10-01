@@ -260,9 +260,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .attr-type-badge.effects { color: #ffd76e; }
 .attr-type-badge.text { color: #d9b8ff; }
 .attr-type-badge.direction { color: #ff9ec4; }
+.attr-type-badge.plane { color: #f5c542; }
+.attr-type-badge.point { color: #19e0bc; }
+.attr-type-badge.ray { color: #ff7ab0; }
 .attr-type-badge.model { color: #7ee0d0; }
 /* 生成器 (文字/方向/3D) 的 chip:面画在自己那块 canvas 上,空面 = 底色透出 (停用另有角标说话)。 */
-.layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb { cursor: pointer; background-color: #1b1d24; }
+.layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb,
+.layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb { cursor: pointer; background-color: #1b1d24; }
 .layer-thumb.text-attr-thumb canvas, .layer-thumb.direction-attr-thumb canvas, .layer-thumb.scene3d-attr-thumb canvas { width: 100%; height: 100%; display: block; }
 /* `+` 与 chip 同尺寸同圆角,但它是按钮不是缩略图:虚线边说"这一步还没有东西",正是它该有的样子。 */
 .attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
@@ -281,9 +285,12 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Direction 小窗的舞台: three.js 那块 (js/direction_view.js 建的 webgl canvas) 与 2D 退路那块叠在
    同一个取景框里, 谁在显示由 DirView.begin() 的成败决定; 指针一律吃舞台, 所以两种画法下指针落点一致。
    舞台铺满窗宽、按窗口自己的高度走 (窗是 520 宽, 见下面那条 .tool-flyout-wide)。 */
-.dir-stage { position: relative; height: 300px; border: 1px solid #2a2f3d; border-radius: 8px;
+.dir-stage { position: relative; height: 420px; border: 1px solid #2a2f3d; border-radius: 8px;
     background: #0b0d14; overflow: hidden; }
 .dir-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.dir-hint { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 10.5px; letter-spacing: 0.02em;
+    color: rgba(255,255,255,0.5); pointer-events: none; user-select: none; }
+.dir-hint b { color: #fff; font-weight: 600; }
 .dir-angles { margin-top: 2px; }
 .dir-angles input:disabled { opacity: 0.4; cursor: default; }
 /* Stash 的暖黄: direction 已经占了那支粉 (#ff9ec4), 两枚徽章并排时必须一眼分得开。 */
@@ -1023,27 +1030,35 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
             </div>
             <!-- Direction 工具: 小窗是**世界里的观察** —— 一张 three.js 场景 (js/direction_view.js):
-                 画布平面贴着此刻的 context image, 方位环 / 仰角弧 / 滚转环 / 箭头 / 三颗把手挂在它上面,
-                 中键拖动只转眼睛。图层自己的像素是**画布空间的观察** (正面看画布: 平面 + 箭头 + 从 +X
-                 量到箭头的角弧, 度数烘进像素)。两边吃的是同一份世界坐标 (dirWorldPose), 不是同一次绘制
-                 —— 相机本来就不同。选中的不是 Direction 层时整颗转暗、三格 field 禁用, 那本身就是
-                 "没人在编辑"的话。K3D 缺席或 WebGL 起不来时舞台退回 direction.js 那张 2D 世界图。 -->
-            <div class="panel-section tool-section foldable collapsed" id="directionSection" data-flyout-width="520">
+                 画布平面贴着此刻的 context image。它现在是 geometry 家族 (direction/point/ray/plane,
+                 全是相对画布的 3D 对象) 共用的一扇窗: direction 是环/弧/滚转环/箭头 (钉在原点),
+                 point 是球+落地线, ray 是球+箭头, plane 是圆盘+法线短箭。
+                 中键拖动只转眼睛。图层自己的像素是**画布空间的观察** (正面看画布: 对象按世界坐标投影
+                 落位, 读数烘进像素)。两边吃的是同一份世界坐标, 不是同一次绘制 —— 相机本来就不同。
+                 选中的不是家族记录时整颗转暗、field 禁用, 那本身就是"没人在编辑"的话。
+                 K3D 缺席或 WebGL 起不来时舞台退回 direction.js 那张 2D 世界图。 -->
+            <div class="panel-section tool-section foldable collapsed" id="directionSection" data-flyout-width="720">
                 <div class="panel-head">
-                    <div class="panel-label" id="dirLabel" title="Direction (D) — a layer that draws where a direction sits relative to the canvas. The window is a 3D view of the world: the canvas plane, textured with the current context image, inside the 360° azimuth ring with the pitch arc and the roll ring on it. Hold the middle mouse button and drag to orbit the camera — that moves your eye only, it never changes the pose. Drag the ring handle for Yaw (0° right, 90° down — the same reading as the lighting Angle), the tip for Pitch (0 = flat on the canvas plane, 90 = out of it toward you), the fin for Roll, or type the three angles directly. Shift snaps to 15°. The layer's own pixels are the canvas view of the same pose. Click the header to open or close its settings window."><span class="fold-caret"></span>Direction <span class="tool-key">D</span></div>
+                    <div class="panel-label" id="dirLabel" title="Direction (D) — the family window for the canvas-relative 3D objects: a Direction step (a pose, pinned at the origin), a Point (a world position), a Ray (a point plus a direction) or a Plane (a point plus a normal). The world is standard XYZ: the image lies on the XZ plane facing +Y — X runs across the canvas, Z down it, Y lifts off it. The window is a 3D view: the canvas plane textured with the current context image on a ground grid. Hold the middle mouse button and drag to orbit; scroll to zoom — both move your eye only. Drag the handles: the red/green/blue triad moves the object along world X/Y/Z, Yaw/Pitch (and Roll for Direction) steer the orientation — Shift snaps (15° angles, 0.05 positions). The layer's own pixels are the canvas view of the same object. Click the header to open or close its settings window."><span class="fold-caret"></span><span class="dir-kind">Direction</span> <span class="tool-key">D</span></div>
                 </div>
                 <div class="tool-body">
                     <div class="dir-stage" id="dirStage">
                         <canvas id="dirView"></canvas>
                         <canvas id="dirGizmo"></canvas>
+                        <div class="dir-hint" id="dirHint"></div>
                     </div>
-                    <div class="rgba-fields dir-angles" title="The three angles, typed directly — they read and write the same pose the handles drag. Yaw is measured in the canvas plane from its +X edge, Pitch lifts the direction off that plane, Roll banks it about itself. Values are folded, not clamped: 999° yaw lands on 279°.">
-                        <span class="rgba-cell"><label>Yaw</label><input id="dirYawNum" type="number" min="0" max="359" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell"><label>Pitch</label><input id="dirPitchNum" type="number" min="-90" max="90" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell"><label>Roll</label><input id="dirRollNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
+                    <div class="rgba-fields dir-angles" title="The object in world XYZ, typed directly — the image lies on the XZ plane facing +Y: X runs across the canvas, Z down it, Y lifts off the plane (in canvas heights) for Point/Ray/Plane; Yaw/Pitch/Roll steer the direction (Direction) or the ray/normal (Ray/Plane). Angles are folded, not clamped: 999° yaw lands on 279°.">
+                        <span class="rgba-cell" id="dirXCell"><label>X</label><input id="dirXNum" type="number" min="-1" max="2" step="0.01"></span>
+                        <span class="rgba-cell" id="dirYCell"><label>Y</label><input id="dirYNum" type="number" min="-2" max="2" step="0.01"></span>
+                        <span class="rgba-cell" id="dirZCell"><label>Z</label><input id="dirZNum" type="number" min="-1" max="2" step="0.01"></span>
                     </div>
-                    <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The arrow's own colour — the ring, arc and fin keep theirs"><span id="dirColorValue">#FF2E88</span></div>
-                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Point this layer back at the default orientation (135° yaw, 25° pitch, no roll)">Default</button><span></span></div>
+                    <div class="rgba-fields dir-angles">
+                        <span class="rgba-cell" id="dirYawCell"><label>Yaw</label><input id="dirYawNum" type="number" min="0" max="359" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell" id="dirPitchCell"><label>Pitch</label><input id="dirPitchNum" type="number" min="-90" max="90" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell" id="dirRollCell"><label>Roll</label><input id="dirRollNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
+                    </div>
+                    <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The object's own colour — the ring, arc and handles keep theirs"><span id="dirColorValue">#FF2E88</span></div>
+                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Back to this object's default placement">Default</button><span></span></div>
                 </div>
             </div>
             <!-- 3D 工具小窗:选中带 3D 步骤的层时点亮。跳转与状态在这里;完整编辑 (fly、inspector、
@@ -1470,6 +1485,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="attr/mask.js"></script>
 <script src="attr/text.js"></script>
 <script src="attr/direction.js"></script>
+<script src="attr/geometry.js"></script>
 <script src="attr/3d.js"></script>
 <!-- 图层特效链按特效拆在 fx/ 下: 一类特效一个文件 (注册数据 + 着色器 + pass + 读数 + 缩略图)。
      这些文件与页面本体同一个全局作用域, 顺序即依赖方向: core / maps / gl -> 特效 -> ui -> 页面。
@@ -4671,8 +4687,9 @@ function render() {
     }
     if (canvasW > 0 && canvasH > 0) {
         // Direction 小窗开着时, 同一趟里顺手抄一张参考图给那张画布平面当贴图: 它 = 此刻的 context
-        // image, 唯独不含正在编辑的这张方向层自己 (guidance 本来也不进 context)。跳过它是因为箭头若被
-        // 抄进自己的参考面, 拖一下就变成两个箭头, 而那两个说的不是同一件事。
+        // image, 唯独不含正在编辑的这一枚自己的面 (guidance 本来也不进 context)。剔除的单位是那枚
+        // 记录而不是整层 —— 家族三枚 (point/ray/plane) 挂在照片层上, 连照片一起剔, 3D 场景里的
+        // 画布就空了; 画这层时把那枚记录临时停用再折 (老 direction 层整层就是那枚面, 两种读法等价)。
         const dirRef = dirRefTarget();
         let dirPainted = false;
         // 两条栈各带一份「到目前为止叠了些什么」的指纹:Stash 层轮到自己那一刻抄的就是它,而它上面的
@@ -4694,12 +4711,19 @@ function render() {
             drawLayer(l, target);
             // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
             // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
-            // 一条例外: Stash 若在"正在编辑的那支箭"之后才轮到自己 (它压着那支箭), 它的快照里就带着那支
-            // 箭, 抄进参考面就又长出第二个箭头。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
-            // 各自进来了 —— 也不许"两个箭头"这件事发生。
-            if (dirRef && !guidance && l.id !== dirRef.skip
-                && !(isStashLayer(l) && dirPainted)) drawLayer(l, dirRef.ctx);
-            if (dirRef && l.id === dirRef.skip && l.visible && l.img) dirPainted = true;
+            // 一条例外: Stash 若在"正在编辑的那一枚"之后才轮到自己 (它压着那一枚), 它的快照里就带着
+            // 那一枚, 抄进参考面就又长出第二份。这种时候宁可少这一层 —— 它抄的那些像素本来也已经逐层
+            // 各自进来了 —— 也不许"两个标记"这件事发生。
+            if (dirRef && !guidance && !(isStashLayer(l) && dirPainted)) {
+                if (l.id === dirRef.skipLayer && l.visible && l.img) {
+                    const rec = attrRecord(dirRef.skipRef);
+                    const was = rec ? rec.enabled : null;
+                    if (rec) rec.enabled = false;       // 折缓存签名认 enabled:这一趟折出"没有它"的那张
+                    drawLayer(l, dirRef.ctx);
+                    if (rec) rec.enabled = was;         // 原样放回 —— 主画布那一趟已经把带面的版本折好缓存
+                } else drawLayer(l, dirRef.ctx);
+            }
+            if (dirRef && l.id === dirRef.skipLayer && l.visible && l.img) dirPainted = true;
             if (guidance) belowGuide += stashLayerKey(l); else belowWork += stashLayerKey(l);
         }
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
@@ -9350,8 +9374,9 @@ function addDirectionLayer(box) {
     syncDirectionBuffer(l);
     setMode('transform');                          // renders the list + canvas
     layoutCanvas();
-    setStatus(box ? `Direction Layer added — ${box.w} × ${box.h}, pointing ${Math.round(l.dir.yaw)}° / ${Math.round(l.dir.pitch)}°`
-                  : `Direction Layer added — full canvas, pointing ${Math.round(l.dir.yaw)}° / ${Math.round(l.dir.pitch)}°`);
+    const dirE = geoEuler(l.dir.rotation);
+    setStatus(box ? `Direction Layer added — ${box.w} × ${box.h}, pointing ${Math.round(dirWrap360(dirE.yaw))}° / ${Math.round(dirE.pitch)}°`
+                  : `Direction Layer added — full canvas, pointing ${Math.round(dirWrap360(dirE.yaw))}° / ${Math.round(dirE.pitch)}°`);
     pushHistory();
     return l;
 }
@@ -11403,8 +11428,9 @@ window.addEventListener('keydown', e => {
     // so unlike B/E/G they need no selected layer.
     if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
     if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('lasso'); return; }
-    // D opens the Direction window. It is a settings window, not a canvas mode — the layers are
-    // made from the Add menu — so it only folds the panel out, exactly like clicking its header.
+    // D opens the Direction window — the family window for the canvas-relative 3D objects
+    // (Direction / Point / Ray / Plane). It is a settings window, not a canvas mode — the steps are
+    // made from each strip's + menu — so it only folds the panel out, exactly like clicking its header.
     // (Alt+D is not used: Chrome eats it for the address bar before the page ever sees it.)
     if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
@@ -12265,6 +12291,11 @@ async function buildCudBlob() {
     const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
         ? await addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
         : null;
+    // 链接读的"最终图":保存那一刻画布上的合成(特效链已烘、视图变换不在位图里)直接入档 ——
+    // cud 图层的像素就是它,读取端不必再猜链怎么跑。旧工作台读新文件不受影响(它不认这个字段,
+    // 照旧逐层折);读老文件没有这张图,也退回逐层折叠。
+    render();
+    const compositeAsset = await addAsset('composite', blendCanvas, canvasW, canvasH);
     const header = {
         format: 'cud',
         version: CUD_VERSION,
@@ -12275,6 +12306,7 @@ async function buildCudBlob() {
         selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
         tools: captureCudTools(),
         maskLayer: { visible: maskLayer.visible, surface: maskSurface },
+        composite: compositeAsset,
         layers: records,
         // The Guidance card is a projection of the stacks that are already in this file, so it must
         // not travel as a workspace image too — reloading would resurrect it as a plain entry and
@@ -12586,14 +12618,14 @@ function attrChainsOf(rec) {
 // 面在文件里是一个资产 id,回来才是画布;链还要过 restoreFxMaps,绑定才接得上这次导入的那份像素。
 // 指不到像素的面 attribute 就地丢掉 (旧文件里那枚空的 Mask 与"没有 Mask"同义),链则连空容器一起留 ——
 // 那是"这条链清过但还挂着"的意思,S5 的 UI 要读它。
-async function resolveRecAttrs(rec, blobs, cache) {
+async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
     const out = [];
     for (const a of recAttrEntries(rec)) {
         const key = a.id || null;        // v4 及更早的条目没有标签,那它们本来就该各解一份
         if (cache && key && cache.has(key)) { out.push(cache.get(key)); continue; }
         let e = null;
         if (a.type === 'effects') {
-            e = { id: key, type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs) };
+            e = { id: key, type: 'effects', chain: await restoreFxMaps(normalizeEffects(a.chain), blobs, mapKeys) };
         } else if (a.desc !== undefined && a.desc !== null) {
             // 生成器 (文字/方向):入档的是描述符,回来原样接住 —— 面由 sync 在第一次折叠前重算。
             e = { id: key, type: a.type, desc: a.desc, box: a.box || null, ownsGrid: !!a.ownsGrid };
@@ -12804,12 +12836,37 @@ function cudDocFor(link) { return link ? (cudDocs.get(link) || null) : null; }
 function isCudLayer(l) { return !!l && !!l.cud && !l.isMaskLayer; }
 function cudLayerLinked(l) { return isCudLayer(l) && !!cudDocFor(l.cud.link); }
 
+// 每条链接一份「资产 id → 贴图池 key」的备忘:折叠一份存档时,链上绑定的贴图按它去重,同一份
+// 深度/法线图跨多次刷新只进本地池一次 (见 fx/maps.js 的 restoreFxMaps)。
+const cudMapKeys = new Map();
+function cudMapKeysFor(link) {
+    if (!link) return undefined;
+    let m = cudMapKeys.get(link);
+    if (!m) { m = new Map(); cudMapKeys.set(link, m); }
+    return m;
+}
+
 // The file's own working stack, bottom → top, painted into a canvas at the resolution it was saved
-// with. Guidances are skipped because a cud layer stands for the CONTEXT image (what #blendCanvas
-// holds and the backend composites), and the Mask singleton is a data channel, never a picture.
-// `layerSource`/`drawLayer` are the two functions this mirrors pixel for pixel; it cannot call them
-// because they paint the ACTIVE document's canvases.
-async function flattenCudStack(header, blobs) {
+// with. This is the picture a linked cud row draws, so it must be the picture the file's own
+// #blendCanvas holds: every layer goes through the REAL strip fold — fxDropStrip runs each effects
+// chain on the WebGL engine (with its bound maps), decals sit over, masks cut, and the generator
+// faces (text / direction) re-render from their descriptors via syncGeneratorFaces. Guidances are
+// skipped because a cud layer stands for the CONTEXT image, and the Mask singleton is a data
+// channel, never a picture.
+// A live layer can't be reused (layerSource/drawLayer paint the ACTIVE document's canvases), so
+// each file record gets a pseudo layer built exactly the way openCudDocument builds rows:
+// resolveRecAttrs → adoptAttrPayloads puts the attrs on the global record table, sync + fold read
+// them back through attrRecordsOf. Those records are transient — pruneAttrs lets go of them again.
+// `mapKeys` (per source link) keeps bound map assets from re-entering the local pool on every
+// save-driven refresh of the same file.
+async function flattenCudStack(header, blobs, mapKeys) {
+    // 新存档自带最终合成图(保存那一刻 #blendCanvas 的像素,链已烘)——链接的像素就是它,
+    // 直接解资产返回。这张图缺席(老文件)才走下面的逐层折叠退路。
+    const comp = header && header.composite;
+    if (comp !== null && comp !== undefined) {
+        const blob = blobs.get(comp);
+        if (blob) return blobToCanvas(blob);
+    }
     const c = (header && header.canvas) || {};
     if (!Number(c.w) || !Number(c.h)) throw new Error('this .cud has no canvas to flatten');
     const cw = Math.min(MAX_CANVAS_SIDE, Math.max(1, Math.round(Number(c.w))));
@@ -12817,54 +12874,84 @@ async function flattenCudStack(header, blobs) {
     const out = document.createElement('canvas');
     out.width = cw; out.height = ch;
     const ctx = out.getContext('2d');
-    const scratch = document.createElement('canvas');
     const recs = Array.isArray(header.layers) ? header.layers : [];
+    const attrDecoded = new Map();      // v5 表键 → 解好的值条目 (共指的面只解一次)
+    const attrAdopted = new Map();      // adoptAttrPayloads 的分组标签 → 立好的记录
     for (let i = recs.length - 1; i >= 0; i--) {
         const rec = recs[i];
         if (!rec || rec.visible === false || rec.stack === GUIDANCE_STACK) continue;
-        if (rec.image === null || rec.image === undefined) continue;    // a blank layer paints nothing
-        if (!blobs.has(rec.image)) continue;
-        let src = await blobToCanvas(blobs.get(rec.image));
-        const w = src.width, h = src.height;
-        // attribute 按文件里那份顺序过一遍:贴片往画面上盖,蒙版往画面上乘。链在这里不算 ——
-        // 这份合成只是那条链接的预览,特效链要 WebGL,而它画的从来就是"链跑之前"的那张图。
-        let sc = null;
-        for (const a of recAttrEntries(rec)) {
-            if (a.type === 'effects') continue;
-            const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
-            if (!blob) continue;
-            const s = await blobToCanvas(blob);
-            if (!sc) {
-                if (scratch.width !== w || scratch.height !== h) { scratch.width = w; scratch.height = h; }
-                sc = scratch.getContext('2d');
-                resetCtx(sc);
-                sc.clearRect(0, 0, w, h);
-                sc.drawImage(src, 0, 0, w, h);
+        if (rec.stash) continue;        // Stash 复读的是它下面的合成 —— 自底向上折到它时那句话已经画在画布上了
+        let src = null;
+        if (rec.image === null || rec.image === undefined) {
+            // 生成器行没有自己的像素 (底就是一张空白格子):按文件里的格子重建,面由 sync 现算。
+            if (!rec.raster) {
+                const pw = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec.pw) || 1)));
+                const ph = Math.max(1, Math.min(MAX_CANVAS_SIDE, Math.round(Number(rec.ph) || 1)));
+                src = makeBlankCanvas(pw, ph);
             }
-            if (a.type === 'decal') { sc.drawImage(s, 0, 0, w, h); continue; }    // the decal sits over the image
-            sc.globalCompositeOperation = 'destination-in';
-            sc.drawImage(s, 0, 0, w, h);
-            sc.globalCompositeOperation = 'source-over';
+        } else {
+            const blob = blobs.get(rec.image);
+            if (blob) src = await blobToCanvas(blob);
         }
-        if (sc) src = scratch;
-        if (rec.raster) { ctx.drawImage(src, 0, 0); continue; }          // buffer IS the canvas, 1:1
+        if (!src) continue;
+        const payload = {
+            text: rec.text || null, dir: rec.dir || null,      // 老文件的图层字段,merge 补进 strip
+            attrs: await resolveRecAttrs(rec, blobs, attrDecoded, mapKeys),
+        };
+        mergeLegacyGenerators(payload);
         const tr = rec.transform || {};
-        const tw = (Number.isFinite(tr.w) ? tr.w : 1) * cw;
-        const th = (Number.isFinite(tr.h) ? tr.h : 1) * ch;
+        const pseudo = {
+            id: rec.id, name: rec.name || 'Layer',
+            visible: true, fragment: !!rec.fragment, raster: !!rec.raster,
+            transform: rec.raster
+                ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
+                : {
+                    cx: Number.isFinite(tr.cx) ? tr.cx : 0.5,
+                    cy: Number.isFinite(tr.cy) ? tr.cy : 0.5,
+                    w: Number.isFinite(tr.w) ? tr.w : 1,
+                    h: Number.isFinite(tr.h) ? tr.h : 1,
+                    rotation: Number.isFinite(tr.rotation) ? tr.rotation : 0,
+                },
+            img: src, src: '',
+            attrs: adoptAttrPayloads(payload.attrs, attrAdopted),
+            fxCache: null,
+        };
+        // 折叠要读 canvasW/H:ownsGrid 的生成器按它定格子,Canvas 对齐的贴图按它算落点 —— 这里
+        // 折的是**文件自己的画布**,不是宿主当下的。swap 只罩住下面这段同步代码,所有 await 都
+        // 在窗口之外,不会撞上别的渲染帧。
+        const saveW = canvasW, saveH = canvasH, saveBypass = effectsBypass;
+        canvasW = cw; canvasH = ch;
+        effectsBypass = false;          // 存进图层的像素不受宿主「看加特效前原样」开关的影响
+        let folded = src;
+        try {
+            syncGeneratorFaces(pseudo);
+            const n = nativeSize(pseudo.img);
+            if (n.w && n.h) {
+                const surface = fxScratch(n.w, n.h);
+                if (fxDropStrip(pseudo, surface, pseudo.img, -1, FX_CUT_ALL)) folded = surface;
+            }
+        } finally {
+            canvasW = saveW; canvasH = saveH; effectsBypass = saveBypass;
+        }
+        if (rec.raster) { ctx.drawImage(folded, 0, 0); continue; }          // buffer IS the canvas, 1:1
+        const tw = pseudo.transform.w * cw;
+        const th = pseudo.transform.h * ch;
         ctx.save();
-        ctx.translate(Number.isFinite(tr.cx) ? tr.cx * cw : cw / 2, Number.isFinite(tr.cy) ? tr.cy * ch : ch / 2);
-        ctx.rotate(Number.isFinite(tr.rotation) ? tr.rotation : 0);
-        ctx.drawImage(src, -tw / 2, -th / 2, tw, th);
+        ctx.translate(pseudo.transform.cx * cw, pseudo.transform.cy * ch);
+        ctx.rotate(pseudo.transform.rotation);
+        ctx.drawImage(folded, -tw / 2, -th / 2, tw, th);
         ctx.restore();
     }
+    // 伪图层的 attribute 记录到此没人指了,当场放手 —— 表只给活图层当视图用 (attr/core.js)。
+    pruneAttrs();
     return out;
 }
 
 // One read of the bytes, both answers: the canvas is the layer's new pixels, the PNG data URL is its
 // `src` — and comparing that string is how "did this actually change?" gets decided for free.
-async function flattenCudBytes(buffer) {
+async function flattenCudBytes(buffer, mapKeys) {
     const { header, blobs } = decodeCud(buffer);
-    const canvas = await flattenCudStack(header, blobs);
+    const canvas = await flattenCudStack(header, blobs, mapKeys);
     return { canvas, src: canvas.toDataURL('image/png') };
 }
 
@@ -12895,7 +12982,7 @@ async function refreshCudLinks(doc, blob) {
     const hits = linkedCudRecords(cudLinkKey(doc));
     if (!hits.length) return { updated: 0, failed: 0 };
     let flat = null;
-    try { flat = await flattenCudBytes(await blob.arrayBuffer()); }
+    try { flat = await flattenCudBytes(await blob.arrayBuffer(), cudMapKeysFor(cudLinkKey(doc))); }
     catch (err) { return { updated: 0, failed: hits.length }; }
     const touched = new Set();
     for (const rec of hits) {
@@ -12949,7 +13036,7 @@ async function addCudLayer(doc, stack) {
     setStatus('Reading the linked project…');
     try {
         const file = await docToFile(doc);
-        const flat = await flattenCudBytes(await file.arrayBuffer());
+        const flat = await flattenCudBytes(await file.arrayBuffer(), cudMapKeysFor(key));
         addLayer({
             name: baseName(file.name),
             src: flat.src,
@@ -12992,7 +13079,7 @@ async function refreshCudLayerFromFile(l) {
     cudBusy = true; syncIoUI();
     try {
         const file = await docToFile(doc);
-        const flat = await flattenCudBytes(await file.arrayBuffer());
+        const flat = await flattenCudBytes(await file.arrayBuffer(), cudMapKeysFor(cudLinkKey(doc)));
         if (flat.src === l.src) { setStatus(`${l.cud.name || 'That project'} has not changed since this layer was written`); return false; }
         l.src = flat.src;
         l.img = flat.canvas;
@@ -13028,7 +13115,7 @@ async function relinkCudLayer(l) {
     cudBusy = true; syncIoUI();
     try {
         const file = await docToFile(doc);
-        const flat = await flattenCudBytes(await file.arrayBuffer());
+        const flat = await flattenCudBytes(await file.arrayBuffer(), cudMapKeysFor(key));
         l.cud = { link: key, name: file.name || '', path: doc.path || '' };
         l.src = flat.src;
         l.img = flat.canvas;
