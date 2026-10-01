@@ -192,6 +192,16 @@ const App: React.FC = () => {
 
   useEffect(() => { refreshStaging(); }, [refreshStaging]);
 
+  // 后端图池的一切变更走同一条 promise 链：打开/切换工程会整池 replace 上传（每条都是
+  // 几 MB 的 base64，服务端逐张 decode 要跑好几秒），这条链若和拖文件、guidance 卡、
+  // 单条移除并行跨连接竞，后端最后留下的池会取决于完成顺序而不是发起顺序。串行化保证
+  // 「最后发起的 = 最后落地的」。
+  const stagingChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueStaging = useCallback((op: () => Promise<unknown>) => {
+    const run = () => op().catch(() => {});
+    stagingChainRef.current = stagingChainRef.current.then(run, run);
+  }, []);
+
   // Push staging list changes into the Blend workbench (its strip renders from this mirror).
   useEffect(() => {
     blendIframeRef.current?.contentWindow?.postMessage({
@@ -609,7 +619,7 @@ const App: React.FC = () => {
         }
       } else if (event.data?.type === 'blend-staging-changed') {
         // 工作区条目变了（工作台上传/删除）：重拉列表，effect 会自动镜像回工作台。
-        refreshStaging();
+        queueStaging(() => refreshStaging());
       } else if (event.data?.type === 'blend-action') {
         // Blend workbench action: blend (archive) / tag / detailer
         handleBlendAction(event.data);
@@ -654,32 +664,41 @@ const App: React.FC = () => {
         pushProcessors();
         seedBlendCanvas();
       } else if (event.data?.type === 'blend-staging-upload') {
-        // 工作台拖文件/CUD 导入恢复：批量进图池（后端建 tensor 引用），随后镜像回工作台。
+        // 工作台拖文件/Processor 产出：批量追加进图池。replace=true 是工作台换工程的
+        // 整池换水（.cud 导入或 tab 激活）：后端先清可见条目、再按 ids 原样落回，
+        // 这时空 images 也要发 —— 那是一次纯清空。
         const images: string[] = Array.isArray(event.data.images) ? event.data.images : [];
         const names: string[] = Array.isArray(event.data.names) ? event.data.names : [];
-        if (!images.length) return;
-        fetch('/api/staging', {
+        const ids: string[] = Array.isArray(event.data.ids) ? event.data.ids : [];
+        const replace = event.data.replace === true;
+        if (!images.length && !replace) return;
+        queueStaging(() => fetch('/api/staging', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ images, names, name: 'Loaded' }),
-        }).then(() => refreshStaging()).catch(() => {});
+          body: JSON.stringify({
+            images, names,
+            ...(ids.length ? { ids } : {}),
+            ...(replace ? { replace: true } : {}),
+            name: 'Loaded',
+          }),
+        }).then(() => refreshStaging()));
       } else if (event.data?.type === 'blend-guidance-card') {
         // Guidances 栈的那一张总卡（Layers 合成 + 整个 guidance 栈）。后端按保留 id
         // staging_guidance 原地换像素 —— 工作区永远只有这一张；image 为空 = 撤回它
         // （栈被清空 / 全隐藏）。条目是真 staging：可删、可 <image_id:…> 引用、可当参考图。
-        fetch('/api/guidance_card', {
+        queueStaging(() => fetch('/api/guidance_card', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image: event.data.image || null, name: event.data.name || 'Guidance' }),
-        }).then(() => refreshStaging()).catch(() => {});
+        }).then(() => refreshStaging()));
       } else if (event.data?.type === 'blend-staging-remove') {
         const sid = typeof event.data.id === 'string' ? event.data.id : '';
         if (!sid) return;
-        fetch('/api/staging_remove', {
+        queueStaging(() => fetch('/api/staging_remove', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: sid }),
-        }).then(() => refreshStaging()).catch(() => {});
+        }).then(() => refreshStaging()));
       } else if (event.data?.type === 'blend-log') {
         // 工作台画布上那颗常显的状态药丸撤掉了：它每次说话改发一条到这里，攒成 Log 面板
         // （Context 标题行 → Log）。kind 只可能是 '' / 'success' / 'error'，别的按普通行显示。
@@ -690,7 +709,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, pushLog, pushProcessors]);
+  }, [config, blockSets, activeBlockSetId, handleBlendAction, handleLayerGenerate, handleProcessorRun, seedBlendCanvas, refreshStaging, queueStaging, pushLog, pushProcessors]);
 
   // Push preset (tab) changes to the Blend workbench as they happen. The iframe only asks for
   // init once, on load — without this effect a tab created / renamed / deleted / switched after
