@@ -5,6 +5,9 @@
 // 光照:切线空间法线图(uv 基:y 向上,因为上传时已 UNPACK_FLIP_Y;平坦处 = (0.5,0.5,1))做
 // Lambert 漫反射 + Blinn-Phong 高光。绿色通道的朝向按贴图族选(OpenGL 朝上 / DirectX 朝下)。
 // 灯的颜色逐通道作用在漫反射与高光项上 —— 从前它只进高光项,所以 Spec=0 时整盏灯看着是白色的。
+// 那束光只有一个来源:姿态四元数把 +X 送到哪儿 (fxLightVec)。绑了 Direction attribute 就是它自己的
+// 四元数,没绑是把 Angle/Elev 两颗旋钮折成同一枚 —— 于是漫反射、朝向门、迈步、抽头吃同一份,
+// 「画面亮在哪一面」和「影子拖向哪一边」不可能两说。
 //
 // 阴影 = 一张从深度图 + 法线图重建出来的 shadow mask,与光照**分家**跑几趟:
 //   1) 烘高度场:深度图按 Near 极性 + Align 基写进一张 mip 纹理,一个贴图像素之内取四角最大值 ——
@@ -404,28 +407,44 @@ function lightRetire(gl, ent) {
     lightFree.push(ent);
 }
 
-// ---- 光向的引用 (Direction attribute) ----
-// 绑定的那枚记录还在 (表里找得到、类型对、描述符带姿态) 就由它出光向。箭头读作**光行进方向**
-// (光源在箭头反侧),所以朝光方位 = yaw + 180°;elev 直接取 pitch 钳进 Elev 的定义域。两个体系
-// 同基 (js/direction.js:14:Yaw 0° = 画布右、90° = 画布下,与 Lighting 同一条规矩),只差这一个
-// 语义翻转。记录悬空 = 回 null,特效退回手动旋钮值,不让一个删掉的 attribute 把灯灭掉。
+// ---- 光向:一枚四元数出全部 ----
+// 光的向量只有一个来源 —— 姿态四元数把 +X 送到哪儿 (js/direction.js 的基:x、z 铺在画布平面上,
+// y 抬离画布朝镜头)。绑了 Direction 就用它自己的四元数,没绑就把 Angle/Elev 两颗旋钮折成同一枚
+// (qFromEuler),于是两条路共用一次 qApply,不再各写一遍三角式去重画同一个方向。
+// 落进 shader 的基与 fxglDirUV 同规矩 (uv 的 y 朝上):v = (f.x, -f.z, f.y)。
+// 实测它与老写法在同一条地面上等价 (gl-probe/light_vec_gl.mjs:八个方位量到的来向与旋钮面值差 ≤1.2°,
+// roll 不动这束光),差别全在仰角的定义域:老写法先钳进 [0,90] 再取 sin/cos,方向被压到画布平面之下时
+// 拍平成贴着地面那一根;四元数照原样把灯放到平面下,漫反射随之压暗,而影子那一侧由 fxglLight 那道闸
+// 明说「埋在地里,谁也没被挡」(高度场里「高」= 朝镜头,一条往下走的光线一步都迈不出去)。
+// 记录悬空 = 退回旋钮值,不让一个删掉的 attribute 把灯灭掉。
 // 绑定生效时 Angle/Elev 两行整个不出现 (params 的 when),要改方向去 Direction 工具。
-function fxLightDir(effect) {
+function fxLightPose(effect, p) {
     const ref = effect && effect.params && effect.params.dirRef;
     const r = attrRecord(ref);
-    if (!r || r.type !== 'direction' || !r.desc || !r.desc.rotation) {
-        console.log('[dirLight] no follow — ref:', ref, 'record:', r ? r.type + '/desc?' : 'null (fallback to manual knobs)');
-        return null;
+    if (r && r.type === 'direction' && r.desc && r.desc.rotation) {
+        const eu = geoEuler(r.desc.rotation);
+        const out = { q: r.desc.rotation, angle: dirWrap360(eu.yaw),
+            elev: Math.max(-90, Math.min(90, eu.pitch)), bound: true };
+        console.log('[dirLight] follow ref:', ref, 'yaw->angle:', out.angle.toFixed(2),
+            'pitch->elev:', eu.pitch.toFixed(2), '->', out.elev.toFixed(2));
+        return out;
     }
-    const e = geoEuler(r.desc.rotation);
-    const out = { angle: dirWrap360(e.yaw + 180), elev: Math.max(0, Math.min(90, e.pitch)) };
-    console.log('[dirLight] follow ref:', ref, 'yaw->angle:', out.angle.toFixed(2), 'pitch->elev:', e.pitch.toFixed(2), '->', out.elev.toFixed(2));
-    return out;
+    console.log('[dirLight] no follow — ref:', ref, 'record:', r ? r.type + '/desc?' : 'null (fallback to manual knobs)');
+    const src = p || (effect && effect.params) || {};
+    const angle = +src.angle || 0, elev = +src.elev || 0;
+    return { q: qFromEuler(angle, elev, 0), angle, elev, bound: false };
 }
-// 用角统一走这里:绑定了用 yaw/pitch,没绑定用手动旋钮。四个消费点 (高度场键、烘场、迈步、走线)
-// 必须读同一份,否则「画面亮在哪一面」和「影子拖向哪一边」会两说。
-function fxLightAE(effect, p) {
-    return fxLightDir(effect) || { angle: p.angle, elev: p.elev };
+// 光向量:四元数唯一的产物。uL (两处)、迈步方向、仰角抽头全部由它出,所以「画面亮在哪一面」和
+// 「影子拖向哪一边」不可能两说。
+function fxLightVec(effect, p) {
+    const f = qApply(fxLightPose(effect, p).q, { x: 1, y: 0, z: 0 });
+    return { x: f.x, y: -f.z, z: f.y };
+}
+// 绑定那枚还在就由它出读数 (Elev 现在可以是负的:灯在画布平面之下),否则交回手动旋钮。
+// 面板读数与缓存戳只认这一份,`bound` 为假时说「这两颗旋钮就是画面用的那一份」。
+function fxLightDir(effect) {
+    const s = fxLightPose(effect, null);
+    return s.bound ? { angle: s.angle, elev: s.elev } : null;
 }
 
 // 高度场由什么决定:两张图的像素身份(深度图供高度、法线图供那道朝向门)、深度铺在谁身上
@@ -434,7 +453,7 @@ function fxLightAE(effect, p) {
 // 方向键读的是**解析后**的角:转一下绑定的 Direction,姿态值换、键跟着换,金字塔当场重烘。
 function lightFieldKey(effect, l, p) {
     const align = p.align === 'Canvas' ? 'C' : 'L';
-    const d = fxLightAE(effect, p);
+    const d = fxLightPose(effect, p);
     return `${fxMapIdentity(effect, 'depth')}+${fxMapIdentity(effect, 'map')}`
         + `|${align}|${align === 'C' ? fxMapBoxStamp(l) : '-'}`
         + `|${fxgl.w}x${fxgl.h}|${d.angle}|${d.elev}|${p.near}|${p.green}`;
@@ -470,15 +489,14 @@ function lightBakeField(gl, p, effect, l, fk) {
     if (!img) return false;
     const n = nativeSize(img);
     const fr = fxMapFrame(p.align, l);
-    const A = fxLightAE(effect, p);
-    const a = A.angle * Math.PI / 180, e = A.elev * Math.PI / 180, ce = Math.cos(e);
+    const v = fxLightVec(effect, p);
     lightBindLevel(0);
     fxglRunPass({ fb: lightPyr.fb }, fxgl.progs.lightBake, pr => {
         fxglBindTex(pr, 'uDepth', fxgl.texMap2, 0);
-        // 朝向门读的是**本层网格**上的法线图 (与漫反射那一趟同一个 vUV,不吃 Align);光线方向与
-        // fxglLight 里那条 uL 逐字同式,否则「门开在哪个朝向上」和「画面亮在哪一面」会两说。
+        // 朝向门读的是**本层网格**上的法线图 (与漫反射那一趟同一个 vUV,不吃 Align);那束光就是
+        // fxglLight 用的同一条 fxLightVec,所以「门开在哪个朝向上」和「画面亮在哪一面」不可能两说。
         fxglBindTex(pr, 'uNormal', fxgl.texMap, 1);
-        gl.uniform3f(fxglU(pr, 'uL'), Math.cos(a) * ce, -Math.sin(a) * ce, Math.sin(e));
+        gl.uniform3f(fxglU(pr, 'uL'), v.x, v.y, v.z);
         gl.uniform1f(fxglU(pr, 'uGreen'), p.green === 'down' ? -1 : 1);
         gl.uniform2f(fxglU(pr, 'uMapU'), fr.u[0], fr.u[1]);
         gl.uniform2f(fxglU(pr, 'uMapV'), fr.v[0], fr.v[1]);
@@ -527,17 +545,21 @@ function lightShadowMask(gl, p, effect, l) {
     if (!lightBakeField(gl, p, effect, l, lightFieldKey(effect, l, p))) return null;
     const ent = lightTakeTarget(gl, fxgl.w, fxgl.h);
     if (!ent.ok) { lightRetire(gl, ent); return null; }
-    const A0 = fxLightAE(effect, p);
-    const a = A0.angle * Math.PI / 180;
-    // 光源向量与迈步用同一条基(画布角 0° = 右、90° = 下,uv 的 y 朝上故取负,与 fxglDirUV 同规矩)。
-    const dx = Math.cos(a) * (fxgl.w / Math.max(fxgl.h, 1)), dy = -Math.sin(a);
+    const V = fxLightVec(effect, p);
+    // 迈步方向 = 光向在画布平面上的投影 (x 乘宽高比换成「图高」单位,与 fxglDirUV 同一条 y 朝上的基)。
+    // 它与老写法 cos/sin 那条差一个正因子 cos(elev),归一化后同一条 —— 换掉三角式不是为了这里,
+    // 是为了仰角不再被钳在 [0,90]:见 fxLightPose。
+    const dx = V.x * (fxgl.w / Math.max(fxgl.h, 1)), dy = V.y;
     const dl = Math.hypot(dx, dy) || 1;
     const scale = Math.max(p.scale, 1) / 100;
+    // 仰角从同一条向量读回来:水平投影的长就是 cos(elev),所以 atan2(z, 水平) 与旋钮那颗面值同源。
+    const elev0 = Math.atan2(V.z, Math.hypot(V.x, V.y)) * 180 / Math.PI;
     // 灯盘的角半径 = Size(°),σ 取它的半 ⇒ 抽头正好铺在 Elev ± Size 上。仰角钳在 [0,90]:那两条
     // 越过界的(夜侧 / 正上方)并到同一根光线上,权重相加、总和仍是 1,所以钳位不用重新归一。
+    // 中心仰角为负的那一路走不到这儿 —— 灯在平面之下无从迈步,fxglLight 那道闸把它整条影子收掉了。
     const sigma = Math.max(0, p.size) / 2;
     for (let i = 0; i < FX_LIGHT_TAPS.length; i++) {
-        const e = Math.min(90, Math.max(0, A0.elev + FX_LIGHT_TAPS[i][0] * sigma)) * Math.PI / 180;
+        const e = Math.min(90, Math.max(0, elev0 + FX_LIGHT_TAPS[i][0] * sigma)) * Math.PI / 180;
         // 横向走一个图高抬 tan(Elev) 个「世界距离」,而一个满幅深度 = scale 个图高 ⇒ 除回来。
         lightSlopeK[i] = Math.tan(e) / scale;
     }
@@ -612,18 +634,34 @@ function lightSmoothMask(gl, p, effect, l, src) {
 
 function fxglLight(col, p, effect, l) {
     const gl = fxgl.gl;
-    const AE = fxLightAE(effect, p);
-    const a = AE.angle * Math.PI / 180, e = AE.elev * Math.PI / 180, ce = Math.cos(e);
+    const V = fxLightVec(effect, p);
     const rgb = fxHexToRgb01(p.color);
     const tint = fxHexToRgb01(p.tint);
     // 副槽就绪(引擎按 needsMap2When 决定它有没有像素)且强度 > 0 才走线,否则连步都不迈。
     const march = fxgl.hasMap2 === 1 && p.shadow > 0;
     // 影子开着一张图都没来 = 光照照旧、阴影没有。这一下必须写在链上,不许看着像「阴影怎么没生效」。
     if (p.shadow > 0 && !march) fxgl.skip = 'Lighting: no depth map for shadows';
-    let mask = march ? lightShadowMask(gl, p, effect, l) : null;
+    // 两种姿态下这条线根本不该迈,各自说一句写在链上:
+    //   · 灯压在画布平面之下 (只有绑定的 Direction 出得来,旋钮的 Elev 定义域是 [0,90])。这张高度场里
+    //     「高」= 朝镜头那侧,所以往平面下走的光线一步就埋在地里:谁也没被它照亮,也就没有东西挡得住它。
+    //     画面该暗 = 漫反射跟着 uL.z<0 自己暗下去 (实测环均值 145→132),而不是再拿 Tint 乘一遍黑 (那会
+    //     掉到 20 上下)。老写法先把仰角钳进 [0,90] 再取 sin/cos,这一档被拍平成贴地的掠射,于是在整个
+    //     覆盖区里量出一条 59px 偏移、重心 8621 的影 (gl-probe/light_vec_gl.mjs 的 before 那一列;那一趟
+    //     还叠着「绑定方位反 180°」那条旧错,所以它落在 270.7° 上)。
+    //   · 灯正对画面 (Elev=90,旋钮顶格)。方位在这条姿态下不存在,水平投影 (V.x, V.y) 是零向量,归一化
+    //     它 = 说一个不存在的方向,迈下去也只是原地问自己脚下那一块。实测这一档两种写法**画面无差别**
+    //     (圆丘 Cast 60/1024、棋盘高度场三趟环均值都 217,与 89° 同亮),所以这道闸买的不是像素,是省下
+    //     一条根本不存在的迈步,加上把「为什么没有影子」说一句,别看着像 Shadow 那颗钮没对上。
+    const noCast = V.z < -1e-6 ? 'below' : (Math.hypot(V.x, V.y) < 1e-4 ? 'head-on' : '');
+    let mask = march && !noCast ? lightShadowMask(gl, p, effect, l) : null;
+    if (march && noCast) {
+        fxgl.skip = noCast === 'below'
+            ? 'Lighting: light below the plane, nothing casts a shadow'
+            : 'Lighting: light along the canvas normal, no direction to march';
+    }
     // 该走的线走了却烘不出面(金字塔建不起来 / 深度图读不出像素 / framebuffer 不完整)= 一样要说,
     // 不许让「有图但没影」看着像「影子的强度没对上」。
-    if (march && !mask) fxgl.skip = 'Lighting: shadow mask could not be built';
+    else if (march && !mask) fxgl.skip = 'Lighting: shadow mask could not be built';
     const dst = fxgl.off[1 - col.slot];
     fxglRunPass(dst, fxgl.progs.light, pr => {
         fxglBindTex(pr, 'uTex', fxgl.off[col.slot].tex, 0);
@@ -631,9 +669,9 @@ function fxglLight(col, p, effect, l) {
         // 没有 mask 就不绑它:uShadow 已经归 0,那一支不会进采样器。绑一张没分配过层级的纹理会让整次
         // drawArrays 报 INVALID_OPERATION,那才是「整条链不出图」而不是「没影子」。
         if (mask) fxglBindTex(pr, 'uShadowMask', mask, 2);
-        // 光朝向量的基与法线图一致:画布角(0° 右、90° 下)映到 uv 时 y 取负,和 fxglDirUV 同一条
-        // 规矩;z = sin(elev) 朝屏幕外,elev=90° 即正对打光。
-        gl.uniform3f(fxglU(pr, 'uL'), Math.cos(a) * ce, -Math.sin(a) * ce, Math.sin(e));
+        // 光向 = 姿态四元数把 +X 送到的地方,基与法线图一致 (fxLightVec:画布角 0° 右、90° 下,uv 的 y
+        // 取负;z 朝屏幕外,z<0 即灯在平面之下)。烘场那趟的朝向门吃的是同一条向量。
+        gl.uniform3f(fxglU(pr, 'uL'), V.x, V.y, V.z);
         gl.uniform3f(fxglU(pr, 'uColor'), rgb[0], rgb[1], rgb[2]);
         gl.uniform3f(fxglU(pr, 'uTint'), tint[0], tint[1], tint[2]);
         gl.uniform1f(fxglU(pr, 'uIntensity'), p.intensity / 100);
