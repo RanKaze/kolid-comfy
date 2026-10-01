@@ -272,7 +272,8 @@ function fxStepEl(l, r, effect) {
         dragFx = null;
     });
     chip.addEventListener('dragover', ev => {
-        const side = dropSide(ev, chip, dragFx, l.id, effect.id, 'y');
+        if (!dragFx || String(dragFx.layerId) !== String(l.id)) return;   // 链只在同层的本容器里重排
+        const side = dropSide(ev, chip, dragFx, effect.id, 'y');
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
@@ -282,7 +283,8 @@ function fxStepEl(l, r, effect) {
     });
     chip.addEventListener('dragleave', () => chip.classList.remove('drop-before', 'drop-after'));
     chip.addEventListener('drop', ev => {
-        const side = dropSide(ev, chip, dragFx, l.id, effect.id, 'y');
+        if (!dragFx || String(dragFx.layerId) !== String(l.id)) return;   // 同上:外来层的 fx 不落
+        const side = dropSide(ev, chip, dragFx, effect.id, 'y');
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();

@@ -19,9 +19,11 @@ defineAttrType({
     // 这里只说读取的形状。
     legacyGet: () => true,
     // 面入档:bake 是唯一真相,snapshot/clone/load 都带上 (与 generator 默认"面不入档"相反)。
-    snap: r => ({ desc: null, box: null, ownsGrid: true, sceneUid: r.sceneUid || null, surface: r.surface || null }),
-    load: raw => ({ desc: null, ownsGrid: true, sceneUid: raw.sceneUid || null, surface: raw.surface || null }),
-    clone: (r, dup) => ({ desc: null, ownsGrid: true, sceneUid: r.sceneUid || null, surface: r.surface ? dup(r.surface) : null }),
+    // ownsGrid 记实际值:老宿主迁来的那批是 true,跨层搬走的那枚被 moveAttrToLayer 清成 false ——
+    // 写死的话一次快照往返就把它翻回老宿主的形状。
+    snap: r => ({ desc: null, box: null, ownsGrid: !!r.ownsGrid, sceneUid: r.sceneUid || null, surface: r.surface || null }),
+    load: raw => ({ desc: null, ownsGrid: raw.ownsGrid !== false, sceneUid: raw.sceneUid || null, surface: raw.surface || null }),
+    clone: (r, dup) => ({ desc: null, ownsGrid: !!r.ownsGrid, sceneUid: r.sceneUid || null, surface: r.surface ? dup(r.surface) : null }),
     // 有墨 = 烘过一次。没烘过的记录是"参数还在、像素没有"——Generate 通道把它当不存在。
     ink: r => !!(r.surface && r.surface.width && r.surface.height),
     title: (r, l) => attrStepNote('3D', r, l)

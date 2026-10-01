@@ -242,6 +242,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
 .layer-thumb.attr-chip.drop-before::before { left: 0; }
 .layer-thumb.attr-chip.drop-after::after { right: 0; }
+/* 跨层拖到条带空隙 / `+` 上 = 追加尾步;整条条带亮一道内缘当落点反馈。 */
+.layer-row-thumbs.drop-tail { box-shadow: inset 0 0 0 1px rgba(0,122,255,0.6); border-radius: 6px; }
 /* 启用角标:启用时什么都不显示 —— chip 本身就是"这一步在跑"的样子。停用时整颗 chip 罩一枚
    居中的叉 (红,与告警色同一支),内容暗淡 (.attr-off) 照旧,两笔一起读才分得清"停用的面"
    和"没画的面"。badge 元素常驻,只有 .attr-off 时才显形。 */
@@ -5306,7 +5308,8 @@ function attrChip(l, r) {
         openAttrMenu(l, r, ev.clientX, ev.clientY);
     });
     // 拖动重排:这一枚自己就是拖拽源,所以 dragstart 必须停在这里 —— 让它冒到行上,行的那套 (图层
-    // 重排序) 会把它当成整层被拖走。落点只在这一条条带里,所以跨层/跨栈一律不参与。
+    // 重排序) 会把它当成整层被拖走。缝位落点认跨层:drop 时按源层分流 (moveAttr 同层重排 /
+    // moveAttrToLayer 搬层),空条带的落点在 chips 容器上 (见下一处)。
     el.addEventListener('dragstart', ev => {
         ev.stopPropagation();
         attrDrag = { layerId: l.id, ref: r.id };
@@ -5319,7 +5322,7 @@ function attrChip(l, r) {
         attrDrag = null;
     });
     el.addEventListener('dragover', ev => {
-        const side = dropSide(ev, el, attrDrag, l.id, r.id);
+        const side = dropSide(ev, el, attrDrag, r.id);
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
@@ -5329,13 +5332,19 @@ function attrChip(l, r) {
     });
     el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
     el.addEventListener('drop', ev => {
-        const side = dropSide(ev, el, attrDrag, l.id, r.id);
+        const side = dropSide(ev, el, attrDrag, r.id);
         if (!side) return;
         ev.preventDefault();
         ev.stopPropagation();
         el.classList.remove('drop-before', 'drop-after');
         const moved = attrRecord(attrDrag.ref);
-        if (moveAttr(l, attrDrag.ref, r.id, side === 'after')) {
+        const src = getLayer(attrDrag.layerId);
+        if (src && src !== l) {
+            if (moveAttrToLayer(src, l, attrDrag.ref, r.id, side === 'after')) {
+                setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${l.name}」— it is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length}`);
+                pushHistory();
+            }
+        } else if (moveAttr(l, attrDrag.ref, r.id, side === 'after')) {
             setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length} — it runs there`);
             pushHistory();
         }
@@ -5766,6 +5775,31 @@ function renderStackList(listEl, stack) {
         chips.className = 'layer-row-thumbs';
         chips.appendChild(canvasThumb);
         for (const el of attrStripEls(l)) chips.appendChild(el);
+        // 条带空隙与 `+` 按钮也是落点:跨层拖到这里 = 追加为这一层的最后一步 (空条带唯一的缝)。
+        // 同层拖到缝里没有可说的位置,原样放走。chip 自己的 dragover/drop 会 stopPropagation,
+        // 事件能到这里的只剩空隙、`+` 和空条带。
+        chips.addEventListener('dragover', ev => {
+            if (!attrDrag) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.dataTransfer.dropEffect = 'move';
+            chips.classList.add('drop-tail');
+        });
+        chips.addEventListener('dragleave', () => chips.classList.remove('drop-tail'));
+        chips.addEventListener('drop', ev => {
+            chips.classList.remove('drop-tail');
+            if (!attrDrag) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            const src = getLayer(attrDrag.layerId);
+            const moved = attrRecord(attrDrag.ref);
+            if (src && src !== l && moveAttrToLayer(src, l, attrDrag.ref, null, false)) {
+                setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${l.name}」— it is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length}`);
+                pushHistory();
+                renderLayerList();
+                render();
+            }
+        });
 
         // 特效容器、文字/方向/3D 的编辑 lane 摊在 head **之上**:它们属于这个图层,但执行发生在图层
         // 把自己的像素交出去之前/由 spec.lane 自己说话。同一种挂了两枚容器时,条带上越靠左 (越先执行)
@@ -12227,7 +12261,7 @@ async function buildCudBlob() {
                     // 整枚不入档 (与"没有像素的面不入档"同一条)。
                     if (r.type === '3d') {
                         e = (r.surface && r.surface.width && r.surface.height)
-                            ? { id: r.id, type: '3d', surface: await addAsset('3d', r.surface, r.surface.width, r.surface.height) }
+                            ? { id: r.id, type: '3d', ownsGrid: !!r.ownsGrid, surface: await addAsset('3d', r.surface, r.surface.width, r.surface.height) }
                             : null;
                     } else {
                         e = r.desc ? { id: r.id, type: r.type, desc: Object.assign({}, r.desc),
@@ -12631,7 +12665,11 @@ async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
             e = { id: key, type: a.type, desc: a.desc, box: a.box || null, ownsGrid: !!a.ownsGrid };
         } else {
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
-            if (blob) e = { id: key, type: a.type, surface: await blobToCanvas(blob) };
+            if (blob) {
+                e = { id: key, type: a.type, surface: await blobToCanvas(blob) };
+                // 3d 的 ownsGrid 随档走 (老文件没有这个字段 = 老宿主的 true);mask/decal 不认它。
+                if (a.ownsGrid !== undefined) e.ownsGrid = a.ownsGrid !== false;
+            }
         }
         if (!e) continue;
         if (cache && key) cache.set(key, e);
