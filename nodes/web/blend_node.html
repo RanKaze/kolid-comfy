@@ -11614,6 +11614,9 @@ function setCurrentDocument(handle, name) {
 let documents = [];
 let docSeq = 0;
 let activeDoc = null;         // the entry whose state the globals currently hold
+// 图池是文档态（staging 跟着 .cud 走）：这一枚记下宿主/后端当前的池属于哪个 uid。
+// uid 没变就不必重传整池；boot 那一次激活特殊 —— 池是宿主镜像进来的，不是我们推上去的。
+let stagingPoolOwner = null;
 let pendingCloseUid = null;   // the tab waiting behind the unsaved-changes prompt
 // Restoring a project re-applies its tool settings, and some of those controls report back through
 // the same paths a real edit uses (the Extra Prompt box rebuilds its DOM, say). That must not be
@@ -11725,16 +11728,32 @@ function switchDocument(uid) {
 // to the user mid-Load must not be refused by the very lock that Load takes.
 function activateDocument(entry) {
     if (!entry || entry === activeDoc) return false;
-    if (activeDoc) { activeDoc.ctx = captureContext(); stashHistory(activeDoc); }
+    // 开机那趟没有「上一份池」可捕获，也不该向宿主上传任何东西：boot 文档就继承后端
+    // 当下这份池（宿主随后会镜像过来）。判别只在这一刻成立 —— 关掉最后一个 tab 的
+    // 兜底新建同样 activeDoc===null，但那时池易主已经发生过了（stagingPoolOwner 非空）。
+    const bootSwap = activeDoc === null && stagingPoolOwner === null;
+    if (activeDoc) { activeDoc.ctx = captureContext(); activeDoc.staging = stagingItems; stashHistory(activeDoc); }
     activeDoc = entry;
     undoStack = entry.undo || []; redoStack = entry.redo || []; lastActionKey = entry.lastActionKey || null;
     setCurrentDocument(entry.doc, entry.doc ? entry.name : '');
     docSwapping = true;
     try {
+        // 换池要在 restoreState 之前落定：applyCudTools 会把 Extra Prompt 的 <image_id:>
+        // 序列重建成 chip，chip 能不能解出图读的就是这份 stagingItems。
+        // 场景 tab 没有自己的池（它是宿主文档跳出来的），进出不换池、也不惊动宿主。
+        if (!bootSwap && !isSceneDoc(entry)) {
+            stagingItems = (entry.staging || []).filter(s => s && s.src);
+            renderStaging();
+            renderProcessorRows();      // Processor 的输入下拉跟着图池走，与 'blend-staging' 镜像同款
+        }
         restoreState(entry.ctx, { document: true });
         applyCudTools(entry.ctx.tools);
     } finally {
         docSwapping = false;
+    }
+    if (!isSceneDoc(entry) && (bootSwap || stagingPoolOwner !== entry.uid)) {
+        stagingPoolOwner = entry.uid;
+        if (!bootSwap) postStagingSync();
     }
     renderDocTabs();
     return true;
@@ -12715,17 +12734,11 @@ async function openCudDocument(file, doc) {
             (x, chain) => Math.max(x, chain.reduce((y, e) => Math.max(y, (e && e.id) | 0), 0)), 0)), fxSeq);
         const ctx = cudContext(header, records, maskSurface);
 
-        // 工作区恢复：条目直接同步到宿主（后端张量由宿主重新上传建立）。
-        if (Array.isArray(header.staging)) {
-            stagingItems = header.staging.filter(s => s && s.src);
-            renderStaging();
-            window.parent.postMessage({
-                type: 'blend-staging-upload',
-                images: stagingItems.map(s => s.src),
-                names: stagingItems.map(s => s.name),
-            }, '*');
-        }
+        // 工作区恢复：文件里的池原样挂到新建条目上，由 activateDocument 换给全局并按
+        // 保留 id 整池同步宿主（见 postStagingSync）。这里不再直接上传 —— 追加会把
+        // 上一个工程的图留进新工程。
         const entry = createDocument((doc && doc.name) || file.name, doc || null, ctx, false);
+        entry.staging = Array.isArray(header.staging) ? header.staging.filter(s => s && s.src) : [];
         activateDocument(entry);
         if (!ctx.canvasW || !ctx.canvasH) applyCanvasSize();   // no usable size in the file — derive it
         setStatus(`Opened ${entry.name} · ${records.length} layer${records.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} unreadable skipped` : ''}`, 'success');
@@ -13079,6 +13092,19 @@ function incomingItems(d) {
 // 列表由宿主同步（'blend-staging'）；上传/移除通过宿主走后端，保持单一写入口。
 // 点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>（无焦点则追加末尾）。
 let stagingItems = [];
+
+// 换工程后的整池同步：replace 模式下宿主会先清后按 ids 落回，条目保住自己在 .cud 里的
+// 编号 —— Extra Prompt chip（chipSrcForId）与 fx 绑定贴图（fxMapSource）都按这个号解析，
+// 重新 mint 会让它们集体指错图。
+function postStagingSync() {
+    window.parent.postMessage({
+        type: 'blend-staging-upload',
+        replace: true,
+        images: stagingItems.map(s => s.src),
+        names: stagingItems.map(s => s.name),
+        ids: stagingItems.map(s => s.id),
+    }, '*');
+}
 
 // ==================== Extra Prompt：文字与图片 chip 混排 ====================
 // 输入框是 contenteditable：<image_id:xxx> 显示成一张**不可编辑**的缩略图 chip，

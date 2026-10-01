@@ -1881,14 +1881,28 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/staging':
                 # 工作区批量上传：{images: [dataURL, ...], name?} → 逐张解码存 tensor。
                 # 返回新条目（含 id），调用方立刻能把 id 设成 Ref Image / 加为图层。
+                # replace=True = 整池换水（staging 是 .cud 的文档态）：先逐掉全部**可见**条目，
+                # 再按 ids 原样落回 —— Extra Prompt chip 与 fx 绑定都按编号引用图池，换 mint
+                # 会让它们指错图。hidden 条目（run 的 seed、Processor 输入/产出）是会话的
+                # 在途数据，不属于任何文档，换水不动它。空 images + replace = 纯清空。
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
+                    replace = bool(body.get('replace'))
+                    ids = body.get('ids') if isinstance(body.get('ids'), list) else None
+                    if replace:
+                        for old in list(inst.staging_items):
+                            if not old.get('hidden'):
+                                inst._staging_tensors.pop(old['id'], None)
+                        inst.staging_items = [s for s in inst.staging_items if s.get('hidden')]
                     images = body.get('images')
                     if not isinstance(images, list) or not images:
                         images = [body.get('image', '')]
                     images = [u for u in images if isinstance(u, str) and u]
                     if not images:
+                        if replace:
+                            self._send_json({'success': True, 'added': []})
+                            return
                         self._send_json({'success': False, 'error': 'No image data'}, 400)
                         return
 
@@ -1901,14 +1915,26 @@ class SnapshotDetailerSamplerServer:
                             print(f"[Staging] skipped image #{idx + 1}: {dec_err}")
                             continue
                         chosen = names[idx] if (names and idx < len(names) and names[idx]) else None
-                        base_name = chosen or body.get('name') or 'Loaded'
-                        name = base_name if len(images) == 1 else f"{base_name} #{len(inst.staging_items) + 1}"
+                        sid = (ids[idx] if (replace and ids and idx < len(ids)
+                                           and isinstance(ids[idx], str) and ids[idx]) else None)
+                        if replace:
+                            # 换水落回文档自带条目：名字逐条原样用，不再加 " #N" 后缀。
+                            name = chosen or body.get('name') or 'Loaded'
+                        else:
+                            base_name = chosen or body.get('name') or 'Loaded'
+                            name = base_name if len(images) == 1 else f"{base_name} #{len(inst.staging_items) + 1}"
                         # hidden=True（Processor 的输入等）只进图池不进条带 —— 跟接口产出同款。
-                        sid = inst.add_staging(tensor, name=name, hidden=bool(body.get('hidden')))
+                        sid = inst.add_staging(tensor, name=name, hidden=bool(body.get('hidden')), sid=sid)
                         added.append({'id': sid, 'name': name, 'src': dataurl})
                     if not added:
                         self._send_json({'success': False, 'error': 'All images failed to decode'}, 400)
                         return
+                    if replace:
+                        # 计数器顶到现存最大数字号之后，之后新加的才不会撞文档带回来的号。
+                        for s in inst.staging_items:
+                            m = re.match(r'staging_(\d+)$', s['id'])
+                            if m:
+                                inst._staging_counter = max(inst._staging_counter, int(m.group(1)))
                     self._send_json({'success': True, 'added': added})
                 except Exception as e:
                     import traceback
