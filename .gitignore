@@ -54,4 +54,5 @@ data/switch/
 
 .codely/**
 .codely-cli/**
+.workbuddy/**
 CODELY.md
