@@ -452,7 +452,7 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
         clr.textContent = '×';
         clr.style.fontSize = '14px';
         clr.style.lineHeight = '1';
-        clr.title = 'Unbind this direction — the Angle/Elev knobs above go back to their own values';
+        clr.title = 'Unbind this direction — the manual Angle/Elev knobs come back';
         const show = () => {
             const ref = get();
             const where = ref ? fxDirSourceName(ref) : null;
@@ -480,22 +480,10 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     inp.min = def.min;
     inp.max = def.max;
     inp.step = def.step;
-    // follows: 'dir' = 绑定的 Direction attribute 生效时这颗旋钮只读:显示解析出的 yaw/pitch (⤳ 标
-    // 来源),拖动无门 —— 要改方向去 Direction 工具 (2.b 的拍板)。没绑定就是普通旋钮。
-    const followed = def.follows === 'dir' ? fxLightDir(effect) : null;
-    inp.value = followed ? followed[def.key] : get();
-    inp.disabled = !!followed;
-    if (followed) row.classList.add('fx-follow');
+    inp.value = get();
     const span = document.createElement('span');
     // def.fmt 可选:自己格式化读数(指数旋钮要显示 2ⁿ 这种「值不是面值」的数),给了就不走 值+unit。
     const show = () => {
-        if (def.follows === 'dir') {
-            const f = fxLightDir(effect);
-            inp.disabled = !!f;
-            row.classList.toggle('fx-follow', !!f);
-            if (f) { inp.value = f[def.key]; span.textContent = `${Math.round(f[def.key])}${def.unit || ''} \u2933`; return; }
-            inp.value = get();
-        }
         span.textContent = def.fmt ? def.fmt(Number(inp.value)) : `${inp.value}${def.unit || ''}`;
     };
     updaters.push(show);

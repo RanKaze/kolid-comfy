@@ -405,10 +405,11 @@ function lightRetire(gl, ent) {
 }
 
 // ---- 光向的引用 (Direction attribute) ----
-// 绑定的那枚记录还在 (表里找得到、类型对、描述符带姿态) 就由它出光向:angle = yaw、elev = pitch
-// 钳到 Elev 的定义域 —— 两个体系早已同基 (js/direction.js:14:Yaw 0° = 画布右、90° = 画布下,与
-// Lighting 同一条规矩),所以是恒等映射,不是换算。记录悬空 = 回 null,特效退回手动旋钮值,不让一个
-// 删掉的 attribute 把灯灭掉。旋钮在跟随时只读 (fx/ui.js 认 follows),要改方向去 Direction 工具。
+// 绑定的那枚记录还在 (表里找得到、类型对、描述符带姿态) 就由它出光向。箭头读作**光行进方向**
+// (光源在箭头反侧),所以朝光方位 = yaw + 180°;elev 直接取 pitch 钳进 Elev 的定义域。两个体系
+// 同基 (js/direction.js:14:Yaw 0° = 画布右、90° = 画布下,与 Lighting 同一条规矩),只差这一个
+// 语义翻转。记录悬空 = 回 null,特效退回手动旋钮值,不让一个删掉的 attribute 把灯灭掉。
+// 绑定生效时 Angle/Elev 两行整个不出现 (params 的 when),要改方向去 Direction 工具。
 function fxLightDir(effect) {
     const ref = effect && effect.params && effect.params.dirRef;
     const r = attrRecord(ref);
@@ -417,7 +418,7 @@ function fxLightDir(effect) {
         return null;
     }
     const e = geoEuler(r.desc.rotation);
-    const out = { angle: dirWrap360(e.yaw), elev: Math.max(0, Math.min(90, e.pitch)) };
+    const out = { angle: dirWrap360(e.yaw + 180), elev: Math.max(0, Math.min(90, e.pitch)) };
     console.log('[dirLight] follow ref:', ref, 'yaw->angle:', out.angle.toFixed(2), 'pitch->elev:', e.pitch.toFixed(2), '->', out.elev.toFixed(2));
     return out;
 }
@@ -658,9 +659,9 @@ defineEffect({
         // Direction attribute 的引用 (fxDirModal 全项目检索后选一枚 guid)。只存一句引用,不存角度
         // —— 与贴图槽同一条规矩;悬空 (那枚被删了) 就回退手动旋钮值。
         { key: 'dirRef', label: 'Direction', kind: 'dir', def: null },
-        // follows: 'dir' = 绑定生效时这两颗旋钮只读 (2.b:显示 yaw/pitch,要改去 Direction 工具)。
-        { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°', follows: 'dir' },
-        { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°', follows: 'dir' },
+        // 绑定生效时这两颗旋钮整个不出现 —— 方向归 Direction attribute 管,面板里留着只会两说。
+        { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°', when: p => !p.dirRef },
+        { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°', when: p => !p.dirRef },
         { key: 'intensity', label: 'Light', min: -100, max: 100, step: 1, def: 50, unit: '%' },
         { key: 'spec', label: 'Spec', min: 0, max: 100, step: 1, def: 25, unit: '%' },
         { key: 'gloss', label: 'Gloss', min: 0, max: 100, step: 1, def: 60, unit: '%' },
