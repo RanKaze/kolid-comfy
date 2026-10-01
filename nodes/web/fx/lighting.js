@@ -48,8 +48,8 @@
 // [到遮挡物的距离, 影长] 里恰好落着一格,影长落在两格之间时整段影子被截在上一格那里 —— 两条都在真机上量过。
 // 只改 RGB:高光加在色上,阴影乘在色上,贴图本身永远不渗进画面。
 const FX_LIGHT_MARCH_MAX = 512;        // 走线循环的迭代上界。迭代数 = ceil(R/块宽),块宽地板在 2px(lod ≥ 1)
-                                       // 而 R ≤ Cast ≤ 1024px,所以 512 就是几何上限 —— Steps 再大也只是把
-                                       // dt0 压进块宽地板,块宽不再变,迭代数停在 512。
+                                       // 而 R ≤ Cast ≤ 1024px,所以 512 就是几何上限;顶档 2⁹ 的 dt0 正好落进
+                                       // 块宽地板,迭代数走满这一条。
 const FX_LIGHT_SMOOTH_MAX = 32;        // 引导平滑的半径上界(像素):半径按块宽算,Steps 拉满时块只剩几个像素
 const FX_LIGHT_CACHE_MAX = 4;          // 按参数缓存的 shadow mask 留几份(拖滑块每帧重建时用回收池,不 new 纹理)
 // 仰角抽头:σ=1 的高斯落在 [-2σ,-σ,0,σ,2σ],把它钉在「截到 ±Size」上 ⇒ σ = Size/2。
@@ -426,9 +426,9 @@ function lightMaskKey(effect, l, p) {
 
 // Steps 旋钮是**指数 n**,步数 = 2^n:迈步选级那道 ceil(log2(dt0·图高)) 本来就只认 2 的幂,
 // 块宽只在 2 的幂上换挡,中间的档位只多花抽样、画面一模一样 —— 所以旋钮直接做成 n,滑一档 = 块宽减半。
-// n ≥ 9 之后 dt0 落进金字塔的地板(lod ≥ 1 ⇒ 块 ≥ 2px),块宽不再变,n=9 与 n=16 烘出来是同一张 mask。
+// 顶档 2⁹ 把 dt0 正好压到金字塔的地板(lod ≥ 1 ⇒ 块 ≥ 2px),再高也不会有更细的块,所以收到 9 为止。
 function lightSteps(p) {
-    const n = Math.max(2, Math.min(16, p.steps | 0));
+    const n = Math.max(2, Math.min(9, p.steps | 0));
     return 1 << n;
 }
 // 旋钮读数显示 2ⁿ 而不是面值 —— 面值 65536 在一行里既宽又难对档,上标又不会读成「n 的 2 次方」。
@@ -624,7 +624,7 @@ defineEffect({
     needsMap: 'Normal',
     needsMap2: { key: 'depth', role: 'Depth' },
     needsMap2When: p => p.shadow > 0,
-    desc: 'Relights the layer through a bound tangent-space normal map — a diffuse term around the light direction plus an optional specular highlight, both taking the light’s own colour. Bind a depth map and the same light is rebuilt into a shadow mask: the map becomes a height field, a ray runs from each pixel toward the light at tan(Elev), and whatever stands higher than that ray cuts the light off, so the shadow stretches Δh·Scale/tan(Elev) out of the occluder instead of stopping at a fixed pixel length. Only a face that looks toward the light is allowed to occlude, and the height field is a per-channel maximum so that gate survives every mip level. The penumbra is geometry, not a blur: Size is the light’s angular radius in degrees, so the march is a fan of five rays spanning Elev ± Size with Gaussian weights — the shadow is hard where it leaves the occluder and the band widens the further it runs, roughly 4·Length·tan(Size) at Elev=45°; the tilt read from the normal map stretches or shrinks that band on slopes. Size=0 collapses the fan to one ray = a hard-edged shadow, and it never smears the shadow back onto the occluder’s own lit face. The height field is a nearest-sampled max pyramid, so the raw mask carries square stair-steps at the block period; after the march a depth-and-normal-guided bilateral smoothing (separable, horizontal then vertical) averages it only across taps that share the surface — a tap is rejected when its normal folds away from the centre pixel’s, or when its depth jumps past a tolerance that grows with the radius — so contact edges and the occluder’s lit face survive untouched. Smooth sets that radius as a percentage of the block size the march actually used, so it tightens on its own as Steps rises; Smooth=0 skips the pass. Scale says how much distance the map’s whole depth range is worth, in image heights — it is the one knob that makes the length mean anything. Align says whether the depth map is measured against the whole canvas or against this layer alone (the normal map always lies on this layer). Cast only caps how far the ray may travel. Steps is an exponent — the march takes 2^Steps equal hops — because the height field’s block size only changes at powers of two, intermediate counts buy nothing but redundant samples; 2^9 is the ceiling, the pyramid’s floor keeps blocks at 2px past it. Shadow=0 means no ray is marched at all. Colour only: the maps never show through, nothing moves, alpha untouched.',
+    desc: 'Relights the layer through a bound tangent-space normal map — a diffuse term around the light direction plus an optional specular highlight, both taking the light’s own colour. Bind a depth map and the same light is rebuilt into a shadow mask: the map becomes a height field, a ray runs from each pixel toward the light at tan(Elev), and whatever stands higher than that ray cuts the light off, so the shadow stretches Δh·Scale/tan(Elev) out of the occluder instead of stopping at a fixed pixel length. Only a face that looks toward the light is allowed to occlude, and the height field is a per-channel maximum so that gate survives every mip level. The penumbra is geometry, not a blur: Size is the light’s angular radius in degrees, so the march is a fan of five rays spanning Elev ± Size with Gaussian weights — the shadow is hard where it leaves the occluder and the band widens the further it runs, roughly 4·Length·tan(Size) at Elev=45°; the tilt read from the normal map stretches or shrinks that band on slopes. Size=0 collapses the fan to one ray = a hard-edged shadow, and it never smears the shadow back onto the occluder’s own lit face. The height field is a nearest-sampled max pyramid, so the raw mask carries square stair-steps at the block period; after the march a depth-and-normal-guided bilateral smoothing (separable, horizontal then vertical) averages it only across taps that share the surface — a tap is rejected when its normal folds away from the centre pixel’s, or when its depth jumps past a tolerance that grows with the radius — so contact edges and the occluder’s lit face survive untouched. Smooth sets that radius as a percentage of the block size the march actually used, so it tightens on its own as Steps rises; Smooth=0 skips the pass. Scale says how much distance the map’s whole depth range is worth, in image heights — it is the one knob that makes the length mean anything. Align says whether the depth map is measured against the whole canvas or against this layer alone (the normal map always lies on this layer). Cast only caps how far the ray may travel. Steps is an exponent — the march takes 2^Steps equal hops — because the height field’s block size only changes at powers of two, intermediate counts buy nothing but redundant samples; 2^9 tops out at the pyramid’s 2px block floor. Shadow=0 means no ray is marched at all. Colour only: the maps never show through, nothing moves, alpha untouched.',
     params: [
         { key: 'map', kind: 'map', def: null },
         { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°' },
@@ -650,9 +650,9 @@ defineEffect({
         // 块锯齿的保边平滑:半径钉在「走线实际用的那级块宽」上,Smooth 只是它的百分比闸;0 = 整道不跑。
         { key: 'smooth', label: 'Smooth', min: 0, max: 100, step: 1, def: 100, unit: '%', when: p => p.shadow > 0 },
         { key: 'cast', label: 'Cast', min: 16, max: 1024, step: 8, def: 1024, unit: 'px', when: p => p.shadow > 0 },
-        // 指数 n,步数 = 2^n(块宽只在 2 的幂上换挡,见 lightSteps):滑一档 = 步数与块宽同时减半。
-        // 读数走 fmt 显示成 2ⁿ —— 面板默认的「值+unit」只能出 7² 这种反着读的样子。
-        { key: 'steps', label: 'Steps', min: 2, max: 16, step: 1, def: 4, fmt: n => `2${lightSup(n)}`, when: p => p.shadow > 0 },
+        // 指数 n,步数 = 2^n(块宽只在 2 的幂上换挡,见 lightSteps):滑一档 = 步数与块宽同时减半;
+        // 顶档 2⁹ = 块宽地板。读数走 fmt 显示成 2ⁿ —— 面板默认的「值+unit」只能出 7² 这种反着读的样子。
+        { key: 'steps', label: 'Steps', min: 2, max: 9, step: 1, def: 4, fmt: n => `2${lightSup(n)}`, when: p => p.shadow > 0 },
         { key: 'green', label: 'Green', kind: 'enum', options: ['up', 'down'], def: 'up' },
     ],
     // 参数换形状:旧存档里 Cast 是「走线总长(1..64px)」,和它现在的意思(推进上限)没有忠实换算,
