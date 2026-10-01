@@ -134,6 +134,20 @@ function fxIconSvg(icon) {
             + '<path d="M3.7 4.5h4.4M3.7 9.5h4.4" opacity="0.5"/>'
             + '<rect x="5.9" y="6.1" width="6.3" height="1.9" rx="0.5" fill="currentColor" fill-opacity="0.35"/></svg>';
     }
+    if (icon === 'noise') {
+        // 一块底上撒满大小、深浅都不一样的杂粒:'split' 那三颗大点是"分色",这里是一把细碎的
+        // 随机偏移 —— 点越小越密,读法越是"哪儿都有的杂色"。
+        return '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">'
+            + '<rect x="1.9" y="1.9" width="10.2" height="10.2" rx="1.6"/>'
+            + '<circle cx="4.6" cy="4.3" r="0.75" fill="currentColor" stroke="none" opacity="0.85"/>'
+            + '<circle cx="8.3" cy="3.4" r="0.55" fill="currentColor" stroke="none" opacity="0.6"/>'
+            + '<circle cx="10.2" cy="5.9" r="0.8" fill="currentColor" stroke="none" opacity="0.75"/>'
+            + '<circle cx="6.5" cy="6.4" r="0.5" fill="currentColor" stroke="none" opacity="0.5"/>'
+            + '<circle cx="3.6" cy="7.9" r="0.55" fill="currentColor" stroke="none" opacity="0.6"/>'
+            + '<circle cx="8.9" cy="8.6" r="0.7" fill="currentColor" stroke="none" opacity="0.85"/>'
+            + '<circle cx="5.7" cy="10.3" r="0.75" fill="currentColor" stroke="none" opacity="0.65"/>'
+            + '<circle cx="10.4" cy="10.8" r="0.5" fill="currentColor" stroke="none" opacity="0.5"/></svg>';
+    }
     if (icon === 'split') {
         // 点阵的底线上三颗点各自偏开、各自朝不同方向:分色点阵读出来是「一个边, 三颗点三个位置」,
         // 而不是 chromatic 那「一个边, 三条竖线」。

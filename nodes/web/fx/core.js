@@ -45,7 +45,7 @@
 // 绑定贴图在 fx/maps.js,行/弹窗在 fx/ui.js。加一类特效 = 写一个文件 + 在页面里加一行 <script src>。
 
 // 注册表由 fx/<effect>.js 的 defineEffect() 填。picker 里的顺序 = 注册顺序,所以页面的 <script>
-// 列表按组排 (实际注册序:Shadow → Blur → Pixelate → Color → Distort → Grunge → Light → Glitch)。字段约定:
+// 列表按组排 (实际注册序:Shadow → Blur → Pixelate → Color → Distort → Noise → Grunge → Light → Glitch)。字段约定:
 //   type/label/group/icon/desc/params —— 注册数据 (参数行、默认值、白名单迁移都读它)
 //   needsMap: 'Depth' | 'Normal' | 'Lookup' | 'Noise' —— 主绑定槽 params.map,引擎上传到 fxgl.texMap
 //   needsMapWhen(p) —— 可选:该模式是否真的需要主槽贴图。注册了 needsMap 却没写这句,就等于「随时都得有图」。
