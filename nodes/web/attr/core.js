@@ -151,6 +151,25 @@ function lastAttr(l, type) {
     return hit;
 }
 function attrRecord(ref) { return ref ? attrRecords.get(ref) || null : null; }
+// 有没有特效**引用**这一枚记录 (params 里存着它的 guid,如 Lighting 的 dirRef)。引用的形式只有一种
+// —— 字符串参数恰是记录的 guid —— 所以按值扫一遍就覆盖了现有与将来的所有绑定,新依赖不必来注册。
+// 只扫活图层:跨文档的绑定在对方文档激活时才落地成活链,那时自然扫得到。
+function attrHasEffectRef(r) {
+    if (!r || typeof layers === 'undefined') return false;
+    for (const l of layers) {
+        if (l.isMaskLayer) continue;
+        for (const rec of attrRecordsOf(l)) {
+            if (!rec.chain) continue;
+            for (const e of rec.chain) {
+                if (!e || !e.params) continue;
+                for (const k in e.params) {
+                    if (e.params[k] === r.id) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
 // 停用的一步 = 数据原地留着,折叠跳过它 (fx/gl.js 的 fxDropStrip 与 attrInks 都认这一句)。
 // 缺席也算开:老快照、克隆路上没带这个字段的记录不会被误停。
 function attrEnabled(r) { return !r || r.enabled !== false; }

@@ -497,17 +497,23 @@ function drawGeometryWorld(ctx, W, H, state, opts) {
 
         // 箭头本体 (对象颜色) + 头部两片倒钩, 都在屏幕上量, 所以粗细与盒子同步缩放。
         // direction/ray 是全长姿态箭; plane 的是法线刻箭 (短, 从盘心立起来, 盘的朝向靠它读)。
+        // direction 的杆穿过对象点往**负方向**也延伸一整段 (方向是根轴线, 两头都能读, 光源在
+        // 反侧一眼可见); ray 是射线只有去程, plane 法线保持单侧。杆与头比三向轴把手只粗一档。
         const v = f;
         const L = kind === 'plane' ? DIR_POSE_R * 0.42 : DIR_POSE_R;
+        const back = kind === 'direction' ? L : 0;
         const tip = dirProject({ x: pos.x + v.x * L, y: pos.y + v.y * L, z: pos.z + v.z * L }, R);
         const len = Math.hypot(tip.x - ps.x, tip.y - ps.y) || 1;
         const ux = (tip.x - ps.x) / len, uy = (tip.y - ps.y) / len;
-        const head = Math.max(6, R * 0.2);
+        const head = Math.max(4.5, R * 0.13);
         const shaftEnd = { x: tip.x - ux * head * 0.62, y: tip.y - uy * head * 0.62 };
+        const tail = back > 0
+            ? dirProject({ x: pos.x - v.x * back, y: pos.y - v.y * back, z: pos.z - v.z * back }, R)
+            : ps;
         ctx.strokeStyle = col;
-        ctx.lineWidth = lw * 1.5;
+        ctx.lineWidth = lw;
         ctx.beginPath();
-        ctx.moveTo(ps.x, ps.y);
+        ctx.moveTo(tail.x, tail.y);
         ctx.lineTo(shaftEnd.x, shaftEnd.y);
         ctx.stroke();
         const px2 = -uy, py2 = ux;
@@ -832,8 +838,11 @@ function dirRefTarget() {
     if (!toolWindows.has('directionSection')) return null;
     const t = dirGizmoTarget();
     if (!t || !canvasW || !canvasH) return null;
-    // 拖把手期间不重抄: 那时唯一在变的就是这一枚自己的像素, 而参考图本来就把它排除在外。
-    if (dirDrag) return null;
+    // 拖把手期间不重抄 —— 旧前提是"那时唯一在变的就是这一枚自己的像素,而参考图本来就把它排除在外",
+    // 抄出来逐位相同。特效可以引用这一枚之后 (Lighting 绑 direction) 这话不再成立:折叠结果跟着姿态
+    // 实时变,冻结会把参考图钉死在拖前那一帧,而且松手也不补 (endDirGizmoDrag 不跑 render)。所以有
+    // 依赖时拖动期间照常重抄;没人引用它才保留原来的省帧冻结。
+    if (dirDrag && !attrHasEffectRef(t.r)) return null;
     if (!dirRefCanvas) { dirRefCanvas = document.createElement('canvas'); dirRefCtx = dirRefCanvas.getContext('2d'); }
     if (dirRefCanvas.width !== canvasW || dirRefCanvas.height !== canvasH) {
         dirRefCanvas.width = canvasW; dirRefCanvas.height = canvasH;
