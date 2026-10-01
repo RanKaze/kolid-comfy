@@ -441,15 +441,63 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
         show();
         return row;
     }
+    if (def.kind === 'dir') {
+        // 这一行的形状与贴图槽同一套 (按钮写当前绑定 + 行尾 × 清除),绑的是一枚 Direction attribute
+        // 的 guid —— openFxDirModal 全项目检索后点名。悬空时按钮转红,与缺图的读法同词。
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fx-map-btn';
+        const clr = document.createElement('button');
+        clr.className = 'icon-btn';
+        clr.textContent = '×';
+        clr.style.fontSize = '14px';
+        clr.style.lineHeight = '1';
+        clr.title = 'Unbind this direction — the Angle/Elev knobs above go back to their own values';
+        const show = () => {
+            const ref = get();
+            const where = ref ? fxDirSourceName(ref) : null;
+            btn.textContent = ref ? (where || 'missing direction') : 'not bound';
+            btn.classList.toggle('unset', !ref);
+            btn.classList.toggle('gone', !!ref && !where);
+            btn.title = ref ? (where ? `${where} — click to pick another` : 'The bound direction attribute is gone — click to pick another')
+                : 'Point this light with a Direction attribute — pick one from the project';
+            clr.style.display = ref ? '' : 'none';
+        };
+        updaters.push(show);
+        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect); });
+        clr.addEventListener('click', ev => {
+            ev.stopPropagation();
+            effect.params[def.key] = null;
+            fxStructuralChange(l);
+        });
+        row.appendChild(btn);
+        row.appendChild(clr);
+        show();
+        return row;
+    }
     const inp = document.createElement('input');
     inp.type = 'range';
     inp.min = def.min;
     inp.max = def.max;
     inp.step = def.step;
-    inp.value = get();
+    // follows: 'dir' = 绑定的 Direction attribute 生效时这颗旋钮只读:显示解析出的 yaw/pitch (⤳ 标
+    // 来源),拖动无门 —— 要改方向去 Direction 工具 (2.b 的拍板)。没绑定就是普通旋钮。
+    const followed = def.follows === 'dir' ? fxLightDir(effect) : null;
+    inp.value = followed ? followed[def.key] : get();
+    inp.disabled = !!followed;
+    if (followed) row.classList.add('fx-follow');
     const span = document.createElement('span');
     // def.fmt 可选:自己格式化读数(指数旋钮要显示 2ⁿ 这种「值不是面值」的数),给了就不走 值+unit。
-    const show = () => { span.textContent = def.fmt ? def.fmt(Number(inp.value)) : `${inp.value}${def.unit || ''}`; };
+    const show = () => {
+        if (def.follows === 'dir') {
+            const f = fxLightDir(effect);
+            inp.disabled = !!f;
+            row.classList.toggle('fx-follow', !!f);
+            if (f) { inp.value = f[def.key]; span.textContent = `${Math.round(f[def.key])}${def.unit || ''} \u2933`; return; }
+            inp.value = get();
+        }
+        span.textContent = def.fmt ? def.fmt(Number(inp.value)) : `${inp.value}${def.unit || ''}`;
+    };
     updaters.push(show);
     inp.addEventListener('input', () => { show(); set(Number(inp.value), false); });
     inp.addEventListener('change', () => set(Number(inp.value), true));
@@ -673,6 +721,110 @@ fxMapFileInput.addEventListener('change', () => {
 });
 fxMapModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxMapModal(); }
+});
+
+// ---- 绑定方向 (Direction attribute picker) ----
+// 与贴图 modal 同一套骨架,检索的是**全项目**:每个文档每一层的 Direction attribute 都是一张卡
+// (平面方向的那批特效不参与 —— 只有 Lighting 这种 3D 光向引用它)。选回来的是记录 guid;那枚记录
+// 被删掉时 fxLightDir 回 null,灯退回手动旋钮值,不让悬空引用静默灭灯。
+const fxDirModalEl = document.getElementById('fxDirModal');
+const fxDirGroupsEl = document.getElementById('fxDirGroups');
+const fxDirTitleEl = document.getElementById('fxDirTitle');
+let fxDirTarget = null;        // { layerId, effectId } —— 一次只给一条特效绑
+
+function fxDirModalOpen() { return fxDirModalEl.classList.contains('open'); }
+function closeFxDirModal() { fxDirModalEl.classList.remove('open'); fxDirTarget = null; syncBrushCursor(); }
+
+function fxDirSourceName(ref) {
+    for (const hit of fxDirInventory()) if (hit.r.id === ref) return `${hit.docName} \u00b7 ${hit.l.name}`;
+    return null;
+}
+
+function fxDirInventory() {
+    const out = [];
+    for (const doc of documents) {
+        if (isSceneDoc(doc)) continue;
+        const docName = doc.name || 'Untitled';
+        const ls = doc === activeDoc ? layers : ((doc.ctx && doc.ctx.layers) || []);
+        for (const l of ls) {
+            if (l.isMaskLayer) continue;
+            for (const r of attrRecordsOf(l)) {
+                if (r.type !== 'direction' || !r.desc || !r.desc.rotation) continue;
+                out.push({ docName, l, r });
+            }
+        }
+    }
+    return out;
+}
+
+function bindFxDir(ref) {
+    const t = fxDirTarget;
+    if (!t) { setStatus('The picker was closed — no direction was bound', 'error'); return; }
+    const l = getLayer(t.layerId);
+    const e = l && effectById(l, t.effectId);
+    if (!e) return;
+    e.params.dirRef = ref || null;
+    closeFxDirModal();
+    fxStructuralChange(l);
+    const where = ref ? fxDirSourceName(ref) : null;
+    setStatus(ref ? `Lighting now points where「${where}」's Direction points (Angle = yaw, Elev = pitch)`
+        : 'Lighting is back on its own Angle/Elev knobs', 'success');
+}
+
+function openFxDirModal(l, effect) {
+    if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
+    fxDirTarget = { layerId: l.id, effectId: effect.id };
+    fxDirTitleEl.textContent = 'Bind a Direction';
+    fxDirGroupsEl.textContent = '';
+    const hits = fxDirInventory();
+    if (!hits.length) {
+        const hint = document.createElement('div');
+        hint.className = 'modal-hint';
+        hint.textContent = 'No Direction attribute in this project — add one from a layer\u2019s \u002B menu.';
+        fxDirGroupsEl.appendChild(hint);
+    }
+    // 分组小标题 = 文档 (作用域),卡上短名 = 图层;缩略图从描述符现烘 (inactive 文档的面不在档)。
+    let lastDoc = null, group = null, cards = null;
+    for (const hit of hits) {
+        if (hit.docName !== lastDoc) {
+            lastDoc = hit.docName;
+            group = document.createElement('div');
+            group.className = 'tag-group';
+            const head = document.createElement('div');
+            head.className = 'tag-group-title';
+            head.textContent = hit.docName;
+            cards = document.createElement('div');
+            cards.className = 'tag-cards';
+            group.appendChild(head);
+            group.appendChild(cards);
+            fxDirGroupsEl.appendChild(group);
+        }
+        const e = geoEuler(hit.r.desc.rotation);
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'tag-mode-item' + (hit.r.id === effect.params.dirRef ? ' active' : '');
+        card.title = `${Math.round(dirWrap360(e.yaw))}\u00b0 / ${Math.round(e.pitch)}\u00b0 — ${hit.docName} \u00b7 ${hit.l.name}`;
+        const cv = document.createElement('canvas');
+        cv.className = 'tag-mode-thumb';
+        cv.width = 168; cv.height = 112;
+        cv.getContext('2d').drawImage(renderDirectionBuffer(hit.r.desc, 168, 112), 0, 0);
+        cv.draggable = false;
+        const nm = document.createElement('span');
+        nm.className = 'tag-mode-name';
+        nm.textContent = hit.l.name;
+        card.appendChild(cv);
+        card.appendChild(nm);
+        card.addEventListener('click', () => bindFxDir(hit.r.id));
+        cards.appendChild(card);
+    }
+    fxDirModalEl.classList.add('open');
+    syncBrushCursor();
+}
+
+fxDirModalEl.addEventListener('mousedown', e => { if (e.target === fxDirModalEl) closeFxDirModal(); });
+document.getElementById('fxDirCancelBtn').addEventListener('click', closeFxDirModal);
+fxDirModalEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxDirModal(); }
 });
 
 function syncFxBypassBtn() {

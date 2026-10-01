@@ -404,14 +404,39 @@ function lightRetire(gl, ent) {
     lightFree.push(ent);
 }
 
+// ---- 光向的引用 (Direction attribute) ----
+// 绑定的那枚记录还在 (表里找得到、类型对、描述符带姿态) 就由它出光向:angle = yaw、elev = pitch
+// 钳到 Elev 的定义域 —— 两个体系早已同基 (js/direction.js:14:Yaw 0° = 画布右、90° = 画布下,与
+// Lighting 同一条规矩),所以是恒等映射,不是换算。记录悬空 = 回 null,特效退回手动旋钮值,不让一个
+// 删掉的 attribute 把灯灭掉。旋钮在跟随时只读 (fx/ui.js 认 follows),要改方向去 Direction 工具。
+function fxLightDir(effect) {
+    const ref = effect && effect.params && effect.params.dirRef;
+    const r = attrRecord(ref);
+    if (!r || r.type !== 'direction' || !r.desc || !r.desc.rotation) {
+        console.log('[dirLight] no follow — ref:', ref, 'record:', r ? r.type + '/desc?' : 'null (fallback to manual knobs)');
+        return null;
+    }
+    const e = geoEuler(r.desc.rotation);
+    const out = { angle: dirWrap360(e.yaw), elev: Math.max(0, Math.min(90, e.pitch)) };
+    console.log('[dirLight] follow ref:', ref, 'yaw->angle:', out.angle.toFixed(2), 'pitch->elev:', e.pitch.toFixed(2), '->', out.elev.toFixed(2));
+    return out;
+}
+// 用角统一走这里:绑定了用 yaw/pitch,没绑定用手动旋钮。四个消费点 (高度场键、烘场、迈步、走线)
+// 必须读同一份,否则「画面亮在哪一面」和「影子拖向哪一边」会两说。
+function fxLightAE(effect, p) {
+    return fxLightDir(effect) || { angle: p.angle, elev: p.elev };
+}
+
 // 高度场由什么决定:两张图的像素身份(深度图供高度、法线图供那道朝向门)、深度铺在谁身上
 // (Align + 盒子)、该层网格大小、以及**中心光线**的方向 —— 门是按 dot(N,L) 开的,Angle/Elev/Near/
 // Green 任一个动了,筛出来的「这一片里最高的受光面」就换一批。图层自己的墨**不在里面**。
+// 方向键读的是**解析后**的角:转一下绑定的 Direction,姿态值换、键跟着换,金字塔当场重烘。
 function lightFieldKey(effect, l, p) {
     const align = p.align === 'Canvas' ? 'C' : 'L';
+    const d = fxLightAE(effect, p);
     return `${fxMapIdentity(effect, 'depth')}+${fxMapIdentity(effect, 'map')}`
         + `|${align}|${align === 'C' ? fxMapBoxStamp(l) : '-'}`
-        + `|${fxgl.w}x${fxgl.h}|${p.angle}|${p.elev}|${p.near}|${p.green}`;
+        + `|${fxgl.w}x${fxgl.h}|${d.angle}|${d.elev}|${p.near}|${p.green}`;
 }
 
 // mask 由高度场 + 迈步那几颗决定:Scale 是把深度满幅换成世界距离的那把尺,Cast 是推进上限,
@@ -444,7 +469,8 @@ function lightBakeField(gl, p, effect, l, fk) {
     if (!img) return false;
     const n = nativeSize(img);
     const fr = fxMapFrame(p.align, l);
-    const a = p.angle * Math.PI / 180, e = p.elev * Math.PI / 180, ce = Math.cos(e);
+    const A = fxLightAE(effect, p);
+    const a = A.angle * Math.PI / 180, e = A.elev * Math.PI / 180, ce = Math.cos(e);
     lightBindLevel(0);
     fxglRunPass({ fb: lightPyr.fb }, fxgl.progs.lightBake, pr => {
         fxglBindTex(pr, 'uDepth', fxgl.texMap2, 0);
@@ -500,7 +526,8 @@ function lightShadowMask(gl, p, effect, l) {
     if (!lightBakeField(gl, p, effect, l, lightFieldKey(effect, l, p))) return null;
     const ent = lightTakeTarget(gl, fxgl.w, fxgl.h);
     if (!ent.ok) { lightRetire(gl, ent); return null; }
-    const a = p.angle * Math.PI / 180;
+    const A0 = fxLightAE(effect, p);
+    const a = A0.angle * Math.PI / 180;
     // 光源向量与迈步用同一条基(画布角 0° = 右、90° = 下,uv 的 y 朝上故取负,与 fxglDirUV 同规矩)。
     const dx = Math.cos(a) * (fxgl.w / Math.max(fxgl.h, 1)), dy = -Math.sin(a);
     const dl = Math.hypot(dx, dy) || 1;
@@ -509,7 +536,7 @@ function lightShadowMask(gl, p, effect, l) {
     // 越过界的(夜侧 / 正上方)并到同一根光线上,权重相加、总和仍是 1,所以钳位不用重新归一。
     const sigma = Math.max(0, p.size) / 2;
     for (let i = 0; i < FX_LIGHT_TAPS.length; i++) {
-        const e = Math.min(90, Math.max(0, p.elev + FX_LIGHT_TAPS[i][0] * sigma)) * Math.PI / 180;
+        const e = Math.min(90, Math.max(0, A0.elev + FX_LIGHT_TAPS[i][0] * sigma)) * Math.PI / 180;
         // 横向走一个图高抬 tan(Elev) 个「世界距离」,而一个满幅深度 = scale 个图高 ⇒ 除回来。
         lightSlopeK[i] = Math.tan(e) / scale;
     }
@@ -584,7 +611,8 @@ function lightSmoothMask(gl, p, effect, l, src) {
 
 function fxglLight(col, p, effect, l) {
     const gl = fxgl.gl;
-    const a = p.angle * Math.PI / 180, e = p.elev * Math.PI / 180, ce = Math.cos(e);
+    const AE = fxLightAE(effect, p);
+    const a = AE.angle * Math.PI / 180, e = AE.elev * Math.PI / 180, ce = Math.cos(e);
     const rgb = fxHexToRgb01(p.color);
     const tint = fxHexToRgb01(p.tint);
     // 副槽就绪(引擎按 needsMap2When 决定它有没有像素)且强度 > 0 才走线,否则连步都不迈。
@@ -627,8 +655,12 @@ defineEffect({
     desc: 'Relights the layer through a bound tangent-space normal map — a diffuse term around the light direction plus an optional specular highlight, both taking the light’s own colour. Bind a depth map and the same light is rebuilt into a shadow mask: the map becomes a height field, a ray runs from each pixel toward the light at tan(Elev), and whatever stands higher than that ray cuts the light off, so the shadow stretches Δh·Scale/tan(Elev) out of the occluder instead of stopping at a fixed pixel length. Only a face that looks toward the light is allowed to occlude, and the height field is a per-channel maximum so that gate survives every mip level. The penumbra is geometry, not a blur: Size is the light’s angular radius in degrees, so the march is a fan of five rays spanning Elev ± Size with Gaussian weights — the shadow is hard where it leaves the occluder and the band widens the further it runs, roughly 4·Length·tan(Size) at Elev=45°; the tilt read from the normal map stretches or shrinks that band on slopes. Size=0 collapses the fan to one ray = a hard-edged shadow, and it never smears the shadow back onto the occluder’s own lit face. The height field is a nearest-sampled max pyramid, so the raw mask carries square stair-steps at the block period; after the march a depth-and-normal-guided bilateral smoothing (separable, horizontal then vertical) averages it only across taps that share the surface — a tap is rejected when its normal folds away from the centre pixel’s, or when its depth jumps past a tolerance that grows with the radius — so contact edges and the occluder’s lit face survive untouched. Smooth sets that radius as a percentage of the block size the march actually used, so it tightens on its own as Steps rises; Smooth=0 skips the pass. Scale says how much distance the map’s whole depth range is worth, in image heights — it is the one knob that makes the length mean anything. Align says whether the depth map is measured against the whole canvas or against this layer alone (the normal map always lies on this layer). Cast only caps how far the ray may travel. Steps is an exponent — the march takes 2^Steps equal hops — because the height field’s block size only changes at powers of two, intermediate counts buy nothing but redundant samples; 2^9 tops out at the pyramid’s 2px block floor. Shadow=0 means no ray is marched at all. Colour only: the maps never show through, nothing moves, alpha untouched.',
     params: [
         { key: 'map', kind: 'map', def: null },
-        { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°' },
-        { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°' },
+        // Direction attribute 的引用 (fxDirModal 全项目检索后选一枚 guid)。只存一句引用,不存角度
+        // —— 与贴图槽同一条规矩;悬空 (那枚被删了) 就回退手动旋钮值。
+        { key: 'dirRef', label: 'Direction', kind: 'dir', def: null },
+        // follows: 'dir' = 绑定生效时这两颗旋钮只读 (2.b:显示 yaw/pitch,要改去 Direction 工具)。
+        { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°', follows: 'dir' },
+        { key: 'elev', label: 'Elev', min: 0, max: 90, step: 1, def: 45, unit: '°', follows: 'dir' },
         { key: 'intensity', label: 'Light', min: -100, max: 100, step: 1, def: 50, unit: '%' },
         { key: 'spec', label: 'Spec', min: 0, max: 100, step: 1, def: 25, unit: '%' },
         { key: 'gloss', label: 'Gloss', min: 0, max: 100, step: 1, def: 60, unit: '%' },
@@ -690,8 +722,18 @@ defineEffect({
         lightSmooth: FX_FS_LIGHT_SMOOTH,
     },
     run: fxglLight,
+    // 链外状态 (fx/core.js 的 fxExternalStamp):光向跟着绑定的 Direction attribute 走,转姿态不改
+    // params —— 把解析出的两个角报进缓存身份,转一下 3D 小窗里的姿态,这条链当场重算。
+    stamp(effect, l) {
+        const d = fxLightDir(effect);
+        return d ? `dir:${d.angle.toFixed(2)},${d.elev.toFixed(2)}` : '';
+    },
     readout(p, n, effect) {
-        const base = `${fxMapShort(effect)}  ${n(p.angle)}°  ${n(p.elev)}°  ${n(p.intensity)}%  s${n(p.spec)}`;
+        const d = fxLightDir(effect);
+        // 跟随时报解析出的角并标出来源 (⤳),手动时是旋钮自己的值 —— 读数永远说画面真用的那一份。
+        const ae = d || p;
+        const mark = d ? '\u2933' : '';
+        const base = `${fxMapShort(effect)}  ${n(ae.angle)}°${mark}  ${n(ae.elev)}°${mark}  ${n(p.intensity)}%  s${n(p.spec)}`;
         // 阴影开着却读不出影子 = 深度图没绑,把那张图的名字写出来 = 可见文本,不许静默降级。
         // 两头缺的各说各的名字 (fxMapShort 按槽的角色报 no normal / no depth),不会混成一句。
         if (p.shadow <= 0) return base;
