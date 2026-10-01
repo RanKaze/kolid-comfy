@@ -25,9 +25,9 @@
     const DIST_MAX = 12;            // 拉远的上限: 再远环就糊成一枚点了
     const TUBE = 0.012;             // 轨道在世界里的粗细
     const HEAD_H = 0.2;             // 箭头那顶锥子的高度 (世界单位)
+    const ARM_HEAD = HEAD_H * 0.5;  // 移动臂的锥子比对象的箭小一档: 箭是读数, 臂只是把手
     const ORBIT_K = 0.55;           // 中键拖动: 每像素转多少度 (与 3D tab 那套"拖多少转多少"同一个分寸)
     const EL_MAX = 85;              // 相机俯仰夹在这里: 正好从边上或正下方看, 三根轨道会糊成一条线
-    const HANDLE_K = 1.3;           // 悬停/按下时把手放大这一档
     const DIM = 0.32;               // 没人在编辑时整颗转暗 (与 2D 世界图同一个数)
 
     let renderer = null, scene = null, cam = null, host = null, ray = null;
@@ -159,13 +159,13 @@
             const q = new T.Quaternion().setFromUnitVectors(new T.Vector3(0, 1, 0),
                 new T.Vector3(dir.x, dir.y, dir.z));
             const shaft = new T.Mesh(
-                new T.CylinderGeometry(TUBE * 1.6, TUBE * 1.6, GEO_AXIS_L - HEAD_H, 8),
+                new T.CylinderGeometry(TUBE * 0.8, TUBE * 0.8, GEO_AXIS_L - ARM_HEAD, 8),
                 material(T, color, 0.8));
             shaft.quaternion.copy(q);
-            shaft.position.set(dir.x, dir.y, dir.z).multiplyScalar((GEO_AXIS_L - HEAD_H) / 2);
-            const head = new T.Mesh(new T.ConeGeometry(HEAD_H * 0.3, HEAD_H, 12), material(T, color, 0.8));
+            shaft.position.set(dir.x, dir.y, dir.z).multiplyScalar((GEO_AXIS_L - ARM_HEAD) / 2);
+            const head = new T.Mesh(new T.ConeGeometry(ARM_HEAD * 0.3, ARM_HEAD, 12), material(T, color, 0.8));
             head.quaternion.copy(q);
-            head.position.set(dir.x, dir.y, dir.z).multiplyScalar(GEO_AXIS_L - HEAD_H / 2);
+            head.position.set(dir.x, dir.y, dir.z).multiplyScalar(GEO_AXIS_L - ARM_HEAD / 2);
             parts.triad.add(shaft, head);
             parts.triadAxes[key] = { shaft, head };
         };
@@ -180,7 +180,7 @@
         // 到当前轴上; 半径比移动臂长大一圈, 悬停/按下提亮。旧 yaw/pitch/roll 把手被它们取代。
         parts.rotRings = {};
         for (const key of ['rotX', 'rotY', 'rotZ']) {
-            const m = new T.Mesh(new T.TorusGeometry(ROT_R, TUBE * 1.1, 6, 64),
+            const m = new T.Mesh(new T.TorusGeometry(ROT_R, TUBE * 0.55, 6, 64),
                 material(T, FAM_HANDLE_COLORS[key], 0.45));
             m.renderOrder = 2;
             m.visible = false;
@@ -380,9 +380,9 @@
                 const q = new T.Quaternion().setFromUnitVectors(parts.up,
                     new T.Vector3(A.x, A.y, A.z));
                 ax.shaft.quaternion.copy(q);
-                ax.shaft.position.set(A.x, A.y, A.z).multiplyScalar((GEO_AXIS_L - HEAD_H) / 2);
+                ax.shaft.position.set(A.x, A.y, A.z).multiplyScalar((GEO_AXIS_L - ARM_HEAD) / 2);
                 ax.head.quaternion.copy(q);
-                ax.head.position.set(A.x, A.y, A.z).multiplyScalar(GEO_AXIS_L - HEAD_H / 2);
+                ax.head.position.set(A.x, A.y, A.z).multiplyScalar(GEO_AXIS_L - ARM_HEAD / 2);
                 const hot = opts.state === key || opts.hover === key;
                 ax.shaft.material.userData.base = hot ? 1 : 0.8;
                 ax.head.material.userData.base = hot ? 1 : 0.8;
@@ -559,7 +559,9 @@
             const g = prev && prev.grab && prev.grab.axis === axis ? prev.grab : null;
             const aw = g ? { x: g.A[0], y: g.A[1], z: g.A[2] } : moveAxes(state)[axis];
             const A = new T.Vector3(aw.x, aw.y, aw.z);
-            const p0 = g ? g.pv : state.desc.position;
+            // 锚里的 pv 和 A 一样是数组 (grabAxis 存的形状; 旋转分支也按 g.pv[0..2] 读)。按对象读
+            // 得到三个 undefined: Vector3 退成原点、position 退成 NaN, sanitize 再把对象钉回默认位。
+            const p0 = g ? { x: g.pv[0], y: g.pv[1], z: g.pv[2] } : state.desc.position;
             const eye = cam.getWorldDirection(new T.Vector3());
             const base = new T.Vector3(p0.x, p0.y, p0.z);
             const hit = r.intersectPlane(new T.Plane(eye, -eye.dot(base)), new T.Vector3());
@@ -590,8 +592,9 @@
             const thDeg = dirDeg(th);
             const thSnap = prev && prev.shiftKey ? Math.round(thDeg / 15) * 15 : thDeg;
             prev.rotTheta = thSnap;
-            // global 空间左乘世界轴旋转, local 空间右乘对象自己的规范轴 (四元数合成)。
-            const R = qFromAxisAngle({ x: g.A[0], y: g.A[1], z: g.A[2] }, dirRad(thSnap));
+            // 合成规矩在家族头部写死: world 轴左乘、local 轴右乘。右乘的那根轴必须是对象自己的
+            // 规范轴 (g.local) —— 环轴 g.A 是它在世界里的落点, 拿它右乘等于绕一根没画出来的轴转。
+            const R = qFromAxisAngle(g.local || { x: g.A[0], y: g.A[1], z: g.A[2] }, dirRad(thSnap));
             return { rotation: qNormalize(g.local ? qMul(g.q0, R) : qMul(R, g.q0)) };
         }
         return null;

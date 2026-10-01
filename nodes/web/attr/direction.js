@@ -47,7 +47,10 @@ defineAttrType({
         if (!w || !h) return;
         const d = r.desc;
         // 画布比例在键里:平面按它 contain,改画布尺寸必须重烘 (老 syncDirectionBuffer 同一条)。
-        const key = JSON.stringify(['direction', d.yaw, d.pitch, d.roll, d.color, canvasW / canvasH, r.box || 0, w, h]);
+        // 姿态键四元数那四个数 (与 attr/geometry.js:224 同一份词汇):老 {yaw,pitch,roll} 已经从
+        // 描述符里没了, 再读它们是 undefined ⇒ 键永远不变 ⇒ 转了角度图层像素永不重烘。
+        const key = JSON.stringify(['direction', d.rotation.x, d.rotation.y, d.rotation.z, d.rotation.w,
+            d.color, canvasW / canvasH, r.box || 0, w, h]);
         if (r.genCache && r.genCache.key === key && r.genCache.img === l.img && r.surface) return;
         const bx = r.box ? Math.round(r.box.x * w) : 0;
         const by = r.box ? Math.round(r.box.y * h) : 0;
