@@ -1993,8 +1993,9 @@ function isRasterLayer(l) { return !!l && !!l.raster && !l.isMaskLayer; }
 // 画布,所以特效参数按画布像素计,与栅格层同一个读法。
 //   · 为什么不必另走一遍合成:render() 从最下面往上画,轮到这一层那一刻,目标画布里摆好的恰好就是它
 //     以下那一叠 ⇒ 抄下来就是「以下合成图」。它永远看不到自己,也永远看不到自己上面的层。
-//   · 只算可见的层 (PS「合并可见图层」的读法);guidance 与 working 各抄各自那条栈 —— 层在哪条栈里
-//     就抄哪块画布,和它自己将被画进去的那块一致。
+//   · 只算可见的层 (PS「合并可见图层」的读法)。working 栈里抄它以下那叠;guidance 栈里的 Stash 压在
+//     整个 Layers 合成**之上**,它的「以下」= 全部工作层 + 它以下的 guidance —— 与 Guidance 卡片
+//     同一张图。若只抄 guidance 画布,拖到栈顶时它下面空无一物,fx 链吃的就是一张空面。
 //   · 几何焊死画布 (l.raster 一起为真,继承栅格层那整套身份):变换、Expand、nudge 一律不适用。挪它
 //     等于挪下面那一叠,而下面那一叠本来就在那儿,那不是这一层要表达的语义。
 //   · 没挂特效时它与下面逐像素相同,画面看不出变化;挂了特效就盖住下面那份,特效把 alpha 咬穿的透明
@@ -2029,7 +2030,7 @@ function stashLayerKey(l) {
 
 // 抄写。指纹没变就一个字都不动 —— 挪它**上面**的层绝不该让整条链重跑一遍。就地重写 img 之后按既有
 // 约定 +1 paintGen (「写表面的路径要 +1 paintGen」,见 fx/gl.js 的缓存注释),链的缓存才认这份新墨。
-function stashResample(l, ctx, key) {
+function stashResample(l, ctx, key, over) {
     const same = l.stashKey === key && !!l.img && l.img.width === canvasW && l.img.height === canvasH;
     l.stashKey = key;
     if (same) return;
@@ -2039,6 +2040,9 @@ function stashResample(l, ctx, key) {
     resetCtx(c);
     c.clearRect(0, 0, canvasW, canvasH);
     c.drawImage(ctx.canvas, 0, 0);
+    // guidance 栈里的 Stash 有两个来源:先铺整条 Layers 合成 (blendCtx),再叠 guidanceCtx 里
+    // 它以下那几层 —— 次序就是画布上的叠放次序。
+    if (over) c.drawImage(over.canvas, 0, 0);
     l.paintGen = (l.paintGen | 0) + 1;
 }
 
@@ -4671,13 +4675,20 @@ function render() {
         let dirPainted = false;
         // 两条栈各带一份「到目前为止叠了些什么」的指纹:Stash 层轮到自己那一刻抄的就是它,而它上面的
         // 层轮到时指纹已经晚了 —— 于是「挪上面那层」不会让它重抄、更不会让它那条链重跑。画布尺寸也在
-        // 指纹里 ⇒ 改画布必然重抄 (栅格层的重采样只是过渡,下一帧就被这份新抄写覆盖)。
+        // 指纹里 ⇒ 改画布必然重抄 (栅格层的重采样只是过渡,下一帧就被这份新抄写覆盖)。guidance 栈里
+        // 的 Stash 两份都要:它的「以下」横跨两条栈 (见抄写分支)。
         let belowWork = canvasW + 'x' + canvasH + ';', belowGuide = belowWork;
         for (let i = layers.length - 1; i >= 0; i--) {
             const l = layers[i];
             const guidance = isGuidanceLayer(l);
             const target = guidance ? guidanceCtx : blendCtx;
-            if (isStashLayer(l) && l.visible) stashResample(l, target, guidance ? belowGuide : belowWork);
+            if (isStashLayer(l) && l.visible) {
+                // guidance 栈里的 Stash 压在整条 Layers 合成之上:走到这里时 blendCtx 已画完全部
+                // 工作层 (循环顺序保证),guidanceCtx 里摆好的是它以下那几层。指纹也吃两条栈 ——
+                // 下面的工作层改了,它照样重抄;两条栈各带尺寸前缀,重复无妨。
+                if (guidance) stashResample(l, blendCtx, belowWork + belowGuide, guidanceCtx);
+                else stashResample(l, target, belowWork);
+            }
             drawLayer(l, target);
             // 参考图吃的是**同一趟**的循环顺序, 所以它必须在 Stash 重抄之后才画 (那份抄写读的是 target
             // 此刻的内容), 也不能吃进 guidance —— 它俩本来就不是一张图。
@@ -9082,8 +9093,9 @@ function addDefaultLayer(stack) {
 }
 
 // Stash Layer: the stack underneath it, re-copied on every composite (see the Stash section above).
-// It arrives at the top of its own stack, so the usual aim is the whole Layers picture; drop it lower
-// and it stashes just what sits under that row. Its pixels start empty because the very next render
+// It arrives at the top of its own stack. In Layers the usual aim is the whole picture; in Guidances
+// the picture is the Layers composite plus the guidance layers under that row. Drop it lower and it
+// stashes just what sits under it. Its pixels start empty because the very next render
 // fills them — the row is built before that first copy, so it must not read "no image" (see 图层行).
 function addStashLayer(stack) {
     const st = stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK;
