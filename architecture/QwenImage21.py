@@ -116,6 +116,18 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     if len(images_vl) > 0:
         print(f"[QwenImage21] {len(images_vl)} reference image(s) -> vision slots + "
               f"{len(ref_latents)} reference latent(s)")
+    try:
+        from ..libs import debug_trace as dbg
+        for _i, _img in enumerate(images_vl):
+            _lat = ref_latents[_i] if _i < len(ref_latents) else None
+            dbg.record_stage(f'OffsetProbe Q21 slot{_i}', block=0,
+                             img_shape=list(_img.shape),
+                             latent_shape=(list(_lat.shape) if _lat is not None else None),
+                             pinned=(pinned and _i == 0),
+                             keep_vision=keep_vision,
+                             resolution=resolution)
+    except Exception as _e:
+        print(f"[QwenImage21] OffsetProbe record failed: {_e!r}")
 
     # 无 vae 时 latent 路径不可用，保留 vision tokens 让图像只经 text encoder 生效
     keep_vision = len(ref_latents) == 0

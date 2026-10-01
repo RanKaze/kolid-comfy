@@ -3576,6 +3576,38 @@ class SnapshotDetailerSamplerNode:
                 # Invert：噪声这一路彻底交给反演（_ksampler 把爬梯段和重绘段拼成一张
                 # 非单调梯子，一趟跑完），随机噪声不再叠加，所以 disable_noise 也一并成立。
                 invert_info = {} if add_noise == 'invert' else None
+                try:
+                    _pc = positive_condition[0][1] if positive_condition else {}
+                    _nc = negative_condition[0][1] if negative_condition else {}
+                    _slots = _pc.get('image_slots')
+                    if _slots is not None and hasattr(_slots, 'tolist'):
+                        _slots = _slots.tolist()
+                    _patches = getattr(model_to_use, 'patches', None)
+                    _patch_desc = {}
+                    if isinstance(_patches, dict):
+                        for _k in _patches:
+                            _arch = _k[0] if isinstance(_k, tuple) and _k else str(_k)
+                            _patch_desc[_arch] = _patch_desc.get(_arch, 0) + len(_patches[_k])
+                    _mo = getattr(model_to_use, 'model_options', None) or {}
+                    _ptext = str(positive_condition[0][0]) if positive_condition else ''
+                    _ntext = str(negative_condition[0][0]) if negative_condition else ''
+                    dbg.record_stage('OffsetProbe 采样入口', block=i + 1,
+                                     latent_shape=list(tmp_latent['samples'].shape),
+                                     has_noise_mask=('noise_mask' in tmp_latent),
+                                     steps=steps, start_step=start_at_step, end_step=end_at_step,
+                                     cfg=cfg, sampler=sampler_name, scheduler=scheduler,
+                                     seed=block_seed,
+                                     has_model_negative=model_negative_to_use is not None,
+                                     sigmas_override=bool(next_pipeline.config.get('sigmas')),
+                                     pos_cond_keys=sorted(_pc.keys()),
+                                     neg_cond_keys=sorted(_nc.keys()),
+                                     image_slots=_slots,
+                                     model_patch_counts=_patch_desc,
+                                     model_options_keys=sorted(_mo.keys()))
+                    dbg.record_prompt('OffsetProbe positive 全文', _ptext, block=i + 1)
+                    dbg.record_prompt('OffsetProbe negative 全文', _ntext, block=i + 1)
+                except Exception as _probe_err:
+                    dbg.record_error('OffsetProbe 失败', _probe_err, block=i + 1, where='detailer _ksampler 前')
                 sampled_latent = _ksampler(
                     model=model_to_use,
                     seed=block_seed,

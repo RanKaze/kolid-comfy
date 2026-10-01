@@ -616,6 +616,45 @@ def run_generate_text(clip, text, params=None, image=None, images=None):
     return str(text_out)
 
 
+def normalize_image_tags(text):
+    """把 `<image1>` / `<image 1>` / `<IMAGE1>` 一类写法统一成 `<image N>`（带空格）。
+
+    kolid 侧引用标签的规范形态是带空格的 `<image N>`（Extra Prompt、Debug 槽位
+    清单都这么写）；Generate Text 的指令模板却要求模型吐无空格的 `<image1>`。
+    输出侧在这里统一归一，模型按哪种约定写都能对上。
+    """
+    import re as _re
+    return _re.sub(r'<image\s*(\d+)\s*>', r'<image \1>', str(text or ''),
+                   flags=_re.IGNORECASE)
+
+
+def strip_generate_text_shell(text):
+    """Generate Text 输出剥壳：模型没守「只返回纯文本」时把 JSON 壳拆掉。
+
+    指令模板（Edit Prompt Enhancer 等）末尾要求模型只返回 rewritten_prompt 纯文本，
+    但模型偶尔把整个 JSON 原样吐回来
+    （`{"rewritten_prompt": "...", "wh_ratio": "", "ratio_follow": "<image1>"}`）。
+    不剥壳的话 JSON 语法与英文键名会原样进 conditioning，稀释真正的编辑指令。
+    识别出这种回复就只提取 rewritten_prompt；识别不了（纯文本回复）原样放行。
+    无论走哪条分支，最后都做一遍 `<imageN>` → `<image N>` 标签归一。
+    """
+    raw = str(text or '').strip()
+    if raw[:1] == '{' and raw[-1:] == '}':
+        try:
+            import json
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                inner = obj.get('rewritten_prompt')
+                if isinstance(inner, str) and inner.strip():
+                    inner = inner.strip()
+                    print(f"[GenerateText] response carried a JSON shell — extracted "
+                          f"rewritten_prompt ({len(raw)} → {len(inner)} chars)")
+                    return normalize_image_tags(inner)
+        except Exception:
+            pass
+    return normalize_image_tags(raw)
+
+
 def describe_image_support(clip, use_default_template=True):
     """诊断「这个 clip 能不能让图像真正生效」，供 Debug / 日志说明原因。
 
@@ -684,5 +723,10 @@ def apply_generate_text_to_prompt(pipeline, positive, prompt_text, params=None,
     print(f"[GenerateText]{label} input ({len(combined)} chars): '{combined[:200]}'")
     generated = run_generate_text(clip, combined, merged, image=batch)
     print(f"[GenerateText]{label} output ({len(generated)} chars): '{generated[:200]}'")
+    # 剥壳 + 标签归一：模型可能吐回 JSON 壳（只提取 rewritten_prompt），
+    # `<imageN>` 也统一成带空格的 `<image N>`。
+    polished = strip_generate_text_shell(generated)
+    if polished != generated:
+        print(f"[GenerateText]{label} polished ({len(polished)} chars): '{polished[:200]}'")
     # 完全替换：旧 positive 不再参与（用户明确要求）
-    return generated, True
+    return polished, True

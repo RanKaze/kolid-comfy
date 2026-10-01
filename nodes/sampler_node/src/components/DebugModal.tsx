@@ -44,6 +44,12 @@ export const DbgIcon: React.FC<{ name: string; size?: number }> = ({ name, size 
     case 'close': return (
       <svg {...p}><path d="M6 6l12 12M18 6L6 18" /></svg>
     );
+    case 'copy': return (
+      <svg {...p}>
+        <rect x="9" y="9" width="11" height="11" rx="2.5" />
+        <path d="M5.5 15H4.5A1.5 1.5 0 0 1 3 13.5V4.5A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5.5" strokeWidth={1.5} />
+      </svg>
+    );
     case 'log': return (
       <svg {...p}>
         <circle cx="4.5" cy="6.5" r="1.1" fill="currentColor" stroke="none" />
@@ -95,12 +101,136 @@ export const DbgIcon: React.FC<{ name: string; size?: number }> = ({ name, size 
 
 type Filter = 'all' | 'prompt' | 'image' | 'block';
 
+// ── AI Debug 报告 ──
+// 把整份 trace 序列化成自包含的 Markdown：目标读者是没见过本工具的 AI，
+// 所以开头交代背景，正文按 block 分组逐条展开。prompt 文本**不截断**
+// （debug 的价值就在完整文本）；过程图是 base64，文本里只记标签 + 分辨率。
+const fmtKv = (val: any): string => {
+  if (val === null) return 'null';
+  if (val === undefined) return '—';
+  if (typeof val === 'boolean' || typeof val === 'number') return String(val);
+  if (typeof val === 'string') return val;
+  try { return JSON.stringify(val); } catch { return String(val); }
+};
+
+const buildAiDebugReport = (trace: DebugTraceResponse): string => {
+  const steps = trace.steps || [];
+  const meta = trace.meta || {};
+  const source = meta.offline ? 'Processor（离线）'
+    : meta.action === 'execute_interface' ? 'Interface tab'
+      : meta.from_blend ? 'Blend 工作台' : 'Run Detailer';
+  const lines: string[] = [];
+  lines.push('请帮我分析下面这份 ComfyUI SnapshotDetailerSamplerNode（交互式 detailer 采样节点）的运行 Debug 快照，找出可能导致问题的环节并给出建议。');
+  lines.push('');
+  lines.push('## 运行元信息');
+  lines.push(`- 来源：${source}`);
+  if (meta.interface !== undefined && meta.interface !== null) lines.push(`- Interface：${String(meta.interface)}`);
+  lines.push(`- 状态：${meta.status || 'unknown'}`);
+  if (meta.generated_at) lines.push(`- 时间：${meta.generated_at}`);
+  if (meta.error) lines.push(`- 错误：${meta.error}`);
+  if (trace.truncated) lines.push('- 注意：过程图数量达到上限，部分图未记录');
+  lines.push(`- 记录条数：${steps.length}`);
+
+  // 与 UI 相同的分组规则：block 条目开新组。
+  const groups: { header: DebugTraceStep | null; items: DebugTraceStep[] }[] = [];
+  let cur: { header: DebugTraceStep | null; items: DebugTraceStep[] } = { header: null, items: [] };
+  for (const s of steps) {
+    if (s.kind === 'block') {
+      if (cur.header || cur.items.length) groups.push(cur);
+      cur = { header: s, items: [] };
+    } else {
+      cur.items.push(s);
+    }
+  }
+  if (cur.header || cur.items.length) groups.push(cur);
+
+  const emitStep = (s: DebugTraceStep) => {
+    const head = `- **[${s.kind}] ${s.label}**${s.detail ? ` —— ${s.detail}` : ''}`;
+    lines.push(head);
+    const data = s.data || {};
+    const skip = new Set(['text', 'chars']);
+    const extras = Object.entries(data).filter(([k, v]) => {
+      if (skip.has(k)) return false;
+      if (v === undefined || v === null || v === '') return false;
+      if (Array.isArray(v) && v.length === 0) return false;
+      return true;
+    });
+    for (const [k, v] of extras) lines.push(`  - ${k}: ${fmtKv(v)}`);
+    if (s.kind === 'prompt') {
+      const text = String(data.text ?? '');
+      lines.push('  - 完整 prompt：');
+      lines.push('');
+      lines.push('  ```');
+      for (const l of (text || '（空）').split('\n')) lines.push('  ' + l);
+      lines.push('  ```');
+    }
+    for (const it of s.items || []) {
+      const knobs = [];
+      if (it.pixels) knobs.push(`像素预算 ${it.pixels}`);
+      if (it.align && it.align > 1) knobs.push(`落格 ${it.align}`);
+      lines.push(`  - 图（${it.label}）：${it.width}×${it.height}${knobs.length ? `，${knobs.join('，')}` : ''}`);
+    }
+  };
+
+  for (const g of groups) {
+    lines.push('');
+    if (g.header) {
+      const hd = g.header;
+      lines.push(`## ${hd.label}${hd.detail ? ` —— ${hd.detail}` : ''}`);
+      const data = hd.data || {};
+      for (const [k, v] of Object.entries(data)) {
+        if (v === undefined || v === null || v === '') continue;
+        if (Array.isArray(v) && v.length === 0) continue;
+        lines.push(`- ${k}: ${fmtKv(v)}`);
+      }
+    } else {
+      lines.push('## 链外步骤（不属于任何 block）');
+    }
+    for (const s of g.items) emitStep(s);
+  }
+
+  lines.push('');
+  lines.push('（过程图以 base64 内嵌在原界面里，这里只列出了标签和分辨率；如需看图请按条目标签截图附上。）');
+  return lines.join('\n');
+};
+
+const copyText = async (text: string): Promise<boolean> => {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to legacy path */ }
+  // http 非安全上下文 / 权限被拒时的兜底
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+};
+
 const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [trace, setTrace] = useState<DebugTraceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [zoom, setZoom] = useState<{ src: string; label: string; w: number; h: number; pixels?: number; align?: number } | null>(null);
+  const [copied, setCopied] = useState<'' | 'ok' | 'fail'>('');
+
+  const copyForAi = useCallback(async () => {
+    if (!trace?.available) return;
+    const ok = await copyText(buildAiDebugReport(trace));
+    setCopied(ok ? 'ok' : 'fail');
+    setTimeout(() => setCopied(''), 2000);
+  }, [trace]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -200,6 +330,14 @@ const DebugModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            <button
+              style={{ ...S.iconBtn, ...(copied ? { width: 'auto', padding: '0 8px' } : {}), ...(copied === 'ok' ? { color: '#30d158', borderColor: 'rgba(48,209,88,0.5)' } : {}) }}
+              title={trace?.available ? '复制整份快照为 Markdown，粘贴给 AI 让它帮你 debug' : '还没有快照可复制'}
+              disabled={!trace?.available}
+              onClick={() => void copyForAi()}
+            >
+              {copied ? <span style={{ fontSize: 11, fontWeight: 600 }}>{copied === 'ok' ? '已复制' : '复制失败'}</span> : <DbgIcon name="copy" size={13} />}
+            </button>
             <button style={S.iconBtn} title="重新读取快照" onClick={() => void load()}><DbgIcon name="reload" size={13} /></button>
             <button style={S.iconBtn} title="关闭 (Esc)" onClick={onClose}><DbgIcon name="close" size={12} /></button>
           </div>

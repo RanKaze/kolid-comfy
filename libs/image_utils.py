@@ -918,19 +918,26 @@ def limit_pixels(image, pixels=None, mask=None, align=1, cap_only=False):
             was_upscaled = new_width * new_height > current_pixels
             need_antialias = new_height < H
         else:
-            # 如果当前像素数已经接近目标（允许少量误差），直接返回
+            # 如果当前像素数已经接近目标（允许少量误差），且**已在 align 格上**，
+            # 才允许原样返回。像素数达标但没落格时不能跳过：QwenImage21 的 VAE
+            # 会自行向下取整（16px 格），输入边缘不到一格的部分被直接裁掉，
+            # decode 之后 recover 再拉伸回去 —— 整幅内容就是肉眼可见的偏移
+            # （1530x1339 超预算 94px < 100 容差 → 没落格 → VAE 裁成 1520x1328）。
             if abs(current_pixels - pixels) < 100:
-                resize_info = {
-                    "original_width": W,
-                    "original_height": H,
-                    "resized_width": W,
-                    "resized_height": H,
-                    "aspect_ratio": W / H if H != 0 else 1.0,
-                    "scale_factor": 1.0,
-                    "align": align,
-                    "was_upscaled": False
-                }
-                return (image, mask, resize_info)
+                _step = align if align and align > 1 else 1
+                if W % _step == 0 and H % _step == 0:
+                    resize_info = {
+                        "original_width": W,
+                        "original_height": H,
+                        "resized_width": W,
+                        "resized_height": H,
+                        "aspect_ratio": W / H if H != 0 else 1.0,
+                        "scale_factor": 1.0,
+                        "align": align,
+                        "was_upscaled": False
+                    }
+                    return (image, mask, resize_info)
+                # 不在格上：继续走下面的正常落格路径（对齐优先于容差）
 
             aspect_ratio = W / H if H != 0 else 1.0
 
