@@ -28,6 +28,12 @@
 //      都不被挡,加权和仍是 0 ⇒ 影子绝不会被糊到挡光的东西脸上。Size=0 时 5 条并成 1 条 = 硬边。
 //      仰角是**共用同一条迈步**的:方位相同、抽样点相同,每一步一次 textureLod、五条 ALU 比较,
 //      所以抽头数几乎不加抽样预算(代价实测见仓库外探针)。
+//   5) 金字塔是 max 块,块与块之间不插值,影缘天生带着「块宽」周期的方格感;走完线再补一道
+//      **引导保边平滑**(可分离的联合双边滤波,横竖各一趟):权重 = 空间高斯 × 深度相似 × 法线相似
+//      —— 只有同一面(深度顺着坡攒、法线不折)上的邻像素才许互相平均,跨过深度跳变或法线翻折的
+//      抽头被压到 0,所以贴墙的接触边与投光体自己的受光面不会被糊进来。半径 = 走线实际用的那一级
+//      块宽 × Smooth:块多大糊多大,正是锯齿的周期;Steps 调大块就变细,半径自己跟着缩。Smooth=0
+//      整道不跑,mask 原样出门。这是启发式不是几何:它修的是「块量化」这道采样噪声,不碰半影本身。
 //   从前这两件事都是错的:更早一版把 Soft 当「高度差阈值」(occ 正比于对面多陡 = 一条贴着轮廓的
 //   emboss 暗边),推进距离又被钉死 ≤64px;上一版改成一趟二值 mask 之后拿**屏幕空间固定半径高斯**
 //   去糊它,于是接触边和尖端边一样宽(几何说前者该是 0)、影子从墙根脱开 5–13px、糊到投光体自己的
@@ -41,7 +47,8 @@
 // 漏掉;步长几何加倍那一版也不行(2,6,14,30,62px 那种稀疏格):「像素在不在影子里」要求区间
 // [到遮挡物的距离, 影长] 里恰好落着一格,影长落在两格之间时整段影子被截在上一格那里 —— 两条都在真机上量过。
 // 只改 RGB:高光加在色上,阴影乘在色上,贴图本身永远不渗进画面。
-const FX_LIGHT_MARCH_MAX = 32;         // 着色器里常数次循环的上界 = Steps 的上界
+const FX_LIGHT_MARCH_MAX = 128;        // 着色器里常数次循环的上界 = Steps 的上界
+const FX_LIGHT_SMOOTH_MAX = 32;        // 引导平滑的半径上界(像素):半径按块宽算,Steps 拉满时块只剩几个像素
 const FX_LIGHT_CACHE_MAX = 4;          // 按参数缓存的 shadow mask 留几份(拖滑块每帧重建时用回收池,不 new 纹理)
 // 仰角抽头:σ=1 的高斯落在 [-2σ,-σ,0,σ,2σ],把它钉在「截到 ±Size」上 ⇒ σ = Size/2。
 // 权重和 = 1,所以 Size=0(五条并成同一条)出来的 mask 与二值那张逐字节相同。
@@ -76,7 +83,8 @@ void main() {
     vec3 halfv = normalize(uL + vec3(0.0, 0.0, 1.0));
     float s = pow(max(dot(n, halfv), 0.0), mix(6.0, 220.0, uGloss)) * uSpec;
     vec3 lit = c.rgb * clamp(1.0 + uColor * (uIntensity * (diff - 0.45)), 0.0, 3.0) + uColor * s;
-    // mask 在 alpha 上,值已经是「灯盘那 5 条光线的加权遮挡」= 半影本身,这一趟只管乘色,不再糊它。
+    // mask 在 alpha 上,值已经是「灯盘那 5 条光线的加权遮挡」= 半影本身,走出线后又过了一道
+    // depth+normal 引导的保边平滑把块锯齿抹掉,这一趟只管乘色,不再碰它。
     // 没深度图时 uShadow 被 JS 侧归 0,这一支根本不进采样器 —— 那个采样器于是留在默认单元 0 上也无所谓(0 号永远是这张色彩面)。
     float occ = uShadow > 0.0 ? texture(uShadowMask, vUV).a : 0.0;
     // 影子是乘法:Tint 就是被挡住那部分乘上去的颜色(黑 = 传统压暗,青色 = 彩色影子),深浅由 Shadow 说。
@@ -228,6 +236,57 @@ void main() {
     Frag = vec4(0.0, 0.0, 0.0, occ);
 }`;
 
+// mask 的引导保边平滑:可分离的联合双边滤波,横竖各跑一趟(两次一维比一次二维便宜一个数量级)。
+// 方格感的根源是高度场那张 max 金字塔:NEAREST 取块最大、块间不插值,块量化直接印在影缘上。
+// 这是**采样噪声**不是几何 —— 不能拿无引导的低通顶替(前两代在画面上糊高斯的失败见文件头),所以
+// 每个抽头过两道门:
+//   · 法线门:中心像素与抽头的法线夹角大就压到 0(pow 24 很陡)。贴墙的接触边两侧深度近乎连续
+//     (地挨着墙根),深度门拦不住那种翻折,全靠这道。
+//   · 深度门:高斯加权,容差 σ 随半径长(JS 侧算好送进来)—— 核越大,同一斜面上攒出的深度差越多,
+//     那是坡不是断崖;真正的悬空跳变仍旧拦死。浮空物体的影子边不往背景上漏。
+// 两道门都过了,剩下的是同一面,平均就是把块量化抹平;权重归一(wsum),半影梯度原样保留。
+// 深度按 Align 的映射读(uMapU/V/B 与烘场那趟同式),法线按本层网格读 —— 与另外几趟同一条规矩。
+const FX_FS_LIGHT_SMOOTH = `#version 300 es
+precision highp float;
+in vec2 vUV;
+layout(location = 0) out vec4 Frag;
+uniform sampler2D uMask;
+uniform sampler2D uDepth;
+uniform sampler2D uNormal;
+uniform vec2 uMapU;
+uniform vec2 uMapV;
+uniform vec2 uMapB;
+uniform vec2 uStep;
+uniform float uRadius;
+uniform float uSigmaD;
+uniform float uGreen;
+void main() {
+    float sum = texture(uMask, vUV).a;
+    if (uRadius < 0.5) { Frag = vec4(0.0, 0.0, 0.0, sum); return; }
+    vec3 nc = texture(uNormal, vUV).xyz;
+    nc = normalize(vec3(nc.x * 2.0 - 1.0, (nc.y * 2.0 - 1.0) * uGreen, max(nc.z * 2.0 - 1.0, 0.05)));
+    float dc = texture(uDepth, uMapU * vUV.x + uMapV * vUV.y + uMapB).r;
+    float wsum = 1.0;
+    float sig2 = uRadius * uRadius * 0.25;   // 空间权重 σ = 半径的一半
+    for (int i = 1; i <= ${FX_LIGHT_SMOOTH_MAX}; i++) {
+        float fi = float(i);
+        if (fi > uRadius) break;
+        float ws = exp(-0.5 * fi * fi / sig2);
+        for (int s = 0; s < 2; s++) {
+            vec2 uv = vUV + uStep * fi * (s == 0 ? -1.0 : 1.0);
+            vec3 nt = texture(uNormal, uv).xyz;
+            nt = normalize(vec3(nt.x * 2.0 - 1.0, (nt.y * 2.0 - 1.0) * uGreen, max(nt.z * 2.0 - 1.0, 0.05)));
+            float wn = pow(max(dot(nc, nt), 0.0), 24.0);
+            float dd = texture(uDepth, uMapU * uv.x + uMapV * uv.y + uMapB).r - dc;
+            float wd = exp(-dd * dd / (uSigmaD * uSigmaD));
+            float w = ws * wn * wd;
+            sum += texture(uMask, uv).a * w;
+            wsum += w;
+        }
+    }
+    Frag = vec4(0.0, 0.0, 0.0, sum / max(wsum, 1e-4));
+}`;
+
 // ---- 高度场金字塔(一张带完整 mip 层级的纹理)+ mask 缓存 ----
 // 金字塔是每次重烘都要整条重写的脚手架,所以只留一份;mask 按参数留着。两者都跟着 GL 上下文活 ——
 // 引擎编译失败会把 fxgl.gl 置空、下次重建一个新上下文,那时旧句柄是废的(与 fx/warp.js 的
@@ -354,11 +413,12 @@ function lightFieldKey(effect, l, p) {
 }
 
 // mask 由高度场 + 迈步那几颗决定:Scale 是把深度满幅换成世界距离的那把尺,Cast 是推进上限,
-// Steps 是抽样预算,Size 是灯盘的角半径(扇里那 5 条光线的仰角跨度)。后四颗都不动金字塔,
-// 所以拖它们只重走线、不重烘场;而前两代实现里 Size 根本不在键上 (它糊的是画面,每帧另跑两趟)。
+// Steps 是抽样预算,Size 是灯盘的角半径(扇里那 5 条光线的仰角跨度),Smooth 是块锯齿那道保边
+// 平滑的半径闸。后四颗都不动金字塔,所以拖它们只重走线、不重烘场;而前两代实现里 Size 根本不在
+// 键上 (它糊的是画面,每帧另跑两趟)。
 function lightMaskKey(effect, l, p) {
     return lightFieldKey(effect, l, p)
-        + `|${p.scale}|${p.cast}|${lightSteps(p)}|${Math.max(0, p.size)}`;
+        + `|${p.scale}|${p.cast}|${lightSteps(p)}|${Math.max(0, p.size)}|${Math.max(0, p.smooth) | 0}`;
 }
 
 
@@ -458,13 +518,57 @@ function lightShadowMask(gl, p, effect, l) {
         gl.uniform1fv(fxglU(pr, 'uWK'), lightWK);
     });
 
-    lightMasks.set(key, ent);
+    // 缓存里存的是平滑后的那张:走线的原始产出是中间脚手架,用完已退还回收池(见 lightSmoothMask)。
+    const fin = lightSmoothMask(gl, p, effect, l, ent);
+    lightMasks.set(key, fin);
     for (const k of lightMasks.keys()) {
         if (lightMasks.size <= FX_LIGHT_CACHE_MAX) break;
         lightRetire(gl, lightMasks.get(k));
         lightMasks.delete(k);
     }
-    return ent.tex;
+    return fin.tex;
+}
+
+// 平滑半径 = 走线实际用的那级块宽(像素)× Smooth%。与着色器里选级的公式同一条(lod = ceil(log2(dt0·图高))),
+// JS 用 R = Cast 的最坏情形估算 —— 块大小对整张 mask 是同一个,锯齿周期就是它。
+function lightSmoothRadius(p) {
+    const dt0 = (p.cast / Math.max(fxgl.h, 1)) / Math.max(lightSteps(p), 1);
+    const block = Math.pow(2, Math.ceil(Math.log2(Math.max(dt0 * fxgl.h, 2))));
+    return Math.min(FX_LIGHT_SMOOTH_MAX, Math.round(block * Math.max(0, p.smooth) / 100));
+}
+
+// 走线出来的 mask 过一遍引导保边平滑:横一趟 src→mid、竖一趟 mid→out,src 与 mid 用完即退还回收池
+// (拖滑块每帧重建,一个纹理都不该 new)。半径不足 1 像素 = Smooth 关到底,mask 原样出门,一道都不跑。
+function lightSmoothMask(gl, p, effect, l, src) {
+    const r = lightSmoothRadius(p);
+    if (r < 1) return src;
+    const mid = lightTakeTarget(gl, fxgl.w, fxgl.h);
+    const out = lightTakeTarget(gl, fxgl.w, fxgl.h);
+    if (!mid.ok || !out.ok) { lightRetire(gl, mid); lightRetire(gl, out); return src; }
+    // 深度门的容差:基础两三个量化级,再随半径长一点 —— 核越大,同一斜面上攒出的深度差越多。
+    const sigmaD = (2 + 0.25 * r) / 255;
+    const fr = fxMapFrame(p.align, l);
+    const passes = [
+        [mid, src, 1 / Math.max(fxgl.w, 1), 0],
+        [out, mid, 0, 1 / Math.max(fxgl.h, 1)],
+    ];
+    for (const [dst, srct, sx, sy] of passes) {
+        fxglRunPass(dst, fxgl.progs.lightSmooth, pr => {
+            fxglBindTex(pr, 'uMask', srct.tex, 0);
+            fxglBindTex(pr, 'uDepth', fxgl.texMap2, 1);
+            fxglBindTex(pr, 'uNormal', fxgl.texMap, 2);
+            gl.uniform2f(fxglU(pr, 'uMapU'), fr.u[0], fr.u[1]);
+            gl.uniform2f(fxglU(pr, 'uMapV'), fr.v[0], fr.v[1]);
+            gl.uniform2f(fxglU(pr, 'uMapB'), fr.b[0], fr.b[1]);
+            gl.uniform2f(fxglU(pr, 'uStep'), sx, sy);
+            gl.uniform1f(fxglU(pr, 'uRadius'), r);
+            gl.uniform1f(fxglU(pr, 'uSigmaD'), sigmaD);
+            gl.uniform1f(fxglU(pr, 'uGreen'), p.green === 'down' ? -1 : 1);
+        });
+    }
+    lightRetire(gl, src);
+    lightRetire(gl, mid);
+    return out;
 }
 
 function fxglLight(col, p, effect, l) {
@@ -509,7 +613,7 @@ defineEffect({
     needsMap: 'Normal',
     needsMap2: { key: 'depth', role: 'Depth' },
     needsMap2When: p => p.shadow > 0,
-    desc: 'Relights the layer through a bound tangent-space normal map — a diffuse term around the light direction plus an optional specular highlight, both taking the light’s own colour. Bind a depth map and the same light is rebuilt into a shadow mask: the map becomes a height field, a ray runs from each pixel toward the light at tan(Elev), and whatever stands higher than that ray cuts the light off, so the shadow stretches Δh·Scale/tan(Elev) out of the occluder instead of stopping at a fixed pixel length. Only a face that looks toward the light is allowed to occlude, and the height field is a per-channel maximum so that gate survives every mip level. The penumbra is geometry, not a blur: Size is the light’s angular radius in degrees, so the march is a fan of five rays spanning Elev ± Size with Gaussian weights — the shadow is hard where it leaves the occluder and the band widens the further it runs, roughly 4·Length·tan(Size) at Elev=45°; the tilt read from the normal map stretches or shrinks that band on slopes. Size=0 collapses the fan to one ray = a hard-edged shadow, and it never smears the shadow back onto the occluder’s own lit face. Scale says how much distance the map’s whole depth range is worth, in image heights — it is the one knob that makes the length mean anything. Align says whether the depth map is measured against the whole canvas or against this layer alone (the normal map always lies on this layer). Cast only caps how far the ray may travel. Shadow=0 means no ray is marched at all. Colour only: the maps never show through, nothing moves, alpha untouched.',
+    desc: 'Relights the layer through a bound tangent-space normal map — a diffuse term around the light direction plus an optional specular highlight, both taking the light’s own colour. Bind a depth map and the same light is rebuilt into a shadow mask: the map becomes a height field, a ray runs from each pixel toward the light at tan(Elev), and whatever stands higher than that ray cuts the light off, so the shadow stretches Δh·Scale/tan(Elev) out of the occluder instead of stopping at a fixed pixel length. Only a face that looks toward the light is allowed to occlude, and the height field is a per-channel maximum so that gate survives every mip level. The penumbra is geometry, not a blur: Size is the light’s angular radius in degrees, so the march is a fan of five rays spanning Elev ± Size with Gaussian weights — the shadow is hard where it leaves the occluder and the band widens the further it runs, roughly 4·Length·tan(Size) at Elev=45°; the tilt read from the normal map stretches or shrinks that band on slopes. Size=0 collapses the fan to one ray = a hard-edged shadow, and it never smears the shadow back onto the occluder’s own lit face. The height field is a nearest-sampled max pyramid, so the raw mask carries square stair-steps at the block period; after the march a depth-and-normal-guided bilateral smoothing (separable, horizontal then vertical) averages it only across taps that share the surface — a tap is rejected when its normal folds away from the centre pixel’s, or when its depth jumps past a tolerance that grows with the radius — so contact edges and the occluder’s lit face survive untouched. Smooth sets that radius as a percentage of the block size the march actually used, so it tightens on its own as Steps rises; Smooth=0 skips the pass. Scale says how much distance the map’s whole depth range is worth, in image heights — it is the one knob that makes the length mean anything. Align says whether the depth map is measured against the whole canvas or against this layer alone (the normal map always lies on this layer). Cast only caps how far the ray may travel. Shadow=0 means no ray is marched at all. Colour only: the maps never show through, nothing moves, alpha untouched.',
     params: [
         { key: 'map', kind: 'map', def: null },
         { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 135, unit: '°' },
@@ -532,8 +636,10 @@ defineEffect({
         // 半影 = 灯盘的大小,不是画面糊半径:它是光源的**角半径**(度),走线因此在 Elev ± Size 之间
         // 铺开一扇光线。单位是角度所以与影长无关 —— 影子越长带越宽,这是几何本来的样子。
         { key: 'size', label: 'Size', min: 0, max: 30, step: 0.5, def: 3, unit: '°', when: p => p.shadow > 0 },
+        // 块锯齿的保边平滑:半径钉在「走线实际用的那级块宽」上,Smooth 只是它的百分比闸;0 = 整道不跑。
+        { key: 'smooth', label: 'Smooth', min: 0, max: 100, step: 1, def: 100, unit: '%', when: p => p.shadow > 0 },
         { key: 'cast', label: 'Cast', min: 16, max: 1024, step: 8, def: 1024, unit: 'px', when: p => p.shadow > 0 },
-        { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.shadow > 0 },
+        { key: 'steps', label: 'Steps', min: 4, max: 128, step: 1, def: 16, when: p => p.shadow > 0 },
         { key: 'green', label: 'Green', kind: 'enum', options: ['up', 'down'], def: 'up' },
     ],
     // 参数换形状:旧存档里 Cast 是「走线总长(1..64px)」,和它现在的意思(推进上限)没有忠实换算,
@@ -563,6 +669,7 @@ defineEffect({
         lightBake: FX_FS_LIGHT_BAKE,
         lightDown: FX_FS_LIGHT_DOWN,
         lightShadow: FX_FS_LIGHT_SHADOW,
+        lightSmooth: FX_FS_LIGHT_SMOOTH,
     },
     run: fxglLight,
     readout(p, n, effect) {
@@ -574,7 +681,7 @@ defineEffect({
         // 烘影子的几何三件都要报:满幅标定、灯盘的角半径、深度铺在谁身上;极性拧反整张 mask 就落在错
         // 的一侧, 而画面看起来「有影子」,所以那一个词也得写在行上 (与景深同词 inv)。
         return `${base}  sh${n(p.shadow)}  ${depth}`
-            + `  ${n(p.scale)}%  ${n(p.size)}°  ${p.align === 'Local' ? 'local' : 'canvas'}`
+            + `  ${n(p.scale)}%  ${n(p.size)}°  sm${n(p.smooth)}  ${p.align === 'Local' ? 'local' : 'canvas'}`
             + `${p.near === 'bright' ? '  inv' : ''}`;
     },
     thumb(g, box) {
