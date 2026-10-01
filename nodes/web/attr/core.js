@@ -13,8 +13,8 @@
 //     chainOwnerRecord),否则"这一步的哪一条链"就没有唯一答案。真正的折叠在引擎里按整串走。
 //   · **有 attribute 才有数据**:装上一个空的 Mask 就是"蒙版还没画",跟没装等价,所以迁移只在字段真
 //     有内容时才立记录。反过来 `l.mask = null` 是把这一枚摘掉,而不是留着它装空。
-//   · refs 一律**扫**出来,不落字段;快照存值 + id 只当分组标签 (跟源图资产表同一套做法),所以表永远
-//     不必替历史保管任何东西,重放时也永远立不出第二条指向同一份历史的记录。
+//   · refs 一律**扫**出来,不落字段;快照与档存值 + 它自己的 guid (guid 就是身份,重放照号收下,所以
+//     特效指向 attribute 的引用活得过重开),表因此永远不必替历史保管任何东西。
 //
 // 文件切分跟 fx 一样:本文件只装"strip 的模型"(注册表容器 + 引用计数 + 迁移 + 快照/克隆)。每一种
 // attribute 自己一个 attr/<type>.js,里面齐活注册数据 (标签、默认落点、老字段名) 与 S4 要的缩略图;
@@ -112,13 +112,19 @@ const ATTR_KINDS = {
 };
 
 let attrSeq = 0;
-const attrRecords = new Map();          // 'attr_N' -> { id, type, ...payload }
+// 一次页面加载一个盐。新号必须**永远不可能等于一份档里带来的号**:老文件的号是纯数字 (`attr_4`),
+// 而这一枚盐保证盐里至少有一个字母、新号 therefore 从不长得像老号 —— 读档那一步 (adoptAttrPayloads)
+// 是照档里的号收下记录的,撞号就等于把人家那枚记录顶掉、图层还指着那个键。
+const attrSalt = 'a' + Math.random().toString(36).slice(2, 7);
+const attrRecords = new Map();          // guid -> { id, type, ...payload } (guid 就是这一枚 attribute 的身份)
 
-function newAttrRecord(type, fields) {
+// `guid` 只由读档那一步交进来 (照档里的号收下);新立的 (装上来、复制、粘贴) 一律现 mint。
+function newAttrRecord(type, fields, guid) {
     const spec = ATTR_TYPES[type];
     if (!spec) return null;
     // enabled = 这一步参不参与折叠。缺席读作 true (见 attrEnabled),所以快照里只有 false 才落字段。
-    const r = Object.assign({ id: 'attr_' + (++attrSeq), type, enabled: true }, spec.init(), fields || {});
+    const r = Object.assign({ id: (typeof guid === 'string' && guid) || ('attr_' + attrSalt + (++attrSeq)),
+        type, enabled: true }, spec.init(), fields || {});
     attrRecords.set(r.id, r);
     return r;
 }
@@ -518,7 +524,9 @@ function attachAttrView(l) {
 }
 
 // ---- 快照、克隆、读档 ----
-// 存的是值 + 一个 id 标签:同一个标签在**一次重放**里只立一条记录,共享就此活过 undo 与 tab 往返。
+// 存的是值 + **它自己的 guid**:guid 是这一枚 attribute 的身份,它随档走 —— 重放照号收下,所以特效里
+// 指向某一枚 attribute 的引用 (Lighting 的 dirRef) 存进文件、重开还认得。同一枚被两层引用时,档里那
+// 一个号在**一次重放**里只立一条记录 (byId),共指就此活过 undo 与 tab 往返。
 function snapshotAttrs(l) {
     return attrRecordsOf(l).map(r => {
         const s = Object.assign({ id: r.id, type: r.type }, ATTR_TYPES[r.type].snap(r));
@@ -527,8 +535,9 @@ function snapshotAttrs(l) {
     });
 }
 
-// `list` 里的每一项是 `{ type, surface|chain }` (+ 可选的分组 id 标签)。读 .cud 与恢复快照共用这一条
-// 口子 —— 区别只在于要不要按标签分组。
+// `list` 里的每一项是 `{ id?, type, surface|chain }`。读 .cud 与恢复快照共用这一条口子 —— 区别只在于
+// 要不要按号分组 (`byId`)。没有号的条目 (v4 及更早的档、mergeLegacyGenerators 补的那几条) 现 mint,
+// 新号从不与档里的号同形 (见 attrSalt),所以两条路都不可能顶掉别人手里的记录。
 function adoptAttrPayloads(list, byId) {
     const refs = [];
     for (const raw of (list || [])) {
@@ -536,7 +545,7 @@ function adoptAttrPayloads(list, byId) {
         if (!spec) continue;
         let r = byId && raw.id ? byId.get(raw.id) : null;
         if (!r) {
-            r = newAttrRecord(spec.type, spec.load(raw));
+            r = newAttrRecord(spec.type, spec.load(raw), raw.id);
             if (byId && raw.id) byId.set(raw.id, r);
         }
         if (r) {
