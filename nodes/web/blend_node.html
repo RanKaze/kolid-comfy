@@ -5753,13 +5753,14 @@ function renderStackList(listEl, stack) {
         row.appendChild(chips);
 
         row.addEventListener('click', ev => selectLayer(l.id, mode, ev.shiftKey));
-        // Right-click offers Generate. Selecting first means the menu always acts on the row the
-        // user pointed at, and it also stops the canvas's own contextmenu from firing instead.
+        // Right-click acts on the row the user pointed at; a group the row belongs to survives the
+        // open (Combine is a group item), a click outside it collapses back to that one row. It also
+        // stops the canvas's own contextmenu from firing instead.
         row.addEventListener('contextmenu', ev => {
             ev.preventDefault();
             ev.stopPropagation();
             if (selectedId !== l.id) selectLayer(l.id, mode);
-            else if (activeGroup().size > 1) selectLayer(l.id, mode);   // the menu has no group items
+            else if (!activeGroup().has(l.id)) selectLayer(l.id, mode);
             openLayerMenu(l, ev.clientX, ev.clientY);
         });
         row.addEventListener('dragstart', ev => {
@@ -6500,6 +6501,70 @@ function splitLayerByMask(l) {
     render();
     setStatus(`Split「${l.name}」into ${made.length} part${made.length === 1 ? '' : 's'} — the original stays on the list, hidden`, 'success');
     pushHistory();
+    return true;
+}
+
+// Right-click "Combine" (multi-select): merge the selected layers into ONE raster layer, the way
+// PS Merge Layers works — each member's CURRENT on-canvas appearance (image + strip folded by
+// layerSource, through its transform) is drawn bottom-to-top into a canvas-sized buffer, the
+// members leave the list, and the result lands where the topmost one sat.
+// 与 Rasterize 同类:单向,条带 (蒙版/贴片/链) 折进像素后不保留;隐藏的组员按 drawLayer 的规矩不进
+// 这一叠。文本/方向/Stash 先 Rasterize —— 它们的画面每帧重算/重抄,此刻抄出来的那张不是这层以后
+// 会画的东西,照 applyAttrToLayer 的立场拒绝。guidance 与工作层各画各的 target,也不许混进一叠。
+function combineLayerGroup(members) {
+    if (guardAdjustMode()) return false;
+    if (new Set(members.map(l => stackOf(l))).size > 1) {
+        setStatus('Combine — guidance layers and working layers paint to separate canvases; select one stack only', 'error');
+        return false;
+    }
+    if (members.some(l => isTextLayer(l) || isDirectionLayer(l))) {
+        setStatus('Combine — text / direction rows re-render from their descriptor every frame. Rasterize them first', 'error');
+        return false;
+    }
+    if (members.some(l => isStashLayer(l))) {
+        setStatus('Combine — a Stash row copies the stack under it, which is not part of this selection. Duplicate it into a plain layer first', 'error');
+        return false;
+    }
+    const drawn = members.filter(l => l.visible && l.img);
+    if (!drawn.length) { setStatus('Combine — nothing visible in the selection to merge', 'error'); return false; }
+    // 一条只画一次:叠的顺序 = 从最底往上,和 render() 同一趟次序。
+    const comp = document.createElement('canvas');
+    comp.width = Math.max(1, Math.round(canvasW));
+    comp.height = Math.max(1, Math.round(canvasH));
+    const cg = comp.getContext('2d');
+    for (let i = drawn.length - 1; i >= 0; i--) drawLayer(drawn[i], cg);
+    const idxs = members.map(l => layers.indexOf(l));
+    const top = Math.min(...idxs);
+    const ids = new Set(members.map(l => l.id));
+    for (let i = layers.length - 1; i >= 0; i--) if (ids.has(layers[i].id)) layers.splice(i, 1);
+    const l = {
+        name: 'Combined',
+        visible: true,
+        transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
+        raster: true,
+        stash: false,
+        canvasThumbEl: null,
+        attrs: [],
+        fxCache: null,
+        stack: stackOf(members[0]),
+        cud: null,
+        text: null,
+        dir: null,
+    };
+    l.id = ++layerSeq;
+    ownSource(l, comp, comp.toDataURL('image/png'));
+    rasterizeLayer(l);            // buffer → canvas 格子 (1:1 栅格不变量), 源记录随之换进新画布
+    layers.splice(Math.min(top, layers.length), 0, l);
+    selectedId = l.id;
+    groupIds = new Set([l.id]);
+    pruneAssets();
+    pruneAttrs();
+    applyCanvasSize();
+    layoutCanvas();
+    renderLayerList();
+    render();
+    setStatus(`Combined ${drawn.length} layer${drawn.length === 1 ? '' : 's'} into one — the rest of the stack is untouched`, 'success');
+    pushHistory();                // one Combine = one undo step
     return true;
 }
 
@@ -10193,6 +10258,15 @@ function openLayerMenu(l, clientX, clientY) {
         duplicateLayer(l);
     });
     menu.appendChild(dup);
+
+    // Combine: only while MULTIPLE rows are held — the menu must stay the same single-layer menu
+    // otherwise. Merges the selection's current appearances into one raster row (see combineLayerGroup).
+    const group = selectedGroup();
+    if (group) {
+        layerMenuItem('Combine',
+            `Merge these ${group.length} layers into one picture — each row's CURRENT look (mask, decal, chain and placement folded in) is stacked bottom-to-top into a single raster layer sitting where the topmost one did; the selected rows leave the list, the rest of the stack is untouched. One-way, like Rasterize. Hidden rows are skipped. Text / direction / Stash rows must be Rasterized first.`,
+            () => { combineLayerGroup(group); });
+    }
 
     // No Apply entry here any more: applying is a per-attribute command, and its one visible entry
     // is the chip's own right-click menu (see openAttrMenu). A row-level "Apply Mask" would read
