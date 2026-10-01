@@ -438,7 +438,8 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     inp.step = def.step;
     inp.value = get();
     const span = document.createElement('span');
-    const show = () => { span.textContent = `${inp.value}${def.unit || ''}`; };
+    // def.fmt 可选:自己格式化读数(指数旋钮要显示 2ⁿ 这种「值不是面值」的数),给了就不走 值+unit。
+    const show = () => { span.textContent = def.fmt ? def.fmt(Number(inp.value)) : `${inp.value}${def.unit || ''}`; };
     updaters.push(show);
     inp.addEventListener('input', () => { show(); set(Number(inp.value), false); });
     inp.addEventListener('change', () => set(Number(inp.value), true));
