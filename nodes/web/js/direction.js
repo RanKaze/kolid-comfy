@@ -260,6 +260,8 @@ function rotPlaneBasis(A) {
     return { e1, e2: { x: e2.x / l2, y: e2.y / l2, z: e2.z / l2 } };
 }
 function rotRingAxes(state) {
+    // 环每帧现读姿态: 抓住的那根轴 A = q0·e, 绕 A 的转动不动 A (Rot(A,θ)·A = A), 所以它不会从指针
+    // 底下跑掉, 另外两根跟着对象摆 —— Unity 同款。整套冻结反而把这两根钉死了, 别加回来。
     const kind = state.kind;
     if (gizmoMode !== 'rotate' || kind === 'point') return [];
     let ax;
@@ -465,13 +467,18 @@ function drawGeometryWorld(ctx, W, H, state, opts) {
     // 现在的仰角 —— pitch 的读数辅助 (对象本体的一部分, 两种模式都画)。
     if (kind !== 'point') {
         const Rt = R * DIR_POSE_R;
+        // 四元数唯一真相: 箭头 = q·X, 方位/仰角从它身上现取 (与 three.js 那边 direction_view.js:327
+        // 同一个式子)。描述符上已经没有 d.yaw/d.pitch, 再读它们是 NaN ⇒ 整段弧与箭都画不出来。
+        const f = qApply(d.rotation, { x: 1, y: 0, z: 0 });
+        const yawDeg = dirWrap360(dirDeg(Math.atan2(f.z, f.x)));
+        const pitDeg = dirDeg(Math.asin(Math.max(-1, Math.min(1, f.y))));
+        const arcAt = t => dirProject({
+            x: pos.x + Math.cos(t) * Math.cos(dirRad(yawDeg)),
+            y: pos.y + Math.sin(t),
+            z: pos.z + Math.cos(t) * Math.sin(dirRad(yawDeg)),
+        }, Rt);
         ctx.strokeStyle = DIR_ARC;
         ctx.lineWidth = lw;
-        const arcAt = t => dirProject({
-            x: pos.x + Math.cos(t) * Math.cos(dirRad(d.yaw)),
-            y: pos.y + Math.sin(t),
-            z: pos.z + Math.cos(t) * Math.sin(dirRad(d.yaw)),
-        }, Rt);
         ctx.globalAlpha = dim * 0.26;
         ctx.beginPath();
         for (let i = 0; i <= 36; i++) {
@@ -483,14 +490,14 @@ function drawGeometryWorld(ctx, W, H, state, opts) {
         ctx.beginPath();
         const steps = 28;
         for (let i = 0; i <= steps; i++) {
-            const p = arcAt(dirRad(d.pitch) * i / steps);
+            const p = arcAt(dirRad(pitDeg) * i / steps);
             if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
         }
         ctx.stroke();
 
         // 箭头本体 (对象颜色) + 头部两片倒钩, 都在屏幕上量, 所以粗细与盒子同步缩放。
         // direction/ray 是全长姿态箭; plane 的是法线刻箭 (短, 从盘心立起来, 盘的朝向靠它读)。
-        const v = dirVecOf(d);
+        const v = f;
         const L = kind === 'plane' ? DIR_POSE_R * 0.42 : DIR_POSE_R;
         const tip = dirProject({ x: pos.x + v.x * L, y: pos.y + v.y * L, z: pos.z + v.z * L }, R);
         const len = Math.hypot(tip.x - ps.x, tip.y - ps.y) || 1;
@@ -554,12 +561,12 @@ function drawGeometryWorld(ctx, W, H, state, opts) {
             const tip = tips[key];
             const len = Math.hypot(tip.x - ps.x, tip.y - ps.y) || 1;
             const ux = (tip.x - ps.x) / len, uy = (tip.y - ps.y) / len;
-            const head = Math.max(5, R * 0.13);
+            const head = Math.max(3, R * 0.065);
             const hot = o.state === key || o.hover === key;
             ctx.globalAlpha = dim * (hot ? 1 : 0.75);
             ctx.strokeStyle = FAM_HANDLE_COLORS[key];
             ctx.fillStyle = FAM_HANDLE_COLORS[key];
-            ctx.lineWidth = lw * (hot ? 1.6 : 1.1);
+            ctx.lineWidth = lw * (hot ? 0.8 : 0.55);
             ctx.beginPath();
             ctx.moveTo(ps.x, ps.y);
             ctx.lineTo(tip.x - ux * head * 0.62, tip.y - uy * head * 0.62);
@@ -581,7 +588,7 @@ function drawGeometryWorld(ctx, W, H, state, opts) {
             const hot = o.state === a.key || o.hover === a.key;
             ctx.globalAlpha = dim * (hot ? 0.95 : 0.45);
             ctx.strokeStyle = FAM_HANDLE_COLORS[a.key];
-            ctx.lineWidth = lw * (hot ? 1.6 : 1.0);
+            ctx.lineWidth = lw * (hot ? 0.8 : 0.5);
             ctx.beginPath();
             for (let i = 0; i <= a.samples.length; i++) {
                 const s = dirProject(a.samples[i % a.samples.length], R);
@@ -631,12 +638,11 @@ function drawDirectionPlan(ctx, W, H, pose) {
     if (ph > H * 0.94) { ph = H * 0.94; pw = ph * a; }
     const Rp = Math.min(pw, ph) / 2 * 0.86;
     const lw = Math.max(1.4, Rp * 0.045);
-    // 四元数唯一真相: f = 箭头方向 (3D), 它的 (x, z) 分量就是正面投影; 鳍 = q·up 同理。
+    // 四元数唯一真相: f = 箭头方向 (3D), 它的 (x, z) 分量就是正面投影。
     const f = qApply(pose.rotation, { x: 1, y: 0, z: 0 });
     const t = Math.atan2(f.z, f.x);
     const co = Math.hypot(f.x, f.z);
     const ux = co > 1e-9 ? f.x / co : 1, uy = co > 1e-9 ? f.z / co : 0;
-    const fin = qApply(pose.rotation, { x: 0, y: 1, z: 0 });
     ctx.save();
     ctx.translate(W / 2, H / 2);
     ctx.lineCap = 'round';
@@ -705,15 +711,6 @@ function drawDirectionPlan(ctx, W, H, pose) {
     ctx.lineTo(shaftEnd.x - px * head * 0.44, shaftEnd.y - py * head * 0.44);
     ctx.closePath();
     ctx.fill();
-
-    // 鳍 (滚转读数): q·up 的 (x,z) 分量 —— 四元数把滚转编在朝向里, 不再有独立的 roll 角。
-    ctx.strokeStyle = DIR_FIN;
-    ctx.lineWidth = lw;
-    ctx.globalAlpha = 0.95;
-    ctx.beginPath();
-    ctx.moveTo(tip.x * 0.55, tip.y * 0.55);
-    ctx.lineTo(tip.x * 0.55 + fin.x * Rp * 0.26, tip.y * 0.55 + fin.z * Rp * 0.26);
-    ctx.stroke();
     ctx.restore();
 }
 
@@ -761,7 +758,9 @@ function dirAxisDelta(axis, W, H, state, pt, prev) {
         g.accum += dd;
         const th = dirRad(snap15(dirDeg(g.accum)));
         prev.rotTheta = dirDeg(th);
-        const R = qFromAxisAngle(g.A, th);
+        // local 右乘的那根轴必须是对象自己的规范轴 g.local; g.A 只是它在世界里的落点,
+        // 拿世界轴右乘会把物体绕到一根没画出来的轴上。
+        const R = qFromAxisAngle(g.local || g.A, th);
         return { rotation: qNormalize(g.local ? qMul(g.q0, R) : qMul(R, g.q0)) };
     }
     // 三向轴 (move 模式): 指针位移在该轴屏幕投影方向上折回世界位移, 直接加到 position 上
@@ -808,8 +807,10 @@ function dirHitHandle(W, H, state, pt, pts) {
     // 移动模式: 三向轴是 Unity 风格的箭头 (末端无球), 抓的是整支 —— 指针到"根→尖"线段的距离。
     pts = pts || famHandlePoints(W, H, state);
     let best = null, bestD = DIR_HIT_R;
-    const basePt = state.kind !== 'direction'
-        ? dirProject(state.desc.position, gizmoRadius(W, H)) : null;
+    // 根点要和尖端同一份投影: 3D 视图活着时 pts 来自相机 (DirView.handlePoints), 再拿固定 25° 俯角的
+    // dirProject 折根点, 眼睛一轨道开, 整支箭杆就点不着了 (只剩尖上那 11px)。
+    const pos = state.kind !== 'direction' ? state.desc.position : null;
+    const basePt = pos && ((DirView.live() && DirView.project(pos)) || dirProject(pos, gizmoRadius(W, H)));
     for (const key of famHandleKeys(state)) {
         const d = (key === 'mvX' || key === 'mvY' || key === 'mvZ') && basePt
             ? distToSegment(pt, basePt, pts[key])
