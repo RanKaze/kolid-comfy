@@ -417,6 +417,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-map-btn.active { background: rgba(10,132,255,0.55); color: #fff; }
 .fx-map-btn.unset { color: #ff9f0a; }
 .fx-map-btn.gone { color: #ff453a; }
+/* 绑了 Direction attribute 的角度旋钮:只读灰显 (⤳ 已标在读数里),不与手动旋钮混读。 */
+.control-row.fx-follow input[type=range] { opacity: 0.45; pointer-events: none; }
 /* Text 行的字体按钮: 那几个字就是它自己那张脸, 不用打开就知道选的是什么。本机没有这个字体时转红,
    与缺失贴图同一套告警色 —— 文字仍旧在, 只是顶着栈尾的回落脸画。 */
 .text-font-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
@@ -1449,6 +1451,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 title="Read a depth / normal map from disk. It is kept with the effect (and archived inside the .cud), not pushed into the workspace pool.">From file&#8230;</button>
             <div style="flex:1;"></div>
             <button class="modal-btn ghost" id="fxMapCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="fxDirModal">
+    <div class="modal tag-modal" role="dialog" aria-modal="true" aria-label="Bind a Direction attribute">
+        <div class="modal-title" id="fxDirTitle">Bind a Direction</div>
+        <div class="modal-sub">Point this light with a Direction attribute from anywhere in the project — Angle follows its yaw, Elev its pitch. The knobs stay read-only while bound; only the reference is kept.</div>
+        <div class="tag-groups" id="fxDirGroups"></div>
+        <div class="modal-actions">
+            <div style="flex:1;"></div>
+            <button class="modal-btn ghost" id="fxDirCancelBtn">Cancel</button>
         </div>
     </div>
 </div>
@@ -11005,7 +11018,7 @@ const canvasRatioHint = document.getElementById('canvasRatioHint');
 
 function canvasModalOpen() { return canvasModalEl.classList.contains('open'); }
 // The replace prompt is a dialog too, so it blocks tools and history exactly like Canvas Size.
-function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || textFontModalOpen() || detectModalOpen(); }
+function modalOpen() { return canvasModalOpen() || docCloseModalOpen() || dynamicModalOpen() || genModalOpen() || tagModalOpen() || fxModalOpen() || fxMapModalOpen() || fxDirModalOpen() || textFontModalOpen() || detectModalOpen(); }
 function gcd(a, b) { while (b) { [a, b] = [b, a % b]; } return a || 1; }
 
 function canvasRatioText(w, h) {
