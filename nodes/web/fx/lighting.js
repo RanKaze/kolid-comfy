@@ -640,7 +640,7 @@ defineEffect({
         { key: 'tint', label: 'Tint', kind: 'color', def: '#000000', when: p => p.shadow > 0 },
         // 深度铺在谁身上是那张深度图的事,法线图永远按本层网格读 —— 与几何 Warp 那颗同名旋钮同词。
         { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.shadow > 0 },
-        { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark', when: p => p.shadow > 0 },
+        { key: 'near', label: 'Near', kind: 'enum', options: ['bright', 'dark'], def: 'bright', when: p => p.shadow > 0 },
         // Scale = 整张图的深度满幅值多少个图高。没有它,「影长」这件事在单位上就没有定义
         // (满幅深度与像素之间没有任何东西把它们连起来)。
         { key: 'scale', label: 'Scale', min: 10, max: 400, step: 1, def: 100, unit: '%', when: p => p.shadow > 0 },

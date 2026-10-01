@@ -119,7 +119,7 @@ const FX_AO_PARAMS = [
     // 行首那个名字由注册表的角色查出来 (needsMap / needsMap2.role),不在这里手打第二遍。
     { key: 'map', kind: 'map', def: null },
     { key: 'normal', kind: 'map', def: null },
-    { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark' },
+    { key: 'near', label: 'Near', kind: 'enum', options: ['bright', 'dark'], def: 'bright' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas' },
     { key: 'radius', label: 'Radius', min: 1, max: 256, step: 1, def: 16, unit: 'px' },
     { key: 'dirs', label: 'Dirs', min: 4, max: 32, step: 1, def: 8 },

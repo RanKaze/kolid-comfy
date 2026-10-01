@@ -97,7 +97,7 @@ const CHROMA_PARAMS = [
     { key: 'amount', label: 'Amount', min: -48, max: 48, step: 1, def: 8, unit: 'px' },
     { key: 'angle', label: 'Angle', min: 0, max: 359, step: 1, def: 0, unit: '\u00b0', when: p => p.mode === 'Directional' },
     { key: 'map', kind: 'map', def: null, when: p => p.mode === 'Depth' },
-    { key: 'near', label: 'Near', kind: 'enum', options: ['dark', 'bright'], def: 'dark', when: p => p.mode === 'Depth' },
+    { key: 'near', label: 'Near', kind: 'enum', options: ['bright', 'dark'], def: 'bright', when: p => p.mode === 'Depth' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Depth' },
     { key: 'focus', label: 'Focal', min: 0, max: 100, step: 1, def: 35, unit: '%', when: p => p.mode === 'Depth' },
     { key: 'thick', label: 'Thick', min: 0, max: 100, step: 1, def: 10, unit: '%', when: p => p.mode === 'Depth' },
