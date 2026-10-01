@@ -402,10 +402,12 @@ function listSlot(refs, dragId, targetId, after, idOf) {
 }
 
 // 一条列表的落点:横排 (条带) 认左右 —— 第 k 颗的左半边 = 'before'、右半边 = 'after'。`axis` 交 'y'
-// 就是竖排**且越靠下越早** (特效容器从下往上读),于是上半 = 'after'、下半 = 'before'。不是这一条里
-// 的、或者就是自己拖自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。
-function dropSide(ev, el, drag, layerId, ownId, axis) {
-    if (!drag || String(drag.layerId) !== String(layerId) || drag.ref === ownId) return '';
+// 就是竖排**且越靠下越早** (特效容器从下往上读),于是上半 = 'after'、下半 = 'before'。跨层也放行:
+// 落点层与源层不同时回的是同一套缝位,搬层是 drop 处理的事,缝位算法只认"这一条里有没有这枚"。
+// 唯一拦下的是 `drag.ref === ownId`:一枚被两层共享时,把它从 A 拖到自己 B 那颗引用上没有可落的缝。
+// 不是这一条里的、或者就是自己拖自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。
+function dropSide(ev, el, drag, ownId, axis) {
+    if (!drag || drag.ref === ownId) return '';
     const r = el.getBoundingClientRect();
     if (axis === 'y') return (ev.clientY - r.top) < r.height / 2 ? 'after' : 'before';
     return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
@@ -415,6 +417,30 @@ function dropSide(ev, el, drag, layerId, ownId, axis) {
 // 特效容器排它自己那条链走的是同一句。
 function moveAttr(l, dragRef, targetRef, after) {
     return listSlot(attrRefList(l), dragRef, targetRef, after) >= 0;
+}
+
+// 跨层移动:把 `ref` 从 `src` 的条带摘下来,插进 `dst` 的 `targetRef` 那一侧 (`targetRef` 为空 =
+// 追加尾步,空条带的落点只有这一个读法)。记录本体不动 —— 表是文档级的,动的只有两条引用串;共享的
+// 那枚被第三方照旧持有 (纯移动)。两笔跟着落点走:
+//   · ownsGrid 的生成器离开老宿主就交还格子:清掉 ownsGrid,面由 spec.sync 按新层网格现算 (3D 没有
+//     sync,烘面是唯一真相,原样带走);非 ownsGrid 的生成器也 sync 一遍 —— 键里带着格子尺寸,换了
+//     层多半要重算,键没变就两下比对过去。
+//   · 面 (mask/decal) 住的是图层空间,后端契约要求 mask 与 src 同格:落到尺寸不同的层上就重采样到
+//     新网格。走 remapAttrFaces —— 共享的那枚在这里自然拆成落点层自己的新记录,原面留给原持有者。
+function moveAttrToLayer(src, dst, ref, targetRef, after) {
+    const rec = attrRecord(ref);
+    const refs = attrRefList(src);
+    if (!rec || !dst || src === dst || refs.indexOf(ref) < 0) return false;
+    if (rec.ownsGrid) { rec.ownsGrid = false; markAttrPainted(rec); }
+    refs.splice(refs.indexOf(ref), 1);
+    if (!Array.isArray(dst.attrs)) dst.attrs = [];
+    const to = targetRef ? dst.attrs.indexOf(targetRef) : dst.attrs.length;
+    dst.attrs.splice(to < 0 ? dst.attrs.length : to + (after ? 1 : 0), 0, ref);
+    const spec = ATTR_TYPES[rec.type];
+    if (spec.kind === 'generator' && spec.sync && attrEnabled(rec)) spec.sync(dst, rec);
+    const { w, h } = nativeSize(dst.img);
+    if (w && h) remapAttrFaces(dst, s => (s.width === w && s.height === h) ? s : stretchSurfaceTo(s, w, h));
+    return true;
 }
 
 // ---- 出厂、迁移与视图 ----
