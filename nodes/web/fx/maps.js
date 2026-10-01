@@ -153,16 +153,22 @@ function fxMapBoxStamp(l) {
 // .cud v3 把绑定的贴图写成随文件的资产;重开时资产像素落进本地池,引用换成新 mint 的 key(图池
 // 那句 id 是宿主重新编号的,原样留着就是死引用)。资产读不出就退回旧引用本行 —— 按钮转红、链上
 // 写明跳过,总比悄悄换一张图当真。每个声明了的槽各存各的资产。
-async function restoreFxMaps(list, blobs) {
+// `mapKeys`(可省)是「资产 id → 池 key」的备忘:传了它,同一份资产跨多次读档只进池一次 ——
+// cud 链接的按存刷新每次都重折整份文件,没有这张表它每存一次就多 mint 一份几 MB 的 data URL。
+async function restoreFxMaps(list, blobs, mapKeys) {
     for (const e of list) {
         for (const slot of fxMapSlots(e)) {
             const m = e.params && e.params[slot.key];
             if (!m || m.asset === null || m.asset === undefined) continue;
+            const pooled = mapKeys && mapKeys.get(m.asset);
+            if (pooled && fxMapPool.has(pooled)) { e.params[slot.key] = { key: pooled, name: m.name }; continue; }
             const blob = blobs.get(m.asset);
             if (!blob) { e.params[slot.key] = { key: m.key, name: m.name }; continue; }
             try {
                 const decoded = await blobToImage(blob);
-                e.params[slot.key] = fxAddLocalMap(m.name, decoded.url);
+                const added = fxAddLocalMap(m.name, decoded.url);
+                e.params[slot.key] = added;
+                if (mapKeys) mapKeys.set(m.asset, added.key);
             } catch (err) {
                 e.params[slot.key] = { key: m.key, name: m.name };
             }
