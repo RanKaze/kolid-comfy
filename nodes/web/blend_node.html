@@ -6336,6 +6336,162 @@ function fitLayerToMask(l, opts) {
     return true;
 }
 
+// Right-click "Split By Mask": cut the layer's FINAL ink — layerSource() with the whole strip
+// folded over it (decals painted, mask cut, chains run) — into its connected pieces, one layer
+// per piece. The composite is the authority: what you see is what gets cut, in the layer's own
+// native grid, and each part lands back on the canvas exactly where its pixels came from
+// (placeTransform with the source layer as frame — the same composition drawLayer() does).
+// Every part is a smart layer with its OWN pixels plus one Mask face whose coverage is exactly
+// that piece: neighbouring parts' boxes overlap, and the face is what keeps one part from
+// showing the piece that belongs to the next. Nothing is shared — every canvas here is new, so
+// the undo snapshot (holding the old layers by reference) survives untouched; the original stays
+// on the list but hidden, and dropping it is the user's call. One command, one pushHistory.
+const SPLIT_MIN_AREA = 64;      // specks under 8×8 px are dropped, not turned into layers
+const SPLIT_MAX_PARTS = 64;     // beyond this the leftovers land together in one part
+function splitLayerByMask(l) {
+    if (!l || l.isMaskLayer || isRasterLayer(l) || !l.img) return false;
+    if (isTextLayer(l)) { setStatus(`「${l.name}」is text — Rasterize it first if you want its pieces split apart`, 'error'); return false; }
+    if (isDirectionLayer(l)) { setStatus(`「${l.name}」is a direction — Rasterize it first if you want its pieces split apart`, 'error'); return false; }
+    if (isStashLayer(l)) { setStatus(`「${l.name}」is a Stash — duplicate the stack below it into a plain layer first`, 'error'); return false; }
+    if (guardAdjustMode()) return false;
+    // 旁路是视图开关:合成此刻不带链,切开得到的件也就不是这层平时画的东西 —— 同 Apply 的立场,宁可不动。
+    if (effectsBypass && liveEffects(l).length) {
+        setStatus(`Split By Mask — the chains are suspended, so what would be cut is not what「${l.name}」normally draws. Resume them (⏸ in the Effects panel) first`, 'error');
+        return false;
+    }
+    const { w: ow, h: oh } = nativeSize(l.img);
+    const comp = document.createElement('canvas');
+    comp.width = ow; comp.height = oh;
+    const cg = comp.getContext('2d');
+    cg.drawImage(layerSource(l), 0, 0, ow, oh);
+    const px = cg.getImageData(0, 0, ow, oh).data;
+    const n = ow * oh;
+    // 每像素一件的标号。墨是合成图自己的 alpha:蒙版把整层藏没的话,这里就是一张白卷,后面自然会
+    // 以"没有可切的东西"收场。
+    const label = new Int32Array(n);
+    const stack = new Int32Array(n);
+    let next = 1;
+    for (let seed = 0; seed < n; seed++) {
+        if (label[seed] || px[seed * 4 + 3] < 128) continue;
+        const id = next++;
+        let sp = 0;
+        stack[sp++] = seed;
+        label[seed] = id;
+        while (sp) {
+            const p = stack[--sp];
+            const x = p % ow, y = (p / ow) | 0;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+                if (!dx && !dy) continue;
+                const nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= ow || ny >= oh) continue;
+                const q = ny * ow + nx;
+                if (!label[q] && px[q * 4 + 3] >= 128) { label[q] = id; stack[sp++] = q; }
+            }
+        }
+    }
+    // 半透明边沿 (0<alpha<128) 谁都够不上种子线,可一把抹掉的话件与件之间会现出一条透明缝 —— 反复扫,
+    // 把贴着已标号件的半透明像素并进那一件,直到没有新的并进为止。描边、羽化边都在这一步认领回来。
+    let grew = true;
+    for (let sweep = 0; grew && sweep < 64; sweep++) {
+        grew = false;
+        for (let p = 0; p < n; p++) {
+            if (label[p] || !px[p * 4 + 3]) continue;
+            const x = p % ow, y = (p / ow) | 0;
+            for (let dy = -1; dy <= 1 && !label[p]; dy++) for (let dx = -1; dx <= 1 && !label[p]; dx++) {
+                const nx = x + dx, ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= ow || ny >= oh) continue;
+                const nb = label[ny * ow + nx];
+                if (nb) { label[p] = nb; grew = true; }
+            }
+        }
+    }
+    const comps = new Array(next - 1);
+    for (let p = 0; p < n; p++) {
+        const id = label[p];
+        if (!id) continue;
+        let c = comps[id - 1];
+        if (!c) c = comps[id - 1] = { id, area: 0, x0: ow, y0: oh, x1: 0, y1: 0 };
+        c.area++;
+        const x = p % ow, y = (p / ow) | 0;
+        if (x < c.x0) c.x0 = x;
+        if (y < c.y0) c.y0 = y;
+        if (x > c.x1) c.x1 = x;
+        if (y > c.y1) c.y1 = y;
+    }
+    const kept = comps.filter(c => c && c.area >= SPLIT_MIN_AREA).sort((a, b) => b.area - a.area);
+    if (!kept.length) { setStatus(`Nothing visible in「${l.name}」— nothing to split`, 'error'); return false; }
+    if (kept.length === 1) { setStatus(`「${l.name}」is one connected piece — nothing to split`, 'error'); return false; }
+    // 面数封顶:榜上装不下的余数并成一件,名字也离开 partN 序列,免得重编号说谎。
+    const parts = [];
+    let rest = null;
+    kept.forEach((c, rank) => {
+        if (rank < SPLIT_MAX_PARTS) parts.push({ x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1, ids: [c.id], name: `part${rank + 1}` });
+        else {
+            if (!rest) rest = { x0: ow, y0: oh, x1: 0, y1: 0, ids: [] };
+            rest.ids.push(c.id);
+            if (c.x0 < rest.x0) rest.x0 = c.x0;
+            if (c.y0 < rest.y0) rest.y0 = c.y0;
+            if (c.x1 > rest.x1) rest.x1 = c.x1;
+            if (c.y1 > rest.y1) rest.y1 = c.y1;
+        }
+    });
+    if (rest) parts.push(Object.assign(rest, { name: 'part-rest' }));
+    for (const p of parts) {
+        p.w = p.x1 - p.x0 + 1;
+        p.h = p.y1 - p.y0 + 1;
+        p.tr = placeTransform({ x: p.x0, y: p.y0, w: p.w, h: p.h, ow, oh }, l.transform);
+        if (!p.tr) { setStatus(`Split By Mask —「${l.name}」's pieces fell outside the canvas; it is unchanged`, 'error'); return false; }
+    }
+    const idx = layers.findIndex(x => x.id === l.id);
+    const made = [];
+    for (const p of parts) {
+        const img = document.createElement('canvas');
+        img.width = p.w; img.height = p.h;
+        img.getContext('2d').drawImage(comp, p.x0, p.y0, p.w, p.h, 0, 0, p.w, p.h);
+        const mark = new Uint8Array(next);
+        for (const id of p.ids) mark[id] = 1;
+        const mk = document.createElement('canvas');
+        mk.width = p.w; mk.height = p.h;
+        const mg = mk.getContext('2d');
+        const md = mg.createImageData(p.w, p.h);
+        for (let y = 0; y < p.h; y++) for (let x = 0; x < p.w; x++) {
+            const id = label[(p.y0 + y) * ow + (p.x0 + x)];
+            if (!id || !mark[id]) continue;
+            const o = (y * p.w + x) * 4;
+            md.data[o] = md.data[o + 1] = md.data[o + 2] = md.data[o + 3] = 255;
+        }
+        mg.putImageData(md, 0, 0);
+        const part = {
+            name: p.name,
+            visible: true,
+            transform: p.tr,
+            raster: false,
+            stash: false,
+            canvasThumbEl: null,
+            attrs: [],
+            fxCache: null,
+            stack: stackOf(l),
+            fragment: !!l.fragment,
+            cud: null,
+            text: null,
+            dir: null,
+        };
+        part.id = ++layerSeq;
+        ownSource(part, img, img.toDataURL('image/png'));
+        part.mask = mk;      // 走 setter 进 strip:coverage 就是这一件自己的 label,蒙住邻居的件不外泄
+        made.push(part);
+    }
+    for (let k = made.length - 1; k >= 0; k--) layers.splice(idx, 0, made[k]);   // part1 落在最上
+    l.visible = false;
+    selectedId = made[0].id;
+    layoutCanvas();
+    renderLayerList();
+    render();
+    setStatus(`Split「${l.name}」into ${made.length} part${made.length === 1 ? '' : 's'} — the original stays on the list, hidden`, 'success');
+    pushHistory();
+    return true;
+}
+
 // `toStack` is what makes a cross-palette drag a MOVE: the row leaves the origin stack because it
 // simply stops belonging to it — the array is shared, so retagging is the whole operation. Without
 // it this is the ordinary within-list reorder.
@@ -9965,6 +10121,23 @@ function openLayerMenu(l, clientX, clientY) {
             fitLayerToMask(l);
         });
         menu.appendChild(fit);
+
+        // Split By Mask: the layer's final ink (source image with the whole strip folded over it)
+        // cut into its connected pieces, one layer per piece. A piece smaller than 8×8 px is not
+        // worth a row; more than 64 pieces land their leftovers together in one extra part.
+        const split = document.createElement('button');
+        split.className = 'layer-menu-item';
+        split.type = 'button';
+        split.setAttribute('role', 'menuitem');
+        split.textContent = 'Split By Mask';
+        split.disabled = !l.img;
+        split.title = `Cut「${l.name}」's final ink — its own picture with every step on its strip folded over — into its connected pieces, one layer per piece (part1 is the biggest). The original stays on the list but hidden.`;
+        split.addEventListener('click', ev => {
+            ev.stopPropagation();
+            closeLayerMenu();
+            splitLayerByMask(l);
+        });
+        menu.appendChild(split);
     }
 
     // Rasterize (one-way): bake the transform into a canvas-sized buffer. The Mask layer is not
