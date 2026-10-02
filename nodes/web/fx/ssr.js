@@ -33,10 +33,16 @@
 //   地形真爬过它的那一圈上出线,不会顺着一张轮廓描一圈。二阶差分只量本格这一圈,所以它与粗细那颗旋钮
 //   无关。另一道闸在**本格自己的交点**上:投到照片以外的那一格没有地形可绕 (ssrTerrainAt 在那里补的
 //   是 -Relief = 一片没有东西),那一处的余量过零不算接触,一格不画 (掠成地平线的那一行由 valid 挡)。
-//   Smooth 那颗旋钮把交线和阈值都改量在
+//   Edge Smooth 那颗旋钮把交线和阈值都改量在
 //   十字平均过的场上 (半径 = 层像素, 默认 1 = 不平滑、也不多采一次), 因为 8 位深度图自己就是台阶状的,
 //   未平滑的场一格一抖 ⇒ 带这里宽那儿窄;二阶差分那两刀仍看原场, 免得半径一大把断面也抹平。Distance
 //   Rate 那颗旋钮管远处:阈值按本格地形沉在浮雕范围里的位置从 1 插到给定系数 (100% = 远近同一把尺)。
+//   整条边还按**尽头档**吃 Fade, 与天光那一支同一句读法 (这条线不是 ray 带回来的内容, 所以不吃逐格的
+//   行进距离):Fade 拧到底时这一趟除了折射底什么都不写, 岸线跟着一起收。不接这一刀的毛病是实测的形状 ——
+//   边此前是这一趟里唯一不淡的东西, Fade=100% 时未命中区 `ssrSky(base)=base` 整片交回原图, 远处却还
+//   描着一条发光轮廓, 底下一滴水都没有。Preview 那一支读的是同一个 e, 所以摆位时拧 Fade 也会把水线带走
+//   (要看线就把 Fade 回 0);不为它开特例, 一条规则管所有出口。另一颗 Fade Multiplier 也接在这条线上,
+//   但它不是等比缩: 它按本格的水深逐格缩这条线 (见 ⑨ 末尾), 两颗一个管远近、一个管浅深。
 // ⑥ 波动 = 那面镜子不再是平镜:镜面上叠两阶正弦 (频率比 1 : 2.3, 沿这张照片自己的两个切向铺开),
 //   自变量是**本格与镜面的交点**, 所以波纹躺在镜面上、随镜子的朝向走。波长以画布高为单位 (一个画布高
 //   = 2hd 世界) ⇒ 换分辨率时两道波是同一个物理尺寸, 只有像素数跟着变。Wave 那颗旋钮说的是法线**最多
@@ -56,6 +62,20 @@
 //   Wave=0 时无从折射 —— 一颗平镜不弯任何东西 (那颗旋钮也就跟着藏起来)。
 //   代价: 波动 0 次额外取样 (全解析式), 但每算一次余量多两个 cos (波高), 每格再有两个 (斜率) —— Edge 开着
 //   那一圈邻格各问一遍, 峰值 ≈ 每格 24 个 cos; 折射每湿格 +1 次 uTex 取样 (≈ 全帧 22 取的 +4.5%)。
+// ⑧ Smooth (半径, 层像素) = 糊的是**采回来的内容**, 不是这一格自己: 凡是从这张照片里取样的地方
+//   (反射落点、折射挪过去的那一处) 都改量在中心 + 四个斜角 (每枚离中心正好 sm 格) 的五次取样平均上,
+//   RGBA 一起糊 (折射那一份的权重读的就是平均过的 alpha)。本格自己的像素走 texelFetch, 永远不糊 ——
+//   糊原图就等于糊这张照片的形状。半径 0 = 缩成一次取样, 与从前逐位同 (判据 30 同一把闸)。
+//   与 Edge 那颗 Edge Smooth 分开: 那一颗平均的是**深度场** (管水线落在哪儿、带多宽), 这一颗平均的是
+//   **颜色** (管照见的东西有多柔)。代价: 每一处取样 +4 次 (满反射 + 满折射那一格 2 → 10 次 uTex 取样)。
+// ⑨ Fade Multiplier = 液面与物体的交接不再是一刀: 水线往水里那一圈 (与 Edge 的 Depth Diff 同一条带) 里,
+//   整份反射 —— ray 采到的内容 *和* 什么都没照见时那一片天光 —— 按这一格的水深线性淡回本格自己的像素
+//   (淡到底 = 原图 / 折射那一底)。尺就是那条带, 但不吃 Noise 的逐格抖动、也不吃 Distance Rate, 免得淡的
+//   边界自己再抖一遍。0 = 现行为 (那句 mix 的 t=0 在 fp32 里精确回 1.0 ⇒ 出口逐位同, 判据 30 同一把闸)。
+//   代价: 0 次额外取样, 每格一个除法。**那条边读的是同一个 shore** (ssrEdge 末尾乘的那一句与这里同一式子,
+//   连 ms 都是同一格) ⇒ 水线那一处线与反射一起归零, 往水里一起长回来; 与 Fade 那一刀分工: 那一颗给整条线
+//   乘同一个数 (等比淡), 这一颗按本格水深铺开 (内缘先没)。真图实测 (判据 38 + F:\Harness\kolid-comfy\gl-probe\ssr_edge_real.mjs):
+//   缩比逐格铺在 0..1、带均值 0.928 → 0.692 (50%) → 0.455 (100%)、64 格整格没了、155 格一寸没动 (深水)。
 // 跳过并在链上说话的情形:没绑 plane / 面侧棱对着视线 (法线的 Y 分量 ≤ 0.15, 每条光线与镜面的交点
 // 跑到无穷远) / 面朝读者的镜子 (整帧只会刷成天光色) / 这一层在画面片上没有面积。镜子照见天光是
 // 正当结果,不跳过 —— 写成 Sky 那颗颜色。
@@ -84,6 +104,7 @@ uniform float uWaveTan;  // tan(Wave) = 波场的坡度上限 (法线最多歪�
 uniform float uWaveLen;  // 一阶波长 (世界单位); 二阶 = 它 / 2.3
 uniform float uWavePhase;// 波场相位 (弧度), 把整张波沿自己滑一格
 uniform float uRefract;  // 折射强度 0..1 (只管挪多少; 露出多少另有一把尺)
+uniform float uSmooth;   // ⑧ 取样点的模糊半径 (层像素); 0 = 原样一次取样
 uniform float uRelief;   // 深度满幅 (世界单位)
 uniform float uEps;      // 八位深度的量化容差 (世界单位) = Relief × 2/255
 uniform float uMinH;     // 一次穿越要算数,那儿的地形至少要高到这里 (世界 Y)
@@ -94,6 +115,7 @@ uniform float uJitter;   // 0..1: 起步相位抖多少步
 uniform int uSeed;
 uniform float uMix;
 uniform float uFade;
+uniform float uFadeMul;  // ⑨ 浅水那一圈把整份反射淡回原图的比例 0..1 (尺 = uEdgeDiff 那一条带)
 uniform float uNearBright;
 uniform float uPreview;  // 预览: 镜面露着的区域画白
 uniform vec3 uSky;       // 反射 ray 照到天空时的天光色
@@ -189,6 +211,16 @@ vec3 ssrWaveNormal(vec3 P) {
     vec2 sl = ssrWaveSlope(P);
     return normalize(uN + uT1 * sl.x + uT2 * sl.y);
 }
+// ⑧ Smooth (半径, 层像素): 凡是从这张照片里**采回来的内容**先糊一糊再用 —— 反射落点那一格、折射挪过去
+//   的那一格都算。中心 + 四个斜角 (每枚离中心正好 sm 格) 五次取样的平均, RGBA 四个通道一起糊 (边的
+//   权重读的就是那一份 alpha)。半径 0 = 原样一次取样 ⇒ 与从前逐位同 (判据 30 钉的就是这一条)。
+//   本格自己的像素走的是 texelFetch, 不在这儿:糊的是「照见的内容」, 不是这张照片本身。
+vec4 ssrFetch(vec2 s) {
+    if (uSmooth <= 0.0) return texture(uTex, s);
+    vec2 r = uSmooth / vec2(textureSize(uTex, 0)) * 0.70710678;
+    return (texture(uTex, s) + texture(uTex, s + vec2(r.x, r.y)) + texture(uTex, s + vec2(-r.x, r.y))
+        + texture(uTex, s + vec2(r.x, -r.y)) + texture(uTex, s + vec2(-r.x, -r.y))) * 0.2;
+}
 // ⑦ 折射底:水下那一格透过起伏的水面看到的画面。**两把 saturating 的尺**,各量各的 (用户 2026-10-02:
 // "目前折射的效果太弱了" —— 原来那份偏移和露出量都乘同一个 dep, 看得见的挪动 ∝ dep², 浅水实测 0.00 格):
 //   bend = 水深 / (0.25 × Relief) —— 管**挪多少**, 水深到 Relief 的四分之一就拧满, 再深的地方不再多挪
@@ -205,7 +237,7 @@ vec3 ssrRefract(vec3 own, vec2 uv, vec3 P, float margin) {
     vec2 sl = ssrWaveSlope(P);
     vec2 su = uv + uInv * (uRefract * bend * uRelief * (sl.x * uT1.xz + sl.y * uT2.xz));
     if (!ssrOn(su)) return own;
-    vec4 rb = texture(uTex, su);
+    vec4 rb = ssrFetch(su);
     return mix(own, rb.rgb, wet * rb.a);
 }
 // 水线 = 这一格的镜面高度与该处地形高之差 (margin) 走到 0 的那一条线 —— 不是画的线,是求交的结果。
@@ -233,7 +265,7 @@ vec3 ssrRefract(vec3 own, vec2 uv, vec3 P, float margin) {
 // 一步跳变的断面它=那一跳的高度 (几十阶)。取 5 个灰阶 (= 量化容差 uEps 的 2.5 倍) 为刀口。为什么不用
 // 「干那一侧高出多少」直接量: 那要拿邻格比, 而邻格离交线多远跟着 Width 那颗旋钮走, 粗边会把远处正常
 // 的干地也当成断面 (实测 Width=8 时 9.6 行的带被削成 5 行)。二阶差分只看本格这一圈, 与粗细无关。
-// Smooth (半径, 层像素): 交线位置和阈值都改量在**十字平均过的场**上 (中心 + 半径 sm 的上下左右 5 格)。
+// Edge Smooth (半径, 层像素): 交线位置和阈值都改量在**十字平均过的场**上 (中心 + 半径 sm 的上下左右 5 格)。
 // 8 位深度图本身就是台阶状的, 未平滑的场一格一抖 ⇒ 带这里宽那儿窄; 半径主要治的是那把**逐格梯度尺**
 // ((Xp-Xm)/2sm 比相邻两格之差稳得多)。**半径 1 = 不平滑**: 直接取本格原值, 与 Depth Diff 那一版逐位同
 // (默认档是用户点过头的, 不许被平均连带改掉), 平均从 2 起生效。**二阶差分那两刀永远看半径 1 的原场**:
@@ -312,14 +344,24 @@ float ssrEdge(float margin, vec3 Pc, vec2 uv, ivec2 tc) {
     float t = clamp((ms - Pc.y) / uRelief, 0.0, 1.0);    // 本格地形沉在浮雕范围里的几成
     float lim = uEdgeDiff * uRelief * mix(1.0, uEdgeRate, t)
         * (1.0 + (ssrH(tc, 7) - 0.5) * 2.0 * uEdgeNoise) / 255.0;
-    return uEdge * (1.0 - smoothstep(lim - 0.5 * dd, lim + 0.5 * dd, ms));
+    // 边也吃 Fade, 而且与天光**同一句读法**:这条线不是 ray 带回来的内容,所以它恒按尽头那一档打折
+    // (1−uFade),不随本格水深走。不接这一刀的毛病是实测的:Fade 拧到底时整片未命中区 ssrSky 原样交回 base,
+    // 这一趟什么都不写了,唯独那条岸线还按 Edge 原样画着 ⇒ 远处一圈发光轮廓,底下一滴水都没有。
+    // uFade=0 时这里乘的是精确的 1.0 ⇒ 出口与从前逐位同 (判据 30 同一把闸)。
+    // Fade Multiplier 那条带**也管这条线** (用户 2026-10-03: "fade 滑块那一条接上了, 但它没接 Fade
+    // Multiplier 那条带"): 浅水那一圈的反射已经淡回本格原图, 线在那一圈里就不该照旧画满。尺与上面第 ⑨
+    // 支同一句 (水深 ms 折进 uEdgeDiff 那一条带, 不吃 Noise 也不吃 Distance Rate), 读的都是这一格的 ms,
+    // 所以线与反射的淡入淡出落在同一圈里 —— 水线那一处两者一起归零, 往水里一起长回来。uFadeMul=0 时
+    // 那句 mix 的 t=0 ⇒ 精确乘 1.0 ⇒ 出口与从前逐位同 (判据 30 同一把闸, 判据 38 钉这一条)。
+    float fm = mix(1.0, clamp(ms * 255.0 / (uEdgeDiff * uRelief), 0.0, 1.0), uFadeMul);
+    return uEdge * (1.0 - uFade) * fm * (1.0 - smoothstep(lim - 0.5 * dd, lim + 0.5 * dd, ms));
 }
 void main() {
     ivec2 tc = ivec2(gl_FragCoord.xy);
     vec4 own = texelFetch(uTex, tc, 0);
     if (uMix <= 0.0) { Frag = own; return; }
     // margin 同时喂 ssrEdge:露/埋的分界就是水线,一份算式两处读。边只长在水那一侧,所以埋着 (干) 的那
-    // 一分支通常 e=0,画面原样;只有 Smooth 把交线挪过本格的少数格会在这儿上色 (那条线本来就该压在水线上)。
+    // 一分支通常 e=0,画面原样;只有 Edge Smooth 把交线挪过本格的少数格会在这儿上色 (那条线本来就该压在水线上)。
     vec3 P, D; bool valid;
     float margin = ssrMargin(vUV, P, D, valid);
     float e = ssrEdge(margin, P, vUV, tc);
@@ -329,11 +371,19 @@ void main() {
     // ⑦ 先折后反: 这一格水面下的那一层先垫上去, 反射再盖在它上面 (ssrSky 与命中那两处都读 base)。
     // 两颗旋钮都关着时 base 就是 own.rgb, 出口与从前逐位同。
     vec3 base = ssrRefract(own.rgb, vUV, P, margin);
+    // ⑨ Fade Multiplier = 浅水那一圈把**整份反射**淡回原图 (液面与物体的交接不再是一刀)。尺与 Edge 的
+    // Depth Diff 同一把 (同一条带的宽度, 但不吃 Noise 的逐格抖动、也不吃 Distance Rate): margin 就是这一格
+    // 的水深, 到 0 (水线) 时反射 = 0, 到带宽时 = 满。0 档那句 mix 的 t = 0 ⇒ shore 精确等于 1.0,
+    // 出口与从前逐位同 (判据 30 同一把闸)。
+    float shore = 1.0;
+    if (uFadeMul > 0.0) {
+        shore = mix(1.0, clamp(margin * 255.0 / (uEdgeDiff * uRelief), 0.0, 1.0), uFadeMul);
+    }
     // ④ 镜面反射: 方向由 Plane attribute 的法线决定, Wave>0 时再让波场把它歪出去一点 (见 ⑥:
     // 歪的只有方向, 水线与余量不动)。往读者那一侧弹 = 照的是相机背后。
     float tMax = float(uSteps) * uStepW;   // 射程尽头 = Fade 的满刻度
     vec3 R = reflect(D, ssrWaveNormal(P));
-    if (R.y >= 0.0) { Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return; }
+    if (R.y >= 0.0) { Frag = vec4(mix(mix(base, ssrSky(base), shore), uEdgeColor, e), own.a); return; }
     float jit = (ssrH(tc, 0) - 0.5) * uJitter;
     float tLo = 0.0, tHi = -1.0;
     float rh = length(R.xz);            // ray 每前进 1 世界长度, 水平方向走 rh 世界长度
@@ -355,7 +405,7 @@ void main() {
     if (tHi < 0.0) {
         // 未命中 = 这条反射 ray 一路照到的是天空。它为什么停的 (走满射程 / 半路出了这张照片) 不改颜色:
         // 什么都没带回 = 按射程尽头打折, 与别的未命中同一档。
-        Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a);
+        Frag = vec4(mix(mix(base, ssrSky(base), shore), uEdgeColor, e), own.a);
         return;
     }
     // 二分精修: 命中点定在「最后一个不算数」与「第一个算数」之间, 步进的台阶感从这里磨掉。判据与上面
@@ -381,12 +431,12 @@ void main() {
     //   落进「远处/掠射」那一类, 那一类自己也是塌缩 644 → 987 ⇒ 条纹总数 1 741 → 1 905 (默认档) **不降反升**,
     //   他刷新后报「还是有伪影」。判天光 = 总数 → 692 (−60 %), 代价是命中少 3.8 % (轮廓处反射缺一个小口)。
     if (terrHi - terrLo > uSlopeMax * rh * (tHi - tLo)) {
-        Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return;
+        Frag = vec4(mix(mix(base, ssrSky(base), shore), uEdgeColor, e), own.a); return;
     }
     vec2 hs = ssrSheet((P + R * tHi).xz);
-    if (!ssrOn(hs)) { Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return; }
-    vec4 hit = texture(uTex, hs);
-    float w = uMix * hit.a * (1.0 - uFade * clamp(tHi / tMax, 0.0, 1.0));
+    if (!ssrOn(hs)) { Frag = vec4(mix(mix(base, ssrSky(base), shore), uEdgeColor, e), own.a); return; }
+    vec4 hit = ssrFetch(hs);            // ⑧ 采回来的内容按 Smooth 的半径先糊一圈
+    float w = shore * uMix * hit.a * (1.0 - uFade * clamp(tHi / tMax, 0.0, 1.0));
     Frag = vec4(mix(mix(base, hit.rgb, w), uEdgeColor, e), own.a);
 }`;
 
@@ -489,6 +539,8 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform1f(fxglU(pr, 'uWaveLen'), Math.max(0.005, p.waveLen) * 2 * sh.hd);
         gl.uniform1f(fxglU(pr, 'uWavePhase'), p.wavePhase * Math.PI / 180);
         gl.uniform1f(fxglU(pr, 'uRefract'), p.refract / 100);
+        // ⑧ 模糊半径 (层像素): 0 = 着色器里那五次取样缩成一次。
+        gl.uniform1f(fxglU(pr, 'uSmooth'), Math.max(0, p.smooth || 0));
         gl.uniform1f(fxglU(pr, 'uRelief'), relief);
         gl.uniform1f(fxglU(pr, 'uEps'), relief * 2 / 255);
         // Solid 那一刀:浮雕底端往上这么一段算「深度范围的尽头」,不是场景里立着的东西。
@@ -511,10 +563,11 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform1i(fxglU(pr, 'uSeed'), p.seed | 0);
         gl.uniform1f(fxglU(pr, 'uMix'), p.mix / 100);
         gl.uniform1f(fxglU(pr, 'uFade'), p.fade / 100);
+        gl.uniform1f(fxglU(pr, 'uFadeMul'), (p.fadeMul || 0) / 100);
         gl.uniform1f(fxglU(pr, 'uNearBright'), p.near === 'bright' ? 1 : 0);
         gl.uniform1f(fxglU(pr, 'uPreview'), p.preview ? 1 : 0);
         gl.uniform3f(fxglU(pr, 'uSky'), ...fxHexToRgb01(p.sky));
-        // 边:尺 = 深度差灰阶;Smooth = 场平滑半径 (层像素);Rate = 远端系数 (100% = 与近端同);
+        // 边:尺 = 深度差灰阶;Edge Smooth = 场平滑半径 (层像素);Rate = 远端系数 (100% = 与近端同);
         // Noise = 那条阈值逐格抖的比例。
         gl.uniform1f(fxglU(pr, 'uEdge'), p.edge / 100);
         gl.uniform1f(fxglU(pr, 'uEdgeDiff'), Math.max(0.5, p.edgeDiff));
@@ -580,16 +633,24 @@ const SSR_PARAMS = [
     // 所以整片未命中是一个颜色, Fade 拧到底 = 这一片整个交回原图。
     { key: 'sky', label: 'Sky', kind: 'color', def: '#aebfd0' },
     { key: 'fade', label: 'Fade', min: 0, max: 100, step: 1, def: 40, unit: '%',
-        tip: 'Everything the ray brings back comes dimmer the farther it went \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground. A ray that brings nothing back pays the full-scale discount, so the whole non-hit area is one colour and a full Fade hands it back to the picture.' },
+        tip: 'Everything this pass writes comes dimmer the farther the ray went \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground. A ray that brings nothing back pays the full-scale discount, so the whole non-hit area is one colour and a full Fade hands it back to the picture. The water line pays that same full-scale discount too: it is not something a ray brought back, so turning Fade up takes the shoreline outline with it instead of leaving it glowing over ground that no longer shows any reflection.' },
+    // ⑨ 浅水那一圈把**整份**反射 (采到的内容 + 什么都没照见时的天光) 淡回原图。尺与 Edge 的 Depth Diff
+    // 同一把 = 同一条带: 边画到哪儿, 反射就淡到哪儿, **而那条边自己也按同一句的 shore 缩** (用户
+    // 2026-10-03: "fade 滑块那一条接上了, 但它没接 Fade Multiplier 那条带")。0 = 现行为 (水线那一刀照旧硬)。
+    { key: 'fadeMul', label: 'Fade Multiplier', min: 0, max: 100, step: 1, def: 0, unit: '%',
+        tip: 'Shallow water hands the picture back: within one Depth Diff band of the water line the whole reflection \u2014 what the ray brought back *and* the sky colour it falls back on when it brought nothing \u2014 fades toward this layer\u2019s own pixels, so the shore stops being a hard cut between mirror and photo. 100% fades completely at the line itself, 0 leaves the cut exactly as it was. Same ruler as Edge\u2019s Depth Diff (that knob\u2019s Noise and Distance Rate do not enter here), so the band the line draws and the band this fades are one and the same band \u2014 and the water line itself pays this ramp too: each of its pixels is weighted by its own water depth, weakest right at the line and growing back as the water deepens, so the outline recedes together with the reflection under it instead of standing at full strength over water that has already been handed back. Unlike Fade, which multiplies every pixel of the line by the same number, this one tilts it by depth.' },
+    // ⑧ 采回来的内容先糊一糊: 反射落点那一格与折射那一格各做五次取样的平均。0 = 单次取样 (逐位同从前)。
+    { key: 'smooth', label: 'Smooth', min: 0, max: 8, step: 1, def: 0, unit: 'px',
+        tip: 'Softens what the rays bring back rather than where they went: every pixel sampled out of this picture \u2014 the reflection\u2019s hit and the refracted waterbed \u2014 is averaged over a five-tap cross this wide (layer pixels, diagonals at the given radius), so a hard-mapped reflection reads as a sheen instead of a second copy of the photo. 0 samples once, exactly as before; the layer\u2019s own pixels are never blurred. Costs four extra taps per sample.' },
     // 边 = 水线自己 (露/埋那份余量过零的地方),不是描边:整面埋着或整面露着时画面里没有交线,一条都不画。
     { key: 'edge', label: 'Edge', min: 0, max: 100, step: 1, def: 60, unit: '%',
-        tip: 'Draw the water line itself \u2014 where the mirror meets the photo \u2014 in its own colour. 0 leaves the crossing to the reflection.' },
+        tip: 'Draw the water line itself \u2014 where the mirror meets the photo \u2014 in its own colour. 0 leaves the crossing to the reflection. Two fade knobs reach this line, from two directions: Fade multiplies every pixel of it by the same (1\u2212Fade), the way the sky colour does, so a full Fade leaves no glowing outline standing over water that has already been handed back; Fade Multiplier weights each of its pixels by that pixel\u2019s own water depth, so the outline thins first right at the line and only reaches full strength a Depth Diff band into the water.' },
     { key: 'edgeDiff', label: 'Depth Diff', min: 1, max: 64, step: 1, def: 8, unit: 'lvl', when: p => p.edge > 0,
         tip: 'How deep the water may be \u2014 in depth-map levels (1/255 of the relief) \u2014 and still count as the edge. Measured on the water side only: ground standing above the surface there is dry, not shore, so nothing is drawn. Steep ground gives a thin line, shallow ground a wide one. Measured in depth instead of pixels, so the line sits where the data puts it rather than breaking into dashes where the crossing jitters by one level.' },
     { key: 'edgeRate', label: 'Distance Rate', min: 0, max: 400, step: 1, def: 100, unit: '%', when: p => p.edge > 0,
         tip: 'The same threshold out at the far end of the relief, as a fraction of the near one (100% = one ruler everywhere). Ground sits further down the scene the darker/paler it is on the depth map, so this says how close far-away ground must come to the water to still count as shore.' },
-    { key: 'edgeSmooth', label: 'Smooth', min: 1, max: 8, step: 1, def: 1, unit: 'px', when: p => p.edge > 0,
-        tip: 'Average the depth field over a cross this wide (layer pixels) before the water line and the threshold are read from it. An 8-bit map is staircased, so 1 leaves the band jittering one cell here and there. The cliff test still reads the raw field, so a wide radius cannot dissolve a real step.' },
+    { key: 'edgeSmooth', label: 'Edge Smooth', min: 1, max: 8, step: 1, def: 1, unit: 'px', when: p => p.edge > 0,
+        tip: 'The edge\u2019s own smooth, and it averages the *depth field*: the water line and its threshold are read off that average. Smooth above blurs what the rays bring back, this one steadies where the line sits. An 8-bit map is staircased, so 1 leaves the band jittering one cell here and there. The cliff test still reads the raw field, so a wide radius cannot dissolve a real step.' },
     { key: 'edgeNoise', label: 'Noise', min: 0, max: 100, step: 1, def: 35, unit: '%', when: p => p.edge > 0,
         tip: 'Rags that threshold by up to this fraction of itself, per pixel \u2014 deterministic; Seed picks the pattern.' },
     { key: 'edgeColor', label: 'Edge Color', kind: 'color', def: '#dff0ff', when: p => p.edge > 0 },
@@ -601,7 +662,7 @@ defineEffect({
     group: 'Reflect',
     icon: 'reflect',
     needsMap: 'Depth',
-    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror while Wave is 0; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray, and when the relief does not climb under the ray more steeply than Steep allows, because a step that steep is the silhouette of something standing in front rather than a surface the ray reaches, and sampling it copies one pixel along the reflection into a streak. Ran out of Reach or left the picture = the ray found the sky = the Sky colour, which takes Mix and pays Fade at full scale whatever distance the ray gave up at, so the whole non-hit area is one colour. Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Wave makes the mirror sheet itself wavy: two sine swells laid along this layer\u2019s own two tangents at a 1 : 2.3 frequency ratio, measured on the mirror rather than on the picture, so they ride the sheet wherever the Plane attribute points it. Wavelength is in canvas heights — the same ruler Relief uses — so a swell keeps its physical size when the resolution changes; Wave is the *angle* the swell may climb, which is why it stays the same strength whatever the Wavelength is; the Wavelength sets how wide and how high the bumps are, so a long swell moves the shoreline a long way. The whole exposed/buried margin is measured on that wavy sheet, so the water line and Edge ride the swell: where the wave lifts the mirror it laps further up the bank, where it drops it bares more ground, and the line that separates the two is the same line. There is no clock anywhere in this chain, so Phase (sliding the field along itself) is the only way to move a swell. Refract then bends what lies under the surface: that pixel\u2019s neighbourhood is sampled sideways by that same lean, on a depth ruler that saturates a quarter of the way down the relief, so shallow water bends visibly instead of barely — the water depth sets *how much of the lean* is used, not how faint the result is: a pixel with any water in it shows the bent content at full strength, dry ground shows none — and the bend lies *under* the reflection, so Mix and Fade keep weighing what sits on top of it. Cost: Wave adds no texture taps (the swell is analytic, two cosines each time the margin is asked, so Edge open means about twenty per pixel), Refract one sample per wet pixel. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
+    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror while Wave is 0; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray, and when the relief does not climb under the ray more steeply than Steep allows, because a step that steep is the silhouette of something standing in front rather than a surface the ray reaches, and sampling it copies one pixel along the reflection into a streak. Ran out of Reach or left the picture = the ray found the sky = the Sky colour, which takes Mix and pays Fade at full scale whatever distance the ray gave up at, so the whole non-hit area is one colour. Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Wave makes the mirror sheet itself wavy: two sine swells laid along this layer\u2019s own two tangents at a 1 : 2.3 frequency ratio, measured on the mirror rather than on the picture, so they ride the sheet wherever the Plane attribute points it. Wavelength is in canvas heights — the same ruler Relief uses — so a swell keeps its physical size when the resolution changes; Wave is the *angle* the swell may climb, which is why it stays the same strength whatever the Wavelength is; the Wavelength sets how wide and how high the bumps are, so a long swell moves the shoreline a long way. The whole exposed/buried margin is measured on that wavy sheet, so the water line and Edge ride the swell: where the wave lifts the mirror it laps further up the bank, where it drops it bares more ground, and the line that separates the two is the same line. There is no clock anywhere in this chain, so Phase (sliding the field along itself) is the only way to move a swell. Refract then bends what lies under the surface: that pixel\u2019s neighbourhood is sampled sideways by that same lean, on a depth ruler that saturates a quarter of the way down the relief, so shallow water bends visibly instead of barely — the water depth sets *how much of the lean* is used, not how faint the result is: a pixel with any water in it shows the bent content at full strength, dry ground shows none — and the bend lies *under* the reflection, so Mix and Fade keep weighing what sits on top of it. Cost: Wave adds no texture taps (the swell is analytic, two cosines each time the margin is asked, so Edge open means about twenty per pixel), Refract one sample per wet pixel. Smooth blurs what the rays bring back rather than where they go: every pixel taken out of this picture \u2014 the reflection\u2019s hit and the refracted waterbed \u2014 is averaged over a five-tap cross of that radius in layer pixels (the colour and its alpha together), so a hard-mapped reflection reads as a sheen instead of a second copy of the photo; the layer\u2019s own pixels are never touched, and 0 samples once, exactly as before. Cost: four extra taps per sample, ten uTex taps on a pixel that both reflects at full strength and refracts. Fade Multiplier softens where the mirror meets the photo: within one Depth Diff band of the water line the *whole* reflection \u2014 the colour the ray brought back and the sky it falls back on when it brought nothing \u2014 fades toward this pixel\u2019s own colour (and whatever refraction laid under it), so the shore is a gradient instead of a cut; 100% fades completely at the line, 0 leaves the cut as it was, and that band uses the same ruler as the edge without its Noise or Distance Rate. The water line itself pays that same per-pixel ramp — each of its pixels weighted by its own depth, weakest right at the crossing and growing back as the water deepens — so the outline recedes together with the reflection instead of standing at full strength over water that has already been handed back; Fade by contrast multiplies every pixel of the line by one number, so the two knobs split it distance against depth. Cost: no extra taps. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Edge Smooth is the other one, and it averages the *depth field* rather than the colour: it reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped. The line as a whole pays Fade at the full-scale discount, the way the sky colour does — it is not something a ray brought back, so it is not measured per ray either; a full Fade leaves no glowing outline standing around ground the reflection has already been handed back from.',
     params: SSR_PARAMS,
     shaders: { ssr: FX_FS_SSR },
     run: fxglSSR,
@@ -640,9 +701,11 @@ defineEffect({
         if (p.near === 'bright') s += '  inv';
         if (p.mix < 100) s += `  m${n(p.mix)}`;
         if (p.fade < 100) s += `  f${n(p.fade)}`;
+        if (p.smooth) s += `  sm${n(p.smooth)}px`;
+        if (p.fadeMul) s += `  fdm${n(p.fadeMul)}`;
         if (p.edge) s += `  e${n(p.edge)}/${n(p.edgeDiff)}lvl`
             + (p.edgeRate !== 100 ? `\u00d7${n(p.edgeRate / 100)}` : '')
-            + (p.edgeSmooth > 1 ? ` sm${n(p.edgeSmooth)}` : '');
+            + (p.edgeSmooth > 1 ? ` esm${n(p.edgeSmooth)}` : '');
         if (!p.jitter) s += '  nojit';
         return s;
     },
