@@ -302,6 +302,14 @@ function fxStepEl(l, r, effect) {
     return { chip, params: fxOpenId === effect.id ? fxParamsEl(l, effect, spec, syncRead, updaters) : null };
 }
 
+// 折叠组 (kind:'fold' 的参数行) 的开合,按 effect id + 组 key 记在内存里 —— 纯 UI 状态,不进存档、
+// 不进 fxSignature,重开页面回到 def.open 的默认。
+const fxFoldState = new Map();
+function fxFoldOpen(effect, d) {
+    const k = effect.id + '|' + d.key;
+    return fxFoldState.has(k) ? fxFoldState.get(k) : d.open !== false;
+}
+
 function fxParamsEl(l, effect, spec, syncRead, updaters) {
     const body = document.createElement('div');
     body.className = 'fx-params';
@@ -310,16 +318,27 @@ function fxParamsEl(l, effect, spec, syncRead, updaters) {
     else {
         // 开关/模式专属的旋钮只在条件成立时出现 —— 这条过滤各编辑面都在走 (见 fx/corrosion.js),
         // 通用面板以前漏了,所以光照那 8 行阴影旋钮在 Shadow=0 时照样铺满一排,而读数行早就不报它们了。
+        // 折叠头 (kind:'fold') 把它后面的行划成一组:组收起时那些行整个不进列表,头自己永远在,
+        // 一组参数在哪儿读一行头就知道。
         const visible = () => {
             const p = effectParams(effect);
-            return spec.params.filter(d => !d.when || d.when(p));
+            const rows = [];
+            let open = true;
+            for (const d of spec.params) {
+                if (d.when && !d.when(p)) continue;
+                if (d.kind === 'fold') { rows.push(d); open = fxFoldOpen(effect, d); }
+                else if (open) rows.push(d);
+            }
+            return rows;
         };
         // 重铺只认「这一批行换没换」,而且只挂在**提交**上:拖动途中每个 input 都会同步读数,
         // 那时候换掉 DOM 等于把正在拖的滑块从指头底下拆走 (与 fxLiveUpdate 同一理由)。
+        // 键里带上每枚折叠头的开合:翻一枚空组 (行全被 when 藏掉了) 时键也要动,
+        // 不然头上的箭头不重画。
         let shown = '';
         const pump = () => {
             const rows = visible();
-            const key = rows.map(d => d.key).join(',');
+            const key = rows.map(d => d.key + (d.kind === 'fold' ? (fxFoldOpen(effect, d) ? '+' : '-') : '')).join(',');
             if (key === shown) return;
             shown = key;
             body.replaceChildren(...rows.map(d => fxControlRow(l, effect, d, syncRead, updaters, pump)));
@@ -348,6 +367,30 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     const mapSlot = def.kind === 'map'
         ? (fxMapSlots(effect).find(s => s.key === def.key) || { key: def.key, role: 'Map' })
         : null;
+    if (def.kind === 'fold') {
+        // 折叠组头:整行一颗按钮,箭头 + 组名 + 一条淡线。开合是纯 UI 状态,不进撤销;
+        // 点下去重铺参数区 (onCommit = 通用面板的 pump),组下的行由 visible() 的行走决定去留。
+        row.className = 'fx-fold';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fx-fold-head';
+        const chev = document.createElement('span');
+        chev.className = 'fx-fold-chev';
+        const nm = document.createElement('span');
+        nm.textContent = def.label;
+        btn.appendChild(chev);
+        btn.appendChild(nm);
+        if (def.tip) btn.title = def.tip;
+        const open = fxFoldOpen(effect, def);
+        chev.textContent = open ? '\u25BE' : '\u25B8';
+        btn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            fxFoldState.set(effect.id + '|' + def.key, !fxFoldOpen(effect, def));
+            if (onCommit) onCommit();
+        });
+        row.appendChild(btn);
+        return row;
+    }
     const label = document.createElement('label');
     label.textContent = mapSlot ? mapSlot.role : def.label;
     row.appendChild(label);

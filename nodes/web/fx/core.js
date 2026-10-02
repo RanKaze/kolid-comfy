@@ -81,6 +81,7 @@ function effectParams(effect) {
     const spec = EFFECT_TYPES[effect.type];
     const out = {};
     for (const p of effectParamDefs(effect.type)) {
+        if (p.kind === 'fold') continue;   // 折叠头是 UI 结构,不是参数:不入 params、不入存档
         const v = effect.params && effect.params[p.key];
         out[p.key] = (v === undefined || v === null) ? p.def : v;
     }
@@ -92,7 +93,7 @@ function effectParams(effect) {
 
 function makeEffect(type) {
     const params = {};
-    for (const p of effectParamDefs(type)) params[p.key] = p.def;
+    for (const p of effectParamDefs(type)) { if (p.kind !== 'fold') params[p.key] = p.def; }
     return { id: ++fxSeq, type, enabled: true, params };
 }
 
