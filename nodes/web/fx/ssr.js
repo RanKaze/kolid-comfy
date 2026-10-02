@@ -37,6 +37,25 @@
 //   十字平均过的场上 (半径 = 层像素, 默认 1 = 不平滑、也不多采一次), 因为 8 位深度图自己就是台阶状的,
 //   未平滑的场一格一抖 ⇒ 带这里宽那儿窄;二阶差分那两刀仍看原场, 免得半径一大把断面也抹平。Distance
 //   Rate 那颗旋钮管远处:阈值按本格地形沉在浮雕范围里的位置从 1 插到给定系数 (100% = 远近同一把尺)。
+// ⑥ 波动 = 那面镜子不再是平镜:镜面上叠两阶正弦 (频率比 1 : 2.3, 沿这张照片自己的两个切向铺开),
+//   自变量是**本格与镜面的交点**, 所以波纹躺在镜面上、随镜子的朝向走。波长以画布高为单位 (一个画布高
+//   = 2hd 世界) ⇒ 换分辨率时两道波是同一个物理尺寸, 只有像素数跟着变。Wave 那颗旋钮说的是法线**最多
+//   歪出去几度**:两阶的振幅各取其频率的倒数, 于是各自贡献同样大的坡度 tan(Wave)/√2, 合成正好不超过
+//   tan(Wave) —— 最大倾角与波长无关 (波长只管两道波多宽, 不管水多陡)。波场不只歪法线, 它把**镜面本身**
+//   抬起/压下: 平的交点 P 顺着视线 D 推到起伏面上那一点 (一阶: 位移 = 该处波高 h ÷ (D·N), 沿 N 的量
+//   正好是 h), 于是露/埋那份余量、水线、Edge、折射用的水深全都跟着波纹摇 —— 水线是镜面与地形的接触,
+//   镜子自己抖了, 接触线不可能不动 (2026-10-02 点名要这一条, 前一版把 Edge 钉在平镜上已撤)。Steep 仍
+//   量地形自己的坡度, 与波场无关。整条 fx 链没有任何时间源, 所以
+//   Phase 是把波场沿自己滑一格的唯一入口; 要动就得手动拧它。
+// ⑦ 折射 = 水面下的东西是**透过**水看到的:把本格周围的内容顺着歪掉的水面横向挪一点再采。挪多少 =
+//   **只打一次折**:水深先过一把 saturating 的尺 (到 Relief 的四分之一就拧满) 再乘波动给出来的那一份倾斜,
+//   最后乘 Refract; 露出多少 (混合权重) 另走一把更紧的尺 (一格水就全露), 不乘 Refract、也不乘那份
+//   depth —— 两条都乘 depth 是上一版的病灶, 看得见的挪动 ∝ depth², 浅水实测 0.00 格 (用户 2026-10-02:
+//   "目前折射的效果太弱了")。投回画面片只有落在
+//   画布平面里的那一段看得见 (指向读者的分量在照片里没有面积)。干的 (margin ≤ 0) 一格不弯。这一格的水深读的是**抖过的镜面** (⑥ 把 P 推上起伏面), 所以浅水带自己会随波纹往前后挪。压在反射**底下** (先折后反), Mix/Fade 照旧只管盖在上面的那一份反射。它吃的是波动的倾斜, 所以
+//   Wave=0 时无从折射 —— 一颗平镜不弯任何东西 (那颗旋钮也就跟着藏起来)。
+//   代价: 波动 0 次额外取样 (全解析式), 但每算一次余量多两个 cos (波高), 每格再有两个 (斜率) —— Edge 开着
+//   那一圈邻格各问一遍, 峰值 ≈ 每格 24 个 cos; 折射每湿格 +1 次 uTex 取样 (≈ 全帧 22 取的 +4.5%)。
 // 跳过并在链上说话的情形:没绑 plane / 面侧棱对着视线 (法线的 Y 分量 ≤ 0.15, 每条光线与镜面的交点
 // 跑到无穷远) / 面朝读者的镜子 (整帧只会刷成天光色) / 这一层在画面片上没有面积。镜子照见天光是
 // 正当结果,不跳过 —— 写成 Sky 那颗颜色。
@@ -59,6 +78,12 @@ uniform mat2 uInv;       // (uBx uBy) 那一组基的逆: 世界 XZ → 这一�
 uniform float uK;        // 1/眼距 (世界单位) = tan(视场半角)/画布半宽; 0 = 正交
 uniform vec3 uA;         // 镜面上的一点 (世界, 直接取自 Plane attribute 的 position)
 uniform vec3 uN;         // 镜面法线 (世界, 单位)
+uniform vec3 uT1;        // 镜面上两个正交切向 (世界, 单位): 波动沿它们铺, 折射顺它们挪
+uniform vec3 uT2;
+uniform float uWaveTan;  // tan(Wave) = 波场的坡度上限 (法线最多歪出去这么多); 0 = 平镜
+uniform float uWaveLen;  // 一阶波长 (世界单位); 二阶 = 它 / 2.3
+uniform float uWavePhase;// 波场相位 (弧度), 把整张波沿自己滑一格
+uniform float uRefract;  // 折射强度 0..1 (只管挪多少; 露出多少另有一把尺)
 uniform float uRelief;   // 深度满幅 (世界单位)
 uniform float uEps;      // 八位深度的量化容差 (世界单位) = Relief × 2/255
 uniform float uMinH;     // 一次穿越要算数,那儿的地形至少要高到这里 (世界 Y)
@@ -98,7 +123,27 @@ float ssrTerrainAt(vec2 xz) {
     vec2 s = ssrSheet(xz);
     return ssrOn(s) ? ssrTerrain(s) : -uRelief;
 }
-// 一格相对那面镜子的状态,一次算全 (步 0..3):视线方向 D、镜面交点 P、露/埋的余量 margin。
+// ⑥ 波场:沿镜面自己的两个正交切向铺的两阶正弦 (频率比 1 : 2.3)。自变量是**本格与平镜的交点**,所以
+// 波纹躺在镜面上、随镜子的朝向走;波长以画布高为单位 ⇒ 换分辨率时两道波是同一个物理尺寸。
+// 两阶各自的原函数与导函数共用这一对余弦。
+vec2 ssrWaveCos(vec3 P) {
+    float g1 = 6.28318531 / uWaveLen;
+    vec2 ab = vec2(dot(P - uA, uT1), dot(P - uA, uT2));
+    return vec2(cos(g1 * ab.x + uWavePhase), cos(g1 * 2.3 * ab.y + uWavePhase * 0.73));
+}
+// 坡度 (无量纲, 上限 = tan(Wave)):一阶振幅取 A = tan(Wave)/(√2·g1) (乘上 g1 以后代码里剩 tan/√2),
+// 二阶振幅 A/2.3 配 2.3 倍频率 ⇒ 两阶各自的最大坡度同为 tan(Wave)/√2, 合成正好 ≤ tan(Wave)。于是 Wave
+// 就是一颗**角度**:换波长只换两道波多宽, 不改它们多陡。解析式, 一格图不多采。
+vec2 ssrWaveSlope(vec3 P) { return (uWaveTan / 1.41421356) * ssrWaveCos(P); }
+// 镜面在该处沿法线抬起/压下多少 (世界单位):每阶振幅 = 那一阶的坡度 ÷ 它的频率, 所以波长拧长, 同一颗
+// Wave 角度下的鼓包又宽又高 (位移跟着波长涨, 坡度不变)。
+float ssrWaveHeight(vec3 P) {
+    float g1 = 6.28318531 / uWaveLen;
+    vec2 c = ssrWaveCos(P);
+    return (uWaveTan / 1.41421356) * (c.x / g1 + c.y / (g1 * 2.3));
+}
+// 一格相对那面镜子的状态,一次算全 (步 0..3):视线方向 D、镜面交点 P、露/埋的余量 margin。margin 三处读:
+// 水线 (ssrEdge)、本格的水深 (折射的尺, ⑦)、以及「埋没埋」这一关。
 // 收成一个函数是因为边要把「交线另一侧」按任意 uv 再问一遍 (ssrEdge)。valid = 这条视线根本够不着
 // 镜子 (交点跑到眼睛背后 = 透视下掠着镜面的那一片),那一格就是照片本身,谈不上反射。
 float ssrMargin(vec2 uv, out vec3 P, out vec3 D, out bool valid) {
@@ -110,6 +155,9 @@ float ssrMargin(vec2 uv, out vec3 P, out vec3 D, out bool valid) {
     // ③ 镜面求交。uN.y ≥ 0.15 由引擎保证 ⇒ dot(uN,D) 一般为负, 每条视线与镜面各交一次。
     P = W + D * (dot(uN, uA - W) / dot(uN, D));
     valid = !(uK > 0.0 && P.y * uK >= 1.0);
+    // ⑥ 镜子不再是平的一张纸: 平的交点沿视线推到起伏面上那一点。位移沿 D, 它在 N 上的分量正好是
+    //   该处的波高 h ⇒ 余量、水线、Edge、水深都跟着波纹摇。Wave=0 整句跳过, 0 档与平镜逐位同。
+    if (uWaveTan > 0.0) P += D * (ssrWaveHeight(P) / dot(uN, D));
     // 地形比镜面更靠近读者 ⇒ 镜子被埋。容差让「贴着水面摆」算露着:水面自己的深度值折出来与镜面
     // 等高,不容差的话整片水都成了冒出来的地形,反射会采到水面/水下内容。
     return P.y - ssrTerrainAt(P.xz);
@@ -132,6 +180,33 @@ bool ssrBlock(vec3 Q, float terr) {
 // 别的未命中不一样」。再往回退到天在无穷远 (恒不吃 Fade) 是另一头: Fade 拧到底压不住那一片。
 vec3 ssrSky(vec3 own) {
     return mix(own, uSky, uMix * (1.0 - uFade));
+}
+// 被波动歪过的镜面法线 (歪掉的只有**反射方向**那一条 ray;露/埋那份余量走的是 ssrMargin 里的位移)。
+// Wave=0 时**原样回 uN, 连 normalize 都不走**:归一化在 fp32 里就能差出 1 ulp,
+// 反射方向跟着抖, 步进/二分的边界就会翻格 —— 0 档必须与平镜逐格相同 (判据 30)。
+vec3 ssrWaveNormal(vec3 P) {
+    if (uWaveTan <= 0.0) return uN;
+    vec2 sl = ssrWaveSlope(P);
+    return normalize(uN + uT1 * sl.x + uT2 * sl.y);
+}
+// ⑦ 折射底:水下那一格透过起伏的水面看到的画面。**两把 saturating 的尺**,各量各的 (用户 2026-10-02:
+// "目前折射的效果太弱了" —— 原来那份偏移和露出量都乘同一个 dep, 看得见的挪动 ∝ dep², 浅水实测 0.00 格):
+//   bend = 水深 / (0.25 × Relief) —— 管**挪多少**, 水深到 Relief 的四分之一就拧满, 再深的地方不再多挪
+//     (挪得多不代表看得清: 同一条倾斜在浅水里也该有可见的量, 线性 depth 会把浅水整个压成 0);
+//   wet  = 水深 / (0.02 × Relief) —— 管**露出多少** (混合权重), 一格水就全露, 因此不再乘 uRefract,
+//     强度只从上面那条偏移里进来 ⇒ 一处打折, 不会二次衰减也不会重影。
+// 挪 = uRefract × bend × Relief × 那份倾斜, 化到画面片的 uv (只有 XZ 分量在照片里有面积);
+// 源格透明就没有内容可折; 挪出这张照片的那一格原样交回 —— 屏幕空间只能折得到画面里有的东西。
+// Wave=0 时倾斜恒为 0 ⇒ 一寸都不挪, 于是这一支整条早退 (那颗旋钮也跟着藏起来)。
+vec3 ssrRefract(vec3 own, vec2 uv, vec3 P, float margin) {
+    if (uRefract <= 0.0 || uWaveTan <= 0.0) return own;
+    float bend = clamp(margin / (uRelief * 0.25), 0.0, 1.0);
+    float wet = clamp(margin / (uRelief * 0.02), 0.0, 1.0);
+    vec2 sl = ssrWaveSlope(P);
+    vec2 su = uv + uInv * (uRefract * bend * uRelief * (sl.x * uT1.xz + sl.y * uT2.xz));
+    if (!ssrOn(su)) return own;
+    vec4 rb = texture(uTex, su);
+    return mix(own, rb.rgb, wet * rb.a);
 }
 // 水线 = 这一格的镜面高度与该处地形高之差 (margin) 走到 0 的那一条线 —— 不是画的线,是求交的结果。
 // 尺是**深度差** (Depth Diff 那颗旋钮, 单位 = 深度图灰阶 = 1/255 个浮雕范围), 而且**只往水那一侧量**:
@@ -251,10 +326,14 @@ void main() {
     if (!valid) { Frag = own; return; }
     if (margin < -uEps) { Frag = vec4(mix(own.rgb, uEdgeColor, e), own.a); return; }
     if (uPreview > 0.5) { Frag = vec4(mix(vec3(1.0), uEdgeColor, e), own.a); return; }
-    // ④ 镜面反射: 方向只由 Plane attribute 的法线决定 —— 一面平镜。往读者那一侧弹 = 照的是相机背后。
+    // ⑦ 先折后反: 这一格水面下的那一层先垫上去, 反射再盖在它上面 (ssrSky 与命中那两处都读 base)。
+    // 两颗旋钮都关着时 base 就是 own.rgb, 出口与从前逐位同。
+    vec3 base = ssrRefract(own.rgb, vUV, P, margin);
+    // ④ 镜面反射: 方向由 Plane attribute 的法线决定, Wave>0 时再让波场把它歪出去一点 (见 ⑥:
+    // 歪的只有方向, 水线与余量不动)。往读者那一侧弹 = 照的是相机背后。
     float tMax = float(uSteps) * uStepW;   // 射程尽头 = Fade 的满刻度
-    vec3 R = reflect(D, uN);
-    if (R.y >= 0.0) { Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return; }
+    vec3 R = reflect(D, ssrWaveNormal(P));
+    if (R.y >= 0.0) { Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return; }
     float jit = (ssrH(tc, 0) - 0.5) * uJitter;
     float tLo = 0.0, tHi = -1.0;
     float rh = length(R.xz);            // ray 每前进 1 世界长度, 水平方向走 rh 世界长度
@@ -276,7 +355,7 @@ void main() {
     if (tHi < 0.0) {
         // 未命中 = 这条反射 ray 一路照到的是天空。它为什么停的 (走满射程 / 半路出了这张照片) 不改颜色:
         // 什么都没带回 = 按射程尽头打折, 与别的未命中同一档。
-        Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a);
+        Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a);
         return;
     }
     // 二分精修: 命中点定在「最后一个不算数」与「第一个算数」之间, 步进的台阶感从这里磨掉。判据与上面
@@ -302,13 +381,13 @@ void main() {
     //   落进「远处/掠射」那一类, 那一类自己也是塌缩 644 → 987 ⇒ 条纹总数 1 741 → 1 905 (默认档) **不降反升**,
     //   他刷新后报「还是有伪影」。判天光 = 总数 → 692 (−60 %), 代价是命中少 3.8 % (轮廓处反射缺一个小口)。
     if (terrHi - terrLo > uSlopeMax * rh * (tHi - tLo)) {
-        Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return;
+        Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return;
     }
     vec2 hs = ssrSheet((P + R * tHi).xz);
-    if (!ssrOn(hs)) { Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return; }
+    if (!ssrOn(hs)) { Frag = vec4(mix(ssrSky(base), uEdgeColor, e), own.a); return; }
     vec4 hit = texture(uTex, hs);
     float w = uMix * hit.a * (1.0 - uFade * clamp(tHi / tMax, 0.0, 1.0));
-    Frag = vec4(mix(mix(own.rgb, hit.rgb, w), uEdgeColor, e), own.a);
+    Frag = vec4(mix(mix(base, hit.rgb, w), uEdgeColor, e), own.a);
 }`;
 
 // 反射面 = 一枚 Plane attribute:世界 position 直接就是镜面上的一点,法线 = 规范朝向 +X 被那枚
@@ -343,6 +422,23 @@ function fxSSRSheet(p, l) {
     };
 }
 
+// 镜面上那对正交切向 (⑥/⑦ 的坐标架): 把画面片的横边 (世界 XZ, Y=0) 投进镜面当第一个, 第二个与它正交、
+// 也还在这面镜里 (cross 天然满足, 且 n ⟂ t1、两者都单位 ⇒ 不用再归一化)。波躺在镜面上、随镜子的朝向走,
+// 而不是躺在画布上:换一枚 plane, 波纹的方向跟着换。pl.ny ≥ 0.15 由上面那道闸保证 ⇒ 水平方向不可能平行
+// 于法线, 投影长度有下界, 这里除得动。
+function fxSSRTangents(pl, sh) {
+    const n = [pl.nx, pl.ny, pl.nz];
+    const e = [sh.Bx[0], 0, sh.Bx[1]];
+    const d = e[0] * n[0] + e[1] * n[1] + e[2] * n[2];
+    const v = [e[0] - d * n[0], e[1] - d * n[1], e[2] - d * n[2]];
+    const L = Math.hypot(v[0], v[1], v[2]);
+    const t1 = [v[0] / L, v[1] / L, v[2] / L];
+    return {
+        t1,
+        t2: [n[1] * t1[2] - n[2] * t1[1], n[2] * t1[0] - n[0] * t1[2], n[0] * t1[1] - n[1] * t1[0]],
+    };
+}
+
 function fxglSSR(col, p, effect, l) {
     if (p.mix <= 0 || p.reach <= 0) return;        // 没有可写的反射 = 画面原样, 不必占用一次 pass
     const pl = fxSSRPlane(effect);
@@ -357,6 +453,10 @@ function fxglSSR(col, p, effect, l) {
     const steps = Math.max(2, Math.min(128, p.steps | 0));
     const k = p.persp > 0 ? Math.tan(p.persp * Math.PI / 360) / sh.hw : 0;
     const relief = Math.max(0.001, p.relief) * 2 * sh.hd;   // ×H → 世界单位 (一个画布高 = 2hd)
+    // ⑥ 波动: Wave 那颗旋钮是法线的**最大倾角** (°), 着色器按斜率加在切向上所以送 tan 过去; 波长那颗
+    // 与 Relief 同一把尺 (×H ⇒ 世界 = 它 × 2hd), 所以换分辨率时波纹是同一个物理尺寸、只有像素数在动。
+    const wave = p.wave > 0 ? Math.tan(p.wave * Math.PI / 180) : 0;
+    const tg = fxSSRTangents(pl, sh);
     // 面朝读者的镜子 (离画布平面不到 45°) 把视线原样弹回读者这一侧, 整帧只会刷成一片天光色 ——
     // 那是正当结果, 但读起来像坏了。在画面中心判一次 (正交下到处一样, 透视下中心最代表视线),
     // 把「往哪儿拧」写在链上。
@@ -381,6 +481,14 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform1f(fxglU(pr, 'uK'), k);
         gl.uniform3f(fxglU(pr, 'uA'), pl.ax, pl.ay, pl.az);
         gl.uniform3f(fxglU(pr, 'uN'), pl.nx, pl.ny, pl.nz);
+        // ⑥/⑦ 那对切向 + 波场的三个数。Wave=0 时 uWaveTan=0, 着色器三处 (交点位移、法线、折射) 都据此早退,
+        // 于是这一趟与平镜逐位同 —— 切向照旧上传 (反正没人读), 少一个分支。
+        gl.uniform3f(fxglU(pr, 'uT1'), tg.t1[0], tg.t1[1], tg.t1[2]);
+        gl.uniform3f(fxglU(pr, 'uT2'), tg.t2[0], tg.t2[1], tg.t2[2]);
+        gl.uniform1f(fxglU(pr, 'uWaveTan'), wave);
+        gl.uniform1f(fxglU(pr, 'uWaveLen'), Math.max(0.005, p.waveLen) * 2 * sh.hd);
+        gl.uniform1f(fxglU(pr, 'uWavePhase'), p.wavePhase * Math.PI / 180);
+        gl.uniform1f(fxglU(pr, 'uRefract'), p.refract / 100);
         gl.uniform1f(fxglU(pr, 'uRelief'), relief);
         gl.uniform1f(fxglU(pr, 'uEps'), relief * 2 / 255);
         // Solid 那一刀:浮雕底端往上这么一段算「深度范围的尽头」,不是场景里立着的东西。
@@ -440,6 +548,22 @@ const SSR_PARAMS = [
         tip: 'Ray-march quality plus 4 bisection refinements on every hit. Taps per pixel: Steps depth samples.' },
     { key: 'relief', label: 'Relief', min: 0.01, max: 4, step: 0.01, def: 0.5, unit: '\u00d7H',
         tip: 'How far the depth range sinks behind the picture plane, in canvas heights \u2014 the one ruler the terrain and the mirror share.' },
+    // 波动 = 那面镜子不再是平镜: 镜面上两阶正弦 (频率比 1 : 2.3) 把镜面本身抬起/压下, Wave 说的就是坡
+    // **最多有多陡** (一颗角度, 与波长无关: 波长只管两道波多宽多高)。水线、余量、Edge、水深量的都是这张
+    // 抖过的镜子 ⇒ 岸线自己随波纹起伏; 反射方向另吃歪过去的法线。0 = 平镜,
+    // 出口与从前逐位同 (判据 30)。
+    { key: 'wave', label: 'Wave', min: 0, max: 30, step: 1, def: 0, unit: '\u00b0',
+        tip: 'How steep the swell may get, in degrees. The mirror itself is lifted and pressed, so the shoreline ripples along with the wave, and the reflection stops being a perfect mirror: each pixel\u2019s ray leaves in a slightly different direction, so what shows in the water breaks up. It is an angle, so the Wavelength cannot make it steeper, only wider and higher. 0 keeps the sheet flat.' },
+    { key: 'waveLen', label: 'Wavelength', min: 0.005, max: 2.0, step: 0.005, def: 0.05, unit: '\u00d7H', when: p => p.wave > 0,
+        tip: 'How wide one swell is, in canvas heights \u2014 the same ruler Relief uses, so a bump keeps its physical size when you change resolution and only the pixel count moves. One canvas height is a long, low ground swell running across the whole picture; below about one layer pixel a wave cannot be drawn at all and only reads as grain. A second octave at 2.3 times the frequency rides on top of it; there is no knob for it.' },
+    { key: 'wavePhase', label: 'Phase', min: 0, max: 360, step: 1, def: 0, unit: '\u00b0', when: p => p.wave > 0,
+        tip: 'Slide the whole wave field along itself. Nothing in this chain has a clock, so the swell never moves on its own \u2014 this is the knob that picks which part of it the picture sits on.' },
+    // 折射压在反射**底下**: 水下的内容顺倾斜的水面横向挪一点再采。偏移只打一次折: 水深过 bend 那把尺
+    // (到 Relief 的四分之一就拧满), 混合权重过 wet 那把 (一格水就全露) —— 两条都乘水深的话可见挪动
+    // ∝ 水深², 浅水实测 0.00 格。
+    // 没有波动就没有倾斜 ⇒ 这颗只在 Wave>0 时出现 (用户点名的「折射也要参考水面波动」)。
+    { key: 'refract', label: 'Refract', min: 0, max: 100, step: 1, def: 0, unit: '%', when: p => p.wave > 0,
+        tip: 'What lies under the surface is seen through it: the waterbed is sampled sideways, by how far the swell leans at that pixel. The sideways bend saturates a quarter of the way down the relief, so shallow water leans visibly too instead of barely at all; only ground standing above the surface stays straight. It lies under the reflection, so Mix and Fade still weight what sits on top of it.' },
     // 一次穿越要算数,那儿的地形得真的高过浮雕底端这一段:底端只是深度范围的尽头,顺着它采远处那一圈
     // 像素就是拖影。0 = 每一道穿越都算 (老行为)。
     { key: 'solid', label: 'Solid', min: 0, max: 100, step: 1, def: 10, unit: '%',
@@ -477,7 +601,7 @@ defineEffect({
     group: 'Reflect',
     icon: 'reflect',
     needsMap: 'Depth',
-    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray, and when the relief does not climb under the ray more steeply than Steep allows, because a step that steep is the silhouette of something standing in front rather than a surface the ray reaches, and sampling it copies one pixel along the reflection into a streak. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
+    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror while Wave is 0; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray, and when the relief does not climb under the ray more steeply than Steep allows, because a step that steep is the silhouette of something standing in front rather than a surface the ray reaches, and sampling it copies one pixel along the reflection into a streak. Ran out of Reach or left the picture = the ray found the sky = the Sky colour, which takes Mix and pays Fade at full scale whatever distance the ray gave up at, so the whole non-hit area is one colour. Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Wave makes the mirror sheet itself wavy: two sine swells laid along this layer\u2019s own two tangents at a 1 : 2.3 frequency ratio, measured on the mirror rather than on the picture, so they ride the sheet wherever the Plane attribute points it. Wavelength is in canvas heights — the same ruler Relief uses — so a swell keeps its physical size when the resolution changes; Wave is the *angle* the swell may climb, which is why it stays the same strength whatever the Wavelength is; the Wavelength sets how wide and how high the bumps are, so a long swell moves the shoreline a long way. The whole exposed/buried margin is measured on that wavy sheet, so the water line and Edge ride the swell: where the wave lifts the mirror it laps further up the bank, where it drops it bares more ground, and the line that separates the two is the same line. There is no clock anywhere in this chain, so Phase (sliding the field along itself) is the only way to move a swell. Refract then bends what lies under the surface: that pixel\u2019s neighbourhood is sampled sideways by that same lean, on a depth ruler that saturates a quarter of the way down the relief, so shallow water bends visibly instead of barely — the water depth sets *how much of the lean* is used, not how faint the result is: a pixel with any water in it shows the bent content at full strength, dry ground shows none — and the bend lies *under* the reflection, so Mix and Fade keep weighing what sits on top of it. Cost: Wave adds no texture taps (the swell is analytic, two cosines each time the margin is asked, so Edge open means about twenty per pixel), Refract one sample per wet pixel. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
     params: SSR_PARAMS,
     shaders: { ssr: FX_FS_SSR },
     run: fxglSSR,
@@ -510,6 +634,9 @@ defineEffect({
         let s = `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}`
             + `  ${tilt === null ? 'no plane' : `mirror ${tilt}\u00b0\u2933`}`
             + `  r${n(p.reach)}px  s${p.steps | 0}  rel${n(p.relief)}H  sol${n(p.solid)}  stp${n(p.steep)}  fov${n(p.persp)}\u00b0`;
+        // 波动/折射只在开着时占位; 波长小到位 (0.005 一档) 所以不走 n() 那位「整数才不写小数」的格式化器。
+        if (p.wave) s += `  wv${n(p.wave)}\u00b0/${+p.waveLen.toFixed(3)}H${p.wavePhase ? `@${n(p.wavePhase)}` : ''}`;
+        if (p.wave && p.refract) s += `  rf${n(p.refract)}`;
         if (p.near === 'bright') s += '  inv';
         if (p.mix < 100) s += `  m${n(p.mix)}`;
         if (p.fade < 100) s += `  f${n(p.fade)}`;
