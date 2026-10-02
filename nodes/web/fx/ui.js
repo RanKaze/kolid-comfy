@@ -452,19 +452,19 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
         clr.textContent = '×';
         clr.style.fontSize = '14px';
         clr.style.lineHeight = '1';
-        clr.title = 'Unbind this direction — the manual Angle/Elev knobs come back';
+        clr.title = 'Unbind this attribute';
         const show = () => {
             const ref = get();
             const where = ref ? fxDirSourceName(ref) : null;
-            btn.textContent = ref ? (where || 'missing direction') : 'not bound';
+            btn.textContent = ref ? (where || 'missing attribute') : 'not bound';
             btn.classList.toggle('unset', !ref);
             btn.classList.toggle('gone', !!ref && !where);
-            btn.title = ref ? (where ? `${where} — click to pick another` : 'The bound direction attribute is gone — click to pick another')
-                : 'Point this light with a Direction attribute — pick one from the project';
+            btn.title = ref ? (where ? `${where} — click to pick another` : 'The bound attribute is gone — click to pick another')
+                : (def.tip || 'Pick an attribute from the project');
             clr.style.display = ref ? '' : 'none';
         };
         updaters.push(show);
-        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect, def.key); });
+        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect, def.key, def.types); });
         clr.addEventListener('click', ev => {
             ev.stopPropagation();
             effect.params[def.key] = null;
@@ -472,6 +472,26 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
         });
         row.appendChild(btn);
         row.appendChild(clr);
+        show();
+        return row;
+    }
+    if (def.kind === 'flag') {
+        // 双态按钮 (预览/模式开关): 值是真参数 —— 进存档、进 fxSignature (翻转即脏、当场重算)。
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'fx-map-btn';
+        const show = () => {
+            const on = !!get();
+            btn.textContent = on ? (def.onText || 'ON') : (def.offText || 'OFF');
+            btn.classList.toggle('unset', !on);
+        };
+        updaters.push(show);
+        btn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            effect.params[def.key] = !get();
+            fxStructuralChange(l);
+        });
+        row.appendChild(btn);
         show();
         return row;
     }
@@ -724,11 +744,26 @@ function fxDirModalOpen() { return fxDirModalEl.classList.contains('open'); }
 function closeFxDirModal() { fxDirModalEl.classList.remove('open'); fxDirTarget = null; syncBrushCursor(); }
 
 function fxDirSourceName(ref) {
-    for (const hit of fxDirInventory()) if (hit.r.id === ref) return `${hit.docName} \u00b7 ${hit.l.name}`;
+    // 按 guid 找绑定来源,不筛类型 —— 这一行要认得所有能被绑的 attribute (direction/plane/…),
+    // 筛类型是选择器 (fxDirInventory) 的事:筛错了这里就是一句 "missing attribute",
+    // 而绑定本身活得好好的 (特效读的是记录表, 不是这张名单)。
+    if (!ref) return null;
+    for (const doc of documents) {
+        if (isSceneDoc(doc)) continue;
+        const docName = doc.name || 'Untitled';
+        const ls = doc === activeDoc ? layers : ((doc.ctx && doc.ctx.layers) || []);
+        for (const l of ls) {
+            if (l.isMaskLayer) continue;
+            for (const r of attrRecordsOf(l)) {
+                if (r.id === ref && r.desc && r.desc.rotation) return `${docName} \u00b7 ${l.name}`;
+            }
+        }
+    }
     return null;
 }
 
-function fxDirInventory() {
+function fxDirInventory(types) {
+    const want = types || ['direction'];
     const out = [];
     for (const doc of documents) {
         if (isSceneDoc(doc)) continue;
@@ -737,7 +772,7 @@ function fxDirInventory() {
         for (const l of ls) {
             if (l.isMaskLayer) continue;
             for (const r of attrRecordsOf(l)) {
-                if (r.type !== 'direction' || !r.desc || !r.desc.rotation) continue;
+                if (want.indexOf(r.type) < 0 || !r.desc || !r.desc.rotation) continue;
                 out.push({ docName, l, r });
             }
         }
@@ -760,19 +795,21 @@ function bindFxDir(ref) {
         : 'Unbound — the step is back on its own knobs', 'success');
 }
 
-function openFxDirModal(l, effect, key) {
+function openFxDirModal(l, effect, key, types) {
     if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
+    const want = types || ['direction'];
     fxDirTarget = { layerId: l.id, effectId: effect.id, key: key || 'dirRef' };
-    fxDirTitleEl.textContent = 'Bind a Direction';
+    fxDirTitleEl.textContent = 'Bind a ' + want[0][0].toUpperCase() + want[0].slice(1);
     fxDirGroupsEl.textContent = '';
-    const hits = fxDirInventory();
+    const hits = fxDirInventory(want);
     if (!hits.length) {
         const hint = document.createElement('div');
         hint.className = 'modal-hint';
-        hint.textContent = 'No Direction attribute in this project — add one from a layer\u2019s \u002B menu.';
+        hint.textContent = `No ${want[0]} attribute in this project — add one from a layer\u2019s \u002B menu.`;
         fxDirGroupsEl.appendChild(hint);
     }
     // 分组小标题 = 文档 (作用域),卡上短名 = 图层;缩略图从描述符现烘 (inactive 文档的面不在档)。
+    // plane 画它自己的正面图 (盘 + 法线记号),direction 家族画方向箭头。
     let lastDoc = null, group = null, cards = null;
     const cur = fxDirTarget.key;
     for (const hit of hits) {
@@ -793,11 +830,16 @@ function openFxDirModal(l, effect, key) {
         const card = document.createElement('button');
         card.type = 'button';
         card.className = 'tag-mode-item' + (hit.r.id === effect.params[cur] ? ' active' : '');
-        card.title = `${Math.round(dirWrap360(e.yaw))}\u00b0 / ${Math.round(e.pitch)}\u00b0 — ${hit.docName} \u00b7 ${hit.l.name}`;
+        card.title = hit.r.type === 'plane'
+            ? `${hit.docName} \u00b7 ${hit.l.name} — plane`
+            : `${Math.round(dirWrap360(e.yaw))}\u00b0 / ${Math.round(e.pitch)}\u00b0 — ${hit.docName} \u00b7 ${hit.l.name}`;
         const cv = document.createElement('canvas');
         cv.className = 'tag-mode-thumb';
         cv.width = 168; cv.height = 112;
-        cv.getContext('2d').drawImage(renderDirectionBuffer(hit.r.desc, 168, 112), 0, 0);
+        cv.getContext('2d').drawImage(
+            hit.r.type === 'plane'
+                ? renderGeometryBuffer('plane', hit.r.desc, 168, 112)
+                : renderDirectionBuffer(hit.r.desc, 168, 112), 0, 0);
         cv.draggable = false;
         const nm = document.createElement('span');
         nm.className = 'tag-mode-name';
