@@ -16,6 +16,21 @@
 //   反射不重塑形状,alpha 是这个像素自己的 (契约 ②)。挡住 ray 的那一处还得真的高过浮雕底端那一截
 //   (Solid):底端只是深度范围走到头,顺着它采远处那一圈像素 = 一条顺反射方向的拖影,不算照见了东西。
 //   Jitter 用确定性整数 hash 抖起步相位,Seed 换花样。
+// ⑤ 边 = 水线自己:每一格都算得出「这一格的镜面比该处地形高靠近读者多少」(露/埋的余量 margin),
+//   Edge 那条线就压在余量过零的那一圈上,尺是**深度差** (Depth Diff 那颗旋钮),并且**只量水盖住地面
+//   的那一侧** (margin > 0 = 那一处的水有多深, 折成灰阶不到这么多就算边);margin < 0 是原图冒出水面,
+//   不算岸、一格不画。坡陡的地方线窄、坡缓的地方线宽,换分辨率时像素数跟着走、
+//   **世界宽度**才是不变的那一个 (判据 16)。Noise 逐格抖的是那条阈值。整面镜埋着或整面镜罩着时
+//   余量在画面里不过零 ⇒ 一条边都不画。**不是任何深度断面都算岸**:看本格与上下左右那一圈的**二阶差分**
+//   (xp+xm-2m、yp+ym-2m) —— 地形连续爬过水面时它只是深度图自己的量化噪声,两片面皮叠在一起 (近的东西
+//   挡着远的地面) 时它等于那一跳的高度。超过 5 个灰阶 (满浮雕的 2%) 就是断面,不画 —— 于是水面只在
+//   地形真爬过它的那一圈上出线,不会顺着一张轮廓描一圈。二阶差分只量本格这一圈,所以它与粗细那颗旋钮
+//   无关。另一道闸在**本格自己的交点**上:投到照片以外的那一格没有地形可绕 (ssrTerrainAt 在那里补的
+//   是 -Relief = 一片没有东西),那一处的余量过零不算接触,一格不画 (掠成地平线的那一行由 valid 挡)。
+//   Smooth 那颗旋钮把交线和阈值都改量在
+//   十字平均过的场上 (半径 = 层像素, 默认 1 = 不平滑、也不多采一次), 因为 8 位深度图自己就是台阶状的,
+//   未平滑的场一格一抖 ⇒ 带这里宽那儿窄;二阶差分那两刀仍看原场, 免得半径一大把断面也抹平。Distance
+//   Rate 那颗旋钮管远处:阈值按本格地形沉在浮雕范围里的位置从 1 插到给定系数 (100% = 远近同一把尺)。
 // 跳过并在链上说话的情形:没绑 plane / 面侧棱对着视线 (法线的 Y 分量 ≤ 0.15, 每条光线与镜面的交点
 // 跑到无穷远) / 面朝读者的镜子 (整帧只会刷成天光色) / 这一层在画面片上没有面积。镜子照见天光是
 // 正当结果,不跳过 —— 写成 Sky 那颗颜色。
@@ -50,6 +65,13 @@ uniform float uFade;
 uniform float uNearBright;
 uniform float uPreview;  // 预览: 镜面露着的区域画白
 uniform vec3 uSky;       // 反射 ray 照到天空时的天光色
+uniform float uEdge;       // 水线那条边:强度 0..1
+uniform float uEdgeDiff;   // 边的尺 = 深度差: 地面离该处水面差这么多**灰阶**以内都算边 (不拿像素当尺)
+uniform float uEdgeSm;     // 场平滑半径 (层像素): 交线与阈值都量在半径这么大的十字平均过的场上
+uniform float uEdgeRate;   // 远端的 depth diff 系数 (1 = 与近端同; 按本格地形沉在浮雕范围里的位置插值)
+uniform float uEdgeNoise;  // 那条阈值逐格抖多少比例 0..1
+uniform float uEdgeJump; // 岸的判刀: 本格这一圈里余量场的二阶差分超过这么多 = 断面, 不是岸 (= 深度图 5 个灰阶)
+uniform vec3 uEdgeColor;
 // 同 fx/noise.js 的整数散列 —— fp32 的 fract 类散列在这里会塌成可见结构, 不再用。
 float ssrH(ivec2 t, int c) {
     uint h = uint(t.x) * 73856093u ^ uint(t.y) * 19349663u ^ uint(c) * 83492791u ^ uint(uSeed) * 2654435761u;
@@ -69,26 +91,143 @@ float ssrTerrainAt(vec2 xz) {
     vec2 s = ssrSheet(xz);
     return ssrOn(s) ? ssrTerrain(s) : -uRelief;
 }
+// 一格相对那面镜子的状态,一次算全 (步 0..3):视线方向 D、镜面交点 P、露/埋的余量 margin。
+// 收成一个函数是因为边要把「交线另一侧」按任意 uv 再问一遍 (ssrEdge)。valid = 这条视线根本够不着
+// 镜子 (交点跑到眼睛背后 = 透视下掠着镜面的那一片),那一格就是照片本身,谈不上反射。
+float ssrMargin(vec2 uv, out vec3 P, out vec3 D, out bool valid) {
+    vec2 xz = uO + uBx * uv.x + uBy * uv.y;
+    // ① 相机 = 这张照片自己的相机:像平面落点 W (世界, Y=0) 与眼睛 (0, 1/uK, 0) 连线;uK=0 就是正着
+    //   往下看 (这层纸),所以视线逐像素变 ⇒ 反射会收敛、水线会弯。
+    vec3 W = vec3(xz.x, 0.0, xz.y);
+    D = normalize(vec3(uK * W.x, -1.0, uK * W.z));
+    // ③ 镜面求交。uN.y ≥ 0.15 由引擎保证 ⇒ dot(uN,D) 一般为负, 每条视线与镜面各交一次。
+    P = W + D * (dot(uN, uA - W) / dot(uN, D));
+    valid = !(uK > 0.0 && P.y * uK >= 1.0);
+    // 地形比镜面更靠近读者 ⇒ 镜子被埋。容差让「贴着水面摆」算露着:水面自己的深度值折出来与镜面
+    // 等高,不容差的话整片水都成了冒出来的地形,反射会采到水面/水下内容。
+    return P.y - ssrTerrainAt(P.xz);
+}
+// 水线 = 这一格的镜面高度与该处地形高之差 (margin) 走到 0 的那一条线 —— 不是画的线,是求交的结果。
+// 尺是**深度差** (Depth Diff 那颗旋钮, 单位 = 深度图灰阶 = 1/255 个浮雕范围), 而且**只往水那一侧量**:
+// margin > 0 = 镜面在地形前面 = 水盖着地面, 那一带是「水有多深」; margin < 0 = 地面冒出水面 (干的),
+// 一格不画 (用户 2026-10-02 点名: "我希望是水面覆盖的地方才算, 也就是水面的深度减去原图的深度")。
+// 原来那把「几层像素」的尺被用户否掉了 ("目前 edge 是噪声, 我希望 edge 不那么噪声,
+// 就靠 depth diff 来生成边缘") —— 固定几格的带绑在交线的**逐格位置**上, 而交线在 8 位深度上一格一抖,
+// 于是带这里断一处那儿断一处 = 看着像噪声。换成深度阈值以后, 带连着铺在「地面确实接近水面」的那一片上,
+// 抖一格不会断开; 代价是粗细随坡度走 (陡=窄、缓=宽), 而且换分辨率时像素数跟着变, 不变的是世界宽度。
+// 第二代价 (这一侧才有的): 带只从水线往水里数, 内缘是硬的一刀, 逐格量化抖动会让那条内缘在 1 格里
+// 前后进退, 而外缘 (lim 那一关) 有 smoothstep 兜着, 不抖。
+// Noise 抖的就是那条阈值 (整数 hash,吃 Seed)。
+// 梯度不拿 dFdx/dFdy 量:那是「同一个 2×2 quad 以内」的差分,深度断面正好压在 quad 边界上时整条水线
+// 会隐身 (实测: 岛从 112..132 挪到 111..131, 画出的脚线就从下侧 [132,133] 换到上侧 [110,111], 另一侧
+// 一格不画)。改成自己现量中心差分: 上下左右各问一次场 (本格那份主流程已算好 = 免费), 与栅格奇偶无关。
+// 但「余量反号」不等于水线。反号只说明镜面板从两格之间**穿过去**,而穿过的可以是**空档**:照片里近的东西
+// 挡着远的地面,深度图上就留下一道断面 —— 断面一侧地形高过镜面 (干), 一侧低过 (= 远处本来有水), 余号
+// 照样反 ⇒ 于是把前景物体的整条轮廓描了一圈 (用户实测: 右侧人/物体轮廓长出边, 而他脚下是干的)。
+// 水线要的是**水绕在物体上那一圈**: 物体站在这片水里, 水面在它身上爬到哪儿, 线就画到哪儿。量出来的分别
+// (诊断 F:\Harness\kolid-comfy\gl-probe\ssr_step_diag.mjs, 用户那张 618×692 深度图, 镜面板降到穿过物体
+// 脚下): 岸 = 地面**连续地**爬过镜面, 干那一侧高出水面只有满浮雕的 0.5~1.5% (495 格全在这一段, 尾巴到
+// 2%); 断面 = 两片面皮叠在一起, 高出 2~15% (110 格, 全落在物体轮廓那几列)。
+// 判刀用**余量场的二阶差分** (xp+xm-2m 与 yp+ym-2m): 连续爬升的岸它≈深度图自己的量化噪声 (一两阶),
+// 一步跳变的断面它=那一跳的高度 (几十阶)。取 5 个灰阶 (= 量化容差 uEps 的 2.5 倍) 为刀口。为什么不用
+// 「干那一侧高出多少」直接量: 那要拿邻格比, 而邻格离交线多远跟着 Width 那颗旋钮走, 粗边会把远处正常
+// 的干地也当成断面 (实测 Width=8 时 9.6 行的带被削成 5 行)。二阶差分只看本格这一圈, 与粗细无关。
+// Smooth (半径, 层像素): 交线位置和阈值都改量在**十字平均过的场**上 (中心 + 半径 sm 的上下左右 5 格)。
+// 8 位深度图本身就是台阶状的, 未平滑的场一格一抖 ⇒ 带这里宽那儿窄; 半径主要治的是那把**逐格梯度尺**
+// ((Xp-Xm)/2sm 比相邻两格之差稳得多)。**半径 1 = 不平滑**: 直接取本格原值, 与 Depth Diff 那一版逐位同
+// (默认档是用户点过头的, 不许被平均连带改掉), 平均从 2 起生效。**二阶差分那两刀永远看半径 1 的原场**:
+// 半径一大, 断面那一跳也被均摊掉、掉到刀口以下, 真岸和假边会一起漏过来。断面本身也不会被平滑"洗白":
+// 岛那种一跳 = 满浮雕的 40~100%, 摊到十字平均里剩下的 |ms| 远在阈值之外。
+// Distance Rate (远端系数): 越远的地面该离水面多近才算边。本格地形在浮雕范围里的位置
+// t = (margin - P.y)/uRelief = -地形高/uRelief ∈ [0,1] (0 = 画布平面那端 = 最近, 1 = 浮雕底 = 最远),
+// 阈值乘 mix(1, rate, t) —— 与 Near 极性无关, 且不额外采一次图。rate=1 (100%) 时与现在完全一致。
+// 最后一道闸: **本格的水面交点必须落在照片里**。P 投到画面片以外时 ssrTerrainAt 补的是 -Relief
+// (= 那里根本没有地形), 于是余量在「镜面高度 = 那个补出来的假地面」那一行过零 —— 一行谁都没碰着的
+// 空档。实测 (F:\Harness\kolid-comfy\gl-probe\ssr_flip_diag.mjs, 平坦 depth-half + 透视 90°):
+// 第 120 列浮雕 1.4 时该处过零在第 74 行 (手算 coverRow=74.6), 真接触在 88.4 行; 第 20 列浮雕 1.0
+// 时在 80 行 (该列的覆盖边界), 而这一行的 |ms|=0.027 < 1.5dd ⇒ 外推那道闸本来就被跳过。判据 18/20/22
+// 量的就是这一处: 镜照出这张照片以外不是「水到了头」。
+float ssrEdge(float margin, vec3 Pc, vec2 uv, ivec2 tc) {
+    if (uEdge <= 0.0) return 0.0;
+    if (!ssrOn(ssrSheet(Pc.xz))) return 0.0;         // 本格的水面得压在照片里那份真深度上
+    vec2 px = 1.0 / vec2(textureSize(uTex, 0));          // 一个层像素的 uv 长 (= 粗细的尺)
+    vec3 Q, D; bool v;
+    float xp = ssrMargin(uv + vec2(px.x, 0.0), Q, D, v);
+    float xm = ssrMargin(uv - vec2(px.x, 0.0), Q, D, v);
+    float yp = ssrMargin(uv + vec2(0.0, px.y), Q, D, v);
+    float ym = ssrMargin(uv - vec2(0.0, px.y), Q, D, v);
+    if (abs(xp + xm - 2.0 * margin) > uEdgeJump) return 0.0;
+    if (abs(yp + ym - 2.0 * margin) > uEdgeJump) return 0.0;
+    float sm = max(1.0, uEdgeSm);
+    vec2 g = 0.5 * vec2(xp - xm, yp - ym);               // 半径 1: 与 Depth Diff 那一版逐位同
+    float ms = margin;                                   //   (值、梯度都不平均 = 不平滑)
+    if (sm > 1.0) {
+        // 半径 sm 的十字 taps, 越界的贴到边上当自身 (不然边框那一圈会把「画面外补的 -Relief」当邻居,
+        // 水线在画面边上凭空断掉 sm 格)。
+        vec2 o = sm * px;
+        float Xp = ssrMargin(clamp(uv + vec2(o.x, 0.0), 0.0, 1.0), Q, D, v);
+        float Xm = ssrMargin(clamp(uv - vec2(o.x, 0.0), 0.0, 1.0), Q, D, v);
+        float Yp = ssrMargin(clamp(uv + vec2(0.0, o.y), 0.0, 1.0), Q, D, v);
+        float Ym = ssrMargin(clamp(uv - vec2(0.0, o.y), 0.0, 1.0), Q, D, v);
+        // **只信不含断面那一根轴**:半径一大, 一次硬跳变会被平均拽进整圈邻域 —— 实测半径 8 时岛的两侧
+        // 各冒出一列紧贴轮廓的假岸 (0.5*(Xp+Xm) 把岛那 40% 浮雕的一跳摊成 8% 的偏移, 正好落进 8 灰阶
+        // 的带)。连续坡面在这一对里只给出弯曲累积量 (= 实测 0.021), 断面给出的是那一跳本身 (= 0.163),
+        // 差一个量级 ⇒ 判据仍用岸的那把刀, 只是按半径放大 (跨 sm 格的连续坡度本来就该比跨 1 格的大)。
+        float dx = 0.5 * (Xp + Xm) - margin;
+        float dy = 0.5 * (Yp + Ym) - margin;
+        float jw = uEdgeJump * sm;
+        bool tx = abs(dx) <= jw, ty = abs(dy) <= jw;      // 这一根轴脚下是连续的, 可以按半径 sm 来平均
+        ms = margin + ((tx ? dx : 0.0) + (ty ? dy : 0.0))
+            / (1.0 + (tx ? 1.0 : 0.0) + (ty ? 1.0 : 0.0));
+        // 梯度同一件事: 被丢的那一根轴退回半径 1 的本地差分 (那一格的两张邻格与本格同侧, 量的是真坡度)。
+        // 丢了就写零是不行的: 岸线本来是横的, 它的梯度全在 y 那一个分量上, y 一被丢整条线当场消失
+        // (实测半径 8 时岛所在的列水线整段断了)。
+        g = vec2(tx ? (Xp - Xm) / (2.0 * sm) : 0.5 * (xp - xm),
+                 ty ? (Yp - Ym) / (2.0 * sm) : 0.5 * (yp - ym));
+    }
+    // **只量水面盖住地面的那一侧**:ms = 镜面比该处地形靠近读者多少 = 那一处的水有多深。ms < 0 是原图
+    // 从水里冒出来 (干的), 用户 2026-10-02 否掉了它:"我希望是水面覆盖的地方才算, 也就是水面的深度减去
+    // 原图的深度; 目前不知道为什么还有原图减去水面的深度 (这种情况不应该出现 edge)"。旧写法拿 |ms| 当
+    // 距离 ⇒ 带对称地压在分界两侧, 岸那一侧的干地也被描上。现在内缘正好停在水线上, 带只往水里伸。
+    if (ms < 0.0) return 0.0;
+    float gg = dot(g, g);
+    if (gg <= 1e-14) return 0.0;
+    float dd = sqrt(gg);                                   // 每格余量变多少 (世界 / 层像素)
+    vec2 dEdge = ms / gg * g;                              // 从那条线走到本格:几格 × 往哪边 (带号, 格为单位)
+    if (ms > 1.5 * dd) {
+        // 走过分界再问一遍: 走的路程 = 到那条线的距离**再往外 1.3 格** (dEdge 是带号的, 所以倍率乘在
+        // 它自己身上 = 沿同一方向外推; 只按 1.3 倍外推在平滑档上会连自己这一侧都没跨过去 —— 实测半径 8
+        // 的坡岸线在 121 行断掉一格: ms 被坡面自己的弯曲挪过了零, 原场的零点还在它下面 1.2 格, 而
+        // 1.3×|dEdge| 只有 0.9 格 ⇒ 采回来同号 ⇒ 判成「没有接触」)。贴着线不足 1.5 格的本格不必再问:
+        // 方向本来就定不出来, 而它对「地面离水面多近」的回答就是它自己的余量, 阈值那一关说了算。
+        vec3 Q2, D2; bool v5;
+        float sa = ssrMargin(uv - dEdge * (1.0 + 1.3 * dd / ms) * px, Q2, D2, v5);
+        if (!v5 || sa >= 0.0 || !ssrOn(ssrSheet(Q2.xz))) return 0.0;
+    }
+    // 边的尺 = **深度差**:本格的水有多深 (ms), 折成灰阶 = ms×255/uRelief, 阈值以内都算边。于是坡陡处
+    // 线窄、坡缓处线宽, 而且不会因为逐格梯度抖一下就断成虚线 —— 拿像素当半宽的毛病正在这里:交线本身
+    // 在 8 位深度上一格一抖, 固定几格的带就这儿断一处那儿断一处。阈值换算成像素数随分辨率走, 同一颗
+    // 旋钮折出的**世界宽度**才是不变的那一个 (判据 16)。
+    float t = clamp((ms - Pc.y) / uRelief, 0.0, 1.0);    // 本格地形沉在浮雕范围里的几成
+    float lim = uEdgeDiff * uRelief * mix(1.0, uEdgeRate, t)
+        * (1.0 + (ssrH(tc, 7) - 0.5) * 2.0 * uEdgeNoise) / 255.0;
+    return uEdge * (1.0 - smoothstep(lim - 0.5 * dd, lim + 0.5 * dd, ms));
+}
 void main() {
     ivec2 tc = ivec2(gl_FragCoord.xy);
     vec4 own = texelFetch(uTex, tc, 0);
     if (uMix <= 0.0) { Frag = own; return; }
-    // ① 视线: 像平面上的落点 W (世界, Y=0) 与眼睛 (0, 1/uK, 0) 连线;uK=0 就是正着往下看。
-    vec2 xz = uO + uBx * vUV.x + uBy * vUV.y;
-    vec3 W = vec3(xz.x, 0.0, xz.y);
-    vec3 D = normalize(vec3(uK * W.x, -1.0, uK * W.z));
-    // ③ 镜面求交。uN.y ≥ 0.15 由引擎保证 ⇒ dot(uN,D) 恒负, 每条视线与镜面各交一次。
-    float tm = dot(uN, uA - W) / dot(uN, D);
-    vec3 P = W + D * tm;
-    // 透视下镜面跑到相机**背后** (Y ≥ 眼距) = 这条光线够不着它 = 这里没有镜子。
-    if (uK > 0.0 && P.y * uK >= 1.0) { Frag = own; return; }
-    // 地形比镜面更靠近读者 ⇒ 镜子被埋。容差让「贴着水面摆」算露着:水面自己的深度值折出来与镜面
-    // 等高,不容差的话整片水都成了冒出来的地形,反射会采到水面/水下内容。
-    if (P.y < ssrTerrainAt(P.xz) - uEps) { Frag = own; return; }
-    if (uPreview > 0.5) { Frag = vec4(1.0, 1.0, 1.0, own.a); return; }
+    // margin 同时喂 ssrEdge:露/埋的分界就是水线,一份算式两处读。边只长在水那一侧,所以埋着 (干) 的那
+    // 一分支通常 e=0,画面原样;只有 Smooth 把交线挪过本格的少数格会在这儿上色 (那条线本来就该压在水线上)。
+    vec3 P, D; bool valid;
+    float margin = ssrMargin(vUV, P, D, valid);
+    float e = ssrEdge(margin, P, vUV, tc);
+    if (!valid) { Frag = own; return; }
+    if (margin < -uEps) { Frag = vec4(mix(own.rgb, uEdgeColor, e), own.a); return; }
+    if (uPreview > 0.5) { Frag = vec4(mix(vec3(1.0), uEdgeColor, e), own.a); return; }
     // ④ 镜面反射: 方向只由 Plane attribute 的法线决定 —— 一面平镜。往读者那一侧弹 = 照的是相机背后。
     vec3 R = reflect(D, uN);
-    if (R.y >= 0.0) { Frag = vec4(mix(own.rgb, uSky, uMix), own.a); return; }
+    if (R.y >= 0.0) { Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a); return; }
     float jit = (ssrH(tc, 0) - 0.5) * uJitter;
     float tLo = 0.0, tHi = -1.0;
     for (int k = 1; k <= 128; k++) {
@@ -105,7 +244,7 @@ void main() {
     }
     if (tHi < 0.0) {
         // 未命中 = 这条反射 ray 照到的是天空: 返回天光色 (不吃 Fade —— 天在无穷远), Mix 照常管浓度。
-        Frag = vec4(mix(own.rgb, uSky, uMix), own.a);
+        Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a);
         return;
     }
     // 二分精修: 命中点定在「最后一个未撞」与「第一个撞上」之间, 步进的台阶感从这里磨掉。判据与上面
@@ -119,10 +258,10 @@ void main() {
         if (Q.y <= terr - uEps && terr >= uMinH - uEps) tHi = th; else tLo = th;
     }
     vec2 hs = ssrSheet((P + R * tHi).xz);
-    if (!ssrOn(hs)) { Frag = vec4(mix(own.rgb, uSky, uMix), own.a); return; }
+    if (!ssrOn(hs)) { Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a); return; }
     vec4 hit = texture(uTex, hs);
     float w = uMix * hit.a * (1.0 - uFade * clamp(tHi / (float(uSteps) * uStepW), 0.0, 1.0));
-    Frag = vec4(mix(own.rgb, hit.rgb, w), own.a);
+    Frag = vec4(mix(mix(own.rgb, hit.rgb, w), uEdgeColor, e), own.a);
 }`;
 
 // 反射面 = 一枚 Plane attribute:世界 position 直接就是镜面上的一点,法线 = 规范朝向 +X 被那枚
@@ -208,6 +347,15 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform1f(fxglU(pr, 'uNearBright'), p.near === 'bright' ? 1 : 0);
         gl.uniform1f(fxglU(pr, 'uPreview'), p.preview ? 1 : 0);
         gl.uniform3f(fxglU(pr, 'uSky'), ...fxHexToRgb01(p.sky));
+        // 边:尺 = 深度差灰阶;Smooth = 场平滑半径 (层像素);Rate = 远端系数 (100% = 与近端同);
+        // Noise = 那条阈值逐格抖的比例。
+        gl.uniform1f(fxglU(pr, 'uEdge'), p.edge / 100);
+        gl.uniform1f(fxglU(pr, 'uEdgeDiff'), Math.max(0.5, p.edgeDiff));
+        gl.uniform1f(fxglU(pr, 'uEdgeSm'), Math.max(1, p.edgeSmooth));
+        gl.uniform1f(fxglU(pr, 'uEdgeRate'), Math.max(0, p.edgeRate) / 100);
+        gl.uniform1f(fxglU(pr, 'uEdgeNoise'), p.edgeNoise / 100);
+        gl.uniform1f(fxglU(pr, 'uEdgeJump'), relief * 5.0 / 255.0);   // 岸的那一刀: 深度图 5 个灰阶
+        gl.uniform3f(fxglU(pr, 'uEdgeColor'), ...fxHexToRgb01(p.edgeColor));
     });
     col.slot = 1 - col.slot;
 }
@@ -245,6 +393,18 @@ const SSR_PARAMS = [
     { key: 'sky', label: 'Sky', kind: 'color', def: '#aebfd0' },
     { key: 'fade', label: 'Fade', min: 0, max: 100, step: 1, def: 40, unit: '%',
         tip: 'Distant hits come back dimmer \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground.' },
+    // 边 = 水线自己 (露/埋那份余量过零的地方),不是描边:整面埋着或整面露着时画面里没有交线,一条都不画。
+    { key: 'edge', label: 'Edge', min: 0, max: 100, step: 1, def: 60, unit: '%',
+        tip: 'Draw the water line itself \u2014 where the mirror meets the photo \u2014 in its own colour. 0 leaves the crossing to the reflection.' },
+    { key: 'edgeDiff', label: 'Depth Diff', min: 1, max: 64, step: 1, def: 8, unit: 'lvl', when: p => p.edge > 0,
+        tip: 'How deep the water may be \u2014 in depth-map levels (1/255 of the relief) \u2014 and still count as the edge. Measured on the water side only: ground standing above the surface there is dry, not shore, so nothing is drawn. Steep ground gives a thin line, shallow ground a wide one. Measured in depth instead of pixels, so the line sits where the data puts it rather than breaking into dashes where the crossing jitters by one level.' },
+    { key: 'edgeRate', label: 'Distance Rate', min: 0, max: 400, step: 1, def: 100, unit: '%', when: p => p.edge > 0,
+        tip: 'The same threshold out at the far end of the relief, as a fraction of the near one (100% = one ruler everywhere). Ground sits further down the scene the darker/paler it is on the depth map, so this says how close far-away ground must come to the water to still count as shore.' },
+    { key: 'edgeSmooth', label: 'Smooth', min: 1, max: 8, step: 1, def: 1, unit: 'px', when: p => p.edge > 0,
+        tip: 'Average the depth field over a cross this wide (layer pixels) before the water line and the threshold are read from it. An 8-bit map is staircased, so 1 leaves the band jittering one cell here and there. The cliff test still reads the raw field, so a wide radius cannot dissolve a real step.' },
+    { key: 'edgeNoise', label: 'Noise', min: 0, max: 100, step: 1, def: 35, unit: '%', when: p => p.edge > 0,
+        tip: 'Rags that threshold by up to this fraction of itself, per pixel \u2014 deterministic; Seed picks the pattern.' },
+    { key: 'edgeColor', label: 'Edge Color', kind: 'color', def: '#dff0ff', when: p => p.edge > 0 },
 ];
 
 defineEffect({
@@ -253,7 +413,7 @@ defineEffect({
     group: 'Reflect',
     icon: 'reflect',
     needsMap: 'Depth',
-    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength.',
+    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
     params: SSR_PARAMS,
     shaders: { ssr: FX_FS_SSR },
     run: fxglSSR,
@@ -289,6 +449,9 @@ defineEffect({
         if (p.near === 'bright') s += '  inv';
         if (p.mix < 100) s += `  m${n(p.mix)}`;
         if (p.fade < 100) s += `  f${n(p.fade)}`;
+        if (p.edge) s += `  e${n(p.edge)}/${n(p.edgeDiff)}lvl`
+            + (p.edgeRate !== 100 ? `\u00d7${n(p.edgeRate / 100)}` : '')
+            + (p.edgeSmooth > 1 ? ` sm${n(p.edgeSmooth)}` : '');
         if (!p.jitter) s += '  nojit';
         return s;
     },
