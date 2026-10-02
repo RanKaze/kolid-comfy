@@ -280,4 +280,7 @@
             sync(l, r) { geoSync(kind, l, r); },
         });
     }
+
+    // 特效绑定选择器的卡片 (fx/ui.js openFxDirModal) 要烘 plane 的正面图 —— IIFE 内的工具走 window 出口。
+    window.renderGeometryBuffer = renderGeometryBuffer;
 })();
