@@ -13,7 +13,9 @@
 //   像素折成的世界长度,每一步把 3D 点投回这一层的网格读地形高度,地形高过 ray 的第一处挡住 ray
 //   (前面的东西把反射裁掉),命中点再二分 4 次磨掉台阶;走出画面或走满 = 什么都没照见 = 天光。
 //   取样 = 命中点那个像素自己 (透明处没有东西可照,按它自己的 alpha 加权),出口只写 RGB ——
-//   反射不重塑形状,alpha 是这个像素自己的 (契约 ②)。Jitter 用确定性整数 hash 抖起步相位,Seed 换花样。
+//   反射不重塑形状,alpha 是这个像素自己的 (契约 ②)。挡住 ray 的那一处还得真的高过浮雕底端那一截
+//   (Solid):底端只是深度范围走到头,顺着它采远处那一圈像素 = 一条顺反射方向的拖影,不算照见了东西。
+//   Jitter 用确定性整数 hash 抖起步相位,Seed 换花样。
 // 跳过并在链上说话的情形:没绑 plane / 面侧棱对着视线 (法线的 Y 分量 ≤ 0.15, 每条光线与镜面的交点
 // 跑到无穷远) / 面朝读者的镜子 (整帧只会刷成天光色) / 这一层在画面片上没有面积。镜子照见天光是
 // 正当结果,不跳过 —— 写成 Sky 那颗颜色。
@@ -38,6 +40,7 @@ uniform vec3 uA;         // 镜面上的一点 (世界, 直接取自 Plane attri
 uniform vec3 uN;         // 镜面法线 (世界, 单位)
 uniform float uRelief;   // 深度满幅 (世界单位)
 uniform float uEps;      // 八位深度的量化容差 (世界单位) = Relief × 2/255
+uniform float uMinH;     // 一次穿越要算数,那儿的地形至少要高到这里 (世界 Y)
 uniform float uStepW;    // 反射 ray 每步的世界长度
 uniform int uSteps;
 uniform float uJitter;   // 0..1: 起步相位抖多少步
@@ -94,7 +97,10 @@ void main() {
         vec3 Q = P + R * t;
         vec2 s = ssrSheet(Q.xz);
         if (!ssrOn(s)) break;                       // 走出画面 = 这条反射 ray 只剩天
-        if (Q.y <= ssrTerrain(s) - uEps) { tHi = t; break; }
+        // 只沉到浮雕底那一档的东西不算「立在 ray 前面」:那是深度范围的尽头,不是场景里的遮挡物 ——
+        // 顺着它采远处那一圈像素就是拖影。够不着 Solid 高度就继续走,走完只剩天。
+        float terr = ssrTerrain(s);
+        if (Q.y <= terr - uEps && terr >= uMinH - uEps) { tHi = t; break; }
         tLo = t;
     }
     if (tHi < 0.0) {
@@ -102,13 +108,15 @@ void main() {
         Frag = vec4(mix(own.rgb, uSky, uMix), own.a);
         return;
     }
-    // 二分精修: 命中点定在「最后一个未撞」与「第一个撞上」之间, 步进的台阶感从这里磨掉。
+    // 二分精修: 命中点定在「最后一个未撞」与「第一个撞上」之间, 步进的台阶感从这里磨掉。判据与上面
+    // 那一条同一句 (含 Solid 那一刀), 否则二分收敛到的是另一种边界。
     for (int r = 0; r < 4; r++) {
         float th = (tLo + tHi) * 0.5;
         vec3 Q = P + R * th;
         vec2 s = ssrSheet(Q.xz);
         if (!ssrOn(s)) break;
-        if (Q.y <= ssrTerrain(s) - uEps) tHi = th; else tLo = th;
+        float terr = ssrTerrain(s);
+        if (Q.y <= terr - uEps && terr >= uMinH - uEps) tHi = th; else tLo = th;
     }
     vec2 hs = ssrSheet((P + R * tHi).xz);
     if (!ssrOn(hs)) { Frag = vec4(mix(own.rgb, uSky, uMix), own.a); return; }
@@ -189,6 +197,8 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform3f(fxglU(pr, 'uN'), pl.nx, pl.ny, pl.nz);
         gl.uniform1f(fxglU(pr, 'uRelief'), relief);
         gl.uniform1f(fxglU(pr, 'uEps'), relief * 2 / 255);
+        // Solid 那一刀:浮雕底端往上这么一段算「深度范围的尽头」,不是场景里立着的东西。
+        gl.uniform1f(fxglU(pr, 'uMinH'), -relief * (1 - p.solid / 100));
         gl.uniform1f(fxglU(pr, 'uStepW'), (p.reach / steps) * sh.px);
         gl.uniform1i(fxglU(pr, 'uSteps'), steps);
         gl.uniform1f(fxglU(pr, 'uJitter'), p.jitter / 100);
@@ -223,6 +233,10 @@ const SSR_PARAMS = [
         tip: 'Ray-march quality plus 4 bisection refinements on every hit. Taps per pixel: Steps depth samples.' },
     { key: 'relief', label: 'Relief', min: 0.01, max: 4, step: 0.01, def: 0.5, unit: '\u00d7H',
         tip: 'How far the depth range sinks behind the picture plane, in canvas heights \u2014 the one ruler the terrain and the mirror share.' },
+    // 一次穿越要算数,那儿的地形得真的高过浮雕底端这一段:底端只是深度范围的尽头,顺着它采远处那一圈
+    // 像素就是拖影。0 = 每一道穿越都算 (老行为)。
+    { key: 'solid', label: 'Solid', min: 0, max: 100, step: 1, def: 10, unit: '%',
+        tip: 'How far above the bottom of the relief a crossing has to stand before it counts as something in front of the ray. The bottom end is only where the depth range stops \u2014 reflecting content from out there smears a long streak along the ray. 0 accepts every crossing.' },
     { key: 'jitter', label: 'Jitter', min: 0, max: 100, step: 1, def: 75, unit: '%',
         tip: 'Scatters each ray\u2019s start phase by up to one step \u2014 trades banding for grain. Deterministic per pixel; Seed picks the pattern.' },
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0 },
@@ -239,7 +253,7 @@ defineEffect({
     group: 'Reflect',
     icon: 'reflect',
     needsMap: 'Depth',
-    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength.',
+    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength.',
     params: SSR_PARAMS,
     shaders: { ssr: FX_FS_SSR },
     run: fxglSSR,
@@ -271,7 +285,7 @@ defineEffect({
         const tilt = pl ? Math.round(dirDeg(Math.asin(Math.max(-1, Math.min(1, pl.ny))))) : null;
         let s = `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}`
             + `  ${tilt === null ? 'no plane' : `mirror ${tilt}\u00b0\u2933`}`
-            + `  r${n(p.reach)}px  s${p.steps | 0}  rel${n(p.relief)}H  fov${n(p.persp)}\u00b0`;
+            + `  r${n(p.reach)}px  s${p.steps | 0}  rel${n(p.relief)}H  sol${n(p.solid)}  fov${n(p.persp)}\u00b0`;
         if (p.near === 'bright') s += '  inv';
         if (p.mix < 100) s += `  m${n(p.mix)}`;
         if (p.fade < 100) s += `  f${n(p.fade)}`;
