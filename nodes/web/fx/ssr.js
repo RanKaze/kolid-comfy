@@ -12,9 +12,15 @@
 //   背后,画面里没有那份内容 = 天光。R 往场景里沉,就从 P 沿 R 步进 Steps 步、每步 Reach/Steps 层
 //   像素折成的世界长度,每一步把 3D 点投回这一层的网格读地形高度,地形高过 ray 的第一处挡住 ray
 //   (前面的东西把反射裁掉),命中点再二分 4 次磨掉台阶;走出画面或走满 = 什么都没照见 = 天光。
+//   天光与命中吃同一把 Fade 尺,但它恒在**射程尽头**那一档:什么都没照见 = 这一条 ray 走满了射程。
+//   (按「ray 实际走到的最远处」折会让未命中区按各自放弃的原因分层,颜色不统一,2026-10-02 点名要撤;
+//    当天在无穷远、恒不吃 Fade 是另一头:Fade 拧到底压不住那一片。)
 //   取样 = 命中点那个像素自己 (透明处没有东西可照,按它自己的 alpha 加权),出口只写 RGB ——
 //   反射不重塑形状,alpha 是这个像素自己的 (契约 ②)。挡住 ray 的那一处还得真的高过浮雕底端那一截
 //   (Solid):底端只是深度范围走到头,顺着它采远处那一圈像素 = 一条顺反射方向的拖影,不算照见了东西。
+//   磨完以后的那一道穿越还要过 Steep 这一刀:那一段里地形抬起得比这颗旋钮还陡 ⇒ 它踩的是**前面那个
+//   东西的轮廓** (深度图上的断面),不是 ray 落上去的表面 —— 照见一条轮廓线就是把同一个源像素顺反射方向
+//   复制成一条拖影 (用户 2026-10-02 点名的竖条纹)。轮廓不是表面 ⇒ 那一条 ray 判天光。
 //   Jitter 用确定性整数 hash 抖起步相位,Seed 换花样。
 // ⑤ 边 = 水线自己:每一格都算得出「这一格的镜面比该处地形高靠近读者多少」(露/埋的余量 margin),
 //   Edge 那条线就压在余量过零的那一圈上,尺是**深度差** (Depth Diff 那颗旋钮),并且**只量水盖住地面
@@ -56,6 +62,7 @@ uniform vec3 uN;         // 镜面法线 (世界, 单位)
 uniform float uRelief;   // 深度满幅 (世界单位)
 uniform float uEps;      // 八位深度的量化容差 (世界单位) = Relief × 2/255
 uniform float uMinH;     // 一次穿越要算数,那儿的地形至少要高到这里 (世界 Y)
+uniform float uSlopeMax; // 一次穿越要算数,地形沿 ray 最多抬起这么多 (无量纲坡度 = 世界Y/世界水平长)
 uniform float uStepW;    // 反射 ray 每步的世界长度
 uniform int uSteps;
 uniform float uJitter;   // 0..1: 起步相位抖多少步
@@ -106,6 +113,25 @@ float ssrMargin(vec2 uv, out vec3 P, out vec3 D, out bool valid) {
     // 地形比镜面更靠近读者 ⇒ 镜子被埋。容差让「贴着水面摆」算露着:水面自己的深度值折出来与镜面
     // 等高,不容差的话整片水都成了冒出来的地形,反射会采到水面/水下内容。
     return P.y - ssrTerrainAt(P.xz);
+}
+// 一次穿越挡不挡这条 ray。两刀, 步进与二分共用同一句 (否则二分收敛到的是另一种边界):
+//   ① 沉到地形以下 = 被挡;  ② Solid: 那儿的地形至少要高过浮雕底端这么一截 (底端只是深度范围走到头)。
+// 第三刀 Steep 不在这儿 —— 它量的不是「这一格挡不挡」,而是「磨完以后的那一道穿越算不算表面」,
+// 所以它走在二分之后 (见 main)。放在步进里会被步长钝掉:一步 42 格,满浮雕的一跳摊到这一整步只剩
+// 6 灰阶/格, 断面与缓坡在这个分辨率下根本分不开 (实测默认档整步进那一刀一次都不响, 条纹只消 17%)。
+bool ssrBlock(vec3 Q, float terr) {
+    return Q.y <= terr - uEps && terr >= uMinH - uEps;
+}
+// 天光那一支吃 Fade, 但**不吃逐格的行进距离**: 「什么都没照见」就是这一条 ray 走满了射程 ⇒ 恒按尽头
+// 那一档打折, 未命中区是一整片同一个颜色。
+// 曾经按「ray 实际走到的最远处」折 (2026-10-02 上一版), 实测不成立: 同一句"没有反射"在三处放弃 (走满射程 /
+// 出画被截断 / 被 Steep 判成轮廓) 各自带着自己的距离进场, 于是未命中区自己分层 —— 他那张 618×692 上
+// fade=40 时 224 036 个未命中格的浓度从 0.600 一路铺到 1.000 (跨度 = 整把 Fade 尺), 其中 21 624 格几乎
+// 满浓度, 且这一簇随 Steep 单调长大 (steep 0/50/90 → 21 251/21 624/22 497): 断面那一圈被改判成未命中的
+// 格子拿的是**墙根那一个小距离**, 所以它比别处浓 (= 比 Sky 还 Sky), 用户点名「steep 导致的未命中颜色和
+// 别的未命中不一样」。再往回退到天在无穷远 (恒不吃 Fade) 是另一头: Fade 拧到底压不住那一片。
+vec3 ssrSky(vec3 own) {
+    return mix(own, uSky, uMix * (1.0 - uFade));
 }
 // 水线 = 这一格的镜面高度与该处地形高之差 (margin) 走到 0 的那一条线 —— 不是画的线,是求交的结果。
 // 尺是**深度差** (Depth Diff 那颗旋钮, 单位 = 深度图灰阶 = 1/255 个浮雕范围), 而且**只往水那一侧量**:
@@ -226,41 +252,62 @@ void main() {
     if (margin < -uEps) { Frag = vec4(mix(own.rgb, uEdgeColor, e), own.a); return; }
     if (uPreview > 0.5) { Frag = vec4(mix(vec3(1.0), uEdgeColor, e), own.a); return; }
     // ④ 镜面反射: 方向只由 Plane attribute 的法线决定 —— 一面平镜。往读者那一侧弹 = 照的是相机背后。
+    float tMax = float(uSteps) * uStepW;   // 射程尽头 = Fade 的满刻度
     vec3 R = reflect(D, uN);
-    if (R.y >= 0.0) { Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a); return; }
+    if (R.y >= 0.0) { Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return; }
     float jit = (ssrH(tc, 0) - 0.5) * uJitter;
     float tLo = 0.0, tHi = -1.0;
+    float rh = length(R.xz);            // ray 每前进 1 世界长度, 水平方向走 rh 世界长度
+    float terrLo = P.y - margin;        // 镜面交点处那一份地形高 —— margin 就是它算出来的, 不必再采一次图
+    float terrHi = terrLo;
     for (int k = 1; k <= 128; k++) {
         if (k > uSteps) break;
         float t = (float(k) + jit) * uStepW;
         vec3 Q = P + R * t;
         vec2 s = ssrSheet(Q.xz);
         if (!ssrOn(s)) break;                       // 走出画面 = 这条反射 ray 只剩天
-        // 只沉到浮雕底那一档的东西不算「立在 ray 前面」:那是深度范围的尽头,不是场景里的遮挡物 ——
-        // 顺着它采远处那一圈像素就是拖影。够不着 Solid 高度就继续走,走完只剩天。
+        // 只沉到浮雕底那一档的东西不算「立在 ray 前面」(Solid:那是深度范围的尽头,顺着它采远处那一圈
+        // 像素就是拖影)。不算就继续往前走, 走完只剩天。
         float terr = ssrTerrain(s);
-        if (Q.y <= terr - uEps && terr >= uMinH - uEps) { tHi = t; break; }
+        if (ssrBlock(Q, terr)) { tHi = t; terrHi = terr; break; }
+        terrLo = terr;
         tLo = t;
     }
     if (tHi < 0.0) {
-        // 未命中 = 这条反射 ray 照到的是天空: 返回天光色 (不吃 Fade —— 天在无穷远), Mix 照常管浓度。
-        Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a);
+        // 未命中 = 这条反射 ray 一路照到的是天空。它为什么停的 (走满射程 / 半路出了这张照片) 不改颜色:
+        // 什么都没带回 = 按射程尽头打折, 与别的未命中同一档。
+        Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a);
         return;
     }
-    // 二分精修: 命中点定在「最后一个未撞」与「第一个撞上」之间, 步进的台阶感从这里磨掉。判据与上面
-    // 那一条同一句 (含 Solid 那一刀), 否则二分收敛到的是另一种边界。
+    // 二分精修: 命中点定在「最后一个不算数」与「第一个算数」之间, 步进的台阶感从这里磨掉。判据与上面
+    // 那一条同一句 (Solid 与高度两刀都在), 否则二分收敛到的是另一种边界。两头的地形高各留一份
+    // (terrLo = 还露着的那头, terrHi = 已挡住的那头), 下面 Steep 那一刀就拿这一对来量。
     for (int r = 0; r < 4; r++) {
         float th = (tLo + tHi) * 0.5;
         vec3 Q = P + R * th;
         vec2 s = ssrSheet(Q.xz);
         if (!ssrOn(s)) break;
         float terr = ssrTerrain(s);
-        if (Q.y <= terr - uEps && terr >= uMinH - uEps) tHi = th; else tLo = th;
+        if (ssrBlock(Q, terr)) { tHi = th; terrHi = terr; }
+        else { tLo = th; terrLo = terr; }
+    }
+    // ④' Steep 那一刀量在**磨完之后的这一小段**上 (tHi - tLo = 一步的 1/16), 两个地形高都是上面现采
+    //   的, 一格图不多取。断面在一格里跳几十上百灰阶 ⇒ 磨得越细, 这一段量出来的坡度越接近真值;
+    //   连续缓坡的抬起量跟着 dt 一起缩小 ⇒ 磨多细都还是那个坡度。所以这一刀与 Steps/Reach 无关
+    //   (rh = R 的水平投影长, 把弧长换成水平前进量)。量法见 F:\Harness\kolid-comfy\gl-probe\ssr_streak_diag.mjs
+    //   —— 内容画成「每格 RGB = 自己的坐标」再解回取样点: 条纹格竖走一格取样点动 0.0 格、横走一格跳 3~12 格,
+    //   命中点坡度中位 18.4 灰阶/格, 其余格只有 0.5 (用户 2026-10-02 点名的竖条纹)。超过这一刀 ⇒ 这一条 ray 撞到的是**轮廓**,不是表面,在它上面取样就是把同一个源格
+    //   复制成拖影 ⇒ 判天光 (轮廓不是东西,后面是什么这张照片不知道)。
+    //   动作曾试过「往前挪一步再取」(2026-10-02 拍板 2a),实测不成立: 断面条纹 1 306 → 73 (−94 %), 可挪完
+    //   落进「远处/掠射」那一类, 那一类自己也是塌缩 644 → 987 ⇒ 条纹总数 1 741 → 1 905 (默认档) **不降反升**,
+    //   他刷新后报「还是有伪影」。判天光 = 总数 → 692 (−60 %), 代价是命中少 3.8 % (轮廓处反射缺一个小口)。
+    if (terrHi - terrLo > uSlopeMax * rh * (tHi - tLo)) {
+        Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return;
     }
     vec2 hs = ssrSheet((P + R * tHi).xz);
-    if (!ssrOn(hs)) { Frag = vec4(mix(mix(own.rgb, uSky, uMix), uEdgeColor, e), own.a); return; }
+    if (!ssrOn(hs)) { Frag = vec4(mix(ssrSky(own.rgb), uEdgeColor, e), own.a); return; }
     vec4 hit = texture(uTex, hs);
-    float w = uMix * hit.a * (1.0 - uFade * clamp(tHi / (float(uSteps) * uStepW), 0.0, 1.0));
+    float w = uMix * hit.a * (1.0 - uFade * clamp(tHi / tMax, 0.0, 1.0));
     Frag = vec4(mix(mix(own.rgb, hit.rgb, w), uEdgeColor, e), own.a);
 }`;
 
@@ -338,6 +385,18 @@ function fxglSSR(col, p, effect, l) {
         gl.uniform1f(fxglU(pr, 'uEps'), relief * 2 / 255);
         // Solid 那一刀:浮雕底端往上这么一段算「深度范围的尽头」,不是场景里立着的东西。
         gl.uniform1f(fxglU(pr, 'uMinH'), -relief * (1 - p.solid / 100));
+        // Steep 那一刀: 0 = 每一道穿越都算 (老行为); 拧大 = 只接受越来越缓的抬起。折成
+        // 「地形每格抬起多少灰阶」的上限 T (50% = 8 灰阶/层像素), 再化成无量纲坡度: T 灰阶/格 ×
+        // (浮雕世界深 / 255 灰阶) / 一个层像素的世界长。
+        // 实测 (用户那张 618×692 深度图, F:\Harness\kolid-comfy\gl-probe\ssr_streak_diag.mjs): 老路
+        // (steep=0) 有条纹格 1 741, 其中 75% (= 1 306) 踩在断面 (命中点 |∇d| ≥ 8 灰阶/格) 上; 90% 那一档
+        // 把这一类压到 73 格 (−94%), 命中总数只少 0.1%。但**取样点往前挪一步**这个处置同时把它们送进了
+        // 另一类塌缩 (掠射/远处, t ≥ 128 格: 644 → 987), 所以条纹格总数几乎没降 (1 741 → 1 827)。
+        // 轮廓处「挪一步」还是「判天光」(2026-10-02 定: 判天光)。挪一步实测把断面条纹压到 73 格, 却把它们
+        // 送进另一类塌缩 (掠射/远处, t ≥ 128 格: 644 → 987), 条纹总数 1 741 → 1 905 不降反升 —— 他刷新后
+        // 就报了「还是有伪影」。判天光 50% 那一档 = 1 741 → 692 (−60%), 命中少 3.8%。
+        const slope = p.steep > 0 ? 8 * (100 - p.steep) / p.steep : Infinity;
+        gl.uniform1f(fxglU(pr, 'uSlopeMax'), isFinite(slope) ? slope * relief / (255 * sh.px) : 1e30);
         gl.uniform1f(fxglU(pr, 'uStepW'), (p.reach / steps) * sh.px);
         gl.uniform1i(fxglU(pr, 'uSteps'), steps);
         gl.uniform1f(fxglU(pr, 'uJitter'), p.jitter / 100);
@@ -385,14 +444,19 @@ const SSR_PARAMS = [
     // 像素就是拖影。0 = 每一道穿越都算 (老行为)。
     { key: 'solid', label: 'Solid', min: 0, max: 100, step: 1, def: 10, unit: '%',
         tip: 'How far above the bottom of the relief a crossing has to stand before it counts as something in front of the ray. The bottom end is only where the depth range stops \u2014 reflecting content from out there smears a long streak along the ray. 0 accepts every crossing.' },
+    // 断面上的命中 = 照见前面那个东西的轮廓, 而不是 ray 落上去的表面: 同一个源格沿 ray 复制成一条
+    // 拖影 (竖条纹)。抬得比这颗旋钮还陡的穿越不算照见了东西 ⇒ 那一条 ray 判天光。0 = 老行为, 每一道穿越都收。
+    { key: 'steep', label: 'Steep', min: 0, max: 100, step: 1, def: 50, unit: '%',
+        tip: 'How steep a climb in the relief a crossing may land on and still count as a surface. A step that steep is the silhouette of something standing in front, not ground the ray reaches, and sampling it copies one pixel along the ray into a streak \u2014 that ray reads sky instead. 0 accepts every crossing; 50 is a climb of 8 depth levels per layer pixel; higher rejects gentler slopes too.' },
     { key: 'jitter', label: 'Jitter', min: 0, max: 100, step: 1, def: 75, unit: '%',
         tip: 'Scatters each ray\u2019s start phase by up to one step \u2014 trades banding for grain. Deterministic per pixel; Seed picks the pattern.' },
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0 },
     { key: 'mix', label: 'Mix', min: 0, max: 100, step: 1, def: 100, unit: '%' },
-    // 未命中的反射 ray 照到的是天空: 返回这份天光色 (不吃 Fade —— 天在无穷远)。
+    // 反射 ray 什么都没照见时回这份天光色; 它吃 Fade 的**满刻度** (与走满射程那一档同一浓度),
+    // 所以整片未命中是一个颜色, Fade 拧到底 = 这一片整个交回原图。
     { key: 'sky', label: 'Sky', kind: 'color', def: '#aebfd0' },
     { key: 'fade', label: 'Fade', min: 0, max: 100, step: 1, def: 40, unit: '%',
-        tip: 'Distant hits come back dimmer \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground.' },
+        tip: 'Everything the ray brings back comes dimmer the farther it went \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground. A ray that brings nothing back pays the full-scale discount, so the whole non-hit area is one colour and a full Fade hands it back to the picture.' },
     // 边 = 水线自己 (露/埋那份余量过零的地方),不是描边:整面埋着或整面露着时画面里没有交线,一条都不画。
     { key: 'edge', label: 'Edge', min: 0, max: 100, step: 1, def: 60, unit: '%',
         tip: 'Draw the water line itself \u2014 where the mirror meets the photo \u2014 in its own colour. 0 leaves the crossing to the reflection.' },
@@ -413,7 +477,7 @@ defineEffect({
     group: 'Reflect',
     icon: 'reflect',
     needsMap: 'Depth',
-    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
+    desc: 'Screen-space reflections, measured on one ruler: the bound depth map is rebuilt as a relief laid on this layer\u2019s picture plane, its height measured along the view axis \u2014 the canvas plane is the end closest to the reader, and Relief says how far (in canvas heights) the whole depth range sinks behind it. A bound Plane attribute is the mirror sheet: its world position is a point of the mirror and its normal is the mirror\u2019s facing, neither converted through any pixel count. Per pixel this photo\u2019s own camera casts a view ray (Perspective = its horizontal field of view; 0 is flat paper, orthographic), the ray meets the mirror sheet, and wherever the sheet stands closer to the reader than the relief it is bare mirror \u2014 where the relief stands in front of it the sheet is buried and there is no mirror at all, so the water line is exactly the line where sheet and relief cross, and it curves by itself under perspective. Preview paints the exposed sheet white while you place it. The direction a reflection leaves in is the view ray reflected about the plane normal \u2014 a pure mirror, nothing else steers it; a mirror within 45° of face-on bounces the ray back at the reader, which means it would show what is behind the camera, so it says so on the chain instead of filling the picture. Otherwise the ray marches into the scene, Steps steps of Reach/Steps layer pixels (converted to world length), testing the relief at each point projected back onto this layer: the first place the relief rises over the ray clips the reflection, refined by 4 bisections, and that pixel is what shows — a crossing only counts when the relief there stands at least Solid above the bottom of the relief range, since that bottom end is just where the depth data stops and reflecting out there smears a long streak along the ray, and when the relief does not climb under the ray more steeply than Steep allows, because a step that steep is the silhouette of something standing in front rather than a surface the ray reaches, and sampling it copies one pixel along the reflection into a streak. Ran out of Reach or left the picture = the ray found the sky = the Sky colour (takes Mix, not Fade — the sky is infinitely far). Reflections can only come from the layer\u2019s own pixels, weighted by the hit\u2019s own alpha; colour only \u2014 alpha is this pixel\u2019s own. Jitter scatters ray starts to break banding into grain (Seed picks the pattern), Fade dims distant hits, Mix sets the strength. Edge draws the water line itself: the line where the mirror sheet and the rebuilt relief cross. Its ruler is a *depth difference* counted on the water side only — Depth Diff says how deep the water may be (grey levels of the 8-bit map, 1/255 of the relief range), and every pixel whose ground lies under that much water is on the line, so it starts at the waterline and reaches into the shallows, narrow on a steep bank and wide on a gentle one, and the map’s own per-pixel staircasing cannot break it into dashes; ground standing above the surface there is dry, not shore, and draws nothing. Distance Rate bends that ruler with depth: it is multiplied by a factor interpolated, along how far this pixel’s ground sinks into the relief range, from 1 at the canvas-plane end to the given value at the far end (100% = one ruler everywhere). Smooth reads the crossing and the threshold off a five-tap field averaged over that radius in layer pixels, which steadies the per-pixel gradient without moving the line (1 = off). Noise rags the threshold per pixel (Seed picks the pattern). Two things are not a water line: a depth discontinuity, where one surface simply stands in front of another — the field’s own second difference around the pixel cuts that, because a bank that walks over the water only bends it while a step breaks it — and a pixel whose mirror point falls outside this picture, where there is no ground at all to be lapped.',
     params: SSR_PARAMS,
     shaders: { ssr: FX_FS_SSR },
     run: fxglSSR,
@@ -445,7 +509,7 @@ defineEffect({
         const tilt = pl ? Math.round(dirDeg(Math.asin(Math.max(-1, Math.min(1, pl.ny))))) : null;
         let s = `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}`
             + `  ${tilt === null ? 'no plane' : `mirror ${tilt}\u00b0\u2933`}`
-            + `  r${n(p.reach)}px  s${p.steps | 0}  rel${n(p.relief)}H  sol${n(p.solid)}  fov${n(p.persp)}\u00b0`;
+            + `  r${n(p.reach)}px  s${p.steps | 0}  rel${n(p.relief)}H  sol${n(p.solid)}  stp${n(p.steep)}  fov${n(p.persp)}\u00b0`;
         if (p.near === 'bright') s += '  inv';
         if (p.mix < 100) s += `  m${n(p.mix)}`;
         if (p.fade < 100) s += `  f${n(p.fade)}`;
