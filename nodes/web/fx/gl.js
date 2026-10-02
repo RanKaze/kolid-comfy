@@ -496,9 +496,33 @@ function fxScratch(w, h) {
     return c;
 }
 
+// 被绑定为**镜面**的 plane 记录:本层条带上有 ssr 特效且 planeRef 指向本层条带上的记录时返回它。
+// 它的取景记号 (盘面/箭头) 不能画进图层 —— 反射采样的是图层自己, 照到记号 = 倒影里长出盘面。
+function ssrMirrorRecord(l) {
+    for (const r of attrRecordsOf(l)) {
+        if (!r.chain || !attrEnabled(r)) continue;
+        for (const e of r.chain) {
+            if (!e || e.type !== 'ssr' || e.enabled === false) continue;
+            const rec = attrRecord(e.params && e.params.planeRef);
+            if (rec && attrRefList(l).indexOf(rec.id) >= 0) return rec;
+        }
+    }
+    return null;
+}
+// 折叠期间把镜面记录临时停用 (fn 内 enabled=false, 出口原样放回): 三条折叠入口 (结算/后端分流/
+// Generate 出图) 都走这一句 —— 记号不进结算面、不进 src、不进 Generate 出图, 反射自然采不到它。
+// 绑定方 (fxSSRPlane) 读的是记录本身, 停用不影响反射几何。
+function fxMirrorHidden(l, fn) {
+    const mirror = ssrMirrorRecord(l);
+    const was = mirror ? mirror.enabled : null;
+    if (mirror) mirror.enabled = false;
+    try { return fn(); } finally { if (mirror) mirror.enabled = was; }
+}
+
 // 画面那一趟:整条折完,蒙版一律裁。结果就是画布要盖的那张图,所以它带缓存 (注释见上)。
 function fxResolved(l) {
     if (!l || !l.img) return l && l.img;
+    return fxMirrorHidden(l, () => {
     // 生成器的面先同步 (attr/core.js):ownsGrid 的文字/方向可能当场换底换格子,必须发生在
     // nativeSize 与早退判据**之前**,否则一枚还没算过面的记录会被当成"没装"。
     syncGeneratorFaces(l);
@@ -526,6 +550,7 @@ function fxResolved(l) {
     // stashLayerKey。只有走了缓存路径 (条带上真有事) 的层才需要它:纯像素层的输入就是那张 img。
     l.fxResolveGen = (l.fxResolveGen | 0) + 1;
     return surface;
+    });
 }
 
 // ---- 后端分界 (the split) ----
@@ -534,6 +559,7 @@ function fxResolved(l) {
 // `Decal·Effects·Mask` 于是与这个功能出现之前逐像素相同 —— 贴片和链烘进 src,蒙版仍原样送出。
 // 折不出新面时 surface 就是 l.img 本身,调用方据此决定能不能走 l.src 那条免重编码的快路。
 function fxSplitForBackend(l) {
+    return fxMirrorHidden(l, () => {
     syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
     const thru = lastChainIndex(l, recs);
@@ -542,6 +568,7 @@ function fxSplitForBackend(l) {
     const surface = fxScratch(w, h);
     if (!fxDropStrip(l, surface, l.img, thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
     return { surface, rest: recs.slice(thru + 1) };
+    });
 }
 
 // Generate 那张图:整条折完,但**留给后端的那几枚蒙版不裁**。蒙版是覆盖率而不是剪刀时,后端还要乘
@@ -550,6 +577,7 @@ function fxSplitForBackend(l) {
 // 没有任何 attribute 做事时返回 null:调用方宁可发原始 l.src,也别白白重编码一张同图。
 function fxSurfaceForGenerate(l, base) {
     if (!l || !l.img) return null;
+    return fxMirrorHidden(l, () => {
     syncGeneratorFaces(l);
     const recs = attrRecordsOf(l);
     const thru = lastChainIndex(l, recs);
@@ -559,6 +587,7 @@ function fxSurfaceForGenerate(l, base) {
     const surface = fxScratch(w, h);
     if (!fxDropStrip(l, surface, base || l.img, -1, cut)) return null;
     return surface;
+    });
 }
 
 // 后端那一次乘法该乘的是哪些蒙版:最后一条启用链**右边**的那些,全与起来。一条都不剩 = 前端已经
