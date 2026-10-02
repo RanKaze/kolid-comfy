@@ -167,6 +167,16 @@ function dirPlaneHalf() {
     const a = dirCanvasAspect(), n = Math.hypot(a, 1);
     return { hw: 0.92 * a / n, hd: 0.92 / n };
 }
+// geometry 描述符里 {u,v,h} (铺在画布矩形上, 0=左/上, h 单位 = 画布高) ↔ 世界 position 的一对
+// 唯一换算: attr/geometry.js 的旧形状转换与特效链的镜面锚点 (fx/ssr.js) 都走这一份。
+function geoUVHToWorld(u, v, h) {
+    const { hw, hd } = dirPlaneHalf();
+    return { x: (u - 0.5) * 2 * hw, y: h * 2 * hd, z: (v - 0.5) * 2 * hd };
+}
+function geoWorldToUVH(p) {
+    const { hw, hd } = dirPlaneHalf();
+    return { u: p.x / (2 * hw) + 0.5, v: p.z / (2 * hd) + 0.5, h: p.y / (2 * hd) };
+}
 // 一个姿态在世界里的全部落点。画布平面也在里面: 半对角线取 0.92 ⇒ 四角正好落在方位环内侧,
 // "画布就是躺在这个世界里的那张矩形"靠它与环的比例关系读出来, 不靠文字说明。
 function dirWorldPose(pose) {

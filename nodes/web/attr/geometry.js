@@ -12,7 +12,9 @@
     // 规范朝向 = +X (ray 的箭头 / plane 的法线), 默认姿态由欧拉转过去 (plane 默认法线朝 +Y)。
     // rotation 用 getter:本文件比 js/direction.js 先加载,qFromEuler 要到运行时才存在。
     const GEO_DEFAULTS = {
-        plane: { position: { x: 0, y: 0.35, z: 0 }, get rotation() { return qFromEuler(0, 90, 0); }, color: '#f5c542' },
+        // plane 默认沉到画面后面 (y = -0.2 世界 ≈ 0.15 个画布高):罩在画面之前 (+y) 的那块玻璃谁也
+        // 挡不着,而 Reflection 正是拿这一枚当镜面 —— 默认就该是一面能埋进地形、能留出水线的镜子。
+        plane: { position: { x: 0, y: -0.2, z: 0 }, get rotation() { return qFromEuler(0, 90, 0); }, color: '#f5c542' },
         point: { position: { x: 0, y: 0.4, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, color: '#19e0bc' },
         ray: { position: { x: -0.3, y: 0, z: 0 }, get rotation() { return qFromEuler(135, 25, 0); }, color: '#ff2e88' },
     };
@@ -35,11 +37,9 @@
             return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d;
         };
         const legacy = raw.u !== undefined && raw.position === undefined;
-        const pos = legacy ? {
-            x: (num(raw.u, 0.5, -1, 2) - 0.5) * 2 * dirPlaneHalf().hw,
-            y: num(raw.h, 0, -2, 2) * 2 * dirPlaneHalf().hd,
-            z: (num(raw.v, 0.5, -1, 2) - 0.5) * 2 * dirPlaneHalf().hd,
-        } : (raw.position || def.position);
+        const pos = legacy ? geoUVHToWorld(num(raw.u, 0.5, -1, 2), num(raw.v, 0.5, -1, 2),
+                                           num(raw.h, 0, -2, 2))
+                           : (raw.position || def.position);
         const out = {
             position: {
                 x: num(pos.x, def.position.x, -4, 4),
