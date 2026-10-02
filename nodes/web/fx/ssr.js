@@ -580,7 +580,13 @@ function fxglSSR(col, p, effect, l) {
     col.slot = 1 - col.slot;
 }
 
+// 参数按折叠组分块 (kind:'fold' 的行是组头,fx/ui.js 里收放):Surface = 深度浮雕与镜面这张"尺子",
+// Ray March = 反射 ray 怎么找落点,Blend = 反射怎么落在图层上,Wave & Refraction = 摇镜子 + 折水下,
+// Water Line = 岸线。组头只是 UI 结构,不进 params、不进存档。
 const SSR_PARAMS = [
+    // ---- Surface:浮雕与镜面 ----
+    { key: 'foldSurface', kind: 'fold', label: 'Surface', open: true,
+        tip: 'The depth relief and the mirror sheet every ray is measured against: bind the depth map, place a Plane attribute as the mirror, say which end of the map stands near and how deep the relief sinks.' },
     { key: 'map', kind: 'map', def: null },
     // 反射面 = 一枚 Plane attribute (fxDirModal 全项目检索后选一枚 guid, 面板只列 plane):它的法线
     // 就是镜子的朝向, 它在世界里的位置就是镜子的位置, 在 3D 小窗里拧。悬空整条跳过并说一句 ——
@@ -595,12 +601,46 @@ const SSR_PARAMS = [
     // 相机的视场:0 = 正交 (这层纸的感觉),视线不收敛;拧大 = 视线逐像素收,水线会弯、远处会压过来。
     { key: 'persp', label: 'Perspective', min: 0, max: 120, step: 1, def: 45, unit: '\u00b0',
         tip: 'Horizontal field of view of this photo\u2019s own camera \u2014 view rays converge, so the water line curves and distance compresses. 0 is flat paper (orthographic).' },
+    { key: 'relief', label: 'Relief', min: 0.01, max: 4, step: 0.01, def: 0.5, unit: '\u00d7H',
+        tip: 'How far the depth range sinks behind the picture plane, in canvas heights \u2014 the one ruler the terrain and the mirror share.' },
+    // ---- Ray March:反射 ray 怎么找落点 ----
+    { key: 'foldRay', kind: 'fold', label: 'Ray March', open: false,
+        tip: 'How the reflected ray searches the relief: range, resolution, and the guards that keep the relief floor and silhouettes from reading as surfaces.' },
     { key: 'reach', label: 'Reach', min: 8, max: 2048, step: 1, def: 512, unit: 'px',
         tip: 'How far the reflected ray searches before giving up \u2014 nothing hit means nothing reflected. Read in this layer\u2019s pixels; converted to world length per step.' },
     { key: 'steps', label: 'Steps', min: 2, max: 128, step: 1, def: 12,
         tip: 'Ray-march quality plus 4 bisection refinements on every hit. Taps per pixel: Steps depth samples.' },
-    { key: 'relief', label: 'Relief', min: 0.01, max: 4, step: 0.01, def: 0.5, unit: '\u00d7H',
-        tip: 'How far the depth range sinks behind the picture plane, in canvas heights \u2014 the one ruler the terrain and the mirror share.' },
+    // 一次穿越要算数,那儿的地形得真的高过浮雕底端这一段:底端只是深度范围的尽头,顺着它采远处那一圈
+    // 像素就是拖影。0 = 每一道穿越都算 (老行为)。
+    { key: 'solid', label: 'Solid', min: 0, max: 100, step: 1, def: 10, unit: '%',
+        tip: 'How far above the bottom of the relief a crossing has to stand before it counts as something in front of the ray. The bottom end is only where the depth range stops \u2014 reflecting content from out there smears a long streak along the ray. 0 accepts every crossing.' },
+    // 断面上的命中 = 照见前面那个东西的轮廓, 而不是 ray 落上去的表面: 同一个源格沿 ray 复制成一条
+    // 拖影 (竖条纹)。抬得比这颗旋钮还陡的穿越不算照见了东西 ⇒ 那一条 ray 判天光。0 = 老行为, 每一道穿越都收。
+    { key: 'steep', label: 'Steep', min: 0, max: 100, step: 1, def: 50, unit: '%',
+        tip: 'How steep a climb in the relief a crossing may land on and still count as a surface. A step that steep is the silhouette of something standing in front, not ground the ray reaches, and sampling it copies one pixel along the ray into a streak \u2014 that ray reads sky instead. 0 accepts every crossing; 50 is a climb of 8 depth levels per layer pixel; higher rejects gentler slopes too.' },
+    { key: 'jitter', label: 'Jitter', min: 0, max: 100, step: 1, def: 75, unit: '%',
+        tip: 'Scatters each ray\u2019s start phase by up to one step \u2014 trades banding for grain. Deterministic per pixel; Seed picks the pattern.' },
+    { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0 },
+    // ⑧ 采回来的内容先糊一糊: 反射落点那一格与折射那一格各做五次取样的平均。0 = 单次取样 (逐位同从前)。
+    { key: 'smooth', label: 'Smooth', min: 0, max: 8, step: 1, def: 0, unit: 'px',
+        tip: 'Softens what the rays bring back rather than where they went: every pixel sampled out of this picture \u2014 the reflection\u2019s hit and the refracted waterbed \u2014 is averaged over a five-tap cross this wide (layer pixels, diagonals at the given radius), so a hard-mapped reflection reads as a sheen instead of a second copy of the photo. 0 samples once, exactly as before; the layer\u2019s own pixels are never blurred. Costs four extra taps per sample.' },
+    // ---- Blend:反射怎么落在图层上 ----
+    { key: 'foldBlend', kind: 'fold', label: 'Blend', open: true,
+        tip: 'How the reflection sits on this layer: strength, the sky colour nothing-hit rays fall back on, and the two fades \u2014 one by distance, one by water depth.' },
+    { key: 'mix', label: 'Mix', min: 0, max: 100, step: 1, def: 100, unit: '%' },
+    // 反射 ray 什么都没照见时回这份天光色; 它吃 Fade 的**满刻度** (与走满射程那一档同一浓度),
+    // 所以整片未命中是一个颜色, Fade 拧到底 = 这一片整个交回原图。
+    { key: 'sky', label: 'Sky', kind: 'color', def: '#aebfd0' },
+    { key: 'fade', label: 'Fade', min: 0, max: 100, step: 1, def: 40, unit: '%',
+        tip: 'Everything this pass writes comes dimmer the farther the ray went \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground. A ray that brings nothing back pays the full-scale discount, so the whole non-hit area is one colour and a full Fade hands it back to the picture. The water line pays that same full-scale discount too: it is not something a ray brought back, so turning Fade up takes the shoreline outline with it instead of leaving it glowing over ground that no longer shows any reflection.' },
+    // ⑨ 浅水那一圈把**整份**反射 (采到的内容 + 什么都没照见时的天光) 淡回原图。尺与 Edge 的 Depth Diff
+    // 同一把 = 同一条带: 边画到哪儿, 反射就淡到哪儿, **而那条边自己也按同一句的 shore 缩** (用户
+    // 2026-10-03: "fade 滑块那一条接上了, 但它没接 Fade Multiplier 那条带")。0 = 现行为 (水线那一刀照旧硬)。
+    { key: 'fadeMul', label: 'Fade Multiplier', min: 0, max: 100, step: 1, def: 0, unit: '%',
+        tip: 'Shallow water hands the picture back: within one Depth Diff band of the water line the whole reflection \u2014 what the ray brought back *and* the sky colour it falls back on when it brought nothing \u2014 fades toward this layer\u2019s own pixels, so the shore stops being a hard cut between mirror and photo. 100% fades completely at the line itself, 0 leaves the cut exactly as it was. Same ruler as Edge\u2019s Depth Diff (that knob\u2019s Noise and Distance Rate do not enter here), so the band the line draws and the band this fades are one and the same band \u2014 and the water line itself pays this ramp too: each of its pixels is weighted by its own water depth, weakest right at the line and growing back as the water deepens, so the outline recedes together with the reflection under it instead of standing at full strength over water that has already been handed back. Unlike Fade, which multiplies every pixel of the line by the same number, this one tilts it by depth.' },
+    // ---- Wave & Refraction:摇镜子 + 折水下 ----
+    { key: 'foldWave', kind: 'fold', label: 'Wave & Refraction', open: false,
+        tip: 'Ripple the mirror sheet itself \u2014 the shoreline rides the swell \u2014 and bend what lies under the water.' },
     // 波动 = 那面镜子不再是平镜: 镜面上两阶正弦 (频率比 1 : 2.3) 把镜面本身抬起/压下, Wave 说的就是坡
     // **最多有多陡** (一颗角度, 与波长无关: 波长只管两道波多宽多高)。水线、余量、Edge、水深量的都是这张
     // 抖过的镜子 ⇒ 岸线自己随波纹起伏; 反射方向另吃歪过去的法线。0 = 平镜,
@@ -617,31 +657,9 @@ const SSR_PARAMS = [
     // 没有波动就没有倾斜 ⇒ 这颗只在 Wave>0 时出现 (用户点名的「折射也要参考水面波动」)。
     { key: 'refract', label: 'Refract', min: 0, max: 100, step: 1, def: 0, unit: '%', when: p => p.wave > 0,
         tip: 'What lies under the surface is seen through it: the waterbed is sampled sideways, by how far the swell leans at that pixel. The sideways bend saturates a quarter of the way down the relief, so shallow water leans visibly too instead of barely at all; only ground standing above the surface stays straight. It lies under the reflection, so Mix and Fade still weight what sits on top of it.' },
-    // 一次穿越要算数,那儿的地形得真的高过浮雕底端这一段:底端只是深度范围的尽头,顺着它采远处那一圈
-    // 像素就是拖影。0 = 每一道穿越都算 (老行为)。
-    { key: 'solid', label: 'Solid', min: 0, max: 100, step: 1, def: 10, unit: '%',
-        tip: 'How far above the bottom of the relief a crossing has to stand before it counts as something in front of the ray. The bottom end is only where the depth range stops \u2014 reflecting content from out there smears a long streak along the ray. 0 accepts every crossing.' },
-    // 断面上的命中 = 照见前面那个东西的轮廓, 而不是 ray 落上去的表面: 同一个源格沿 ray 复制成一条
-    // 拖影 (竖条纹)。抬得比这颗旋钮还陡的穿越不算照见了东西 ⇒ 那一条 ray 判天光。0 = 老行为, 每一道穿越都收。
-    { key: 'steep', label: 'Steep', min: 0, max: 100, step: 1, def: 50, unit: '%',
-        tip: 'How steep a climb in the relief a crossing may land on and still count as a surface. A step that steep is the silhouette of something standing in front, not ground the ray reaches, and sampling it copies one pixel along the ray into a streak \u2014 that ray reads sky instead. 0 accepts every crossing; 50 is a climb of 8 depth levels per layer pixel; higher rejects gentler slopes too.' },
-    { key: 'jitter', label: 'Jitter', min: 0, max: 100, step: 1, def: 75, unit: '%',
-        tip: 'Scatters each ray\u2019s start phase by up to one step \u2014 trades banding for grain. Deterministic per pixel; Seed picks the pattern.' },
-    { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0 },
-    { key: 'mix', label: 'Mix', min: 0, max: 100, step: 1, def: 100, unit: '%' },
-    // 反射 ray 什么都没照见时回这份天光色; 它吃 Fade 的**满刻度** (与走满射程那一档同一浓度),
-    // 所以整片未命中是一个颜色, Fade 拧到底 = 这一片整个交回原图。
-    { key: 'sky', label: 'Sky', kind: 'color', def: '#aebfd0' },
-    { key: 'fade', label: 'Fade', min: 0, max: 100, step: 1, def: 40, unit: '%',
-        tip: 'Everything this pass writes comes dimmer the farther the ray went \u2014 tames the grazing smear a near-horizontal ray leaves on flat ground. A ray that brings nothing back pays the full-scale discount, so the whole non-hit area is one colour and a full Fade hands it back to the picture. The water line pays that same full-scale discount too: it is not something a ray brought back, so turning Fade up takes the shoreline outline with it instead of leaving it glowing over ground that no longer shows any reflection.' },
-    // ⑨ 浅水那一圈把**整份**反射 (采到的内容 + 什么都没照见时的天光) 淡回原图。尺与 Edge 的 Depth Diff
-    // 同一把 = 同一条带: 边画到哪儿, 反射就淡到哪儿, **而那条边自己也按同一句的 shore 缩** (用户
-    // 2026-10-03: "fade 滑块那一条接上了, 但它没接 Fade Multiplier 那条带")。0 = 现行为 (水线那一刀照旧硬)。
-    { key: 'fadeMul', label: 'Fade Multiplier', min: 0, max: 100, step: 1, def: 0, unit: '%',
-        tip: 'Shallow water hands the picture back: within one Depth Diff band of the water line the whole reflection \u2014 what the ray brought back *and* the sky colour it falls back on when it brought nothing \u2014 fades toward this layer\u2019s own pixels, so the shore stops being a hard cut between mirror and photo. 100% fades completely at the line itself, 0 leaves the cut exactly as it was. Same ruler as Edge\u2019s Depth Diff (that knob\u2019s Noise and Distance Rate do not enter here), so the band the line draws and the band this fades are one and the same band \u2014 and the water line itself pays this ramp too: each of its pixels is weighted by its own water depth, weakest right at the line and growing back as the water deepens, so the outline recedes together with the reflection under it instead of standing at full strength over water that has already been handed back. Unlike Fade, which multiplies every pixel of the line by the same number, this one tilts it by depth.' },
-    // ⑧ 采回来的内容先糊一糊: 反射落点那一格与折射那一格各做五次取样的平均。0 = 单次取样 (逐位同从前)。
-    { key: 'smooth', label: 'Smooth', min: 0, max: 8, step: 1, def: 0, unit: 'px',
-        tip: 'Softens what the rays bring back rather than where they went: every pixel sampled out of this picture \u2014 the reflection\u2019s hit and the refracted waterbed \u2014 is averaged over a five-tap cross this wide (layer pixels, diagonals at the given radius), so a hard-mapped reflection reads as a sheen instead of a second copy of the photo. 0 samples once, exactly as before; the layer\u2019s own pixels are never blurred. Costs four extra taps per sample.' },
+    // ---- Water Line:岸线 ----
+    { key: 'foldEdge', kind: 'fold', label: 'Water Line', open: false,
+        tip: 'The shoreline drawn where the mirror sheet meets the ground: its depth ruler, how it thins with distance, and how steady it sits.' },
     // 边 = 水线自己 (露/埋那份余量过零的地方),不是描边:整面埋着或整面露着时画面里没有交线,一条都不画。
     { key: 'edge', label: 'Edge', min: 0, max: 100, step: 1, def: 60, unit: '%',
         tip: 'Draw the water line itself \u2014 where the mirror meets the photo \u2014 in its own colour. 0 leaves the crossing to the reflection. Two fade knobs reach this line, from two directions: Fade multiplies every pixel of it by the same (1\u2212Fade), the way the sky colour does, so a full Fade leaves no glowing outline standing over water that has already been handed back; Fade Multiplier weights each of its pixels by that pixel\u2019s own water depth, so the outline thins first right at the line and only reaches full strength a Depth Diff band into the water.' },

@@ -384,6 +384,15 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .fx-seg button { flex: 1; background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 3px 4px;
     color: rgba(255,255,255,0.75); font-size: 10.5px; font-weight: 600; cursor: pointer; }
 .fx-seg button.on { background: rgba(0,122,255,0.85); color: #fff; }
+/* 折叠组头 (fx/ui.js 的 kind:'fold'):小字大写组名 + 淡线,把一摞相关旋钮划在同一个折叠里。
+   收起时组下的行整个不渲染,不是藏 —— 面板的高度真的缩下去。 */
+.fx-params .fx-fold { display: block; }
+.fx-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; background: none; border: none;
+    padding: 3px 0 2px; cursor: pointer; text-align: left; color: rgba(255,255,255,0.45);
+    font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.fx-fold-head:hover { color: rgba(255,255,255,0.72); }
+.fx-fold-head .fx-fold-chev { font-size: 9px; width: 10px; flex-shrink: 0; line-height: 1; }
+.fx-fold-head::after { content: ''; flex: 1; height: 0.5px; background: rgba(255,255,255,0.14); }
 /* 曲线编辑面 (fx/curves.js 的 editor):图在左、Input/Output 读数在右,底边两个三角就是输入黑/白点。 */
 .fx-curves { display: flex; flex-direction: column; gap: 5px; }
 .fx-curve-row { display: flex; align-items: flex-start; gap: 8px; }
