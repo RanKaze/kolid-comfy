@@ -660,6 +660,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 会真的跳过对应步骤。
   const enableMask = firstDp ? (firstDp.enable_mask ?? true) : true;
   const enableLimit = firstDp ? (firstDp.enable_limit ?? true) : true;
+  const dynLayer = firstDp ? (firstDp.enable_dynamic_layer ?? false) : false;
 
   // Krea2 提供 fit/crop 两种 Edit 模式（source patch）；其余架构仅显示 Enable Edit
   const isKrea2 = !!architecture && /krea2/i.test(architecture);
@@ -1060,6 +1061,44 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   disabled={!firstDp}
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
                 />
+              </div>
+              <div style={styles.paramRow}
+                title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹（detailer_00001_.png 递增命名）——整幅 Run 和图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关，不分流。图里带和 SnapshotPromptNode 的 Cache 完全同形的 prompt 编码（prompt / prompts / lora / prefab / program / custom_prompts / prompt_parsing / filter_* / region），所以这张图能被 Prompt 节点的 Load From Image 原样读回；其中 prompt 一项是最后一个 detailer 真正送进 CLIP 的那一串（标记词打头、Generate Text 之后），其余各项编的是这次真正生效的合并选择（链里没有 Prompt/Query 块时就是 Prompt 节点的全局选择）。关 = 结果只留在画布里，不落盘。">
+                <label style={styles.paramLabel}>Enable Output</label>
+                <IOSToggle
+                  checked={firstDp ? (firstDp.enable_output ?? false) : false}
+                  disabled={!firstDp}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_output', v)}
+                />
+              </div>
+              <div style={styles.paramRow}
+                title="开 = 这个 preset 的 ▶ Run 不再直接跑整幅链：工作台进入框选模式，拖完框跳过分辨率弹窗直接建出 Dynamic Layer，并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消框选 = 什么也不跑。关 = ▶ Run 保持原来的整幅 Run。">
+                <label style={styles.paramLabel}>Dynamic Layer</label>
+                <IOSToggle
+                  checked={dynLayer}
+                  disabled={!firstDp}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_dynamic_layer', v)}
+                />
+              </div>
+              <div style={{ opacity: dynLayer ? 1 : 0.4, pointerEvents: dynLayer ? 'auto' : 'none' }}>
+              <div style={styles.paramRow}
+                title="开 = 建层分辨率自动按 GLOBAL SETTINGS 的 Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）。关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。">
+                <label style={styles.paramLabel}>Layer Limit</label>
+                <IOSToggle
+                  checked={firstDp ? (firstDp.dynamic_layer_limit ?? true) : true}
+                  disabled={!dynLayer}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'dynamic_layer_limit', v)}
+                />
+              </div>
+              <div style={styles.paramRow}
+                title="开 = 自动 Generate 用框下方所有图层的合成当 context（img2img）。关 = 新层是空的，context 落到该层分辨率上的噪声（框内纯 txt2img）。仅 Dynamic Layer 开时生效。">
+                <label style={styles.paramLabel}>Layer Context</label>
+                <IOSToggle
+                  checked={firstDp ? (firstDp.dynamic_layer_ctx ?? true) : true}
+                  disabled={!dynLayer}
+                  onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'dynamic_layer_ctx', v)}
+                />
+              </div>
               </div>
               </div>)}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
