@@ -54,7 +54,11 @@ export function buildLoraSelectionData(
 ): LoraSelectionData[] {
   return selectedLoras.map(l => {
     const sel = loraSelections[l.file_path];
-    return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
+    // 没有状态条目 = 用户从没在这张卡上做过选择,而卡片自己把这种情形渲染成「全套
+    // trainedWords 全选」(Lora.tsx buildActiveSetFromInitial)。序列化必须给同一个值,
+    // 否则 UI 显示全选、payload 传空、后端就只能拼出零个触发词。已有条目里的 [] 是
+    // 用户显式取消全部,不能兜。同款写法见本文件 lora_context/lora_builtin 的组装。
+    return { file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? l.tags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config };
   });
 }
 

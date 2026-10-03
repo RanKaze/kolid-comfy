@@ -1680,7 +1680,10 @@ export function AppShell() {
       }
       return [...prev, item];
     });
-    // Initialize slider_config from loraSliderConfigs when adding
+    // Initialize slider_config from loraSliderConfigs when adding.
+    // activeTags 必须给全套 trainedWords:Lora 卡片把 `[]` 读成「全不选」,只有 undefined
+    // 才走「无记录=全选」的默认(Lora.tsx buildActiveSetFromInitial)。留空 = 这条 lora 的
+    // 触发词从此静默为 0,而且 Persist 之后每次重开都还原不成。
     setLoraSelections(prev => {
       if (prev[item.file_path]) return prev;
       const sc = loraSliderConfigs[item.file_path];
@@ -1688,7 +1691,7 @@ export function AppShell() {
       return {
         ...prev,
         [item.file_path]: {
-          activeTags: [],
+          activeTags: item.tags || [],
           strength: sc.default_value ?? 1.0,
           active: true,
           slider_config: sc,

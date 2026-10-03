@@ -119,6 +119,7 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
               force_full_denoise=False, sigmas=None, model_negative=None,
               invert=False, invert_info=None):
     """统一采样函数：支持 custom sigmas、dual model CFG 和反演往返（invert）"""
+    _external_sigmas = sigmas is not None
     latent_image = latent["samples"]
     latent_image = comfy.sample.fix_empty_latent_channels(
         model, latent_image,
@@ -211,6 +212,24 @@ def _ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negati
             _cb(step, x0, x, total_steps)
         callback = _callback
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+
+    # [NoiseStartProbe] 「这趟到底从噪声还是从图起步」的判据全在 comfy 内部：
+    # KSAMPLER.sample 用 noise_scaling(sigmas[0], noise, latent, max_denoise) 定起点，
+    # max_denoise 只认 σ₀ 是否顶到模型 sigma_max（comfy/samplers.py:717）。
+    # 自定义 sigmas 顶点低于 sigma_max 时，输入 latent 会按比例混回起点。
+    # 这里把判定并排打出来，跑一次看日志即可定位（定位后可撤）。
+    try:
+        _ms = getattr(getattr(model, "model", None), "model_sampling", None)
+        _smax = float(getattr(_ms, "sigma_max", "nan")) if _ms is not None else float("nan")
+        _s0 = float(sigmas[0]) if len(sigmas) > 0 else float("nan")
+        _md = _ms is not None and (math.isclose(_smax, _s0, rel_tol=1e-05) or _s0 > _smax)
+        print(f"[NoiseStartProbe] disable_noise={disable_noise} invert={invert} "
+              f"start_step={start_step} ladder_len={len(sigmas)} sigma0={_s0:.6f} "
+              f"sigma_max={_smax if _ms is not None else 'n/a'} max_denoise={_md} "
+              f"external_sigmas={_external_sigmas} noise_mask={'yes' if noise_mask is not None else 'no'} "
+              f"=> start_from={'pure_noise' if ((not disable_noise) and _md) else ('image_mixed_in' if not disable_noise else 'clean_latent(noise=0)')}")
+    except Exception as _nsp_err:
+        print(f"[NoiseStartProbe] probe failed: {_nsp_err}")
 
     if model_negative is not None:
         guider = DualModelCFGGuider(model, model_negative)
