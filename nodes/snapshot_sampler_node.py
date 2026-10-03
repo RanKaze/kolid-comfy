@@ -2612,6 +2612,9 @@ class SnapshotDetailerSamplerNode:
             loras.extend(prefab_loras)
             lora_str_parts = []
             trigger_words = []
+            # 同款过滤（prompt_node.py:220-226 / 3881-3886）：架构 regex 没命中的 lora
+            # 不加载，也不出标记词。
+            valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
             for lora_item in loras:
                 if isinstance(lora_item, dict):
                     if not lora_item.get('active', True):
@@ -2619,6 +2622,12 @@ class SnapshotDetailerSamplerNode:
                     file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                     if hasattr(prompt_server, '_resolve_lora_file_path'):
                         file_path = prompt_server._resolve_lora_file_path(file_path)
+                    if not file_path:
+                        continue
+                    normalized_path = file_path.replace('\\', '/')
+                    if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                        print(f"[QueryLora] SKIP (prompt tab): 不在当前架构 lora_regex 命中集 — {file_path}")
+                        continue
                     strength = lora_item.get('strength', 1.0)
                     lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
                     trigger_words.extend(lora_item.get('active_tags', []))
@@ -2662,6 +2671,21 @@ class SnapshotDetailerSamplerNode:
             return '', ''
         sel = sel or {}
 
+        # 诊断（run 级，一次一行）：trigger words 丢失只可能发生在下面这三处之一 ——
+        # 进来时 tags 就是空、全局那份压过 block 那份、或拼装末尾没接上。逐个打出来对照。
+        def _lora_diag(tag, items):
+            parts = []
+            for l in items or []:
+                if isinstance(l, dict):
+                    parts.append('{}|active={}|active_tags={}|split_mode={}'.format(
+                        l.get('file_path') or l.get('file_name'),
+                        l.get('active', True), l.get('active_tags'), l.get('split_mode')))
+                else:
+                    parts.append('(non-dict){}'.format(l))
+            print(f"[QueryLora] {tag}: {parts}")
+        _lora_diag('global selected_loras', getattr(ps, 'selected_loras', None))
+        _lora_diag('block selection loras', sel.get('loras'))
+
         # --- 合并 tags：全局在前（text -> 单 tag TagGroup），block 在后 ---
         merged_tags = []
         for p in (getattr(ps, 'selected_prompts', None) or []):
@@ -2679,16 +2703,24 @@ class SnapshotDetailerSamplerNode:
             if isinstance(g, dict):
                 merged_tags.append(copy.deepcopy(g))
 
-        # --- 合并 loras（按 file_path 去重，全局优先）与 prefabs（按 guid 去重）---
+        # --- 合并 loras（全局优先）与 prefabs（按 guid 去重）---
+        # 去重键要先过 _resolve_lora_file_path：全局那份的 file_path 在落盘时被换成了指纹
+        # （prompt_node.py:1154），preset/Query 回答带的是真实路径，字面比较会把同一条 lora
+        # 判成两条（重复加载 + 标记词重复）。region 的同款去重就是先解析再比（3995-3997）。
+        def _lora_identity(l):
+            fp = l.get('file_path') or l.get('file_name') or ''
+            if not fp:
+                return ''
+            return ps._resolve_lora_file_path(fp) if hasattr(ps, '_resolve_lora_file_path') else fp
         merged_loras = []
         seen_lora = set()
         for l in list(getattr(ps, 'selected_loras', None) or []) + list(sel.get('loras') or []):
             if not isinstance(l, dict):
                 continue
-            fp = l.get('file_path') or l.get('file_name')
-            if not fp or fp in seen_lora:
+            key = _lora_identity(l)
+            if not key or key in seen_lora:
                 continue
-            seen_lora.add(fp)
+            seen_lora.add(key)
             merged_loras.append(copy.deepcopy(l))
         merged_prefabs = []
         seen_guid = set()
@@ -2728,6 +2760,9 @@ class SnapshotDetailerSamplerNode:
         loras.extend(prefab_loras)
         lora_str_parts = []
         trigger_words = []
+        # 与 prompt 节点自己的输出同一条规矩（prompt_node.py:220-226 / 3881-3886）：
+        # 没被当前架构 lora_regex 命中的 lora 既不加载，也不出标记词。
+        valid_paths = getattr(ps, '_valid_lora_paths', None) or set()
         for lora_item in loras:
             if isinstance(lora_item, dict):
                 if not lora_item.get('active', True):
@@ -2735,6 +2770,12 @@ class SnapshotDetailerSamplerNode:
                 file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
                 if hasattr(ps, '_resolve_lora_file_path'):
                     file_path = ps._resolve_lora_file_path(file_path)
+                if not file_path:
+                    continue
+                normalized_path = file_path.replace('\\', '/')
+                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                    print(f"[QueryLora] SKIP: 不在当前架构 lora_regex 命中集 — {file_path}")
+                    continue
                 strength = lora_item.get('strength', 1.0)
                 lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
                 trigger_words.extend(lora_item.get('active_tags', []))
@@ -2746,6 +2787,15 @@ class SnapshotDetailerSamplerNode:
             user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
         for text in prefab_texts:
             user_positive = f"{user_positive}, {text}" if user_positive else text
+        # 诊断：库里 trainedWords（lora_data[*]['tags']）能不能兜住这次的空 active_tags。
+        lib_tags = {}
+        for items in (getattr(ps, 'lora_data', None) or {}).values():
+            for it in items or []:
+                if isinstance(it, dict) and it.get('file_path'):
+                    lib_tags[it['file_path']] = it.get('tags') or []
+        _lora_diag('merged→loadable', loras)
+        print(f"[QueryLora] library tags by path: { {k.split('/')[-1]: v for k, v in lib_tags.items() if k in [l.get('file_path') for l in loras if isinstance(l, dict)]} }")
+        print(f"[QueryLora] final trigger_words={trigger_words} | user_loras={user_loras}")
         return user_positive, user_loras
 
     def _await_query_answer(self, server, block, index):
@@ -3537,15 +3587,23 @@ class SnapshotDetailerSamplerNode:
 
                 print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
 
-                # Reference args by architecture — Enable Edit 统一控制 edit 路径
-                # Krea2: source patch + grounded encode (语义+像素双路径)
-                # Flux2Klein: 原生 ref_latents — 当前块 latent 作为 reference
+                # Reference args by architecture — 普遍规则：Enable Edit 关 = 不送图。
+                # Krea2: source patch + grounded encode (语义+像素双路径)，两路都归 enable_edit 管。
+                # Flux2Klein: 原生 ref_latents — 当前块 latent 作为 reference（同样只跟 enable_edit）。
+                # 其余架构（QwenImage21 等）: edit 关时 reference_image=None，
+                #   第一格 pin 随之失效（architecture/QwenImage21.py:92），工作图彻底不进轨迹。
                 architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
                 is_krea2 = bool(architecture and re.search(r"Krea2", architecture, re.IGNORECASE))
                 is_flux2klein = bool(architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE))
 
                 ref_latent_arg = tmp_latent if (is_flux2klein and enable_edit) else None
-                ref_image_arg = resized_image if ((is_krea2 and enable_edit) or not is_flux2klein) else None
+                ref_image_arg = resized_image if enable_edit and not is_flux2klein else None
+                # [EditGate] 门闸读数：这行**不出现**=进程跑的还是旧代码（没重载）；
+                # 出现且 ref_image=sent=该块 Enable Edit 开着，图按设计进 conditioning。
+                print(f"[Block {i+1}] EditGate: enable_edit={enable_edit} arch={architecture} "
+                      f"ref_image={'sent' if ref_image_arg is not None else 'NOT sent'} "
+                      f"ref_latent={'sent' if ref_latent_arg is not None else 'none'} "
+                      f"pipeline_ref_latents={len(next_pipeline.reference.reference_latents)}")
 
                 # 参考图槽位清单（含 <image 1>）—— 必须在 args 定下来之后、真正 conditioning
                 # 之前记，记的才是 get_conditioning 马上要收到的东西。
