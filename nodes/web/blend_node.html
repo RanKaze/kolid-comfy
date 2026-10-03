@@ -12633,6 +12633,7 @@ function addImageFiles(files, stack) {
 // js/psd.js 解出的每个图层带着它在 PSD 文档里的像素矩形;这里把它折成 transform 分数。
 // 画布:空工作台取 PSD 文档尺寸 (超上限按比例缩);已有内容则保持现画布,图层按比例落位 ——
 // 和把一张别的尺寸的图拖进来是同一个读法。z 序按 PSD 的自底向上顺序逐枚插到栈顶。
+// 图层自带的蒙版折成这层尾部的 Mask attribute (面的读法与 cud 完全一致),不进像素、单独走 alpha 给后端。
 const loadImageP = src => new Promise((res, rej) => loadImage(src, res, rej));
 
 async function importPsdFile(file, stack) {
@@ -12660,7 +12661,9 @@ async function importPsdFile(file, stack) {
     window.__psdDebug.stage = 'parsed';
     window.__psdDebug.parsed = {
         size: [psd.width, psd.height], mode: psd.mode, depth: psd.depth,
-        layers: psd.layers.map(l => ({ name: l.name, visible: l.visible, x: l.x, y: l.y, w: l.canvas.width, h: l.canvas.height })),
+        layers: psd.layers.map(l => ({ name: l.name, visible: l.visible, x: l.x, y: l.y,
+            w: l.canvas.width, h: l.canvas.height,
+            mask: l.mask ? { disabled: !!l.mask.disabled, w: l.mask.canvas.width, h: l.mask.canvas.height } : null })),
         notes: psd.notes, debug: psd.debug, hasComposite: !!psd.composite,
     };
     console.log('[psd-import]', file.name, window.__psdDebug.parsed);
@@ -12679,7 +12682,7 @@ async function importPsdFile(file, stack) {
     const entries = psd.layers.length
         ? psd.layers
         : [{ name: baseName(file.name), x: 0, y: 0, visible: true, canvas: psd.composite }];
-    let added = 0, hidden = 0, addedName = '';
+    let added = 0, hidden = 0, masked = 0, maskOff = 0, addedName = '';
     for (const ent of entries) {
         if (!ent.canvas || ent.canvas.width < 1 || ent.canvas.height < 1) continue;
         if (!ent.visible) hidden++;
@@ -12706,6 +12709,16 @@ async function importPsdFile(file, stack) {
             cud: null,
         };
         ownSource(l, img, src);
+        // Photoshop 的那枚蒙版直接落成这层最后一步的 Mask attribute (mask.js:排在尾部、多枚按条带顺序
+        // 相乘)。面已经是解析器按图层原生网格烘好的「白墨 + alpha 覆盖度」,与 cud 读回来的那种同形;
+        // 不走 selectionMaskSurface 那条按 bbox 铺满的路,因为这里给的是整张网格而不是子矩形。
+        // 停用 (PS 右键 → 停用蒙版) 折成 enabled=false,数据留着、条带看得见,与 cud 的稀疏字段往返一致。
+        if (ent.mask && ent.mask.canvas && ent.mask.canvas.width && ent.mask.canvas.height) {
+            l.mask = ent.mask.canvas;
+            const mr = findAttr(l, 'mask');
+            if (mr && ent.mask.disabled) { mr.enabled = false; maskOff++; }
+            masked++;
+        }
         insertAtStackTop(l);
         selectedId = l.id;
         addedName = l.name;
@@ -12716,12 +12729,15 @@ async function importPsdFile(file, stack) {
     renderLayerList();
     render();
     pushHistory();
-    const skipped = (psd.notes.groups ? `${psd.notes.groups} group marker${psd.notes.groups === 1 ? '' : 's'}` : '')
-        + (psd.notes.groups && psd.notes.empty ? ' + ' : '')
-        + (psd.notes.empty ? `${psd.notes.empty} non-pixel layer${psd.notes.empty === 1 ? '' : 's'}` : '');
+    const skipped = [];
+    if (psd.notes.groups) skipped.push(`${psd.notes.groups} group marker${psd.notes.groups === 1 ? '' : 's'}`);
+    if (psd.notes.empty) skipped.push(`${psd.notes.empty} non-pixel layer${psd.notes.empty === 1 ? '' : 's'}`);
+    if (psd.notes.vector) skipped.push(`${psd.notes.vector} vector mask${psd.notes.vector === 1 ? '' : 's'}`);
     setStatus(`${added} layer${added === 1 ? '' : 's'} from ${baseName(file.name)}`
         + (hidden ? ` (${hidden} hidden)` : '')
-        + (skipped ? ` — skipped ${skipped}` : '')
+        + (masked ? ` · ${masked} mask${masked === 1 ? '' : 's'}` : '')
+        + (maskOff ? ` (${maskOff} disabled)` : '')
+        + (skipped.length ? ` — skipped ${skipped.join(' + ')}` : '')
         + (added && !psd.layers.length ? ' (flattened composite)' : '')
         + `, top layer「${addedName}」selected`);
 }
