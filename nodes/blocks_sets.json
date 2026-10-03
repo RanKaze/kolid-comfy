@@ -112,7 +112,9 @@
             "enable_ref_boost_mask": false,
             "grounding_px": 768,
             "context_regex": ".+",
-            "enable_mask": false
+            "enable_mask": false,
+            "enable_output": true,
+            "enable_dynamic_layer": true
           }
         }
       ],
@@ -153,7 +155,9 @@
             "context_reference_key": null,
             "context_regex": ".+",
             "enable_limit": true,
-            "enable_mask": false
+            "enable_mask": false,
+            "enable_output": true,
+            "enable_dynamic_layer": true
           }
         }
       ],

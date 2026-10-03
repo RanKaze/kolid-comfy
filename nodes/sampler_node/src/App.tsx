@@ -656,6 +656,10 @@ const App: React.FC = () => {
             id: s.id, name: s.name,
             enable_mask: firstDetailerFlag(blockSets, s.id, 'enable_mask', true),
             enable_fit: firstDetailerFlag(blockSets, s.id, 'enable_fit', false),
+            // Dynamic Layer 三开关：▶ Run 分流到框选→建层→自动 Generate 的工作台侧流程。
+            dynamic_layer: firstDetailerFlag(blockSets, s.id, 'enable_dynamic_layer', false),
+            layer_limit: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_limit', true),
+            layer_ctx: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
           })),
           active_id: activeBlockSetId,
         }, '*');
@@ -723,6 +727,10 @@ const App: React.FC = () => {
         id: s.id, name: s.name,
         enable_mask: firstDetailerFlag(blockSets, s.id, 'enable_mask', true),
         enable_fit: firstDetailerFlag(blockSets, s.id, 'enable_fit', false),
+        // Dynamic Layer 三开关：▶ Run 分流到框选→建层→自动 Generate 的工作台侧流程。
+        dynamic_layer: firstDetailerFlag(blockSets, s.id, 'enable_dynamic_layer', false),
+        layer_limit: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_limit', true),
+        layer_ctx: firstDetailerFlag(blockSets, s.id, 'dynamic_layer_ctx', true),
       })),
       active_id: activeBlockSetId,
     }, '*');

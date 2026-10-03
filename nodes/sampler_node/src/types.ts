@@ -95,6 +95,23 @@ export interface DetailerBlockParams {
    *  也不做 align 对齐（工作分辨率 = 裁剪/整幅分辨率）。Qwen 架构例外：仍会
    *  强制 32 对齐，否则 latent / vision token 网格不接受。 */
   enable_limit?: boolean;
+  /** Preprocess Settings 的 Enable Output（默认关）。开 = 这一趟的最终产出另外
+   *  写一张 PNG 进 outputs（detailer_00001_.png），`parameters` chunk 与
+   *  SnapshotPromptNode 的 Cache 同形，可被 Load From Image 读回。整幅 Run 与
+   *  图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关。 */
+  enable_output?: boolean;
+  /** Preprocess Settings 的 Dynamic Layer 总闸（默认关）。开 = 这个 preset 的 ▶ Run 不再
+   *  直接跑整幅链：工作台进入框选模式，用户拖完框跳过分辨率弹窗直接建出 Dynamic Layer，
+   *  并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消 = 什么也不跑。 */
+  enable_dynamic_layer?: boolean;
+  /** Dynamic Layer 的 Layer Limit（默认开）。开 = 建层分辨率自动按 GLOBAL SETTINGS 的
+   *  Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）；
+   *  关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。 */
+  dynamic_layer_limit?: boolean;
+  /** Dynamic Layer 的 Layer Context（默认开）。开 = 自动 Generate 用框下方所有图层的
+   *  合成当 context（img2img）；关 = 新层是空的，context 落到该层分辨率上的噪声
+   *  （框内纯 txt2img）。仅 Dynamic Layer 开时生效。 */
+  dynamic_layer_ctx?: boolean;
   enable_edit: boolean;
   /** 块级 Generate Text 开关（默认关）：仅当 pipeline 也启用了 Generate Text 时才生效 */
   enable_text_generate?: boolean;
@@ -386,7 +403,8 @@ export interface PipelinePackageInfo {
  *  必须与后端/工作台读同一 key 时的默认一致（enable_mask 后端默认开）。 */
 export function firstDetailerFlag(
   blockSets: BlockSet[], setId: string | null,
-  key: 'enable_mask' | 'enable_fit', dflt: boolean,
+  key: 'enable_mask' | 'enable_fit' | 'enable_dynamic_layer' | 'dynamic_layer_limit' | 'dynamic_layer_ctx',
+  dflt: boolean,
 ): boolean {
   const set = blockSets.find(s => s.id === setId) || blockSets[0];
   const fd = set?.blocks.find(b => b.type === 'detailer');

@@ -3707,12 +3707,16 @@ function endRectDrag() {
     }
     if (textTarget) { addTextLayer(box); return true; }
     if (rectTargetKind === 'direction') { addDirectionLayer(box); return true; }
+    // Dynamic Layer 总闸下的自动 Run：框一抬手就建层并自动 Generate，不弹分辨率对话框。
+    if (dynAutoRun) { runAutoDynamicLayer(box); return true; }
     openDynamicModal(box);
     return true;
 }
 
 function cancelRectDrag(silent) {
     const wasArmed = rectArmed || !!rectDrag;
+    const wasAuto = !!dynAutoRun;
+    dynAutoRun = null;
     rectArmed = false;
     rectDrag = null;
     if (!wasArmed) return false;
@@ -3721,7 +3725,9 @@ function cancelRectDrag(silent) {
     refreshCursor();
     render();
     if (!silent) setStatus(wasText ? 'New text layer cancelled'
-        : wasDirection ? 'New direction layer cancelled' : 'Dynamic Layer cancelled');
+        : wasDirection ? 'New direction layer cancelled'
+        : wasAuto ? 'Dynamic Layer run cancelled'
+        : 'Dynamic Layer cancelled');
     return true;
 }
 
@@ -8978,7 +8984,7 @@ document.addEventListener('mousedown', e => {
 
 addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
 addStashLayerBtn.addEventListener('click', () => { closeAddMenu(); addStashLayer(WORK_STACK); });
-addDynamicLayerBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(WORK_STACK); });
+addDynamicLayerBtn.addEventListener('click', () => { dynAutoRun = null; closeAddMenu(); armRectDrag(WORK_STACK); });
 addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
 addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
 addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
@@ -11172,9 +11178,11 @@ function updateDynRatioHint() {
 }
 
 // rate² · boxW · boxH = the Pixels budget, solved back for the linear rate.
-function dynaLimitRate() {
-    if (!dynBox || dynBox.w < 1 || dynBox.h < 1) return 1;
-    return Math.max(0.05, Math.min(MAX_RATE, Math.sqrt(dynaPixels / (dynBox.w * dynBox.h))));
+// `box` defaults to the modal's dynBox; the auto-run path passes the swept box directly.
+function dynaLimitRate(box) {
+    const b = box || dynBox;
+    if (!b || b.w < 1 || b.h < 1) return 1;
+    return Math.max(0.05, Math.min(MAX_RATE, Math.sqrt(dynaPixels / (b.w * b.h))));
 }
 
 function applyDynaLimit() {
@@ -11203,6 +11211,78 @@ function syncDynLockedField(source) {
     const w = Number(dynWInput.value), h = Number(dynHInput.value);
     if (source === 'w' && w >= 1) dynHInput.value = String(Math.max(1, Math.round(w / dynRatio)));
     else if (source === 'h' && h >= 1) dynWInput.value = String(Math.max(1, Math.round(h * dynRatio)));
+}
+
+// ---- Dynamic Layer 总闸下的自动 Run ----
+// Preprocess Settings 的 Dynamic Layer 开（宿主随 blend-pipeline-presets 带来的 dynamic_layer）：
+// 这个 preset 的 ▶ 不发整幅 Run，而是武装框选；框一抬手就跳过分辨率弹窗建出 Dynamic Layer，
+// 并立刻对它发 Generate —— 用户只要一框，执行就开始。limit / ctx 是 Layer Limit /
+// Layer Context 两颗子开关在该 preset 上的值。Esc（cancelRectDrag）、手动 Add ▸ Dynamic
+// Layer 都会撤掉这次武装，一次 ▶ 只认一个框。
+let dynAutoRun = null;   // { presetId, limit, ctx } | null
+
+// The auto-run's empty layer exists only while its Generate is in flight. If the run is
+// cancelled or fails, the box never got its picture — the layer is removed instead of
+// lingering as an empty rectangle. Cleared by the result itself (blend-replace-layer).
+let autoDynLayerId = null;
+
+function dropAutoDynLayer() {
+    const id = autoDynLayerId;
+    autoDynLayerId = null;
+    if (id == null) return false;
+    if (layers.some(l => l.id === id)) removeLayer(id);
+    return true;
+}
+
+function startAutoDynamicRun(presetId) {
+    const p = genPresets.find(x => x.id === presetId) || {};
+    dynAutoRun = {
+        presetId,
+        limit: p.layer_limit !== false,
+        ctx: p.layer_ctx !== false,
+    };
+    // Limit 的预算此刻拉一次最新的 GLOBAL SETTINGS Pixels；拖框需要时间，落地前多半已就位。
+    refreshDynaPixels();
+    if (!armRectDrag(WORK_STACK, 'dynamic')) { dynAutoRun = null; return; }
+    setStatus('Dynamic Layer run — drag a box; Generate starts the moment you release (Esc cancels)');
+}
+
+function runAutoDynamicLayer(box) {
+    const auto = dynAutoRun;
+    dynAutoRun = null;
+    if (!auto) { openDynamicModal(box); return; }
+    const rate = auto.limit ? dynaLimitRate(box) : 1;
+    const pw = Math.max(1, Math.round(box.w * rate));
+    const ph = Math.max(1, Math.round(box.h * rate));
+    // 与 applyDynamicModal 的普通分支同一场几何：层框就是拖出的矩形，多出来的分辨率
+    // 落在层表面上，画布尺寸不动。新层没有 mask —— 未涂的 mask 就是全遮罩，Generate
+    // 覆盖整层；context 由 Layer Context 决定（合成 = img2img，空层自身 = 噪声 txt2img）。
+    const l = addSurfaceLayer({
+        pw, ph,
+        transform: {
+            cx: (box.x + box.w / 2) / canvasW,
+            cy: (box.y + box.h / 2) / canvasH,
+            w: box.w / canvasW,
+            h: box.h / canvasH,
+            rotation: 0,
+        },
+        stack: WORK_STACK,
+        name: `Dynamic ${pw}×${ph}`,
+        mask: null,
+    });
+    if (!l) return;
+    setStatus(`Dynamic Layer added — ${pw} × ${ph} over a ${box.w} × ${box.h} canvas area`
+        + (auto.limit ? ` (limited to ${dynaPixels.toLocaleString()} global Pixels)` : '')
+        + ' — generating…');
+    render();
+    // Track only once the send is accepted: a refusal here never started a run, so the layer
+    // is discarded at once rather than waiting for a cancellation that is not coming.
+    if (!sendLayerGenerate(l, auto.presetId, auto.ctx)) {
+        removeLayer(l.id);
+        setStatus('Dynamic Layer discarded — Generate could not start', 'error');
+        return;
+    }
+    autoDynLayerId = l.id;
 }
 
 // The sweep already gave the placement; the modal only decides how many pixels the layer bakes.
@@ -14278,7 +14358,10 @@ window.addEventListener('message', event => {
         // The sampler's Pipeline Presets capsule: its ▶ is the only way a run starts from here.
         // The canvas composite and the Mask layer live on this side, so the run is issued here and
         // the host only names the preset — which also decides the Enable Mask gate for this run.
+        // Dynamic Layer 总闸开着的 preset 例外：▶ 武装框选，框一抬手建层并自动 Generate。
         runPresetId = (d.preset_id || '').toString();
+        const runPreset = genPresets.find(x => x.id === runPresetId);
+        if (runPreset && runPreset.dynamic_layer) { startAutoDynamicRun(runPresetId); return; }
         sendBlendAction('detailer');
         return;
     }
@@ -14315,6 +14398,8 @@ window.addEventListener('message', event => {
         // sits. Either way the result's frame is the SOURCE LAYER's frame — the backend ran at the
         // layer's own size — narrowed onto `place` when Recover Crop is off (see placeTransform).
         // Still NOT addLayer: addLayer would fit-to-canvas and throw away that placement.
+        // The result delivered clears the auto-run's removal watch: the layer earned its pixels.
+        if (autoDynLayerId === d.layer_id) autoDynLayerId = null;
         const srcLayer = layers.find(x => x.id === d.layer_id);
         const item = d.items && d.items[0];
         // Enable Fit 只交给新图层：就地填充空图层改的是那一层自己的像素与 mask，没有"框"可缩。
@@ -14331,7 +14416,12 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-action-result') {
         setActionBusy(false);
-        if (!d.success) setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`, 'error');
+        if (!d.success) {
+            // A layer-generate that never started takes the auto-run's empty layer down with it.
+            const dropped = d.action === 'layer-generate' ? dropAutoDynLayer() : false;
+            setStatus(`${d.action || 'Action'} failed: ${d.error || 'unknown error'}`
+                + (dropped ? ' — the Dynamic Layer was discarded' : ''), 'error');
+        }
         else if (d.action === 'detect') {
             // 检测是同步动作：mask 直接随结果回来，落地由 pendingDetect 记下的 destination 决定。
             if (d.mask) applyDetectMask(d.mask);
@@ -14350,10 +14440,13 @@ window.addEventListener('message', event => {
             setStatus(total ? `Running ${what} — step ${cur} / ${total}` : `Running ${what}…`);
         } else if (st === 'cancelled') {
             setActionBusy(false);
-            setStatus('Run cancelled', 'success');
+            const dropped = dropAutoDynLayer();
+            setStatus(dropped ? 'Run cancelled — the Dynamic Layer it created was removed' : 'Run cancelled', 'success');
         } else if (st === 'error') {
             setActionBusy(false);
-            setStatus('Detailer failed: ' + (d.error || 'unknown error'), 'error');
+            const dropped = dropAutoDynLayer();
+            setStatus('Detailer failed: ' + (d.error || 'unknown error')
+                + (dropped ? ' — the Dynamic Layer was discarded' : ''), 'error');
         } else {
             setActionBusy(false);
         }

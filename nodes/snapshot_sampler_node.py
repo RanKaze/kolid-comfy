@@ -640,6 +640,13 @@ class SnapshotDetailerSamplerServer:
         # 一个 Query 块等多久（秒）。超时按用户的选择 = 中止整条链。
         self.query_timeout = 600
 
+        # Enable Output 的两处记账（每次 run 开头清空，链跑完由 _save_run_output_png 读回）：
+        # last_effective_prompt_selection = 这次真正生效的合并选择（prompt / query 块在
+        # _resolve_prompt_selection 出口暂存；链里没有这类块时保持 None，落盘回落到 prompt
+        # 节点全局）；last_clip_positive = 最后一个 detailer 块真正送进 CLIP 的串。
+        self.last_effective_prompt_selection = None
+        self.last_clip_positive = ''
+
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
 
@@ -2805,7 +2812,120 @@ class SnapshotDetailerSamplerNode:
         _lora_diag('merged→loadable', loras)
         print(f"[QueryLora] library tags by path: { {k.split('/')[-1]: v for k, v in lib_tags.items() if k in [l.get('file_path') for l in loras if isinstance(l, dict)]} }")
         print(f"[QueryLora] final trigger_words={trigger_words} | user_loras={user_loras}")
+        # Enable Output 读的就是这份「这次真正生效的合并选择」：引擎产物（program 生成/过滤
+        # 之后的结果）在这里定格，落盘时按 cache_data 的键形重放，不再跑第二次引擎。
+        server.last_effective_prompt_selection = {
+            'prompts': [{'text': tags_to_display_string(g) if isinstance(g, dict) else str(g),
+                         'source': g.get('source', 'normal') if isinstance(g, dict) else 'normal'}
+                        for g in result['result_tags']],
+            'loras': result['result_loras'],
+            'prefabs': result['result_prefabs'],
+            'custom_prompts': result['result_custom_prompts'],
+            'programs': list(sel.get('programs') or []),
+            'filter_tag_groups': result['filter_tag_groups'],
+            'filter_loras': result['filter_loras'],
+            'filter_prefabs': result['filter_prefabs'],
+        }
         return user_positive, user_loras
+
+    def _save_run_output_png(self, server, image):
+        """Enable Output：这一趟的最终产出连同 prompt 编码写进 outputs/ 的 PNG。
+
+        `parameters` chunk 的键形与 SnapshotPromptNode 的 cache 输出一字不差（见
+        prompt_node.py:4057-4069），所以这张图能被 PromptNode 的「Load From Image」
+        原样读回。内容按这次真正生效的东西编：链里有 prompt / Query 块就编块出口
+        暂存的合并选择，没有这类块则回落到 prompt 节点的全局选择；`prompt` 键是最后
+        一个 detailer 送进 CLIP 的那一串。落盘路径与命名走 ComfyUI 自己的计数
+        （get_save_image_path → detailer_00001_.png）。
+
+        整份 fail-open：写盘失败只打 [Output] 警告，不能把一趟已完成的 run 变成 error。
+        """
+        try:
+            import folder_paths
+            from PIL.PngImagePlugin import PngInfo
+            from .disk_node import _sanitize_json
+
+            if image is None:
+                print("[Output] WARNING: no final image to save")
+                return
+            tensor = image[0] if image.dim() == 4 else image
+            arr = (tensor.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            h, w = int(arr.shape[0]), int(arr.shape[1])
+            pil = Image.fromarray(arr, mode='RGBA' if arr.shape[-1] == 4 else 'RGB')
+
+            ps = server.prompt_server
+            eff = server.last_effective_prompt_selection
+            if eff is not None:
+                prompt_items = eff['prompts']
+                loras = eff['loras']
+                prefabs = eff['prefabs']
+                programs = eff['programs']
+                custom = eff['custom_prompts']
+                f_tags, f_loras, f_prefabs = (eff['filter_tag_groups'], eff['filter_loras'],
+                                              eff['filter_prefabs'])
+                source = 'effective selection'
+            else:
+                # 没有 prompt / Query 块 = prompt 节点的全局选择就是这次的输入。取的是链跑完、
+                # 主循环剥离 program 项**之前**的状态，所以这里能看到 program 加出来的东西。
+                prompt_items = [({'text': p['text'], 'source': p.get('source', 'normal')}
+                                 if isinstance(p, dict) else {'text': p, 'source': 'normal'})
+                                for p in (getattr(ps, 'selected_prompts', None) or [])]
+                loras = getattr(ps, 'selected_loras', None) or []
+                prefabs = getattr(ps, 'selected_prefabs', None) or []
+                programs = getattr(ps, 'selected_programs', None) or []
+                custom = getattr(ps, 'custom_prompts', '') or ''
+                f_tags = getattr(ps, 'filter_tag_groups', None) or []
+                f_loras = getattr(ps, 'filter_loras', None) or []
+                f_prefabs = getattr(ps, 'filter_prefabs', None) or []
+                source = 'prompt node global'
+
+            # 落盘存指纹而不是路径（与 prompt 节点一致）：读回时按当前扫描的指纹重定位路径。
+            if (ps is not None and hasattr(ps, '_convert_loras_to_fingerprint_keys')
+                    and all(isinstance(l, dict) for l in loras)):
+                loras = ps._convert_loras_to_fingerprint_keys(loras)
+
+            # region 与 prompt_node.py:4043-4047 同形：region_result 是前端每次上报的整包，
+            # 这里只取读回需要的三样，预览图那种派生量不进元数据。
+            region_json = ''
+            rr = getattr(ps, 'region_result', None)
+            if rr:
+                try:
+                    region_json = json.dumps({
+                        'boxes': rr.get('boxes', []),
+                        'format_slots': rr.get('format_slots', {}),
+                        'background_context': rr.get('background_context', None),
+                    }, ensure_ascii=False)
+                except Exception:
+                    region_json = ''
+
+            cache_data = {
+                'prompt': server.last_clip_positive or '',
+                'prompts': json.dumps(prompt_items, ensure_ascii=False),
+                'lora': json.dumps(loras, ensure_ascii=False),
+                'prefab': json.dumps(prefabs, ensure_ascii=False),
+                'program': json.dumps(programs, ensure_ascii=False),
+                'prompt_parsing': ", ".join(getattr(ps, 'parsed_prompts', []) or []),
+                'custom_prompts': custom,
+                'filter_tag_groups': json.dumps(f_tags, ensure_ascii=False),
+                'filter_loras': json.dumps(f_loras, ensure_ascii=False),
+                'filter_prefabs': json.dumps(f_prefabs, ensure_ascii=False),
+                'region': region_json,
+            }
+            data_json = json.dumps(_sanitize_json(cache_data), ensure_ascii=False)
+
+            full_output_folder, filename, counter, _subfolder, _prefix = folder_paths.get_save_image_path(
+                'detailer', folder_paths.get_output_directory(), w, h)
+            os.makedirs(full_output_folder, exist_ok=True)
+            path = os.path.join(full_output_folder, f"{filename}_{counter:05}_.png")
+            metadata = PngInfo()
+            metadata.add_text('parameters', data_json)
+            pil.save(path, format='PNG', pnginfo=metadata, compress_level=4)
+            print(f"[Output] saved {path} ({w}x{h}, {len(prompt_items)} tag(s), "
+                  f"{len(loras)} lora(s), source={source}, prompt={len(cache_data['prompt'])} chars)")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[Output] WARNING: failed to write the output PNG: {e}")
 
     def _await_query_answer(self, server, block, index):
         """Park the chain on a Query block until the user answers its prompt dialog.
@@ -3538,6 +3658,10 @@ class SnapshotDetailerSamplerNode:
                                   query_positive=tmp_positive or '',
                                   query_negative=tmp_negative or '',
                                   before_query=current_positive_before_query)
+                # Enable Output 的 `prompt` 键要的就是这一串（标记词打头、Generate Text 与
+                # context 补全之后）。每块覆写一次 → 留下的是最后一个 detailer 的输入。
+                if server is not None:
+                    server.last_clip_positive = current_positive
 
                 model_negative = next_pipeline.config.get("model_negative")
                 model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
@@ -4384,6 +4508,10 @@ class SnapshotDetailerSamplerNode:
                             server.detail_progress = current / total
                     comfy.utils.set_progress_bar_global_hook(_progress_hook)
                     try:
+                        # 每次 run 重新记账：Enable Output 落盘只认这一趟里块出口暂存的选择与
+                        # 最后一份送进 CLIP 的串，上一趟的残留不能被复用。
+                        server.last_effective_prompt_selection = None
+                        server.last_clip_positive = ''
                         user_positive, user_loras = self._parse_prompt(server.prompt_server)
                         # 可观测性：Generate / Run Detailer 实际注入的 prompt tab 内容。
                         # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
@@ -4578,6 +4706,17 @@ class SnapshotDetailerSamplerNode:
 
                         # 更新 pipeline（保留 model/vae/latent 等流转状态）
                         self._current_pipeline = next_pipeline
+
+                        # Enable Output（Preprocess Settings 的开关，存在生效链第一个 detailer
+                        # 的 params 上 —— 与 Enable Mask / Recover Crop 同一份「每个 preset
+                        # 各自一份」的作用域）。落不落盘只看这一颗开关：整幅 Run 与一趟
+                        # 图层 Generate 都走这条，不分流。
+                        # 必须排在下面剥离 program 项之前 —— 那时 selected_* 还是这次的真值。
+                        first_d = next((b for b in blocks
+                                        if isinstance(b, dict) and b.get('type') == 'detailer'), None)
+                        if (first_d is not None
+                                and bool((first_d.get('params', first_d) or {}).get('enable_output', False))):
+                            self._save_run_output_png(server, detailed_image)
 
                         # 清理 prompt 中的 program-sourced 项（parsing tag 保留，在 tag 阶段转换）
                         if server.prompt_server:
