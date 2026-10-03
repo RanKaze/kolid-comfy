@@ -18,9 +18,13 @@ export function useApi() {
   const temporaryPromptsRef = useRef<string[]>([]);
   temporaryPromptsRef.current = temporaryPrompts;
   const [lastSelected, setLastSelected] = useState<string[]>([]);
-  const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[]>([]);
-  const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[]>([]);
+  // null = the seed (global selection OR preset selection) has not arrived yet. The restore
+  // effects must not infer "nothing selected" from an empty array during mount — that race
+  // latched them off and silently dropped the seeded loras/prefabs/programs.
+  const [lastSelectedLoras, setLastSelectedLoras] = useState<LoraSelectionData[] | null>(null);
+  const [lastSelectedPrefabs, setLastSelectedPrefabs] = useState<{ guid: string; active?: boolean }[] | null>(null);
   const [loraData, setLoraData] = useState<LoraFolders>({});
+  const [loraDataReady, setLoraDataReady] = useState(false);
   const [loraRegex, setLoraRegex] = useState('');
   const [loraFolderMeta, setLoraFolderMeta] = useState<Record<string, {bg_image?: string; bg_video?: string}>>({});
   const [loraSliderConfigs, setLoraSliderConfigs] = useState<Record<string, LoraSliderConfig>>({});
@@ -28,9 +32,15 @@ export function useApi() {
   const [hasTagger, setHasTagger] = useState(false);
   const [hasAsset, setHasAsset] = useState(false);
   const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
-  const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[]>([]);
+  const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[] | null>(null);
 
   const loadData = useCallback(async () => {
+    // Mark the seed as "in flight" first: a reload (region / preset context switch) clears the
+    // restored state, and the restore effects must wait for THIS load instead of latching onto
+    // the previous context's arrays while the refs are still false.
+    setLastSelectedLoras(null);
+    setLastSelectedPrefabs(null);
+    setLastSelectedPrograms(null);
     // Preset scope: restore the referenced preset's selection instead of the prompt node's
     // global one — the same UI edits a shared preset referenced by Pipeline prompt blocks.
     const presetSelection = await fetchPromptPresetSelection();
@@ -82,12 +92,16 @@ export function useApi() {
   }, []);
 
   const loadLoraData = useCallback(async () => {
+    setLoraDataReady(false);
     const res = await fetch(`${API_BASE}/lora_data`);
     const data = await res.json();
     setLoraData(data.folders || {});
     setLoraFolderMeta(data.folder_meta || {});
     setLoraSliderConfigs(data.lora_slider_configs || {});
     setLoraRegex(data.lora_regex || '');
+    // An empty scan is a real state (the architecture's lora_regex matched nothing), not
+    // "still loading" — the restore effects need to tell the two apart.
+    setLoraDataReady(true);
     return data.folders || {};
   }, []);
 
@@ -99,7 +113,7 @@ export function useApi() {
     customPrompts, setCustomPrompts,
     temporaryPrompts, setTemporaryPrompts,
     lastSelected, lastSelectedLoras, lastSelectedPrefabs,
-    loraData, setLoraData, loraRegex, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
+    loraData, setLoraData, loraDataReady, loraRegex, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
     hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,

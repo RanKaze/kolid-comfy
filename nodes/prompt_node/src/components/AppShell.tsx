@@ -164,7 +164,7 @@ export function AppShell() {
   const { allPrompts, allLibraries, categoryDisplayModes, categorySizeModes,
     customPrompts, setCustomPrompts, temporaryPrompts, setTemporaryPrompts, loadData: apiLoadData, submitSelection, syncSelection, closeWindow, loraRegex,
     setAllPrompts, setAllLibraries, setCategoryDisplayModes, setCategorySizeModes,
-    loraData, loadLoraData, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
+    loraData, loadLoraData, loraDataReady, lastSelectedLoras, lastSelectedPrefabs, loraFolderMeta, setLoraFolderMeta, loraSliderConfigs, setLoraSliderConfigs, parsedPrompts,
     hasTagger,
     hasAsset,
     allPrograms, setAllPrograms, lastSelectedPrograms,
@@ -596,8 +596,12 @@ export function AppShell() {
   // Restore selected loras from last_selected_loras after loraData loads
   useEffect(() => {
     if (loraRestoredRef.current) return;
-    if (!loraData || Object.keys(loraData).length === 0) return;
-    if (!lastSelectedLoras || lastSelectedLoras.length === 0) {
+    // Both inputs are required before deciding anything: the scan may still be in flight
+    // (loraDataReady false) and the seed may still be in flight (null). Marking the restore
+    // done while either is missing loses the preset's loras — and a Persistent Query then
+    // writes that loss back into the shared preset.
+    if (!loraDataReady || lastSelectedLoras === null) return;
+    if (lastSelectedLoras.length === 0) {
       loraRestoredRef.current = true;
       return;
     }
@@ -646,13 +650,14 @@ export function AppShell() {
     setSelectedLoras(restoredLoras);
     setLoraSelections(restoredSelections);
     loraRestoredRef.current = true;
-  }, [loraData, lastSelectedLoras]);
+  }, [loraData, loraDataReady, lastSelectedLoras]);
 
   // Restore selected prefabs from last_selected_prefabs (recursive tree)
   useEffect(() => {
     if (prefabRestoredRef.current) return;
     if (!allLibraries || Object.keys(allLibraries).length === 0) return;
-    if (!lastSelectedPrefabs || lastSelectedPrefabs.length === 0) {
+    if (lastSelectedPrefabs === null) return;   // seed still in flight — wait, do not latch
+    if (lastSelectedPrefabs.length === 0) {
       prefabRestoredRef.current = true;
       return;
     }
@@ -718,7 +723,8 @@ export function AppShell() {
       return;
     }
     const allAppEntries = Object.values(allPrograms).flatMap(cd => cd.programs || []);
-    if (!lastSelectedPrograms || lastSelectedPrograms.length === 0) {
+    if (lastSelectedPrograms === null) return;   // seed still in flight — wait, do not latch
+    if (lastSelectedPrograms.length === 0) {
       programRestoredRef.current = true;
       return;
     }
@@ -2521,6 +2527,16 @@ export function AppShell() {
       prefabs: selectedPrefabs.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children })),
       programs: selectedPrograms.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_tag_texts: a.context_tag_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_tag_inactive: a.context_tag_inactive })),
     };
+    if (PRESET_SCOPE || QUERY_SCOPE) {
+      // A seed that never reached the cards would be written back as an empty selection, and a
+      // Persistent Query overwrites the shared preset with it — so name the counts here.
+      const line = `[ScopedConfirm] seed→sent loras=${lastSelectedLoras?.length ?? 'not-loaded'}→${rawSelection.loras.length}`
+        + ` prefabs=${lastSelectedPrefabs?.length ?? 'not-loaded'}→${rawSelection.prefabs.length}`
+        + ` programs=${lastSelectedPrograms?.length ?? 'not-loaded'}→${rawSelection.programs.length}`;
+      const lost = (lastSelectedLoras?.length ?? 0) > 0 && rawSelection.loras.length === 0;
+      if (lost) console.error(line + ' — LORAS LOST before submit');
+      else console.log(line);
+    }
     if (PRESET_SCOPE) {
       void savePromptPresetSelection(rawSelection).then(ok => {
         if (!ok) console.error('[PresetScope] failed to save prompt preset selection');
@@ -2657,7 +2673,8 @@ export function AppShell() {
       },
       keepParsing
     );
-  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, selectedPrograms, programResult, submitSelection, enableRegion]);
+  }, [selectedTags, customPrompts, selectedLoras, loraSelections, selectedPrefabs, selectedPrograms, programResult, submitSelection, enableRegion,
+      lastSelectedLoras, lastSelectedPrefabs, lastSelectedPrograms]);
 
   // ========== Delete Prompt ==========
   const deletePrompt = useCallback(async (id: string) => {
