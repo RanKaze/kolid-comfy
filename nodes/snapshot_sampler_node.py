@@ -1375,9 +1375,15 @@ class SnapshotDetailerSamplerServer:
             q['answer'] = selection if isinstance(selection, dict) else {}
             if q.get('persistent'):
                 preset_id = q.get('preset_id')
+                before = (self._prompt_preset_selection(preset_id).get('loras') or [])
+                after = (q['answer'].get('loras') or [])
                 try:
                     if self._save_prompt_preset_selection(preset_id, q['answer']):
-                        print(f"[Query] answer persisted into preset '{preset_id}'")
+                        print(f"[Query] answer persisted into preset '{preset_id}' "
+                              f"(loras {len(before)} -> {len(after)})")
+                        if before and not after:
+                            print(f"[Query] WARNING: preset '{preset_id}' had {len(before)} lora(s), "
+                                  "the answer carried none — the write-back emptied it")
                     else:
                         print(f"[Query] WARNING: preset '{preset_id}' is gone — answer not persisted")
                 except Exception as e:
