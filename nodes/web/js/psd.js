@@ -11,6 +11,10 @@
 //     (调整层等) 跳过并计数 —— 导入的是像素,不是 Photoshop 的结构。组的成员按存储序平铺导入。
 //   * 16/32 位文档的 LayerInfo 是空的,真图层在 LMI 的 'Lr16'/'Lr32' 附加块里 —— 两条路都认。
 //   * 图层可见性:flags bit1 (0x02) = 隐藏。
+//   * 图层蒙版:Adobe 'lmsk' 的矩形原点 + 默认外色 + 停用标志都读。用户蒙版通道 (id -2) 烘成工作台
+//     那一读法的面 —— 图层原生网格上的「白墨 + alpha 装覆盖度」,bbox 外铺默认外色,蒙版 1:1 落在
+//     它自己的原点 (绝不缩放:折叠那句是 drawImage(面, 0, 0, w, h),小面自己进去必然被拉伸错位)。
+//   * 矢量蒙版 (id -3 / 'vmsk') 不解析像素,只计数;羽化与密度不读,覆盖度按文件里存的灰度原样进 alpha。
 //   * 合成图 (文件尾的合并图像) 也解出来,图层全空时调用方拿它当独一份。注意合并 RLE 的行数表
 //     是**全通道一张表** (channels×height 个 u16),与分层通道"各自带表"不同。
 // 输出坐标全部是 PSD 文档像素 (top-left 原系,y 向下),调用方自己折算成 transform 分数。
@@ -140,6 +144,33 @@
         return c;
     }
 
+    // 蒙版通道平面 (0 = 遮, 255 = 露) → 工作台那张面:白墨,覆盖度在 alpha。整张按**图层自己的网格**
+    // (w×h = 图层矩形) 铺:先填满 bbox 之外的默认值,再把蒙版按它自己的原点 1:1 落上去。
+    // 通道比声明的矩形短 (截断的档) 只烘得住有样本的那几行,其余按 0 = 遮 —— 不 throw:坏蒙版不该
+    // 连坐整份 PSD 的图层导入,顶部声明的矩形却照旧进状态栏。
+    function maskFaceCanvas(w, h, rect, outside, plane) {
+        const c = makeCanvas(w, h);
+        const g = c.getContext('2d');
+        const img = g.createImageData(w, h);
+        const px = img.data;
+        const out = outside ? 255 : 0;
+        for (let i = 0; i < w * h; i++) {
+            px[i * 4] = 255; px[i * 4 + 1] = 255; px[i * 4 + 2] = 255; px[i * 4 + 3] = out;
+        }
+        for (let y = 0; y < rect.h; y++) {
+            const gy = rect.y + y;
+            if (gy < 0 || gy >= h) continue;
+            for (let x = 0; x < rect.w; x++) {
+                const gx = rect.x + x;
+                if (gx < 0 || gx >= w) continue;
+                const s = y * rect.w + x;
+                px[(gy * w + gx) * 4 + 3] = (plane && s < plane.length) ? plane[s] : 0;
+            }
+        }
+        g.putImageData(img, 0, 0);
+        return c;
+    }
+
     // 'luni' 附加块:u32 字符数 + UTF-16BE 文本 (字符数据在计数 u32 之后)。
     function readUnicodeName(bytes) {
         if (bytes.length < 4) return null;
@@ -211,16 +242,25 @@
             const visible = !(flags & 0x02);
             const extraLen = r.u32();
             const extraEnd = r.pos + extraLen;
-            let name = null, isGroup = false, maskRect = null;
+            let name = null, isGroup = false, maskRect = null, maskOutside = 255, maskDisabled = false, vector = false;
             if (extraLen > 0) {
                 if (r.pos + 4 <= extraEnd) {
-                    // 图层蒙版数据:u32 长度 (+ 20/36 字节记录)。**蒙版通道 (id ≤ -2) 的像素矩形是
-                    // 这里的蒙版 bbox, 不是图层矩形** —— 尺寸不同时按图层矩形读蒙版通道必然错位。
+                    // 图层蒙版块。Adobe 公开规范把默认色/着色写成两个 Short + 一个 flags,真实文件是
+                    // 「矩形(16) + 默认外色(1) + flags(1)」= 18 字节 —— 照 psd-tools 的 _read_body 读
+                    // (它按实测文件校准,注释原文 "The specification is messed up here")。
+                    // **蒙版通道 (id -2) 的像素矩形就是这个 bbox, 不是图层矩形**:原点也要用,蒙版得落回
+                    // 图层网格里它自己的位置。默认外色定 bbox 之外是全露 (255) 还是全遮 (0) —— Hide All
+                    // 起步的蒙版靠这一句才对得上画面。real_* 那 18 字节 (矢量蒙版的合成结果) 不读:
+                    // 本轮只认像素蒙版,-3 通道计数后跳过。
                     const maskLen = r.u32();
                     const maskEnd = r.pos + maskLen;
                     if (maskLen >= 16 && maskEnd <= extraEnd) {
                         const mt = r.i32(), ml = r.i32(), mb = r.i32(), mr = r.i32();
-                        if (mb > mt && mr > ml) maskRect = { w: mr - ml, h: mb - mt };
+                        if (mb > mt && mr > ml) maskRect = { x: ml, y: mt, w: mr - ml, h: mb - mt };
+                        if (maskLen >= 18) {
+                            maskOutside = r.u8() ? 255 : 0;                 // 默认外色 (0 == 全遮)
+                            maskDisabled = (r.u8() & 0x02) !== 0;           // flags bit1 = 停用 (PS: 右键 → 停用蒙版)
+                        }
                     }
                     r.pos = maskEnd;
                 }
@@ -242,38 +282,57 @@
                     } else if (key === 'lsct' && dLen >= 4) {
                         const t = r.view.getInt32(r.pos);
                         if (t >= 1 && t <= 3) isGroup = true;    // 分组标记 (开/闭/分隔行)
+                    } else if (key === 'vmsk' || key === 'vmge') {
+                        vector = true;                        // 矢量蒙版:本轮只计数,不解析贝塞尔
                     }
                     r.skip(dEnd - r.pos);
                 }
                 r.pos = extraEnd;
             }
-            records.push({ top, left, w, h, channels, visible, name, isGroup, maskRect });
+            records.push({ top, left, w, h, channels, visible, name, isGroup,
+                maskRect, maskOutside, maskDisabled, vector });
         }
         // 数据段:每层每通道一段 (长度在记录里),分组的空通道也要按声明走完
         for (const rec of records) {
             const planes = {};
+            const mplanes = {};                               // 蒙版通道按 bbox 尺寸解,与像素面分家
             const jobs = [];
             for (const ch of rec.channels) {
                 if (rec.isGroup || rec.w < 1 || rec.h < 1) {
                     r.skip(ch.len);                           // 声明长度含压缩标记,任何压缩都照走
                     continue;
                 }
-                // 蒙版通道 (id ≤ -2) 按蒙版自己的矩形读;其余按图层矩形
-                const mw = (ch.id <= -2 && rec.maskRect) ? rec.maskRect.w : rec.w;
-                const mh = (ch.id <= -2 && rec.maskRect) ? rec.maskRect.h : rec.h;
+                // 矢量蒙版通道 (id -3):它的矩形不住在 'lmsk' 里,尺寸无从定 —— 按声明走完、计一笔。
+                if (ch.id === -3) { r.skip(ch.len); rec.vector = true; continue; }
+                // 用户蒙版通道 (id -2) 必须按蒙版自己的矩形读;没有矩形就是截断的档,同样不能猜尺寸。
+                if (ch.id <= -2 && !rec.maskRect) { r.skip(ch.len); continue; }
+                const mw = (ch.id <= -2) ? rec.maskRect.w : rec.w;
+                const mh = (ch.id <= -2) ? rec.maskRect.h : rec.h;
+                const to = ch.id <= -2 ? mplanes : planes;
                 const p = decodeChannel(r, mw, mh, bps, ch.len);
-                if (p && p.then) jobs.push(p.then(v => { planes[ch.id] = v; }));
-                else planes[ch.id] = p;
+                if (p && p.then) jobs.push(p.then(v => { to[ch.id] = v; }));
+                else to[ch.id] = p;
             }
             if (jobs.length) await Promise.all(jobs);
             if (rec.isGroup) { notes.groups++; continue; }
+            if (rec.vector) notes.vector++;
             const canvas = planesToCanvas(planes, rec.w, rec.h, mode);
             if (!canvas) { notes.empty++; continue; }
+            // 面的偏移是「蒙版 bbox 相对图层矩形左上角」—— psd-tools 同一句 (topil 里的
+            // data.left - layer.left)。拿文档坐标当偏移会把整张蒙版推出去 (逐字节实测全错)。
+            const maskFace = rec.maskRect && mplanes[-2] !== undefined
+                ? { canvas: maskFaceCanvas(rec.w, rec.h,
+                    { x: rec.maskRect.x - rec.left, y: rec.maskRect.y - rec.top,
+                        w: rec.maskRect.w, h: rec.maskRect.h },
+                    rec.maskOutside, mplanes[-2]),
+                    disabled: rec.maskDisabled }
+                : null;
             layers.push({
                 name: rec.name || null,
                 x: rec.left, y: rec.top,
                 visible: rec.visible,
                 canvas,
+                mask: maskFace,
             });
         }
         r.pos = blockEnd;
@@ -369,7 +428,7 @@
         if (mode !== 3 && mode !== 1) throw new PsdError('unsupported colour mode (only RGB and greyscale)');
         if (depth !== 8 && depth !== 16) throw new PsdError('unsupported bit depth ' + depth + ' (only 8/16)');
         const bps = depth / 8;
-        const notes = { groups: 0, empty: 0 };
+        const notes = { groups: 0, empty: 0, vector: 0 };
         const layers = [];
 
         r.skip(r.u32());                                      // Color Mode Data
