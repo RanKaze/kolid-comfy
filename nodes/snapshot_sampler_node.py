@@ -2634,9 +2634,11 @@ class SnapshotDetailerSamplerNode:
                 else:
                     lora_str_parts.append(str(lora_item))
             user_loras = ','.join(lora_str_parts)
+            # Trigger words lead the prompt: a lora's own vocabulary is what the model
+            # was trained to key on, so it goes before the user's tag list.
             if trigger_words:
                 trigger_str = ', '.join(trigger_words)
-                user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
+                user_positive = trigger_str + (', ' + user_positive if user_positive else '')
             for text in prefab_texts:
                 user_positive = f"{user_positive}, {text}" if user_positive else text
         return user_positive, user_loras
@@ -2662,8 +2664,8 @@ class SnapshotDetailerSamplerNode:
             的项剥离——它们会由 selection 的 program 重新生成，与前端 useProgram 语义一致）。
           - selection 的 applications(programs) 在**合并后的整体 selection**上执行（后端
             quickjs 引擎，移植 useProgram.ts），所以程序能过滤/修改全局内容。
-          - 输出拼装顺序与 _parse_prompt 完全一致：texts + custom -> <lora:...> ->
-            trigger words -> prefab texts。全局在前、selection 在后由合并顺序保证。
+          - 输出拼装顺序与 _parse_prompt 完全一致：trigger words -> texts + custom ->
+            prefab texts（<lora:...> 是独立端口，不进文本）。全局在前、selection 在后由合并顺序保证。
           - 纯临时：只影响本次 run 中排在该块之后的 detailer，不写回任何状态。
         """
         ps = server.prompt_server if server else None
@@ -2782,9 +2784,10 @@ class SnapshotDetailerSamplerNode:
             else:
                 lora_str_parts.append(str(lora_item))
         user_loras = ','.join(lora_str_parts)
+        # Same leading position as _parse_prompt: trigger words before every other segment.
         if trigger_words:
             trigger_str = ', '.join(trigger_words)
-            user_positive = user_positive + ', ' + trigger_str if user_positive else trigger_str
+            user_positive = trigger_str + (', ' + user_positive if user_positive else '')
         for text in prefab_texts:
             user_positive = f"{user_positive}, {text}" if user_positive else text
         # 诊断：库里 trainedWords（lora_data[*]['tags']）能不能兜住这次的空 active_tags。
