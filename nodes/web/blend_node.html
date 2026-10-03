@@ -845,9 +845,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                         </button>
                     </div>
                     <button class="io-menu-item primary" id="importBtn" role="menuitem"
-                            title="Import images as new layers. A .cud document belongs to Load.">
+                            title="Import images and PSD files as new layers. A .cud document belongs to Load.">
                         <span class="io-menu-title">Import</span>
-                        <span class="io-menu-sub">Images in as new layers — a .cud goes to Load.</span>
+                        <span class="io-menu-sub">Images &amp; PSD in as layers — a .cud goes to Load.</span>
                     </button>
                 </div>
             </div>
@@ -857,7 +857,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </button>
             </div>
         </div>
-        <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg" multiple hidden>
+        <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg,.psd" multiple hidden>
         <!-- Only used where the File System Access API is missing; a document picked this way
              has no handle to write back to, so Save turns into Save As. -->
         <input type="file" id="cudFile" accept=".cud" hidden>
@@ -1554,6 +1554,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <!-- Direction 图层: 姿态数学 (世界坐标的唯一一份) + 图层像素那一次绘制 + 面板交互与 2D 退路。
      它只在运行时调页面本体的 render/pushHistory/getLayer, 加载时一个都不碰。 -->
 <script src="js/direction.js"></script>
+<!-- PSD 导入解析器 (零依赖, RLE/ZIP 都吃): Import 与拖入的 .psd 在这里拆成图层。 -->
+<script src="js/psd.js"></script>
 
 <script>
 const canvasArea = document.getElementById('canvasArea');
@@ -12074,7 +12076,7 @@ const CUD_PICK_TYPES = [{ description: 'Context document', accept: { 'applicatio
 const PICK_TYPES = {
     cud: CUD_PICK_TYPES,
     png: [{ description: 'PNG image', accept: { 'image/png': ['.png'] } }],
-    image: [{ description: 'Image', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.avif', '.svg'] } }],
+    image: [{ description: 'Image', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff', '.avif', '.svg', '.psd'] } }],
 };
 function pickerCancelled(err) { return !!err && err.name === 'AbortError'; }
 
@@ -12609,13 +12611,119 @@ function applyCudTools(t) {
 
 // ---- import routing: one entry point for the file picker and for a drop ----
 function addImageFiles(files, stack) {
-    for (const f of files) {
+    const psds = [], imgs = [];
+    for (const f of files) (/\.psd$/i.test(f.name) ? psds : imgs).push(f);
+    for (const f of psds) importPsdFile(f, stack);
+    if (!imgs.length) {
+        if (!psds.length) setStatus('Import takes image files — a .cud document belongs to Load', 'error');
+        return;
+    }
+    for (const f of imgs) {
         const reader = new FileReader();
         reader.onload = () => addLayer({ name: baseName(f.name), src: String(reader.result) }, stack);
         reader.onerror = () => setStatus(`Could not read ${f.name}`, 'error');
         reader.readAsDataURL(f);
     }
-    setStatus(files.length === 1 ? `Adding ${baseName(files[0].name)}` : `Adding ${files.length} images…`);
+    setStatus(psds.length
+        ? `Adding ${imgs.length} image${imgs.length === 1 ? '' : 's'} and ${psds.length} PSD…`
+        : (imgs.length === 1 ? `Adding ${baseName(imgs[0].name)}` : `Adding ${imgs.length} images…`));
+}
+
+// ---- PSD 导入:一份 .psd 拆成自己的图层堆 ----
+// js/psd.js 解出的每个图层带着它在 PSD 文档里的像素矩形;这里把它折成 transform 分数。
+// 画布:空工作台取 PSD 文档尺寸 (超上限按比例缩);已有内容则保持现画布,图层按比例落位 ——
+// 和把一张别的尺寸的图拖进来是同一个读法。z 序按 PSD 的自底向上顺序逐枚插到栈顶。
+const loadImageP = src => new Promise((res, rej) => loadImage(src, res, rej));
+
+async function importPsdFile(file, stack) {
+    if (cudBusy) return;
+    // 调试钩子:原始字节与解析结果都留在 window.__psdDebug 上 —— 导入不正确时把它交出来,
+    // 那份真实文件就能在本地用参考实现逐字节交叉验证, 而不是隔着状态栏猜。
+    const psdBytes = await file.arrayBuffer();
+    window.__psdDebug = { name: file.name, size: file.size, bytes: psdBytes, stage: 'parsing', t: Date.now() };
+    setStatus(`Reading ${baseName(file.name)}… (${file.size} bytes)`);
+    if (typeof psdDecode !== 'function') {
+        window.__psdDebug.stage = 'no-parser';
+        setStatus('PSD support not loaded — hard-refresh the page (Ctrl+F5) and retry', 'error');
+        return;
+    }
+    let psd;
+    try {
+        psd = await psdDecode(psdBytes);
+    } catch (err) {
+        console.error('[psd-import] parse failed:', err);
+        window.__psdDebug.stage = 'parse-error';
+        window.__psdDebug.error = String(err && err.message || err);
+        setStatus(`Could not read ${file.name}: ${err && err.message || err}`, 'error');
+        return;
+    }
+    window.__psdDebug.stage = 'parsed';
+    window.__psdDebug.parsed = {
+        size: [psd.width, psd.height], mode: psd.mode, depth: psd.depth,
+        layers: psd.layers.map(l => ({ name: l.name, visible: l.visible, x: l.x, y: l.y, w: l.canvas.width, h: l.canvas.height })),
+        notes: psd.notes, debug: psd.debug, hasComposite: !!psd.composite,
+    };
+    console.log('[psd-import]', file.name, window.__psdDebug.parsed);
+    // 图层全空 (导出时没存像素分层) 就拿合成图当独一份;连合成图都没有才算失败。
+    if (!psd.layers.length && !psd.composite) {
+        setStatus(`${baseName(file.name)} holds no pixel layers`, 'error');
+        return;
+    }
+    const docW = psd.width, docH = psd.height;
+    const s = Math.min(1, MAX_CANVAS_SIDE / docW, MAX_CANVAS_SIDE / docH, Math.sqrt(MAX_CANVAS_PIXELS / (docW * docH)));
+    const targetW = Math.max(1, Math.round(docW * s)), targetH = Math.max(1, Math.round(docH * s));
+    const fresh = !layers.some(l => !l.isMaskLayer);
+    if (fresh && (canvasW !== targetW || canvasH !== targetH)) setCanvasSize(targetW, targetH, false);
+    // PSD 坐标折成画布 px:画布 = PSD 尺寸时正好 1:1;不同画布 = 整份文档按比例铺进去。
+    const sx = canvasW / docW, sy = canvasH / docH;
+    const entries = psd.layers.length
+        ? psd.layers
+        : [{ name: baseName(file.name), x: 0, y: 0, visible: true, canvas: psd.composite }];
+    let added = 0, hidden = 0, addedName = '';
+    for (const ent of entries) {
+        if (!ent.canvas || ent.canvas.width < 1 || ent.canvas.height < 1) continue;
+        if (!ent.visible) hidden++;
+        const src = ent.canvas.toDataURL('image/png');
+        let img;
+        try { img = await loadImageP(src); }
+        catch (e) {
+            console.error('[psd-import] layer tile decode failed:', e, window.__psdDebug && window.__psdDebug.parsed);
+            window.__psdDebug.stage = 'tile-decode-error';
+            setStatus(`Could not decode a layer of ${file.name}`, 'error');
+            return;
+        }
+        const x = ent.x * sx, y = ent.y * sy, w = ent.canvas.width * sx, h = ent.canvas.height * sy;
+        const l = {
+            id: ++layerSeq,
+            name: ent.name || `${baseName(file.name)} ${added + 1}`,
+            src, img,
+            visible: ent.visible !== false,
+            transform: { cx: (x + w / 2) / canvasW, cy: (y + h / 2) / canvasH, w: w / canvasW, h: h / canvasH, rotation: 0 },
+            canvasThumbEl: null,
+            fxCache: null,
+            stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
+            fragment: false,
+            cud: null,
+        };
+        ownSource(l, img, src);
+        insertAtStackTop(l);
+        selectedId = l.id;
+        addedName = l.name;
+        added++;
+    }
+    applyCanvasSize();
+    layoutCanvas();
+    renderLayerList();
+    render();
+    pushHistory();
+    const skipped = (psd.notes.groups ? `${psd.notes.groups} group marker${psd.notes.groups === 1 ? '' : 's'}` : '')
+        + (psd.notes.groups && psd.notes.empty ? ' + ' : '')
+        + (psd.notes.empty ? `${psd.notes.empty} non-pixel layer${psd.notes.empty === 1 ? '' : 's'}` : '');
+    setStatus(`${added} layer${added === 1 ? '' : 's'} from ${baseName(file.name)}`
+        + (hidden ? ` (${hidden} hidden)` : '')
+        + (skipped ? ` — skipped ${skipped}` : '')
+        + (added && !psd.layers.length ? ' (flattened composite)' : '')
+        + `, top layer「${addedName}」selected`);
 }
 
 // Import takes images only — a .cud belongs to Load, which is the path that binds the document so
@@ -12654,7 +12762,7 @@ function routeImportFiles(files, stack) {
         requestImportCud(docs[0]);
         return;
     }
-    const images = list.filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg)$/i.test(f.name));
+    const images = list.filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg|psd)$/i.test(f.name));
     if (!images.length) { setStatus('Import takes image files — a .cud document belongs to Load', 'error'); return; }
     addImageFiles(images, stack);
 }

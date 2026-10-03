@@ -947,6 +947,24 @@ class SnapshotPromptServer:
     class PromptHandler(http.server.SimpleHTTPRequestHandler):
         server_instance = None
 
+        def _send_safe_error(self, code, exc):
+            # str(e) 里常带中文路径, 而 HTTP 状态行只认 latin-1 —— 直接 send_error(str(e)) 会在
+            # 报错路径里再抛 UnicodeEncodeError, 连接裸断, 原始异常全程不可见。这里把原始异常
+            # 全量打进控制台, 响应里的信息做百分号编码 (纯 ASCII, 任何编码都写得进去)。
+            try:
+                print(f"[SnapshotPrompt] request error on {self.path}:\n"
+                      + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            except Exception:
+                pass
+            msg = urllib.parse.quote(str(exc), safe=' ') or 'internal error'
+            try:
+                self.send_error(code, msg)
+            except Exception:
+                try:
+                    self.send_error(code, 'internal error (details in console)')
+                except Exception:
+                    pass  # 连接已经死了 (客户端早断), 无处可写
+
         def do_GET(self):
             # Match the HTML route with the query string stripped: embedded scopes open
             # /prompt_node.html?scope=...&preset_id=...&sampler_base=..., and an exact
@@ -1027,7 +1045,7 @@ class SnapshotPromptServer:
                         self.send_error(404, "Image not found")
                         return
                 except Exception as e:
-                    self.send_error(500, str(e))
+                    self._send_safe_error(500, e)
                     return
 
             elif self.path == '/lora_data':
@@ -1078,7 +1096,7 @@ class SnapshotPromptServer:
                         self.send_error(404, "Image not found")
                         return
                 except Exception as e:
-                    self.send_error(500, str(e))
+                    self._send_safe_error(500, e)
                     return
 
             elif self.path == '/region_config':
@@ -1104,7 +1122,7 @@ class SnapshotPromptServer:
                         self.end_headers()
                         self.wfile.write(data)
                     except Exception as e:
-                        self.send_error(500, str(e))
+                        self._send_safe_error(500, e)
                 else:
                     data = json.dumps({'image': None, 'enable_region': False}).encode('utf-8')
                     self.send_response(200)

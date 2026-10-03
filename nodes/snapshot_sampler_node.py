@@ -263,7 +263,7 @@ IO_FILE_KINDS = {
     'image': {
         'label': 'Image',
         'patterns': ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.bmp',
-                     '*.tif', '*.tiff', '*.avif', '*.svg'],
+                     '*.tif', '*.tiff', '*.avif', '*.svg', '*.psd'],
         'extension': '.png',
         'mime': 'image/*',
     },
