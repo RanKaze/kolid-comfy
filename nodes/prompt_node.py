@@ -3951,7 +3951,7 @@ class SnapshotPromptNode:
 
         merged_prompt = cleaned_result
         if lora_trigger_words:
-            merged_prompt = cleaned_result + ", " + lora_trigger_words
+            merged_prompt = lora_trigger_words + (", " + cleaned_result if cleaned_result else "")
 
         # Build region outputs (region_prompt, region_active_loras, preview, bboxes) if enable_region
         region_prompt = ""
