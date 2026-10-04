@@ -65,6 +65,27 @@ const SectionHeader: React.FC<{
   </div>
 );
 
+// Section 内部的分组折叠头：与 SectionHeader 同一套几何（chevron 是唯一动的东西），但
+// 字号与颜色都轻一档 —— 它折的是 section 里的一组开关，不是面板的一块。
+const GroupHeader: React.FC<{
+  label: string; open: boolean; onToggle: () => void;
+}> = ({ label, open, onToggle }) => (
+  <div onClick={onToggle} title={open ? 'Collapse this group' : 'Expand this group'}
+    style={{
+      ...styles.groupHeader, display: 'flex', alignItems: 'center', gap: 5,
+      cursor: 'pointer', userSelect: 'none',
+    }}>
+    <span style={{
+      display: 'flex', flexShrink: 0, transform: open ? 'rotate(90deg)' : 'none',
+      transition: 'transform 0.12s ease',
+    }}>
+      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+        strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
+    </span>
+    {label}
+  </div>
+);
+
 // Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
 // second right-click anywhere), which beats wiring window listeners inside an iframe.
 const ContextMenu: React.FC<{
@@ -352,6 +373,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
     return next;
   });
+  // Preprocess Settings 里的分组折叠（Mask / Limit / Output / Dynamic Layer）。
+  // 只活在当前会话：默认全展开，折起来是临时收视线，不进 localStorage。
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(
+    { mask: true, limit: true, output: true, dynamic: true });
+  const toggleGroup = (k: string) => setOpenGroups(prev => ({ ...prev, [k]: !prev[k] }));
   // 左栏宽度：拖右边缘的把手来调，把手只有 8px，所以指针一旦移出宿主文档就会被右边的
   // 工作台 iframe 吞掉 —— setPointerCapture 把整段拖动钉在把手上，才能越过 iframe 继续。
   const [panelWidth, setPanelWidth] = useState<number>(loadPanelWidth);
@@ -1024,6 +1050,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   到上方 GLOBAL SETTINGS，不按 preset 区分。 */}
               <SectionHeader label="Preprocess Settings" open={openSections.preprocess} onToggle={() => toggleSection('preprocess')} />
               {openSections.preprocess && (<div style={styles.nestedSection}>
+              {/* Mask — mask 预处理三件套，Enable Mask 是总闸 */}
+              <div style={styles.groupBlock}>
+              <GroupHeader label="Mask" open={openGroups.mask} onToggle={() => toggleGroup('mask')} />
+              {openGroups.mask && (<div style={styles.groupBody}>
               <div style={styles.paramRow}
                 title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
                 <label style={styles.paramLabel}>Enable Mask</label>
@@ -1053,6 +1083,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
               </div>
+              </div>)}
+              </div>
+              {/* Limit — 工作分辨率上限 */}
+              <div style={styles.groupBlock}>
+              <GroupHeader label="Limit" open={openGroups.limit} onToggle={() => toggleGroup('limit')} />
+              {openGroups.limit && (<div style={styles.groupBody}>
               <div style={styles.paramRow}
                 title="开 = 按 Pixels / Align 限制工作分辨率。关 = 既不缩放也不对齐，工作分辨率就是裁剪（或整幅）分辨率；Qwen 架构仍会强制 32 对齐，否则 latent / vision token 网格不接受。">
                 <label style={styles.paramLabel}>Enable Limit</label>
@@ -1062,8 +1098,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
                 />
               </div>
+              </div>)}
+              </div>
+              {/* Output — 产出落盘 */}
+              <div style={styles.groupBlock}>
+              <GroupHeader label="Output" open={openGroups.output} onToggle={() => toggleGroup('output')} />
+              {openGroups.output && (<div style={styles.groupBody}>
               <div style={styles.paramRow}
-                title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹（detailer_00001_.png 递增命名）——整幅 Run 和图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关，不分流。图里带和 SnapshotPromptNode 的 Cache 完全同形的 prompt 编码（prompt / prompts / lora / prefab / program / custom_prompts / prompt_parsing / filter_* / region），所以这张图能被 Prompt 节点的 Load From Image 原样读回；其中 prompt 一项是最后一个 detailer 真正送进 CLIP 的那一串（标记词打头、Generate Text 之后），其余各项编的是这次真正生效的合并选择（链里没有 Prompt/Query 块时就是 Prompt 节点的全局选择）。关 = 结果只留在画布里，不落盘。">
+                title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹（detailer_00001_.png 递增命名）——整幅 Run 和图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关，不分流。图里带和 SnapshotPromptNode 的 Cache 完全同形的 prompt 编码（prompt / prompts / lora / prefab / program / custom_prompts / prompt_parsing / filter_* / region），所以这张图能被 Prompt 节点的 Load From Image 原样读回；其中 prompt 一项编的是这次真正生效的用户选择（标签 / 自定义 / prefab 文本——不含 pipeline 自带的 prompt，也不含 lora 触发词：触发词由 lora 条目自己提供，读回后不会重复；Generate Text 的改写只属于那一趟采样，同样不编入），其余各项编的是这次真正生效的合并选择（链里没有 Prompt/Query 块时就是 Prompt 节点的全局选择）。关 = 结果只留在画布里，不落盘。">
                 <label style={styles.paramLabel}>Enable Output</label>
                 <IOSToggle
                   checked={firstDp ? (firstDp.enable_output ?? false) : false}
@@ -1071,6 +1113,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_output', v)}
                 />
               </div>
+              </div>)}
+              </div>
+              {/* Dynamic Layer — ▶ Run 分流到框选建层自动 Generate，Dynamic Layer 是总闸 */}
+              <div style={styles.groupBlock}>
+              <GroupHeader label="Dynamic Layer" open={openGroups.dynamic} onToggle={() => toggleGroup('dynamic')} />
+              {openGroups.dynamic && (<div style={styles.groupBody}>
               <div style={styles.paramRow}
                 title="开 = 这个 preset 的 ▶ Run 不再直接跑整幅链：工作台进入框选模式，拖完框跳过分辨率弹窗直接建出 Dynamic Layer，并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消框选 = 什么也不跑。关 = ▶ Run 保持原来的整幅 Run。">
                 <label style={styles.paramLabel}>Dynamic Layer</label>
@@ -1099,6 +1147,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'dynamic_layer_ctx', v)}
                 />
               </div>
+              </div>
+              </div>)}
               </div>
               </div>)}
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
@@ -2095,6 +2145,11 @@ const styles: Record<string, React.CSSProperties> = {
   // 折叠块的正文容器：继承设置面板原来的行距（面板本身 gap 10，行与行也隔 10），
   // 否则把一段包进 div 会让行贴在一起。
   nestedSection: { display: 'flex', flexDirection: 'column', gap: 10 },
+  // Section 内的分组（GroupHeader + 正文）：头与正文之间收窄到 6，正文整体缩进一道
+  // 左边线，让「这些行属于这个组」不用靠标题文字也能看出来。
+  groupBlock: { display: 'flex', flexDirection: 'column', gap: 6 },
+  groupHeader: { fontSize: 10.5, fontWeight: 700, color: 'rgba(255,255,255,0.42)', textTransform: 'uppercase', letterSpacing: 0.6 },
+  groupBody: { display: 'flex', flexDirection: 'column', gap: 10, paddingLeft: 12, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
   // Context 标题 + 右侧的 Log / Debug 两颗按钮同行；按钮抱成一组贴右，标题留在左边。
   contextTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
   contextTitleActions: { display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' },

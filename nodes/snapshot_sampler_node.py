@@ -643,9 +643,12 @@ class SnapshotDetailerSamplerServer:
         # Enable Output 的两处记账（每次 run 开头清空，链跑完由 _save_run_output_png 读回）：
         # last_effective_prompt_selection = 这次真正生效的合并选择（prompt / query 块在
         # _resolve_prompt_selection 出口暂存；链里没有这类块时保持 None，落盘回落到 prompt
-        # 节点全局）；last_clip_positive = 最后一个 detailer 块真正送进 CLIP 的串。
+        # 节点全局）；last_clip_positive = 最后一个 detailer 块真正送进 CLIP 的串；
+        # last_output_positive = 同一刻的「纯用户选择」——不掺 pipeline context 的 prompt、
+        # 不掺 lora 触发词（触发词由 'lora' 键的 active_tags 自己提供，读回不重复）。
         self.last_effective_prompt_selection = None
         self.last_clip_positive = ''
+        self.last_output_positive = ''
 
         # Interface 执行结果 keys（最近一次）
         self.interface_result_keys = []
@@ -2649,9 +2652,14 @@ class SnapshotDetailerSamplerNode:
             user_loras = ','.join(lora_str_parts)
             # Trigger words lead the prompt: a lora's own vocabulary is what the model
             # was trained to key on, so it goes before the user's tag list.
+            # 记下这次拼进去的触发词串：Enable Output 的 `prompt` 键编码用户选择时要剥掉
+            # 它（触发词由 'lora' 键自己带，读回后不该重复出现）。链上有 prompt/Query 块
+            # 时 _resolve_prompt_selection 会整体替换 user_positive 并覆写这里。
+            self._last_trigger_str = ''
             if trigger_words:
                 trigger_str = ', '.join(trigger_words)
                 user_positive = trigger_str + (', ' + user_positive if user_positive else '')
+                self._last_trigger_str = trigger_str
             for text in prefab_texts:
                 user_positive = f"{user_positive}, {text}" if user_positive else text
         return user_positive, user_loras
@@ -2798,9 +2806,13 @@ class SnapshotDetailerSamplerNode:
                 lora_str_parts.append(str(lora_item))
         user_loras = ','.join(lora_str_parts)
         # Same leading position as _parse_prompt: trigger words before every other segment.
+        # 这里替换的是整条 user_positive，所以触发词串也以这次为准覆写（同上，供
+        # Enable Output 剥离用）。
+        self._last_trigger_str = ''
         if trigger_words:
             trigger_str = ', '.join(trigger_words)
             user_positive = trigger_str + (', ' + user_positive if user_positive else '')
+            self._last_trigger_str = trigger_str
         for text in prefab_texts:
             user_positive = f"{user_positive}, {text}" if user_positive else text
         # 诊断：库里 trainedWords（lora_data[*]['tags']）能不能兜住这次的空 active_tags。
@@ -2834,9 +2846,11 @@ class SnapshotDetailerSamplerNode:
         `parameters` chunk 的键形与 SnapshotPromptNode 的 cache 输出一字不差（见
         prompt_node.py:4057-4069），所以这张图能被 PromptNode 的「Load From Image」
         原样读回。内容按这次真正生效的东西编：链里有 prompt / Query 块就编块出口
-        暂存的合并选择，没有这类块则回落到 prompt 节点的全局选择；`prompt` 键是最后
-        一个 detailer 送进 CLIP 的那一串。落盘路径与命名走 ComfyUI 自己的计数
-        （get_save_image_path → detailer_00001_.png）。
+        暂存的合并选择，没有这类块则回落到 prompt 节点的全局选择；`prompt` 键是
+        这次生效的**用户选择**（标签 / 自定义 / prefab 文本，剥离了打头的 lora 触发词，
+        也不掺 pipeline context 自带的 prompt 与 Generate Text 的改写 —— 触发词由
+        'lora' 键的 active_tags 自己提供，读回后不该重复出现）。落盘路径与命名走
+        ComfyUI 自己的计数（get_save_image_path → detailer_00001_.png）。
 
         整份 fail-open：写盘失败只打 [Output] 警告，不能把一趟已完成的 run 变成 error。
         """
@@ -2899,7 +2913,8 @@ class SnapshotDetailerSamplerNode:
                     region_json = ''
 
             cache_data = {
-                'prompt': server.last_clip_positive or '',
+                # 用户自己的选择（无 pipeline prompt / 无 lora 触发词，见块循环捕获处）。
+                'prompt': getattr(server, 'last_output_positive', '') or '',
                 'prompts': json.dumps(prompt_items, ensure_ascii=False),
                 'lora': json.dumps(loras, ensure_ascii=False),
                 'prefab': json.dumps(prefabs, ensure_ascii=False),
@@ -3522,6 +3537,21 @@ class SnapshotDetailerSamplerNode:
                 # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
                 context_positive, context_negative, context_loras = next_pipeline.context.get_context(block_context_regex)
                 current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+                # Enable Output 的 `prompt` 键在此刻定格：user_positive 已是本块最终形态
+                # （prompt / Query 块与 extra prompt 都已处理，每块覆写一次 → 留下最后一个
+                # detailer 的输入），在这里剥掉打头的 lora 触发词串 —— pipeline context 的
+                # prompt（context_positive 与后面 get_prompt_context 的补全）和 Generate
+                # Text 的改写都只属于这一趟采样，不进读回用的用户选择。落盘键形见
+                # _save_run_output_png。
+                if server is not None:
+                    _clean_positive = user_positive
+                    _trigger_str = getattr(self, '_last_trigger_str', '') or ''
+                    if _trigger_str and _clean_positive.startswith(_trigger_str):
+                        _clean_positive = _clean_positive[len(_trigger_str):]
+                        if _clean_positive.startswith(','):
+                            _clean_positive = _clean_positive[1:]
+                        _clean_positive = _clean_positive.strip()
+                    server.last_output_positive = _clean_positive
                 dbg.record_prompt(f'Block {i+1} · a) context 解出（regex={block_context_regex}）',
                                   context_positive, block=i + 1,
                                   loras=list(context_loras or []))
@@ -3658,8 +3688,9 @@ class SnapshotDetailerSamplerNode:
                                   query_positive=tmp_positive or '',
                                   query_negative=tmp_negative or '',
                                   before_query=current_positive_before_query)
-                # Enable Output 的 `prompt` 键要的就是这一串（标记词打头、Generate Text 与
-                # context 补全之后）。每块覆写一次 → 留下的是最后一个 detailer 的输入。
+                # Enable Output 的 `prompt` 键不再用这一整串（context 补全与触发词都混在
+                # 里面）。last_clip_positive 保留作调试对照；落盘编码的是用户自己的选择
+                # （server.last_output_positive，块循环在 context 拼接处捕获）。
                 if server is not None:
                     server.last_clip_positive = current_positive
 
@@ -4512,6 +4543,7 @@ class SnapshotDetailerSamplerNode:
                         # 最后一份送进 CLIP 的串，上一趟的残留不能被复用。
                         server.last_effective_prompt_selection = None
                         server.last_clip_positive = ''
+                        server.last_output_positive = ''
                         user_positive, user_loras = self._parse_prompt(server.prompt_server)
                         # 可观测性：Generate / Run Detailer 实际注入的 prompt tab 内容。
                         # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
