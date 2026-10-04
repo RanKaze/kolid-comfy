@@ -1001,11 +1001,11 @@ export function AppShell() {
   // Prompt text 自动扩高：输入多少长多少,自身不出滚动条（height=auto 重置后读 scrollHeight）。
   const autoGrowPromptText = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
-    el.style.height = 'auto';
-    el.style.height = el.scrollHeight + 'px';
+    el.style.minHeight = '550px';
+    el.style.minHeight = Math.max(550, el.scrollHeight) + 'px';
   };
   const hpPromptTextRef = useCallback((el: HTMLTextAreaElement | null) => {
-    if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+    if (el) { el.style.minHeight = '550px'; el.style.minHeight = Math.max(550, el.scrollHeight) + 'px'; }
   }, []);
   // 实时翻译：600ms 防抖后交给后端 Translators 库（英→中；内容本身含中文时后端直接回空,
   // 前端面板留空）。缓存按原文去重,序列号防旧响应覆盖新输入。
@@ -1022,9 +1022,10 @@ export function AppShell() {
     if (hit !== undefined) { setPromptTranslation(hit); setPromptTranslating(false); return; }
     setPromptTranslating(true);
     setPromptTranslation('');
+    const ctrl = new AbortController();
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch('/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        const res = await fetch('/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }), signal: ctrl.signal });
         const data = await res.json();
         if (translateSeqRef.current !== seq) return;   // 更新的输入已经接管
         if (data.success) {
@@ -1033,13 +1034,14 @@ export function AppShell() {
         } else {
           setPromptTranslation('⚠ ' + (data.error || 'Translation failed'));
         }
-      } catch {
-        if (translateSeqRef.current === seq) setPromptTranslation('⚠ Translation service unavailable');
+      } catch (e) {
+        if (translateSeqRef.current === seq && !(e instanceof DOMException && e.name === 'AbortError'))
+          setPromptTranslation('⚠ Translation service unavailable');
       } finally {
         if (translateSeqRef.current === seq) setPromptTranslating(false);
       }
-    }, 600);
-    return () => clearTimeout(timer);
+    }, 350);
+    return () => { clearTimeout(timer); ctrl.abort(); };
   }, [modalPrompt]);
   // Natural-language：这张 prompt 卡是自然语言描述而不是 tag 串（header 的语言过滤按它分拣）。
   const [modalNatural, setModalNatural] = useState(false);
@@ -5666,31 +5668,37 @@ export function AppShell() {
         <div className="modal visible scrollable" onMouseDown={closeModal}>
           <div className="modal-content no-scroll prompt-modal" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prompt</h2>
-            <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <div className="prompt-text-row">
-              <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
-              <div className="prompt-translation" title="Real-time translation (any language → Chinese via the Translators library). Chinese content needs no translation and stays blank.">
-                {promptTranslating ? 'Translating…' : promptTranslation}
+            <div className="prompt-edit-columns">
+              <div className="prompt-edit-left">
+                <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
+                <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+                <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+                  <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
+                  <div onClick={() => setModalNatural(!modalNatural)} style={{
+                    width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                    background: modalNatural ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                  }}>
+                    <div style={{
+                      position: 'absolute', top: 2, left: modalNatural ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                      background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                    }} />
+                  </div>
+                </label>
+                <select value={modalCategory} onChange={e => setModalCategory(e.target.value)}>
+                  <option value="">Keep current category</option>
+                  {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
+              </div>
+              <div className="prompt-edit-right">
+                <div className="prompt-text-row">
+                  <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+                  <div className="prompt-translation" title="Real-time translation (any language → Chinese via the Translators library). Chinese content needs no translation and stays blank.">
+                    {promptTranslating ? 'Translating…' : promptTranslation}
+                  </div>
+                </div>
               </div>
             </div>
-            <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
-            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
-              <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
-              <div onClick={() => setModalNatural(!modalNatural)} style={{
-                width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
-                background: modalNatural ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
-              }}>
-                <div style={{
-                  position: 'absolute', top: 2, left: modalNatural ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
-                  background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
-                }} />
-              </div>
-            </label>
-            <select value={modalCategory} onChange={e => setModalCategory(e.target.value)}>
-              <option value="">Keep current category</option>
-              {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
             <div className="modal-buttons">
               <button className="btn btn-secondary" onClick={closeModal}>Cancel</button>
               <button className="btn btn-primary" onClick={updatePrompt}>Update</button>
