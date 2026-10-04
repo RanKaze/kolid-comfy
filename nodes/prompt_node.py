@@ -156,20 +156,37 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
-    def translate_text(self, text):
-        """实时翻译（Prompt 编辑的右侧预览）：本身含中文的原样跳过（无需翻译），
-        否则走 Translators 库 auto→中文。引擎按序回退（bing → alibaba → google → youdao），
-        结果按小写原文缓存（容量封顶，超了整表清）。失败返回 (False, 原因)。"""
+    @staticmethod
+    def _detect_script(text):
+        """轻量语系探测（auto 源时判断"已是目标语言"用）：假名→日文,谚文→韩文,
+        汉字→中文,西里尔→俄文,其余（拉丁系）一律按英文算。"""
+        import re
+        if re.search(r'[぀-ヿ]', text):
+            return 'ja'
+        if re.search(r'[가-힯]', text):
+            return 'ko'
+        if re.search(r'[一-鿿㐀-䶿]', text):
+            return 'zh'
+        if re.search(r'[Ѐ-ӿ]', text):
+            return 'ru'
+        return 'en'
+
+    def translate_text(self, text, from_lang='auto', to_lang='zh'):
+        """实时翻译（Prompt 编辑的右侧预览）：走 Translators 库 from→to。
+        from=auto 时按字符系探测,探测结果就是目标语言的原文直接跳过（无需翻译）。
+        引擎按序回退（粘性引擎优先,youdao 起排）,结果按 from>to:原文 小写缓存
+        （容量封顶,超了整表清）。失败返回 (False, 原因)。"""
         text = str(text or '').strip()
         if not text:
             return True, ''
-        import re
-        if re.search(r'[一-鿿㐀-䶿]', text):
-            return True, ''          # 本身是中文：无需翻译
+        if from_lang == to_lang:
+            return True, ''
+        if from_lang == 'auto' and self._detect_script(text) == to_lang:
+            return True, ''          # 原文已经是目标语言：无需翻译
         cache = getattr(self, '_translate_cache', None)
         if cache is None:
             cache = self._translate_cache = {}
-        key = text.lower()
+        key = f'{from_lang}>{to_lang}:' + text.lower()
         if key in cache:
             return True, cache[key]
         try:
@@ -183,7 +200,7 @@ class SnapshotPromptServer:
         last_err = None
         for engine in order:
             try:
-                out = ts.translate_text(text, translator=engine, from_language='auto', to_language='zh', timeout=8)
+                out = ts.translate_text(text, translator=engine, from_language=from_lang, to_language=to_lang, timeout=8)
                 if out:
                     out = str(out)
                     if len(cache) > 500:
@@ -1830,9 +1847,11 @@ class SnapshotPromptServer:
                 except Exception:
                     data = {}
                 text = data.get('text', '')
+                from_lang = str(data.get('from', 'auto') or 'auto')
+                to_lang = str(data.get('to', 'zh') or 'zh')
                 if self.server_instance:
                     try:
-                        ok, out = self.server_instance.translate_text(text)
+                        ok, out = self.server_instance.translate_text(text, from_lang, to_lang)
                     except Exception as e:
                         ok, out = False, f'translation error: {e}'
                 else:

@@ -1068,7 +1068,15 @@ body {
 .prompt-text-row .prompt-text-area { flex: 1 1 auto; margin-bottom: 0; height: auto; align-self: stretch; }
 /* 公共高度：两边都不许有显式 height —— textarea 只带 min-height（内容下限）,行高 =
    max(正文内容, 翻译内容),两边各自 stretch 到同一高度,谁也不会一边高一边低。 */
-.prompt-translation { flex: 0 0 520px; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; user-select: text; -webkit-user-select: text; }
+.prompt-translation { flex: 0 0 520px; display: flex; flex-direction: column; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; cursor: text; }
+.prompt-translation-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; flex: 0 0 auto; }
+.prompt-translation-head span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgba(255,255,255,0.42); }
+.prompt-translation-head select { font-size: 12px; padding: '2px 6px'; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.prompt-translation-body { flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; cursor: text; }
+/* Prompt 语言（源）选择行：位于 prompt text 上方 */
+.prompt-lang-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.prompt-lang-row span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgba(255,255,255,0.42); }
+.prompt-lang-row select { font-size: 12px; padding: '3px 8px'; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
 .modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; margin-top: 8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
