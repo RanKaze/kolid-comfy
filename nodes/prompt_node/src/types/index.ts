@@ -212,6 +212,8 @@ export interface LoraSliderConfig {
   max_name: string;
   reverse: boolean;
   marks: LoraSliderMark[];
+  /** Model-only：这条 lora 加载时只改 model 权重，CLIP 不动（strength_clip=0） */
+  model_only?: boolean;
 }
 
 export interface LoraSelectionData {

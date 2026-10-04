@@ -103,14 +103,41 @@
             "split_mode": false
           },
           {
-            "file_path": "F:/ComfyDB/models/loras/修正/Krea2/better pussy.safetensors",
-            "name": "krea2 better pussy",
-            "strength": 1,
-            "active_tags": [
-              "krea2pus"
-            ],
+            "file_path": "F:/ComfyDB/models/loras/滑块/Krea2/labia_minora_krea2_loraholic.safetensors",
+            "name": "阴唇大小",
+            "strength": -4,
+            "active_tags": [],
             "active": true,
-            "split_mode": true
+            "split_mode": false,
+            "slider_config": {
+              "enabled": true,
+              "min": -4,
+              "max": 6,
+              "step": 0.1,
+              "default_value": 0,
+              "min_name": "小阴唇",
+              "max_name": "大阴唇",
+              "reverse": false,
+              "marks": [],
+              "model_only": false
+            }
+          },
+          {
+            "file_path": "F:/ComfyDB/models/loras/滑块/Krea2/mons_pubis_krea2_loraholic.safetensors",
+            "name": "馒头逼",
+            "strength": 1,
+            "active_tags": [],
+            "active": true,
+            "split_mode": false,
+            "slider_config": {
+              "enabled": true,
+              "min": -6,
+              "max": 8,
+              "step": 0.1,
+              "min_name": "薄逼",
+              "max_name": "馒头逼",
+              "reverse": false
+            }
           }
         ],
         "prefabs": [],
