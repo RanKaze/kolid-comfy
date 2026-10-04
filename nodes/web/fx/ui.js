@@ -411,6 +411,16 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
         if (undoable && onCommit) onCommit();
     };
 
+    if (def.kind === 'check') {
+        // 布尔开关行（如马赛克的 Anti-aliasing）：勾选 = def.def 的缺省语义不变。
+        const inp = document.createElement('input');
+        inp.type = 'checkbox';
+        inp.checked = !!get();
+        updaters.push(() => { inp.checked = !!get(); });
+        inp.addEventListener('change', () => set(inp.checked, true));
+        row.appendChild(inp);
+        return row;
+    }
     if (def.kind === 'color') {
         const inp = document.createElement('input');
         inp.type = 'color';

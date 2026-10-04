@@ -187,6 +187,33 @@ export function AppShell() {
     setLangFilter(v);
     try { localStorage.setItem('pn_lang_filter', v); } catch { /* in-memory only */ }
   };
+  // Prefab 的语言分拣：tag 的 prompt/name 文本命中某张 natural prompt 卡 = 自然语言 tag,
+  // 否则按缺省 kinds 算 tag 串。整卡文本之外也认子 tag（_normalize_prefab_tags 的拆链结果）。
+  // 现算现用,不改 prefab 的存储 —— 老 prefab 无需迁移,prompt 卡改标记后即时生效。
+  const naturalPromptTexts = useMemo(() => {
+    const set = new Set<string>();
+    for (const catData of Object.values(allPrompts)) {
+      for (const p of ((catData as CategoryData).prompts || [])) {
+        if (!p.natural || !p.prompt) continue;
+        set.add(p.prompt.trim().toLowerCase());
+      }
+    }
+    return set;
+  }, [allPrompts]);
+  const tagIsNatural = (tag: any) => {
+    const cand: string[] = [];
+    if (tag?.prompt) cand.push(String(tag.prompt));
+    if (tag?.name) cand.push(String(tag.name));
+    for (const t of (tag?.tags || [])) if (t) cand.push(String(t));
+    return cand.some(c => naturalPromptTexts.has(c.trim().toLowerCase()));
+  };
+  const prefabHasNatural = (pf: PrefabData) => (pf.tag_groups || []).some(g => (g.tags || []).some(t => tagIsNatural(t)));
+  const prefabHasTagLang = (pf: PrefabData) => {
+    const groups = pf.tag_groups || [];
+    // 一个 tag 都没有的 prefab 按缺省 kinds 算 tag 串（只有 custom_prompts / loras 时同此）。
+    if (!groups.some(g => (g.tags || []).length)) return true;
+    return groups.some(g => (g.tags || []).some(t => !tagIsNatural(t)));
+  };
   const [selectedFilter, setSelectedFilter] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [expandedLibraries, setExpandedLibraries] = useState<Set<string>>(new Set());
@@ -971,6 +998,15 @@ export function AppShell() {
   // Form state for modals
   const [modalName, setModalName] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
+  // Prompt text 自动扩高：输入多少长多少,自身不出滚动条（height=auto 重置后读 scrollHeight）。
+  const autoGrowPromptText = (e: React.FormEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  };
+  const hpPromptTextRef = useCallback((el: HTMLTextAreaElement | null) => {
+    if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+  }, []);
   // Natural-language：这张 prompt 卡是自然语言描述而不是 tag 串（header 的语言过滤按它分拣）。
   const [modalNatural, setModalNatural] = useState(false);
   const [modalTags, setModalTags] = useState<string[]>([]);
@@ -4517,7 +4553,7 @@ export function AppShell() {
                           );
                         })}
                         {!(searchQuery || selectedFilter) && !isTemporary ? (
-                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={cat} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModalCategory(cat); setModal({type:'addPrompt'}); }}><div>{iconPlus}</div></div>
+                          <div className={`prompt-item add-prompt-btn ${modeClass}`} data-category={cat} style={{ cursor:'pointer' }} onMouseDown={() => { resetModalForm(); setModalCategory(cat); setModalNatural(langFilter === 'natural'); setModal({type:'addPrompt'}); }}><div>{iconPlus}</div></div>
                         ) : null}
                       </div>
                     ) : null}
@@ -4558,7 +4594,7 @@ export function AppShell() {
                     return !cycle;
                   });
                 }
-                const libNeedsFilter = searchQuery || selectedFilter;
+                const libNeedsFilter = searchQuery || selectedFilter || langFilter !== 'everything';
                 if (libNeedsFilter) {
                   filteredPrompts = prompts.filter(p => {
                     if (searchQuery) {
@@ -4575,6 +4611,10 @@ export function AppShell() {
                     return true;
                   });
                   filteredPrefabs = prefabs.filter(pf => {
+                    // 语言过滤（header enum）：prefab 的 tag 文本命中 natural prompt 卡 =
+                    // 自然语言 tag,否则算 tag 串;"有没有"任一即显示。
+                    if (langFilter === 'natural' && !prefabHasNatural(pf)) return false;
+                    if (langFilter === 'tag' && !prefabHasTagLang(pf)) return false;
                     if (searchQuery) {
                       if (pf.name.toLowerCase().includes(searchQuery)) return true;
                       for (const group of (pf.tag_groups || [])) {
@@ -5541,11 +5581,11 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'addPrompt' ? (
-        <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+        <div className="modal visible scrollable" onMouseDown={closeModal}>
+          <div className="modal-content no-scroll" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
+            <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
             <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
               <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
@@ -5584,11 +5624,11 @@ export function AppShell() {
           </div>
         </div>
       ) : modal?.type === 'editPrompt' ? (
-        <div className="modal visible" onMouseDown={closeModal}>
-          <div className="modal-content" onMouseDown={e => e.stopPropagation()}>
+        <div className="modal visible scrollable" onMouseDown={closeModal}>
+          <div className="modal-content no-scroll" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
+            <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
             <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
               <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
