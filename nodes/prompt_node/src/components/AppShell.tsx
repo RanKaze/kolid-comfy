@@ -178,6 +178,15 @@ export function AppShell() {
 
   const [selectedTags, setSelectedTags] = useState<TagGroup[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  // Prompt 语言过滤（header 的 enum，localStorage 持久化）：everything = 全部，
+  // natural = 自然语言卡，tag = tag 串卡。分拣依据是每张卡的 natural 标记。
+  const [langFilter, setLangFilter] = useState<'everything' | 'natural' | 'tag'>(() => {
+    try { const v = localStorage.getItem('pn_lang_filter'); return v === 'natural' || v === 'tag' ? v : 'everything'; } catch { return 'everything'; }
+  });
+  const changeLangFilter = (v: 'everything' | 'natural' | 'tag') => {
+    setLangFilter(v);
+    try { localStorage.setItem('pn_lang_filter', v); } catch { /* in-memory only */ }
+  };
   const [selectedFilter, setSelectedFilter] = useState('');
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set());
   const [expandedLibraries, setExpandedLibraries] = useState<Set<string>>(new Set());
@@ -962,6 +971,8 @@ export function AppShell() {
   // Form state for modals
   const [modalName, setModalName] = useState('');
   const [modalPrompt, setModalPrompt] = useState('');
+  // Natural-language：这张 prompt 卡是自然语言描述而不是 tag 串（header 的语言过滤按它分拣）。
+  const [modalNatural, setModalNatural] = useState(false);
   const [modalTags, setModalTags] = useState<string[]>([]);
   const [modalCategory, setModalCategory] = useState('');
   const [modalOldName, setModalOldName] = useState('');
@@ -1329,7 +1340,7 @@ export function AppShell() {
   // ========== Reset all modal form state ==========
   const resetModalForm = useCallback(() => {
     clearZoomView();
-    setModalName(''); setModalPrompt(''); setModalTags([]);
+    setModalName(''); setModalPrompt(''); setModalTags([]); setModalNatural(false);
     setModalCategory(''); setModalOldName(''); setModalPromptIds('');
     setModalCustomPrompts(''); setModalPrefabTags([]); setModalPrefabLoras([]); setModalPrefabSelectedPrefabs([]); setModalProgramSelectedPrograms([]); setModalEnablePrefabCtx(false); setModalEnableLoraCtx(false); setModalEnablePromptCtx(false); setModalMultiProgram(false); setModalCtxPrefabGuids([]); setModalCtxLoraPaths([]); setModalCtxPromptTexts([]); setModalPrefabBuiltinGuids([]); setModalLoraBuiltinPaths([]); setModalPromptBuiltinTexts([]); setModalPrefabBuiltinInactive([]); setModalLoraBuiltinInactive([]); setModalPromptBuiltinInactive([]); setModalPrefabBuiltinDisplay([]); setModalLoraBuiltinDisplay([]); setModalTagGroupBuiltinDisplay([]); setModalCtxTab('prefab'); setModalMode('horizontal'); setModalSize('normal');
     setModalIsCat(true); clearImageFields();
@@ -2982,7 +2993,7 @@ export function AppShell() {
     let imageData = '';
     if (modalImageFile) { const r = new FileReader(); imageData = await new Promise(resolve => { r.onload = e => resolve(e.target?.result as string); r.readAsDataURL(modalImageFile); }); }
     try {
-      const res = await fetch('/update_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name, prompt:pt, tags:modalTags, category:modalCategory, image:imageData}) });
+      const res = await fetch('/update_prompt', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, name, prompt:pt, tags:modalTags, category:modalCategory, image:imageData, natural:modalNatural}) });
       const result = await res.json();
       if (imageData) setImgVersion(v => v + 1);
       saveModalFocus(id, false);
@@ -2990,7 +3001,7 @@ export function AppShell() {
         const next: AllPrompts = {};
         for (const [cat, catData] of Object.entries(prev)) {
           const prompts = ((catData as CategoryData).prompts || []).map((p: PromptData) =>
-            p.id === id ? { ...p, name, prompt: pt, tags: modalTags as any, preview: result.preview || p.preview } : p,
+            p.id === id ? { ...p, name, prompt: pt, tags: modalTags as any, preview: result.preview || p.preview, natural: modalNatural } : p,
           );
           next[cat] = { ...(catData as CategoryData), prompts };
         }
@@ -2998,7 +3009,7 @@ export function AppShell() {
       });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalCategory, modalImageFile, saveModalFocus, setAllPrompts]);
+  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalCategory, modalImageFile, modalNatural, saveModalFocus, setAllPrompts]);
 
   // Helper to build current lora payload for prefab storage
   const buildPrefabLoras = useCallback(() => {
@@ -4254,6 +4265,16 @@ export function AppShell() {
                 />
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <select
+                  value={langFilter}
+                  onChange={e => changeLangFilter(e.target.value as any)}
+                  title="Filter prompt cards by language kind — Natural-language cards are marked in their edit dialog"
+                  style={{ fontSize: '12px', padding: '6px 8px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-card, #2c2c2e)', color: 'var(--text-primary, #fff)', cursor: 'pointer' }}
+                >
+                  <option value="everything">Everything</option>
+                  <option value="natural">Natural-language</option>
+                  <option value="tag">Tag-language</option>
+                </select>
                 <SearchBar
                   searchQuery={searchQuery}
                   onSearchChange={handleSearch}
@@ -4378,7 +4399,7 @@ export function AppShell() {
                 const bgVideo = (catData as any).bg_video || '';
 
                 let filtered = cp;
-                const needsFilter = searchQuery || selectedFilter;
+                const needsFilter = searchQuery || selectedFilter || langFilter !== 'everything';
                 if (isTemporary && currentCtx && currentCtx.matchFn) {
                   filtered = cp.filter(p => currentCtx.matchFn!(p, cat));
                   if (filtered.length === 0) return null;
@@ -4386,6 +4407,9 @@ export function AppShell() {
                   const catDataObj = allPrompts[cat] as any;
                   const catTgs: string[] = catDataObj ? (Array.isArray(catDataObj.tags) ? catDataObj.tags : typeof catDataObj.tags === 'string' ? catDataObj.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []) : [];
                   filtered = cp.filter(p => {
+                    // 语言过滤（header enum）：natural 标记缺省 = tag 串卡。
+                    if (langFilter === 'natural' && !p.natural) return false;
+                    if (langFilter === 'tag' && p.natural) return false;
                     if (searchQuery) {
                       const tm = Array.isArray(p.tags) ? p.tags.some((t: string) => t.toLowerCase().includes(searchQuery)) : (p.tags || '').toLowerCase().includes(searchQuery);
                       if (!p.name.toLowerCase().includes(searchQuery) && !p.prompt.toLowerCase().includes(searchQuery) && !tm) return false;
@@ -4468,7 +4492,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconGear}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalNatural(!!p.natural); setModalCategory(cat); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:cat}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -4619,7 +4643,7 @@ export function AppShell() {
                                   </div>
                                 </div>
                                 <div className="actions" onMouseDown={e => e.stopPropagation()}>
-                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconGear}</button>
+                                  <button className="action-btn edit" onClick={e => { e.stopPropagation(); resetModalForm(); setModalOldName(p.id); setModalName(p.name); setModalPrompt(p.prompt||''); setModalTags(Array.isArray(p.tags)?[...p.tags]:[]); setModalNatural(!!p.natural); setModalCategory(p.category||''); if(p.preview){ setModalPreviewUrl(imgUrl(p.preview)); setModalPreviewVisible(true); setModalFileName(p.preview); const pt = focusPoints[p.id]; if(pt){ setModalFocusX(pt.x); setModalFocusY(pt.y); setModalFocusVisible(true); } } setModal({type:'editPrompt',data:{id:p.id,category:p.category}}); }}>{iconGear}</button>
                                   <button className="action-btn delete" onClick={e => { e.stopPropagation(); deletePrompt(p.id); }}>{iconTrash}</button>
                                 </div>
                               </div>
@@ -5523,6 +5547,18 @@ export function AppShell() {
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+              <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
+              <div onClick={() => setModalNatural(!modalNatural)} style={{
+                width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                background: modalNatural ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+              }}>
+                <div style={{
+                  position: 'absolute', top: 2, left: modalNatural ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                  background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                }} />
+              </div>
+            </label>
             <input type="text" placeholder="Category (default: 杂项)" value={modalCategory} onChange={e => setModalCategory(e.target.value)} />
              <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
              <div className="modal-buttons">
@@ -5532,12 +5568,12 @@ export function AppShell() {
                  if(!name||!pt){alert('Please enter name and prompt text');return;}
                  let imageData = '';
                  if(modalImageFile){const r=new FileReader();imageData=await new Promise(resolve=>{r.onload=e=>resolve(e.target?.result as string);r.readAsDataURL(modalImageFile!);});}
-                 const res = await fetch('/add_prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:modalCategory||'杂项',name,prompt:pt,tags:modalTags,image:imageData})});
+                 const res = await fetch('/add_prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({category:modalCategory||'杂项',name,prompt:pt,tags:modalTags,image:imageData,natural:modalNatural})});
                  if (!res.ok) return;
                  const result = await res.json();
                  if (imageData) setImgVersion(v => v + 1);
                  const cat = modalCategory || '杂项';
-                 const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: pt, preview: result.preview || '', tags: modalTags as any };
+                 const newPrompt: PromptData = { id: result.id || `${Date.now()}`, name, prompt: pt, preview: result.preview || '', tags: modalTags as any, natural: modalNatural };
                  setAllPrompts((prev: AllPrompts) => {
                    const catData = prev[cat];
                    return { ...prev, [cat]: { ...(catData as CategoryData || {}), prompts: [...((catData as CategoryData)?.prompts || []), newPrompt] } };
@@ -5554,6 +5590,18 @@ export function AppShell() {
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
             <input type="text" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} />
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+              <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
+              <div onClick={() => setModalNatural(!modalNatural)} style={{
+                width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                background: modalNatural ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+              }}>
+                <div style={{
+                  position: 'absolute', top: 2, left: modalNatural ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                  background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                }} />
+              </div>
+            </label>
             <select value={modalCategory} onChange={e => setModalCategory(e.target.value)}>
               <option value="">Keep current category</option>
               {Object.keys(allPrompts).map(c => <option key={c} value={c}>{c}</option>)}
