@@ -147,9 +147,12 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
-    def update_lora_regex(self, new_regex):
-        """Update lora_regex, rescan loras, and rebuild valid paths."""
-        self.lora_regex = str(new_regex) if new_regex else ""
+    def refresh_loras(self):
+        """Rescan the lora folders and rebuild every derived cache.
+
+        lora_data（含 lora_fingerprints，_scan_loras 里一并重建）与 _valid_lora_paths
+        全部从头来一遍 —— 用户往文件夹里丢新 lora 后调这个，不用重启也不用改 regex。
+        """
         self.lora_data = self._scan_loras(self.lora_regex)
         import re as _re
         compiled_re = _re.compile(self.lora_regex) if self.lora_regex else None
@@ -160,6 +163,13 @@ class SnapshotPromptServer:
                 if not compiled_re or compiled_re.search(fp):
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
+        print(f"[PromptServer] loras refreshed: {sum(len(v) for v in self.lora_data.values())} loras, "
+              f"{len(self._valid_lora_paths)} valid paths (regex '{self.lora_regex}')")
+
+    def update_lora_regex(self, new_regex):
+        """Update lora_regex, rescan loras, and rebuild valid paths."""
+        self.lora_regex = str(new_regex) if new_regex else ""
+        self.refresh_loras()
         print(f"[PromptServer] lora_regex updated to '{self.lora_regex}', {len(self._valid_lora_paths)} valid loras")
 
     @staticmethod
@@ -1720,6 +1730,19 @@ class SnapshotPromptServer:
                     self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
+
+            elif self.path == '/refresh_loras':
+                # 运行中途往 loras 文件夹丢了新文件：重扫一遍（lora_data / fingerprints /
+                # valid paths 全部重建），前端随后重拉 /lora_data 就能看见新条目。
+                lora_count = 0
+                if self.server_instance:
+                    self.server_instance.refresh_loras()
+                    lora_count = sum(len(v) for v in (self.server_instance.lora_data or {}).values())
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'lora_count': lora_count}).encode('utf-8'))
 
             elif self.path == '/update_lora_slider_configs':
                 content_length = int(self.headers['Content-Length'])

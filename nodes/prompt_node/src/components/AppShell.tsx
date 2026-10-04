@@ -2482,6 +2482,24 @@ export function AppShell() {
     }
   }, [allPrompts, setSelectedTags]);
 
+  // ========== Lora cache refresh ==========
+  // 运行中途往 loras 文件夹丢的新文件不会自己出现：后端扫的是启动时的快照。
+  // 这颗按钮让后端重扫一遍（lora_data / fingerprints / valid paths 全部重建），
+  // 然后重拉 /lora_data 刷新列表 —— 已选中的 lora 按文件路径保留，不受影响。
+  const [lorasRefreshing, setLorasRefreshing] = useState(false);
+  const handleRefreshLoras = useCallback(async () => {
+    if (lorasRefreshing) return;
+    setLorasRefreshing(true);
+    try {
+      await fetch('/refresh_loras', { method: 'POST' });
+      await loadLoraData();
+    } catch (err) {
+      alert('Refresh loras error: ' + (err as Error).message);
+    } finally {
+      setLorasRefreshing(false);
+    }
+  }, [lorasRefreshing, loadLoraData]);
+
   // ========== Tag From Assets ==========
   const [assetsLoading, setAssetsLoading] = useState(false);
   const handleTagFromAssets = useCallback(async () => {
@@ -4233,13 +4251,25 @@ export function AppShell() {
                   onChange={handleTagImageSelected}
                 />
               </div>
-              <SearchBar
-                searchQuery={searchQuery}
-                onSearchChange={handleSearch}
-                filterOptions={allFilterOptions}
-                selectedFilter={selectedFilter}
-                onFilterChange={handleFilterChange}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <SearchBar
+                  searchQuery={searchQuery}
+                  onSearchChange={handleSearch}
+                  filterOptions={allFilterOptions}
+                  selectedFilter={selectedFilter}
+                  onFilterChange={handleFilterChange}
+                />
+                {/* 运行中途往 loras 文件夹丢的新文件不会自己出现，这颗让后端重扫并刷新列表 */}
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleRefreshLoras}
+                  disabled={lorasRefreshing}
+                  title="Rescan the lora folders — picks up loras you dropped into the folder after the node started (selections are kept)"
+                  style={{ fontSize: '12px', padding: '6px 12px', borderRadius: '8px', cursor: lorasRefreshing ? 'wait' : 'pointer', opacity: lorasRefreshing ? 0.6 : 1, whiteSpace: 'nowrap' }}
+                >
+                  {lorasRefreshing ? 'Scanning…' : '↻ Refresh Loras'}
+                </button>
+              </div>
             </div>
 
             {tempCtx.mode === 'tag' && currentCtx ? (
