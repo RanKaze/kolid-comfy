@@ -176,15 +176,20 @@ class SnapshotPromptServer:
             import translators as ts
         except ImportError:
             return False, 'translators library not installed (pip install translators)'
+        # 粘性引擎：上次成功的引擎排最前,正常情况一次命中,不再每趟把整条回退链走一遍。
+        sticky = getattr(self, '_translate_sticky', None)
+        # 实测排序：youdao 本地最快（~0.6s）,google 兜底较稳；粘性引擎之后自动跟随实际可用者。
+        order = ([sticky] if sticky else []) + [e for e in ('youdao', 'bing', 'alibaba', 'google') if e != sticky]
         last_err = None
-        for engine in ('bing', 'alibaba', 'google', 'youdao'):
+        for engine in order:
             try:
-                out = ts.translate_text(text, translator=engine, from_language='auto', to_language='zh')
+                out = ts.translate_text(text, translator=engine, from_language='auto', to_language='zh', timeout=8)
                 if out:
                     out = str(out)
                     if len(cache) > 500:
                         cache.clear()
                     cache[key] = out
+                    self._translate_sticky = engine
                     return True, out
             except Exception as e:
                 last_err = e
@@ -965,6 +970,9 @@ class SnapshotPromptServer:
                 self.port = port
                 self.started = True
                 print(f"[SnapshotPrompt] Server started on port {port}")
+                # 翻译预热：后台把 translators 的导入、引擎首次握手和粘性引擎选型提前付掉,
+                # 用户第一次实时翻译就是热路径。
+                threading.Thread(target=lambda: self.translate_text('warm up'), daemon=True).start()
                 break
             except:
                 continue

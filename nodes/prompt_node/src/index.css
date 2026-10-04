@@ -1056,10 +1056,19 @@ body {
 /* Prompt text 专用：随内容自动长高（onInput/ref 里按 scrollHeight 撑开）,自身不出滚动条。 */
 .modal-content textarea.prompt-text-area { min-height: 200px; line-height: 1.5; overflow: hidden; resize: none; }
 /* Prompt text + 实时翻译并排（Add/Edit Prompt 的宽布局）：右侧虚线框随 textarea 等高伸展。 */
-.modal-content.prompt-modal { max-width: 880px; }
-.prompt-text-row { display: flex; gap: 10px; margin-bottom: 12px; align-items: stretch; }
-.prompt-text-row .prompt-text-area { flex: 1 1 auto; margin-bottom: 0; }
-.prompt-translation { flex: 0 0 260px; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.modal-content.prompt-modal { max-width: 1500px; }
+/* Edit/Add Prompt 双列：左 = Name/Tags/toggle/类别/背景图,右 = Prompt text + 实时翻译。 */
+.prompt-edit-columns { display: flex; gap: 16px; align-items: flex-start; }
+.prompt-edit-left { flex: 0 0 280px; min-width: 0; }
+.prompt-edit-right { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.prompt-edit-right .prompt-text-row { flex: 1 1 auto; }
+.prompt-edit-right .prompt-text-area { min-height: 550px; }
+.prompt-edit-left .context-preview, .prompt-edit-left .image-layer { max-width: 100%; }
+.prompt-text-row { display: flex; gap: 10px; margin-bottom: 12px; align-items: stretch; min-height: 550px; }
+.prompt-text-row .prompt-text-area { flex: 1 1 auto; margin-bottom: 0; height: auto; align-self: stretch; }
+/* 公共高度：两边都不许有显式 height —— textarea 只带 min-height（内容下限）,行高 =
+   max(正文内容, 翻译内容),两边各自 stretch 到同一高度,谁也不会一边高一边低。 */
+.prompt-translation { flex: 0 0 520px; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; user-select: text; -webkit-user-select: text; }
 .modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; margin-top: 8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
