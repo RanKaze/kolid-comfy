@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { Tag, TagGroup, PromptData, AllPrompts, TemporaryContext } from '../types';
+import type { Tag, TagGroup, PromptData, AllPrompts, AllPrograms, TemporaryContext, TagContextRef } from '../types';
 
 function toList(v: string | string[] | undefined): string[] {
   if (Array.isArray(v)) return v.map(s => s.toLowerCase());
@@ -63,16 +63,31 @@ function findPromptByName(nameText: string, allPrompts: AllPrompts): { name: str
   return null;
 }
 
+export function findPromptId(promptText: string, allPrompts: AllPrompts): string {
+  for (const [, catData] of Object.entries(allPrompts)) {
+    const prompts = (catData as { prompts?: PromptData[] }).prompts || [];
+    for (const p of prompts) {
+      if (p.prompt === promptText) return p.id || '';
+    }
+  }
+  return '';
+}
+
 function createTag(promptText: string, allPrompts: AllPrompts): Tag {
   const name = findPromptName(promptText, allPrompts);
   const category = findPromptCategory(promptText, allPrompts);
   if (name === promptText) {
     const byName = findPromptByName(promptText, allPrompts);
     if (byName) {
-      return { name: byName.name, prompt: byName.prompt, category: byName.category };
+      return { name: byName.name, prompt: byName.prompt, category: byName.category, base_id: findPromptId(byName.prompt, allPrompts) || undefined };
     }
   }
-  return { name, prompt: promptText, category };
+  return { name, prompt: promptText, category, base_id: findPromptId(promptText, allPrompts) || undefined };
+}
+
+/** 点卡进来的那条基 tag：id 用按下的那张卡，文本相同的双卡不会认错。 */
+export function createCardTag(card: { id: string; name: string; prompt: string; category?: string }): Tag {
+  return { name: card.name, prompt: card.prompt, category: card.category || '', base_id: card.id };
 }
 
 export function parseStringToTags(str: string, allPrompts: AllPrompts): TagGroup {
@@ -123,25 +138,113 @@ export function findPromptData(prompt: string, allPrompts: AllPrompts): (PromptD
   return null;
 }
 
-export function isBasePromptSelectedInTags(prompt: string, selectedTags: TagGroup[]): boolean {
-  return selectedTags.some(group => {
-    const base = group.tags[group.tags.length - 1];
-    return base && base.prompt === prompt;
+export function findPromptDataById(id: string, allPrompts: AllPrompts): (PromptData & { category: string }) | null {
+  if (!id) return null;
+  for (const [cat, catData] of Object.entries(allPrompts)) {
+    const prompts = (catData as { prompts?: PromptData[] }).prompts || [];
+    for (const p of prompts) {
+      if (p.id === id) return { ...p, category: cat };
+    }
+  }
+  return null;
+}
+
+/**
+ * 旧档迁移：context 里那些纯文本条目一次性换成 {id,text}（撞不到卡的 id 留空,当自由文本继续出词）。
+ * 已经是对象的原样留下 —— 每个入口都过它，幂等。
+ */
+export function migrateTagRefs(items: (string | TagContextRef)[] | undefined, allPrompts: AllPrompts): TagContextRef[] {
+  return (items || []).map(item => {
+    if (typeof item !== 'string') return item.id ? item : { ...item, id: findPromptId(item.text, allPrompts) };
+    return { id: findPromptId(item, allPrompts), text: item };
   });
 }
 
-export function findTagGroupByBasePrompt(basePrompt: string, selectedTags: TagGroup[]): TagGroup | undefined {
-  return selectedTags.find(group => {
-    const base = group.tags[group.tags.length - 1];
-    return base && base.prompt === basePrompt;
-  });
+/** tag 引用的身份键：有卡用卡 id，自由文本退回文本（同一份自由文本本就是同一件事）。 */
+export function tagRefKey(ref: TagContextRef): string {
+  return ref.id || ref.text;
 }
 
-export function findTagGroupIndex(basePrompt: string, selectedTags: TagGroup[]): number {
-  return selectedTags.findIndex(group => {
-    const base = group.tags[group.tags.length - 1];
-    return base && base.prompt === basePrompt;
-  });
+/**
+ * 一次性迁移：引用列表过 migrateTagRefs，同时把当初按文本记的停用/显示位改成新的身份键。
+ * 已经是 id 的键撞不到文本表，原样留下 —— 幂等。
+ */
+export function migrateTagRefSet(
+  refs: (string | TagContextRef)[] | undefined,
+  keys: string[] | undefined,
+  allPrompts: AllPrompts,
+): { refs: TagContextRef[]; keys: string[] } {
+  const migrated = migrateTagRefs(refs, allPrompts);
+  const textToKey = new Map<string, string>();
+  for (const r of migrated) textToKey.set(r.text, tagRefKey(r));
+  const next = (keys || []).map(k => textToKey.get(k) ?? k);
+  return { refs: migrated, keys: Array.from(new Set(next)) };
+}
+
+/** 卡片文本/名字变了：按 id 刷新选中组里的基 tag（文本只是出词，认人靠 id）。 */
+export function retextCardTag(group: TagGroup, cardId: string, prompt: string, name: string): TagGroup {
+  const bi = group.tags.length - 1;
+  if (group.tags[bi]?.base_id !== cardId) return group;
+  return { ...group, tags: group.tags.map((t, i) => i === bi ? { ...t, prompt, name } : t) };
+}
+
+/** 卡片文本变了：按 id 刷新所有 tag 引用里的出词文本。 */
+export function retextTagRefs(refs: TagContextRef[] | undefined, cardId: string, text: string): TagContextRef[] {
+  return (refs || []).map(r => r.id === cardId ? { ...r, text } : r);
+}
+
+/** 一次性迁移：程序定义里的 Tags Builtin 旧档是纯文本串 + 按文本记的停用/显示位，一起换成 id 口径。 */
+export function migrateProgramTagRefs(programs: AllPrograms, allPrompts: AllPrompts): AllPrograms {
+  const next: AllPrograms = {};
+  for (const [cat, catData] of Object.entries(programs)) {
+    next[cat] = { ...catData, programs: (catData.programs || []).map(a => {
+      const builtin = migrateTagRefSet(a.tag_group_builtin_texts, a.tag_group_builtin_inactive, allPrompts);
+      const display = migrateTagRefSet(a.tag_group_builtin_texts, a.tag_group_builtin_display, allPrompts);
+      return { ...a, tag_group_builtin_texts: builtin.refs, tag_group_builtin_inactive: builtin.keys, tag_group_builtin_display: display.keys };
+    }) };
+  }
+  return next;
+}
+
+function baseTagOf(group: TagGroup): Tag | undefined {
+  return group.tags[group.tags.length - 1];
+}
+
+/** 认人只认基 tag 上的卡 id —— 文本是出词用的,不做兜底匹配（旧档在载入时先过 migrateTagGroups 打戳）。 */
+export function isCardSelectedInTags(cardId: string, selectedTags: TagGroup[]): boolean {
+  return selectedTags.some(group => baseTagOf(group)?.base_id === cardId);
+}
+
+export function findTagGroupByCardId(cardId: string, selectedTags: TagGroup[]): TagGroup | undefined {
+  return selectedTags.find(group => baseTagOf(group)?.base_id === cardId);
+}
+
+export function findTagGroupIndexByCardId(cardId: string, selectedTags: TagGroup[]): number {
+  return selectedTags.findIndex(group => baseTagOf(group)?.base_id === cardId);
+}
+
+/**
+ * 一次性迁移：给只带文本的旧 tag 组（preset 落盘档、last_selected、prefab 快照、filter 组）打上卡 id。
+ * 文本撞不到卡的就留作自由文本 tag（没有 base_id,从此不点亮任何卡,但照样出词）。
+ * 同文本的双卡撞到的都是先出现的那张 —— 只有点卡进来的那条能保住真实 id。
+ */
+export function migrateTagGroups(groups: TagGroup[], allPrompts: AllPrompts): TagGroup[] {
+  return groups.map(group => ({
+    ...group,
+    tags: group.tags.map(tag => {
+      if (tag.base_id) return tag;
+      const id = findPromptId(tag.prompt, allPrompts);
+      return id ? { ...tag, base_id: id } : tag;
+    }),
+  }));
+}
+
+/** 把组的基 tag 钉到给定卡 id：context 引用带 id 时以引用为准，不靠文本撞。 */
+export function pinGroupBaseId(group: TagGroup, cardId: string): TagGroup {
+  if (!cardId || group.tags.length === 0) return group;
+  const tags = [...group.tags];
+  tags[tags.length - 1] = { ...tags[tags.length - 1], base_id: cardId };
+  return { ...group, tags };
 }
 
 export function combineTagGroups(
@@ -150,8 +253,11 @@ export function combineTagGroups(
   basePromptName: string,
   baseDecoNum: number,
   allPrompts: AllPrompts,
+  baseCardId?: string,
 ): TagGroup {
-  const baseTag: Tag = { ...createTag(basePrompt, allPrompts), name: basePromptName };
+  const baseTag: Tag = baseCardId
+    ? createCardTag({ id: baseCardId, name: basePromptName, prompt: basePrompt })
+    : { ...createTag(basePrompt, allPrompts), name: basePromptName };
   // Flatten all tags from child groups + base tag at the end
   const allTags: Tag[] = [...tagGroups.flatMap(g => g.tags), baseTag];
   const strength = tagGroups.length > 0 ? tagGroups[0].strength : 1.0;

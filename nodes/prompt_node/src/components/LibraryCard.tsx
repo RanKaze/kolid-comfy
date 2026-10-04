@@ -1,6 +1,6 @@
 import type { LibraryData, PromptData, TagGroup, FocusPoints, CategoryData } from '../types';
 import { PromptItem } from './PromptItem';
-import { isBasePromptSelectedInTags, findTagGroupByBasePrompt, tagsToDisplayName } from '../hooks/useSelection';
+import { isCardSelectedInTags, findTagGroupByCardId, tagsToDisplayName } from '../hooks/useSelection';
 
 const iconGrip = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{verticalAlign:'middle'}}><circle cx="9" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>;
 const iconGrid = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>;
@@ -22,7 +22,7 @@ interface LibraryCardProps {
   focusPoints: FocusPoints;
   allPrompts: Record<string, CategoryData>;
   onToggle: () => void;
-  onSelectPrompt: (prompt: string) => void;
+  onSelectPrompt: (card: PromptData) => void;
   onDragStartLibrary: (e: React.DragEvent) => void;
   onDragStartPrompt: (e: React.DragEvent, category: string, id: string) => void;
   onDragStartPrefab: (e: React.DragEvent, libName: string, idx: number) => void;
@@ -101,9 +101,9 @@ export function LibraryCard({
           }}
         >
           {prompts.map(p => {
-            const isSelected = isBasePromptSelectedInTags(p.prompt, selectedTags);
+            const isSelected = isCardSelectedInTags(p.id, selectedTags);
             let selectedCardsHtml = '';
-            const group = findTagGroupByBasePrompt(p.prompt, selectedTags);
+            const group = findTagGroupByCardId(p.id, selectedTags);
             if (group) {
               const display = tagsToDisplayName(group);
               selectedCardsHtml = `<div class="selected-card"><div class="selected-card-content">${display}</div></div>`;
@@ -121,7 +121,7 @@ export function LibraryCard({
                 focusStyle={focusStyle}
                 decoTagsHtml=""
                 selectedCardsHtml={selectedCardsHtml}
-                onClick={() => onSelectPrompt(p.prompt)}
+                onClick={() => onSelectPrompt(p)}
                 onDragStart={(e) => onDragStartPrompt(e, p.category, p.id)}
                 isDraggable
               />

@@ -5,6 +5,7 @@ import type {
   LoraFolders, LoraSelectionData, LoraSliderConfig, AllPrograms,
 } from '../types';
 import { PRESET_SCOPE, SCOPED_SELECTION, SAMPLER_BASE, fetchPromptPresetSelection } from '../blockScope';
+import { migrateProgramTagRefs } from './useSelection';
 
 const API_BASE = '';
 
@@ -61,7 +62,7 @@ export function useApi() {
     setParsedPrompts(data.parsed_prompts || []);
     setHasTagger(data.has_tagger || false);
     setHasAsset(data.has_asset || false);
-    setAllPrograms(data.programs || {});
+    setAllPrograms(migrateProgramTagRefs(data.programs || {}, data.categories));
     setLastSelectedPrograms((presetSelection?.programs as any[]) || (SCOPED_SELECTION ? [] : (data.last_selected_programs || [])));
     return { ...data, preset_selection: presetSelection };
   }, []);

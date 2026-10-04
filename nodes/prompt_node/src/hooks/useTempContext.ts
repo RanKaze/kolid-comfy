@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { TempContextLayer, TempContextMode, LoraTempState } from '../types';
+import type { TempContextLayer, TempContextMode, LoraTempState, TagContextRef } from '../types';
 
 export function useTempContext() {
   const [stack, setStack] = useState<TempContextLayer[]>([]);
@@ -19,16 +19,30 @@ export function useTempContext() {
     setStack([]);
   }, []);
 
-  /** Toggle an id in the current layer's selections (for lora/prefab modes) */
+  /** Toggle an id in the current layer's selections (for lora/prefab/program modes) */
   const toggleId = useCallback((id: string) => {
     setStack(prev => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
-      if (last.type !== 'lora' && last.type !== 'prefab' && last.type !== 'program' && last.type !== 'prefabCtx' && last.type !== 'loraCtx' && last.type !== 'tagCtx' && last.type !== 'prefabBuiltin' && last.type !== 'loraBuiltin' && last.type !== 'tagGroupBuiltin') return prev;
+      if (last.type !== 'lora' && last.type !== 'prefab' && last.type !== 'program' && last.type !== 'prefabCtx' && last.type !== 'loraCtx' && last.type !== 'prefabBuiltin' && last.type !== 'loraBuiltin') return prev;
       const selections = new Set(last.selections || []);
       if (selections.has(id)) selections.delete(id);
       else selections.add(id);
       return [...prev.slice(0, -1), { ...last, selections: Array.from(selections) }];
+    });
+  }, []);
+
+  /** tag 类上下文按引用挑：id 认卡，text 出词（卡删了 text 还在，引用就当自由文本活下去） */
+  const toggleTagRef = useCallback((ref: TagContextRef) => {
+    setStack(prev => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.type !== 'tagCtx' && last.type !== 'tagGroupBuiltin') return prev;
+      const refs = last.tagSelections || [];
+      const next = refs.some(r => r.id === ref.id)
+        ? refs.filter(r => r.id !== ref.id)
+        : [...refs, ref];
+      return [...prev.slice(0, -1), { ...last, tagSelections: next }];
     });
   }, []);
 
@@ -40,6 +54,14 @@ export function useTempContext() {
       return (last.tagGroups || []).some(g => g.tags.slice(0, -1).some(t => t.prompt === id));
     }
     return (last.selections || []).includes(id);
+  }, [stack]);
+
+  /** Check if a prompt card id is picked in the current tag-context layer */
+  const isTagRefSelected = useCallback((id: string): boolean => {
+    if (stack.length === 0) return false;
+    const last = stack[stack.length - 1];
+    if (last.type !== 'tagCtx' && last.type !== 'tagGroupBuiltin') return false;
+    return (last.tagSelections || []).some(r => r.id === id);
   }, [stack]);
 
   /** Remove a tag group by index in the current tag layer */
@@ -82,7 +104,9 @@ export function useTempContext() {
     pop,
     clear,
     toggleId,
+    toggleTagRef,
     isIdSelected,
+    isTagRefSelected,
     removeTagGroup,
     setLoraState,
     updateTop,

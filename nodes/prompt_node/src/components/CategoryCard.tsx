@@ -1,6 +1,6 @@
 import type { CategoryData, PromptData, TagGroup, FocusPoints } from '../types';
 import { PromptItem } from './PromptItem';
-import { isBasePromptSelectedInTags, findTagGroupByBasePrompt, tagsToDisplayName } from '../hooks/useSelection';
+import { isCardSelectedInTags, findTagGroupByCardId, tagsToDisplayName } from '../hooks/useSelection';
 
 const iconGrip = <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{verticalAlign:'middle'}}><circle cx="9" cy="6" r="1.8"/><circle cx="9" cy="12" r="1.8"/><circle cx="9" cy="18" r="1.8"/><circle cx="15" cy="6" r="1.8"/><circle cx="15" cy="12" r="1.8"/><circle cx="15" cy="18" r="1.8"/></svg>;
 const iconGrid = <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{verticalAlign:'middle'}}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>;
@@ -22,7 +22,7 @@ interface CategoryCardProps {
   isTemporary: boolean;
   matchFn?: (p: PromptData, cat: string) => boolean;
   onToggle: () => void;
-  onSelectPrompt: (prompt: string) => void;
+  onSelectPrompt: (card: PromptData) => void;
   onDragStartCategory: (e: React.DragEvent) => void;
   onDragStartPrompt: (e: React.DragEvent, category: string, id: string) => void;
   onDrop: (e: React.DragEvent) => void;
@@ -60,7 +60,7 @@ export function CategoryCard({
 
   const selectedCount = isTemporary
     ? filteredPrompts.length
-    : prompts.filter(p => isBasePromptSelectedInTags(p.prompt, selectedTags)).length;
+    : prompts.filter(p => isCardSelectedInTags(p.id, selectedTags)).length;
 
   return (
     <div
@@ -105,10 +105,10 @@ export function CategoryCard({
           onDragOver={e => { if (document.querySelector('.prompt-item.dragging')) e.preventDefault(); }}
         >
           {filteredPrompts.map(p => {
-            let isSelected = isTemporary ? false : isBasePromptSelectedInTags(p.prompt, selectedTags);
+            let isSelected = isTemporary ? false : isCardSelectedInTags(p.id, selectedTags);
             let selectedCardsHtml = '';
             if (!isTemporary) {
-              const group = findTagGroupByBasePrompt(p.prompt, selectedTags);
+              const group = findTagGroupByCardId(p.id, selectedTags);
               if (group) {
                 const display = tagsToDisplayName(group);
                 selectedCardsHtml = `<div class="selected-card"><div class="selected-card-content">${display}</div></div>`;
@@ -129,7 +129,7 @@ export function CategoryCard({
                 focusStyle={focusStyle}
                 decoTagsHtml={''}
                 selectedCardsHtml={selectedCardsHtml}
-                onClick={() => onSelectPrompt(p.prompt)}
+                onClick={() => onSelectPrompt(p)}
                 onDragStart={(e) => onDragStartPrompt(e, category, p.id)}
                 isDraggable
               />
