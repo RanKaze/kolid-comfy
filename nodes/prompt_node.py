@@ -158,8 +158,8 @@ class SnapshotPromptServer:
 
     @staticmethod
     def _detect_script(text):
-        """轻量语系探测（auto 源时判断"已是目标语言"用）：假名→日文,谚文→韩文,
-        汉字→中文,西里尔→俄文,其余（拉丁系）一律按英文算。"""
+        """轻量语系探测（把 auto 源落成真语言,再判"原文已是目标语言"）：假名→日文,谚文→韩文,
+        汉字→中文,西里尔→俄文,其余（拉丁系）一律按英文算,细分交给引擎。"""
         import re
         if re.search(r'[぀-ヿ]', text):
             return 'ja'
@@ -173,16 +173,18 @@ class SnapshotPromptServer:
 
     def translate_text(self, text, from_lang='auto', to_lang='zh'):
         """实时翻译（Prompt 编辑的右侧预览）：走 Translators 库 from→to。
-        from=auto 时按字符系探测,探测结果就是目标语言的原文直接跳过（无需翻译）。
+        auto 在交给引擎之前先自己探测成具体语系（youdao 拿到 from=auto 会连 to_language
+        一起无视,实测无论选什么目标都回中文/英文）；探测结果就是目标语言的原文回空串
+        （前端显示 [ Same Language ]）。
         引擎按序回退（粘性引擎优先,youdao 起排）,结果按 from>to:原文 小写缓存
         （容量封顶,超了整表清）。失败返回 (False, 原因)。"""
         text = str(text or '').strip()
         if not text:
             return True, ''
+        if from_lang == 'auto':
+            from_lang = self._detect_script(text)
         if from_lang == to_lang:
             return True, ''
-        if from_lang == 'auto' and self._detect_script(text) == to_lang:
-            return True, ''          # 原文已经是目标语言：无需翻译
         cache = getattr(self, '_translate_cache', None)
         if cache is None:
             cache = self._translate_cache = {}
@@ -193,10 +195,11 @@ class SnapshotPromptServer:
             import translators as ts
         except ImportError:
             return False, 'translators library not installed (pip install translators)'
-        # 粘性引擎：上次成功的引擎排最前,正常情况一次命中,不再每趟把整条回退链走一遍。
-        sticky = getattr(self, '_translate_sticky', None)
+        # 粘性引擎：上次成功的排最前,正常情况一次命中,不再每趟把整条回退链走一遍。
         # 实测排序：youdao 本地最快（~0.6s）,google 兜底较稳；粘性引擎之后自动跟随实际可用者。
-        order = ([sticky] if sticky else []) + [e for e in ('youdao', 'bing', 'alibaba', 'google') if e != sticky]
+        # bing 已从链里去掉：translators 6.0.4 的 bing 每次都 AttributeError('NoneType' xpath)。
+        sticky = getattr(self, '_translate_sticky', None)
+        order = ([sticky] if sticky else []) + [e for e in ('youdao', 'alibaba', 'google') if e != sticky]
         last_err = None
         for engine in order:
             try:
@@ -1838,8 +1841,8 @@ class SnapshotPromptServer:
                     self.send_error(500, "Server error")
 
             elif self.path == '/translate':
-                # Prompt 编辑的实时翻译：{text} -> {success, translation}。
-                # 含中文的原文直接回空串（前端显示"无需翻译"）。
+                # Prompt 编辑的实时翻译：{text, from, to} -> {success, translation}。
+                # 源语言已是目标语言时回空串（前端显示 [ Same Language ]）。
                 content_length = int(self.headers.get('Content-Length', 0))
                 post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
                 try:
