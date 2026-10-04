@@ -5661,15 +5661,17 @@ export function AppShell() {
                 <ImageSection previewUrl={modalPreviewUrl} previewVisible={modalPreviewVisible} focusX={modalFocusX} focusY={modalFocusY} focusVisible={modalFocusVisible} videoUrl={modalVideoUrl} isVideo={!!modalVideoFile || !!modalVideoUrl} fileName={modalFileName} videoVolume={modalVideoVolume} onVideoVolumeChange={setModalVideoVolume} clarityPoints={modalClarityPoints} onImageSelect={handleImageSelect} onPreviewClick={handlePreviewClick} onRemoveFocus={handleRemoveFocus} onPasteImage={handlePasteImage} onPreviewCtrlClick={handlePreviewCtrlClick} onPreviewCtrlRightClick={handlePreviewCtrlRightClick} />
               </div>
               <div className="prompt-edit-right">
-                <div className="prompt-lang-row" title="What language the prompt text is written in — Auto detect reads the script itself">
-                  <span>Prompt language</span>
-                  <select value={promptSourceLang} onChange={e => setPromptSourceLang(e.target.value)}>
-                    <option value="auto">Auto detect</option>
-                    {TRANSLATE_LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                  </select>
-                </div>
                 <div className="prompt-text-row">
-                  <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+                  <div className="prompt-text-col">
+                    <div className="prompt-lang-row" title="What language the prompt text is written in — Auto detect reads the script itself">
+                      <span>Prompt language</span>
+                      <select value={promptSourceLang} onChange={e => setPromptSourceLang(e.target.value)}>
+                        <option value="auto">Auto detect</option>
+                        {TRANSLATE_LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                      </select>
+                    </div>
+                    <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+                  </div>
                   <div className="prompt-translation">
                     <div className="prompt-translation-head">
                       <span>Translation</span>
@@ -5734,9 +5736,26 @@ export function AppShell() {
               </div>
               <div className="prompt-edit-right">
                 <div className="prompt-text-row">
-                  <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
-                  <div className="prompt-translation" title="Real-time translation (any language → Chinese via the Translators library). Chinese content needs no translation and stays blank.">
-                    {promptTranslating ? 'Translating…' : promptTranslation}
+                  <div className="prompt-text-col">
+                    <div className="prompt-lang-row" title="What language the prompt text is written in — Auto detect reads the script itself">
+                      <span>Prompt language</span>
+                      <select value={promptSourceLang} onChange={e => setPromptSourceLang(e.target.value)}>
+                        <option value="auto">Auto detect</option>
+                        {TRANSLATE_LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                      </select>
+                    </div>
+                    <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+                  </div>
+                  <div className="prompt-translation">
+                    <div className="prompt-translation-head">
+                      <span>Translation</span>
+                      <select value={translateTarget} onChange={e => changeTranslateTarget(e.target.value)} title="Target language — global setting, shared by every prompt">
+                        {TRANSLATE_LANGS.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                      </select>
+                    </div>
+                    <div className="prompt-translation-body">
+                      {promptTranslating ? 'Translating…' : promptTranslation}
+                    </div>
                   </div>
                 </div>
               </div>
