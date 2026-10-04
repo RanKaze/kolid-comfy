@@ -502,6 +502,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Drag-and-drop target: covers the canvas area, never swallows pointer events. */
 #dropOverlay { position: absolute; inset: 0; z-index: 110; display: none; align-items: center; justify-content: center; border-radius: 12px; background: rgba(0,122,255,0.10); border: 2px dashed rgba(0,122,255,0.8); pointer-events: none; }
 #dropOverlay .drop-card { padding: 12px 20px; border-radius: 12px; background: rgba(28,28,30,0.88); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.16); box-shadow: 0 6px 24px rgba(0,0,0,0.45); color: #fff; font-size: 13px; font-weight: 600; }
+/* Ctrl 悬浮放大预览：跟随指针的浮层，pointer-events 关掉——它永远不吃拖拽/点击。 */
+#hoverPreview { position: fixed; left: 0; top: 0; z-index: 300; display: none; padding: 6px; border-radius: 10px; background: rgba(28,28,30,0.92); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.18); box-shadow: 0 10px 32px rgba(0,0,0,0.5); pointer-events: none; }
+#hoverPreview canvas { display: block; border-radius: 6px; }
 label { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); white-space: nowrap; }
 input[type="range"] { cursor: pointer; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.15); outline: none; width: 100px; }
 input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); cursor: pointer; margin-top: -6px; }
@@ -892,6 +895,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div id="sceneAxisDock" class="s3d-float"><svg id="sceneAxisGizmo" viewBox="-32 -32 64 64" width="62" height="62" aria-hidden="true" focusable="false"></svg></div>
         </div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
+        <div id="hoverPreview"><canvas id="hoverPreviewCanvas"></canvas></div>
         <div id="brushCursor"></div>
         <!-- 按住右键那一路的眼睛光标:瞳孔正好钉在指针上,和 #brushCursor 同一套 DOM 光标。 -->
         <div id="lookCursor"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.4 12S5.9 6.2 12 6.2 21.6 12 21.6 12 18.1 17.8 12 17.8 2.4 12 2.4 12z"/><circle cx="12" cy="12" r="3.1" fill="currentColor" stroke="none"/></svg></div>
@@ -5864,6 +5868,11 @@ function renderStackList(listEl, stack) {
             try { ev.dataTransfer.setData('application/x-blend-layer', String(l.id)); } catch (e) { /* 类型受限时只剩排序 */ }
         });
         row.addEventListener('dragend', () => { row.classList.remove('dragging'); dragRowId = null; });
+        // Ctrl 悬浮：放大预览这条图层的合成结果（layerSource 现取，永远跟着 attribute 走）。
+        hpWire(row, () => {
+            if (!l.img) return null;
+            try { return layerSource(l); } catch (e) { return null; }
+        });
         // 行拖拽（图层重排序）只在真的是「拖动图层」时接管 —— 拖外部文件 / 拖工作区缩略图
         // 经过这里时因为 dragRowId 为 null 而原样放行，让 window 的全局拖入去处理
         // （否则会亮起插入线误导，也看不见画布的全屏 drop 提示）。
@@ -9715,6 +9724,96 @@ function patchSelectedText(patch, historyKey) {
     patchTextLayer(l, patch, { historyKey });
 }
 
+// ==================== Alt 悬浮放大预览 ====================
+// 按住 Alt 悬浮在工作区卡片 / 钉死的 Context·Guidance 卡 / 图层行上：浮出一张放大预览，
+// 跟随指针、贴边自动让位。图层给的是合成结果（layerSource —— decal / FX / mask 全部折入），
+// 工作区给的是条目原图，Context / Guidance 给的是全分辨率画布读法。
+// 预览浮层 pointer-events 关掉，永远不吃拖拽和点击。
+const hoverPreviewEl = document.getElementById('hoverPreview');
+const hoverPreviewCanvas = document.getElementById('hoverPreviewCanvas');
+const hoverPreviewCtx = hoverPreviewCanvas ? hoverPreviewCanvas.getContext('2d') : null;
+const HP_MAX = 480;
+let hpHover = null;    // () => canvas|Image|null —— 当前悬浮对象的预览源；null = 指针不在可预览对象上
+
+function hpHide() {
+    if (hoverPreviewEl) hoverPreviewEl.style.display = 'none';
+}
+
+function hpShow(ev) {
+    if (!hoverPreviewEl || !hoverPreviewCtx) return;
+    const src = hpHover && hpHover();
+    if (!src || !src.width || !src.height) { hoverPreviewEl.style.display = 'none'; return; }
+    const scale = Math.min(1, HP_MAX / src.width, HP_MAX / src.height);
+    const w = Math.max(1, Math.round(src.width * scale));
+    const h = Math.max(1, Math.round(src.height * scale));
+    if (hoverPreviewCanvas.width !== w || hoverPreviewCanvas.height !== h) {
+        hoverPreviewCanvas.width = w; hoverPreviewCanvas.height = h;
+    }
+    hoverPreviewCtx.setTransform(1, 0, 0, 1, 0, 0);
+    hoverPreviewCtx.clearRect(0, 0, w, h);
+    hoverPreviewCtx.drawImage(src, 0, 0, w, h);
+    hoverPreviewEl.style.display = 'block';
+    hpPosition(ev);
+}
+
+function hpPosition(ev) {
+    if (!hoverPreviewEl) return;
+    const r = hoverPreviewEl.getBoundingClientRect();
+    let x = ev.clientX + 18, y = ev.clientY + 18;
+    if (x + r.width > window.innerWidth - 8) x = Math.max(8, ev.clientX - r.width - 18);
+    if (y + r.height > window.innerHeight - 8) y = Math.max(8, ev.clientY - r.height - 18);
+    hoverPreviewEl.style.left = x + 'px';
+    hoverPreviewEl.style.top = y + 'px';
+}
+
+// 同一套三件套（enter / move / leave）喂给所有可预览对象：provider 每次现取，图层预览
+// 永远是当下的合成结果。Ctrl 是移动中读取的；指针不动时按下/松开由全局 keydown/up 补同步。
+function hpWire(el, provider) {
+    if (!el) return;
+    el.addEventListener('mouseenter', ev => {
+        hpHover = provider;
+        if (ev.altKey) hpShow(ev);
+    });
+    el.addEventListener('mousemove', ev => {
+        hpHover = provider;
+        if (ev.altKey) hpShow(ev);
+        else hpHide();
+    });
+    el.addEventListener('mouseleave', () => { hpHover = null; hpHide(); });
+}
+window.addEventListener('keydown', e => { if (e.key === 'Alt' && hpHover) { e.preventDefault(); hpShow(e); } });
+window.addEventListener('keyup', e => { if (e.key === 'Alt' && hpHover) hpHide(); });
+
+// 工作区条目的源是一张 URL：按条目 id 缓存解码结果，加载完成后的第一次移动就会出图。
+const hpImgCache = new Map();
+function hpStagingSource(s) {
+    if (!s || !s.src) return null;
+    let img = hpImgCache.get(s.id);
+    if (!img) {
+        img = new Image();
+        img.src = s.src;
+        hpImgCache.set(s.id, img);
+    }
+    return (img.complete && img.naturalWidth > 0) ? img : null;
+}
+
+// Guidance 卡片的预览源：blendCanvas + guidanceCanvas 1:1 合成（与卡片缩略图同一读法，
+// 只是全分辨率）。复用一份缓冲，预览不产生新的分配。
+let hpGuidBuf = null;
+function hpGuidanceSource() {
+    if (!canvasW || !canvasH) return null;
+    if (!hpGuidBuf) hpGuidBuf = document.createElement('canvas');
+    if (hpGuidBuf.width !== canvasW || hpGuidBuf.height !== canvasH) {
+        hpGuidBuf.width = canvasW; hpGuidBuf.height = canvasH;
+    }
+    const c = hpGuidBuf.getContext('2d');
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, canvasW, canvasH);
+    c.drawImage(blendCanvas, 0, 0);
+    c.drawImage(guidanceCanvas, 0, 0);
+    return hpGuidBuf;
+}
+
 // ==================== 拖入本地图片 ====================
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
 // hands the pixels to the backend directly.
@@ -9767,6 +9866,7 @@ window.addEventListener('drop', e => {
 // 又没落进任何落点的拖拽会把全屏提示永远留在屏幕上。
 window.addEventListener('dragend', () => {
     dropOverlay.style.display = 'none';
+    hpHide();       // Ctrl 预览开着时直接起拖：拖拽吞掉后续鼠标事件，靠这里收尾
 });
 
 // Don't let a focused sidebar control swallow the canvas shortcuts (T/M/B/E, space, arrows…).
@@ -13782,7 +13882,7 @@ function paintPinnedCard(img, withGuidance) {
     } catch (e) { /* taint 等异常：保持文字态 */ return null; }
 }
 
-function makePinnedCard(cls, labelText, tokenId, title) {
+function makePinnedCard(cls, labelText, tokenId, title, previewProvider) {
     const item = document.createElement('div');
     item.className = 'staging-item ' + cls;
     item.title = title;
@@ -13797,6 +13897,9 @@ function makePinnedCard(cls, labelText, tokenId, title) {
     label.textContent = labelText;
     item.appendChild(label);
     item.addEventListener('click', () => insertImageIdToken(tokenId));
+    // Alt 悬浮放大预览：Context = 当前 context image（blendCanvas），Guidance = 叠上
+    // guidance 栈的全分辨率合成 —— 都比卡片里那张 54px 缩略图大得多。
+    if (previewProvider) hpWire(item, previewProvider);
     return item;
 }
 
@@ -13806,11 +13909,13 @@ function renderStaging() {
     strip.textContent = '';
     // 两张钉死卡片恒在最左侧（空池时也在），Context 在前、Guidance 紧随。
     const ctxCard = makePinnedCard('staging-context', 'Context', 'context',
-        'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.');
+        'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.',
+        () => (canvasW && canvasH) ? blendCanvas : null);
     contextCardImg = ctxCard.querySelector('.context-preview');
     strip.appendChild(ctxCard);
     const gCard = makePinnedCard('staging-guidance', 'Guidance', GUIDANCE_CARD_ID,
-        'Guidance — the Layers composite with the whole Guidances stack painted over it. Always in the workspace as <image_id:staging_guidance>; with an empty Guidances stack it is the composite alone.');
+        'Guidance — the Layers composite with the whole Guidances stack painted over it. Always in the workspace as <image_id:staging_guidance>; with an empty Guidances stack it is the composite alone.',
+        hpGuidanceSource);
     guidanceCardImg = gCard.querySelector('.context-preview');
     strip.appendChild(gCard);
     schedulePinnedCardPreview();
@@ -13841,6 +13946,8 @@ function renderStaging() {
             ev.dataTransfer.effectAllowed = 'copy';
             try { ev.dataTransfer.setData(STAGING_ITEM_TYPE, String(s.id)); } catch (e) { /* 老宿主不认就当没有 */ }
         });
+        // Ctrl 悬浮：放大预览条目原图。
+        hpWire(item, () => hpStagingSource(s));
         item.appendChild(img);
         const rm = document.createElement('button');
         rm.className = 'staging-remove';
