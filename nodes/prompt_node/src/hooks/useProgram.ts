@@ -2,8 +2,9 @@ import { useMemo } from 'react';
 import type {
   AllPrompts, AllPrograms, SelectedProgramItem, ProgramData,
   TagGroup, LoraItemData, LoraSelectionData, LoraSliderConfig, SelectedPrefabItem, AllLibraries,
+  TagContextRef,
 } from '../types';
-import { tagsToDisplayString, parseStringToTags } from './useSelection';
+import { tagsToDisplayString, parseStringToTags, pinGroupBaseId, tagRefKey } from './useSelection';
 
 function toList(v: string | string[] | undefined): string[] {
   if (Array.isArray(v)) return v;
@@ -107,7 +108,7 @@ export function useProgram(
       ctxSource?: {
         context_prefab_guids?: string[];
         context_lora_paths?: string[];
-        context_tag_texts?: string[];
+        context_tag_texts?: TagContextRef[];
         context_prefab_inactive?: string[];
         context_lora_inactive?: string[];
         context_tag_inactive?: string[];
@@ -116,14 +117,14 @@ export function useProgram(
         enable_tag_context?: boolean;
         prefab_builtin_guids?: string[];
         lora_builtin_paths?: string[];
-        tag_group_builtin_texts?: string[];
+        tag_group_builtin_texts?: TagContextRef[];
         prefab_builtin_inactive?: string[];
         lora_builtin_inactive?: string[];
         tag_group_builtin_inactive?: string[];
       };
     }
     const activePrograms: ActiveProgram[] = [];
-    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_tag_texts?: string[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_tag_inactive?: string[] }[], resolved: Set<string>, depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
+    function resolvePrograms(items: { id: string; context_prefab_guids?: string[]; context_lora_paths?: string[]; context_tag_texts?: TagContextRef[]; context_prefab_inactive?: string[]; context_lora_inactive?: string[]; context_tag_inactive?: string[] }[], resolved: Set<string>, depth = 0, inheritedCtx?: ActiveProgram['ctxSource']) {
       for (const item of items) {
         const pid = item.id;
         if (resolved.has(pid)) continue;
@@ -283,9 +284,9 @@ export function useProgram(
           }).filter(Boolean) as LoraSelectionData[];
         }
         if (cs.enable_tag_context && cs.context_tag_texts) {
-          tagContext = cs.context_tag_texts.map((text: string) => {
-            const isActive = !(cs.context_tag_inactive || []).includes(text);
-            const tg = parseStringToTags(text, allPrompts);
+          tagContext = cs.context_tag_texts.map((ref: TagContextRef) => {
+            const isActive = !(cs.context_tag_inactive || []).includes(tagRefKey(ref));
+            const tg = pinGroupBaseId(parseStringToTags(ref.text, allPrompts), ref.id);
             return { ...tg, active: isActive };
           });
         }
@@ -308,9 +309,9 @@ export function useProgram(
           }).filter(Boolean) as LoraSelectionData[];
         }
         if (cs.tag_group_builtin_texts) {
-          tagGroupBuiltin = cs.tag_group_builtin_texts.map((text: string) => {
-            const isActive = !(cs.tag_group_builtin_inactive || []).includes(text);
-            const tg = parseStringToTags(text, allPrompts);
+          tagGroupBuiltin = cs.tag_group_builtin_texts.map((ref: TagContextRef) => {
+            const isActive = !(cs.tag_group_builtin_inactive || []).includes(tagRefKey(ref));
+            const tg = pinGroupBaseId(parseStringToTags(ref.text, allPrompts), ref.id);
             return { ...tg, active: isActive };
           });
         }

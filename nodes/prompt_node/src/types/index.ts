@@ -21,6 +21,14 @@ export interface Tag {
   prompt: string;
   category: string;
   tags?: string[];
+  /** 基 tag 指向的 prompt 卡 id —— 认人只用它，不用文本。自由文本 tag（解析来的、卡已删的）没有这个键。 */
+  base_id?: string;
+}
+
+/** tag context 里的一条 prompt 卡引用：id 认人，text 出词。 */
+export interface TagContextRef {
+  id: string;
+  text: string;
 }
 
 export type SourceMode = 'normal' | 'parsing' | 'program';
@@ -149,10 +157,10 @@ export interface TempContextRestorePoint {
   enableTagCtx?: boolean;
   ctxPrefabGuids?: string[];
   ctxLoraPaths?: string[];
-  ctxTagTexts?: string[];
+  ctxTagTexts?: TagContextRef[];
   prefabBuiltinGuids?: string[];
   loraBuiltinPaths?: string[];
-  tagGroupBuiltinTexts?: string[];
+  tagGroupBuiltinTexts?: TagContextRef[];
   prefabBuiltinInactive?: string[];
   loraBuiltinInactive?: string[];
   tagGroupBuiltinInactive?: string[];
@@ -184,6 +192,8 @@ export interface TempContextLayer {
   level?: number;
   // lora/prefab mode fields
   selections?: string[];
+  // tagCtx / tagGroupBuiltin mode fields：引用 = 卡 id + 出词的文本
+  tagSelections?: TagContextRef[];
   restorePoint?: TempContextRestorePoint;
   // lora mode: per-file-path state
   loraStates?: Record<string, LoraTempState>;
@@ -286,7 +296,7 @@ export interface SelectedProgramRef {
   active?: boolean;
   context_prefab_guids?: string[];
   context_lora_paths?: string[];
-  context_tag_texts?: string[];
+  context_tag_texts?: TagContextRef[];
   context_prefab_inactive?: string[];
   context_lora_inactive?: string[];
   context_tag_inactive?: string[];
@@ -304,7 +314,7 @@ export interface ProgramData {
   multi_program?: boolean;
   prefab_builtin_guids?: string[];
   lora_builtin_paths?: string[];
-  tag_group_builtin_texts?: string[];
+  tag_group_builtin_texts?: TagContextRef[];
   prefab_builtin_inactive?: string[];
   lora_builtin_inactive?: string[];
   tag_group_builtin_inactive?: string[];
@@ -330,7 +340,7 @@ export interface SelectedProgramItem {
   // Per-instance context overrides (independent copies for multi_program)
   context_prefab_guids?: string[];
   context_lora_paths?: string[];
-  context_tag_texts?: string[];
+  context_tag_texts?: TagContextRef[];
   context_prefab_inactive?: string[];
   context_lora_inactive?: string[];
   context_tag_inactive?: string[];

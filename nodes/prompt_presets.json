@@ -65,9 +65,22 @@
           {
             "tags": [
               {
-                "name": "肉穴",
-                "prompt": "pussy",
-                "category": "人物要素"
+                "name": "腹直肌中间的中央沟/竖线",
+                "prompt": "linea alba",
+                "category": "人物要素",
+                "base_id": "custom_1780631334_d83ca2c5"
+              }
+            ],
+            "strength": 1,
+            "source": "normal"
+          },
+          {
+            "tags": [
+              {
+                "name": "乳头",
+                "prompt": "nipples",
+                "category": "人物要素",
+                "base_id": "custom_1777408995_7a5fb1cb"
               }
             ],
             "strength": 1,
@@ -78,12 +91,14 @@
               {
                 "name": "白色",
                 "prompt": "white",
-                "category": "颜色"
+                "category": "颜色",
+                "base_id": "custom_1777477368_46ca7fba"
               },
               {
                 "name": "阴毛",
                 "prompt": "pubic hair",
-                "category": "人物要素"
+                "category": "人物要素",
+                "base_id": "custom_1777408987_07ffafae"
               }
             ],
             "strength": 1,
@@ -92,9 +107,10 @@
           {
             "tags": [
               {
-                "name": "吊下诱惑 0",
-                "prompt": "extreme close-up, low angle, The camera is very close to her crotch, looking sharply upward.\nShe squats facing the camera, knees wide, heels down, looking down at the lens.\nA black man stands directly behind her, facing the camera, His long black penis lies on top of her hair, The glans rests at her hairline.\nnipples uncovered. No panties. vulva visible.\nBoth hands pull the labia wide apart toward the lens. A jeweled anal plug with a large crystal gem base sits in her anus.",
-                "category": "场景(Natural)"
+                "name": "立柱拘束 0",
+                "prompt": "The main subject is a girl, Her features appear soft under the warm, gentle lighting that illuminates the room, casting a soft glow across her face.\\n\\nIn the full-body photo, she stands confidently with her legs slightly apart, emphasizing her posture and the intriguing element of the thick steel bar that extends from a sturdy baseplate set into the floor. The bar is positioned directly between her legs, adding an element of mystery and allure to the scene. She holds her hands behind her head, her fingers gently intertwined, exuding a sense of control and poise.\\n\\nAdding to the dramatic flair, she dons a metal slave collar, a symbol that contrasts beautifully with her otherwise serene appearance. The photograph captures her in this unique and captivating position, suspended between the bar and the baseplate, creating a visually compelling and thought-provoking image that combines artistry, emotion, and a touch of the unconventional.\",",
+                "category": "场景(Natural)",
+                "base_id": "custom_1791134237_319e4e8f"
               }
             ],
             "strength": 1,
@@ -114,54 +130,25 @@
             "split_mode": false
           },
           {
-            "file_path": "F:/ComfyDB/models/loras/滑块/Krea2/mons_pubis_krea2_loraholic.safetensors",
-            "name": "馒头逼",
-            "strength": 4.5,
-            "active_tags": [],
-            "active": true,
+            "file_path": "F:/ComfyDB/models/loras/修正/Krea2/western_innie_pussy_epoch_10.safetensors",
+            "name": "innie pussy 粉嫩屄 粉木耳|一线天 馒头屄",
+            "strength": 0.3,
+            "active_tags": [
+              "krea2innie, innie pussy, uncensored"
+            ],
+            "active": false,
             "split_mode": false,
             "slider_config": {
-              "enabled": true,
-              "min": -6,
-              "max": 8,
-              "step": 0.1,
-              "min_name": "薄逼",
-              "max_name": "馒头逼",
-              "reverse": false
-            }
-          },
-          {
-            "file_path": "F:/ComfyDB/models/loras/滑块/Krea2/pubes_krea2_loraholic.safetensors",
-            "name": "阴毛茂密程度",
-            "strength": -1.3,
-            "active_tags": [],
-            "active": true,
-            "split_mode": false,
-            "slider_config": {
-              "enabled": true,
-              "min": -2,
+              "enabled": false,
+              "min": 0,
               "max": 2,
               "step": 0.1,
-              "min_name": "稀疏",
-              "max_name": "茂密",
-              "reverse": false
-            }
-          },
-          {
-            "file_path": "F:/ComfyDB/models/loras/滑块/Krea2/hair_volume_krea2_loraholic.safetensors",
-            "name": "头发卷曲",
-            "strength": -1.7,
-            "active_tags": [],
-            "active": true,
-            "split_mode": false,
-            "slider_config": {
-              "enabled": true,
-              "min": -5,
-              "max": 5,
-              "step": 0.1,
-              "min_name": "直",
-              "max_name": "曲",
-              "reverse": false
+              "default_value": 1,
+              "min_name": "",
+              "max_name": "",
+              "reverse": false,
+              "marks": [],
+              "model_only": true
             }
           }
         ],

@@ -13,7 +13,7 @@ export const TRANSLATE_LANGS: { code: string; label: string }[] = [
 import type {
   AllPrompts, AllLibraries, PointsResponse,
   CategoryDisplayModes, CategorySizeModes, FocusPoints, DragState,
-  PromptData, TagGroup, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem, SelectedProgramRef,
+  PromptData, TagGroup, TagContextRef, PrefabData, CategoryData, LibraryData, ProgramData, AllPrograms, ProgramCategoryData, SelectedProgramItem, SelectedProgramRef,
   LoraItemData, LoraSelectionData, LoraSliderConfig, SelectedPrefabItem, SelectedPrefabRef, SelectedPrefabLoraState, SelectedPrefabTagState,
   PromptContextBase, RegionContext, RegionBox, BackgroundContext,
 } from '../types';
@@ -22,8 +22,9 @@ import {
 } from '../modules';
 import {
   parseStringToTags, tagsToDisplayName, tagsToDisplayString,
-  findPromptData, combineTagGroups,
-  isBasePromptSelectedInTags, findTagGroupByBasePrompt,
+  findPromptData, findPromptDataById, combineTagGroups,
+  isCardSelectedInTags, findTagGroupByCardId, findTagGroupIndexByCardId, createCardTag, migrateTagGroups,
+  migrateTagRefSet, pinGroupBaseId, findPromptId, tagRefKey, retextCardTag, retextTagRefs,
   tryParseLine,
 } from '../hooks/useSelection';
 import { useApi } from '../hooks/useApi';
@@ -479,7 +480,7 @@ export function AppShell() {
     // (no text re-parsing; source flags like 'parsing' are preserved verbatim).
     if (data.preset_selection) {
       const bs = data.preset_selection as { tags?: TagGroup[]; custom_prompts?: string };
-      setSelectedTags((bs.tags || []).map(g => ({ ...g, tags: (g.tags || []).map(t => ({ ...t })) })));
+      setSelectedTags(migrateTagGroups((bs.tags || []).map(g => ({ ...g, tags: (g.tags || []).map(t => ({ ...t })) })), data.categories));
       setCustomPrompts(bs.custom_prompts || '');
       return data;
     }
@@ -778,19 +779,22 @@ export function AppShell() {
     const appIds = new Set(allAppEntries.map(a => a.id));
     const restored: SelectedProgramItem[] = lastSelectedPrograms
       .filter(sa => appIds.has(sa.id))
-      .map(sa => ({
-        id: sa.id,
-        active: sa.active !== false,
-        context_prefab_guids: sa.context_prefab_guids,
-        context_lora_paths: sa.context_lora_paths,
-        context_tag_texts: sa.context_tag_texts,
-        context_prefab_inactive: sa.context_prefab_inactive,
-        context_lora_inactive: sa.context_lora_inactive,
-        context_tag_inactive: sa.context_tag_inactive,
-      }));
+      .map(sa => {
+        const ctxTags = migrateTagRefSet(sa.context_tag_texts, sa.context_tag_inactive, allPrompts);
+        return {
+          id: sa.id,
+          active: sa.active !== false,
+          context_prefab_guids: sa.context_prefab_guids,
+          context_lora_paths: sa.context_lora_paths,
+          context_tag_texts: ctxTags.refs,
+          context_prefab_inactive: sa.context_prefab_inactive,
+          context_lora_inactive: sa.context_lora_inactive,
+          context_tag_inactive: ctxTags.keys,
+        };
+      });
     setSelectedPrograms(restored);
     programRestoredRef.current = true;
-  }, [allPrograms, lastSelectedPrograms]);
+  }, [allPrograms, allPrompts, lastSelectedPrograms]);
 
   // Listen for context switch from parent (iframe embedding) + notify ready
   const isReloadingRef = useRef(false);
@@ -1081,10 +1085,10 @@ export function AppShell() {
   const [modalEnableTagCtx, setModalEnablePromptCtx] = useState(false);
   const [modalCtxPrefabGuids, setModalCtxPrefabGuids] = useState<string[]>([]);
   const [modalCtxLoraPaths, setModalCtxLoraPaths] = useState<string[]>([]);
-  const [modalCtxTagTexts, setModalCtxPromptTexts] = useState<string[]>([]);
+  const [modalCtxTagTexts, setModalCtxPromptTexts] = useState<TagContextRef[]>([]);
   const [modalPrefabBuiltinGuids, setModalPrefabBuiltinGuids] = useState<string[]>([]);
   const [modalLoraBuiltinPaths, setModalLoraBuiltinPaths] = useState<string[]>([]);
-  const [modalPromptBuiltinTexts, setModalPromptBuiltinTexts] = useState<string[]>([]);
+  const [modalPromptBuiltinTexts, setModalPromptBuiltinTexts] = useState<TagContextRef[]>([]);
   const [modalPrefabBuiltinInactive, setModalPrefabBuiltinInactive] = useState<string[]>([]);
   const [modalLoraBuiltinInactive, setModalLoraBuiltinInactive] = useState<string[]>([]);
   const [modalPromptBuiltinInactive, setModalPromptBuiltinInactive] = useState<string[]>([]);
@@ -1297,14 +1301,16 @@ export function AppShell() {
       const val = input.value.trim();
       if (val) {
         const segments = val.split(',').map(s => s.trim()).filter(Boolean);
+        const next: TagContextRef[] = [...modalPromptBuiltinTexts];
         for (const seg of segments) {
           const result = tryParseLine(seg, allPrompts);
-          if (result && !modalPromptBuiltinTexts.includes(result.tagGroup.tags.map(t => t.prompt).join(','))) {
-            setModalPromptBuiltinTexts(prev => [...prev, result.tagGroup.tags.map(t => t.prompt).join(',')]);
-          } else if (!modalPromptBuiltinTexts.includes(seg)) {
-            setModalPromptBuiltinTexts(prev => [...prev, seg]);
-          }
+          const text = result ? result.tagGroup.tags.map(t => t.prompt).join(',') : seg;
+          const baseTag = result?.tagGroup.tags[result.tagGroup.tags.length - 1];
+          const id = baseTag?.base_id || findPromptId(text, allPrompts);
+          if (next.some(r => (r.id || r.text) === (id || text))) continue;
+          next.push({ id, text });
         }
+        setModalPromptBuiltinTexts(next);
         input.value = '';
         setBuiltinTagInputShowDropdown(false);
         setBuiltinTagInputQuery('');
@@ -1636,13 +1642,13 @@ export function AppShell() {
   }, [temporaryPrompts, setTemporaryPrompts, setCustomPrompts]);
 
   // ========== Select Prompt (full toggle logic) ==========
-  const selectPrompt = useCallback((prompt: string) => {
+  // 认人只认卡 id：基 tag 上带 base_id，编辑卡的文本/名字后选中组照样跟着这张卡（见 updatePrompt）。
+  const selectPrompt = useCallback((card: PromptData & { category?: string }) => {
     clearZoomState();
     snapshotZoom();
     const ctxStack = tempCtx.stack;
     if (ctxStack.length > 0) {
-      const ctx = ctxStack[ctxStack.length - 1] as { matchFn?: (p: PromptData, cat: string) => boolean; basePrompt?: string; tagGroups?: TagGroup[]; level?: number };
-      const promptData = findPromptData(prompt, allPrompts);
+      const promptData = findPromptData(card.prompt, allPrompts);
       if (!promptData) return;
 
       // Toggle the tag (no decoration sub-context)
@@ -1650,9 +1656,10 @@ export function AppShell() {
         const stack = [...prev];
         const lastIdx = stack.length - 1;
         const last = stack[lastIdx];
-        const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.tags.slice(0, -1).some(t => t.prompt === prompt));
+        // 装饰位判据仍按文本：子上下文里挑进来的是散装装饰 tag（多数不是卡），身份不是卡 id
+        const existing = (last.tagGroups || []).findIndex((g: TagGroup) => g.tags.slice(0, -1).some(t => t.prompt === card.prompt));
         const newLast = { ...last, tagGroups: existing === -1
-          ? [...(last.tagGroups || []), { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, source: 'normal' as const }]
+          ? [...(last.tagGroups || []), { tags: [createCardTag({ ...promptData, category: promptData.category || '' })], strength: 1.0, source: 'normal' as const }]
           : (last.tagGroups || []).filter((_g: TagGroup, i: number) => i !== existing)
         };
         stack[lastIdx] = newLast;
@@ -1661,12 +1668,12 @@ export function AppShell() {
       return;
     }
 
-    const promptData = findPromptData(prompt, allPrompts);
+    const promptData = findPromptData(card.prompt, allPrompts);
     if (!promptData) return;
 
     setSelectedTags(prev => {
-      const idx = prev.findIndex(g => g.tags[g.tags.length - 1]?.prompt === prompt);
-      if (idx === -1) return [...prev, { tags: [{ name: promptData.name, prompt, category: promptData.category || "" }], strength: 1.0, source: 'normal' }];
+      const idx = findTagGroupIndexByCardId(card.id, prev);
+      if (idx === -1) return [...prev, { tags: [createCardTag({ ...promptData, category: promptData.category || '' })], strength: 1.0, source: 'normal' }];
       return prev.filter((_, i) => i !== idx);
     });
   }, [tempCtx, allPrompts, setSelectedTags]);
@@ -1682,7 +1689,7 @@ export function AppShell() {
       const bp = findPromptData(ctx.basePrompt || '', allPrompts);
       const bpName = bp ? bp.name : '';
       const bdn = Math.max(0, (ctx.level || 1) - 1);
-      const combined = combineTagGroups(tagGroups, ctx.basePrompt || '', bpName, bdn, allPrompts);
+      const combined = combineTagGroups(tagGroups, ctx.basePrompt || '', bpName, bdn, allPrompts, bp?.id);
       if (stack.length > 0) {
         const prevCtx = { ...stack[stack.length - 1] };
         prevCtx.tagGroups = [...(prevCtx.tagGroups || []), combined];
@@ -1713,17 +1720,20 @@ export function AppShell() {
   );
 
   // ========== Tag Selection Helper ==========
-  const isTagSelected = useCallback((prompt: string) => {
-    return isBasePromptSelectedInTags(prompt, selectedTags);
+  const isTagSelected = useCallback((cardId: string) => {
+    return isCardSelectedInTags(cardId, selectedTags);
   }, [selectedTags]);
 
-  const getTagGroupForPrompt = useCallback((prompt: string): TagGroup | undefined => {
-    return findTagGroupByBasePrompt(prompt, selectedTags);
+  const getTagGroupForPrompt = useCallback((cardId: string): TagGroup | undefined => {
+    return findTagGroupByCardId(cardId, selectedTags);
   }, [selectedTags]);
 
-  const isPromptSelectedInTempCtx = useCallback((prompt: string): boolean => {
-    return tempCtx.isIdSelected(prompt);
-  }, [tempCtx]);
+  // 卡面高亮判据：tagCtx/tagGroupBuiltin 认 {id,text} 引用；筛选态临时上下文仍按文本；常态按卡 id
+  const isCardSelectedInView = useCallback((card: { id: string; prompt: string }): boolean => {
+    if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') return tempCtx.isTagRefSelected(card.id);
+    if (isTemporary) return tempCtx.isIdSelected(card.prompt);
+    return isCardSelectedInTags(card.id, selectedTags);
+  }, [tempCtx, isTemporary, selectedTags]);
 
   const removeTag = useCallback((idx: number) => {
     setSelectedTags(prev => prev.filter((_, i) => i !== idx));
@@ -2045,7 +2055,7 @@ export function AppShell() {
   const mergePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
     snapshotZoom();
-    const prefabTags = pf.tag_groups || [];
+    const prefabTags = migrateTagGroups((pf.tag_groups || []) as TagGroup[], allPrompts);
     const prefabCp = pf.custom_prompts || '';
     const prefabLoras = pf.loras || [];
     const prefabSelectedPrefabs = pf.selected_prefabs || [];
@@ -2214,12 +2224,12 @@ export function AppShell() {
         return next;
       }
     });
-  }, [selectedTags, setSelectedTags, setCustomPrompts, selectedLoras, setSelectedLoras, loraData, setLoraSelections, setSelectedPrefabs, findPrefabByGuid, buildPrefabItemTree]);
+  }, [selectedTags, setSelectedTags, setCustomPrompts, selectedLoras, setSelectedLoras, loraData, setLoraSelections, setSelectedPrefabs, findPrefabByGuid, buildPrefabItemTree, allPrompts]);
 
   const replacePrefab = useCallback((pf: PrefabData) => {
     clearZoomState();
     snapshotZoom();
-    const tagGroups: TagGroup[] = (pf.tag_groups || []) as TagGroup[];
+    const tagGroups: TagGroup[] = migrateTagGroups((pf.tag_groups || []) as TagGroup[], allPrompts);
     setSelectedTags(tagGroups);
     setCustomPrompts(pf.custom_prompts || '');
 
@@ -2257,7 +2267,7 @@ export function AppShell() {
     }
     setSelectedLoras(newSelectedLoras);
     setLoraSelections(newLoraSelections);
-  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, loraSliderConfigs, setSelectedLoras, setLoraSelections]);
+  }, [setSelectedTags, setCustomPrompts, setSelectedPrefabs, buildPrefabItemTree, loraData, loraSliderConfigs, setSelectedLoras, setLoraSelections, allPrompts]);
 
   // ========== Load From Image ==========
   const handleLoadFromImageClick = useCallback(() => {
@@ -2325,7 +2335,7 @@ export function AppShell() {
     try {
       if (loaded.prompts) loadedPromptItems = typeof loaded.prompts === 'string' ? JSON.parse(loaded.prompts) : loaded.prompts;
     } catch {}
-    const newTags = regularSegments.map((s, i) => {
+    const newTags: TagGroup[] = regularSegments.map((s, i) => {
       const tg = parseStringToTags(s, allPrompts);
       const key = tagsToDisplayString(tg);
       const isFromParsing = loadedParsedKeys.has(key);
@@ -2426,7 +2436,7 @@ export function AppShell() {
     let newPrograms: SelectedProgramItem[] = [];
     try {
       const programArr = JSON.parse(loaded.program || '[]');
-      newPrograms = programArr.map((p: any) => ({ id: p.id, active: p.active !== false, context_prefab_guids: p.context_prefab_guids, context_lora_paths: p.context_lora_paths, context_tag_texts: p.context_tag_texts, context_prefab_inactive: p.context_prefab_inactive, context_lora_inactive: p.context_lora_inactive, context_tag_inactive: p.context_tag_inactive }));
+      newPrograms = programArr.map((p: any) => { const ctxTags = migrateTagRefSet(p.context_tag_texts, p.context_tag_inactive, allPrompts); return { id: p.id, active: p.active !== false, context_prefab_guids: p.context_prefab_guids, context_lora_paths: p.context_lora_paths, context_tag_texts: ctxTags.refs, context_prefab_inactive: p.context_prefab_inactive, context_lora_inactive: p.context_lora_inactive, context_tag_inactive: ctxTags.keys }; });
     } catch {}
 
     // --- Parse filter data (items removed by programs) and restore with original source ---
@@ -2439,7 +2449,7 @@ export function AppShell() {
         if (ftSource === 'program') continue;
         const key = tagsToDisplayString(ft);
         if (!existingTagKeys.has(key)) {
-          newTags.push({ ...ft, tags: ft.tags.map((t: any) => ({ ...t })), source: ftSource });
+          newTags.push(migrateTagGroups([{ ...ft, tags: ft.tags.map((t: any) => ({ ...t })), source: ftSource }], allPrompts)[0]);
           existingTagKeys.add(key);
         }
       }
@@ -3101,9 +3111,23 @@ export function AppShell() {
         }
         return next;
       });
+      // 卡片文本/名字变了：认人靠 id，所以按 id 把所有引用一起刷新（文本只是出词）
+      setSelectedTags(prev => prev.map(g => retextCardTag(g, id, pt, name)));
+      setSelectedPrograms(prev => prev.map(p => (p.context_tag_texts || []).some(r => r.id === id)
+        ? { ...p, context_tag_texts: retextTagRefs(p.context_tag_texts, id, pt) }
+        : p));
+      setAllPrograms(prev => {
+        const next: AllPrograms = {};
+        for (const [cat, catData] of Object.entries(prev)) {
+          next[cat] = { ...catData, programs: (catData.programs || []).map(a => (a.tag_group_builtin_texts || []).some(r => r.id === id)
+            ? { ...a, tag_group_builtin_texts: retextTagRefs(a.tag_group_builtin_texts, id, pt) }
+            : a) };
+        }
+        return next;
+      });
       closeModal();
     } catch(e) { console.error(e); }
-  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalCategory, modalImageFile, modalNatural, saveModalFocus, setAllPrompts]);
+  }, [closeModal, modalOldName, modalName, modalPrompt, modalTags, modalCategory, modalImageFile, modalNatural, saveModalFocus, setAllPrompts, setSelectedTags, setSelectedPrograms, setAllPrograms]);
 
   // Helper to build current lora payload for prefab storage
   const buildPrefabLoras = useCallback(() => {
@@ -3249,13 +3273,13 @@ export function AppShell() {
     } else if (tempCtx.mode === 'loraCtx') {
       setModalCtxLoraPaths([...(tempCtx.current.selections || [])]);
     } else if (tempCtx.mode === 'tagCtx') {
-      setModalCtxPromptTexts([...(tempCtx.current.selections || [])]);
+      setModalCtxPromptTexts([...(tempCtx.current.tagSelections || [])]);
     } else if (tempCtx.mode === 'prefabBuiltin') {
       setModalPrefabBuiltinGuids([...(tempCtx.current.selections || [])]);
     } else if (tempCtx.mode === 'loraBuiltin') {
       setModalLoraBuiltinPaths([...(tempCtx.current.selections || [])]);
     } else if (tempCtx.mode === 'tagGroupBuiltin') {
-      setModalPromptBuiltinTexts([...(tempCtx.current.selections || [])]);
+      setModalPromptBuiltinTexts([...(tempCtx.current.tagSelections || [])]);
     }
     setModalPrefabLoras(newLoras);
     setModalPrefabSelectedPrefabs(newPrefabs);
@@ -3284,11 +3308,12 @@ export function AppShell() {
     if (tempCtx.mode === 'prefabCtx' || tempCtx.mode === 'loraCtx' || tempCtx.mode === 'tagCtx') {
       const instanceIdx = (rp.modalData as { programId: string; instanceIndex: number }).instanceIndex;
       const selections = [...(tempCtx.current.selections || [])];
+      const tagSelections = [...(tempCtx.current.tagSelections || [])];
       setSelectedPrograms(prev => prev.map((p, j) => {
         if (j !== instanceIdx) return p;
         if (tempCtx.mode === 'prefabCtx') return { ...p, context_prefab_guids: selections };
         if (tempCtx.mode === 'loraCtx') return { ...p, context_lora_paths: selections };
-        if (tempCtx.mode === 'tagCtx') return { ...p, context_tag_texts: selections };
+        if (tempCtx.mode === 'tagCtx') return { ...p, context_tag_texts: tagSelections };
         return p;
       }));
       tempCtx.clear();
@@ -4519,12 +4544,12 @@ export function AppShell() {
                 }
 
                 const parsedCount = isTemporary ? 0 : cp.filter(p => {
-                  const group = getTagGroupForPrompt(p.prompt);
+                  const group = getTagGroupForPrompt(p.id);
                   return group && (group.source === 'parsing' || group.source === 'program');
                 }).length;
-                const selCount = isTemporary ? cp.filter(p => isPromptSelectedInTempCtx(p.prompt)).length : cp.filter(p => {
-                  if (!isTagSelected(p.prompt)) return false;
-                  const group = getTagGroupForPrompt(p.prompt);
+                const selCount = isTemporary ? cp.filter(p => isCardSelectedInView(p)).length : cp.filter(p => {
+                  if (!isTagSelected(p.id)) return false;
+                  const group = getTagGroupForPrompt(p.id);
                   return !group || group.source === 'normal';
                 }).length;
                 const catHasDuplicate = cp.some(p => duplicateSet.has(p.prompt));
@@ -4565,17 +4590,17 @@ export function AppShell() {
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {filtered.map(p => {
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-                          const sel = isTemporary ? isPromptSelectedInTempCtx(p.prompt) : isTagSelected(p.prompt);
-                          const group = !isTemporary ? getTagGroupForPrompt(p.prompt) : undefined;
+                          const sel = isCardSelectedInView(p);
+                          const group = !isTemporary ? getTagGroupForPrompt(p.id) : undefined;
                           const fp = focusPoints[p.id];
-                          const showSelCard = isTemporary ? isPromptSelectedInTempCtx(p.prompt) : !!group;
+                          const showSelCard = isTemporary ? (currentCtx?.type === 'tag' && sel) : !!group;
 
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.id); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleTagRef({ id: p.id, text: p.prompt }); } else { selectPrompt(p); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -4721,16 +4746,16 @@ export function AppShell() {
                     {expanded ? (
                       <div className={`category-content${anim ? ' animating' : ''} ${displayMode==='box'?'box-mode':''} ${isMiniMode?'mini-mode':''}`}>
                         {filteredPrompts.map(p => {
-                          const sel = tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin' ? tempCtx.isIdSelected(p.prompt) : isTagSelected(p.prompt);
-                          const group = getTagGroupForPrompt(p.prompt);
+                          const sel = isCardSelectedInView(p);
+                          const group = getTagGroupForPrompt(p.id);
                           const fp = focusPoints[p.id];
                           const pTags = Array.isArray(p.tags) ? p.tags : (p.tags ? p.tags.split(',').map((s: string) => s.trim()).filter(Boolean) : []);
                           return (
                             <div key={p.id} className="prompt-item-wrapper">
-                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.prompt); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
+                              <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.id); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
-                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleId(p.prompt); } else { selectPrompt(p.prompt); } }}>
+                                <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleTagRef({ id: p.id, text: p.prompt }); } else { selectPrompt(p); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
                                   </div>
@@ -4964,20 +4989,16 @@ export function AppShell() {
             {tempCtx.mode === 'tagCtx' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Tag Context ({(tempCtx.current?.selections || []).length})</h3>
-                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                  <h3 style={{ marginBottom: 0 }}>Tag Context ({(tempCtx.current?.tagSelections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, tagSelections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="selected-tags">
-                  {(tempCtx.current?.selections || []).map(text => {
-                    let name = text;
-                    for (const catData of Object.values(allPrompts)) {
-                      const p = (catData.prompts || []).find(p => p.prompt === text);
-                      if (p) { name = p.name; break; }
-                    }
+                  {(tempCtx.current?.tagSelections || []).map(ref => {
+                    const card = findPromptDataById(ref.id, allPrompts);
                     return (
-                      <span className="tag" key={text}>
-                        {name}
-                        <span className="remove" onClick={() => tempCtx.toggleId(text)}>{iconX}</span>
+                      <span className="tag" key={ref.id || ref.text} title={ref.text}>
+                        {card?.name || ref.text}
+                        <span className="remove" onClick={() => tempCtx.toggleTagRef(ref)}>{iconX}</span>
                       </span>
                     );
                   })}
@@ -5047,20 +5068,16 @@ export function AppShell() {
             {tempCtx.mode === 'tagGroupBuiltin' ? (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                  <h3 style={{ marginBottom: 0 }}>Tags Builtin ({(tempCtx.current?.selections || []).length})</h3>
-                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, selections: [] }))} title="Clear">{iconX}</button>
+                  <h3 style={{ marginBottom: 0 }}>Tags Builtin ({(tempCtx.current?.tagSelections || []).length})</h3>
+                  <button className="clear-btn" onClick={() => tempCtx.updateTop(layer => ({ ...layer, tagSelections: [] }))} title="Clear">{iconX}</button>
                 </div>
                 <div className="selected-tags">
-                  {(tempCtx.current?.selections || []).map(text => {
-                    let name = text;
-                    for (const catData of Object.values(allPrompts)) {
-                      const p = (catData.prompts || []).find(p => p.prompt === text);
-                      if (p) { name = p.name; break; }
-                    }
+                  {(tempCtx.current?.tagSelections || []).map(ref => {
+                    const card = findPromptDataById(ref.id, allPrompts);
                     return (
-                      <span className="tag" key={text}>
-                        {name}
-                        <span className="remove" onClick={() => tempCtx.toggleId(text)}>{iconX}</span>
+                      <span className="tag" key={ref.id || ref.text} title={ref.text}>
+                        {card?.name || ref.text}
+                        <span className="remove" onClick={() => tempCtx.toggleTagRef(ref)}>{iconX}</span>
                       </span>
                     );
                   })}
@@ -5347,7 +5364,7 @@ export function AppShell() {
                         <div className="program-card-actions">
                           {app.enable_prefab_context && <button className="prefab-card-btn edit" title="Prefab Context" onMouseDown={e => { e.stopPropagation(); const ctxGuids = sa.context_prefab_guids ?? []; tempCtx.push({ type: 'prefabCtx', title: `Prefab Context for ${app.name}`, selections: [...ctxGuids], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: ctxGuids, ctxLoraPaths: sa.context_lora_paths ?? [], ctxTagTexts: sa.context_tag_texts ?? [], previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconLayers}</button>}
                           {app.enable_lora_context && <button className="prefab-card-btn edit" title="Lora Context" onMouseDown={e => { e.stopPropagation(); const ctxPaths = sa.context_lora_paths ?? []; tempCtx.push({ type: 'loraCtx', title: `Lora Context for ${app.name}`, selections: [...ctxPaths], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: sa.context_prefab_guids ?? [], ctxLoraPaths: ctxPaths, ctxTagTexts: sa.context_tag_texts ?? [], previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconGrid}</button>}
-                          {app.enable_tag_context && <button className="prefab-card-btn edit" title="Tag Context" onMouseDown={e => { e.stopPropagation(); const ctxTexts = sa.context_tag_texts ?? []; tempCtx.push({ type: 'tagCtx', title: `Tag Context for ${app.name}`, selections: [...ctxTexts], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: sa.context_prefab_guids ?? [], ctxLoraPaths: sa.context_lora_paths ?? [], ctxTagTexts: ctxTexts, previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconCode}</button>}
+                          {app.enable_tag_context && <button className="prefab-card-btn edit" title="Tag Context" onMouseDown={e => { e.stopPropagation(); const ctxTags = sa.context_tag_texts ?? []; tempCtx.push({ type: 'tagCtx', title: `Tag Context for ${app.name}`, tagSelections: [...ctxTags], restorePoint: { name: app.name, customPrompts: app.code, prefabTags: [], prefabLoras: [], prefabSelectedPrefabs: [], programSelectedPrograms: [...(app.selected_programs || [])], ctxPrefabGuids: sa.context_prefab_guids ?? [], ctxLoraPaths: sa.context_lora_paths ?? [], ctxTagTexts: ctxTags, previewUrl: '', previewVisible: false, focusX: 0, focusY: 0, focusVisible: false, modalData: { programId: sa.id, instanceIndex: i } } }); }}>{iconCode}</button>}
                           <button className="prefab-card-btn remove" onMouseDown={e => { e.stopPropagation(); removeProgram(sa.id, i); }}>{iconX}</button>
                         </div>
                       </div>
@@ -5498,11 +5515,11 @@ export function AppShell() {
                       )}
                       {/* Tags Builtin */}
                       {app.tag_group_builtin_display && app.tag_group_builtin_display.length > 0 && app.tag_group_builtin_texts && (() => {
-                        const displayTexts = app.tag_group_builtin_display.filter(t => app.tag_group_builtin_texts?.includes(t));
-                        if (displayTexts.length === 0) return null;
-                        const toggleBuiltin = (text: string) => {
+                        const displayRefs = app.tag_group_builtin_texts.filter(r => app.tag_group_builtin_display?.includes(tagRefKey(r)));
+                        if (displayRefs.length === 0) return null;
+                        const toggleBuiltin = (key: string) => {
                           const inactive = app.tag_group_builtin_inactive || [];
-                          const newInactive = inactive.includes(text) ? inactive.filter(t => t !== text) : [...inactive, text];
+                          const newInactive = inactive.includes(key) ? inactive.filter(t => t !== key) : [...inactive, key];
                           setAllPrograms(prev => {
                             const next: AllPrograms = {};
                             for (const [cat, catData] of Object.entries(prev)) {
@@ -5513,14 +5530,14 @@ export function AppShell() {
                         };
                         return (
                           <>
-                            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Tags Builtin ({displayTexts.length})</div>
+                            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Tags Builtin ({displayRefs.length})</div>
                             <div className="selected-tags">
-                              {displayTexts.map(text => {
-                                let name = text;
-                                for (const catData of Object.values(allPrompts)) { const p = (catData.prompts || []).find(p => p.prompt === text); if (p) { name = p.name; break; } }
-                                const isActive = !(app.tag_group_builtin_inactive || []).includes(text);
+                              {displayRefs.map(ref => {
+                                const name = findPromptDataById(ref.id, allPrompts)?.name || ref.text;
+                                const key = tagRefKey(ref);
+                                const isActive = !(app.tag_group_builtin_inactive || []).includes(key);
                                 return (
-                                  <span className={`tag ${isActive ? '' : 'program-filtered'}`} key={text} style={{ cursor: 'pointer', opacity: isActive ? 1 : 0.5 }} onMouseDown={e => { e.stopPropagation(); toggleBuiltin(text); }}>
+                                  <span className={`tag ${isActive ? '' : 'program-filtered'}`} key={key} title={ref.text} style={{ cursor: 'pointer', opacity: isActive ? 1 : 0.5 }} onMouseDown={e => { e.stopPropagation(); toggleBuiltin(key); }}>
                                     {name}
                                   </span>
                                 );
@@ -5534,15 +5551,15 @@ export function AppShell() {
                         <>
                           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 6 }}>Tag Context ({ctxTagTexts.length})</div>
                           <div className="selected-tags">
-                            {ctxTagTexts.map(text => {
-                              let name = text;
-                              for (const catData of Object.values(allPrompts)) { const p = (catData.prompts || []).find(p => p.prompt === text); if (p) { name = p.name; break; } }
-                              const isActive = !ctxTagInactive.includes(text);
+                            {ctxTagTexts.map(ref => {
+                              const name = findPromptDataById(ref.id, allPrompts)?.name || ref.text;
+                              const key = tagRefKey(ref);
+                              const isActive = !ctxTagInactive.includes(key);
                               return (
-                                <span className={`tag${isActive ? '' : ' program-filtered'}`} key={text} style={{ cursor: 'pointer' }}
-                                  onMouseDown={() => updateInstance({ context_tag_inactive: isActive ? [...ctxTagInactive, text] : ctxTagInactive.filter(t => t !== text) })}>
+                                <span className={`tag${isActive ? '' : ' program-filtered'}`} key={key} title={ref.text} style={{ cursor: 'pointer' }}
+                                  onMouseDown={() => updateInstance({ context_tag_inactive: isActive ? [...ctxTagInactive, key] : ctxTagInactive.filter(t => t !== key) })}>
                                   {name}
-                                  <span className="remove" onMouseDown={e => { e.stopPropagation(); updateInstance({ context_tag_texts: ctxTagTexts.filter(t => t !== text), context_tag_inactive: ctxTagInactive.filter(t => t !== text) }); }}>{iconX}</span>
+                                  <span className="remove" onMouseDown={e => { e.stopPropagation(); updateInstance({ context_tag_texts: ctxTagTexts.filter(r => tagRefKey(r) !== key), context_tag_inactive: ctxTagInactive.filter(t => t !== key) }); }}>{iconX}</span>
                                 </span>
                               );
                             })}
@@ -5934,16 +5951,17 @@ export function AppShell() {
                   {modalPromptBuiltinTexts.length > 0 && <button className="clear-btn" style={{ fontSize: 11, height: 20, padding: '0 6px' }} onClick={() => { setModalPromptBuiltinTexts([]); setModalPromptBuiltinInactive([]); }} title="Clear All">{iconX}</button>}
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8, flex: 1, overflow: 'auto', maxHeight: 820 }}>
-                  {modalPromptBuiltinTexts.map((text, i) => {
-                    const tg = parseStringToTags(text, allPrompts);
+                  {modalPromptBuiltinTexts.map((ref, i) => {
+                    const tg = parseStringToTags(ref.text, allPrompts);
                     const name = tg.tags.map(t => t.name).join(' > ');
-                    const isActive = !modalPromptBuiltinInactive.includes(text);
-                    const isDisplay = modalTagGroupBuiltinDisplay.includes(text);
+                    const key = tagRefKey(ref);
+                    const isActive = !modalPromptBuiltinInactive.includes(key);
+                    const isDisplay = modalTagGroupBuiltinDisplay.includes(key);
                     return (
-                      <span className={`tag ${isActive ? '' : 'program-filtered'}`} key={i} style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }} onMouseDown={() => setModalPromptBuiltinInactive(prev => isActive ? [...prev, text] : prev.filter(t => t !== text))}>
+                      <span className={`tag ${isActive ? '' : 'program-filtered'}`} key={i} style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }} onMouseDown={() => setModalPromptBuiltinInactive(prev => isActive ? [...prev, key] : prev.filter(t => t !== key))}>
                         {name}
-                        <button className="prefab-card-btn" style={{ fontSize: 8, padding: '0 3px', color: isDisplay ? '#0a84ff' : '#8e8e93', background: 'none', border: 'none', cursor: 'pointer' }} onMouseDown={e => { e.stopPropagation(); setModalTagGroupBuiltinDisplay(prev => isDisplay ? prev.filter(t => t !== text) : [...prev, text]); }} title={isDisplay ? 'Display mode' : 'Normal mode'}>D</button>
-                        <span className="remove" onMouseDown={e => { e.stopPropagation(); setModalPromptBuiltinTexts(prev => prev.filter(t => t !== text)); setModalPromptBuiltinInactive(prev => prev.filter(t => t !== text)); setModalTagGroupBuiltinDisplay(prev => prev.filter(t => t !== text)); }}>{iconX}</span>
+                        <button className="prefab-card-btn" style={{ fontSize: 8, padding: '0 3px', color: isDisplay ? '#0a84ff' : '#8e8e93', background: 'none', border: 'none', cursor: 'pointer' }} onMouseDown={e => { e.stopPropagation(); setModalTagGroupBuiltinDisplay(prev => isDisplay ? prev.filter(t => t !== key) : [...prev, key]); }} title={isDisplay ? 'Display mode' : 'Normal mode'}>D</button>
+                        <span className="remove" onMouseDown={e => { e.stopPropagation(); setModalPromptBuiltinTexts(prev => prev.filter(r => tagRefKey(r) !== key)); setModalPromptBuiltinInactive(prev => prev.filter(t => t !== key)); setModalTagGroupBuiltinDisplay(prev => prev.filter(t => t !== key)); }}>{iconX}</span>
                       </span>
                     );
                   })}

@@ -64,6 +64,26 @@ def _to_list(v):
     return []
 
 
+def tag_ref(entry):
+    """context 里的一条 tag 引用：新档 {id,text}，旧档纯文本串（只容忍形状, 身份仍只认 id）。"""
+    if isinstance(entry, dict):
+        return entry.get('id') or '', entry.get('text') or ''
+    return '', str(entry)
+
+
+def tag_ref_key(ref_id, text):
+    """身份键：有卡用卡 id，自由文本退回文本（同 useSelection.tagRefKey）。"""
+    return ref_id or text
+
+
+def pin_group_base_id(group, card_id):
+    """把组的基 tag（最后一个）钉到给定卡 id —— 同 useSelection.pinGroupBaseId。"""
+    tags = group.get('tags') or []
+    if card_id and tags and isinstance(tags[-1], dict):
+        tags[-1] = dict(tags[-1], base_id=card_id)
+    return group
+
+
 def tags_to_display_string(group):
     """Port of useSelection.tagsToDisplayString: decoration brackets + (text:strength)."""
     tags = group.get('tags') or []
@@ -106,14 +126,23 @@ def _find_prompt_by_name(name_text, all_prompts):
     return None
 
 
+def _find_prompt_id(prompt_text, all_prompts):
+    for _cat, cat_data in (all_prompts or {}).items():
+        for p in (cat_data.get('prompts') or []) if isinstance(cat_data, dict) else []:
+            if p.get('prompt') == prompt_text:
+                return p.get('id') or ''
+    return ''
+
+
 def _create_tag(prompt_text, all_prompts):
     name = _find_prompt_name(prompt_text, all_prompts)
     category = _find_prompt_category(prompt_text, all_prompts)
     if name == prompt_text:
         by_name = _find_prompt_by_name(prompt_text, all_prompts)
         if by_name:
-            return by_name
-    return {'name': name, 'prompt': prompt_text, 'category': category}
+            return dict(by_name, base_id=by_name.get('id') or _find_prompt_id(prompt_text, all_prompts))
+    return {'name': name, 'prompt': prompt_text, 'category': category,
+            'base_id': _find_prompt_id(prompt_text, all_prompts)}
 
 
 def parse_string_to_tags(s, all_prompts):
@@ -355,9 +384,10 @@ class PromptProgramEngine:
                     lora_context.append(e)
         if cs.get('enable_tag_context') and cs.get('context_tag_texts'):
             inactive = set(cs.get('context_tag_inactive') or [])
-            for text in cs['context_tag_texts']:
-                tg = parse_string_to_tags(text, all_prompts)
-                tg['active'] = text not in inactive
+            for entry in cs['context_tag_texts']:
+                ref_id, text = tag_ref(entry)
+                tg = pin_group_base_id(parse_string_to_tags(text, all_prompts), ref_id)
+                tg['active'] = tag_ref_key(ref_id, text) not in inactive
                 tag_context.append(tg)
         if cs.get('prefab_builtin_guids'):
             inactive = set(cs.get('prefab_builtin_inactive') or [])
@@ -377,9 +407,10 @@ class PromptProgramEngine:
                     lora_builtin.append(e)
         if cs.get('tag_group_builtin_texts'):
             inactive = set(cs.get('tag_group_builtin_inactive') or [])
-            for text in cs['tag_group_builtin_texts']:
-                tg = parse_string_to_tags(text, all_prompts)
-                tg['active'] = text not in inactive
+            for entry in cs['tag_group_builtin_texts']:
+                ref_id, text = tag_ref(entry)
+                tg = pin_group_base_id(parse_string_to_tags(text, all_prompts), ref_id)
+                tg['active'] = tag_ref_key(ref_id, text) not in inactive
                 tag_group_builtin.append(tg)
         return prefab_context, lora_context, tag_context, prefab_builtin, lora_builtin, tag_group_builtin
 
