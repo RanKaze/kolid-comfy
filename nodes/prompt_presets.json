@@ -101,6 +101,16 @@
             ],
             "active": true,
             "split_mode": false
+          },
+          {
+            "file_path": "F:/ComfyDB/models/loras/修正/Krea2/better pussy.safetensors",
+            "name": "krea2 better pussy",
+            "strength": 1,
+            "active_tags": [
+              "krea2pus"
+            ],
+            "active": true,
+            "split_mode": true
           }
         ],
         "prefabs": [],
