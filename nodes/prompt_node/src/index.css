@@ -1055,28 +1055,26 @@ body {
 .modal-content textarea { resize: vertical; min-height: 80px; }
 /* Prompt text 专用：随内容自动长高（onInput/ref 里按 scrollHeight 撑开）,自身不出滚动条。 */
 .modal-content textarea.prompt-text-area { min-height: 200px; line-height: 1.5; overflow: hidden; resize: none; }
-/* Prompt text + 实时翻译并排（Add/Edit Prompt 的宽布局）：右侧虚线框随 textarea 等高伸展。 */
+/* Prompt text + 实时翻译并排（Add/Edit Prompt 的宽布局）。 */
 .modal-content.prompt-modal { max-width: 1500px; }
 /* Edit/Add Prompt 双列：左 = Name/Tags/toggle/类别/背景图,右 = Prompt text + 实时翻译。 */
 .prompt-edit-columns { display: flex; gap: 16px; align-items: flex-start; }
 .prompt-edit-left { flex: 0 0 280px; min-width: 0; }
 .prompt-edit-right { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.prompt-edit-right .prompt-text-row { flex: 1 1 auto; }
-.prompt-edit-right .prompt-text-area { min-height: 550px; }
 .prompt-edit-left .context-preview, .prompt-edit-left .image-layer { max-width: 100%; }
-.prompt-text-row { display: flex; gap: 10px; margin-bottom: 12px; align-items: stretch; min-height: 550px; }
-.prompt-text-row .prompt-text-area { flex: 1 1 auto; margin-bottom: 0; height: auto; align-self: stretch; }
-/* 公共高度：两边都不许有显式 height —— textarea 只带 min-height（内容下限）,行高 =
-   max(正文内容, 翻译内容),两边各自 stretch 到同一高度,谁也不会一边高一边低。 */
-.prompt-translation { flex: 0 0 520px; display: flex; flex-direction: column; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; cursor: text; }
+/* 行内两列按 58/42 分宽,各自纵向成块:选择器贴着自己那块的顶上。
+   公共高度:两边都无显式 height,行高 = max(正文内容, 翻译内容),stretch 到同一高度。 */
+.prompt-text-row { display: flex; gap: 10px; align-items: stretch; min-height: 550px; margin-bottom: 12px; }
+.prompt-text-col { flex: 1 1 58%; min-width: 0; display: flex; flex-direction: column; }
+.prompt-text-col .prompt-text-area { flex: 1 1 auto; margin-bottom: 0; }
+.prompt-translation { flex: 1 1 42%; min-width: 0; display: flex; flex-direction: column; padding: 10px 15px; border-radius: 8px; border: 1px dashed var(--border-color); background: rgba(120,120,128,0.08); color: var(--text-secondary); font-size: 13px; line-height: 1.6; cursor: text; }
 .prompt-translation-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; flex: 0 0 auto; }
 .prompt-translation-head span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgba(255,255,255,0.42); }
-.prompt-translation-head select { font-size: 12px; padding: '2px 6px'; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.prompt-translation-head select { font-size: 12px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
 .prompt-translation-body { flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; cursor: text; }
-/* Prompt 语言（源）选择行：位于 prompt text 上方 */
-.prompt-lang-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.prompt-lang-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex: 0 0 auto; }
 .prompt-lang-row span { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: rgba(255,255,255,0.42); }
-.prompt-lang-row select { font-size: 12px; padding: '3px 8px'; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
+.prompt-lang-row select { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; }
 .modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; margin-top: 8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
