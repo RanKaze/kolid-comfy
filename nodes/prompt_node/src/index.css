@@ -999,7 +999,11 @@ body {
     align-items: center; justify-content: center;
 }
 .modal.visible { display: flex; }
+/* 不出滚动条的弹窗：内容长多高弹窗就长多高。外层 .scrollable 只在超过整屏时才滚动兜底。 */
+.modal.scrollable { overflow-y: auto; }
+.modal-content.no-scroll { max-height: none; overflow-y: visible; }
 .modal-content {
+    margin: auto;   /* flex 居中 + 内容超高时可触及（配合 .modal.scrollable 的兜底滚动） */
     position: relative;
     background: rgba(35, 35, 40, 0.72);
     backdrop-filter: blur(40px) saturate(180%);
@@ -1049,6 +1053,8 @@ body {
     color: var(--text-primary);
 }
 .modal-content textarea { resize: vertical; min-height: 80px; }
+/* Prompt text 专用：随内容自动长高（onInput/ref 里按 scrollHeight 撑开）,自身不出滚动条。 */
+.modal-content textarea.prompt-text-area { min-height: 200px; line-height: 1.5; overflow: hidden; resize: none; }
 .modal-content label { color: var(--text-secondary); font-size: 12px; margin-bottom: 4px; margin-top: 8px; display: block; }
 .modal-content .tag-input-container { margin-bottom: 12px; }
 .modal-content .tag-input-container label { margin-bottom: 4px; }
