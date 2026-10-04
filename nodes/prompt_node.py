@@ -156,6 +156,40 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
+    def translate_text(self, text):
+        """实时翻译（Prompt 编辑的右侧预览）：本身含中文的原样跳过（无需翻译），
+        否则走 Translators 库 auto→中文。引擎按序回退（bing → alibaba → google → youdao），
+        结果按小写原文缓存（容量封顶，超了整表清）。失败返回 (False, 原因)。"""
+        text = str(text or '').strip()
+        if not text:
+            return True, ''
+        import re
+        if re.search(r'[一-鿿㐀-䶿]', text):
+            return True, ''          # 本身是中文：无需翻译
+        cache = getattr(self, '_translate_cache', None)
+        if cache is None:
+            cache = self._translate_cache = {}
+        key = text.lower()
+        if key in cache:
+            return True, cache[key]
+        try:
+            import translators as ts
+        except ImportError:
+            return False, 'translators library not installed (pip install translators)'
+        last_err = None
+        for engine in ('bing', 'alibaba', 'google', 'youdao'):
+            try:
+                out = ts.translate_text(text, translator=engine, from_language='auto', to_language='zh')
+                if out:
+                    out = str(out)
+                    if len(cache) > 500:
+                        cache.clear()
+                    cache[key] = out
+                    return True, out
+            except Exception as e:
+                last_err = e
+        return False, f'translation failed: {last_err}'
+
     def refresh_loras(self, propagate=True):
         """Rescan the lora folders and rebuild every derived cache.
 
@@ -1777,6 +1811,29 @@ class SnapshotPromptServer:
                     self.wfile.write(json.dumps(result).encode('utf-8'))
                 else:
                     self.send_error(500, "Server error")
+
+            elif self.path == '/translate':
+                # Prompt 编辑的实时翻译：{text} -> {success, translation}。
+                # 含中文的原文直接回空串（前端显示"无需翻译"）。
+                content_length = int(self.headers.get('Content-Length', 0))
+                post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+                try:
+                    data = json.loads(post_data) if post_data else {}
+                except Exception:
+                    data = {}
+                text = data.get('text', '')
+                if self.server_instance:
+                    try:
+                        ok, out = self.server_instance.translate_text(text)
+                    except Exception as e:
+                        ok, out = False, f'translation error: {e}'
+                else:
+                    ok, out = False, 'no server'
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': ok, 'translation': out if ok else '', 'error': '' if ok else str(out)}).encode('utf-8'))
 
             elif self.path == '/refresh_loras':
                 # 运行中途往 loras 文件夹丢了新文件：重扫一遍（lora_data / fingerprints /

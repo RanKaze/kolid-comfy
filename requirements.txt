@@ -11,3 +11,4 @@ pywebview
 onnxruntime
 decord
 quickjs
+translators

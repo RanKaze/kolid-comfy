@@ -1007,6 +1007,40 @@ export function AppShell() {
   const hpPromptTextRef = useCallback((el: HTMLTextAreaElement | null) => {
     if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
   }, []);
+  // 实时翻译：600ms 防抖后交给后端 Translators 库（英→中；内容本身含中文时后端直接回空,
+  // 前端面板留空）。缓存按原文去重,序列号防旧响应覆盖新输入。
+  const [promptTranslation, setPromptTranslation] = useState('');
+  const [promptTranslating, setPromptTranslating] = useState(false);
+  const translateSeqRef = useRef(0);
+  const translateCacheRef = useRef(new Map<string, string>());
+  useEffect(() => {
+    const text = modalPrompt.trim();
+    const seq = ++translateSeqRef.current;
+    if (!text) { setPromptTranslation(''); setPromptTranslating(false); return; }
+    const cache = translateCacheRef.current;
+    const hit = cache.get(text.toLowerCase());
+    if (hit !== undefined) { setPromptTranslation(hit); setPromptTranslating(false); return; }
+    setPromptTranslating(true);
+    setPromptTranslation('');
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch('/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) });
+        const data = await res.json();
+        if (translateSeqRef.current !== seq) return;   // 更新的输入已经接管
+        if (data.success) {
+          if (data.translation) cache.set(text.toLowerCase(), data.translation);
+          setPromptTranslation(data.translation);
+        } else {
+          setPromptTranslation('⚠ ' + (data.error || 'Translation failed'));
+        }
+      } catch {
+        if (translateSeqRef.current === seq) setPromptTranslation('⚠ Translation service unavailable');
+      } finally {
+        if (translateSeqRef.current === seq) setPromptTranslating(false);
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [modalPrompt]);
   // Natural-language：这张 prompt 卡是自然语言描述而不是 tag 串（header 的语言过滤按它分拣）。
   const [modalNatural, setModalNatural] = useState(false);
   const [modalTags, setModalTags] = useState<string[]>([]);
@@ -5582,10 +5616,15 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'addPrompt' ? (
         <div className="modal visible scrollable" onMouseDown={closeModal}>
-          <div className="modal-content no-scroll" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-content no-scroll prompt-modal" onMouseDown={e => e.stopPropagation()}>
             <h2>Add New Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+            <div className="prompt-text-row">
+              <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+              <div className="prompt-translation" title="Real-time translation (any language → Chinese via the Translators library). Chinese content needs no translation and stays blank.">
+                {promptTranslating ? 'Translating…' : promptTranslation}
+              </div>
+            </div>
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
             <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
               <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
@@ -5625,10 +5664,15 @@ export function AppShell() {
         </div>
       ) : modal?.type === 'editPrompt' ? (
         <div className="modal visible scrollable" onMouseDown={closeModal}>
-          <div className="modal-content no-scroll" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-content no-scroll prompt-modal" onMouseDown={e => e.stopPropagation()}>
             <h2>Edit Prompt</h2>
             <input type="text" placeholder="Name" value={modalName} onChange={e => setModalName(e.target.value)} />
-            <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+            <div className="prompt-text-row">
+              <textarea ref={hpPromptTextRef} rows={8} className="prompt-text-area" placeholder="Prompt text" value={modalPrompt} onChange={e => setModalPrompt(e.target.value)} onInput={autoGrowPromptText} />
+              <div className="prompt-translation" title="Real-time translation (any language → Chinese via the Translators library). Chinese content needs no translation and stays blank.">
+                {promptTranslating ? 'Translating…' : promptTranslation}
+              </div>
+            </div>
             <TagInput label="Tags" tags={modalTags} setTags={setModalTags} />
             <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
               <span style={{ fontSize: 13, color: modalNatural ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }} title="Mark this card as natural-language prose rather than a tag string — the header filter can then show only one kind">Natural-language</span>
