@@ -4,6 +4,8 @@ export interface PromptData {
   prompt: string;
   preview: string;
   tags?: string | string[];
+  /** Natural-language：这张卡是自然语言描述而非 tag 串（header 的语言过滤按它分拣） */
+  natural?: boolean;
 }
 
 export interface CategoryData {

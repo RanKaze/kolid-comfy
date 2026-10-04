@@ -1260,6 +1260,8 @@ class SnapshotPromptServer:
                             'prompt': prompt_text,
                             'preview': preview,
                             'tags': tags,
+                            # Natural-language：自然语言描述而不是 tag 串（header 的语言过滤）。
+                            'natural': bool(data.get('natural', False)),
                         })
                         self.server_instance._save_prompts(self.server_instance.prompts_data)
 
@@ -1298,6 +1300,8 @@ class SnapshotPromptServer:
                                 tags = data.get('tags', p.get('tags', []))
                                 if isinstance(tags, str):
                                     tags = [t.strip() for t in tags.split(",") if t.strip()]
+                                # Natural-language：请求没带就保留原值（老条目没有这个键 = tag 串）。
+                                natural = bool(data.get('natural', p.get('natural', False)))
 
                                 if new_category_final != cat_name:
                                     if new_category_final not in self.server_instance.prompts_data:
@@ -1306,13 +1310,14 @@ class SnapshotPromptServer:
                                             "tags": [],
                                             "prompts": []
                                         }
-                                    
+
                                     self.server_instance.prompts_data[new_category_final]["prompts"].append({
                                         'id': prompt_id,
                                         'name': new_name,
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
+                                        'natural': natural,
                                     })
                                     prompts.pop(i)
                                     if not prompts:
@@ -1324,6 +1329,7 @@ class SnapshotPromptServer:
                                         'prompt': new_prompt,
                                         'preview': new_preview,
                                         'tags': tags,
+                                        'natural': natural,
                                     }
                                 
                                 found = True

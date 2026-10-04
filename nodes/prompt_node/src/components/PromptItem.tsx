@@ -51,7 +51,12 @@ export function PromptItem({
           </div>
           {!isMiniMode && <div className="glass-layer" />}
           <div className="text-layer">
-            <div className="name">{prompt.name}</div>
+            <div className="name">
+              {prompt.name}
+              {prompt.natural ? (
+                <span title="Natural-language card" style={{ marginLeft: 6, display: 'inline-block', padding: '0 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, lineHeight: '14px', verticalAlign: 'middle', background: 'rgba(10,132,255,0.22)', border: '0.5px solid rgba(10,132,255,0.55)', color: '#64d2ff' }}>NL</span>
+              ) : null}
+            </div>
             <div className="prompt-text">{prompt.prompt}</div>
           </div>
         </div>
