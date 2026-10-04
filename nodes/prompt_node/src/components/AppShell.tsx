@@ -990,6 +990,8 @@ export function AppShell() {
   const [modalMultiProgram, setModalMultiProgram] = useState(false);
   const [modalEditLoraFilePath, setModalEditLoraFilePath] = useState<string | null>(null);
   const [modalSliderEnabled, setModalSliderEnabled] = useState(false);
+  // Model-only：加载时只改 model 权重，CLIP 不动。存在 slider config 里随 lora 持久化。
+  const [modalModelOnly, setModalModelOnly] = useState(false);
   const [modalSliderMin, setModalSliderMin] = useState('0');
   const [modalSliderMax, setModalSliderMax] = useState('2');
   const [modalSliderStep, setModalSliderStep] = useState('0.1');
@@ -4317,6 +4319,7 @@ export function AppShell() {
                         setModalEditLoraFilePath(item.file_path);
                         const sc = loraSliderConfigs[item.file_path];
                         setModalSliderEnabled(sc?.enabled ?? false);
+                        setModalModelOnly(sc?.model_only ?? false);
                         setModalSliderMin(String(sc?.min ?? 0));
                         setModalSliderMax(String(sc?.max ?? 2));
                         setModalSliderStep(String(sc?.step ?? 0.1));
@@ -6290,6 +6293,23 @@ export function AppShell() {
               </label>
             </div>
             <div className="edit-modal-section">
+              <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, cursor: 'pointer', userSelect: 'none', padding: '4px 0' }}>
+                <span style={{ fontSize: 13, color: modalModelOnly ? '#0a84ff' : 'var(--text-secondary)', transition: 'color 0.2s' }}>Model-only</span>
+                <div onClick={() => setModalModelOnly(!modalModelOnly)} style={{
+                  width: 44, height: 26, borderRadius: 13, position: 'relative', transition: 'background 0.3s',
+                  background: modalModelOnly ? '#0a84ff' : 'rgba(120,120,128,0.32)', flexShrink: 0,
+                }}>
+                  <div style={{
+                    position: 'absolute', top: 2, left: modalModelOnly ? 20 : 2, width: 22, height: 22, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
+                  }} />
+                </div>
+              </label>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                When enabled, this lora only patches the model weights — the CLIP text encoder stays untouched (its output marks the lora as model-only).
+              </div>
+            </div>
+            <div className="edit-modal-section">
               <label>Default Value</label>
               <input type="number" step="0.01" value={modalSliderDefaultValue} onChange={e => setModalSliderDefaultValue(e.target.value)} />
             </div>
@@ -6351,8 +6371,8 @@ export function AppShell() {
                   const dvParsed = parseFloat(modalSliderDefaultValue);
                   const dv = isNaN(dvParsed) ? 1 : dvParsed;
                   const newConfig = modalSliderEnabled
-                    ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, default_value: dv, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse, marks: parsedMarks }
-                    : { enabled: false, min: 0, max: 2, step: 0.1, default_value: dv, min_name: '', max_name: '', reverse: false, marks: [] };
+                    ? { enabled: true, min: parseFloat(modalSliderMin) || 0, max: parseFloat(modalSliderMax) || 0, step: parseFloat(modalSliderStep) || 0.1, default_value: dv, min_name: modalSliderMinName, max_name: modalSliderMaxName, reverse: modalSliderReverse, marks: parsedMarks, model_only: modalModelOnly }
+                    : { enabled: false, min: 0, max: 2, step: 0.1, default_value: dv, min_name: '', max_name: '', reverse: false, marks: [], model_only: modalModelOnly };
                   const updatedConfigs = { ...loraSliderConfigs };
                   updatedConfigs[modalEditLoraFilePath] = newConfig;
                   setLoraSliderConfigs(updatedConfigs);

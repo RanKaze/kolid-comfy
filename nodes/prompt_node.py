@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import weakref
 import http.server
 import webbrowser
 import time
@@ -76,7 +77,15 @@ def check_interrupted():
 class SnapshotPromptServer:
     """HTTP server for SnapshotPromptNode to select prompts from categories."""
 
+    # 同进程全部活实例（weakref）。prompt 节点每次执行都新建一个，sampler 启动时也建一个；
+    # UI 的写操作（Edit Lora 保存 / Refresh Loras）落在 prompt 节点那个实例上，sampler
+    # 运行时读的是自己这份 —— 不互相同步，中途的修改永远到不了运行端。
+    _live_instances = []
+
     def __init__(self, port=None, last_selected=None, lora_regex="", last_selected_loras=None, last_selected_prefabs=None, parsed_prompts=None, last_selected_programs=None):
+        cls = SnapshotPromptServer
+        cls._live_instances = [r for r in cls._live_instances if r() is not None]
+        cls._live_instances.append(weakref.ref(self))
         self.port = port
         self.server = None
         self.started = False
@@ -147,7 +156,7 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(fp)
                     self._valid_lora_paths.add(item.get('file_name', ''))
 
-    def refresh_loras(self):
+    def refresh_loras(self, propagate=True):
         """Rescan the lora folders and rebuild every derived cache.
 
         lora_data（含 lora_fingerprints，_scan_loras 里一并重建）与 _valid_lora_paths
@@ -165,6 +174,18 @@ class SnapshotPromptServer:
                     self._valid_lora_paths.add(item.get('file_name', ''))
         print(f"[PromptServer] loras refreshed: {sum(len(v) for v in self.lora_data.values())} loras, "
               f"{len(self._valid_lora_paths)} valid paths (regex '{self.lora_regex}')")
+        # 同步给同进程的其它实例：各自的 lora_regex 不同，各按自己的正则重扫一遍
+        #（不直接搬数据）。_propagate=False 防止 A→B→A 的递归。Refresh Loras /
+        # update_lora_regex 都走这里，sampler 运行端的 _valid_lora_paths 因此保持新鲜。
+        if propagate:
+            for ref in list(SnapshotPromptServer._live_instances):
+                inst = ref()
+                if inst is None or inst is self:
+                    continue
+                try:
+                    inst.refresh_loras(propagate=False)
+                except Exception as e:
+                    print(f"[PromptServer] WARNING: propagating lora refresh to another instance failed: {e}")
 
     def update_lora_regex(self, new_regex):
         """Update lora_regex, rescan loras, and rebuild valid paths."""
@@ -214,6 +235,12 @@ class SnapshotPromptServer:
         all_loras = self.selected_loras + (prefab_loras or [])
         print(f"[get_active_loras_string] input: selected_loras={len(self.selected_loras)}, prefab_loras={len(prefab_loras or [])}, total={len(all_loras)}, lora_path_mode={lora_path_mode}")
         print(f"[get_active_loras_string] _valid_lora_paths count={len(self._valid_lora_paths)}")
+        # Model-only 标记的持久源：Edit Lora 弹窗把它存在 slider config 里（按指纹落盘，
+        # 这里换算回 file_path 一次查表）。条目自带 model_only 时（cache 读回等）优先。
+        try:
+            slider_cfgs = self._get_lora_slider_configs_by_filepath() or {}
+        except Exception:
+            slider_cfgs = {}
         active_lora_parts = []
         for idx, lora_item in enumerate(all_loras):
             active = lora_item.get('active', True)
@@ -235,7 +262,8 @@ class SnapshotPromptServer:
                 print(f"[get_active_loras_string] [{idx}] SKIP: not in _valid_lora_paths")
                 continue
             if lora_path_mode:
-                part = f"<lora_path:{file_path}:{strength}>"
+                model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                part = f"<lora_path:{file_path}:{strength}>" + (":model_only" if model_only else "")
                 active_lora_parts.append(part)
                 print(f"[get_active_loras_string] [{idx}] ACCEPT: {part}")
             else:
@@ -243,11 +271,17 @@ class SnapshotPromptServer:
                 file_name = lora_item.get('file_name', '')
                 if not file_name:
                     file_name = file_path.split('/')[-1].split('\\')[-1]
-                part = f"<lora:{file_name}:{strength}>"
+                model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                part = f"<lora:{file_name}:{strength}>" + (":model_only" if model_only else "")
                 active_lora_parts.append(part)
                 print(f"[get_active_loras_string] [{idx}] ACCEPT: {part}")
         result = ", ".join(active_lora_parts)
         print(f"[get_active_loras_string] result: {result}")
+        _mo = [p for p in active_lora_parts if p.endswith(':model_only>')]
+        if _mo:
+            print(f"[get_active_loras_string] MODEL-ONLY marked ({len(_mo)}): {_mo}")
+        else:
+            print(f"[get_active_loras_string] model-only marked: none (every lora patches model + CLIP)")
         return result
 
     def _ensure_dirs(self):
@@ -545,18 +579,25 @@ class SnapshotPromptServer:
 
     def _get_lora_slider_configs_by_filepath(self):
         """Return slider configs keyed by file_path, resolving via fingerprint."""
+        # 每次读都从盘上重载：同进程有多个实例，UI 的保存写在 prompt 节点实例（并发盘），
+        # sampler 实例的内存副本是启动时的旧快照 —— 不重载的话，中途保存的 model_only /
+        # 滑条配置在运行端（_parse_prompt / _resolve_prompt_selection 的查表）永远看不见。
+        self.lora_slider_configs = self._load_lora_slider_configs()
         raw = self.lora_slider_configs  # keyed by fingerprint (or legacy file_path)
         if not hasattr(self, 'lora_fingerprints'):
             return raw
         result = {}
-        # Build reverse map: fingerprint -> file_path
-        fp_to_path = {}
+        # fingerprint -> 全部同内容副本的路径。同名/同 hash 的 lora 可能存在多份副本，
+        # 它们是同一条 lora（同一份配置）—— 只映射回其中一条的话，UI 用另一条副本的
+        # file_path 查表会落空（Edit Lora 弹窗读到的开关永远是默认值）。
+        fp_to_paths = {}
         for fp, fingerprint in self.lora_fingerprints.items():
-            fp_to_path[fingerprint] = fp
+            fp_to_paths.setdefault(fingerprint, []).append(fp)
         for key, config in raw.items():
-            if key in fp_to_path:
-                # Key is a fingerprint, resolve to file_path
-                result[fp_to_path[key]] = config
+            if key in fp_to_paths:
+                # Key is a fingerprint — resolve to every copy's file_path
+                for p in fp_to_paths[key]:
+                    result[p] = config
             elif key in self.lora_fingerprints:
                 # Key is a file_path that we know about, keep as-is
                 result[key] = config
@@ -4020,6 +4061,10 @@ class SnapshotPromptNode:
                         if fp and not any(server._resolve_lora_file_path(al.get("file_path", "") or al.get("file_name", "")) == fp for al in all_region_loras):
                             all_region_loras.append(lora)
             # Build lora string like active_loras format
+            try:
+                slider_cfgs = server._get_lora_slider_configs_by_filepath() or {}
+            except Exception:
+                slider_cfgs = {}
             region_lora_parts = []
             for lora_item in all_region_loras:
                 fp = server._resolve_lora_file_path(lora_item.get("file_path", "") or lora_item.get("file_name", ""))
@@ -4032,11 +4077,14 @@ class SnapshotPromptNode:
                 file_name = lora_item.get("file_name", "") or fp.split("/")[-1].split("\\")[-1]
                 split_mode = lora_item.get("split_mode", False)
                 active_tags = lora_item.get("active_tags", [])
+                # Model-only 同 active_loras 一套标记：加载端据此跳过 CLIP。
+                model_only = bool(lora_item.get("model_only", False)) or bool((slider_cfgs.get(fp) or {}).get("model_only", False))
+                flag = ":model_only" if model_only else ""
                 if split_mode and active_tags:
                     for tag in active_tags:
-                        region_lora_parts.append(f"<lora:{fp}:{strength}:{tag}>")
+                        region_lora_parts.append(f"<lora:{fp}:{strength}:{tag}{flag}>")
                 else:
-                    region_lora_parts.append(f"<lora:{file_name}:{strength}>")
+                    region_lora_parts.append(f"<lora:{file_name}:{strength}{flag}>")
             region_active_loras = ", ".join(region_lora_parts)
 
             # Preview

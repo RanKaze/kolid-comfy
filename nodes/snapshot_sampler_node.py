@@ -2628,6 +2628,12 @@ class SnapshotDetailerSamplerNode:
             loras.extend(prefab_loras)
             lora_str_parts = []
             trigger_words = []
+            # Model-only 标记（Edit Lora 的持久配置，按指纹存、这里换算回路径查表一次）：
+            # 拼进 <lora_path:...:strength:model_only>，加载端据此跳过 CLIP。
+            try:
+                slider_cfgs = prompt_server._get_lora_slider_configs_by_filepath() or {}
+            except Exception:
+                slider_cfgs = {}
             # 同款过滤（prompt_node.py:220-226 / 3881-3886）：架构 regex 没命中的 lora
             # 不加载，也不出标记词。
             valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
@@ -2645,7 +2651,8 @@ class SnapshotDetailerSamplerNode:
                         print(f"[QueryLora] SKIP (prompt tab): 不在当前架构 lora_regex 命中集 — {file_path}")
                         continue
                     strength = lora_item.get('strength', 1.0)
-                    lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
+                    model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                    lora_str_parts.append(f"<lora_path:{file_path}:{strength}" + (":model_only" if model_only else "") + ">")
                     trigger_words.extend(lora_item.get('active_tags', []))
                 else:
                     lora_str_parts.append(str(lora_item))
@@ -2783,6 +2790,11 @@ class SnapshotDetailerSamplerNode:
         loras.extend(prefab_loras)
         lora_str_parts = []
         trigger_words = []
+        # Model-only 标记（同 _parse_prompt）：Edit Lora 的持久配置兜底 + 条目自带优先。
+        try:
+            slider_cfgs = ps._get_lora_slider_configs_by_filepath() or {}
+        except Exception:
+            slider_cfgs = {}
         # 与 prompt 节点自己的输出同一条规矩（prompt_node.py:220-226 / 3881-3886）：
         # 没被当前架构 lora_regex 命中的 lora 既不加载，也不出标记词。
         valid_paths = getattr(ps, '_valid_lora_paths', None) or set()
@@ -2800,7 +2812,8 @@ class SnapshotDetailerSamplerNode:
                     print(f"[QueryLora] SKIP: 不在当前架构 lora_regex 命中集 — {file_path}")
                     continue
                 strength = lora_item.get('strength', 1.0)
-                lora_str_parts.append(f"<lora_path:{file_path}:{strength}>")
+                model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                lora_str_parts.append(f"<lora_path:{file_path}:{strength}" + (":model_only" if model_only else "") + ">")
                 trigger_words.extend(lora_item.get('active_tags', []))
             else:
                 lora_str_parts.append(str(lora_item))
@@ -2824,6 +2837,8 @@ class SnapshotDetailerSamplerNode:
         _lora_diag('merged→loadable', loras)
         print(f"[QueryLora] library tags by path: { {k.split('/')[-1]: v for k, v in lib_tags.items() if k in [l.get('file_path') for l in loras if isinstance(l, dict)]} }")
         print(f"[QueryLora] final trigger_words={trigger_words} | user_loras={user_loras}")
+        _mo = [p.strip() for p in user_loras.split(',') if p.strip().endswith(':model_only>')]
+        print(f"[QueryLora] model-only (CLIP untouched): {_mo if _mo else 'none'}")
         # Enable Output 读的就是这份「这次真正生效的合并选择」：引擎产物（program 生成/过滤
         # 之后的结果）在这里定格，落盘时按 cache_data 的键形重放，不再跑第二次引擎。
         server.last_effective_prompt_selection = {
@@ -2941,6 +2956,64 @@ class SnapshotDetailerSamplerNode:
             import traceback
             traceback.print_exc()
             print(f"[Output] WARNING: failed to write the output PNG: {e}")
+
+    def _model_only_paths(self, ps):
+        """Model-only lora 的路径集合（持久 slider config，盘上重载 —— 跨实例保鲜）。"""
+        if ps is None or not hasattr(ps, '_get_lora_slider_configs_by_filepath'):
+            return []
+        try:
+            cfgs = ps._get_lora_slider_configs_by_filepath() or {}
+        except Exception:
+            return []
+        return [str(p).replace('\\', '/') for p, c in cfgs.items()
+                if isinstance(c, dict) and c.get('model_only')]
+
+    @staticmethod
+    def _mark_model_only(lora_items, mo_paths):
+        """给缺 `:model_only` 尾标的 lora 串按持久配置补标记。
+
+        context 里的串是 prompt 节点上次图执行时冻结的 —— 之后才打开的 model_only
+        只有在这里补标，同一趟 run 才能生效（ producers 侧的拼串只覆盖「新执行」）。
+        匹配按路径与文件名两个口径：同名副本共享同一指纹/同一份配置，标哪条都命中。
+        """
+        if not lora_items or not mo_paths:
+            return lora_items
+        mo_lower = [p.lower() for p in mo_paths]
+        mo_stems = []
+        for p in mo_lower:
+            name = p.rsplit('/', 1)[-1]
+            mo_stems.append(name.rsplit('.', 1)[0] if '.' in name else name)
+        out = []
+        for item in lora_items:
+            s = item.strip() if isinstance(item, str) else str(item)
+            if s.endswith(':model_only>') or not (s.startswith('<') and s.endswith('>')):
+                out.append(item)
+                continue
+            body = s[1:-1]
+            # 按 _apply_loras 的真实解析语义解出路径/名字，再与持久配置精确匹配 ——
+            # 不能拿原始串做尾段剥离（split-mode 串 :strength:tag 会让匹配落空）。
+            hit = False
+            try:
+                if body.startswith('lora_path:'):
+                    b = body[len('lora_path:'):]
+                    last = b.rfind(':')
+                    if last != -1 and b[last + 1:] != 'model_only':
+                        path_l = b[:last].replace('\\', '/').lower()
+                        nm = path_l.rsplit('/', 1)[-1]
+                        st = nm.rsplit('.', 1)[0] if '.' in nm else nm
+                        hit = any(path_l == pl or st == stem
+                                  for pl, stem in zip(mo_lower, mo_stems))
+                elif body.startswith('lora:'):
+                    parts = body.split(':', 2)
+                    if len(parts) >= 2:
+                        nm = parts[1].replace('\\', '/').lower()
+                        st = nm.rsplit('.', 1)[0] if '.' in nm else nm
+                        hit = any(nm == p.rsplit('/', 1)[-1] or nm == stem or st == stem
+                                  for p, stem in zip(mo_lower, mo_stems))
+            except Exception:
+                hit = False
+            out.append(s[:-1] + ':model_only>' if hit else s)
+        return out
 
     def _await_query_answer(self, server, block, index):
         """Park the chain on a Query block until the user answers its prompt dialog.
@@ -3672,6 +3745,16 @@ class SnapshotDetailerSamplerNode:
                 current_negative = context_negative
                 current_loras = context_loras.copy()
                 current_loras.extend(get_loras_from_string(user_loras))
+                # Model-only 补标（持久配置为准）：context 里的串是 prompt 节点上次图执行
+                # 时冻结的，之后才打开的 model_only 在这里补上，同一趟立即生效。
+                _ps = server.prompt_server if server is not None else None
+                _mo_paths = self._model_only_paths(_ps)
+                if _mo_paths:
+                    _patched = self._mark_model_only(current_loras, _mo_paths)
+                    if _patched != current_loras:
+                        print(f"[PipelineBlock] model-only flags patched at run time: "
+                              f"{[x for x in _patched if ':model_only>' in str(x)]}")
+                    current_loras = _patched
 
                 tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_image)
                 if tmp_positive:
@@ -4220,6 +4303,11 @@ class SnapshotDetailerSamplerNode:
                 entry.positive = user_positive
                 entry.negative = ''
                 entry.loras = get_loras_from_string(user_loras) if user_loras else []
+                # Model-only 补标（同块循环）：注入的串也要按持久配置补齐。
+                _mo = self._mark_model_only(entry.loras, self._model_only_paths(server.prompt_server if server else None))
+                if _mo != entry.loras:
+                    print(f"[interface] model-only flags patched at run time: {[x for x in _mo if ':model_only>' in str(x)]}")
+                entry.loras = _mo
                 injected_pipeline.context.contexts['__prompt_tab__'] = entry
         if own_trace:
             dbg.record_prompt('Prompt tab（注入 pipeline 上下文）', user_positive,
@@ -4549,6 +4637,13 @@ class SnapshotDetailerSamplerNode:
                         # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
                         # 「没注入」在日志里一眼可见。
                         print(f"[run_detailer] prompt tab: positive='{user_positive[:200]}' ({len(user_positive)} chars), loras={user_loras}")
+                        # Model-only 名单（这一趟哪些 lora 只改 model 不改 CLIP）——核对
+                        # 标记有没有在 payload / cache 往返中跟丢，就看这行和块内 [QueryLora]。
+                        _mo = [p.strip() for p in user_loras.split(',') if p.strip().endswith(':model_only>')]
+                        if _mo:
+                            print(f"[run_detailer] MODEL-ONLY loras this run ({len(_mo)}): {_mo}")
+                        else:
+                            print(f"[run_detailer] model-only loras this run: none (every lora patches model + CLIP)")
                         dbg.record_prompt('1. Prompt tab（_parse_prompt 解析结果）', user_positive,
                                           loras=debug_lora_entries(user_loras))
 

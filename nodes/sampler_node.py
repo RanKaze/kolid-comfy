@@ -522,23 +522,39 @@ class SamplerCache:
             if lora_str.startswith("<") and lora_str.endswith(">"):
                 lora_str = lora_str[1:-1].strip()
 
+            model_only = False
             try:
                 if lora_str.startswith("lora_path:"):
                     body = lora_str[len("lora_path:"):]
                     last_colon = body.rfind(":")
                     if last_colon == -1:
-                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                        print(f"Warning: 格式错误，需要 lora_path:path:strength[:model_only]: {lora_str}")
                         continue
-                    lora_path = body[:last_colon].strip()
-                    strength = float(body[last_colon+1:].strip())
+                    strength_str = body[last_colon+1:].strip()
+                    try:
+                        strength = float(strength_str)
+                        lora_path = body[:last_colon].strip()
+                    except ValueError:
+                        # 尾段是标志（目前只有 model_only）：<lora_path:path:strength:model_only>
+                        if strength_str != "model_only":
+                            raise
+                        model_only = True
+                        prev_colon = body.rfind(":", 0, last_colon)
+                        if prev_colon == -1:
+                            print(f"Warning: 格式错误，需要 lora_path:path:strength[:model_only]: {lora_str}")
+                            continue
+                        lora_path = body[:prev_colon].strip()
+                        strength = float(body[prev_colon+1:last_colon].strip())
                     lora_name = lora_path.replace("/", "\\").split("\\")[-1]
                 elif lora_str.startswith("lora:"):
                     parts = lora_str.split(":", 2)
                     if len(parts) != 3:
-                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                        print(f"Warning: 格式错误，需要 lora:name:strength[:model_only]: {lora_str}")
                         continue
                     lora_name = parts[1].strip()
-                    strength = float(parts[2].strip())
+                    segs = parts[2].split(":")
+                    strength = float(segs[0].strip())
+                    model_only = any(s.strip() == "model_only" for s in segs[1:])
                     lora_path = _lora_path_cache.get(lora_name)
                     if lora_path is None:
                         for key in _lora_path_cache:
@@ -554,15 +570,19 @@ class SamplerCache:
 
                 lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
 
+                # Model-only：强度只落在 model 上，CLIP 不动（strength_clip=0）。
                 model_patcher, clip_patcher = comfy.sd.load_lora_for_models(
                     model_patcher,
                     clip_patcher,
                     lora_dict,
                     strength,
-                    strength
+                    0.0 if model_only else strength
                 )
 
-                print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
+                if model_only:
+                    print(f"✓ Applied LoRA: {lora_name} (strength={strength}, MODEL-ONLY → model patched, CLIP untouched)")
+                else:
+                    print(f"✓ Applied LoRA: {lora_name} (strength={strength}, model + CLIP)")
 
             except Exception as e:
                 print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
@@ -2690,26 +2710,42 @@ class ApplyLorasNode:
             if lora_str.startswith("<") and lora_str.endswith(">"):
                 lora_str = lora_str[1:-1].strip()
 
+            model_only = False
             try:
                 if lora_str.startswith("lora_path:"):
                     # Direct path mode: path may contain ':' (Windows drive letter)
-                    # Format: lora_path:path:strength  — split from the rightmost ':'
+                    # Format: lora_path:path:strength[:model_only] — split from the rightmost ':'
                     body = lora_str[len("lora_path:"):]
                     last_colon = body.rfind(":")
                     if last_colon == -1:
-                        print(f"Warning: 格式错误，需要 lora_path:path:strength: {lora_str}")
+                        print(f"Warning: 格式错误，需要 lora_path:path:strength[:model_only]: {lora_str}")
                         continue
-                    lora_path = body[:last_colon].strip()
-                    strength = float(body[last_colon+1:].strip())
+                    strength_str = body[last_colon+1:].strip()
+                    try:
+                        strength = float(strength_str)
+                        lora_path = body[:last_colon].strip()
+                    except ValueError:
+                        # 尾段是标志（目前只有 model_only）：这个节点本来就不碰 CLIP，
+                        # 标记只是 tolerated，保持与 SamplerCache._apply_loras 同一套解析。
+                        if strength_str != "model_only":
+                            raise
+                        prev_colon = body.rfind(":", 0, last_colon)
+                        if prev_colon == -1:
+                            print(f"Warning: 格式错误，需要 lora_path:path:strength[:model_only]: {lora_str}")
+                            continue
+                        lora_path = body[:prev_colon].strip()
+                        strength = float(body[prev_colon+1:last_colon].strip())
                     lora_name = lora_path.replace("/", "\\").split("\\")[-1]
                 elif lora_str.startswith("lora:"):
-                    # Normal mode: lora:name:strength
+                    # Normal mode: lora:name:strength[:model_only]
                     parts = lora_str.split(":", 2)
                     if len(parts) != 3:
-                        print(f"Warning: 格式错误，需要 lora:name:strength: {lora_str}")
+                        print(f"Warning: 格式错误，需要 lora:name:strength[:model_only]: {lora_str}")
                         continue
                     lora_name = parts[1].strip()
-                    strength = float(parts[2].strip())
+                    segs = parts[2].split(":")
+                    strength = float(segs[0].strip())
+                    model_only = any(s.strip() == "model_only" for s in segs[1:])
                     lora_path = _lora_path_cache.get(lora_name)
                     if lora_path is None:
                         for key in _lora_path_cache:
@@ -2732,7 +2768,10 @@ class ApplyLorasNode:
                     strength
                 )
 
-                print(f"✓ Applied LoRA: {lora_name} (strength={strength})")
+                if model_only:
+                    print(f"✓ Applied LoRA: {lora_name} (strength={strength}, MODEL-ONLY → model patched, no CLIP in this node)")
+                else:
+                    print(f"✓ Applied LoRA: {lora_name} (strength={strength}, model only — this node never touches CLIP)")
 
             except Exception as e:
                 print(f"Failed to load LoRA '{item}': {type(e).__name__} - {e}")
