@@ -1019,8 +1019,9 @@ export function AppShell() {
     if (el) { el.style.minHeight = '550px'; el.style.minHeight = Math.max(550, el.scrollHeight) + 'px'; }
   }, []);
   // 实时翻译：350ms 防抖后交给后端 Translators 库（源语言 → 目标语言；原文已是目标语言时
-  // 后端直接回空,前端面板留空）。缓存按 源>目标:原文 去重,序列号防旧响应覆盖新输入。
-  // 源语言随弹窗会话（默认 auto 自动检测）;目标语言全局持久化（localStorage,不随 prompt 走）。
+  // 后端回空,面板显示 [ Same Language ]）。缓存按 源>目标:原文 去重,序列号防旧响应覆盖新输入。
+  // 源语言随弹窗会话（默认 auto,后端探测成具体语系后再交给引擎）;目标语言全局持久化
+  // （localStorage,不随 prompt 走）。
   const [promptSourceLang, setPromptSourceLang] = useState('auto');
   const [promptTranslation, setPromptTranslation] = useState('');
   const [promptTranslating, setPromptTranslating] = useState(false);
@@ -1050,7 +1051,7 @@ export function AppShell() {
         const data = await res.json();
         if (translateSeqRef.current !== seq) return;   // 更新的输入已经接管
         if (data.success) {
-          if (data.translation) cache.set(cacheKey, data.translation);
+          cache.set(cacheKey, data.translation);   // 空串（同语言）也进缓存,免得每次敲字都回后端
           setPromptTranslation(data.translation);
         } else {
           setPromptTranslation('⚠ ' + (data.error || 'Translation failed'));
@@ -5680,7 +5681,7 @@ export function AppShell() {
                       </select>
                     </div>
                     <div className="prompt-translation-body">
-                      {promptTranslating ? 'Translating…' : promptTranslation}
+                      {promptTranslating ? 'Translating…' : (promptTranslation || (modalPrompt.trim() ? '[ Same Language ]' : ''))}
                     </div>
                   </div>
                 </div>
@@ -5754,7 +5755,7 @@ export function AppShell() {
                       </select>
                     </div>
                     <div className="prompt-translation-body">
-                      {promptTranslating ? 'Translating…' : promptTranslation}
+                      {promptTranslating ? 'Translating…' : (promptTranslation || (modalPrompt.trim() ? '[ Same Language ]' : ''))}
                     </div>
                   </div>
                 </div>
