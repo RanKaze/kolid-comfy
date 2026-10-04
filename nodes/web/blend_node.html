@@ -5859,6 +5859,9 @@ function renderStackList(listEl, stack) {
             row.classList.add('dragging');
             ev.dataTransfer.effectAllowed = 'move';
             ev.dataTransfer.setData('text/plain', String(l.id));
+            // 同时带一枚图层标记：同一趟拖到工作区条上 = 把这条图层的合成结果
+            // （image + decal + FX 链 + mask，即 layerSource()）存进图池。
+            try { ev.dataTransfer.setData('application/x-blend-layer', String(l.id)); } catch (e) { /* 类型受限时只剩排序 */ }
         });
         row.addEventListener('dragend', () => { row.classList.remove('dragging'); dragRowId = null; });
         // 行拖拽（图层重排序）只在真的是「拖动图层」时接管 —— 拖外部文件 / 拖工作区缩略图
@@ -6044,7 +6047,9 @@ function addLayer(item, stack) {
         // fragments are exempt — their crop-rect placement is the whole point of keeping them smart.
         // A cud layer is exempt for the same reason in the other direction: rasterizing detaches it,
         // so the preference would silently throw the link away on the way in.
-        if (rasterDrop && !l.fragment && !placed && !l.cud) rasterizeLayer(l);
+        // item.smart=true forces the smart path regardless of the preference (staging drops):
+        // the global flips back before the async load lands, so it cannot carry the intent.
+        if ((rasterDrop && !item.smart) && !l.fragment && !placed && !l.cud) rasterizeLayer(l);
         layoutCanvas();
         renderLayerList();
         render();
@@ -8996,10 +9001,20 @@ addCudGuidanceBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerF
 function wireStackListDrop(listEl, stack) {
     const guidance = stack === GUIDANCE_STACK;
     listEl.addEventListener('dragover', ev => {
+        // 工作区条目 = 智能图层落点（画布之外的第二落点，guidance 栈同理）。
+        if (dragHasType(ev, STAGING_ITEM_TYPE)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.dataTransfer.dropEffect = 'copy';
+            dropOverlay.style.display = 'none';    // 列表有自己的高亮，全屏提示让位
+            listEl.classList.add('drop-target');
+            return;
+        }
         if (dropHasFiles(ev.dataTransfer)) {
             ev.preventDefault();
             ev.stopPropagation();
             ev.dataTransfer.dropEffect = 'copy';
+            dropOverlay.style.display = 'none';
             listEl.classList.add('drop-target');
             return;
         }
@@ -9012,6 +9027,15 @@ function wireStackListDrop(listEl, stack) {
     listEl.addEventListener('dragleave', () => listEl.classList.remove('drop-target'));
     listEl.addEventListener('drop', ev => {
         listEl.classList.remove('drop-target');
+        // 工作区条目落进列表 = 以智能图层加入这条栈（行上的排序拖拽不认它，照常冒泡到这）。
+        if (dragHasType(ev, STAGING_ITEM_TYPE)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            let sid = '';
+            try { sid = ev.dataTransfer.getData(STAGING_ITEM_TYPE); } catch (err) { sid = ''; }
+            addStagingAsLayer(sid, stack);
+            return;
+        }
         if (dropHasFiles(ev.dataTransfer)) {
             // Files land in the stack the pointer is over, which is the one way to feed the
             // Guidances list without first making a layer and dragging it across.
@@ -9695,9 +9719,22 @@ function patchSelectedText(patch, historyKey) {
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
 // hands the pixels to the backend directly.
 function dropHasFiles(dt) { return !!dt && Array.prototype.indexOf.call(dt.types || [], 'Files') >= 0; }
+function dragHasType(e, t) { return !!e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], t) >= 0; }
+// 工作区 ⇆ 图层的两枚自定义拖拽标记（dragover 阶段只能看 types，drop 时才读得到值）：
+//   x-blend-layer   = 图层行起拖（图层列表排序的同一趟），落到工作区条 = 图层合成结果进图池
+//   x-blend-staging = 工作区条目起拖，落到画布 / 图层列表 = 以智能图层加入
+const STAGING_LAYER_TYPE = 'application/x-blend-layer';
+const STAGING_ITEM_TYPE = 'application/x-blend-staging';
 function baseName(name) { return String(name || 'Layer').replace(/\.[^.]+$/, '') || 'Layer'; }
 
 window.addEventListener('dragover', e => {
+    // 工作区条目拖进来：画布 = 智能图层落点，亮同一块全屏提示。
+    if (dragHasType(e, STAGING_ITEM_TYPE)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        dropOverlay.style.display = 'flex';
+        return;
+    }
     if (!dropHasFiles(e.dataTransfer)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
@@ -9707,12 +9744,29 @@ window.addEventListener('dragleave', e => {
     if (!e.relatedTarget) dropOverlay.style.display = 'none';   // only when the pointer leaves the frame
 });
 window.addEventListener('drop', e => {
+    // 工作区条目落在画布上 = 以智能图层加入（工作区条 / 图层列表自己接的先 stopPropagation）。
+    if (dragHasType(e, STAGING_ITEM_TYPE)) {
+        e.preventDefault();
+        dropOverlay.style.display = 'none';
+        let sid = '';
+        try { sid = e.dataTransfer.getData(STAGING_ITEM_TYPE); } catch (err) { sid = ''; }
+        addStagingAsLayer(sid, WORK_STACK);
+        return;
+    }
+    // 图层行拖拽在画布上松手：不是落点，安静放行（preventDefault 防浏览器把 text/plain 当导航）。
+    if (dragHasType(e, STAGING_LAYER_TYPE)) { e.preventDefault(); return; }
     if (!dropHasFiles(e.dataTransfer)) return;
     e.preventDefault();
     dropOverlay.style.display = 'none';
     // Exactly the same routing as the Import button: a .cud restores the context, images
     // become layers, and a non-empty project is never replaced without being asked.
     routeImportFiles(e.dataTransfer.files);
+});
+// 拖拽结束的兜底收尾：dragend 在源元素上触发并冒泡，是唯一保证会来的事件（松手在未
+// 处理的区域 / Esc 取消 / drop 不被允许时都不会走上面的 drop）。不挂它，一次路过画布
+// 又没落进任何落点的拖拽会把全屏提示永远留在屏幕上。
+window.addEventListener('dragend', () => {
+    dropOverlay.style.display = 'none';
 });
 
 // Don't let a focused sidebar control swallow the canvas shortcuts (T/M/B/E, space, arrows…).
@@ -13778,9 +13832,15 @@ function renderStaging() {
         const img = document.createElement('img');
         img.src = s.src;
         img.alt = s.name;
-        // 工作区条目只响应「点击插入 token」；把它当成 HTML5 拖拽源会和图层列表的
-        // 排序拖拽撞车（浏览器默认 <img> 可拖），所以显式关掉。
+        // 工作区条目点击 = 插入 <image_id:…> token；img 自身仍然不可拖（浏览器默认的图片
+        // 拖拽会带着 Files 语义到处触发落图），整张卡片才是真正的拖拽源 —— 拖到画布 /
+        // 图层列表 = 以智能图层加入。
         img.draggable = false;
+        item.draggable = true;
+        item.addEventListener('dragstart', ev => {
+            ev.dataTransfer.effectAllowed = 'copy';
+            try { ev.dataTransfer.setData(STAGING_ITEM_TYPE, String(s.id)); } catch (e) { /* 老宿主不认就当没有 */ }
+        });
         item.appendChild(img);
         const rm = document.createElement('button');
         rm.className = 'staging-remove';
@@ -13819,6 +13879,34 @@ function stageFiles(files) {
     })();
 }
 
+// ---- 图层 ⇆ 工作区的双向拖拽 ----
+
+// 图层行拖到工作区条上：导出这条图层的合成结果。layerSource() 就是「这条图层此刻的样子」
+// —— 图像 + decal + FX 链 + mask 按 attribute 条带顺序全部折入，按图层自身原始分辨率落一张 PNG。
+function exportLayerToStaging(id) {
+    const l = layers.find(x => x.id === id);
+    if (!l) return;
+    if (!l.img) { setStatus(`「${l.name}」has no pixels to stage yet`, 'error'); return; }
+    let src = null;
+    try { src = layerSource(l); } catch (err) { setStatus('Could not fold that layer: ' + err.message, 'error'); return; }
+    const c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    c.getContext('2d').drawImage(src, 0, 0);
+    let url = null;
+    try { url = c.toDataURL('image/png'); } catch (err) { setStatus('Could not read that layer\'s pixels: ' + err.message, 'error'); return; }
+    window.parent.postMessage({ type: 'blend-staging-upload', images: [url], names: [l.name] }, '*');
+    setStatus(`「${l.name}」staged — composite saved (decal / effects / mask folded in)`);
+}
+
+// 工作区条目拖到画布 / 图层列表：以智能图层加入。item.smart=true 绕过 "Place images as
+// raster" 偏好（staging 拖进来的就是智能对象），几何与文件拖入同一条路（fit 到画布）。
+function addStagingAsLayer(id, stack) {
+    const s = stagingItems.find(x => String(x.id) === String(id));
+    if (!s || !s.src) { setStatus('That workspace image is gone', 'error'); return; }
+    addLayer({ src: s.src, name: s.name || 'Staged', smart: true }, stack);
+    setStatus(`「${s.name || 'Staged'}」added from the workspace as a smart layer`);
+}
+
 const stagingStripEl = document.getElementById('stagingStrip');
 // 从画布一路拖到工作区条上时，画布的全屏 drop 提示必须让位给工作区自己的高亮 ——
 // 两者同时显示 = 用户不知道松手会发生什么。
@@ -13831,10 +13919,20 @@ function hideGlobalDropOverlay() {
 }
 if (stagingStripEl) {
     stagingStripEl.addEventListener('dragover', e => {
-        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+        const hasFiles = dropHasFiles(e.dataTransfer);
+        const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
+        // 从条目自己起拖路过自己家：既不是文件也不是图层，别亮任何东西，
+        // 并把路过画布时亮起的全屏提示收掉。
+        if (!hasFiles && !hasLayer) {
+            if (dragHasType(e, STAGING_ITEM_TYPE)) {
+                e.stopPropagation();
+                hideGlobalDropOverlay();
+            }
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();       // ★ 独占：window 的全局拖入不得再弹全屏 overlay
-        e.dataTransfer.dropEffect = 'copy';
+        e.dataTransfer.dropEffect = hasFiles ? 'copy' : 'move';
         hideGlobalDropOverlay();
         stagingStripEl.classList.add('drag-over');
     });
@@ -13844,13 +13942,23 @@ if (stagingStripEl) {
         stagingStripEl.classList.remove('drag-over');
     });
     stagingStripEl.addEventListener('drop', e => {
+        const hasFiles = dropHasFiles(e.dataTransfer);
+        const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
         // 图层排序的拖拽也可能在这上面松手（types 里没有 Files）—— 那不是我们的事，
-        // 不要拦也不要处理，让事件照常走完。
-        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+        // 不要拦也不要处理，让事件照常走完。staging 条目拖过自己家同理。
+        if (!hasFiles && !hasLayer) {
+            if (dragHasType(e, STAGING_ITEM_TYPE)) {
+                e.stopPropagation();
+                hideGlobalDropOverlay();
+            }
+            return;
+        }
         e.preventDefault();
         e.stopPropagation();       // 不让文件再落进画布变图层 —— 它们进图池
         stagingStripEl.classList.remove('drag-over');
-        stageFiles(e.dataTransfer.files);
+        if (hasFiles) { stageFiles(e.dataTransfer.files); return; }
+        // 图层拖上来 = 导出合成结果进图池
+        try { exportLayerToStaging(Number(e.dataTransfer.getData(STAGING_LAYER_TYPE))); } catch (err) { /* ignore */ }
     });
 }
 renderStaging();
