@@ -29,6 +29,10 @@
 
 ![SnapshotPromptNode 界面：左侧按分类浏览词条卡片，右侧汇总本次选中的 Prefab / LoRA / Prompt / Program](images/prompt_node.png)
 
+实际使用中：分类词条墙 + 右侧选中汇总 + 底部关键词搜索：
+
+![SnapshotPromptNode 实际使用示例](images/prompt_node_usage.png)
+
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | prompt_cache | BOOLEAN | 是 | 是否缓存 prompt 选择状态 |
@@ -62,6 +66,22 @@
 
 ![SnapshotDetailerSamplerNode 工作台：左侧 Context 与管线设置，中间图层画布，右侧 Canvas / Mask / Guidances / Layers 面板](images/sampler_node.png)
 
+实际使用流程：在 Pipeline Presets 里选一个 preset（如「请求生成」），画布上画 mask 或框选区域后一键运行，Guidances 挂参考、Layers 管图层，底部 Extra prompt 可带图说话：
+
+![工作台上画 mask、选 preset 准备运行](images/sampler_usage_mask.png)
+
+运行产出直接作为新图层（Output_01470_）落在图层栈里，可继续迭代：
+
+![运行结果作为图层回贴](images/sampler_usage_result.png)
+
+文本图层 + 逐层特效链（Drop Shadow / Stroke / Inner Shadow / Mosaic / Noise / Chromatic Aberration 均可实时叠加）：
+
+![文本图层与特效链](images/sampler_text_effects.png)
+
+工作台中部可以内嵌 Prompt 选择器标签页，项目可存为 .cud 文件（File 菜单 Load / Save / Export PNG / Import PSD）：
+
+![内嵌 Prompt 编辑器与 .cud 文件菜单](images/sampler_embedded_prompt.png)
+
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | pipeline | PIPELINE_DATA | 是 | 管线数据 |
@@ -86,6 +106,10 @@
 tldraw 画布资源管理节点。提供拖放式图片/视频卡片管理面板，支持图片强度配置、prompt 输入、Slot 插槽配置。
 
 ![SnapshotAssetsNode 界面：tldraw 无限画布，图片/视频/音频作为卡片自由摆放，底部为素材面板](images/assets_node.png)
+
+实际使用中的画布：图片、视频、音频各自成卡，选中的素材显示在底部「图片」面板等待确认输出：
+
+![SnapshotAssetsNode 实际使用示例](images/assets_node_usage.png)
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|

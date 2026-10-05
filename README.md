@@ -115,6 +115,8 @@ kolid-comfy/
 - **BranchManagerNode** — 可视化分支依赖关系图（SVG 力导向布局），显示所有 relay / config / select 依赖边
 - 以上所有配置字符串均有**前端语法高亮编辑器**（绿色=找到目标，橙色=未找到，蓝色=操作符）和**跳转按钮**快速定位引用节点
 
+![Branch 分支控制系统：一组 BranchSwitchNode 通过 relay_expression / active_config 联动，右侧 ApplicationNode 面板汇总全部开关](docs/images/branch_system.png)
+
 ### 交互式 Web UI 节点
 
 启动本地 HTTP 服务器并打开浏览器，提供可视化交互界面：
@@ -146,25 +148,71 @@ kolid-comfy/
 
 ## 界面一览
 
-核心特色节点的浏览器交互界面示意（全部界面在本地 HTTP 服务器中运行）：
+核心交互界面集中在本节展示；各节点完整说明与更多截图见 [docs/web-ui.md](docs/web-ui.md)。
 
-**SnapshotDetailerSamplerNode** — 图层工作台：画布上摆图层、画 mask、跑管线 preset
+### SnapshotDetailerSamplerNode — 图层工作台(核心)
 
-![SnapshotDetailerSamplerNode 工作台](docs/images/sampler_node.png)
+整个插件的核心:图层画布上画 mask、摆图层、挂 Guidance,选一个 pipeline preset 一键重绘:
 
-**SnapshotPromptNode** — 提示词选择器：按分类挑词条、选 LoRA、组 prefab
+![工作台:画 mask、选 preset](docs/images/sampler_usage_mask.png)
+
+运行产出直接作为新图层回贴图层栈,可无限迭代精修:
+
+![产出回贴图层](docs/images/sampler_usage_result.png)
+
+文本图层 + 逐层特效链(Drop Shadow / Stroke / Inner Shadow / Mosaic / Noise / Chromatic Aberration 均实时可调):
+
+![文本图层与特效链](docs/images/sampler_text_effects.png)
+
+中部可内嵌 Prompt 选择器标签页;工程存为 .cud 文件,支持 Export PNG / Import PSD:
+
+![内嵌 Prompt 编辑器与 .cud 文件菜单](docs/images/sampler_embedded_prompt.png)
+
+PROCESSOR 面板把图层交给接口处理器(此处为 DLSS5 神经渲染),参数就地可调:
+
+![Processor 调用 DLSS5](docs/images/processor_modal.png)
+
+处理器产出按 New Layer 落回,与普通图层同等对待:
+
+![Processor 结果落层](docs/images/processor_result_layer.png)
+
+接口系统在 ComfyUI 侧就是一组普通节点:InterfaceStartNode / InterfaceEndNode / InterfacePackageNode 组成子图,任意节点图都能封装成工作台里的处理器:
+
+![Interface 接口子图](docs/images/interface_graph.png)
+
+工作台右侧的接口卡面板:每张卡声明 Block / Processor 两种身份与注入端口,勾选即接入:
+
+![接口卡配置面板](docs/images/interface_config_panel.png)
+
+### SnapshotPromptNode — 提示词选择器
+
+按分类挑词条卡片、选 LoRA、组 prefab,右侧实时汇总本次选中的全部内容:
 
 ![SnapshotPromptNode 提示词选择器](docs/images/prompt_node.png)
 
-**SnapshotAssetsNode** — tldraw 素材画布：图片/视频/音频卡片拖放管理
+实际使用中:分类词条墙(每张卡带预览图)、右侧汇总选中的 Prefab / LoRA / Prompt / Program,底部按关键词即搜即选:
+
+![SnapshotPromptNode 实际使用](docs/images/prompt_node_usage.png)
+
+### SnapshotAssetsNode — tldraw 素材画布
+
+图片/视频/音频卡片在无限画布上自由摆放,选中素材汇入底部面板等待确认输出:
 
 ![SnapshotAssetsNode 素材画布](docs/images/assets_node.png)
 
-**SnapshotGaussianNode** — 3D 高斯泼溅预览，按 Enter 截图回传
+![实际使用中的素材画布](docs/images/assets_node_usage.png)
+
+### SnapshotGaussianNode — 3D 高斯泼溅预览
+
+浏览器里渲染 .ply 高斯点云,Scale / Focal 可调,按 Enter 截图回传节点:
 
 ![SnapshotGaussianNode 3D 预览](docs/images/gaussian_node.png)
 
-更多界面截图见 [docs/web-ui.md](docs/web-ui.md)。
+### SnapshotRegionNode — 区域描述编辑器
+
+画布上拖出 bbox 区域并填写描述,输出 caption JSON 供区域受控生成:
+
+![SnapshotRegionNode 区域编辑](docs/images/region_node.png)
 
 ---
 

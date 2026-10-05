@@ -383,6 +383,15 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 图片尺寸记录 (用于过滤同尺寸图片)
 
 ### 7. Interface 子图执行
+
+接口系统在 ComfyUI 图里由 InterfaceStartNode / InterfaceEndNode / InterfacePackageNode 组成子图，处理器（如 DLSS Neural Renderer）作为子图内部节点：
+
+![Interface 接口子图接线](images/interface_graph.png)
+
+工作台右侧的接口卡配置面板（每张卡有 Block / Processor 两个开关，声明注入的输入输出端口）：
+
+![接口卡配置面板](images/interface_config_panel.png)
+
 - InterfacePackageNode → sub_prompt
 - Port 显示 (Start/End, inject/manual/port 分类)
 - 注入选项: Image source (默认/选择), Operation (默认/Crop mask 区域), Crop Reserve
@@ -390,21 +399,31 @@ SnapshotDetailerSamplerNode 是一个事件驱动的交互式图像细节修复�
 - 结果 uncrop 回原图尺寸
 - 结果加入 history + auto-set context
 
-### 8. Finish 流程
+### 8. Processor 处理器调用
+
+工作台 PROCESSOR 面板选择接口（如 DLSS5），图层/Staging 作为输入，参数就地可调：
+
+![Processor 弹窗调用 DLSS5](images/processor_modal.png)
+
+产出按「New Layer」落回图层栈，与普通图层一样可继续叠加特效：
+
+![Processor 结果作为图层](images/processor_result_layer.png)
+
+### 9. Finish 流程
 - 多选 history 图片
 - POST /api/finish → server.finished = True → 主循环 break
 - server.stop() (关闭 mask/prompt/main server)
 - 选中图片设为 pipeline.image
 - 前端显示 Finished 页面 (不调 window.close())
 
-### 9. 参数同步
+### 10. 参数同步
 - 前端 → /api/update_config → _apply_params → server 状态
 - server 状态 → _sync_widgets → ComfyUI widget 同步
 - run_detailer 前: params 从 server 同步最新值
 - Mask: handleTabChange → sync-mask → /mask → handleMask → pipeline.mask
 - Prompt: handleTabChange → sync-prompt → /select_prompt → prompt_server
 
-### 10. 服务器架构
+### 11. 服务器架构
 ```
 SnapshotDetailerSamplerServer
 ├── mask_server (SnapshotMaskNodeServer, image_node.py)

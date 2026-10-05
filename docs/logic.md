@@ -4,6 +4,8 @@
 
 分支节点系统提供工作流级别的流程控制能力，包括：条件输出、节点静音/旁路/折叠、布尔逻辑中继、多路选择、分组管理等。所有配置在前端实时解析并可视化高亮，支持跳转到引用节点。
 
+![Branch 分支控制系统实战工作流：每个卡片是一个分支开关，relay_expression / active_config 配置带语法高亮](images/branch_system.png)
+
 ---
 
 ### BranchNoneNode
