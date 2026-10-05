@@ -606,7 +606,15 @@ const App: React.FC = () => {
   // Declared after the handlers so the listener always closes over the current ones.
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'prompt-confirmed') {
+      if (event.data?.type === 'kolid-prompt-library-changed') {
+        // A prompt document wrote the shared library (词条 / 分类 / prefab / program). Every prompt
+        // UI in this workbench is a separate document with its own React copy of /prompts_data, and
+        // the Prompt tab never re-fetches on its own — so relay to it. Skip the writer itself: it
+        // already patched its own state. Only the always-mounted Prompt tab can be stale while
+        // something else writes, since an open Query / preset dialog is modal over this page.
+        if (event.source === promptIframeRef.current?.contentWindow) return;
+        promptIframeRef.current?.contentWindow?.postMessage({ type: 'kolid-prompt-refresh-library' }, '*');
+      } else if (event.data?.type === 'prompt-confirmed') {
         setPromptReady(true);
         // Skip auto-advance if this was consumed by handleTabChange sync
         if (consumedPromptConfirmedRef.current) {

@@ -54,6 +54,41 @@ export function answerQuerySelection(selection: PromptPresetSelectionPayload): b
   return true;
 }
 
+/** The library the prompt UI shares with its host — prompt.json / library.json / applications.json
+ *  — and every endpoint that writes it. These writes go to the SERVER, so a sibling prompt document
+ *  (the workbench's always-mounted Prompt tab, a preset editor, a Query dialog) keeps rendering the
+ *  copy it pulled at mount until someone re-fetches. The writer therefore announces each accepted
+ *  write once and the host decides who re-pulls.
+ *  Lora scans are deliberately NOT here: they are a different store with their own channel
+ *  ('reload-lora-data', fired by the host on a pipeline switch). */
+const LIBRARY_WRITE_ENDPOINTS = new Set([
+  '/add_prompt', '/update_prompt', '/delete_prompt', '/reorder_prompts', '/move_prompt_to_category',
+  '/add_category', '/update_category', '/delete_category', '/reorder_categories', '/update_category_display_mode',
+  '/add_library', '/update_library', '/delete_library', '/reorder_libraries', '/update_library_display_mode',
+  '/add_library_prefab', '/update_library_prefab', '/delete_library_prefab',
+  '/reorder_library_prefabs', '/move_prefab_to_library',
+  '/add_program', '/update_program', '/delete_program', '/reorder_programs',
+  '/move_program_to_category', '/update_program_category', '/update_program_display_mode',
+]);
+
+/** Observe this document's own library writes from the fetch layer, so no call site has to
+ *  remember to notify. Installed once at startup; a standalone window has no host to tell. */
+export function installLibraryWriteNotifier(): void {
+  if (typeof window === 'undefined' || window.parent === window) return;
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => nativeFetch(input, init).then(res => {
+    const url = typeof input === 'string' || input instanceof URL
+      ? String(input)
+      : input.url;
+    const path = new URL(url, window.location.href).pathname;
+    if ((init?.method || 'GET').toUpperCase() === 'POST'
+        && LIBRARY_WRITE_ENDPOINTS.has(path) && res.ok) {
+      window.parent.postMessage({ type: 'kolid-prompt-library-changed' }, '*');
+    }
+    return res;
+  });
+}
+
 /** Save the selection into the shared preset and notify the host (EditPhase) so it can close the modal. */
 export async function savePromptPresetSelection(selection: PromptPresetSelectionPayload): Promise<boolean> {
   if (!PRESET_SCOPE || !PRESET_ID || !SAMPLER_BASE) return false;
