@@ -1,4 +1,4 @@
-# 🖼️ 图像处理节点
+# 图像处理节点
 
 [← 返回主 README](../README.md)
 
@@ -10,12 +10,12 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| width | INT | ✅ | 目标画布宽度 0-2048（默认 0=不限制） |
-| height | INT | ✅ | 目标画布高度 0-2048（默认 0=不限制） |
-| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
-| padding_color | STRING | ✅ | 填充颜色，支持 `R, G, B` 或 `#RRGGBB`（默认 "255, 255, 255"） |
-| mask | MASK | ❌ | 可选 mask，同步缩放 |
+| image | IMAGE | 是 | 输入图片 |
+| width | INT | 是 | 目标画布宽度 0-2048（默认 0=不限制） |
+| height | INT | 是 | 目标画布高度 0-2048（默认 0=不限制） |
+| interpolation | COMBO | 是 | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| padding_color | STRING | 是 | 填充颜色，支持 `R, G, B` 或 `#RRGGBB`（默认 "255, 255, 255"） |
+| mask | MASK | 否 | 可选 mask，同步缩放 |
 
 **输出:** `Image` (IMAGE), `FitInfo` (FIT_INFO), `Mask` (MASK)
 
@@ -27,10 +27,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 适配后的图片 |
-| fitInfo | FIT_INFO | ✅ | 来自 ImageFitNode 的 FitInfo |
-| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
-| mask | MASK | ❌ | 可选 mask，同步恢复 |
+| image | IMAGE | 是 | 适配后的图片 |
+| fitInfo | FIT_INFO | 是 | 来自 ImageFitNode 的 FitInfo |
+| interpolation | COMBO | 是 | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| mask | MASK | 否 | 可选 mask，同步恢复 |
 
 **输出:** `Image` (IMAGE), `Mask` (MASK)
 
@@ -42,11 +42,11 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| width | INT | ✅ | 目标画布宽度 0-2048（默认 0=不限制） |
-| height | INT | ✅ | 目标画布高度 0-2048（默认 0=不限制） |
-| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
-| mask | MASK | ❌ | 可选 mask，同步缩放和裁剪 |
+| image | IMAGE | 是 | 输入图片 |
+| width | INT | 是 | 目标画布宽度 0-2048（默认 0=不限制） |
+| height | INT | 是 | 目标画布高度 0-2048（默认 0=不限制） |
+| interpolation | COMBO | 是 | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| mask | MASK | 否 | 可选 mask，同步缩放和裁剪 |
 
 **输出:** `Image` (IMAGE), `MeetInfo` (MEET_INFO), `Mask` (MASK)
 
@@ -61,12 +61,12 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 处理后的 meet 图 |
-| meetInfo | MEET_INFO | ✅ | 来自 ImageMeetNode 的 MeetInfo |
-| interpolation | COMBO | ✅ | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
-| padding_color | STRING | ✅ | 有损还原时的填充颜色，支持 `R, G, B` 或 `#RRGGBB`（默认 "255, 255, 255"） |
-| background | IMAGE | ❌ | 原图背景，连接则贴回原图完美还原 |
-| mask | MASK | ❌ | 可选 mask，同步恢复 |
+| image | IMAGE | 是 | 处理后的 meet 图 |
+| meetInfo | MEET_INFO | 是 | 来自 ImageMeetNode 的 MeetInfo |
+| interpolation | COMBO | 是 | 插值模式：nearest / bilinear / bicubic（默认 bilinear） |
+| padding_color | STRING | 是 | 有损还原时的填充颜色，支持 `R, G, B` 或 `#RRGGBB`（默认 "255, 255, 255"） |
+| background | IMAGE | 否 | 原图背景，连接则贴回原图完美还原 |
+| mask | MASK | 否 | 可选 mask，同步恢复 |
 
 **输出:** `Image` (IMAGE), `Mask` (MASK)
 
@@ -78,10 +78,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| pixels | INT | ✅ | 最大像素数（默认 1048576=1MP） |
-| align | INT | ✅ | 对齐到最近的像素网格（默认 1） |
-| mask | MASK | ❌ | 可选 mask，同步缩放 |
+| image | IMAGE | 是 | 输入图片 |
+| pixels | INT | 是 | 最大像素数（默认 1048576=1MP） |
+| align | INT | 是 | 对齐到最近的像素网格（默认 1） |
+| mask | MASK | 否 | 可选 mask，同步缩放 |
 
 **输出:** `image` (IMAGE), `mask` (MASK), `resize_info` (RESIZE_INFO)
 
@@ -93,10 +93,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| width | INT | ✅ | 原始宽度（默认 1024） |
-| height | INT | ✅ | 原始高度（默认 1024） |
-| pixels | INT | ✅ | 最大像素数（默认 1048576=1MP） |
-| align | INT | ✅ | 对齐步长（默认 1） |
+| width | INT | 是 | 原始宽度（默认 1024） |
+| height | INT | 是 | 原始高度（默认 1024） |
+| pixels | INT | 是 | 最大像素数（默认 1048576=1MP） |
+| align | INT | 是 | 对齐步长（默认 1） |
 
 **输出:** `width` (INT), `height` (INT)
 
@@ -108,9 +108,9 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 缩放后的图片 |
-| resize_info | RESIZE_INFO | ✅ | 来自 ImageLimitPixelNode 的 resize_info |
-| mask | MASK | ❌ | 可选 mask，同步恢复 |
+| image | IMAGE | 是 | 缩放后的图片 |
+| resize_info | RESIZE_INFO | 是 | 来自 ImageLimitPixelNode 的 resize_info |
+| mask | MASK | 否 | 可选 mask，同步恢复 |
 
 **输出:** `image` (IMAGE), `mask` (MASK)
 
@@ -122,9 +122,9 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| mask | MASK | ✅ | 用于裁剪的 mask |
-| reserve | INT | ✅ | mask 边距像素数 0-1000（默认 0） |
+| image | IMAGE | 是 | 输入图片 |
+| mask | MASK | 是 | 用于裁剪的 mask |
+| reserve | INT | 是 | mask 边距像素数 0-1000（默认 0） |
 
 **输出:** `image` (IMAGE), `mask` (MASK), `crop_info` (CROP_INFO)
 
@@ -136,11 +136,11 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| background | IMAGE | ✅ | 背景图（作为恢复底板） |
-| image | IMAGE | ✅ | 裁剪后的图片 |
-| crop_info | CROP_INFO | ✅ | 来自 ImageCropMaskNode 的 crop_info |
-| recover_method | COMBO | ✅ | 恢复方式：mask_blend / mask_only / bounds_only（默认 mask_blend） |
-| mask | MASK | ❌ | 可选 mask，同步恢复 |
+| background | IMAGE | 是 | 背景图（作为恢复底板） |
+| image | IMAGE | 是 | 裁剪后的图片 |
+| crop_info | CROP_INFO | 是 | 来自 ImageCropMaskNode 的 crop_info |
+| recover_method | COMBO | 是 | 恢复方式：mask_blend / mask_only / bounds_only（默认 mask_blend） |
+| mask | MASK | 否 | 可选 mask，同步恢复 |
 
 **输出:** `image` (IMAGE), `mask` (MASK)
 
@@ -152,13 +152,13 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| images | IMAGE | ✅ | 输入图片（支持列表） |
-| align | INT | ✅ | 尺寸对齐步长 0-128（默认 16） |
-| width | INT | ✅ | 目标宽度 0-4096（默认 0=自动计算，0=按面积加权平均） |
-| height | INT | ✅ | 目标高度 0-4096（默认 0=自动计算） |
-| masks | MASK | ❌ | 可选 mask 列表，同步处理 |
-| fill_image | STRING | ❌ | 图片填充颜色 #RRGGBB（默认 "#000000"） |
-| fill_mask | FLOAT | ❌ | mask 填充值 0.0-1.0（默认 0.0） |
+| images | IMAGE | 是 | 输入图片（支持列表） |
+| align | INT | 是 | 尺寸对齐步长 0-128（默认 16） |
+| width | INT | 是 | 目标宽度 0-4096（默认 0=自动计算，0=按面积加权平均） |
+| height | INT | 是 | 目标高度 0-4096（默认 0=自动计算） |
+| masks | MASK | 否 | 可选 mask 列表，同步处理 |
+| fill_image | STRING | 否 | 图片填充颜色 #RRGGBB（默认 "#000000"） |
+| fill_mask | FLOAT | 否 | mask 填充值 0.0-1.0（默认 0.0） |
 
 **输出:** `image` (IMAGE), `mask` (MASK), `batch_info` (BATCH_INFO)
 
@@ -170,9 +170,9 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | Batch 后的图片 |
-| batch_info | BATCH_INFO | ✅ | 来自 ImageBatchNode 的 batch_info |
-| mask | MASK | ❌ | 可选 mask，同步恢复 |
+| image | IMAGE | 是 | Batch 后的图片 |
+| batch_info | BATCH_INFO | 是 | 来自 ImageBatchNode 的 batch_info |
+| mask | MASK | 否 | 可选 mask，同步恢复 |
 
 **输出:** `images` (IMAGE[]), `masks` (MASK[])
 
@@ -184,9 +184,9 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| tolerance | FLOAT | ✅ | 内容与边框颜色容差 0.0-1.0（默认 0.06） |
-| border_threshold | FLOAT | ✅ | 判断是否有边框的严格程度 0.0-0.5（默认 0.08，越小越严格） |
+| image | IMAGE | 是 | 输入图片 |
+| tolerance | FLOAT | 是 | 内容与边框颜色容差 0.0-1.0（默认 0.06） |
+| border_threshold | FLOAT | 是 | 判断是否有边框的严格程度 0.0-0.5（默认 0.08，越小越严格） |
 
 **输出:** `mask` (MASK), `has_border` (BOOLEAN)
 
@@ -198,8 +198,8 @@ Mask 裁剪。根据 mask 的包围盒裁剪图片，支持 reserve 参数留出
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| image | IMAGE | ✅ | 输入图片 |
-| include_prefix | BOOLEAN | ✅ | 是否包含 data URI 前缀（默认 True） |
+| image | IMAGE | 是 | 输入图片 |
+| include_prefix | BOOLEAN | 是 | 是否包含 data URI 前缀（默认 True） |
 
 **输出:** `base64_string` (STRING)
 
@@ -211,6 +211,6 @@ Base64 字符串转图片（ComfyUI IMAGE 格式）。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| base64_string | STRING | ✅ | Base64 编码的图片字符串（多行） |
+| base64_string | STRING | 是 | Base64 编码的图片字符串（多行） |
 
 **输出:** `image` (IMAGE)

@@ -1,4 +1,4 @@
-# 🔀 分支/流程控制节点
+# 分支/流程控制节点
 
 [← 返回主 README](../README.md)
 
@@ -12,8 +12,8 @@ None 值分支。当 `check` 输入为 None 时输出 `on_none`，否则输出 `
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| check | * | ✅ | 检查值（任意类型） |
-| on_none | * | ❌ | check 为 None 时的输出（lazy 加载，不触发上游执行） |
+| check | * | 是 | 检查值（任意类型） |
+| on_none | * | 否 | check 为 None 时的输出（lazy 加载，不触发上游执行） |
 
 **输出:** `*` (任意类型)
 
@@ -27,7 +27,7 @@ None 值分支。当 `check` 输入为 None 时输出 `on_none`，否则输出 `
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| check | * | ❌ | 可选输入值（未连接时输出 True） |
+| check | * | 否 | 可选输入值（未连接时输出 True） |
 
 **输出:** `is_none` (BOOLEAN)
 
@@ -39,7 +39,7 @@ None 值分支。当 `check` 输入为 None 时输出 `on_none`，否则输出 `
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| required | * | ❌ | 可选输入值 |
+| required | * | 否 | 可选输入值 |
 
 **输出:** `required` (任意类型)
 
@@ -77,10 +77,10 @@ None 值分支。当 `check` 输入为 None 时输出 `on_none`，否则输出 `
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| value | * | ✅ | 输入值（lazy 加载：toggle=False 时不触发上游） |
-| toggle | BOOLEAN | ✅ | 开关（默认 False） |
-| relay_expression | STRING | ❌ | 布尔逻辑中继表达式（多行，前端语法高亮） |
-| active_config | STRING | ❌ | 节点状态控制配置（多行，前端语法高亮） |
+| value | * | 是 | 输入值（lazy 加载：toggle=False 时不触发上游） |
+| toggle | BOOLEAN | 是 | 开关（默认 False） |
+| relay_expression | STRING | 否 | 布尔逻辑中继表达式（多行，前端语法高亮） |
+| active_config | STRING | 否 | 节点状态控制配置（多行，前端语法高亮） |
 
 **输出:** `*` (任意类型，toggle=False 时输出 None)
 
@@ -165,10 +165,10 @@ toggle=true 时：将 ID 1234 的分支节点 toggle 设为 true，静音 MyGrou
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| select | COMBO | ✅ | 显示用下拉框（自动生成：`[N] 上游节点名`，前端使用） |
-| select_input | INT | ✅ | 选择输入索引（0=无选择，1=input1，2=input2...） |
-| select_config | STRING | ✅ | 选择配置字符串（多行，前端语法高亮） |
-| input1+ | * | ❌ | 动态扩展输入（lazy 加载，连接后自动添加更多槽位） |
+| select | COMBO | 是 | 显示用下拉框（自动生成：`[N] 上游节点名`，前端使用） |
+| select_input | INT | 是 | 选择输入索引（0=无选择，1=input1，2=input2...） |
+| select_config | STRING | 是 | 选择配置字符串（多行，前端语法高亮） |
+| input1+ | * | 否 | 动态扩展输入（lazy 加载，连接后自动添加更多槽位） |
 
 **输出:** `output` (*), `select` (STRING), `select_index` (INT)
 
@@ -225,9 +225,9 @@ select=1 时静音 RenderGroup 中所有节点，select=2 时取消静音。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| toggle | BOOLEAN | ✅ | 布尔值（默认 False） |
-| relay_expression | STRING | ❌ | 布尔逻辑中继表达式（格式同 BranchSwitchNode） |
-| active_config | STRING | ❌ | 节点状态控制配置（格式同 BranchSwitchNode） |
+| toggle | BOOLEAN | 是 | 布尔值（默认 False） |
+| relay_expression | STRING | 否 | 布尔逻辑中继表达式（格式同 BranchSwitchNode） |
+| active_config | STRING | 否 | 节点状态控制配置（格式同 BranchSwitchNode） |
 
 **输出:** `toggle` (BOOLEAN)
 
@@ -250,14 +250,14 @@ select=1 时静音 RenderGroup 中所有节点，select=2 时取消静音。
 **可视化内容：**
 - **节点**：BranchSwitchNode（蓝色）、BranchBooleanNode（绿色）、BranchSwitchesNode（橙色）、被 config 引用的非分支节点（红色）
 - **边**：
-  - `relay` 边：relay_expression 中引用的其他分支节点
-  - `config` 边：active_config 中操作的目标节点
-  - `select` 边：select_config 中操作的目标节点
+ - `relay` 边：relay_expression 中引用的其他分支节点
+ - `config` 边：active_config 中操作的目标节点
+ - `select` 边：select_config 中操作的目标节点
 - **交互**：悬停节点显示详细信息（title、type、表达式内容），点击节点跳转到对应节点
 
 ---
 
-## 📋 List 操作节点
+## List 操作节点
 
 ### ListMergeNode
 
@@ -265,10 +265,10 @@ select=1 时静音 RenderGroup 中所有节点，select=2 时取消静音。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| list0 | * | ❌ | 列表 0 |
-| list1 | * | ❌ | 列表 1 |
-| list2 | * | ❌ | 列表 2 |
-| list3 | * | ❌ | 列表 3 |
+| list0 | * | 否 | 列表 0 |
+| list1 | * | 否 | 列表 1 |
+| list2 | * | 否 | 列表 2 |
+| list3 | * | 否 | 列表 3 |
 
 **输出:** `List` (LIST)
 
@@ -280,10 +280,10 @@ DICT 列表合并。将最多 4 个字典列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| list0 | DICT | ❌ | 列表 0 |
-| list1 | DICT | ❌ | 列表 1 |
-| list2 | DICT | ❌ | 列表 2 |
-| list3 | DICT | ❌ | 列表 3 |
+| list0 | DICT | 否 | 列表 0 |
+| list1 | DICT | 否 | 列表 1 |
+| list2 | DICT | 否 | 列表 2 |
+| list3 | DICT | 否 | 列表 3 |
 
 **输出:** `DICT` (DICT[])
 
@@ -295,10 +295,10 @@ MASK 列表合并。将最多 4 个 mask 列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| list0 | MASK | ❌ | 列表 0 |
-| list1 | MASK | ❌ | 列表 1 |
-| list2 | MASK | ❌ | 列表 2 |
-| list3 | MASK | ❌ | 列表 3 |
+| list0 | MASK | 否 | 列表 0 |
+| list1 | MASK | 否 | 列表 1 |
+| list2 | MASK | 否 | 列表 2 |
+| list3 | MASK | 否 | 列表 3 |
 
 **输出:** `MASK` (MASK[])
 
@@ -310,16 +310,16 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| list0 | REGEX_PACK | ❌ | 列表 0 |
-| list1 | REGEX_PACK | ❌ | 列表 1 |
-| list2 | REGEX_PACK | ❌ | 列表 2 |
-| list3 | REGEX_PACK | ❌ | 列表 3 |
+| list0 | REGEX_PACK | 否 | 列表 0 |
+| list1 | REGEX_PACK | 否 | 列表 1 |
+| list2 | REGEX_PACK | 否 | 列表 2 |
+| list3 | REGEX_PACK | 否 | 列表 3 |
 
 **输出:** `REGEX_PACK` (REGEX_PACK[])
 
 ---
 
-## 📖 Dictionary 操作节点
+## Dictionary 操作节点
 
 ### DictionaryNewNode
 
@@ -327,7 +327,7 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary_text | STRING | ✅ | Python 字典字面量字符串（多行） |
+| dictionary_text | STRING | 是 | Python 字典字面量字符串（多行） |
 
 **输出:** `Dict` (DICT)
 
@@ -339,9 +339,9 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| key | STRING | ✅ | 键名 |
-| value | * | ✅ | 值（任意类型） |
-| dictionary | DICT | ❌ | 上游字典 |
+| key | STRING | 是 | 键名 |
+| value | * | 是 | 值（任意类型） |
+| dictionary | DICT | 否 | 上游字典 |
 
 **输出:** `Dict` (DICT)
 
@@ -353,8 +353,8 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| key | STRING | ✅ | 键名 |
+| dictionary | DICT | 是 | 字典 |
+| key | STRING | 是 | 键名 |
 
 **输出:** `*` (任意类型)
 
@@ -366,7 +366,7 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
+| dictionary | DICT | 是 | 字典 |
 
 **输出:** `values` (LIST)
 
@@ -378,10 +378,10 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| index | * | ✅ | 索引值（任意类型） |
-| key | STRING | ✅ | 键名前缀 |
-| value | * | ✅ | 值 |
-| dictionary | DICT | ❌ | 上游字典 |
+| index | * | 是 | 索引值（任意类型） |
+| key | STRING | 是 | 键名前缀 |
+| value | * | 是 | 值 |
+| dictionary | DICT | 否 | 上游字典 |
 
 **输出:** `Dict` (DICT)
 
@@ -393,9 +393,9 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| index | * | ✅ | 索引值 |
-| key | STRING | ✅ | 键名前缀 |
+| dictionary | DICT | 是 | 字典 |
+| index | * | 是 | 索引值 |
+| key | STRING | 是 | 键名前缀 |
 
 **输出:** `value` (任意类型)
 
@@ -407,9 +407,9 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| key | STRING | ✅ | 键名 |
-| values | * | ✅ | 值列表 |
-| dictionary | DICT | ❌ | 上游字典模板 |
+| key | STRING | 是 | 键名 |
+| values | * | 是 | 值列表 |
+| dictionary | DICT | 否 | 上游字典模板 |
 
 **输出:** `Dict` (DICT[])
 
@@ -421,10 +421,10 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| condition | STRING | ✅ | 条件键名 |
-| key | STRING | ✅ | 要设置的键名 |
-| value | * | ✅ | 要设置的值 |
-| dictionary | DICT | ❌ | 上游字典 |
+| condition | STRING | 是 | 条件键名 |
+| key | STRING | 是 | 要设置的键名 |
+| value | * | 是 | 要设置的值 |
+| dictionary | DICT | 否 | 上游字典 |
 
 **输出:** `Dict` (DICT)
 
@@ -436,10 +436,10 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| condition | STRING | ✅ | 条件键名 |
-| key | STRING | ✅ | 要设置的键名 |
-| value | BOOLEAN | ✅ | 要设置的布尔值（默认 True） |
-| dictionary | DICT | ❌ | 上游字典 |
+| condition | STRING | 是 | 条件键名 |
+| key | STRING | 是 | 要设置的键名 |
+| value | BOOLEAN | 是 | 要设置的布尔值（默认 True） |
+| dictionary | DICT | 否 | 上游字典 |
 
 **输出:** `Dict` (DICT), `Success` (BOOLEAN)
 
@@ -451,11 +451,11 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| condition | STRING | ✅ | 条件键名 |
-| key | STRING | ✅ | 结果存储键名 |
-| on_failure | * | ✅ | 失败时的输出 |
-| on_success | * | ❌ | 成功时的输出（lazy 加载） |
+| dictionary | DICT | 是 | 字典 |
+| condition | STRING | 是 | 条件键名 |
+| key | STRING | 是 | 结果存储键名 |
+| on_failure | * | 是 | 失败时的输出 |
+| on_success | * | 否 | 成功时的输出（lazy 加载） |
 
 **输出:** `Dict` (DICT), `*` (任意类型)
 
@@ -467,8 +467,8 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| key | STRING | ✅ | 键名 |
+| dictionary | DICT | 是 | 字典 |
+| key | STRING | 是 | 键名 |
 
 **输出:** `value` (INT)
 
@@ -480,8 +480,8 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| key | STRING | ✅ | 键名 |
+| dictionary | DICT | 是 | 字典 |
+| key | STRING | 是 | 键名 |
 
 **输出:** `value` (FLOAT)
 
@@ -493,8 +493,8 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| key | STRING | ✅ | 键名 |
+| dictionary | DICT | 是 | 字典 |
+| key | STRING | 是 | 键名 |
 
 **输出:** `value` (STRING)
 
@@ -506,7 +506,7 @@ REGEX_PACK 列表合并。将最多 4 个正则包列表合并。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| dictionary | DICT | ✅ | 字典 |
-| key | STRING | ✅ | 键名 |
+| dictionary | DICT | 是 | 字典 |
+| key | STRING | 是 | 键名 |
 
 **输出:** `dict` (DICT), `flag` (BOOLEAN)

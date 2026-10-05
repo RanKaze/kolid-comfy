@@ -4,7 +4,7 @@
 
 ---
 
-## 📦 安装教程
+## 安装教程
 
 ### 1. 克隆仓库
 
@@ -14,7 +14,7 @@
 cd ComfyUI/custom_nodes
 git clone https://github.com/RanKaze/kolid-comfy.git
 cd kolid-comfy
-git submodule update --init --recursive   # 拉取 SuperSplat 前端子模块
+git submodule update --init --recursive # 拉取 SuperSplat 前端子模块
 ```
 
 > 如果不需要 SnapshotGaussianNode 的 SuperSplat 渲染模式，可以跳过 submodule 步骤。
@@ -75,7 +75,7 @@ npm run build -w assets_node
 
 ---
 
-## 📁 目录结构
+## 目录结构
 
 ```
 kolid-comfy/
@@ -98,24 +98,24 @@ kolid-comfy/
 
 ---
 
-## ⭐ 核心特色节点
+## 核心特色节点
 
 这些节点具有超出常规数据处理的特殊功能（前端交互、工作流控制、架构扩展等），是 Kolid-Comfy 的核心价值所在。
 
-### 🔀 Branch 分支控制系统
+### Branch 分支控制系统
 
 一套完整的**工作流级流程控制**系统，无需 Python 代码即可实现条件分支、节点静音/旁路/折叠、布尔逻辑中继、多路选择、分组管理。
 
 - **BranchSwitchNode** — 布尔开关。toggle=true 时透传数据，toggle=false 时输出 None（lazy 加载，不触发上游）。支持 **relay_expression**（布尔逻辑中继）和 **active_config**（节点状态控制）两个强大的配置字符串：
-  - `relay_expression`：根据其他分支节点的 toggle 值自动计算当前值。支持 `&&` `||` `!` `()` 运算符、`{id}` 按 ID 引用、`..Parent:NodeName` 跨图引用、`{id}==[N]` SwitchesNode 选择检查
-  - `active_config`：toggle 变化时自动控制其他节点。格式 `op:target_type:target_value`，操作包括 mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand/set/!set，目标支持 name/id/group
+ - `relay_expression`：根据其他分支节点的 toggle 值自动计算当前值。支持 `&&` `||` `!` `()` 运算符、`{id}` 按 ID 引用、`..Parent:NodeName` 跨图引用、`{id}==[N]` SwitchesNode 选择检查
+ - `active_config`：toggle 变化时自动控制其他节点。格式 `op:target_type:target_value`，操作包括 mute/!mute/bypass/!bypass/foldout/!foldout/expand/!expand/set/!set，目标支持 name/id/group
 - **BranchSwitchesNode** — 多路选择器。动态扩展输入槽，仅加载选中输入（lazy）。支持 **select_config**：根据选择索引自动控制其他节点状态，格式 `select_index:op:target_type:target_value`，匹配的执行原操作，不匹配的执行反转操作。支持 SwitchesNode 间联动
 - **BranchBooleanNode** — 纯布尔控制节点（无数据输入），配合 relay_expression / active_config 作为逻辑控制器
 - **BranchGroupNode** — 分组管理。通过 properties 配置批量管理一组分支节点，支持 Default（独立 toggle）/ MaxOne（最多选一个）/ AlwaysOne（必须选一个）三种模式
 - **BranchManagerNode** — 可视化分支依赖关系图（SVG 力导向布局），显示所有 relay / config / select 依赖边
 - 以上所有配置字符串均有**前端语法高亮编辑器**（绿色=找到目标，橙色=未找到，蓝色=操作符）和**跳转按钮**快速定位引用节点
 
-### 📋 交互式 Web UI 节点
+### 交互式 Web UI 节点
 
 启动本地 HTTP 服务器并打开浏览器，提供可视化交互界面：
 
@@ -128,7 +128,7 @@ kolid-comfy/
 - **SnapshotRegionNode** — 区域编辑器。绘制 bbox 区域 + 描述，输出 caption JSON（支持 normalized/absolute 坐标、yx/xy 轴序、compact/pretty 格式），可嵌入 SnapshotPromptNode
 - **SnapshotCaptureNode** — 桌面截图。PySide6 浮动面板，Shot（框选截图）/ Previous（加载缓存）模式
 
-### 🎨 采样管线 (Pipeline) 系统
+### 采样管线 (Pipeline) 系统
 
 模块化采样工作流，通过 PipelineData 在节点间传递模型、图片、条件等上下文：
 
@@ -138,27 +138,51 @@ kolid-comfy/
 - **双模型 CFG** — ConfigModelNegativeNode 设置负向模型，采样时正向用 model、负向用 model_negative（DualModelCFGGuider）
 - **Context 系统** — ContextNode 按名称管理多组 prompt/LoRA，ContextQueryNode 通过相似度模型自动选择上下文，采样器通过 context_regex 正则匹配
 
-### 🧮 ScriptNode
+### ScriptNode
 
 自定义 Python 脚本执行节点。在节点中编写 Python 代码，通过 `result` 变量返回结果，支持 `x`/`y`/`z` 三个任意类型输入和列表输出。
 
 ---
 
-## 📖 完整节点文档索引
+## 界面一览
 
-| 分类 | 说明 | 文档 |
-|------|------|------|
-| 📋 交互式 Web UI | 浏览器交互式选择器、绘制工具、截图等（13 个节点） | [docs/web-ui.md](docs/web-ui.md) |
-| 🖼️ 图像处理 | 适配缩放、裁剪、合批、Base64 转换等（12 个节点） | [docs/image.md](docs/image.md) |
-| 🎨 采样管线 (Pipeline) | 模块化采样工作流：上下文、参考、配置、采样器、Detailer（30 个节点） | [docs/pipeline.md](docs/pipeline.md) |
-| 🎬 视频和音频 | 视频下载/提取/预览、音频提取/编码（15 个节点） | [docs/media.md](docs/media.md) |
-| 💾 磁盘 IO 和网络 | 磁盘读写、网络图片加载、文件操作（13 个节点） | [docs/io.md](docs/io.md) |
-| 🔀 分支和逻辑 | 流程控制、List 合并、Dictionary 操作（23 个节点） | [docs/logic.md](docs/logic.md) |
-| 📝 文本/数学/工具 | 字符串处理、正则、数学表达式、脚本、LoRA、调试、3D、训练（20 个节点） | [docs/utility.md](docs/utility.md) |
+核心特色节点的浏览器交互界面示意（全部界面在本地 HTTP 服务器中运行）：
+
+**SnapshotDetailerSamplerNode** — 图层工作台：画布上摆图层、画 mask、跑管线 preset
+
+![SnapshotDetailerSamplerNode 工作台](docs/images/sampler_node.png)
+
+**SnapshotPromptNode** — 提示词选择器：按分类挑词条、选 LoRA、组 prefab
+
+![SnapshotPromptNode 提示词选择器](docs/images/prompt_node.png)
+
+**SnapshotAssetsNode** — tldraw 素材画布：图片/视频/音频卡片拖放管理
+
+![SnapshotAssetsNode 素材画布](docs/images/assets_node.png)
+
+**SnapshotGaussianNode** — 3D 高斯泼溅预览，按 Enter 截图回传
+
+![SnapshotGaussianNode 3D 预览](docs/images/gaussian_node.png)
+
+更多界面截图见 [docs/web-ui.md](docs/web-ui.md)。
 
 ---
 
-## 🖥️ 服务端口说明
+## 完整节点文档索引
+
+| 分类 | 说明 | 文档 |
+|------|------|------|
+| 交互式 Web UI | 浏览器交互式选择器、绘制工具、截图等（13 个节点） | [docs/web-ui.md](docs/web-ui.md) |
+| 图像处理 | 适配缩放、裁剪、合批、Base64 转换等（12 个节点） | [docs/image.md](docs/image.md) |
+| 采样管线 (Pipeline) | 模块化采样工作流：上下文、参考、配置、采样器、Detailer（30 个节点） | [docs/pipeline.md](docs/pipeline.md) |
+| 视频和音频 | 视频下载/提取/预览、音频提取/编码（15 个节点） | [docs/media.md](docs/media.md) |
+| 磁盘 IO 和网络 | 磁盘读写、网络图片加载、文件操作（13 个节点） | [docs/io.md](docs/io.md) |
+| 分支和逻辑 | 流程控制、List 合并、Dictionary 操作（23 个节点） | [docs/logic.md](docs/logic.md) |
+| 文本/数学/工具 | 字符串处理、正则、数学表达式、脚本、LoRA、调试、3D、训练（20 个节点） | [docs/utility.md](docs/utility.md) |
+
+---
+
+## 服务端口说明
 
 | 服务 | 端口范围 |
 |------|----------|

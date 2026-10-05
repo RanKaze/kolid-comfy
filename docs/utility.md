@@ -1,4 +1,4 @@
-# 📝 文本/字符串节点
+# 文本/字符串节点
 
 [← 返回主 README](../README.md)
 
@@ -10,9 +10,9 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| str0 | STRING | ✅ | 字符串 0 |
-| str1 | STRING | ✅ | 字符串 1 |
-| delimiter | STRING | ✅ | 分隔符（默认 ","） |
+| str0 | STRING | 是 | 字符串 0 |
+| str1 | STRING | 是 | 字符串 1 |
+| delimiter | STRING | 是 | 分隔符（默认 ","） |
 
 **输出:** (STRING)
 
@@ -24,7 +24,7 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| text | STRING | ✅ | 数字字符串 |
+| text | STRING | 是 | 数字字符串 |
 
 **输出:** `number` (INT)
 
@@ -36,8 +36,8 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| template | STRING | ✅ | 格式模板字符串（用 {0}, {1}... 或 {name} 占位） |
-| input0~input7 | * | ❌ | 最多 8 个输入值 |
+| template | STRING | 是 | 格式模板字符串（用 {0}, {1}... 或 {name} 占位） |
+| input0~input7 | * | 否 | 最多 8 个输入值 |
 
 **输出:** `text` (STRING)
 
@@ -49,8 +49,8 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| regex_pattern | STRING | ✅ | 正则表达式（默认 `\w+`） |
-| input_string | STRING | ✅ | 输入字符串 |
+| regex_pattern | STRING | 是 | 正则表达式（默认 `\w+`） |
+| input_string | STRING | 是 | 输入字符串 |
 
 **输出:** `matches` (STRING[]), `has_matches` (BOOLEAN)
 
@@ -62,9 +62,9 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| match_key | STRING | ✅ | 匹配的 key（如 "title"，默认 "title"） |
-| regex_pattern | STRING | ✅ | 正则表达式 |
-| input_packs | REGEX_PACK | ✅ | 输入的正则包列表 |
+| match_key | STRING | 是 | 匹配的 key（如 "title"，默认 "title"） |
+| regex_pattern | STRING | 是 | 正则表达式 |
+| input_packs | REGEX_PACK | 是 | 输入的正则包列表 |
 
 **输出:** `packs` (REGEX_PACK[])
 
@@ -76,12 +76,12 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| title | STRING | ✅ | 标题 |
-| content0 | STRING | ✅ | 内容 0 |
-| content1 | STRING | ✅ | 内容 1 |
-| content2 | STRING | ✅ | 内容 2 |
-| value0 | FLOAT | ✅ | 值 0（默认 1.0） |
-| value1 | FLOAT | ✅ | 值 1（默认 1.0） |
+| title | STRING | 是 | 标题 |
+| content0 | STRING | 是 | 内容 0 |
+| content1 | STRING | 是 | 内容 1 |
+| content2 | STRING | 是 | 内容 2 |
+| value0 | FLOAT | 是 | 值 0（默认 1.0） |
+| value1 | FLOAT | 是 | 值 1（默认 1.0） |
 
 **输出:** `pack` (REGEX_PACK)
 
@@ -93,13 +93,13 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| pack | REGEX_PACK | ✅ | 正则包 |
+| pack | REGEX_PACK | 是 | 正则包 |
 
 **输出:** `title` (STRING), `content0` (STRING), `content1` (STRING), `content2` (STRING), `value0` (FLOAT), `value1` (FLOAT)
 
 ---
 
-## 🧮 数学/脚本节点
+## 数学/脚本节点
 
 ### MathNode
 
@@ -107,10 +107,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| math_expression | STRING | ✅ | 数学表达式（多行，可用 x/y/z 变量） |
-| x | * | ❌ | 变量 x |
-| y | * | ❌ | 变量 y |
-| z | * | ❌ | 变量 z |
+| math_expression | STRING | 是 | 数学表达式（多行，可用 x/y/z 变量） |
+| x | * | 否 | 变量 x |
+| y | * | 否 | 变量 y |
+| z | * | 否 | 变量 z |
 
 **输出:** `int` (INT), `float` (FLOAT)
 
@@ -122,16 +122,16 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| script | STRING | ✅ | Python 脚本代码（多行） |
-| x | * | ❌ | 变量 x |
-| y | * | ❌ | 变量 y |
-| z | * | ❌ | 变量 z |
+| script | STRING | 是 | Python 脚本代码（多行） |
+| x | * | 否 | 变量 x |
+| y | * | 否 | 变量 y |
+| z | * | 否 | 变量 z |
 
 **输出:** `result` (*), `list` (*)
 
 ---
 
-## ⏱️ 时间戳节点
+## 时间戳节点
 
 ### TimestampDurationNode
 
@@ -139,8 +139,8 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| start_timestamp | STRING | ✅ | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
-| end_timestamp | STRING | ✅ | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
+| start_timestamp | STRING | 是 | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
+| end_timestamp | STRING | 是 | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
 
 **输出:** `duration_timestamp` (STRING), `duration_seconds` (INT)
 
@@ -152,14 +152,14 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| input_timestamp | STRING | ✅ | 输入时间戳 hh:mm:ss（默认 "00:00:00"） |
-| seconds | INT | ✅ | 增减秒数 -3600~3600（默认 60） |
+| input_timestamp | STRING | 是 | 输入时间戳 hh:mm:ss（默认 "00:00:00"） |
+| seconds | INT | 是 | 增减秒数 -3600~3600（默认 60） |
 
 **输出:** `result_timestamp` (STRING), `result_seconds` (INT)
 
 ---
 
-## 🎛️ LoRA 节点
+## LoRA 节点
 
 ### LoadLoraPackNode
 
@@ -167,12 +167,12 @@ LoRA 配置打包。选择 LoRA 文件并配置正/负 prompt 和 model/clip 强
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| lora | COMBO | ✅ | LoRA 文件名列表 |
-| enable | BOOLEAN | ✅ | 是否启用（默认 True） |
-| positive | STRING | ✅ | 正向 prompt |
-| negative | STRING | ✅ | 负向 prompt |
-| strength_model | FLOAT | ✅ | 模型强度（默认 1.0） |
-| strength_clip | FLOAT | ✅ | CLIP 强度（默认 1.0） |
+| lora | COMBO | 是 | LoRA 文件名列表 |
+| enable | BOOLEAN | 是 | 是否启用（默认 True） |
+| positive | STRING | 是 | 正向 prompt |
+| negative | STRING | 是 | 负向 prompt |
+| strength_model | FLOAT | 是 | 模型强度（默认 1.0） |
+| strength_clip | FLOAT | 是 | CLIP 强度（默认 1.0） |
 
 **输出:** `pack` (REGEX_PACK)
 
@@ -184,9 +184,9 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| model | MODEL | ✅ | 基础模型 |
-| clip | CLIP | ✅ | CLIP 模型 |
-| packs | REGEX_PACK | ✅ | LoRA 包列表 |
+| model | MODEL | 是 | 基础模型 |
+| clip | CLIP | 是 | CLIP 模型 |
+| packs | REGEX_PACK | 是 | LoRA 包列表 |
 
 **输出:** `model` (MODEL), `clip` (CLIP)
 
@@ -198,16 +198,16 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| clip | CLIP | ✅ | CLIP 模型 |
-| packs | REGEX_PACK | ✅ | LoRA 包列表 |
-| pos_global | STRING | ✅ | 全局正向 prompt（forceInput） |
-| neg_global | STRING | ✅ | 全局负向 prompt（forceInput） |
+| clip | CLIP | 是 | CLIP 模型 |
+| packs | REGEX_PACK | 是 | LoRA 包列表 |
+| pos_global | STRING | 是 | 全局正向 prompt（forceInput） |
+| neg_global | STRING | 是 | 全局负向 prompt（forceInput） |
 
 **输出:** `positive` (CONDITIONING), `negative` (CONDITIONING), `pos_local` (STRING), `neg_local` (STRING)
 
 ---
 
-## 🔧 工具节点
+## 工具节点
 
 ### NeedNode
 
@@ -215,7 +215,7 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| any | * | ✅ | 任意输入 |
+| any | * | 是 | 任意输入 |
 
 **输出:** `none` (None)
 
@@ -227,7 +227,7 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| any | * | ✅ | 任意输入 |
+| any | * | 是 | 任意输入 |
 
 **输出:** `any` (任意类型)
 
@@ -239,7 +239,7 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| any | * | ✅ | 任意输入 |
+| any | * | 是 | 任意输入 |
 
 **输出:** `log` (STRING)
 
@@ -251,13 +251,13 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| collect_nodes | STRING | ✅ | 收集格式：`id:234,id:145,regex:test,name:TT`（多行） |
+| collect_nodes | STRING | 是 | 收集格式：`id:234,id:145,regex:test,name:TT`（多行） |
 
 **输出:** 无
 
 ---
 
-## 🔭 高斯/3D 节点
+## 高斯/3D 节点
 
 ### ExtrinsicsCompareNode
 
@@ -265,14 +265,14 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| current | EXTRINSICS | ✅ | 当前外参矩阵 |
-| next | EXTRINSICS | ✅ | 下一帧外参矩阵 |
+| current | EXTRINSICS | 是 | 当前外参矩阵 |
+| next | EXTRINSICS | 是 | 下一帧外参矩阵 |
 
 **输出:** `x` (FLOAT), `y` (FLOAT), `z` (FLOAT), `pitch` (FLOAT), `yaw` (FLOAT), `roll` (FLOAT)
 
 ---
 
-## 🏋️ 训练节点
+## 训练节点
 
 ### TrainEditLoraNode
 
@@ -280,21 +280,21 @@ LoRA 批量加载。从 REGEX_PACK 列表中逐个加载 LoRA 到 model 和 clip
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| model | MODEL | ✅ | 基础模型 |
-| latents | LATENT | ✅ | 目标图潜空间（支持 batch） |
-| positive | CONDITIONING | ✅ | 正样本 conditioning（需包含 reference_latents） |
-| rank | INT | ✅ | LoRA 秩 1-128（默认 32） |
-| alpha | FLOAT | ✅ | LoRA 缩放系数 0.1-512.0（默认 16.0） |
-| learning_rate | FLOAT | ✅ | 学习率（默认 0.0005） |
-| steps | INT | ✅ | 总训练步数（默认 1000） |
-| batch_size | INT | ✅ | batch 大小（默认 1） |
-| grad_accumulation_steps | INT | ✅ | 梯度累积步数（默认 1） |
-| optimizer | COMBO | ✅ | 优化器：AdamW / Adam / SGD / RMSprop（默认 AdamW） |
-| loss_function | COMBO | ✅ | 损失函数：MSE / L1 / Huber / SmoothL1（默认 MSE） |
-| seed | INT | ✅ | 随机种子 |
-| training_dtype | COMBO | ✅ | 训练精度：bf16 / fp32 / none（默认 bf16） |
-| architecture | COMBO | ✅ | 架构：Krea2 / Flux2Klein（默认 Krea2） |
-| output_name | STRING | ✅ | 输出 LoRA 文件名（默认 "reference_lora"） |
-| save_every | INT | ✅ | 每 N 步保存检查点（默认 500） |
+| model | MODEL | 是 | 基础模型 |
+| latents | LATENT | 是 | 目标图潜空间（支持 batch） |
+| positive | CONDITIONING | 是 | 正样本 conditioning（需包含 reference_latents） |
+| rank | INT | 是 | LoRA 秩 1-128（默认 32） |
+| alpha | FLOAT | 是 | LoRA 缩放系数 0.1-512.0（默认 16.0） |
+| learning_rate | FLOAT | 是 | 学习率（默认 0.0005） |
+| steps | INT | 是 | 总训练步数（默认 1000） |
+| batch_size | INT | 是 | batch 大小（默认 1） |
+| grad_accumulation_steps | INT | 是 | 梯度累积步数（默认 1） |
+| optimizer | COMBO | 是 | 优化器：AdamW / Adam / SGD / RMSprop（默认 AdamW） |
+| loss_function | COMBO | 是 | 损失函数：MSE / L1 / Huber / SmoothL1（默认 MSE） |
+| seed | INT | 是 | 随机种子 |
+| training_dtype | COMBO | 是 | 训练精度：bf16 / fp32 / none（默认 bf16） |
+| architecture | COMBO | 是 | 架构：Krea2 / Flux2Klein（默认 Krea2） |
+| output_name | STRING | 是 | 输出 LoRA 文件名（默认 "reference_lora"） |
+| save_every | INT | 是 | 每 N 步保存检查点（默认 500） |
 
 **输出:** `lora_path` (STRING)

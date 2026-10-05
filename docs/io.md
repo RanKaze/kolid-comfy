@@ -1,4 +1,4 @@
-# 💾 磁盘 IO 节点
+# 磁盘 IO 节点
 
 [← 返回主 README](../README.md)
 
@@ -10,10 +10,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| images | IMAGE | ✅ | 输入图片 |
-| folder_name | STRING | ✅ | 保存文件夹名（默认 "my_images"） |
-| folder_clear | BOOLEAN | ✅ | True=清空文件夹后保存，False=追加续编号（默认 True） |
-| addition | STRING | ❌ | 附带文本描述（每个图片一个 .txt 文件，forceInput） |
+| images | IMAGE | 是 | 输入图片 |
+| folder_name | STRING | 是 | 保存文件夹名（默认 "my_images"） |
+| folder_clear | BOOLEAN | 是 | True=清空文件夹后保存，False=追加续编号（默认 True） |
+| addition | STRING | 否 | 附带文本描述（每个图片一个 .txt 文件，forceInput） |
 
 **输出:** `folder_name` (STRING)
 
@@ -25,7 +25,7 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| folder_name | STRING | ✅ | 加载文件夹名（默认 "my_images"） |
+| folder_name | STRING | 是 | 加载文件夹名（默认 "my_images"） |
 
 **输出:** `images` (IMAGE[]), `additions` (STRING[])
 
@@ -37,7 +37,7 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| folder_name | STRING | ✅ | 文件夹名（默认 "my_images"） |
+| folder_name | STRING | 是 | 文件夹名（默认 "my_images"） |
 
 **输出:** `count` (INT)
 
@@ -49,10 +49,10 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| root_directory | STRING | ✅ | 根目录路径 |
-| random_seed | INT | ✅ | 随机种子 |
-| index | INT | ✅ | 图片索引 0-10000（默认 0） |
-| search | STRING | ✅ | 子目录名正则过滤（默认 ".*"） |
+| root_directory | STRING | 是 | 根目录路径 |
+| random_seed | INT | 是 | 随机种子 |
+| index | INT | 是 | 图片索引 0-10000（默认 0） |
+| search | STRING | 是 | 子目录名正则过滤（默认 ".*"） |
 
 **输出:** `image` (IMAGE)
 
@@ -64,14 +64,14 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| signal | * | ✅ | 触发信号（任意类型，用于触发上游执行） |
-| data | DICT | ✅ | 要编码的字典数据 |
+| signal | * | 是 | 触发信号（任意类型，用于触发上游执行） |
+| data | DICT | 是 | 要编码的字典数据 |
 
 **输出:** `signal` (*)
 
 ---
 
-## 🌐 网络加载节点
+## 网络加载节点
 
 ### EHentaiRandomNode
 
@@ -79,9 +79,9 @@ E-Hentai 随机图片。根据搜索关键词随机获取漫画并加载指定�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| random_seed | INT | ✅ | 随机种子 |
-| page_index | INT | ✅ | 页码索引 0-1000（默认 0） |
-| search | STRING | ✅ | 搜索关键词 |
+| random_seed | INT | 是 | 随机种子 |
+| page_index | INT | 是 | 页码索引 0-1000（默认 0） |
+| search | STRING | 是 | 搜索关键词 |
 
 **输出:** `image` (IMAGE), `gallery_url` (STRING)
 
@@ -93,8 +93,8 @@ E-Hentai URL 加载。直接通过画廊 URL 加载指定页面的图片。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| gallery_url | STRING | ✅ | 画廊 URL |
-| page_index | INT | ✅ | 页码索引 0-1000（默认 0） |
+| gallery_url | STRING | 是 | 画廊 URL |
+| page_index | INT | 是 | 页码索引 0-1000（默认 0） |
 
 **输出:** `image` (IMAGE), `gallery_url` (STRING)
 
@@ -106,15 +106,15 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| mode | COMBO | ✅ | 模式：artwork / user（默认 artwork） |
-| id | INT | ✅ | artwork ID 或 user ID |
-| page_index | INT | ✅ | 页码索引 0-100（默认 0，0=随机） |
+| mode | COMBO | 是 | 模式：artwork / user（默认 artwork） |
+| id | INT | 是 | artwork ID 或 user ID |
+| page_index | INT | 是 | 页码索引 0-100（默认 0，0=随机） |
 
 **输出:** `image` (IMAGE), `new_index` (INT), `node_id` (INT)
 
 ---
 
-## 📂 文件操作节点
+## 文件操作节点
 
 ### FileCheckNode
 
@@ -122,7 +122,7 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file_path | STRING | ✅ | 文件路径 |
+| file_path | STRING | 是 | 文件路径 |
 
 **输出:** `exists` (BOOLEAN)
 
@@ -134,7 +134,7 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file_path | STRING | ✅ | 文件路径 |
+| file_path | STRING | 是 | 文件路径 |
 
 **输出:** `text` (STRING)
 
@@ -146,8 +146,8 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| data | STRING | ✅ | 文本内容（forceInput） |
-| output_path | STRING | ✅ | 输出文件路径 |
+| data | STRING | 是 | 文本内容（forceInput） |
+| output_path | STRING | 是 | 输出文件路径 |
 
 **输出:** `saved_text` (STRING)
 
@@ -159,7 +159,7 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| path | STRING | ✅ | 完整路径 |
+| path | STRING | 是 | 完整路径 |
 
 **输出:** (STRING)
 
@@ -171,6 +171,6 @@ Pixiv 图片加载。支持 artwork（单作品）和 user（用户作品列表�
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file_path | STRING | ✅ | 文件路径 |
+| file_path | STRING | 是 | 文件路径 |
 
 **输出:** `file_path` (STRING)

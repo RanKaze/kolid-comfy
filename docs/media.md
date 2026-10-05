@@ -1,4 +1,4 @@
-# 🎬 视频节点
+# 视频节点
 
 [← 返回主 README](../README.md)
 
@@ -10,7 +10,7 @@
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| videoInfo | STRING | ✅ | 视频信息字符串 |
+| videoInfo | STRING | 是 | 视频信息字符串 |
 
 **输出:** `video_segments` (VideoSegments)
 
@@ -22,9 +22,9 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| url | STRING | ✅ | 视频或网页 URL |
-| cache_path | COMBO | ✅ | 缓存选择（"URL"=使用 URL 下载，或选择已缓存视频） |
-| clear_cache | BOOLEAN | ❌ | 清除缓存并重新下载（默认 False） |
+| url | STRING | 是 | 视频或网页 URL |
+| cache_path | COMBO | 是 | 缓存选择（"URL"=使用 URL 下载，或选择已缓存视频） |
+| clear_cache | BOOLEAN | 否 | 清除缓存并重新下载（默认 False） |
 
 **输出:** `video` (VIDEO)
 
@@ -36,9 +36,9 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
-| timestamp | STRING | ✅ | 时间戳 hh:mm:ss 格式（默认 "00:00:00"） |
-| frame_offset | INT | ✅ | 帧偏移量（可为负数，默认 0） |
+| video | VIDEO | 是 | 输入视频对象 |
+| timestamp | STRING | 是 | 时间戳 hh:mm:ss 格式（默认 "00:00:00"） |
+| frame_offset | INT | 是 | 帧偏移量（可为负数，默认 0） |
 
 **输出:** `image` (IMAGE)
 
@@ -50,12 +50,12 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
-| start_timestamp | STRING | ✅ | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
-| start_frame_offset | INT | ✅ | 起始帧偏移（默认 0） |
-| end_timestamp | STRING | ✅ | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
-| end_frame_offset | INT | ✅ | 结束帧偏移（默认 0） |
-| fps | FLOAT | ✅ | 目标 FPS，0=提取所有帧（默认 0.0） |
+| video | VIDEO | 是 | 输入视频对象 |
+| start_timestamp | STRING | 是 | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
+| start_frame_offset | INT | 是 | 起始帧偏移（默认 0） |
+| end_timestamp | STRING | 是 | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
+| end_frame_offset | INT | 是 | 结束帧偏移（默认 0） |
+| fps | FLOAT | 是 | 目标 FPS，0=提取所有帧（默认 0.0） |
 
 **输出:** `images` (IMAGE)
 
@@ -67,7 +67,7 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
+| video | VIDEO | 是 | 输入视频对象 |
 
 **输出:** `fps` (FLOAT), `frames` (FLOAT), `duration` (FLOAT)
 
@@ -79,12 +79,12 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
-| start_timestamp | STRING | ✅ | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
-| start_frame_offset | INT | ✅ | 起始帧偏移（默认 0） |
-| end_timestamp | STRING | ✅ | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
-| end_frame_offset | INT | ✅ | 结束帧偏移（默认 0） |
-| fps | FLOAT | ✅ | 目标 FPS，0=提取所有帧（默认 0.0） |
+| video | VIDEO | 是 | 输入视频对象 |
+| start_timestamp | STRING | 是 | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
+| start_frame_offset | INT | 是 | 起始帧偏移（默认 0） |
+| end_timestamp | STRING | 是 | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
+| end_frame_offset | INT | 是 | 结束帧偏移（默认 0） |
+| fps | FLOAT | 是 | 目标 FPS，0=提取所有帧（默认 0.0） |
 
 **输出:** `images` (IMAGE), `audio` (AUDIO), `fps` (FLOAT)
 
@@ -96,7 +96,7 @@ URL 视频下载。支持直接视频链接和 YouTube/Bilibili/Pornhub/Hanime1 
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
+| video | VIDEO | 是 | 输入视频对象 |
 
 **输出:** 无（预览节点）
 
@@ -108,7 +108,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video_title | COMBO | ✅ | 从 Wallpaper Engine 扫描到的视频列表中选择 |
+| video_title | COMBO | 是 | 从 Wallpaper Engine 扫描到的视频列表中选择 |
 
 **输出:** `video` (VIDEO)
 
@@ -120,7 +120,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file_name | COMBO | ✅ | 从 input/videos 目录扫描到的视频文件列表中选择 |
+| file_name | COMBO | 是 | 从 input/videos 目录扫描到的视频文件列表中选择 |
 
 **输出:** `video` (VIDEO)
 
@@ -132,7 +132,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
+| video | VIDEO | 是 | 输入视频对象 |
 
 **输出:** `file_name` (STRING), `path` (STRING)
 
@@ -144,17 +144,17 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| folder_name | STRING | ✅ | 图片序列所在文件夹名 |
-| file_name | STRING | ✅ | 输出视频文件名（不含扩展名） |
-| fps | FLOAT | ✅ | 输出视频 FPS 1.0-120.0（默认 24.0） |
-| crf | INT | ✅ | CRF 质量 0-51（默认 18） |
-| audio | AUDIO | ❌ | 可选音频轨道 |
+| folder_name | STRING | 是 | 图片序列所在文件夹名 |
+| file_name | STRING | 是 | 输出视频文件名（不含扩展名） |
+| fps | FLOAT | 是 | 输出视频 FPS 1.0-120.0（默认 24.0） |
+| crf | INT | 是 | CRF 质量 0-51（默认 18） |
+| audio | AUDIO | 否 | 可选音频轨道 |
 
 **输出:** `video_path` (STRING)
 
 ---
 
-## 🔊 音频节点
+## 音频节点
 
 ### GetVideoAudioNode
 
@@ -162,7 +162,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| video | VIDEO | ✅ | 输入视频对象 |
+| video | VIDEO | 是 | 输入视频对象 |
 
 **输出:** `audio` (AUDIO)
 
@@ -174,7 +174,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| audio | AUDIO | ✅ | 输入音频对象 |
+| audio | AUDIO | 是 | 输入音频对象 |
 
 **输出:** `duration` (FLOAT)
 
@@ -186,12 +186,12 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| audio | AUDIO | ✅ | 输入音频对象 |
-| start_timestamp | STRING | ✅ | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
-| end_timestamp | STRING | ✅ | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
-| start_frame_offset | INT | ❌ | 起始帧偏移（forceInput） |
-| end_frame_offset | INT | ❌ | 结束帧偏移（forceInput） |
-| fps | FLOAT | ❌ | FPS（forceInput） |
+| audio | AUDIO | 是 | 输入音频对象 |
+| start_timestamp | STRING | 是 | 起始时间戳 hh:mm:ss（默认 "00:00:00"） |
+| end_timestamp | STRING | 是 | 结束时间戳 hh:mm:ss（默认 "00:01:00"） |
+| start_frame_offset | INT | 否 | 起始帧偏移（forceInput） |
+| end_frame_offset | INT | 否 | 结束帧偏移（forceInput） |
+| fps | FLOAT | 否 | FPS（forceInput） |
 
 **输出:** `audio_segment` (AUDIO)
 
@@ -203,7 +203,7 @@ Wallpaper Engine 视频加载。自动检测运行的 Wallpaper Engine 进程，
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| audio | AUDIO | ✅ | 输入音频对象 |
-| vae | VAE | ✅ | VAE 模型（需支持音频编码） |
+| audio | AUDIO | 是 | 输入音频对象 |
+| vae | VAE | 是 | VAE 模型（需支持音频编码） |
 
 **输出:** `latent` (LATENT)
