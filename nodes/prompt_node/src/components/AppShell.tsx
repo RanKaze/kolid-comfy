@@ -255,6 +255,10 @@ export function AppShell() {
   const loraSelectionsRef = useRef(loraSelections); loraSelectionsRef.current = loraSelections;
   const selectedPrefabsRef = useRef(selectedPrefabs); selectedPrefabsRef.current = selectedPrefabs;
   const customPromptsRef = useRef(customPrompts); customPromptsRef.current = customPrompts;
+  const selectedProgramsRef = useRef(selectedPrograms); selectedProgramsRef.current = selectedPrograms;
+  // Assigned just after the program memo below. The tab-switch flush must send the filters the
+  // programs produced, never an empty list — /select_prompt overwrites unconditionally.
+  const programFilterRef = useRef({ filter_tag_groups: [] as any[], filter_loras: [] as any[], filter_prefabs: [] as any[] });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const tagFileInputRef = useRef<HTMLInputElement>(null);
   const [loadFromImageData, setLoadFromImageData] = useState<any>(null);
@@ -818,6 +822,11 @@ export function AppShell() {
       } else if (e.data?.type === 'reload-lora-data') {
         // Only reload lora data (lora_regex changed due to pipeline switch), keep selections
         loadLoraData();
+      } else if (e.data?.type === 'kolid-prompt-refresh-library') {
+        // A sibling prompt document wrote the shared library (the host relays the writer's
+        // notification). Re-pull the library only: this window's unsaved selection stays put,
+        // unlike 'kolid-reload-data' above, which is a full context switch and wipes it.
+        void apiLoadData('library');
       }
     };
     window.addEventListener('message', reloadHandler);
@@ -832,7 +841,9 @@ export function AppShell() {
           lorasPayload.push({ file_path: l.file_path, name: l.name, strength: sel?.strength ?? 1.0, active_tags: sel?.activeTags ?? [], active: sel?.active ?? true, split_mode: sel?.split_mode, slider_config: sel?.slider_config });
         }
         const prefabsPayload = selectedPrefabsRef.current.map(p => ({ guid: p.guid, active: p.active, tag_groups: p.tag_groups, loras: p.loras, children: p.children }));
-        syncSelection(promptsToSend, customPromptsRef.current, lorasPayload, prefabsPayload, [], [], [], []).then(() => {
+        const programsPayload = selectedProgramsRef.current.map(a => ({ id: a.id, active: a.active, context_prefab_guids: a.context_prefab_guids, context_lora_paths: a.context_lora_paths, context_tag_texts: a.context_tag_texts, context_prefab_inactive: a.context_prefab_inactive, context_lora_inactive: a.context_lora_inactive, context_tag_inactive: a.context_tag_inactive }));
+        const f = programFilterRef.current;
+        syncSelection(promptsToSend, customPromptsRef.current, lorasPayload, prefabsPayload, programsPayload, f.filter_tag_groups, f.filter_loras, f.filter_prefabs).then(() => {
           window.parent.postMessage({ type: 'prompt-synced' }, '*');
         }).catch(() => {
           window.parent.postMessage({ type: 'prompt-synced' }, '*');
@@ -843,7 +854,7 @@ export function AppShell() {
 
     try { window.parent?.postMessage({ type: 'kolid-prompt-ready' }, '*'); } catch {}
     return () => { window.removeEventListener('message', reloadHandler); window.removeEventListener('message', syncHandler); };
-  }, [loadData, loadLoraData]);
+  }, [loadData, loadLoraData, apiLoadData]);
 
   // Live context push: whenever selections change, notify parent immediately
   // Skip while reloading to avoid overwriting saved context with cleared state
@@ -1718,6 +1729,7 @@ export function AppShell() {
     selectedTags, selectedLoras, loraSelections,
     selectedPrefabs, customPrompts, allPrompts, allLibraries, loraData,
   );
+  programFilterRef.current = programResult;
 
   // ========== Tag Selection Helper ==========
   const isTagSelected = useCallback((cardId: string) => {

@@ -9,6 +9,15 @@ import { migrateProgramTagRefs } from './useSelection';
 
 const API_BASE = '';
 
+type PromptsDataResponse = PointsResponse & {
+  last_selected_loras?: LoraSelectionData[];
+  lora_regex?: string;
+  programs?: AllPrograms;
+  last_selected_programs?: any[];
+  /** Not from the server: full mode attaches the preset this scoped window seeds from. */
+  preset_selection?: any;
+};
+
 export function useApi() {
   const [allPrompts, setAllPrompts] = useState<AllPrompts>({});
   const [allLibraries, setAllLibraries] = useState<AllLibraries>({});
@@ -35,7 +44,25 @@ export function useApi() {
   const [allPrograms, setAllPrograms] = useState<AllPrograms>({});
   const [lastSelectedPrograms, setLastSelectedPrograms] = useState<any[] | null>(null);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (mode: 'full' | 'library' = 'full') => {
+    // The library the host's other prompt documents share: categories, prefab libraries,
+    // programs and the per-category display/size modes.
+    const applyLibrary = (data: PromptsDataResponse) => {
+      setAllPrompts(data.categories);
+      setAllLibraries(data.libraries || {});
+      setCategoryDisplayModes(data.category_display_modes || {});
+      setCategorySizeModes(data.category_size_modes || {});
+      setAllPrograms(migrateProgramTagRefs(data.programs || {}, data.categories));
+    };
+    if (mode === 'library') {
+      // A sibling document wrote the library: re-pull it and NOTHING ELSE. The selection here is
+      // still the user's unsaved work, and the seed refs must keep their current values — nulling
+      // them re-arms the restore effects, which then overwrite that work.
+      const res = await fetch(`${API_BASE}/prompts_data`);
+      const data: PromptsDataResponse = await res.json();
+      applyLibrary(data);
+      return data;
+    }
     // Mark the seed as "in flight" first: a reload (region / preset context switch) clears the
     // restored state, and the restore effects must wait for THIS load instead of latching onto
     // the previous context's arrays while the refs are still false.
@@ -46,11 +73,8 @@ export function useApi() {
     // global one — the same UI edits a shared preset referenced by Pipeline prompt blocks.
     const presetSelection = await fetchPromptPresetSelection();
     const res = await fetch(`${API_BASE}/prompts_data`);
-    const data: PointsResponse & { last_selected_loras?: LoraSelectionData[]; lora_regex?: string; programs?: AllPrograms; last_selected_programs?: any[] } = await res.json();
-    setAllPrompts(data.categories);
-    setAllLibraries(data.libraries || {});
-    setCategoryDisplayModes(data.category_display_modes || {});
-    setCategorySizeModes(data.category_size_modes || {});
+    const data: PromptsDataResponse = await res.json();
+    applyLibrary(data);
     // An unbound Query starts EMPTY on purpose: the user picks this pass's prompt from
     // scratch. A Query that binds a preset is seeded from it like the preset editor is.
     setLastSelected((presetSelection?.tags as string[]) || (SCOPED_SELECTION ? [] : (data.last_selected || [])));
@@ -62,7 +86,6 @@ export function useApi() {
     setParsedPrompts(data.parsed_prompts || []);
     setHasTagger(data.has_tagger || false);
     setHasAsset(data.has_asset || false);
-    setAllPrograms(migrateProgramTagRefs(data.programs || {}, data.categories));
     setLastSelectedPrograms((presetSelection?.programs as any[]) || (SCOPED_SELECTION ? [] : (data.last_selected_programs || [])));
     return { ...data, preset_selection: presetSelection };
   }, []);
