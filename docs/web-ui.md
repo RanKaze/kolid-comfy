@@ -12,6 +12,10 @@
 
 ![SnapshotSwitchNode 界面：每个输入一张预览卡，点击卡片即选中输出，左侧可自定义粘贴图片](images/switch_node.png)
 
+实战接线：十几个 pipeline 预设汇入一个 Switch，拨选即切模型：
+
+![pipeline 预设汇入 Switch](images/pipeline_switch_graph.png)
+
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | lazy_switch | BOOLEAN | 是 | 默认 True，启用懒加载模式（仅加载被选中的输入） |
@@ -137,6 +141,18 @@ tldraw 画布资源管理节点。提供拖放式图片/视频卡片管理面板
 高斯点云预览节点。加载 PLY 文件并在浏览器中渲染 3D 高斯泼溅场景。支持 **GSplat**（轻量渲染）和 **SuperSplat**（需要 Node.js，魔改 UI）两种渲染方式。按 Enter 截图输出。
 
 ![SnapshotGaussianNode 界面：浏览器里的 3D 高斯泼溅视口，可调 Scale / Focal，按 Enter 截图回传](images/gaussian_node.png)
+
+实际工作流：SHARP 预测 PLY，SnapshotGaussianNode 渲染并按 Enter 截图：
+
+![SHARP 图生 PLY 工作流](images/sharp_gaussian_graph.png)
+
+GSplat 渲染模式：
+
+![GSplat 真实渲染](images/gaussian_gsplat_usage.png)
+
+SuperSplat 渲染模式（需要本机 Node.js 常驻进程）：
+
+![SuperSplat 渲染](images/gaussian_supersplat_usage.png)
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|

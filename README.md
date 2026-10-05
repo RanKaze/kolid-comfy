@@ -140,6 +140,10 @@ kolid-comfy/
 - **双模型 CFG** — ConfigModelNegativeNode 设置负向模型，采样时正向用 model、负向用 model_negative（DualModelCFGGuider）
 - **Context 系统** — ContextNode 按名称管理多组 prompt/LoRA，ContextQueryNode 通过相似度模型自动选择上下文，采样器通过 context_regex 正则匹配
 
+实际用法:十几个 pipeline 预设(Flux2Klein / Illustrious / Anima / Krea2 / QwenImage21 各家模型)汇入 SnapshotSwitchNode,拨一格就切模型;模块节点(Turbo / Sage Attention)与 PipelinePackageNode 串在下游:
+
+![pipeline 预设切换实战](docs/images/pipeline_switch_graph.png)
+
 ### ScriptNode
 
 自定义 Python 脚本执行节点。在节点中编写 Python 代码，通过 `result` 变量返回结果，支持 `x`/`y`/`z` 三个任意类型输入和列表输出。
@@ -207,6 +211,18 @@ PROCESSOR 面板把图层交给接口处理器(此处为 DLSS5 神经渲染),参
 浏览器里渲染 .ply 高斯点云,Scale / Focal 可调,按 Enter 截图回传节点:
 
 ![SnapshotGaussianNode 3D 预览](docs/images/gaussian_node.png)
+
+实际工作流:SHARP 从单张图预测 PLY 点云,直接进 Gaussian 节点:
+
+![SHARP 图生 PLY 工作流](docs/images/sharp_gaussian_graph.png)
+
+GSplat 渲染(轻量模式):
+
+![GSplat 真实渲染](docs/images/gaussian_gsplat_usage.png)
+
+SuperSplat 渲染(完整工具栏与轴向指示):
+
+![SuperSplat 渲染](docs/images/gaussian_supersplat_usage.png)
 
 ### SnapshotRegionNode — 区域描述编辑器
 
