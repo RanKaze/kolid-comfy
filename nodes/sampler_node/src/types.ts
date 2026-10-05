@@ -31,6 +31,8 @@ export interface ServerConfig {
   interface_meta?: InterfaceMeta;
   /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loaded_pipeline_name?: string;
+  /** lora_regex 换过几代（只有真变了才 +1）。Prompt tab 那张 LoRA 卡的灰名单跟着它走。 */
+  pipeline_lora_epoch?: number;
 }
 
 /** 一套 Pipeline Blocks = 一个 tab。id 稳定（重命名不改 id），blocks 与旧模型同构。 */
@@ -234,6 +236,8 @@ export interface StatusResponse {
   pending_query?: PendingQuery | null;
   /** preset 绑定的 pipeline 可能在本次 run 里被现加载 —— 名字与架构都跟着变，轮询时顺手同步 */
   loaded_pipeline_name?: string;
+  /** 同一趟里 lora_regex 也可能换了代：Prompt tab 的 LoRA 灰名单要跟这一枚 */
+  pipeline_lora_epoch?: number;
   architecture?: string | null;
 }
 

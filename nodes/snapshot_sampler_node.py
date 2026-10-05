@@ -247,6 +247,11 @@ def parse_prompt_image_refs(text, resolve):
 #
 # 为什么单独一个常驻线程：Tk 不是线程安全的，而 HTTP handler 每个请求一个线程。所有对话框排进
 # 一条队列，由唯一那根线程上唯一的 root 执行；对话框本身是原生模态的，只挡住那根线程。
+#
+# "最近一份 .cud"记在 nodes/recent_cud.json，只在上面那条原生对话框的路上写（那是后端唯一拿得到
+# 真实路径的一趟；浏览器 handle 与 <input type=file> 都没有路径可记）。读回来时同样由服务端自己
+# mint token，页面从头到尾无从指定路径 —— 这条记录的用途是"重开你自己上次挑过的那份文件"，
+# 不是第二个文件读取口。
 IO_FILE_KINDS = {
     'cud': {
         'label': 'Context document',
@@ -269,9 +274,12 @@ IO_FILE_KINDS = {
     },
 }
 
+RECENT_CUD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'recent_cud.json')
+
 
 class DocumentIo:
-    """原生对话框 + token→绝对路径 登记表，供 MainHandler 的 /api/io_* 四条路由使用。"""
+    """原生对话框 + token→绝对路径 登记表，供 MainHandler 的 /api/io_* 四条路由与
+    /api/recent_cud 使用。"""
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -384,6 +392,39 @@ class DocumentIo:
         with self._lock:
             self._tokens.pop(token or '', None)
 
+    # ---- 最近一份 .cud ----
+    def _remember_cud(self, path):
+        """把这条路径写成"上次打开的那份文档"。写失败只记账，不影响这次的挑选。"""
+        try:
+            with open(RECENT_CUD_FILE, 'w', encoding='utf-8') as f:
+                json.dump({'path': os.path.abspath(path)}, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] could not record the recent .cud: {e}")
+
+    def reopen_recent_cud(self):
+        """把上次那一份 .cud 重新登记成一个文档描述符，无需对话框。
+
+        返回 (doc, reason) 其一为 None。路径只从服务端自己写下的记录里读，页面无从指定；
+        描述符与对话框同形（含一个现 mint 的 token），所以前端照旧走 /api/io_read 取字节、
+        Save 照旧原地写回同一个文件。
+        """
+        try:
+            with open(RECENT_CUD_FILE, encoding='utf-8') as f:
+                recorded = json.load(f)
+        except FileNotFoundError:
+            return None, 'no .cud has been opened with the file dialog on this machine yet'
+        except Exception as e:
+            return None, f'the recent-document record could not be read ({e})'
+        path = (recorded or {}).get('path') if isinstance(recorded, dict) else None
+        if not (isinstance(path, str) and path):
+            return None, 'no .cud has been opened with the file dialog on this machine yet'
+        if not os.path.isfile(path):
+            return None, f'{os.path.basename(path)} is no longer at {path}'
+        try:
+            return self._document(path, 'cud'), None
+        except Exception as e:
+            return None, str(e)
+
     # ---- 对外三条 ----
     def pick(self, mode, kind, suggested='', multiple=False):
         """弹出原生对话框，返回选中的文档描述列表（用户取消则为空表）。
@@ -399,7 +440,10 @@ class DocumentIo:
         status, result = reply.get()
         if status == 'err':
             raise RuntimeError(result)
-        return [self._document(p, kind) for p in (result or [])]
+        picks = [self._document(p, kind) for p in (result or [])]
+        if kind == 'cud' and picks:
+            self._remember_cud(picks[0]['path'])
+        return picks
 
     def write(self, token, data):
         """覆盖写回这份文档：先落 .tmp 再 os.replace，中途失败不会把原文练废。"""
@@ -595,6 +639,10 @@ class SnapshotDetailerSamplerServer:
         # server 每次节点执行都是新建的，所以这份身份天然随执行复位，不需要额外清理。
         self.loaded_pipeline_node_id = ''
         self.loaded_pipeline_name = ''
+        # lora_regex 换过几代的记账。Prompt tab 那张 LoRA 卡的灰名单是从 prompt server 拉的这份
+        # regex，服务端重扫（update_lora_regex）浏览器是看不见的，所以代数只在 regex 真的变了时才
+        # +1：手动切换与 run 循环里 preset 绑定共用这一处，宿主页拿它判断那份 UI 是不是脏了。
+        self.pipeline_lora_epoch = 0
         self.detail_status = 'idle'
         self.detail_error = None
         self.detail_progress = 0       # 0..1
@@ -668,7 +716,7 @@ class SnapshotDetailerSamplerServer:
     # -------------------------------------------------------------------------
     # 生命周期
     # -------------------------------------------------------------------------
-    def start(self, initial_image=None):
+    def start(self):
         # 1) Prompt server
         if SnapshotPromptServer is None:
             raise RuntimeError("SnapshotPromptServer not available")
@@ -1517,6 +1565,8 @@ class SnapshotDetailerSamplerServer:
                     'pipeline_settings': inst.pipeline_settings if inst else {'selected': '', 'overrides': {}},
                     'interface_meta': getattr(inst, 'interface_meta', {}) if inst else {},
                     'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    # Prompt tab 的 LoRA 灰名单跟着哪一代 regex 拉的 —— 宿主页拿它判断要不要重拉。
+                    'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
                 })
                 return
 
@@ -1538,6 +1588,7 @@ class SnapshotDetailerSamplerServer:
                     # 一条 preset 绑定的 pipeline 可能在这次 run 里被现加载（见 run_detailer）：
                     # 名字与架构都跟着变，前端轮询时顺手同步，不用重拉 config。
                     'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
                     'architecture': self._get_current_architecture(inst),
                 })
                 return
@@ -1748,6 +1799,13 @@ class SnapshotDetailerSamplerServer:
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(data)
+                return
+
+            # 空 pipeline 时的补救入口：让工作台重开上次那份 .cud。描述符由服务端从自己写下的
+            # 记录里造，页面只说"要不要"，说不出"哪一个"。
+            if self.path == '/api/recent_cud':
+                doc, reason = doc_io.reopen_recent_cud()
+                self._send_json({'ok': doc is not None, 'doc': doc, 'reason': reason})
                 return
 
             self.send_error(404)
@@ -3230,9 +3288,12 @@ class SnapshotDetailerSamplerNode:
         if next_pipeline.model is None:
             raise ValueError('PipelineData model is empty, cannot Detailer')
 
+        # 两头都空 = 没有任何像素来源：pipeline 没带图，而画布也没交出合成图。这句话以前写在
+        # get_image() 下面，永远读不到 —— image 与 latent 皆空时 get_image 自己先抛一句中文长串。
+        if next_pipeline.image is None and next_pipeline.latent is None:
+            raise ValueError('No image available for detailer — the pipeline carries no image and the '
+                             'Blend canvas delivered no composite (add a layer, or open a .cud, first)')
         original_image = next_pipeline.get_image()
-        if original_image is None:
-            raise ValueError("No image available for detailer")
 
         dbg.record_block(0, f'链条开始（共 {len(blocks)} 个 block）',
                          f'enable_mask={bool((blocks[0].get("params", blocks[0]) or {}).get("enable_mask", True))}')
@@ -3653,7 +3714,9 @@ class SnapshotDetailerSamplerNode:
                     _gt_ref_keys = []
                     _gt_img_status = 'n/a（未送图）'
                     if enable_edit:
-                        _chain_img = next_pipeline.get_image()
+                        # 链上没像素时下面那句 `is not None` 本来就打算跳过送图（只带 refs），
+                        # 所以这里要 None，别让 get_image 抢先把整块打断。
+                        _chain_img = next_pipeline.get_image(required=False)
                         if _chain_img is not None:
                             _gt_images.append(_chain_img)
                             _gt_sources.append('pipeline.image（链上工作图）')
@@ -4158,7 +4221,10 @@ class SnapshotDetailerSamplerNode:
             new_pipeline.mask = current_pipeline.mask
         self._current_pipeline = new_pipeline.copy()
         self._base_pipeline = self._current_pipeline
-        new_image = new_pipeline.get_image() if hasattr(new_pipeline, 'get_image') else None
+        # 换到一条既无 image 又无 latent 的管线是合法状态（工作台那侧自己去要上次那一份 .cud），
+        # 所以这里要 None 就够，别让它抛 —— 以前这句把整条切换打成页面上的一行红字，run 循环走
+        # 同一个 loader 时更是直接打断整趟。有 latent 仍然解码（下面 required=False 不管这一路）。
+        new_image = new_pipeline.get_image(required=False) if hasattr(new_pipeline, 'get_image') else None
         self._switch_image(server, new_image)
         # Update lora_regex from the new pipeline's architecture
         new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
@@ -4166,16 +4232,23 @@ class SnapshotDetailerSamplerNode:
         print(f"[PipelineSwitch] old_arch={old_arch}, new_arch={new_arch}, config_keys={list(new_pipeline.config.keys()) if new_pipeline.config else 'None'}")
         if new_arch:
             new_arch = str(new_arch)
-            server.lora_regex = new_arch
-            if server.prompt_server:
-                server.prompt_server.update_lora_regex(new_arch)
+            # 一条谓词管住 lora 侧的全部动作：架构没变（例如 preset 每趟都点名同一条）既不重扫
+            # 磁盘（update_lora_regex → refresh_loras 会顺带 propagate 给进程里每一个 prompt 实例），
+            # 也不惊动 Prompt tab。server 与它的 prompt server 都在构造时就带着同一枚 regex，所以
+            # 这里比出的"相等"不存在两边不一致的可能。
+            if new_arch != server.lora_regex:
+                server.lora_regex = new_arch
+                server.pipeline_lora_epoch += 1
+                if server.prompt_server:
+                    server.prompt_server.update_lora_regex(new_arch)
         elif old_arch:
             # If new pipeline didn't set architecture, keep old regex
             print(f"[PipelineSwitch] WARNING: new pipeline has no architecture in config, keeping old lora_regex={server.lora_regex}")
         # 身份记账：run 循环靠它判断「这次要不要重新加载」。
         server.loaded_pipeline_node_id = upstream_node_id
         server.loaded_pipeline_name = pipeline_name or ''
-        print(f"[PipelineSwitch] Switched to pipeline '{pipeline_name}' (node {upstream_node_id}), lora_regex='{new_arch or server.lora_regex}'")
+        print(f"[PipelineSwitch] Switched to pipeline '{pipeline_name}' (node {upstream_node_id}), "
+              f"lora_regex='{new_arch or server.lora_regex}', epoch={server.pipeline_lora_epoch}")
         return True, None
 
     # -------------------------------------------------------------------------
@@ -4315,7 +4388,7 @@ class SnapshotDetailerSamplerNode:
         # 默认注入的图 + mask (context image)
         # chain 模式：优先使用调用方显式传入的输入图/mask（来自上一 block 的 pipeline）
         base_img = input_image if input_image is not None else (
-            injected_pipeline.get_image() if injected_pipeline else None)
+            injected_pipeline.get_image(required=False) if injected_pipeline else None)
         base_mask = input_mask if input_mask is not None else (
             injected_pipeline.mask if injected_pipeline else None)
 
@@ -4542,13 +4615,19 @@ class SnapshotDetailerSamplerNode:
                package=None, extra_pnginfo=None, unique_id=None):
         mm.throw_exception_if_processing_interrupted()
 
-        self._current_pipeline = pipeline.copy() if pipeline else None
+        # pipeline 口是必需口，交回 None 就没有任何东西可跑（画布、Run、finish 落图全指着它）。
+        # 这句检查原来只在末尾，于是中途两处裸访问（_switch_image、finish 落图）会先炸成
+        # AttributeError —— 挪到这里，两条路一起断在一句话上。
+        if pipeline is None:
+            raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
+
+        self._current_pipeline = pipeline.copy()
         # 保存"原始 pipeline"引用：仅在初始化 / Pipeline tab 切换时设定。
         # 每次 Run detailer 都基于它的副本执行，run 之间不共享、不累积修改。
         self._base_pipeline = self._current_pipeline
 
         # Derive lora_regex from pipeline's architecture config if not explicitly provided
-        if not lora_regex and pipeline and pipeline.config:
+        if not lora_regex and pipeline.config:
             arch = pipeline.config.get("architecture")
             if arch:
                 lora_regex = str(arch)
@@ -4563,7 +4642,7 @@ class SnapshotDetailerSamplerNode:
             unique_id=unique_id,
             extra_pnginfo=extra_pnginfo,
         )
-        server.start(initial_image=self._current_pipeline.image if self._current_pipeline else None)
+        server.start()
 
         t0 = time.time()
         while not server.started:
@@ -4574,9 +4653,13 @@ class SnapshotDetailerSamplerNode:
             time.sleep(0.01)
 
         # 初始图进内部图池（hidden：前端种子画布从这里取，但不占工作区条带 ——
-        # 工作区只收用户主动拖入的图）。
-        if self._current_pipeline and self._current_pipeline.image is not None:
+        # 工作区只收用户主动拖入的图）。没有图就没有种子，工作台那侧会自己去要上次那一份
+        # .cud（GET /api/recent_cud），所以这句写在日志里而不是让它静默成一块空画布。
+        if self._current_pipeline.image is not None:
             server.original_key = server.add_staging(self._current_pipeline.image, name='Original', hidden=True)
+        else:
+            print("[SnapshotDetailerSampler] pipeline carries no image — the Blend canvas has no seed; "
+                  "the workbench will ask for the last .cud opened here")
 
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
         webbrowser.open(server.browser_url)
@@ -4975,7 +5058,4 @@ class SnapshotDetailerSamplerNode:
 
         result = self._current_pipeline
         self._current_pipeline = None
-
-        if result is None:
-            raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
         return (result,)

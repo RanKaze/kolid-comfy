@@ -107,28 +107,10 @@
           {
             "tags": [
               {
-                "name": "悬挂拘束 0",
-                "prompt": "场景中有两个黑人和一个女人,女人四肢悬空垂下,臀部翘起,双脚离地,双手扶在男人的大腿上,一个黑人双手抓住了女人的髋部,顶着跨,将阴茎插入女人的阴道.另一个黑人将阴茎插入女人的嘴巴.full body.两个黑人相同高度.女人臀部紧贴着一个黑人的大腿根,女人的嘴将阴茎整根吞入,嘴唇贴到了睾丸上",
+                "name": "泡水汽车 0",
+                "prompt": "side-window medium shot, completely nude girl reclining in the driver seat of a 1980s convertible, one foot resting on the dashboard, the other foot on the steering wheel, thighs spread wide open, hips tilted toward the camera, pussy fully visible and detailed, one hand resting on her stomach, looking directly at the lens\n\nthe entire car is submerged in clear turquoise swimming-pool water, the driver's cabin completely flooded, water filling the interior up to chest level, gentle underwater caustics and light refraction dancing across her wet skin, the car seats, steering wheel and dashboard, visible distorted blue square tiles of the pool floor beneath the car through the water\n\nbright natural daylight filtering down through the water surface, soft highlights on her wet skin and hair, realistic water ripples and bubbles inside the cabin, photorealistic, highly detailed",
                 "category": "场景(Natural)",
-                "base_id": "custom_1791134886_5d4eb2b9"
-              }
-            ],
-            "strength": 1,
-            "source": "normal"
-          },
-          {
-            "tags": [
-              {
-                "name": "在...里",
-                "prompt": "in",
-                "category": "交互",
-                "base_id": "custom_1777742681_0a914abf"
-              },
-              {
-                "name": "房间",
-                "prompt": "room",
-                "category": "对象要素",
-                "base_id": "custom_1779950906_ede4b109"
+                "base_id": "custom_1791191859_81be2a08"
               }
             ],
             "strength": 1,

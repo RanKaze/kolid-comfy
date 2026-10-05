@@ -776,11 +776,16 @@ class PipelineData:
         self.latent = latent_out
         return self.latent
     # ==================== 获取 Image ====================
-    def get_image(self):
+    # required=False：调用方本来就有"没图也照走"的分支（切到一条空管线、interface 无输入图、
+    # Generate Text 的送图开关），让它们拿到 None 而不是让这句先把整趟打断。真采样路径保持
+    # required=True —— 那里没有像素就是失败，该抛。vae 为空是另一种坏法，两种模式下都照抛。
+    def get_image(self, required=True):
         if self.image is not None:
             return self.image
 
         if self.latent is None:
+            if not required:
+                return None
             raise ValueError("PipelineData 中 image 和 latent 都为空，无法获取 image")
 
         if self.vae is None:
