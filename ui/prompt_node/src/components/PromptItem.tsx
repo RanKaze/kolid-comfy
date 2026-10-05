@@ -18,6 +18,25 @@ interface PromptItemProps {
   isDraggable: boolean;
 }
 
+/** 卡右上角的语言徽标:蓝 T = tag 语言,绿 N = 自然语言。 */
+export function PromptLangBadge({ natural }: { natural?: boolean }) {
+  return (
+    <span
+      className="prompt-lang-badge"
+      title={natural ? 'Natural-language card' : 'Tag-language card'}
+      style={{
+        position: 'absolute', top: 8, right: 8, zIndex: 3,
+        width: 18, height: 18, borderRadius: '50%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 10, fontWeight: 800, lineHeight: 1, pointerEvents: 'none',
+        background: natural ? 'rgba(48, 209, 88, 0.9)' : 'rgba(10, 132, 255, 0.9)',
+        color: '#fff', border: '0.5px solid rgba(255,255,255,0.35)',
+        boxShadow: '0 1px 4px rgba(0,0,0,0.45)',
+      }}
+    >{natural ? 'N' : 'T'}</span>
+  );
+}
+
 export function PromptItem({
   prompt, category, modeClass, isMiniMode, isSelected,
   focusStyle, decoTagsHtml, selectedCardsHtml,
@@ -42,6 +61,7 @@ export function PromptItem({
             onClick={e => e.stopPropagation()}
           >{iconGrip}</span>
         )}
+        <PromptLangBadge natural={prompt.natural} />
         <div dangerouslySetInnerHTML={{ __html: decoTagsHtml }} />
         <div className="select-area" onClick={onClick}>
           <div className="image-layer">
@@ -51,12 +71,7 @@ export function PromptItem({
           </div>
           {!isMiniMode && <div className="glass-layer" />}
           <div className="text-layer">
-            <div className="name">
-              {prompt.name}
-              {prompt.natural ? (
-                <span title="Natural-language card" style={{ marginLeft: 6, display: 'inline-block', padding: '0 5px', borderRadius: 6, fontSize: 9, fontWeight: 700, lineHeight: '14px', verticalAlign: 'middle', background: 'rgba(10,132,255,0.22)', border: '0.5px solid rgba(10,132,255,0.55)', color: '#64d2ff' }}>NL</span>
-              ) : null}
-            </div>
+            <div className="name">{prompt.name}</div>
             <div className="prompt-text">{prompt.prompt}</div>
           </div>
         </div>

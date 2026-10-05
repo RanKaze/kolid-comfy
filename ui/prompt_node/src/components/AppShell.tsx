@@ -34,6 +34,7 @@ import { PRESET_SCOPE, QUERY_SCOPE, answerQuerySelection, savePromptPresetSelect
 import { SearchBar } from './SearchBar';
 import { PrefabItem } from './PrefabItem';
 import { CustomPromptsEditor } from './CustomPromptsEditor';
+import { PromptLangBadge } from './PromptItem';
 import { ProgramCodeEditor } from './ProgramCodeEditor';
 import { LoraFolderCard } from './LoraFolderCard';
 import { Lora } from './Lora';
@@ -4612,6 +4613,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.id); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={cat}>
                                 <span className="drag-handle" draggable data-drag-type="prompt" data-id={p.id} data-category={cat}>{iconGrip}</span>
                                 {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
+<PromptLangBadge natural={p.natural} />
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleTagRef({ id: p.id, text: p.prompt }); } else { selectPrompt(p); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}
@@ -4767,6 +4769,7 @@ export function AppShell() {
                               <div className={`prompt-item ${modeClass}${sel ? ' selected' : ''}${duplicateSet.has(p.prompt) ? ' duplicate' : ''}${(() => { const g = getTagGroupForPrompt(p.id); return g && programResult.filter_tag_groups.some(fg => tagsToDisplayString(fg) === tagsToDisplayString(g)) ? ' program-filtered' : ''; })()}`} data-prompt={p.prompt} data-id={p.id} data-category={p.category}>
                                 <span className="drag-handle" data-drag-type="prompt" data-id={p.id} data-category={p.category}>{iconGrip}</span>
                                 {pTags.length > 0 && <div className="decoration-tags">{pTags.map((t: string) => <span className="decoration-tag tag" key={t}>{t}</span>)}</div>}
+<PromptLangBadge natural={p.natural} />
                                 <div className="select-area" onMouseDown={() => { if (tempCtx.mode === 'tagCtx' || tempCtx.mode === 'tagGroupBuiltin') { tempCtx.toggleTagRef({ id: p.id, text: p.prompt }); } else { selectPrompt(p); } }}>
                                   <div className="image-layer">
                                     {p.preview ? <img src={imgUrl(p.preview)} alt={p.name} loading="lazy" style={fp ? { objectPosition: `${fp.x}% ${fp.y}%` } : {}} /> : <div className="no-image">No Image</div>}

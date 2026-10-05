@@ -896,6 +896,9 @@ body {
     z-index: 10;
 }
 .prompt-item:hover .actions { opacity: 1; }
+/* 语言徽标给悬浮操作按钮让位 */
+.prompt-lang-badge { transition: opacity 0.15s ease; }
+.prompt-item:hover .prompt-lang-badge { opacity: 0; }
 .prompt-item .action-btn {
     padding: 4px 8px;
     border-radius: 4px;
