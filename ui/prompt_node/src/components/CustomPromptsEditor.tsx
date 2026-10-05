@@ -51,16 +51,30 @@ export function CustomPromptsEditor({
   const [selIdx, setSelIdx] = useState(-1);
   const [query, setQuery] = useState('');
 
+  // Custom Prompts 里的匹配只认 tag 词条:自然语言(natural)卡不进补全列表,
+  // 也不参与 Enter 解析命中 —— 打了自然语言原文就当自由文本,不认成卡。
+  const tagOnlyPrompts = useMemo(() => {
+    const out: AllPrompts = {};
+    let changed = false;
+    for (const [cat, cd] of Object.entries(allPrompts)) {
+      const prompts = ((cd as any).prompts || []) as any[];
+      const kept = prompts.filter(p => !p.natural);
+      if (kept.length !== prompts.length) changed = true;
+      out[cat] = kept.length !== prompts.length ? { ...(cd as any), prompts: kept } : cd;
+    }
+    return changed ? out : allPrompts;
+  }, [allPrompts]);
+
   const suggestions = useMemo(() => {
     const map = new Map<string, string>();
-    for (const cd of Object.values(allPrompts)) {
+    for (const cd of Object.values(tagOnlyPrompts)) {
       const prompts = ((cd as any).prompts || []) as { name: string; prompt: string }[];
       for (const p of prompts) {
         if (p.prompt && !map.has(p.prompt)) map.set(p.prompt, p.name || p.prompt);
       }
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'zh-CN'));
-  }, [allPrompts]);
+  }, [tagOnlyPrompts]);
 
   const filtered = useMemo(() => {
     if (!query) return suggestions.slice(0, 50);
@@ -185,7 +199,7 @@ export function CustomPromptsEditor({
         return;
       }
 
-      const result = tryParseLine(segmentToParse, allPrompts);
+      const result = tryParseLine(segmentToParse, tagOnlyPrompts);
       if (result) {
         onParsed(result.tagGroup, result.displayString);
         // Build new line: remove the parsed segment and its trailing comma (or leading comma)
@@ -231,7 +245,7 @@ export function CustomPromptsEditor({
       }
       setShowDropdown(false);
     }
-  }, [showDropdown, filtered, selIdx, replaceWord, onChange, allPrompts, onParsed]);
+  }, [showDropdown, filtered, selIdx, replaceWord, onChange, tagOnlyPrompts, onParsed]);
 
   return (
     <div style={{ position: 'relative' }}>
