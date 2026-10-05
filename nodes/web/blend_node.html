@@ -13223,6 +13223,17 @@ function requestImportCud(file, doc) {
     return openCudDocument(file, doc);
 }
 
+// Reopen without a dialog. The host only ever hands back a descriptor the *server* recorded from a
+// dialog it showed, so this is Load with the picking step already done: same token→bytes read, same
+// new tab, same in-place Save. openCudDocument reports its own failures on this status line.
+async function reopenCudDocument(doc) {
+    try {
+        requestImportCud(await docToFile(doc), doc);
+    } catch (err) {
+        setStatus('Reopen failed: ' + ((err && err.message) || err), 'error');
+    }
+}
+
 // ==================== The cud link ====================
 // A cud layer is another .cud project living inside this one: its picture is the flattened Layers
 // stack of that file — the very image #blendCanvas holds while the project is open — and in every
@@ -14592,6 +14603,16 @@ window.addEventListener('message', event => {
         if (!valid.length) return;
         for (const it of valid) addLayer(it);
         setStatus('Canvas seeded with the current pipeline image');
+        return;
+    }
+    if (d.type === 'blend-reopen-cud') {
+        // No seed image existed (the pipeline carries no picture), so the host hands over the last
+        // .cud this machine picked in the file dialog. The descriptor is shaped exactly like what
+        // Load gets — server-minted token, bytes through /api/io_read, Save still writes in place —
+        // so from here it is the ordinary Load path. A refusal is reported, never retried by
+        // throwing a dialog at the user.
+        if (!d.doc) { setStatus(d.reason || 'No recent .cud to reopen'); return; }
+        reopenCudDocument(d.doc);
         return;
     }
     if (d.type === 'blend-add-layer') {

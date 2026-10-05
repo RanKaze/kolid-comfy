@@ -51,6 +51,8 @@ nodes/web/supersplat/build/
 cookies/
 data/prompt/
 data/switch/
+# 上次打开的 .cud 是本机绝对路径，不入库
+nodes/recent_cud.json
 
 .codely/**
 .codely-cli/**

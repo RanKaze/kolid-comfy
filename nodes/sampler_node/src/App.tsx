@@ -49,6 +49,29 @@ const App: React.FC = () => {
     setActionLog(prev => [...prev, { at: Date.now(), text, kind }].slice(-32));
   }, []);
   const promptIframeRef = useRef<HTMLIFrameElement>(null);
+  // Prompt tab 那份 LoRA 卡是 iframe 自己在 mount 时拉的副本：后端换 pipeline 时把 lora_regex
+  // 换了代（并重扫了磁盘），这页看不见。`loraEpochRef` = 本页已知的当前代数，
+  // `promptLoraEpochRef` = 那份副本是哪一代拉的，两者不等就是脏 —— 只在这一刻才让它重拉。
+  const loraEpochRef = useRef(0);
+  const promptLoraEpochRef = useRef(0);
+  // 唯一的一处「让 Prompt tab 跟上现在的 pipeline」。`fromServer` = 先现拉一次 /api/config 才比
+  // 代数：进 tab 那一趟要用它，因为 /api/status 只在运行中轮询，闲置时本页手上的代数可能是旧的。
+  // 走 iframe 现成的 'reload-lora-data'（只重拉 lora，保住这一页没保存的选择），不是全量
+  // 'kolid-reload-data'（那会把选择整片清空）。
+  const flushPromptPipeline = useCallback(async (fromServer = false) => {
+    if (fromServer) {
+      try {
+        const cfg: ServerConfig = await fetch('/api/config').then(r => r.json());
+        if (typeof cfg?.pipeline_lora_epoch === 'number') loraEpochRef.current = cfg.pipeline_lora_epoch;
+      } catch { /* 问不到就不动，下一次进 tab 再问 */ }
+    }
+    if (loraEpochRef.current === promptLoraEpochRef.current) return;
+    const win = promptIframeRef.current?.contentWindow;
+    // 记"已送达"要在真发出去之后：iframe 还没挂上就先把基线抬走，这一代就永远没人补了。
+    if (!win) return;
+    promptLoraEpochRef.current = loraEpochRef.current;
+    win.postMessage({ type: 'reload-lora-data' }, '*');
+  }, []);
   // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
   // Mask layer, which would be lost if React unmounted it on every tab switch.
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
@@ -158,6 +181,9 @@ const App: React.FC = () => {
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
         setInterfaceMeta(data.interface_meta ?? {});
         setLoadedPipelineName(data.loaded_pipeline_name ?? '');
+        // Prompt iframe 此刻才被挂上（src 就是这一份 config 里的 prompt_url），它拉的就是这一代
+        // 的 lora_regex —— 两枚代数从这里同时起步。
+        loraEpochRef.current = promptLoraEpochRef.current = data.pipeline_lora_epoch ?? 0;
         if (data.has_package) {
           fetch('/api/package')
             .then(r => r.json())
@@ -244,6 +270,8 @@ const App: React.FC = () => {
     const needPromptSync = tab === 'prompt' && newTab !== 'prompt';
     if (!needPromptSync) {
       setTab(newTab);
+      // 打开 Prompt tab = 主动对一次账：这一页显示不显示是用户说了算，程序不该替他留着脏数据。
+      if (newTab === 'prompt') void flushPromptPipeline(true);
       return;
     }
     setSyncingTab(true);
@@ -327,6 +355,14 @@ const App: React.FC = () => {
         // 轮询顺手同步，前端就不用再拉一次 config。
         if (typeof data.loaded_pipeline_name === 'string') setLoadedPipelineName(data.loaded_pipeline_name);
         if (data.architecture !== undefined) setArchitecture(data.architecture ?? null);
+        // 同一趟 run 里 lora_regex 也可能换了代（后端已经跟着重扫过 lora 了）：Prompt tab 开着
+        // 的话这一代当场送过去，别等用户下次进那个 tab。
+        if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
+        void flushPromptPipeline();
+        // 同一趟里 lora_regex 也可能换了代（prompt server 已经跟着重扫过了）：Prompt tab 开着
+        // 的话这一代要当场送过去，别等用户下次进那个 tab。
+        if (typeof data.pipeline_lora_epoch === 'number') loraEpochRef.current = data.pipeline_lora_epoch;
+        void flushPromptPipeline();
         if (st === 'running') {
           post({ status: 'running', ...progress });
         } else if (st === 'error') {
@@ -402,7 +438,18 @@ const App: React.FC = () => {
       const r = await fetch('/api/staging').then(r => r.json());
       full = (r?.staging || []) as StagingItem[];
     } catch { /* nothing to seed with */ }
-    if (!full.length) return;
+    if (!full.length) {
+      // Nothing to seed with = the pipeline carried no image. The workbench then reopens the
+      // last .cud *this machine* chose in the file dialog: the backend holds that record and
+      // mints the token for it, so the page never names a path. Whether it succeeds or refuses,
+      // the workbench says so in its own status line — that's where Load reports live.
+      try {
+        const r = await fetch('/api/recent_cud').then(r => r.json());
+        iframe.contentWindow.postMessage(
+          { type: 'blend-reopen-cud', doc: r?.doc || null, reason: r?.reason || '' }, '*');
+      } catch { /* no record, no backend — the canvas simply stays empty */ }
+      return;
+    }
     const item = full.find(s => s.name === 'Original')
       ?? stagingRef.current[stagingRef.current.length - 1]
       ?? full[full.length - 1];
@@ -606,7 +653,11 @@ const App: React.FC = () => {
   // Declared after the handlers so the listener always closes over the current ones.
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.data?.type === 'kolid-prompt-library-changed') {
+      if (event.data?.type === 'kolid-prompt-ready') {
+        // Prompt 页刚把监听挂上（它的 mount 拉取与这句几乎同时发出，拉的是当时那一代）。这一句
+        // 唯一的用处是补发：切换发生在它就绪之前的那一趟，postMessage 已经丢在空气里了。
+        void flushPromptPipeline();
+      } else if (event.data?.type === 'kolid-prompt-library-changed') {
         // A prompt document wrote the shared library (词条 / 分类 / prefab / program). Every prompt
         // UI in this workbench is a separate document with its own React copy of /prompts_data, and
         // the Prompt tab never re-fetches on its own — so relay to it. Skip the writer itself: it
@@ -818,11 +869,11 @@ const App: React.FC = () => {
         fetch('/api/config').then(r => r.json()).then((cfg: ServerConfig) => {
           setArchitecture(cfg.architecture ?? null);
           setLoadedPipelineName(cfg.loaded_pipeline_name ?? '');
+          loraEpochRef.current = cfg.pipeline_lora_epoch ?? loraEpochRef.current;
+          // 这里以前是 setTimeout(100) 的一次性 post：iframe 还没挂上监听就永久丢在空气里。
+          // 现在漏发有 'kolid-prompt-ready' 和进 tab 那两趟兜，只留这一处发送点。
+          void flushPromptPipeline();
         }).catch(() => {});
-        // Notify prompt iframe to reload lora data (lora_regex may have changed)
-        setTimeout(() => {
-          promptIframeRef.current?.contentWindow?.postMessage({ type: 'reload-lora-data' }, '*');
-        }, 100);
       } else {
         setError(data.error || 'Failed to switch pipeline');
       }
