@@ -1,0 +1,18 @@
+import { createViteConfig } from '../packages/ui-utils/src/vite-config';
+import { defineConfig } from 'vite';
+import { resolve } from 'path';
+
+const uiUtilsSrc = resolve(__dirname, '../packages/ui-utils/src');
+
+export default defineConfig({
+  ...createViteConfig({
+    appName: 'draw_node',
+    outDir: resolve(__dirname, '../../nodes/web'),
+    base: '',
+  }),
+  resolve: {
+    alias: {
+      '@kolid/ui-utils': uiUtilsSrc,
+    },
+  },
+});

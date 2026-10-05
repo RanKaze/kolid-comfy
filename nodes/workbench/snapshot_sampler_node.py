@@ -1,0 +1,5075 @@
+import os
+import re
+import json
+import hashlib
+import mimetypes
+import threading
+import queue
+import http.server
+import socketserver
+import webbrowser
+import time
+import base64
+from urllib.parse import parse_qs, urlparse
+import io
+import copy
+import shutil
+import numpy as np
+from PIL import Image
+import torch
+import comfy.model_management as mm
+
+# =============================================================================
+# 导入现有模块
+# =============================================================================
+from ...libs.utils import AlwaysEqualProxy
+from ...libs.data_paths import data_dir, data_file, web_file
+
+try:
+    from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
+except ImportError as e:
+    print(f"[SnapshotDetailerSampler] Warning: cannot import prompt_node: {e}")
+    SnapshotPromptServer = None
+    SnapshotPromptNode = None
+
+from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_crop, tensor_to_base64, composite_layers, decode_mask_alpha, decode_decal_rgba, decode_image_dataurl, merge_mask_alpha
+from ...libs.mask_utils import expand_mask
+from ...libs.caption_utils import get_tag
+from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
+from ..pipeline.sampler_node import get_loras_from_string
+from ...libs.generate_text_utils import apply_generate_text_to_prompt
+from ...libs import debug_trace as dbg
+from ...architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
+import gc
+import uuid
+
+
+# =============================================================================
+# detailer block 之间的 seed 传递
+# =============================================================================
+def next_seed(prev):
+    """由上一个 seed 生成下一个 seed。
+
+    哈希而不是 +1：链里块数可能到十几，逐个加一会全挤在相邻整数上，而
+    torch 的 randn 是逐位取随机数，相邻 seed 的首段噪声并不"长得开"。
+    取 sha256 前 8 字节压回 ComfyUI 的 INT 上限，纯函数、跨进程可复现。
+    """
+    digest = hashlib.sha256(str(int(prev) & 0xFFFFFFFFFFFFFFFF).encode()).digest()
+    return int.from_bytes(digest[:8], 'big') & 0xFFFFFFFFFFFFFFFF
+
+
+# =============================================================================
+# Debug 面板的 lora 读数
+# =============================================================================
+def debug_lora_entries(loras):
+    """把链路里的 lora 值归一成"一条 lora 一个条目"，供 Debug 记录用。
+
+    loras 一路是以 `<lora_path:文件:强度>` 逗号拼接的**字符串**在跑（_parse_prompt /
+    _resolve_prompt_* 的返回值都是这种形态），早期 Debug 直接写 list(user_loras) 等于把字符串
+    拆成单字符，面板上就成了 '<, l, o, r, a, _, p, a, t, h, :' 的花汤。context 那条路径本来就
+    是 list，所以两种入口都从这里走，显示口径只有这一个。
+    """
+    if isinstance(loras, str):
+        return get_loras_from_string(loras)
+    return list(loras or [])
+
+
+# =============================================================================
+# Detailer 产出回贴几何（Recover Crop 关闭时）
+# =============================================================================
+def detail_place_rect(crop_info, patch=None):
+    """crop_info + 产出图 → Blend 画布把它贴回原位所需的全部几何。
+
+    坐标链（每一步都在压缩这幅图，贴回去就是原路反演）：
+
+        original_image (ow x oh)                 ← Blend 画布，run 时的 context
+          └ crop_mask  → cropped image (cw x ch)，左上角落在 (crop_x, crop_y)
+              └ limit_pixels → patch (pw x ph)   ← 模型真正跑的工作分辨率，sx/sy 是这一步的缩放比
+
+    注意 limit_pixels 是**会放大**的（当前像素数小于目标时按 aspect 放大并对齐 align），
+    所以 pw x ph 通常既不等于 cw x ch，也不是同一边长比例：pw/ph 只能近似 cx 的比例。
+    唯一的硬约束是「整张 patch 必须盖满 crop 矩形的 cw x ch」——这正是开着 Recover Crop
+    时 recover_size + recover_crop 的结果（recover_size 先把 patch 拉回 cw x ch，再由
+    recover_crop 贴到 [crop_y:, crop_x:]），两条路径必须在画布上得到同一个矩形。
+
+    于是这里给出的不是一个画好的 transform，而是让前端自己算的原始量：crop 矩形用
+    **这次 run 的原始图像素**表示（ow/oh 同单位），外加 patch 自身尺寸与缩放比便于核对。
+    纯算术、不依赖 torch，方便单测。
+    """
+    info = crop_info or {}
+    ow = int(info.get('original_width') or 0)
+    oh = int(info.get('original_height') or 0)
+    if ow <= 0 or oh <= 0:
+        return None
+    x = int(info.get('crop_x') or 0)
+    y = int(info.get('crop_y') or 0)
+    # 缺 crop_width/height 时退回整图（对齐 crop_mask 的空 mask 分支语义）
+    w = int(info.get('crop_width') or ow)
+    h = int(info.get('crop_height') or oh)
+    # 夹回原图范围：crop_mask 正常不会越界，但越界会把 patch 贴到画布外
+    x = max(0, min(x, ow - 1))
+    y = max(0, min(y, oh - 1))
+    w = max(1, min(w, ow - x))
+    h = max(1, min(h, oh - y))
+
+    pw, ph = 0, 0
+    if patch is not None and hasattr(patch, 'shape') and len(patch.shape) >= 3:
+        ph = int(patch.shape[-3])
+        pw = int(patch.shape[-2])
+
+    return {
+        'x': x, 'y': y, 'w': w, 'h': h,     # crop 矩形，单位 = 本次 run 的原始图像素
+        'ow': ow, 'oh': oh,                 # 同一幅原始图的尺寸（= run 时的画布尺寸）
+        'pw': pw, 'ph': ph,                 # 返回的 patch 自身像素尺寸
+        'sx': (pw / w) if w else 0.0,       # limit_pixels 施加的缩放比，供前端核对
+        'sy': (ph / h) if h else 0.0,
+    }
+
+
+# =============================================================================
+# Extra Prompt 里的嵌图标记（<image_id:...>）解析
+# =============================================================================
+# Blend 工作台的工作区条目点击后会把 <image_id:staging_N> 嵌进 Extra Prompt 文本
+# （光标处）。Run 时在这里统一解析：引用图按**首次出现顺序**去重编号 —— context
+# 工作图恒为 <image 1>，引用图依次为 <image 2>、<image 3>……（重复引用同一张复用
+# 同一号）。解码后的文本（标记重写成 <image N>）才会被追加进 positive；解不出的
+# id（图已从工作区移除）跳过并从解码文本中移除该标记，留下警告。
+IMAGE_ID_TOKEN_RE = re.compile(r'<image_id:([^<>\s]+)>')
+# 保留 id：Context Image（工作区最左侧那张固定卡片）。它不指向任何 staging 条目，
+# 而是在解码时直接展开成 <image 1> —— context 图在 Enable Edit 下恒为 image 1。
+CONTEXT_IMAGE_ID = 'context'
+
+# 保留 id：Guidance 卡（Blend 工作台 Guidances 栈的那一张总卡）。与 context 不同，它就是一条
+# 货真价实的 staging 条目 —— 能删、能被 <image_id:staging_guidance> 引用、能被 run 当参考图，
+# 只是全工作区固定只有这一张，重发布时由 /api/guidance_card 原地换像素。
+GUIDANCE_STAGING_ID = 'staging_guidance'
+
+
+def dataurl_to_tensor(image_b64):
+    """dataURL → [1, H, W, 3|4] float tensor（工作区入库用的那一个方向）。
+
+    带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB。
+    解不出图就抛异常，让调用方按各自语义决定是跳过这张还是整单失败。
+    """
+    b64_data = image_b64.split(',', 1)[1] if ',' in image_b64 else image_b64
+    img_bytes = base64.b64decode(b64_data)
+    img = Image.open(io.BytesIO(img_bytes))
+    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+        img = img.convert('RGBA')
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+    arr = np.array(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
+
+
+def staging_image_to_mask(img):
+    """[1,H,W,C] 工作区图 → [1,H,W] float mask（取亮度）。
+
+    Processor 的 MASK 端口覆盖走的就是 staging 运输（图都是 PNG dataURL），落到
+    端口上时按这个方向转。带 alpha 的图亮度用 RGB 均值 —— mask 语义里 alpha 不参与
+    （透明处的颜色依然算数），与工作台「把图当 mask 读」的读法一致。
+    """
+    if img is None or not hasattr(img, 'shape'):
+        return None
+    if img.dim() == 4:
+        return img[..., :3].mean(dim=-1)
+    if img.dim() == 3:
+        if img.shape[-1] in (3, 4):
+            return img[..., :3].mean(dim=-1).unsqueeze(0)
+        return img
+    if img.dim() == 2:
+        return img.unsqueeze(0)
+    return None
+
+
+def staging_mask_to_image(mask):
+    """[1,H,W]（兼容 [H,W] / [1,H,W,1]）mask → [1,H,W,3] 灰度图。
+
+    接口的 MASK 产出没有直接过线的通道 —— staging 只运图。灰度展开成 RGB 后
+    工作台拿到的就是一张普通 PNG，写回蒙版时按亮度读回来。
+    """
+    m = mask
+    if m is None or not hasattr(m, 'shape'):
+        return None
+    while m.dim() > 2 and m.shape[-1] == 1:
+        m = m[..., 0]
+    if m.dim() == 2:
+        m = m.unsqueeze(0)
+    if m.dim() != 3:
+        return None
+    return m.unsqueeze(-1).expand(-1, -1, -1, 3).clamp(0.0, 1.0)
+
+
+def parse_prompt_image_refs(text, resolve):
+    """解析 text 里的 <image_id:xxx> 标记。
+
+    resolve(id) → bool：该 id 是否能解出一张图（由调用方提供，通常包着
+    server.get_staging_image）。纯字符串处理、不依赖 torch，方便单测。
+
+    返回 (ref_ids, decoded_text, missing)：
+      ref_ids      引用图 id 列表（首次出现顺序、去重；'context' 不在其中）
+      decoded_text 标记重写成 <image N>（N 从 2 起）后的文本；失效标记被移除
+      missing      解不出的 id 列表（按出现顺序，不去重）
+    """
+    ref_ids = []
+    index_by_id = {}
+    missing = []
+
+    def _sub(m):
+        mid = m.group(1)
+        if mid == CONTEXT_IMAGE_ID:
+            # context 图恒为 <image 1>（Enable Edit 下它本来就是第一张参考图），
+            # 插不插进文本都在 refs 里 —— 所以这里只解码，**不占引用编号**。
+            return '<image 1>'
+        if not resolve(mid):
+            missing.append(mid)
+            return ''          # 失效引用：从解码文本中移除
+        if mid not in index_by_id:
+            index_by_id[mid] = len(ref_ids) + 2   # <image 1> 留给 context 图
+            ref_ids.append(mid)
+        return '<image %d>' % index_by_id[mid]
+
+    decoded = IMAGE_ID_TOKEN_RE.sub(_sub, text or '')
+    return ref_ids, decoded, missing
+
+
+# =============================================================================
+# 文档 IO：原生文件对话框 + 令牌登记表
+# =============================================================================
+# Blend 工作台的 Load / Save / Save As / Export / Import 全部走这里选文件。
+#
+# 为什么在后端弹：页面原先用 File System Access 的 showSaveFilePicker，浏览器会在每次 Ctrl+S
+# 前插一条自己的"将所作更改保存至…"提示，用户要求把它绕开。本服务器和浏览器在同一台机器上
+# （browser_url 是 localhost，节点用 webbrowser.open 打开页面），所以 tkinter 的原生对话框出现
+# 在同一块桌面上，而**已绑定文档的回写一个弹窗都不需要**。
+#
+# 为什么只认 token 不认路径：MainHandler 对任意 Origin 应答（CORS *）。若读写端点接受前端传来
+# 的路径，/api/io_read 立刻就是一个任意文件读取口。对话框返回路径 → 服务端存进登记表 → 前端拿
+# 到不透明 token，之后所有读写只能用 token，路径从不出服务端。
+#
+# 为什么单独一个常驻线程：Tk 不是线程安全的，而 HTTP handler 每个请求一个线程。所有对话框排进
+# 一条队列，由唯一那根线程上唯一的 root 执行；对话框本身是原生模态的，只挡住那根线程。
+#
+# "最近一份 .cud"记在 data/sampler/recent_cud.json，只在上面那条原生对话框的路上写（那是后端唯一拿得到
+# 真实路径的一趟；浏览器 handle 与 <input type=file> 都没有路径可记）。读回来时同样由服务端自己
+# mint token，页面从头到尾无从指定路径 —— 这条记录的用途是"重开你自己上次挑过的那份文件"，
+# 不是第二个文件读取口。
+IO_FILE_KINDS = {
+    'cud': {
+        'label': 'Context document',
+        'patterns': ['*.cud'],
+        'extension': '.cud',
+        'mime': 'application/octet-stream',
+    },
+    'png': {
+        'label': 'PNG image',
+        'patterns': ['*.png'],
+        'extension': '.png',
+        'mime': 'image/png',
+    },
+    'image': {
+        'label': 'Image',
+        'patterns': ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.bmp',
+                     '*.tif', '*.tiff', '*.avif', '*.svg', '*.psd'],
+        'extension': '.png',
+        'mime': 'image/*',
+    },
+}
+
+# 工作台自己那三份用户内容（blocks 链与 GLOBAL SETTINGS、Prompt 预设、最近一份 .cud 的路径）
+# 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
+# 里、其中两份还归了 git —— 那是每台机器各写各的运行状态，不是包的代码。
+def _workbench_file(name):
+    """data/sampler/<name>（落点由 libs/data_paths 定）；nodes/ 里那份旧文件首次访问时搬进来。"""
+    target = data_file('sampler', name)
+    legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    # 搬家那刻 ComfyUI 可能还带着旧代码在跑，它下一次写就写回 legacy —— 所以比 mtime，
+    # 而不是"target 有了就不管 legacy"，否则那之后的改动会静默丢在旧位置。
+    if os.path.exists(legacy) and (not os.path.exists(target)
+                                   or os.path.getmtime(legacy) > os.path.getmtime(target)):
+        shutil.move(legacy, target)
+    return target
+
+
+class DocumentIo:
+    """原生对话框 + token→绝对路径 登记表，供 MainHandler 的 /api/io_* 四条路由与
+    /api/recent_cud 使用。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tokens = {}            # token -> {'path', 'mime'}
+        self._jobs = None            # queue.Queue，常驻线程的任务口
+        self._thread = None
+        self._tk_checked = False
+        self._tk_ok = False
+
+    # ---- 能力 ----
+    def available(self):
+        """tkinter 是否可用（venv 可能是无 Tk 的精简构建）。只探测一次。"""
+        if not self._tk_checked:
+            self._tk_checked = True
+            try:
+                import tkinter                       # noqa: F401
+                from tkinter import filedialog       # noqa: F401
+                self._tk_ok = True
+            except Exception:
+                self._tk_ok = False
+        return self._tk_ok
+
+    def _ensure_thread(self):
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        q = queue.Queue()
+        t = threading.Thread(target=self._worker, args=(q,), daemon=True, name='blend-file-dialog')
+        self._jobs = q
+        self._thread = t
+        t.start()
+        return True
+
+    def _worker(self, jobs):
+        """唯一持有 Tk root 的线程：逐个取出请求，弹原生对话框，回传结果。"""
+        try:
+            import tkinter as tk
+            root = tk.Tk()
+            root.withdraw()                          # 只要对话框，不要一块空白窗体
+            try:
+                root.attributes('-topmost', True)    # 别让它跑到 ComfyUI 窗口后面
+            except Exception:
+                pass
+        except Exception as e:
+            while True:
+                job = jobs.get()
+                if job is None:
+                    return
+                _, reply = job
+                reply.put(('err', 'tkinter root could not be created: %s' % e))
+        while True:
+            job = jobs.get()
+            if job is None:
+                break
+            spec, reply = job
+            try:
+                reply.put(('ok', self._ask(root, **spec)))
+            except Exception as e:
+                reply.put(('err', str(e)))
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _ask(root, mode, kind, suggested, multiple):
+        from tkinter import filedialog
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        filetypes = [(spec['label'], ' '.join(spec['patterns'])), ('All files', '*.*')]
+        if mode == 'save':
+            path = filedialog.asksaveasfilename(
+                parent=root, title='Save as', filetypes=filetypes,
+                defaultextension=spec['extension'], initialfile=suggested or '')
+            return [path] if path else []
+        paths = filedialog.askopenfilename(
+            parent=root, title='Open', filetypes=filetypes, multiple=bool(multiple))
+        if isinstance(paths, str):
+            paths = [paths] if paths else []
+        return [p for p in (paths or []) if p]
+
+    # ---- 登记表 ----
+    def _document(self, path, kind):
+        """把一条真实路径收进登记表，返回前端使用的文档描述。
+
+        mime 由扩展名推断，推断不出（.cud）退回该类别的默认值 —— 前端拿它造 File。
+        """
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        mime = mimetypes.guess_type(path)[0] or spec['mime']
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        abspath = os.path.abspath(path)
+        token = uuid.uuid4().hex
+        with self._lock:
+            self._tokens[token] = {'path': abspath, 'mime': mime, 'size': size}
+        return {'token': token, 'name': os.path.basename(abspath), 'path': abspath,
+                'size': size, 'mime': mime}
+
+    def resolve(self, token):
+        with self._lock:
+            entry = self._tokens.get(token or '')
+        return entry['path'] if entry else None
+
+    def entry(self, token):
+        with self._lock:
+            entry = self._tokens.get(token or '')
+        return dict(entry) if entry else None
+
+    def forget(self, token):
+        with self._lock:
+            self._tokens.pop(token or '', None)
+
+    # ---- 最近一份 .cud ----
+    def _remember_cud(self, path):
+        """把这条路径写成"上次打开的那份文档"。写失败只记账，不影响这次的挑选。"""
+        try:
+            with open(_workbench_file('recent_cud.json'), 'w', encoding='utf-8') as f:
+                json.dump({'path': os.path.abspath(path)}, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] could not record the recent .cud: {e}")
+
+    def reopen_recent_cud(self):
+        """把上次那一份 .cud 重新登记成一个文档描述符，无需对话框。
+
+        返回 (doc, reason) 其一为 None。路径只从服务端自己写下的记录里读，页面无从指定；
+        描述符与对话框同形（含一个现 mint 的 token），所以前端照旧走 /api/io_read 取字节、
+        Save 照旧原地写回同一个文件。
+        """
+        try:
+            with open(_workbench_file('recent_cud.json'), encoding='utf-8') as f:
+                recorded = json.load(f)
+        except FileNotFoundError:
+            return None, 'no .cud has been opened with the file dialog on this machine yet'
+        except Exception as e:
+            return None, f'the recent-document record could not be read ({e})'
+        path = (recorded or {}).get('path') if isinstance(recorded, dict) else None
+        if not (isinstance(path, str) and path):
+            return None, 'no .cud has been opened with the file dialog on this machine yet'
+        if not os.path.isfile(path):
+            return None, f'{os.path.basename(path)} is no longer at {path}'
+        try:
+            return self._document(path, 'cud'), None
+        except Exception as e:
+            return None, str(e)
+
+    # ---- 对外三条 ----
+    def pick(self, mode, kind, suggested='', multiple=False):
+        """弹出原生对话框，返回选中的文档描述列表（用户取消则为空表）。
+
+        每项 {token, name, path, size, mime}：token 之后独占寻址，path/name 只是给读数看的。
+        """
+        if not self.available():
+            return None
+        self._ensure_thread()
+        reply = queue.Queue()
+        self._jobs.put(({'mode': mode, 'kind': kind, 'suggested': suggested or '',
+                         'multiple': multiple}, reply))
+        status, result = reply.get()
+        if status == 'err':
+            raise RuntimeError(result)
+        picks = [self._document(p, kind) for p in (result or [])]
+        if kind == 'cud' and picks:
+            self._remember_cud(picks[0]['path'])
+        return picks
+
+    def write(self, token, data):
+        """覆盖写回这份文档：先落 .tmp 再 os.replace，中途失败不会把原文练废。"""
+        path = self.resolve(token)
+        if not path:
+            return False, 'unknown document token'
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'wb') as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except PermissionError:
+            # 最常见的一种失败：文档正被别的程序占着。措辞与前端 stale handle 分支一致。
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, 'the file is open elsewhere or is read-only'
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, str(e)
+        with self._lock:
+            self._tokens[token]['size'] = len(data)
+        return True, None
+
+    def read(self, token):
+        path = self.resolve(token)
+        if not path:
+            return None, 'unknown document token'
+        try:
+            with open(path, 'rb') as f:
+                return f.read(), None
+        except Exception as e:
+            return None, str(e)
+
+
+doc_io = DocumentIo()
+
+
+# =============================================================================
+# Pipeline Settings（按 pipeline 名字绑定）—— 与前端 types.ts 里的字面量一一对应
+# =============================================================================
+# preset 的 pipeline 绑定只有两类取值：
+#   ''                    = [Default]，节点输入口那条 pipeline。它的名字/信息从未被收集过，
+#                           所以一旦选过别的 pipeline，前端就把这个选项收起来（无从切回）。
+#   PIPELINE_CURRENT_SELECT = [Current Select]，用当前已加载的那一条，不做任何切换。
+#   其余字符串            = pipeline 在 /api/pipeline_package 里的名字（重名时取第一个）。
+PIPELINE_CURRENT_SELECT = '[Current Select]'
+# Pipeline Settings 里可以按 pipeline 名字 override 的九个参数 —— 与 GLOBAL SETTINGS 同名同义，
+# 区别只是「这条 pipeline 跑的时候盖掉全局值」，且必须 toggle 开着才生效。
+# 后四个（ref_*/tgen_*）是**输入侧上限**：pixels 只许往下压，永不放大。
+PIPELINE_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
+                          'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align')
+
+
+# =============================================================================
+# SnapshotDetailerSamplerServer：前后端交互服务器
+# =============================================================================
+class SnapshotDetailerSamplerServer:
+    """
+    事件驱动的交互服务器。不再有固定阶段顺序，前端通过 tab 自由切换。
+    后端通过 action queue 接收前端指令（run_detailer / select_image / finish）。
+    """
+
+    # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
+    # → 落盘 data/sampler/blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
+    # 所以除了这份文件不存在第二个来源，不会出现互相覆盖。
+    # ref_* / tgen_* 是输入侧的显存封顶（喂给 ref image / generate text 之前先 limit_pixels
+    # 的 cap_only 模式压一刀），0 = 不设上限。
+    GLOBAL_PARAM_DEFAULTS = {'pixels': 1048576, 'align': 8, 'crop_reserve': 32,
+                             'mask_grow': 32, 'mask_blur': 32,
+                             'ref_pixels': 1048576, 'ref_align': 8,
+                             'tgen_pixels': 1048576, 'tgen_align': 8}
+
+    def __init__(self, detector, tagger, lora_regex, asset=None, package=None,
+                 node_instance=None, unique_id=None, config=None, extra_pnginfo=None, prompt=None):
+        self.detector = detector
+        self.tagger = tagger
+        self.extra_pnginfo = extra_pnginfo
+        self.asset = asset
+        self.lora_regex = lora_regex
+        self.node_instance = node_instance
+        self.unique_id = unique_id
+        self.packages = []
+        self.interface_packages = []
+        self.pipeline_packages = []
+        if package is not None:
+            # Robust flattening: package may be a dict, a list of dicts, or a nested list
+            flat = []
+            if isinstance(package, dict):
+                flat = [package]
+            elif isinstance(package, list):
+                for p in package:
+                    if isinstance(p, dict):
+                        flat.append(p)
+                    elif isinstance(p, list):
+                        flat.extend([x for x in p if isinstance(x, dict)])
+            self.packages = flat
+            for p in self.packages:
+                if p.get("type") == "pipeline":
+                    self.pipeline_packages.append(p)
+                else:
+                    self.interface_packages.append(p)
+            print(f"[SnapshotDetailerSampler] package input: type={type(package).__name__}, "
+                  f"len={len(package) if isinstance(package, (list, dict)) else 1}, "
+                  f"total={len(self.packages)}, interface={len(self.interface_packages)}, pipeline={len(self.pipeline_packages)}")
+
+        cfg = config or {}
+        # GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
+        # （改动即 POST → _apply_params → _save_global_params_file）。server 是在 sample()
+        # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。节点上不再有这些端口 ——
+        # 两处各存一份必然不同步。
+        _persisted = self._load_global_params_file()
+        for _k, _d in self.GLOBAL_PARAM_DEFAULTS.items():
+            try:
+                setattr(self, _k, int(_persisted.get(_k, _d)))
+            except (TypeError, ValueError):
+                setattr(self, _k, _d)
+
+        # Pipeline Block chain (default: single Detailer block with the workbench defaults).
+        # 采样参数属于每个 detailer block（工作台 Edit 页），这里只是新建链时的初值。
+        self.blocks = cfg.get('blocks')
+        if not self.blocks:
+            self.blocks = [{
+                'id': 'block-1',
+                'type': 'detailer',
+                'name': 'Detailer',
+                'params': {
+                    'add_noise': 'enable',
+                    'start_step_rate': 0.8,
+                    'end_step_rate': 1.0,
+                    'pixels': self.pixels,
+                    'align': self.align,
+                    'crop_reserve': self.crop_reserve,
+                    'recover_crop': True,
+                    'enable_edit': False,
+                    'edit_mode': 'fit',
+                    'ref_boost': 4.0,
+                    'ref_boost_a': 1.0,
+                    'enable_ref_boost_mask': False,
+                    'grounding_px': 768,
+                },
+            }]
+
+        self.tag_result = None
+
+        # Multi-set Pipeline Blocks ("tabs" in the workbench). Legacy configs only carry the flat
+        # `blocks` list — migrate it into a single "Default" set so the tab model and the runner's
+        # flat chain always agree. `self.blocks` keeps mirroring the ACTIVE set: the runner and
+        # the Blend workbench only ever see one chain, the sets are a UI/存储 layer on top.
+        self.blocks_sets = cfg.get('blocks_sets')
+        if not isinstance(self.blocks_sets, list):
+            self.blocks_sets = [{'id': 'set-1', 'name': 'Default', 'blocks': self.blocks}]
+        self.active_block_set = cfg.get('active_block_set')
+        if self.blocks_sets:
+            if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+                self.active_block_set = self.blocks_sets[0].get('id')
+        else:
+            self.active_block_set = None
+        active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+        if active_set and active_set.get('blocks'):
+            self.blocks = active_set['blocks']
+        # Disk persistence: the tab sets survive ComfyUI restarts (the in-memory chain only lives
+        # as long as the session). The file wins over the migrated config when it exists.
+        f_sets, f_active = self._load_blocks_sets_file()
+        if f_sets is not None:
+            self.blocks_sets = f_sets
+            if f_sets:
+                self.active_block_set = f_active if any(s.get('id') == f_active for s in f_sets) else f_sets[0].get('id')
+                active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+                if active_set and active_set.get('blocks'):
+                    self.blocks = active_set['blocks']
+            else:
+                self.active_block_set = None
+                self.blocks = []
+        # Pipeline Settings：选中的 pipeline 名字 + 每条 pipeline 自己的五个 override。
+        # 与 blocks_sets 同路（config 只是初值，落盘文件赢）—— 同样是纯 UI 状态。
+        self.pipeline_settings = self._normalize_pipeline_settings(cfg.get('pipeline_settings'))
+        _f_ps = self._load_pipeline_settings_file()
+        if _f_ps is not None:
+            self.pipeline_settings = _f_ps
+        # Interface meta：Interface tab 里给每个 interface 配置的东西 —— 端口改名、
+        # block/processor 模式开关、block 模式的两个端口绑定。接口包本身每次从工作流
+        # 图现推导、不可持久化，所以这些「贴在包上的标注」按包名字单独落盘。
+        self.interface_meta = self._normalize_interface_meta(cfg.get('interface_meta'))
+        _f_im = self._load_interface_meta_file()
+        if _f_im is not None:
+            self.interface_meta = _f_im
+        # 当前真的加载在 node 上的是哪条 pipeline（'' = 节点输入口那条 = [Default]）。
+        # server 每次节点执行都是新建的，所以这份身份天然随执行复位，不需要额外清理。
+        self.loaded_pipeline_node_id = ''
+        self.loaded_pipeline_name = ''
+        # lora_regex 换过几代的记账。Prompt tab 那张 LoRA 卡的灰名单是从 prompt server 拉的这份
+        # regex，服务端重扫（update_lora_regex）浏览器是看不见的，所以代数只在 regex 真的变了时才
+        # +1：手动切换与 run 循环里 preset 绑定共用这一处，宿主页拿它判断那份 UI 是不是脏了。
+        self.pipeline_lora_epoch = 0
+        self.detail_status = 'idle'
+        self.detail_error = None
+        self.detail_progress = 0       # 0..1
+        self.detail_total_steps = 0
+        self.detail_current_step = 0
+        self.interface_status = 'idle'
+        self.interface_error = None
+        self.interface_progress = 0
+        self.interface_total_steps = 0
+        self.interface_current_step = 0
+        self.interface_result_meta = []   # 离线 processor 执行的结果明细（key/port/type/name）
+        self.finished = False
+        self.finish_selected_key = None
+        self.finish_selected_keys = None  # 多选 keys 列表
+        self.window_closed = False
+
+        # 工作区（staging）：唯一的图池。拖进来的文件、run 初始图、接口/Blend/Run 结果
+        # 都落在这里；detailer 的 Ref Image、接口端口图/掩码都引用这里的条目。
+        # 图层不再绑定条目 id —— 图层自带像素（见 blend_node.html），这里只存「可复用的图」。
+        self.staging_items = []
+        self._staging_tensors = {}  # id → tensor (原始引用，避免 base64 往返)
+        self._staging_counter = 0
+
+        # 最新结果
+        self.original_image = None
+        self.detailed_image = None
+        self.original_key = None   # staging id of the original image
+        self.detailed_key = None   # staging id of the detailed image
+
+        # Blend 工作台（Draw tab）：画布合成图就是 Context Image，
+        # 合成结果 + 纯 Mask 层随 blend_action 一次性送达，不再走 history key 切换。
+        self.blend_image = None
+        self.blend_mask = None
+        self.blend_prompt = ''
+        # 逐 run 的 pipeline preset 选择（blocks_sets 里某一 set 的 id）。
+        # 由「图层右键 → Generate」的 enum 下发；主循环取用后立即清空，避免污染下一次普通 Run。
+        self.pending_generate_preset = None
+
+        # Query 块：run 到它时链条停在这里等用户在弹窗里挑 prompt。run 循环阻塞在
+        # pending_query['event'] 上；前端轮询 /api/status 看到 pending_query 就弹窗，
+        # 回答 POST 到 /api/query_answer 唤醒。None = 当前没有块在等。
+        self.pending_query = None
+        # 一个 Query 块等多久（秒）。超时按用户的选择 = 中止整条链。
+        self.query_timeout = 600
+
+        # Enable Output 的两处记账（每次 run 开头清空，链跑完由 _save_run_output_png 读回）：
+        # last_effective_prompt_selection = 这次真正生效的合并选择（prompt / query 块在
+        # _resolve_prompt_selection 出口暂存；链里没有这类块时保持 None，落盘回落到 prompt
+        # 节点全局）；last_clip_positive = 最后一个 detailer 块真正送进 CLIP 的串；
+        # last_output_positive = 同一刻的「纯用户选择」——不掺 pipeline context 的 prompt、
+        # 不掺 lora 触发词（触发词由 'lora' 键的 active_tags 自己提供，读回不重复）。
+        self.last_effective_prompt_selection = None
+        self.last_clip_positive = ''
+        self.last_output_positive = ''
+
+        # Interface 执行结果 keys（最近一次）
+        self.interface_result_keys = []
+
+        # 子服务器
+        self.prompt_server = None
+        self.main_server = None
+        self.main_port = None
+        self.prompt_url = ""
+        self.browser_url = ""
+        self.started = False
+
+        # 事件驱动：前端发送 action，主循环等待并处理
+        self._action_queue = queue.Queue()
+        self._action_event = threading.Event()
+
+    # -------------------------------------------------------------------------
+    # 生命周期
+    # -------------------------------------------------------------------------
+    def start(self):
+        # 1) Prompt server
+        if SnapshotPromptServer is None:
+            raise RuntimeError("SnapshotPromptServer not available")
+        self.prompt_server = SnapshotPromptServer(
+            port=None,
+            last_selected=[],
+            lora_regex=self.lora_regex,
+            last_selected_loras=[],
+            last_selected_prefabs=[],
+        )
+        self.prompt_server.lora_path_mode = True
+        self.prompt_server.tagger = self.tagger
+        self.prompt_server.asset = self.asset
+        t_prompt = threading.Thread(target=self.prompt_server.start)
+        t_prompt.daemon = True
+        t_prompt.start()
+
+        t0 = time.time()
+        while not self.prompt_server.started:
+            if time.time() - t0 > 10:
+                raise RuntimeError("[SnapshotDetailerSampler] Prompt server startup timeout")
+            time.sleep(0.01)
+
+        self.prompt_url = self.prompt_server.browser_url
+
+        # 2) Main server
+        class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            pass
+        for port in range(8700, 8800):
+            try:
+                self.main_server = ThreadedHTTPServer(
+                    ('localhost', port), self.MainHandler
+                )
+                self.main_port = port
+                self.started = True
+                break
+            except Exception:
+                continue
+
+        if not self.started:
+            raise RuntimeError("[SnapshotDetailerSampler] Main server startup failed")
+
+        self.browser_url = f"http://localhost:{self.main_port}/sampler_node.html"
+        self.MainHandler.server_instance = self
+
+        print(f"[SnapshotDetailerSampler] Main server on {self.main_port}")
+        print(f"[SnapshotDetailerSampler] Prompt server at {self.prompt_url}")
+
+        t_main = threading.Thread(target=self.main_server.serve_forever)
+        t_main.daemon = True
+        t_main.start()
+
+    def stop(self):
+        print("[SnapshotDetailerSampler] stop() called")
+        def _stop(server, name):
+            if server:
+                try:
+                    print(f"[SnapshotDetailerSampler] Stopping {name}...")
+                    server.stop()
+                    print(f"[SnapshotDetailerSampler] {name} stopped.")
+                except Exception as e:
+                    print(f"[SnapshotDetailerSampler] Error stopping {name}: {e}")
+        threads = []
+        for s, name in [(self.prompt_server, 'prompt_server')]:
+            t = threading.Thread(target=_stop, args=(s, name))
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        print("[SnapshotDetailerSampler] Stopping main_server...")
+        if self.main_server:
+            try:
+                self.main_server.shutdown()
+                self.main_server.server_close()
+            except Exception as e:
+                print(f"[SnapshotDetailerSampler] Error stopping main_server: {e}")
+        print("[SnapshotDetailerSampler] main_server stopped.")
+        for t in threads:
+            t.join(timeout=2.0)
+        print("[SnapshotDetailerSampler] All servers stopped.")
+
+    # -------------------------------------------------------------------------
+    # 事件驱动
+    # -------------------------------------------------------------------------
+    def put_action(self, action, **kwargs):
+        """前端通过 HTTP handler 调用，向队列中放入一个 action。"""
+        self._action_queue.put({'action': action, **kwargs})
+        self._action_event.set()
+
+    def wait_for_action(self):
+        """主循环等待下一个 action。"""
+        # Check queue first — action may have been queued while we were busy
+        if not self._action_queue.empty():
+            return self._action_queue.get()
+        self._action_event.clear()
+        while not self._action_event.is_set():
+            if mm.processing_interrupted():
+                return None
+            if self.window_closed:
+                return None
+            self._action_event.wait(0.05)
+        # Check queue again after event was set
+        if not self._action_queue.empty():
+            return self._action_queue.get()
+        return None
+
+    # -------------------------------------------------------------------------
+    # 历史画廊
+    # -------------------------------------------------------------------------
+    def add_staging(self, image, name=None, place=None, hidden=False, sid=None):
+        """添加一张图到工作区。保留 tensor 引用以避免 base64 往返。
+
+        hidden=True 的条目只作内部引用（seed 画布的 Original、run/接口的产出图），
+        不进工作区条带 —— 条带只展示用户主动拖入/导入的图。宿主按此字段过滤镜像。
+
+        place 只有「Recover Crop 关闭」的 detailer run 会提供：归一化的放置矩形
+        (x, y, w, h, ow, oh)。此时 image 是 RGBA —— alpha 就是 crop 工作区的 mask，
+        图层自带的 alpha 承担裁剪，所以条目不需要额外的 mask 字段。前端据此把
+        它作为一个新图层贴回原位，而不是由后端合成。
+
+        sid 钉住条目 id，不再另起一个计数器号：Guidance 卡靠它在工作区里永远只占
+        一格，重发布时原地换像素（顺序、位置都不变），而不是越积越多。
+        """
+        if sid is None:
+            self._staging_counter += 1
+            sid = f'staging_{self._staging_counter}'
+        # 记录尺寸供前端展示
+        h, w = 0, 0
+        if image is not None and hasattr(image, 'shape'):
+            shp = image.shape
+            if len(shp) == 4:
+                h, w = shp[1], shp[2]
+            elif len(shp) == 3:
+                h, w = shp[0], shp[1]
+        # 保留 tensor 引用
+        self._staging_tensors[sid] = image
+        entry = {
+            'id': sid,
+            'src': tensor_to_base64(image),
+            'name': name or f'#{self._staging_counter}',
+            'width': w,
+            'height': h,
+            'place': place,
+            'hidden': bool(hidden),
+        }
+        for i, old in enumerate(self.staging_items):
+            if old['id'] == sid:
+                # 原地替换：条目留在它原来的格子里，只换图。
+                self.staging_items[i] = entry
+                return sid
+        self.staging_items.append(entry)
+        if len(self.staging_items) > 40:
+            old = self.staging_items.pop(0)
+            self._staging_tensors.pop(old['id'], None)
+        return sid
+
+    def get_staging_list(self):
+        """返回工作区条目列表（base64 图，宿主直接可渲染）。"""
+        return [{'id': s['id'], 'name': s['name'], 'src': s['src'],
+                 'width': s.get('width', 0), 'height': s.get('height', 0),
+                 'hidden': bool(s.get('hidden')), 'place': s.get('place')}
+                for s in self.staging_items]
+
+    def _first_detailer_enable_mask(self, preset_id=None):
+        """生效链第一个 detailer 的 Enable Mask 总闸（默认开）。
+
+        preset_id 能解出 block set 时看那套链，否则看激活 tab 的镜像（self.blocks）——
+        与 run_detailer 主循环选链的优先级一致。Enable Mask 关 = 不做围绕 mask 的
+        grow/blur/crop 预处理，整幅图就是工作区：Mask 层没画也允许跑（run 的
+        「Mask is required」闸门据此放行，mask 变成可选的重绘限制）。
+
+        ★ 类归属：Server（HTTP handler 用 inst.、主循环用 server. 都拿得到 blocks 镜像）。
+        """
+        blocks = self.blocks or []
+        if preset_id:
+            preset_set = next(
+                (s for s in (self.blocks_sets or [])
+                 if isinstance(s, dict) and s.get('id') == preset_id and s.get('blocks')),
+                None,
+            )
+            if preset_set is not None:
+                blocks = preset_set['blocks']
+        bp = next((b.get('params', b) for b in blocks
+                   if isinstance(b, dict) and b.get('type') == 'detailer'), None)
+        return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
+
+    def get_staging_image(self, sid):
+        """根据 id 获取工作区图片 tensor。优先返回 tensor 引用，避免 base64 decode。
+
+        兼容：旧配置里的 'history_N' 引用解析不到（工作区 id 一律 'staging_N'），
+        返回 None，由调用方按「引用缺失」容错处理。
+        """
+        tensor = self._staging_tensors.get(sid)
+        if tensor is not None:
+            return tensor
+        # Fallback: 从 base64 decode（张量被上限淘汰后仍可从自带 src 恢复）
+        for s in self.staging_items:
+            if s['id'] == sid:
+                try:
+                    src = s['src']
+                    if ',' in src:
+                        b64_data = src.split(',', 1)[1]
+                    else:
+                        b64_data = src
+                    img_bytes = base64.b64decode(b64_data)
+                    img = Image.open(io.BytesIO(img_bytes))
+                    # 带 alpha 的图保留 4 通道（QwenImage21 这类 alpha 架构需要），其余统一转 RGB
+                    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                        img = img.convert('RGBA')
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    arr = np.array(img).astype(np.float32) / 255.0
+                    return torch.from_numpy(arr).unsqueeze(0)
+                except Exception as e:
+                    print(f"[SnapshotDetailerSampler] Failed to load staging image: {e}")
+                    return None
+        return None
+
+    def compose_blend(self, layer_specs, width=0, height=0, mask_data_url=None, attributes=None):
+        """把图层栈合成成一张图（不写工作区），返回 (image, mask)。
+
+        layer_specs: [{'src': dataURL, 'attrs': [表键], 'transform': {...}|None, 'visible': bool}]
+        列表自下而上（[0] 是最底层）。图层自带像素（data URL），不绑定任何图池 id。
+        画布尺寸优先用 width/height，否则取最底层图片的原始尺寸。
+
+        `attrs` 是图层条带上**归后端重放**的那一段，顺序即生效顺序（decal 叠、mask 裁，与前端画布
+        同一条「从左到右」的规矩）；特效链不会出现在这里，前端已经把它们烘进 src 了。面本身不跟着
+        每层重复编码 —— 它住在同包上来的 `attributes` 表里（`[{'id','type','image'}]`，一枚一份 PNG），
+        图层那条只剩表键，所以两层引用同一枚蒙版时后端拿到的是同一份像素（与 .cud v5 同一份账）。
+        旧负载没有 `attrs` 这个键，按它原本的 `decal` 再 `mask` 读 —— 那正是条带的默认顺序，那种形状
+        的面就内联在条目里。
+
+        mask_data_url 是画布顶层的「纯 Mask 层」（alpha = 覆盖率，按画布尺寸栅格化），
+        与图层自身的 coverage mask 无关 —— 返回的 mask 为 [1,H,W] float 或 None（无遮罩）。
+        """
+        if not layer_specs:
+            raise ValueError('Missing layers')
+        table = {a.get('id'): a for a in (attributes or []) if a and a.get('id')}
+        resolved = []
+        for spec in layer_specs:
+            src = spec.get('src')
+            # src 为空 = 前端的空白图层（刻意设计），等价于一张全透明图，不报错。
+            # 前端已保证只发送可解码的 data URL（不可信的 src 会先用图层像素重编码
+            # 成 PNG）；这里再兜底：万一仍解码失败，按空白图层继续合成并打日志，
+            # 绝不让整个 Blend/Run 动作因单张图层报错中断。
+            tensor = decode_image_dataurl(src) if src else None
+            if src and tensor is None:
+                print(f"[SnapshotDetailerSampler] layer image failed to decode "
+                      f"({len(src)} chars, head={src[:48]!r}) — treating as a transparent blank layer")
+            if tensor is not None and tensor.dim() == 4:
+                tensor = tensor[0]
+            attrs = spec.get('attrs')
+            if attrs is None:
+                attrs = [{'type': 'decal', 'image': spec.get('decal')},
+                         {'type': 'mask', 'image': spec.get('mask')}]
+            # 只认这两种:链类 attribute 只有 WebGL 跑得动,前端烘完才发,永远不会跨这条边界。
+            pending = []
+            for a in attrs:
+                # 图层那条只剩表键,值在同包的表里。键解不到就是包与表不同源（转发漏了或版本错位），
+                # 宁可在合成前抛，也不能悄悄少乘一层蒙版 —— 那正是一次合成与两次合成的语义漂移。
+                if isinstance(a, str):
+                    if a not in table:
+                        raise ValueError(f'layer keys attribute {a!r} but the payload carries no such face')
+                    a = table[a]
+                if a and a.get('type') in ('decal', 'mask') and a.get('image'):
+                    pending.append({'type': a.get('type'), 'src': a.get('image')})
+            resolved.append({
+                'image': tensor,        # None = 空白图层，画布尺寸确定后补全透明
+                'transform': spec.get('transform'),
+                'attrs': pending,
+                'visible': spec.get('visible', True),
+            })
+        canvas_w = int(width or 0)
+        canvas_h = int(height or 0)
+        if canvas_w <= 0 or canvas_h <= 0:
+            first = next((l['image'] for l in resolved if l['image'] is not None), None)
+            if first is None:
+                raise ValueError('Missing layers')
+            canvas_h, canvas_w = first.shape[0], first.shape[1]
+        for layer in resolved:
+            if layer['image'] is None:
+                layer['image'] = torch.zeros((canvas_h, canvas_w, 4), dtype=torch.float32)
+        for layer in resolved:
+            # 蒙版与 decal 都在图层自身尺寸下生效，随图层一起被 transform（缩放/旋转）
+            layer_h, layer_w = layer['image'].shape[0], layer['image'].shape[1]
+            layer['attrs'] = [{'type': a['type'],
+                               'image': (decode_mask_alpha(a['src'], layer_w, layer_h)
+                                         if a['type'] == 'mask' else
+                                         decode_decal_rgba(a['src'], layer_w, layer_h))}
+                              for a in layer['attrs']]
+        blended = composite_layers(resolved, canvas_w, canvas_h)
+        # composite_layers 刻意返回**预乘 alpha**（整栈 source-over 在预乘空间做），
+        # 但这一层往后的一切图像空间消费方都是**直通 alpha** 语义：staging/预览 PNG、
+        # 打标的白底合成、vision 塔预处理、alpha VAE、recover_crop 的背景混合
+        # （都做 rgb*alpha + white*(1-alpha)）。预乘缓冲喂进去会在蒙版边缘再乘一次
+        # alpha → 灰色条带。在这里做一次标准的 premul→straight 逆转（a≈0 处颜色无
+        # 定义，取黑）。a 为 0/1 的像素两种表示相同，不受影响。
+        if blended.shape[-1] == 4:
+            _a = blended[..., 3:4]
+            _rgb = torch.where(_a > 1e-4, blended[..., :3] / _a.clamp_min(1e-4),
+                               torch.zeros_like(blended[..., :3]))
+            blended = torch.cat([_rgb.clamp(0.0, 1.0), _a], dim=-1)
+        # 纯 Mask 层整体按画布尺寸栅格化，squeeze 成 [1,H,W] 与 pipeline.mask 同构。
+        # collapse_opaque=False：这一层「全白」= 整块画布都被覆盖，绝不能当成「没有蒙版」
+        # （那样 Full / 涂满画布都会被误判成没画，弹出 "Mask is required"）。
+        blend_mask = decode_mask_alpha(mask_data_url, canvas_w, canvas_h, collapse_opaque=False)
+        if blend_mask is not None:
+            blend_mask = blend_mask.squeeze(-1)
+        return blended, blend_mask
+
+    def _apply_tag_result(self, tag):
+        """把打标结果写进 prompt 阶段：替换 parsing 来源的项，保留 normal/program。
+
+        返回 (parsed_selected, temporary_list)。由 /api/blend_action 的 tag 分派调用，
+        保证「Tag 只产出 prompt、不碰 Context」这一语义。解析不出来的段进 Temporary
+        Prompts（和 matched 项同属这一次打标，随 prompt 节点的生命周期走），不写进
+        custom_prompts，所以不会被持久化成用户的自定义词条。clear_tag 传空串 = 两边都清空。
+        """
+        self.tag_result = tag
+        parsed_selected, parsed_unmatched = [], [tag]
+        if SnapshotPromptNode is not None:
+            parsed_selected, parsed_unmatched = SnapshotPromptNode._parse_raw_prompt(tag)
+        temporary = [t.strip() for t in parsed_unmatched if t and t.strip()]
+        if self.prompt_server is not None:
+            new_prompts = [
+                p for p in (self.prompt_server.selected_prompts or [])
+                if not (isinstance(p, dict) and p.get('source', 'normal') == 'parsing')
+            ]
+            new_prompts.extend({'text': p, 'source': 'parsing'} for p in parsed_selected)
+            self.prompt_server.selected_prompts = new_prompts
+            self.prompt_server.temporary_prompts = temporary
+        return parsed_selected, temporary
+
+    # -------------------------------------------------------------------------
+    # 全局参数 / block 链持久化
+    # -------------------------------------------------------------------------
+    def _blocks_sets_file(self):
+        return _workbench_file('blocks_sets.json')
+
+    def _load_blocks_sets_file(self):
+        """Persisted tab sets from disk, or (None, None) when absent/corrupt."""
+        try:
+            with open(self._blocks_sets_file(), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            sets = data.get('blocks_sets') if isinstance(data, dict) else None
+            if isinstance(sets, list):
+                return sets, data.get('active_block_set')
+        except Exception:
+            pass
+        return None, None
+
+    def _read_sets_file(self):
+        """Whole persisted JSON (possibly {}), shared by the two save paths so neither
+        ever clobbers the other's keys."""
+        try:
+            with open(self._blocks_sets_file(), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _load_global_params_file(self):
+        gp = self._read_sets_file().get('global_params')
+        return gp if isinstance(gp, dict) else {}
+
+    def _save_global_params_file(self):
+        try:
+            data = self._read_sets_file()
+            data['global_params'] = {k: getattr(self, k) for k in self.GLOBAL_PARAM_DEFAULTS}
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save global params: {e}")
+
+    def _save_blocks_sets_file(self):
+        try:
+            data = self._read_sets_file()
+            data['blocks_sets'] = self.blocks_sets
+            data['active_block_set'] = self.active_block_set
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save blocks_sets: {e}")
+
+    # -------------------------------------------------------------------------
+    # Pipeline Settings（选中项 + 按名字的 override）与 pipeline 名字解析
+    # -------------------------------------------------------------------------
+    def _normalize_pipeline_settings(self, raw):
+        """Coerce anything on disk / from the frontend into the canonical shape.
+
+        {'selected': str, 'overrides': {<pipeline name>: {<key>: {'value': int, 'enabled': bool}}}}
+        Unknown keys are dropped rather than kept — a stale key would silently win over a
+        GLOBAL SETTINGS value at run time.
+        """
+        out = {'selected': '', 'overrides': {}}
+        if not isinstance(raw, dict):
+            return out
+        sel = raw.get('selected')
+        out['selected'] = sel if isinstance(sel, str) else ''
+        ov = raw.get('overrides')
+        if isinstance(ov, dict):
+            for name, entry in ov.items():
+                if not isinstance(name, str) or not isinstance(entry, dict):
+                    continue
+                one = {}
+                for k in PIPELINE_OVERRIDE_KEYS:
+                    v = entry.get(k)
+                    if not isinstance(v, dict):
+                        continue
+                    try:
+                        value = int(v.get('value'))
+                    except (TypeError, ValueError):
+                        continue
+                    one[k] = {'value': value, 'enabled': bool(v.get('enabled'))}
+                if one:
+                    out['overrides'][name] = one
+        return out
+
+    def _load_pipeline_settings_file(self):
+        """Persisted Pipeline Settings, or None when the key is absent (first run)."""
+        ps = self._read_sets_file().get('pipeline_settings')
+        return self._normalize_pipeline_settings(ps) if isinstance(ps, dict) else None
+
+    def _save_pipeline_settings_file(self):
+        try:
+            data = self._read_sets_file()
+            data['pipeline_settings'] = self.pipeline_settings
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save pipeline_settings: {e}")
+
+    # -------------------------------------------------------------------------
+    # Interface meta（按 interface 名字贴的标注：端口改名 / 模式 / block 端口绑定）
+    # -------------------------------------------------------------------------
+    def _normalize_interface_meta(self, raw):
+        """把磁盘 / 前端来的任意形状收敛成规范形，未知键一律丢弃。
+
+        {<interface name>: {'names':   {'start': {<port num>: label}, 'end': {...}},
+                            'modes':   {'block': bool, 'processor': bool},
+                            'block_ports': {'in': <start port num>, 'out': <end port num>},
+                            'output_targets': {<port num>: 'new_layer'|'selected_layer'|
+                                               'selected_mask'|'staging'},
+                            'input_sources': {<port num>: 'layers'|'selected'|'staging'|
+                                               'main_mask'|'selected_mask'|'selected_alpha'|'mask_alpha'}}}
+        端口号一律收成 str（JSON 键本就是字符串），label 去空白、空 label 视为没改。
+        output_targets / input_sources = image/mask 出口的默认落位与入口的默认来源（Processor
+        小窗的初值），取值出枚举就丢。
+        """
+        out = {}
+        if not isinstance(raw, dict):
+            return out
+        dst_enum = {'new_layer', 'selected_layer', 'selected_mask', 'staging'}
+        src_enum = {'layers', 'selected', 'staging', 'main_mask', 'selected_mask', 'selected_alpha', 'mask_alpha'}
+        for name, entry in raw.items():
+            if not isinstance(name, str) or not name or not isinstance(entry, dict):
+                continue
+            one = {}
+            raw_names = entry.get('names')
+            if isinstance(raw_names, dict):
+                names = {}
+                for side in ('start', 'end'):
+                    sub = raw_names.get(side)
+                    if not isinstance(sub, dict):
+                        continue
+                    clean = {}
+                    for num, label in sub.items():
+                        if (isinstance(num, str) and num.isdigit()
+                                and isinstance(label, str) and label.strip()):
+                            clean[str(int(num))] = label.strip()
+                    if clean:
+                        names[side] = clean
+                if names:
+                    one['names'] = names
+            modes = entry.get('modes')
+            if isinstance(modes, dict):
+                one['modes'] = {'block': bool(modes.get('block')),
+                                'processor': bool(modes.get('processor'))}
+            bp = entry.get('block_ports')
+            if isinstance(bp, dict):
+                ports = {}
+                for side in ('in', 'out'):
+                    v = bp.get(side)
+                    if isinstance(v, int) and 1 <= v <= 20:
+                        ports[side] = v
+                if ports:
+                    one['block_ports'] = ports
+            targets = entry.get('output_targets')
+            if isinstance(targets, dict):
+                clean_targets = {}
+                for num, dst in targets.items():
+                    if isinstance(num, str) and num.isdigit() and dst in dst_enum:
+                        clean_targets[str(int(num))] = dst
+                if clean_targets:
+                    one['output_targets'] = clean_targets
+            sources = entry.get('input_sources')
+            if isinstance(sources, dict):
+                clean_sources = {}
+                for num, src in sources.items():
+                    if isinstance(num, str) and num.isdigit() and src in src_enum:
+                        clean_sources[str(int(num))] = src
+                if clean_sources:
+                    one['input_sources'] = clean_sources
+            if one:
+                out[name] = one
+        return out
+
+    def _load_interface_meta_file(self):
+        im = self._read_sets_file().get('interface_meta')
+        return self._normalize_interface_meta(im) if isinstance(im, dict) else None
+
+    def _save_interface_meta_file(self):
+        try:
+            data = self._read_sets_file()
+            data['interface_meta'] = self.interface_meta
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save interface_meta: {e}")
+
+    def find_pipeline_by_name(self, name):
+        """Resolve a pipeline by its package name → {'package_idx','pipeline_idx','node_id'}.
+
+        Names come from inferred node titles and are NOT unique; the first match wins, which is
+        the same rule the workbench's enum uses. Returns None when the pipeline is gone
+        (renamed / package disconnected) — presets and overrides then read as `Missing`.
+        """
+        if not isinstance(name, str) or not name:
+            return None
+        for pi, pkg in enumerate(self.pipeline_packages or []):
+            for qi, p in enumerate(pkg.get('pipelines') or []):
+                if p.get('name') == name:
+                    return {'package_idx': pi, 'pipeline_idx': qi,
+                            'node_id': p.get('node_id', ''), 'name': name}
+        return None
+
+    def preset_pipeline_name(self, set_id):
+        """Which pipeline a block set (pipeline preset) runs with: '' = [Default]."""
+        s = next((x for x in (self.blocks_sets or [])
+                  if isinstance(x, dict) and x.get('id') == set_id), None)
+        name = s.get('pipeline_name') if isinstance(s, dict) else None
+        return name if isinstance(name, str) else ''
+
+    def pipeline_overrides(self, name):
+        """Enabled override values bound to `name` ({} = nothing overrides the globals)."""
+        if not name:
+            return {}
+        entry = (self.pipeline_settings.get('overrides') or {}).get(name) or {}
+        return {k: v['value'] for k, v in entry.items()
+                if isinstance(v, dict) and v.get('enabled') and k in PIPELINE_OVERRIDE_KEYS}
+
+    def _apply_params(self, data):
+        for _k in self.GLOBAL_PARAM_DEFAULTS:
+            if _k in data:
+                setattr(self, _k, int(data[_k]))
+        if any(k in data for k in self.GLOBAL_PARAM_DEFAULTS):
+            self._save_global_params_file()
+        # Multi-set Pipeline Blocks (the workbench's tabs). Sets/active arrive together with the
+        # active set's blocks mirrored in `blocks`; either way the active set wins and the runner
+        # only ever sees its flat chain.
+        if 'blocks_sets' in data:
+            sets = data['blocks_sets']
+            if isinstance(sets, list):
+                self.blocks_sets = sets
+        if 'active_block_set' in data and data['active_block_set']:
+            self.active_block_set = data['active_block_set']
+        if 'blocks_sets' in data or 'active_block_set' in data:
+            if self.blocks_sets:
+                if not any(s.get('id') == self.active_block_set for s in self.blocks_sets):
+                    self.active_block_set = self.blocks_sets[0].get('id')
+                active_set = next((s for s in self.blocks_sets if s.get('id') == self.active_block_set), None)
+                if active_set is not None:
+                    self._set_blocks(active_set.get('blocks') or [])
+            else:
+                self.active_block_set = None
+                self._set_blocks([])
+            self._save_blocks_sets_file()
+        if 'blocks' in data:
+            self._set_blocks(data['blocks'])
+        # Pipeline Settings 整份替换（前端是唯一作者：选中项 + 按名字的 override）。
+        if 'pipeline_settings' in data:
+            self.pipeline_settings = self._normalize_pipeline_settings(data['pipeline_settings'])
+            self._save_pipeline_settings_file()
+        # Interface meta 整份替换（前端是唯一作者：Interface tab 的改名 / 模式 / 端口绑定）。
+        if 'interface_meta' in data:
+            self.interface_meta = self._normalize_interface_meta(data['interface_meta'])
+            self._save_interface_meta_file()
+
+    def _set_blocks(self, blocks):
+        """Adopt a flat block chain as the active one.
+
+        Used by both the legacy `blocks` key and the multi-set tabs path. The chain itself is the
+        only state here — per-block sampling params are read straight from each block at run time,
+        they are never mirrored onto the server."""
+        self.blocks = blocks or []
+
+    # ------------------------------------------------------------------
+    # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
+    # 预设内容（tags/custom/loras/prefabs/programs 的 raw selection）存 data/sampler/prompt_presets.json，
+    # 编辑 preset 即影响所有引用它的块；run 时按块顺序注入其后的 detailer（纯临时）。
+    # ------------------------------------------------------------------
+    def _prompt_presets_file(self):
+        return _workbench_file('prompt_presets.json')
+
+    def _load_prompt_presets(self):
+        """Persisted prompt presets: [{'id','name','selection'}]. Absent/corrupt file -> []."""
+        try:
+            with open(self._prompt_presets_file(), encoding='utf-8') as f:
+                data = json.load(f)
+            presets = data.get('presets') if isinstance(data, dict) else data
+            if isinstance(presets, list):
+                return [p for p in presets if isinstance(p, dict) and p.get('id')]
+        except Exception:
+            pass
+        return []
+
+    def _save_prompt_presets(self, presets):
+        with open(self._prompt_presets_file(), 'w', encoding='utf-8') as f:
+            json.dump({'presets': presets}, f, ensure_ascii=False, indent=2)
+
+    def _find_prompt_preset(self, preset_id):
+        if not preset_id:
+            return None
+        for p in self._load_prompt_presets():
+            if isinstance(p, dict) and p.get('id') == preset_id:
+                return p
+        return None
+
+    def _prompt_preset_selection(self, preset_id):
+        """Raw selection of the referenced preset; {} when unset/missing (block = pass-through)."""
+        preset = self._find_prompt_preset(preset_id)
+        sel = preset.get('selection') if isinstance(preset, dict) else None
+        return sel if isinstance(sel, dict) else {}
+
+    def _create_prompt_preset(self, name=None):
+        presets = self._load_prompt_presets()
+        if isinstance(name, str) and name.strip():
+            name = name.strip()
+        else:
+            existing = {p.get('name') for p in presets}
+            k = 1
+            while f'Preset {k}' in existing:
+                k += 1
+            name = f'Preset {k}'
+        preset = {'id': 'preset-' + uuid.uuid4().hex[:12], 'name': name, 'selection': {}}
+        presets.append(preset)
+        self._save_prompt_presets(presets)
+        return preset
+
+    def _save_prompt_preset_selection(self, preset_id, selection):
+        presets = self._load_prompt_presets()
+        for p in presets:
+            if p.get('id') == preset_id:
+                p['selection'] = selection
+                self._save_prompt_presets(presets)
+                return True
+        return False
+
+    def _rename_prompt_preset(self, preset_id, name):
+        if not isinstance(name, str) or not name.strip():
+            return False
+        presets = self._load_prompt_presets()
+        for p in presets:
+            if p.get('id') == preset_id:
+                p['name'] = name.strip()
+                self._save_prompt_presets(presets)
+                return True
+        return False
+
+    def _delete_prompt_preset(self, preset_id):
+        """Delete the preset only. Blocks keep the now-dangling id on purpose: the UI
+        renders it as `(missing)` so the reference stays visible and can be re-pointed,
+        and a run treats a missing preset as an empty selection (logged + skipped).
+        Nothing is rewritten behind the user's back."""
+        presets = self._load_prompt_presets()
+        kept = [p for p in presets if p.get('id') != preset_id]
+        if len(kept) == len(presets):
+            return False
+        self._save_prompt_presets(kept)
+        return True
+
+    def _pending_query_view(self):
+        """What /api/status publishes: which Query block is parked waiting for an answer.
+
+        The run loop owns the wait (it blocks on the event); this is only the read-only
+        projection the sampler polls to know it must open the prompt dialog. The event
+        itself never crosses the wire. `preset_id` rides along so the dialog can seed
+        itself from the bound preset (same scope the preset editor uses); `persistent`
+        tells the sampler UI whether the answer will be written back.
+        """
+        q = self.pending_query
+        if not q:
+            return None
+        return {'id': q.get('id'), 'name': q.get('name'), 'index': q.get('index'),
+                'preset_id': q.get('preset_id'), 'persistent': bool(q.get('persistent'))}
+
+    def _answer_pending_query(self, selection=None, cancelled=False):
+        """Release a parked Query block with the user's choice (or their cancellation).
+
+        `selection` is the RAW prompt-node selection — the run loop merges it and runs its
+        programs exactly like a prompt block's preset. `cancelled` (closing the dialog,
+        not answering) aborts the whole chain. False = nothing was waiting.
+
+        A Persistent Query overwrites its bound preset with this final selection, here and
+        not in the run loop: the write has to be on disk before this request answers, so the
+        sampler can refresh the preset summaries without racing the parked thread. Fail-open
+        — persistence is for NEXT run, it must never break THIS one.
+        """
+        q = self.pending_query
+        if not q:
+            return False
+        if cancelled:
+            q['cancelled'] = True
+        else:
+            q['answer'] = selection if isinstance(selection, dict) else {}
+            if q.get('persistent'):
+                preset_id = q.get('preset_id')
+                before = (self._prompt_preset_selection(preset_id).get('loras') or [])
+                after = (q['answer'].get('loras') or [])
+                try:
+                    if self._save_prompt_preset_selection(preset_id, q['answer']):
+                        print(f"[Query] answer persisted into preset '{preset_id}' "
+                              f"(loras {len(before)} -> {len(after)})")
+                        if before and not after:
+                            print(f"[Query] WARNING: preset '{preset_id}' had {len(before)} lora(s), "
+                                  "the answer carried none — the write-back emptied it")
+                    else:
+                        print(f"[Query] WARNING: preset '{preset_id}' is gone — answer not persisted")
+                except Exception as e:
+                    print(f"[Query] WARNING: could not persist the answer ({e})")
+        self.pending_query = None
+        evt = q.get('event')
+        if evt is not None:
+            evt.set()
+        return True
+
+    # -------------------------------------------------------------------------
+    # HTTP 请求处理器
+    # -------------------------------------------------------------------------
+    class MainHandler(http.server.SimpleHTTPRequestHandler):
+        server_instance = None
+
+        def log_message(self, format, *args):
+            pass
+
+        @staticmethod
+        def _get_current_architecture(inst):
+            """当前 pipeline 的模型架构名（用于前端按架构渲染 DetailerBlock 设置）。"""
+            try:
+                node = getattr(inst, 'node_instance', None)
+                pipeline = getattr(node, '_current_pipeline', None)
+                cfg = getattr(pipeline, 'config', None)
+                return cfg.get('architecture') if isinstance(cfg, dict) else None
+            except Exception:
+                return None
+
+        def _send_json(self, data, status=200):
+            self.send_response(status)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode('utf-8'))
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.end_headers()
+
+        def do_GET(self):
+            inst = self.server_instance
+
+            if self.path in ('/', '/sampler_node.html'):
+                file_path = web_file('sampler_node.html')
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "sampler_node.html not found")
+                return
+
+            if self.path == '/blend_node.html':
+                file_path = web_file('blend_node.html')
+                if os.path.exists(file_path):
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
+                    with open(file_path, 'rb') as f:
+                        self.wfile.write(f.read())
+                else:
+                    self.send_error(404, "blend_node.html not found")
+                return
+
+            # 图层特效链按特效拆在 web/fx/ 下,图层 attribute 拆在 web/attr/ 下,3D 图层的 three.js
+            # 内置包放在 web/js/ 下,blend_node.html 都用 <script src> 引它们,所以工作台得能送这些
+            # 文件。只认这三个目录直属的 .js:realpath 之后再验归属,../ 与绝对路径都翻不出去。禁缓存
+            # 是开发回路的命门 —— 否则改了特效文件刷新页面还是旧的。
+            req_path = urlparse(self.path).path
+            for sub in ('fx', 'js', 'attr'):
+                prefix = '/' + sub + '/'
+                if not req_path.startswith(prefix):
+                    continue
+                root = os.path.realpath(web_file(sub))
+                name = req_path[len(prefix):]
+                file_path = os.path.realpath(os.path.join(root, name))
+                if (not name.endswith('.js') or os.path.dirname(file_path) != root
+                        or not os.path.isfile(file_path)):
+                    self.send_error(404, "%s module not found" % sub)
+                    return
+                self.send_response(200)
+                self.send_header('Content-type', 'text/javascript; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(file_path, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+
+            if self.path == '/api/config':
+                self._send_json({
+                    'prompt_url': inst.prompt_url if inst else '',
+                    'detail_status': inst.detail_status if inst else 'idle',
+                    # GLOBAL SETTINGS 的全部键（前端 Global Settings 的唯一真源）—— 按
+                    # GLOBAL_PARAM_DEFAULTS 回显，加参数不必再来这里补一行。
+                    **{k: (getattr(inst, k, d) if inst else d)
+                       for k, d in SnapshotDetailerSamplerServer.GLOBAL_PARAM_DEFAULTS.items()},
+                    'has_tagger': inst.tagger is not None if inst else False,
+                    # Detector 工具的总闸：节点没连 detector 时整块工具隐藏。
+                    'has_detector': inst.detector is not None if inst else False,
+                    'architecture': self._get_current_architecture(inst),
+                    'has_package': bool(inst and inst.interface_packages),
+                    'package_count': len(inst.interface_packages) if inst else 0,
+                    'has_pipeline_package': bool(inst and inst.pipeline_packages),
+                    'pipeline_package_count': len(inst.pipeline_packages) if inst else 0,
+                    'blocks': inst.blocks if inst else [],
+                    'blocks_sets': inst.blocks_sets if inst else [],
+                    'active_block_set': inst.active_block_set if inst else None,
+                    # Pipeline Settings（选中项 + 按名字的 override）与此刻真正加载在节点上的
+                    # 那条 pipeline 的名字。'' = 还没选过 = [Default]（节点输入口那条）。
+                    'pipeline_settings': inst.pipeline_settings if inst else {'selected': '', 'overrides': {}},
+                    'interface_meta': getattr(inst, 'interface_meta', {}) if inst else {},
+                    'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    # Prompt tab 的 LoRA 灰名单跟着哪一代 regex 拉的 —— 宿主页拿它判断要不要重拉。
+                    'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
+                })
+                return
+
+            if self.path == '/api/status':
+                self._send_json({
+                    'detail_status': inst.detail_status if inst else 'idle',
+                    'error': getattr(inst, 'detail_error', None),
+                    'progress': inst.detail_progress if inst else 0,
+                    'current_step': inst.detail_current_step if inst else 0,
+                    'total_steps': inst.detail_total_steps if inst else 0,
+                    'interface_status': getattr(inst, 'interface_status', 'idle') if inst else 'idle',
+                    'interface_error': getattr(inst, 'interface_error', None) if inst else None,
+                    'interface_progress': getattr(inst, 'interface_progress', 0) if inst else 0,
+                    'interface_current_step': getattr(inst, 'interface_current_step', 0) if inst else 0,
+                    'interface_total_steps': getattr(inst, 'interface_total_steps', 0) if inst else 0,
+                    'interface_result_keys': getattr(inst, 'interface_result_keys', []) if inst else [],
+                    'interface_result_meta': getattr(inst, 'interface_result_meta', []) if inst else [],
+                    'pending_query': inst._pending_query_view() if inst else None,
+                    # 一条 preset 绑定的 pipeline 可能在这次 run 里被现加载（见 run_detailer）：
+                    # 名字与架构都跟着变，前端轮询时顺手同步，不用重拉 config。
+                    'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
+                    'pipeline_lora_epoch': getattr(inst, 'pipeline_lora_epoch', 0) if inst else 0,
+                    'architecture': self._get_current_architecture(inst),
+                })
+                return
+
+            if self.path == '/api/debug_trace':
+                self._send_json(dbg.debug_trace_snapshot())
+                return
+
+            if self.path == '/api/package':
+                if not inst or not inst.interface_packages:
+                    self._send_json({'interfaces': []})
+                    return
+
+                from .interface_node import InterfacePackageNode
+                epi = getattr(inst, 'extra_pnginfo', None)
+                if isinstance(epi, list):
+                    epi = epi[0] if epi else {}
+                # 显示用的类型来自 inst.extra_pnginfo —— 那是**上一次 run 图片里带的存档**,
+                # 不是画布上当前的图。改完连线没重新跑一次, 这里读到的就还是旧存档。
+                _wf = epi.get('workflow') if isinstance(epi, dict) else None
+                print("[InterfacePorts] /api/package epi=%s keys=%s wf_nodes=%s stored=%d"
+                      % ('yes' if epi else 'NO',
+                         sorted(epi.keys())[:4] if isinstance(epi, dict) else '-',
+                         len(_wf.get('nodes') or []) if isinstance(_wf, dict) else 'no-workflow',
+                         len(inst.interface_packages)))
+
+                interfaces = []
+                for pkg in inst.interface_packages:
+                    end_id = pkg.get('end_node_id', '')
+
+                    # Get fresh package from extra_pnginfo for full port info
+                    fresh_pkg = pkg
+                    _from = 'stored'
+                    if epi and isinstance(epi, dict) and end_id:
+                        pkg_node = InterfacePackageNode()
+                        fresh = pkg_node.get_package(end_id, epi, None)
+                        if fresh and fresh[0]:
+                            fresh_pkg = fresh[0]
+                            _from = 'rebuilt-from-epi'
+
+                    start_types = fresh_pkg.get('start_types', {})
+                    end_types = fresh_pkg.get('types', {})
+                    print("[InterfacePorts] /api/package end=%s via=%s start_types=%s end_types=%s"
+                          % (end_id, _from, start_types or '{}', end_types or '{}'))
+
+                    # 这一口的名字 / 默认值 / 候选项, 全部来自 get_package 从存档算出的那条
+                    # "它喂到的内部节点输入" —— 面板不再自造一份真值。
+                    start_labels = fresh_pkg.get('start_labels', {}) or {}
+                    start_defaults = fresh_pkg.get('start_defaults', {}) or {}
+                    start_targets = fresh_pkg.get('start_targets', {}) or {}
+                    # 面板上每个框里的数字就该等于这里的一个值; 空 dict = 后端这次没算出
+                    # 任何默认值 (上面 get_package 的"默认值缺席 ..."会说明为什么)。
+                    print("[InterfacePorts] /api/package '%s' 名字=%s 默认值=%s 候选来源=%s"
+                          % (fresh_pkg.get('name', pkg.get('name', '')),
+                             sorted(start_labels), sorted(start_defaults), sorted(start_targets)))
+
+                    def get_combo_options(port_num):
+                        tgt = start_targets.get(str(port_num)) or {}
+                        in_name = tgt.get('input_name')
+                        if not in_name:
+                            print("[InterfacePorts] COMBO port=%s: 存档里没算出它喂到的输入 "
+                                  "(targets=%s), 取不到候选项" % (port_num, sorted(start_targets)))
+                            return []
+                        try:
+                            import nodes as comfy_nodes
+                            cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(tgt.get('class_type', ''))
+                            if not cls:
+                                return []
+                            it = cls.INPUT_TYPES()
+                        except Exception:
+                            return []
+                        options = []
+                        for cat in ('required', 'optional'):
+                            ci = it.get(cat, {})
+                            if not isinstance(ci, dict):
+                                continue
+                            val = ci.get(in_name)
+                            if isinstance(val, tuple) and len(val) >= 1 and isinstance(val[0], list):
+                                options = [str(x) for x in val[0]]
+                        # de-dup, preserve order
+                        seen = set()
+                        result = []
+                        for o in options:
+                            if o not in seen:
+                                seen.add(o)
+                                result.append(o)
+                        return result
+
+                    def make_port(num, name, ptype, default=None):
+                        is_inject = ptype in ('PIPELINE_DATA', 'IMAGE', 'MASK')
+                        is_manual = ptype in ('STRING', 'INT', 'FLOAT', 'BOOLEAN', 'COMBO')
+                        port = {
+                            'num': num,
+                            'name': name,
+                            'type': ptype,
+                            # inject 类的值来自画面, 不给它摆一个会误导的"默认值"
+                            'value': None if is_inject else default,
+                            'category': 'inject' if is_inject else ('manual' if is_manual else 'port'),
+                        }
+                        if ptype == 'COMBO':
+                            port['options'] = get_combo_options(num)
+                        return port
+
+                    # Interface meta（改名 / 模式 / block 端口绑定）按包名字贴回来。
+                    # 端口名本身只是展示 —— 执行全程按端口号走,改名不影响链路。
+                    iface_name = fresh_pkg.get('name', pkg.get('name', ''))
+                    meta = (getattr(inst, 'interface_meta', None) or {}).get(iface_name) or {}
+                    names_meta = meta.get('names') or {}
+
+                    def port_label(side, num):
+                        # 你改过的名 > 从端口算出的名(它喂到的那个输入) > valueN 兜底
+                        named = (names_meta.get(side) or {}).get(str(num))
+                        if named:
+                            return named
+                        if side == 'start' and start_labels.get(str(num)):
+                            return start_labels[str(num)]
+                        return 'value' + str(num)
+
+                    # Start ports: ONLY from start_types (Start node's connected value ports)
+                    start_ports = []
+                    for port_num_str, ptype in sorted(start_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                        port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
+                        start_ports.append(make_port(port_num, port_label('start', port_num), ptype,
+                                                     start_defaults.get(port_num_str)))
+
+                    # End ports: ONLY from end_types (End node's connected value ports)
+                    end_ports = []
+                    for port_num_str, ptype in sorted(end_types.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                        port_num = int(port_num_str) if isinstance(port_num_str, str) else port_num_str
+                        end_ports.append(make_port(port_num, port_label('end', port_num), ptype))
+
+                    interfaces.append({
+                        'name': iface_name,
+                        'start_ports': start_ports,
+                        'end_ports': end_ports,
+                        'modes': meta.get('modes') or {'block': False, 'processor': False},
+                        'block_ports': meta.get('block_ports') or {},
+                        # image/mask 出口的默认落位与入口的默认来源（Processor 小窗的初值），没有就是空表。
+                        'output_targets': meta.get('output_targets') or {},
+                        'input_sources': meta.get('input_sources') or {},
+                    })
+                self._send_json({'interfaces': interfaces})
+                return
+
+            if self.path == '/api/pipeline_package':
+                if not inst or not inst.pipeline_packages:
+                    self._send_json({'pipeline_packages': []})
+                    return
+                pipeline_packages = []
+                for pkg in inst.pipeline_packages:
+                    pipelines = []
+                    for i, p in enumerate(pkg.get('pipelines', [])):
+                        pipelines.append({"name": p.get("name", f"Pipeline {i+1}"), "node_id": p.get("node_id", "")})
+                    pipeline_packages.append({
+                        "name": pkg.get("name", "PipelineGroup"),
+                        "pipelines": pipelines,
+                    })
+                self._send_json({"pipeline_packages": pipeline_packages})
+                return
+
+            if self.path == '/api/has_prompt':
+                has = (inst.prompt_server is not None and
+                       (getattr(inst.prompt_server, 'selected_prompts', None) or
+                        getattr(inst.prompt_server, 'custom_prompts', None) or
+                        getattr(inst.prompt_server, 'selected_loras', None)))
+                self._send_json({'has_prompt': bool(has)})
+                return
+
+            if self.path == '/api/result':
+                if inst and inst.original_image is not None and inst.detailed_image is not None:
+                    try:
+                        self._send_json({
+                            'original_image': tensor_to_base64(inst.original_image),
+                            'detailed_image': tensor_to_base64(inst.detailed_image),
+                            'original_key': getattr(inst, 'original_key', None),
+                            'detailed_key': getattr(inst, 'detailed_key', None),
+                        })
+                    except Exception as e:
+                        self._send_json({'error': str(e)}, 500)
+                else:
+                    self._send_json({'error': 'Result not ready'}, 404)
+                return
+
+            if self.path == '/api/staging':
+                self._send_json({'staging': inst.get_staging_list() if inst else []})
+                return
+
+            if self.path == '/api/prompt_presets':
+                self._send_json({'presets': inst._load_prompt_presets() if inst else []})
+                return
+
+            # ---- 文档 IO：前端问一次能力，之后就只按 token 读文件 ----
+            if self.path == '/api/io_caps':
+                self._send_json({'pick': doc_io.available()})
+                return
+
+            if self.path.startswith('/api/io_read'):
+                token = (parse_qs(urlparse(self.path).query).get('token') or [''])[0]
+                data, err = doc_io.read(token)
+                if err:
+                    self._send_json({'success': False, 'error': err}, 404)
+                    return
+                entry = doc_io.entry(token) or {}
+                self.send_response(200)
+                self.send_header('Content-type', entry.get('mime') or 'application/octet-stream')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            # 空 pipeline 时的补救入口：让工作台重开上次那份 .cud。描述符由服务端从自己写下的
+            # 记录里造，页面只说"要不要"，说不出"哪一个"。
+            if self.path == '/api/recent_cud':
+                doc, reason = doc_io.reopen_recent_cud()
+                self._send_json({'ok': doc is not None, 'doc': doc, 'reason': reason})
+                return
+
+            self.send_error(404)
+
+        def do_POST(self):
+            inst = self.server_instance
+
+            if self.path == '/api/update_config':
+                length = int(self.headers.get('Content-Length', 0))
+                data = json.loads(self.rfile.read(length)) if length else {}
+                inst._apply_params(data)
+                self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/prompt_presets':
+                # Prompt preset 管理：Prompt 块引用的共享 selection 模板（prompt_node.html
+                # 的 preset 作用域 iframe 通过 action=save 写入），持久化到
+                # data/sampler/prompt_presets.json。action: create | save | rename | delete。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    action = body.get('action') or ''
+                    if action == 'create':
+                        self._send_json({'ok': True, 'preset': inst._create_prompt_preset(body.get('name'))})
+                    elif action == 'save':
+                        selection = body.get('selection')
+                        if not isinstance(selection, dict):
+                            self._send_json({'ok': False, 'error': 'selection must be an object'}, 400)
+                        elif inst._save_prompt_preset_selection(body.get('id') or '', selection):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found'}, 404)
+                    elif action == 'rename':
+                        if inst._rename_prompt_preset(body.get('id') or '', body.get('name')):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found or bad name'}, 404)
+                    elif action == 'delete':
+                        if inst._delete_prompt_preset(body.get('id') or ''):
+                            self._send_json({'ok': True})
+                        else:
+                            self._send_json({'ok': False, 'error': 'preset not found'}, 404)
+                    else:
+                        self._send_json({'ok': False, 'error': f'unknown action {action!r}'}, 400)
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/execute_interface':
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                interface_index = body.get('interface_index', 0)
+                manual_values = body.get('manual_values', {})
+                exec_options = body.get('exec_options', {})
+                inst.put_action('execute_interface', interface_index=interface_index, manual_values=manual_values, exec_options=exec_options)
+                self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/switch_pipeline':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    package_idx = int(body.get('package_idx', 0))
+                    pipeline_idx = int(body.get('pipeline_idx', 0))
+                    if not inst or package_idx >= len(inst.pipeline_packages):
+                        self._send_json({'success': False, 'error': 'Invalid package index'}, 400)
+                        return
+                    pkg = inst.pipeline_packages[package_idx]
+                    pipelines = pkg.get('pipelines', [])
+                    if pipeline_idx >= len(pipelines):
+                        self._send_json({'success': False, 'error': 'Invalid pipeline index'}, 400)
+                        return
+                    pipeline_info = pipelines[pipeline_idx]
+                    # 加载本身（执行上游节点 + 换 current/base pipeline + 架构与 lora_regex）
+                    # 与 run 循环里 preset 绑定用的是同一份代码。
+                    ok, err = inst.node_instance._load_pipeline_from_node(
+                        inst, pipeline_info.get('node_id', ''), pipeline_info.get('name', ''))
+                    self._send_json({'success': True} if ok
+                                    else {'success': False, 'error': err}, 200 if ok else 500)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/select_image':
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                key = body.get('key', '')
+                inst.put_action('select_image', key=key)
+                self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/finish':
+                length = int(self.headers.get('Content-Length', 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+                selected_keys = body.get('selected_keys')
+                if selected_keys is not None and isinstance(selected_keys, list):
+                    inst.finish_selected_keys = selected_keys
+                    inst.finish_selected_key = selected_keys[0] if len(selected_keys) == 1 else None
+                else:
+                    # 兼容旧格式 single key
+                    selected_key = body.get('selected_key')
+                    inst.finish_selected_key = selected_key
+                    inst.finish_selected_keys = [selected_key] if selected_key else None
+                inst.finished = True
+                inst.put_action('finish')
+                print("[SnapshotDetailerSampler] Finish action received, selected_keys:", inst.finish_selected_keys)
+                # 唤醒 prompt 以防阻塞
+                if inst.prompt_server:
+                    inst.prompt_server.prompt_event.set()
+                self._send_json({'ok': True})
+                return
+
+            if self.path == '/api/query_answer':
+                # 一个 Query 块正停在链条里等用户挑 prompt。`selection` 是 prompt UI 的 raw
+                # 选择（后端按 prompt 块同样的规则合并 + 跑 programs）；`cancelled` = 用户
+                # 关掉了弹窗 —— 整条链中止。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    answered = inst._answer_pending_query(
+                        selection=body.get('selection'),
+                        cancelled=bool(body.get('cancelled')),
+                    ) if inst else False
+                    self._send_json({'success': answered})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/cancel_run':
+                # 工作台浮出的 Cancel 按钮。点击 = 走 ComfyUI 的原生打断：
+                # 全局 interrupt 标志让 KSampler 在下一个采样步抛
+                # InterruptProcessingException；块循环里的检查点会在 block / Generate
+                # Text 边界抛同一个异常。run_detailer 的 except 把它转成
+                # status='cancelled'（不炸节点、不停 server）。
+                try:
+                    mm.interrupt_current_processing(True)
+                    print("[SnapshotDetailerSampler] Cancel requested — interrupt flag set")
+                    self._send_json({'success': True})
+                except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/staging':
+                # 工作区批量上传：{images: [dataURL, ...], name?} → 逐张解码存 tensor。
+                # 返回新条目（含 id），调用方立刻能把 id 设成 Ref Image / 加为图层。
+                # replace=True = 整池换水（staging 是 .cud 的文档态）：先逐掉全部**可见**条目，
+                # 再按 ids 原样落回 —— Extra Prompt chip 与 fx 绑定都按编号引用图池，换 mint
+                # 会让它们指错图。hidden 条目（run 的 seed、Processor 输入/产出）是会话的
+                # 在途数据，不属于任何文档，换水不动它。空 images + replace = 纯清空。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    replace = bool(body.get('replace'))
+                    ids = body.get('ids') if isinstance(body.get('ids'), list) else None
+                    if replace:
+                        for old in list(inst.staging_items):
+                            if not old.get('hidden'):
+                                inst._staging_tensors.pop(old['id'], None)
+                        inst.staging_items = [s for s in inst.staging_items if s.get('hidden')]
+                    images = body.get('images')
+                    if not isinstance(images, list) or not images:
+                        images = [body.get('image', '')]
+                    images = [u for u in images if isinstance(u, str) and u]
+                    if not images:
+                        if replace:
+                            self._send_json({'success': True, 'added': []})
+                            return
+                        self._send_json({'success': False, 'error': 'No image data'}, 400)
+                        return
+
+                    added = []
+                    names = body.get('names') if isinstance(body.get('names'), list) else None
+                    for idx, dataurl in enumerate(images):
+                        try:
+                            tensor = dataurl_to_tensor(dataurl)
+                        except Exception as dec_err:
+                            print(f"[Staging] skipped image #{idx + 1}: {dec_err}")
+                            continue
+                        chosen = names[idx] if (names and idx < len(names) and names[idx]) else None
+                        sid = (ids[idx] if (replace and ids and idx < len(ids)
+                                           and isinstance(ids[idx], str) and ids[idx]) else None)
+                        if replace:
+                            # 换水落回文档自带条目：名字逐条原样用，不再加 " #N" 后缀。
+                            name = chosen or body.get('name') or 'Loaded'
+                        else:
+                            base_name = chosen or body.get('name') or 'Loaded'
+                            name = base_name if len(images) == 1 else f"{base_name} #{len(inst.staging_items) + 1}"
+                        # hidden=True（Processor 的输入等）只进图池不进条带 —— 跟接口产出同款。
+                        sid = inst.add_staging(tensor, name=name, hidden=bool(body.get('hidden')), sid=sid)
+                        added.append({'id': sid, 'name': name, 'src': dataurl})
+                    if not added:
+                        self._send_json({'success': False, 'error': 'All images failed to decode'}, 400)
+                        return
+                    if replace:
+                        # 计数器顶到现存最大数字号之后，之后新加的才不会撞文档带回来的号。
+                        for s in inst.staging_items:
+                            m = re.match(r'staging_(\d+)$', s['id'])
+                            if m:
+                                inst._staging_counter = max(inst._staging_counter, int(m.group(1)))
+                    self._send_json({'success': True, 'added': added})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/staging_remove':
+                # 从工作区移除一个条目（张量引用一并释放）。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    sid = body.get('id', '')
+                    before = len(inst.staging_items)
+                    inst.staging_items = [s for s in inst.staging_items if s['id'] != sid]
+                    inst._staging_tensors.pop(sid, None)
+                    self._send_json({'success': True, 'removed': before - len(inst.staging_items)})
+                except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/guidance_card':
+                # Guidances 栈的唯一总卡：image = 合成好的 PNG dataURL（Layers 合成 + 整个
+                # guidance 栈压在上面），原地替换保留条目；image 为空 = 撤回这张卡（栈被清空）。
+                # 客户端不能指定 id —— 这张卡只可能落在 GUIDANCE_STAGING_ID 那一格。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    dataurl = body.get('image')
+                    if not isinstance(dataurl, str) or not dataurl:
+                        before = len(inst.staging_items)
+                        inst.staging_items = [s for s in inst.staging_items if s['id'] != GUIDANCE_STAGING_ID]
+                        inst._staging_tensors.pop(GUIDANCE_STAGING_ID, None)
+                        self._send_json({'success': True, 'withdrawn': before != len(inst.staging_items)})
+                        return
+                    try:
+                        tensor = dataurl_to_tensor(dataurl)
+                    except Exception as dec_err:
+                        self._send_json({'success': False, 'error': f'Could not decode the guidance image ({dec_err})'}, 400)
+                        return
+                    sid = inst.add_staging(tensor, name=body.get('name') or 'Guidance',
+                                           sid=GUIDANCE_STAGING_ID)
+                    self._send_json({'success': True, 'id': sid})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/resize_image':
+                # 工作区条目缩放变体：源条目不动，产物作为新条目进工作区。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    sid = body.get('id', '')
+                    width = int(body.get('width', 0))
+                    height = int(body.get('height', 0))
+                    if not sid or width <= 0 or height <= 0:
+                        self._send_json({'success': False, 'error': 'Invalid id, width or height'}, 400)
+                        return
+                    # 获取工作区图片 tensor
+                    tensor = inst.get_staging_image(sid)
+                    if tensor is None:
+                        self._send_json({'success': False, 'error': 'Image not found'}, 404)
+                        return
+                    # tensor 可能是 [B,H,W,C] 或 [H,W,C]
+                    if tensor.dim() == 4:
+                        img = tensor[0]
+                    elif tensor.dim() == 3:
+                        img = tensor
+                    else:
+                        self._send_json({'success': False, 'error': f'Unexpected tensor dim: {tensor.dim()}'}, 400)
+                        return
+                    # img: [H,W,C] float32 0-1
+                    orig_h, orig_w = img.shape[0], img.shape[1]
+                    # numpy → PIL resize → numpy
+                    arr = (img.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+                    pil_img = Image.fromarray(arr)
+                    pil_img = pil_img.resize((width, height), Image.LANCZOS)
+                    arr2 = np.array(pil_img).astype(np.float32) / 255.0
+                    resized_tensor = torch.from_numpy(arr2)
+                    if tensor.dim() == 4:
+                        resized_tensor = resized_tensor.unsqueeze(0)
+                    # 添加到工作区
+                    name = None
+                    for s in inst.staging_items:
+                        if s['id'] == sid:
+                            name = f"{s['name']} ({width}x{height})"
+                            break
+                    new_id = inst.add_staging(resized_tensor, name=name)
+                    new_item = next((s for s in inst.staging_items if s['id'] == new_id), None)
+                    self._send_json({'success': True, 'id': new_id,
+                                     'item': new_item if new_item is not None else {'id': new_id, 'name': name}})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/load_from_assets':
+                try:
+                    if inst.node_instance is None:
+                        self._send_json({'success': False, 'error': 'Node instance not available'})
+                        return
+                    asset_data = inst.asset or ''
+                    if not asset_data or not asset_data.strip():
+                        self._send_json({'success': False, 'error': 'No asset data configured'})
+                        return
+                    count = inst.node_instance._load_from_assets(inst, asset_data)
+                    self._send_json({'success': True, 'count': count})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/blend_action':
+                # Blend 工作台的统一入口：一次合成（图在 tensor 上，不走 PNG 往返），三种分派。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    action = body.get('action', '')
+                    if action not in ('blend', 'tag', 'detailer', 'layer_generate', 'clear_tag', 'detect'):
+                        self._send_json({'success': False, 'error': f'Unknown action: {action}'}, 400)
+                        return
+
+                    # Clear Tag: touches only the prompt stage — no canvas, no composite, no
+                    # tagger. Running _apply_tag_result('') drops the parsing-source tags exactly
+                    # the way a real tag replaces them, and returns empty tag/tags/custom so the
+                    # host pushes a cleared state into the prompt editor.
+                    if action == 'clear_tag':
+                        parsed_selected, parsed_temporary = inst._apply_tag_result('')
+                        self._send_json({'success': True, 'tag': '', 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
+                        return
+
+                    # layer_generate does NOT go through compose_blend: the caller sends one layer's
+                    # own image and that layer's own mask as separate payloads, because the layer may
+                    # be smaller than / offset on the canvas and the canvas composite is not what it
+                    # wants refined. Nothing about the canvas is involved.
+                    if action == 'layer_generate':
+                        layer_image = decode_image_dataurl(body.get('layer_image'))
+                        if layer_image is None:
+                            self._send_json({'success': False, 'error': 'That layer has no decodable image'}, 400)
+                            return
+                        # The layer's own mask is authored at the layer's native size, so it is
+                        # decoded in that space rather than against the canvas.
+                        layer_h, layer_w = int(layer_image.shape[0]), int(layer_image.shape[1])
+                        layer_mask = decode_mask_alpha(
+                            body.get('layer_mask'), layer_w, layer_h, collapse_opaque=False,
+                        )
+                        if layer_mask is None or float(layer_mask.sum()) == 0:
+                            self._send_json({'success': False, 'error': 'Mask is required — paint that layer\'s own mask before generating'}, 400)
+                            return
+                        if layer_image.dim() == 3:
+                            layer_image = layer_image.unsqueeze(0)
+                        # The Generate dialog's Pipeline Preset enum: which block set runs this
+                        # generate. Invalid/absent ids fall back to the server's runner chain.
+                        preset_id = body.get('preset_id')
+                        if not isinstance(preset_id, str) or not preset_id:
+                            preset_id = None
+                        inst.blend_image = layer_image
+                        inst.blend_mask = layer_mask.squeeze(-1)
+                        inst.blend_prompt = (body.get('extra_prompt') or '').strip()
+                        # Consumed once by the main loop, then cleared, so a later toolbar run is
+                        # not silently stuck on this preset.
+                        inst.pending_generate_preset = preset_id
+                        inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
+                        self._send_json({'success': True})
+                        return
+
+                    # detailer：前端 blendCanvas 已经把图层栈合成好了 —— 预览里看到
+                    # 的就是这张图（浏览器原生 source-over，直通 alpha PNG）。直接把它
+                    # 送进管线，不再让后端按 layers 重合成一遍，消除两套合成语义漂移在
+                    # 蒙版边缘产生的灰色条带。解不出图（旧前端 / 画布被污染）时回落到
+                    # 后端合成。Layer Tag 也走这条：前端把「合成图按该 Layer 原生网格抠好 +
+                    # 该 Layer 自带蒙版」预制送来，后端直接复用现成的 mask/covered/full 语义喂 tagger。
+                    comp = decode_image_dataurl(body.get('composite')) if action in ('detailer', 'tag', 'detect') else None
+                    if comp is not None:
+                        if comp.dim() == 3:
+                            comp = comp.unsqueeze(0)
+                        _ch, _cw = int(comp.shape[1]), int(comp.shape[2])
+                        image = comp
+                        mask = decode_mask_alpha(body.get('mask'), _cw, _ch, collapse_opaque=False)
+                        if mask is not None:
+                            mask = mask.squeeze(-1)
+                    else:
+                        image, mask = inst.compose_blend(
+                            body.get('layers') or [],
+                            width=body.get('width'), height=body.get('height'),
+                            mask_data_url=body.get('mask'),
+                            attributes=body.get('attributes'),
+                        )
+
+                    if action == 'blend':
+                        # 合成图不再进工作区（工作区只收用户主动拖入的图）—— 以 dataURL
+                        # 返回，前端把它作为新的智能图层加到画布顶层（图层自带像素，
+                        # 不绑 id）。想让它进工作区的用户会自己拖进来。
+                        self._send_json({'success': True, 'id': None,
+                                         'image': tensor_to_base64(image)})
+                        return
+
+                    if action == 'tag':
+                        # 纯读取：拿画布合成图 + Mask 层打标，结果只写进 prompt 阶段
+                        if inst.tagger is None:
+                            self._send_json({'success': False, 'error': 'Tagger not configured'})
+                            return
+                        if inst.node_instance is None:
+                            self._send_json({'success': False, 'error': 'Node not ready'})
+                            return
+                        mode = body.get('tag_mode', 'mask')
+                        tag = inst.node_instance._run_tag_on_image(image, mask, inst.tagger, mode)
+                        parsed_selected, parsed_temporary = inst._apply_tag_result(tag)
+                        self._send_json({'success': True, 'tag': tag, 'tags': parsed_selected, 'custom': '', 'temporary': parsed_temporary})
+                        return
+
+                    if action == 'detect':
+                        # Detector 工具：source 图由前端合成好送来（All Layers = 画布合成图，
+                        # Selected Layer = 那一层自己的结算面），prompt 按 VideoSegmentationNode
+                        # 的掩码表达式语法逐 term 检测（collect_terms 给出 name:threshold 对，
+                        # 与 video 节点同一套 parse/eval），Empty prompt 直接整图一次检测。
+                        # 结果按 invert 翻转、再乘 Main Mask（Masked 变体由前端随 payload 带
+                        # mask，且已换算到 source 图自己的网格），以「白=覆盖」的 RGBA PNG 返回
+                        # —— 亮度进不了 mask 面，alpha 就是覆盖度，四个 destination 都由前端落地。
+                        if inst.detector is None:
+                            self._send_json({'success': False, 'error': 'No detector is connected to the node'})
+                            return
+                        from ...libs.detect_utils import detect_mask
+                        from ...libs.mask_utils import combine_masks
+                        from ...libs.mask_expression import parse_mask_expression, collect_terms, eval_expression
+                        params = body.get('detect') or {}
+                        prompt = str(params.get('prompt') or '').strip()
+                        try:
+                            threshold = float(params.get('threshold', 0.5))
+                        except (TypeError, ValueError):
+                            threshold = 0.5
+                        threshold = min(1.0, max(0.0, threshold))
+                        invert = bool(params.get('invert'))
+                        img = image[0] if image.dim() == 4 else image
+                        # Detect 也是「最近一次动作」: 一次 detect = 一份新 trace (与 Run
+                        # 同一个只留最近一次的约定), Debug 窗口里看得见表达式、源图、
+                        # 每个术语检到几张、以及最终落地的那张蒙版。
+                        _src = str(params.get('source') or '')
+                        _dst = str(params.get('dest') or '')
+                        _SRC_LABELS = {'all': 'All Layers', 'all_masked': 'Masked All Layers',
+                                       'selected': 'Selected Layer', 'selected_masked': 'Masked Selected Layer'}
+                        _DST_LABELS = {'main_mask': 'Main Mask', 'selected_mask': 'Selected Mask',
+                                       'staging': 'Staging', 'new_layer': 'New Layer'}
+                        dbg.begin_trace({'from_blend': True, 'action': 'detect'})
+                        dbg.record_prompt('Detect 表达式', prompt,
+                                          source=_SRC_LABELS.get(_src, _src or '—'),
+                                          dest=_DST_LABELS.get(_dst, _dst or '—'),
+                                          threshold=threshold, invert=invert)
+                        dbg.record_image('Detect 源图', img)
+                        if mask is not None and float(mask.sum()) > 0:
+                            dbg.record_mask('随行的 Mask', mask)
+                        if prompt:
+                            root = parse_mask_expression(prompt, threshold)
+                            # eval_expression 用 (name, threshold) 二元组作键 —— 只放名字它永远
+                            # 找不到, 同一个词换阈值就该是两条独立的掩码。
+                            term_masks = {}
+                            for name, t in collect_terms(root):
+                                term_hits = detect_mask(detector=inst.detector, image=img,
+                                                        threshold=float(t), prompt=name)
+                                combined = combine_masks(term_hits, mode='max')
+                                term_masks[(name, float(t))] = combined
+                                dbg.record_mask(f"术语 '{name}' @ {t}", combined,
+                                                detail=f'{len(term_hits)} 个实例')
+                            result = eval_expression(root, term_masks)
+                        else:
+                            result = combine_masks(
+                                detect_mask(detector=inst.detector, image=img,
+                                            threshold=threshold, prompt=''),
+                                mode='max')
+                        if invert:
+                            result = 1.0 - result
+                        if mask is not None and float(mask.sum()) > 0:
+                            m = mask[0] if mask.dim() == 3 else mask
+                            result = result * m
+                        dbg.record_mask('Detect 结果', result,
+                                        detail=('invert 后' if invert else '') +
+                                        ('乘 Main Mask' if mask is not None and float(mask.sum()) > 0 else ''))
+                        arr = result.detach().cpu().numpy()
+                        arr = np.clip(arr, 0.0, 1.0)
+                        if arr.ndim == 3:
+                            arr = arr[0]
+                        rgba = np.zeros((arr.shape[0], arr.shape[1], 4), dtype=np.uint8)
+                        rgba[..., 0:3] = 255
+                        rgba[..., 3] = (arr * 255).astype(np.uint8)
+                        buf = io.BytesIO()
+                        Image.fromarray(rgba, mode='RGBA').save(buf, format='PNG')
+                        _tr = dbg.current_trace()
+                        if _tr is not None:
+                            _tr.meta['status'] = 'done'
+                        self._send_json({'success': True,
+                                         'mask': 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')})
+                        return
+
+                    # action == 'detailer'：合成结果交给主循环执行（主循环在另一个线程）
+                    # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
+                    # （生效链第一个 detailer 的 params.enable_mask，随 Run 设置里的
+                    # preset 解析）时整幅都是工作区，Mask 层没画也允许跑。
+                    if (inst._first_detailer_enable_mask(body.get('preset_id'))
+                            and (mask is None or float(mask.sum()) == 0)):
+                        self._send_json({'success': False, 'error': 'Mask is required — paint the mask layer before running the detailer'}, 400)
+                        return
+                    inst.blend_image = image
+                    inst.blend_mask = mask
+                    inst.blend_prompt = (body.get('extra_prompt') or '').strip()
+                    # The Run settings dialog's Pipeline Preset: which block set runs this pass.
+                    # Absent / invalid -> the runner's own chain (the active tab). Consumed once
+                    # by the main loop, so a later run is not stuck on a stale choice.
+                    run_preset = body.get('preset_id')
+                    if not isinstance(run_preset, str) or not run_preset:
+                        run_preset = None
+                    inst.pending_generate_preset = run_preset
+                    inst.put_action('run_detailer', from_blend=True, extra_prompt=inst.blend_prompt)
+                    self._send_json({'success': True})
+                except LookupError as e:
+                    self._send_json({'success': False, 'error': str(e)}, 404)
+                except ValueError as e:
+                    self._send_json({'success': False, 'error': str(e)}, 400)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            # ---- 文档 IO：对话框由后端弹，路径只在服务端流转 ----
+            if self.path == '/api/io_pick':
+                # {mode: 'open'|'save', kind: 'cud'|'png'|'image', suggested, multiple}
+                # → {cancelled, picks:[{token,name,path,size,mime}]}
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    mode = 'save' if body.get('mode') == 'save' else 'open'
+                    kind = body.get('kind') if body.get('kind') in IO_FILE_KINDS else 'cud'
+                    picks = doc_io.pick(mode, kind,
+                                        suggested=str(body.get('suggested') or ''),
+                                        multiple=bool(body.get('multiple')))
+                    if picks is None:
+                        self._send_json({'cancelled': True, 'picks': [], 'unavailable': True})
+                    else:
+                        self._send_json({'cancelled': not picks, 'picks': picks})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'cancelled': True, 'picks': [], 'error': str(e)}, 500)
+                return
+
+            if self.path.startswith('/api/io_write'):
+                # 原始字节直接进 body（不是 dataURL：几百 MB 的上下文经不起再一次三分之一膨胀）
+                try:
+                    token = (parse_qs(urlparse(self.path).query).get('token') or [''])[0]
+                    length = int(self.headers.get('Content-Length', 0))
+                    data = self.rfile.read(length) if length else b''
+                    ok, err = doc_io.write(token, data)
+                    self._send_json({'success': ok, 'error': err, 'size': len(data)})
+                except Exception as e:
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/window_closed':
+                inst.window_closed = True
+                inst.put_action('window_closed')
+                self._send_json({'ok': True})
+                return
+
+            self.send_error(404)
+
+
+# =============================================================================
+# SnapshotDetailerSamplerNode
+# =============================================================================
+class SnapshotDetailerSamplerNode:
+    """
+    事件驱动的交互式细节修复节点。
+    前端通过 tab 自由切换 Mask/Tag/Prompt/Draw/Context，后端通过 action queue 响应。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        # 采样参数不在节点上：add_noise / start_step_rate / end_step_rate / enable_edit /
+        # context_regex 属于每个 detailer block（工作台 Edit 页），pixels / align /
+        # crop_reserve / mask_grow / mask_blur 属于 GLOBAL SETTINGS（落盘）。节点端口
+        # 留着只会和前端各存一份、Run 时互相覆盖，所以全部取消。
+        return {
+            "required": {
+                "pipeline": ("PIPELINE_DATA",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "lora_regex": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": {
+                "detector": ("*",),
+                "tagger": ("*",),
+                "asset": ("STRING", {"default": "", "multiline": True, "tooltip": "Assets snapshot: JSON string (normal mode) or name (global mode) for Tag From Assets button"}),
+                "package": ("*",),
+            },
+            "hidden": {
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("PIPELINE_DATA",)
+    RETURN_NAMES = ("pipeline",)
+    FUNCTION = "sample"
+    CATEGORY = "sampling/custom"
+
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        return float("nan")
+
+    def get_current_pipeline(self):
+        return getattr(self, '_current_pipeline', None)
+
+    # -------------------------------------------------------------------------
+    # Tag
+    # -------------------------------------------------------------------------
+    def _run_tag_on_image(self, tag_image, mask, tagger, mode='mask'):
+        """对给定图像 + 遮罩打标，与 pipeline 状态无关（供 Blend 工作台直接调用）。"""
+        from ...libs.caption_utils import get_tag
+        from ...libs.image_utils import crop_mask
+        if mask is not None:
+            try:
+                img = tag_image
+                if img.dim() == 3:
+                    img = img.unsqueeze(0)
+                if mask.dim() == 2:
+                    mask = mask.unsqueeze(0)
+                cropped_img, cropped_mask, _ = crop_mask(img, mask, reserve=32)
+                if mode == 'mask':
+                    tag_image = cropped_img
+                elif mode == 'covered':
+                    white_bg = torch.ones_like(cropped_img)
+                    mask_expanded = cropped_mask.unsqueeze(-1).float()
+                    tag_image = cropped_img * mask_expanded + white_bg * (1 - mask_expanded)
+            except Exception as mask_err:
+                print(f"[RunTag] crop_mask failed, falling back to full: {mask_err}")
+        return get_tag(tagger, tag_image)
+
+    # -------------------------------------------------------------------------
+    # Load From Assets
+    # -------------------------------------------------------------------------
+    def _load_from_assets(self, server, asset_data):
+        """Open SnapshotAssetsServer for image selection, add selected images to history."""
+        import webbrowser
+        from .assets_node import SnapshotAssetsServer, SnapshotAssetsNode
+
+        # Determine mode: JSON string → normal mode, else → global mode name
+        global_mode = True
+        canvas_snapshot = None
+        if asset_data and asset_data.strip():
+            try:
+                parsed = json.loads(asset_data.strip())
+                if isinstance(parsed, dict):
+                    canvas_snapshot = asset_data.strip()
+                    global_mode = False
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        if global_mode and asset_data and asset_data.strip():
+            snap_dir = data_dir('snapshots')
+            snap_path = os.path.join(snap_dir, f"{asset_data.strip()}.json")
+            if os.path.exists(snap_path):
+                with open(snap_path, 'r', encoding='utf-8') as f:
+                    canvas_snapshot = f.read()
+
+        assets_server = SnapshotAssetsServer(
+            input_data=asset_data,
+            canvas_snapshot=canvas_snapshot,
+            enable_image=True,
+            enable_image_config=False,
+            image_config="",
+            enable_video=False,
+            enable_audio=False,
+            enable_prompt=False,
+            enable_slot=False,
+            global_mode=global_mode,
+        )
+        server_thread = threading.Thread(target=assets_server.start)
+        server_thread.daemon = True
+        server_thread.start()
+
+        start_time = time.time()
+        while not assets_server.started:
+            try:
+                mm.throw_exception_if_processing_interrupted()
+            except Exception:
+                assets_server.stop()
+                raise
+            if time.time() - start_time > 10:
+                assets_server.stop()
+                raise RuntimeError("[load_from_assets] Server startup timeout")
+            time.sleep(0.01)
+
+        print(f"[load_from_assets] Opening browser at: {assets_server.browser_url}")
+        webbrowser.open(assets_server.browser_url)
+
+        if not assets_server.wait_for_confirm():
+            assets_server.stop()
+            return 0
+        assets_server.stop()
+
+        selected_images = getattr(assets_server, 'selected_images', [])
+        if not selected_images:
+            return 0
+
+        count = 0
+        for img_data in selected_images:
+            if isinstance(img_data, dict):
+                image_url = img_data.get('image', '')
+                if not image_url:
+                    continue
+                tensor = SnapshotAssetsNode._decode_image_data(image_url)
+                server.add_staging(tensor, name=f'Asset #{len(server.staging_items) + 1}')
+                count += 1
+
+        print(f"[load_from_assets] Added {count} images to staging")
+        return count
+
+    # -------------------------------------------------------------------------
+    # Prompt 解析
+    # -------------------------------------------------------------------------
+    def _expand_prefabs(self, prompt_server, selected=None):
+        """Expand selected prefab instances into (prompt_texts, loras).
+
+        `selected` defaults to the prompt server's own selection; the prompt-BLOCK runner
+        passes an explicit (program-resolved) instance list instead. A synced prefab entry
+        carries only INSTANCE state — guid, active flag, per-tag-group
+        active flags, per-lora active flags (see the prompt iframe's sync-prompt payload). The
+        tag and lora CONTENT lives in the prefab library, looked up by guid. Without this
+        expansion a user whose prompt lives in a prefab — the common case, and the log proves
+        it: "/select_prompt received: prompts=0 ... loras=0, prefabs=1" — generated with an
+        EMPTY prompt, because _parse_prompt() used to read only selected_prompts /
+        custom_prompts / selected_loras and dropped prefabs entirely. The main graph run was
+        never affected (SnapshotPromptNode.snapshot_prompt expands prefabs there), which is
+        exactly why only the interactive Generate / Run-Detailer looked "not injected".
+        Mirrors snapshot_prompt()'s expansion: per-tag-group active state, [decoration]
+        nesting, (text:strength) wrapping, prefab custom_prompts, recursive children,
+        per-lora active state and lora_regex validity.
+        """
+        texts = []
+        loras = []
+        if prompt_server is None:
+            return texts, loras
+        if selected is None:
+            selected = getattr(prompt_server, 'selected_prefabs', None) or []
+        if not selected:
+            return texts, loras
+        guid_to_prefab = {}
+        for lib_data in (getattr(prompt_server, 'libraries_data', None) or {}).values():
+            if isinstance(lib_data, dict):
+                for pf in (lib_data.get('prefabs') or []):
+                    guid = pf.get('guid') if isinstance(pf, dict) else None
+                    if guid:
+                        guid_to_prefab[guid] = pf
+        valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
+
+        def expand(node, visited):
+            if not isinstance(node, dict) or not node.get('active', True):
+                return
+            guid = node.get('guid')
+            if not guid or guid in visited:
+                return
+            visited.add(guid)
+            pf = guid_to_prefab.get(guid)
+            if not pf:
+                return
+            # Per-group active state lives on the INSTANCE under tag_groups (the sync payload's
+            # format: {guid, active, tag_groups: [{key, active}], loras, children}); the
+            # standalone graph flow stores the same states under `tags`. Read both.
+            tag_states = {
+                t.get('key'): t.get('active', True)
+                for t in (node.get('tag_groups') or node.get('tags') or [])
+                if isinstance(t, dict)
+            }
+            for tag_group in pf.get('tag_groups', pf.get('tags', [])):
+                # Group identity: the interactive library stores a group NAME under `key`; the
+                # standalone format identifies a group by its joined tag names. Try both.
+                def group_key(g):
+                    if isinstance(g, dict) and g.get('key'):
+                        return g.get('key')
+                    tags = g.get('tags') if isinstance(g, dict) else g
+                    return ' '.join(
+                        t.get('name') or t.get('prompt', '') for t in (tags or []) if isinstance(t, dict))
+                # New TagGroup format: { tags: [...], strength } — strength wraps the group.
+                if isinstance(tag_group, dict) and 'tags' in tag_group:
+                    group_tags = tag_group.get('tags', [])
+                    group_strength = tag_group.get('strength', 1.0)
+                    if not tag_states.get(group_key(tag_group), True):
+                        continue
+                    parts = []
+                    for i, tag in enumerate(group_tags):
+                        if isinstance(tag, dict):
+                            prompt_text = tag.get('prompt', '')
+                            deco_level = len(group_tags) - 1 - i  # last = 0 (base)
+                            text = ('[' * deco_level + prompt_text + ']' * deco_level) if deco_level > 0 else prompt_text
+                            parts.append(text)
+                    if parts:
+                        # Same cleaned form the detailer consumes: no [] decoration, (x:strength) kept.
+                        prompt_str = ' '.join(parts).replace('[', '').replace(']', '')
+                        if group_strength != 1.0:
+                            prompt_str = f"({prompt_str}:{group_strength})"
+                        if prompt_str not in texts:
+                            texts.append(prompt_str)
+                # Old format: Tag[] — per-tag decoration/strength.
+                elif isinstance(tag_group, list):
+                    if not tag_states.get(group_key(tag_group), True):
+                        continue
+                    parts = []
+                    for tag in tag_group:
+                        if isinstance(tag, dict):
+                            prompt_text = tag.get('prompt', '')
+                            deco = tag.get('decoration_num') or 0
+                            strength = tag.get('strength', 1.0)
+                            text = ('[' * deco + prompt_text + ']' * deco) if deco > 0 else prompt_text
+                            if strength != 1.0:
+                                text = f"({text}:{strength})"
+                            parts.append(text)
+                    if parts:
+                        prompt_str = ' '.join(parts).replace('[', '').replace(']', '')
+                        if prompt_str not in texts:
+                            texts.append(prompt_str)
+            cp = pf.get('custom_prompts', '')
+            if cp:
+                texts.append(cp)
+            # Collect loras (per-lora active state from the instance, lora_regex validity)
+            lora_states = {l.get('file_path'): l.get('active', True) for l in node.get('loras', [])}
+            for lora_item in pf.get('loras', []):
+                if not isinstance(lora_item, dict):
+                    continue
+                file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                if not file_path:
+                    continue
+                normalized_path = file_path.replace('\\', '/')
+                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                    continue
+                if not lora_states.get(file_path, True):
+                    continue
+                exists = any((l.get('file_path', '') or l.get('file_name', '')) == file_path for l in loras)
+                if not exists:
+                    loras.append(lora_item)
+            for child in node.get('children', []):
+                expand(child, visited)
+
+        for sp in selected:
+            expand(sp, set())
+        return texts, loras
+
+    def _parse_prompt(self, prompt_server):
+        user_positive = ''
+        user_loras = ''
+        if prompt_server:
+            selected = prompt_server.selected_prompts
+            custom = prompt_server.custom_prompts
+            parts = []
+            for p in selected:
+                text = p['text'] if isinstance(p, dict) else p
+                if text.startswith('<') and text.endswith('>'):
+                    parts.append(text[1:-1])
+                else:
+                    parts.append(text)
+            if custom:
+                parts.append(custom)
+            # The latest tag's unparseable segments live in the editor's Temporary Prompts,
+            # so they belong to this pass's prompt as well — just never persisted.
+            parts.extend(getattr(prompt_server, 'temporary_prompts', None) or [])
+            user_positive = ','.join(parts)
+
+            loras = list(prompt_server.selected_loras or [])
+            # Prefab contents are part of the user's prompt: expand them (tags -> prompt text,
+            # prefab loras -> loadable loras) and merge. See _expand_prefabs() for why this
+            # cannot be skipped — a prefab-only selection otherwise generates with no prompt.
+            prefab_texts, prefab_loras = self._expand_prefabs(prompt_server)
+            loras.extend(prefab_loras)
+            lora_str_parts = []
+            trigger_words = []
+            # Model-only 标记（Edit Lora 的持久配置，按指纹存、这里换算回路径查表一次）：
+            # 拼进 <lora_path:...:strength:model_only>，加载端据此跳过 CLIP。
+            try:
+                slider_cfgs = prompt_server._get_lora_slider_configs_by_filepath() or {}
+            except Exception:
+                slider_cfgs = {}
+            # 同款过滤（prompt_node.py:220-226 / 3881-3886）：架构 regex 没命中的 lora
+            # 不加载，也不出标记词。
+            valid_paths = getattr(prompt_server, '_valid_lora_paths', None) or set()
+            for lora_item in loras:
+                if isinstance(lora_item, dict):
+                    if not lora_item.get('active', True):
+                        continue
+                    file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                    if hasattr(prompt_server, '_resolve_lora_file_path'):
+                        file_path = prompt_server._resolve_lora_file_path(file_path)
+                    if not file_path:
+                        continue
+                    normalized_path = file_path.replace('\\', '/')
+                    if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                        print(f"[QueryLora] SKIP (prompt tab): 不在当前架构 lora_regex 命中集 — {file_path}")
+                        continue
+                    strength = lora_item.get('strength', 1.0)
+                    model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                    lora_str_parts.append(f"<lora_path:{file_path}:{strength}" + (":model_only" if model_only else "") + ">")
+                    trigger_words.extend(lora_item.get('active_tags', []))
+                else:
+                    lora_str_parts.append(str(lora_item))
+            user_loras = ','.join(lora_str_parts)
+            # Trigger words lead the prompt: a lora's own vocabulary is what the model
+            # was trained to key on, so it goes before the user's tag list.
+            # 记下这次拼进去的触发词串：Enable Output 的 `prompt` 键编码用户选择时要剥掉
+            # 它（触发词由 'lora' 键自己带，读回后不该重复出现）。链上有 prompt/Query 块
+            # 时 _resolve_prompt_selection 会整体替换 user_positive 并覆写这里。
+            self._last_trigger_str = ''
+            if trigger_words:
+                trigger_str = ', '.join(trigger_words)
+                user_positive = trigger_str + (', ' + user_positive if user_positive else '')
+                self._last_trigger_str = trigger_str
+            for text in prefab_texts:
+                user_positive = f"{user_positive}, {text}" if user_positive else text
+        return user_positive, user_loras
+
+    # -------------------------------------------------------------------------
+    # Prompt block（pipeline block type='prompt'）运行时解析
+    # -------------------------------------------------------------------------
+    def _resolve_prompt_block(self, server, block_params):
+        # 块只存 preset 引用；内容来自共享 preset（未配置/被删 = 空 selection = 直通）
+        sel = server._prompt_preset_selection((block_params or {}).get('preset_id'))
+        return self._resolve_prompt_selection(server, sel)
+
+    def _resolve_prompt_selection(self, server, sel):
+        """Resolve one raw selection into (user_positive, user_loras) for the detailers AFTER it.
+
+        Shared by the prompt block (whose selection is a persisted preset) and the Query
+        block (whose selection is picked by the user at run time) — both are transient
+        injections with identical semantics.
+
+        Semantics (与产品确认过的行为一致):
+          - 合并 = prompt 节点全局最终选择（selected_prompts/loras/prefabs，已是全局
+            program 的产物）在前 + 该 raw selection 追加在后（source='program'
+            的项剥离——它们会由 selection 的 program 重新生成，与前端 useProgram 语义一致）。
+          - selection 的 applications(programs) 在**合并后的整体 selection**上执行（后端
+            quickjs 引擎，移植 useProgram.ts），所以程序能过滤/修改全局内容。
+          - 输出拼装顺序与 _parse_prompt 完全一致：trigger words -> texts + custom ->
+            prefab texts（<lora:...> 是独立端口，不进文本）。全局在前、selection 在后由合并顺序保证。
+          - 纯临时：只影响本次 run 中排在该块之后的 detailer，不写回任何状态。
+        """
+        ps = server.prompt_server if server else None
+        if ps is None:
+            return '', ''
+        sel = sel or {}
+
+        # 诊断（run 级，一次一行）：trigger words 丢失只可能发生在下面这三处之一 ——
+        # 进来时 tags 就是空、全局那份压过 block 那份、或拼装末尾没接上。逐个打出来对照。
+        def _lora_diag(tag, items):
+            parts = []
+            for l in items or []:
+                if isinstance(l, dict):
+                    parts.append('{}|active={}|active_tags={}|split_mode={}'.format(
+                        l.get('file_path') or l.get('file_name'),
+                        l.get('active', True), l.get('active_tags'), l.get('split_mode')))
+                else:
+                    parts.append('(non-dict){}'.format(l))
+            print(f"[QueryLora] {tag}: {parts}")
+        _lora_diag('global selected_loras', getattr(ps, 'selected_loras', None))
+        _lora_diag('block selection loras', sel.get('loras'))
+
+        # --- 合并 tags：全局在前（text -> 单 tag TagGroup），block 在后 ---
+        merged_tags = []
+        for p in (getattr(ps, 'selected_prompts', None) or []):
+            text = p.get('text') if isinstance(p, dict) else str(p)
+            src = p.get('source', 'normal') if isinstance(p, dict) else 'normal'
+            if text.startswith('<') and text.endswith('>'):
+                text = text[1:-1]
+            if not text:
+                continue
+            merged_tags.append({'tags': [{'name': text, 'prompt': text, 'category': ''}],
+                                'strength': 1.0, 'source': src})
+        for g in (sel.get('tags') or []):
+            if isinstance(g, dict) and g.get('source', 'normal') == 'program':
+                continue
+            if isinstance(g, dict):
+                merged_tags.append(copy.deepcopy(g))
+
+        # --- 合并 loras（全局优先）与 prefabs（按 guid 去重）---
+        # 去重键要先过 _resolve_lora_file_path：全局那份的 file_path 在落盘时被换成了指纹
+        # （prompt_node.py:1154），preset/Query 回答带的是真实路径，字面比较会把同一条 lora
+        # 判成两条（重复加载 + 标记词重复）。region 的同款去重就是先解析再比（3995-3997）。
+        def _lora_identity(l):
+            fp = l.get('file_path') or l.get('file_name') or ''
+            if not fp:
+                return ''
+            return ps._resolve_lora_file_path(fp) if hasattr(ps, '_resolve_lora_file_path') else fp
+        merged_loras = []
+        seen_lora = set()
+        for l in list(getattr(ps, 'selected_loras', None) or []) + list(sel.get('loras') or []):
+            if not isinstance(l, dict):
+                continue
+            key = _lora_identity(l)
+            if not key or key in seen_lora:
+                continue
+            seen_lora.add(key)
+            merged_loras.append(copy.deepcopy(l))
+        merged_prefabs = []
+        seen_guid = set()
+        for p in list(getattr(ps, 'selected_prefabs', None) or []) + list(sel.get('prefabs') or []):
+            if not isinstance(p, dict):
+                continue
+            guid = p.get('guid')
+            if not guid or guid in seen_guid:
+                continue
+            seen_guid.add(guid)
+            merged_prefabs.append(copy.deepcopy(p))
+
+        custom_parts = [c for c in [getattr(ps, 'custom_prompts', '') or '', sel.get('custom_prompts') or ''] if c]
+        merged_custom = '\n'.join(custom_parts)
+
+        # --- block 的 programs 在合并 selection 上执行（无 programs = 原样通过）---
+        from ..pipeline.prompt_program_engine import PromptProgramEngine, tags_to_display_string
+        engine = PromptProgramEngine(ps)
+        result = engine.run(sel.get('programs') or [], merged_tags, merged_loras, merged_prefabs, merged_custom)
+
+        # --- 拼装（与 _parse_prompt 相同的顺序与格式）---
+        parts = []
+        for g in result['result_tags']:
+            text = tags_to_display_string(g)
+            if text.startswith('<') and text.endswith('>'):
+                text = text[1:-1]
+            if text:
+                parts.append(text)
+        if result['result_custom_prompts']:
+            parts.append(result['result_custom_prompts'])
+        # Same as _parse_prompt: the last tag's unparseable segments are this pass's prompt.
+        parts.extend(getattr(ps, 'temporary_prompts', None) or [])
+        user_positive = ','.join(parts)
+
+        loras = list(result['result_loras'])
+        prefab_texts, prefab_loras = self._expand_prefabs(ps, selected=result['result_prefabs'])
+        loras.extend(prefab_loras)
+        lora_str_parts = []
+        trigger_words = []
+        # Model-only 标记（同 _parse_prompt）：Edit Lora 的持久配置兜底 + 条目自带优先。
+        try:
+            slider_cfgs = ps._get_lora_slider_configs_by_filepath() or {}
+        except Exception:
+            slider_cfgs = {}
+        # 与 prompt 节点自己的输出同一条规矩（prompt_node.py:220-226 / 3881-3886）：
+        # 没被当前架构 lora_regex 命中的 lora 既不加载，也不出标记词。
+        valid_paths = getattr(ps, '_valid_lora_paths', None) or set()
+        for lora_item in loras:
+            if isinstance(lora_item, dict):
+                if not lora_item.get('active', True):
+                    continue
+                file_path = lora_item.get('file_path', '') or lora_item.get('file_name', '')
+                if hasattr(ps, '_resolve_lora_file_path'):
+                    file_path = ps._resolve_lora_file_path(file_path)
+                if not file_path:
+                    continue
+                normalized_path = file_path.replace('\\', '/')
+                if valid_paths and normalized_path not in valid_paths and file_path not in valid_paths:
+                    print(f"[QueryLora] SKIP: 不在当前架构 lora_regex 命中集 — {file_path}")
+                    continue
+                strength = lora_item.get('strength', 1.0)
+                model_only = bool(lora_item.get('model_only', False)) or bool((slider_cfgs.get(file_path) or {}).get('model_only', False))
+                lora_str_parts.append(f"<lora_path:{file_path}:{strength}" + (":model_only" if model_only else "") + ">")
+                trigger_words.extend(lora_item.get('active_tags', []))
+            else:
+                lora_str_parts.append(str(lora_item))
+        user_loras = ','.join(lora_str_parts)
+        # Same leading position as _parse_prompt: trigger words before every other segment.
+        # 这里替换的是整条 user_positive，所以触发词串也以这次为准覆写（同上，供
+        # Enable Output 剥离用）。
+        self._last_trigger_str = ''
+        if trigger_words:
+            trigger_str = ', '.join(trigger_words)
+            user_positive = trigger_str + (', ' + user_positive if user_positive else '')
+            self._last_trigger_str = trigger_str
+        for text in prefab_texts:
+            user_positive = f"{user_positive}, {text}" if user_positive else text
+        # 诊断：库里 trainedWords（lora_data[*]['tags']）能不能兜住这次的空 active_tags。
+        lib_tags = {}
+        for items in (getattr(ps, 'lora_data', None) or {}).values():
+            for it in items or []:
+                if isinstance(it, dict) and it.get('file_path'):
+                    lib_tags[it['file_path']] = it.get('tags') or []
+        _lora_diag('merged→loadable', loras)
+        print(f"[QueryLora] library tags by path: { {k.split('/')[-1]: v for k, v in lib_tags.items() if k in [l.get('file_path') for l in loras if isinstance(l, dict)]} }")
+        print(f"[QueryLora] final trigger_words={trigger_words} | user_loras={user_loras}")
+        _mo = [p.strip() for p in user_loras.split(',') if p.strip().endswith(':model_only>')]
+        print(f"[QueryLora] model-only (CLIP untouched): {_mo if _mo else 'none'}")
+        # Enable Output 读的就是这份「这次真正生效的合并选择」：引擎产物（program 生成/过滤
+        # 之后的结果）在这里定格，落盘时按 cache_data 的键形重放，不再跑第二次引擎。
+        server.last_effective_prompt_selection = {
+            'prompts': [{'text': tags_to_display_string(g) if isinstance(g, dict) else str(g),
+                         'source': g.get('source', 'normal') if isinstance(g, dict) else 'normal'}
+                        for g in result['result_tags']],
+            'loras': result['result_loras'],
+            'prefabs': result['result_prefabs'],
+            'custom_prompts': result['result_custom_prompts'],
+            'programs': list(sel.get('programs') or []),
+            'filter_tag_groups': result['filter_tag_groups'],
+            'filter_loras': result['filter_loras'],
+            'filter_prefabs': result['filter_prefabs'],
+        }
+        return user_positive, user_loras
+
+    def _save_run_output_png(self, server, image):
+        """Enable Output：这一趟的最终产出连同 prompt 编码写进 outputs/ 的 PNG。
+
+        `parameters` chunk 的键形与 SnapshotPromptNode 的 cache 输出一字不差（见
+        prompt_node.py:4057-4069），所以这张图能被 PromptNode 的「Load From Image」
+        原样读回。内容按这次真正生效的东西编：链里有 prompt / Query 块就编块出口
+        暂存的合并选择，没有这类块则回落到 prompt 节点的全局选择；`prompt` 键是
+        这次生效的**用户选择**（标签 / 自定义 / prefab 文本，剥离了打头的 lora 触发词，
+        也不掺 pipeline context 自带的 prompt 与 Generate Text 的改写 —— 触发词由
+        'lora' 键的 active_tags 自己提供，读回后不该重复出现）。落盘路径与命名走
+        ComfyUI 自己的计数（get_save_image_path → detailer_00001_.png）。
+
+        整份 fail-open：写盘失败只打 [Output] 警告，不能把一趟已完成的 run 变成 error。
+        """
+        try:
+            import folder_paths
+            from PIL.PngImagePlugin import PngInfo
+            from ..io.disk_node import _sanitize_json
+
+            if image is None:
+                print("[Output] WARNING: no final image to save")
+                return
+            tensor = image[0] if image.dim() == 4 else image
+            arr = (tensor.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            h, w = int(arr.shape[0]), int(arr.shape[1])
+            pil = Image.fromarray(arr, mode='RGBA' if arr.shape[-1] == 4 else 'RGB')
+
+            ps = server.prompt_server
+            eff = server.last_effective_prompt_selection
+            if eff is not None:
+                prompt_items = eff['prompts']
+                loras = eff['loras']
+                prefabs = eff['prefabs']
+                programs = eff['programs']
+                custom = eff['custom_prompts']
+                f_tags, f_loras, f_prefabs = (eff['filter_tag_groups'], eff['filter_loras'],
+                                              eff['filter_prefabs'])
+                source = 'effective selection'
+            else:
+                # 没有 prompt / Query 块 = prompt 节点的全局选择就是这次的输入。取的是链跑完、
+                # 主循环剥离 program 项**之前**的状态，所以这里能看到 program 加出来的东西。
+                prompt_items = [({'text': p['text'], 'source': p.get('source', 'normal')}
+                                 if isinstance(p, dict) else {'text': p, 'source': 'normal'})
+                                for p in (getattr(ps, 'selected_prompts', None) or [])]
+                loras = getattr(ps, 'selected_loras', None) or []
+                prefabs = getattr(ps, 'selected_prefabs', None) or []
+                programs = getattr(ps, 'selected_programs', None) or []
+                custom = getattr(ps, 'custom_prompts', '') or ''
+                f_tags = getattr(ps, 'filter_tag_groups', None) or []
+                f_loras = getattr(ps, 'filter_loras', None) or []
+                f_prefabs = getattr(ps, 'filter_prefabs', None) or []
+                source = 'prompt node global'
+
+            # 落盘存指纹而不是路径（与 prompt 节点一致）：读回时按当前扫描的指纹重定位路径。
+            if (ps is not None and hasattr(ps, '_convert_loras_to_fingerprint_keys')
+                    and all(isinstance(l, dict) for l in loras)):
+                loras = ps._convert_loras_to_fingerprint_keys(loras)
+
+            # region 与 prompt_node.py:4043-4047 同形：region_result 是前端每次上报的整包，
+            # 这里只取读回需要的三样，预览图那种派生量不进元数据。
+            region_json = ''
+            rr = getattr(ps, 'region_result', None)
+            if rr:
+                try:
+                    region_json = json.dumps({
+                        'boxes': rr.get('boxes', []),
+                        'format_slots': rr.get('format_slots', {}),
+                        'background_context': rr.get('background_context', None),
+                    }, ensure_ascii=False)
+                except Exception:
+                    region_json = ''
+
+            cache_data = {
+                # 用户自己的选择（无 pipeline prompt / 无 lora 触发词，见块循环捕获处）。
+                'prompt': getattr(server, 'last_output_positive', '') or '',
+                'prompts': json.dumps(prompt_items, ensure_ascii=False),
+                'lora': json.dumps(loras, ensure_ascii=False),
+                'prefab': json.dumps(prefabs, ensure_ascii=False),
+                'program': json.dumps(programs, ensure_ascii=False),
+                'prompt_parsing': ", ".join(getattr(ps, 'parsed_prompts', []) or []),
+                'custom_prompts': custom,
+                'filter_tag_groups': json.dumps(f_tags, ensure_ascii=False),
+                'filter_loras': json.dumps(f_loras, ensure_ascii=False),
+                'filter_prefabs': json.dumps(f_prefabs, ensure_ascii=False),
+                'region': region_json,
+            }
+            data_json = json.dumps(_sanitize_json(cache_data), ensure_ascii=False)
+
+            full_output_folder, filename, counter, _subfolder, _prefix = folder_paths.get_save_image_path(
+                'detailer', folder_paths.get_output_directory(), w, h)
+            os.makedirs(full_output_folder, exist_ok=True)
+            path = os.path.join(full_output_folder, f"{filename}_{counter:05}_.png")
+            metadata = PngInfo()
+            metadata.add_text('parameters', data_json)
+            pil.save(path, format='PNG', pnginfo=metadata, compress_level=4)
+            print(f"[Output] saved {path} ({w}x{h}, {len(prompt_items)} tag(s), "
+                  f"{len(loras)} lora(s), source={source}, prompt={len(cache_data['prompt'])} chars)")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[Output] WARNING: failed to write the output PNG: {e}")
+
+    def _model_only_paths(self, ps):
+        """Model-only lora 的路径集合（持久 slider config，盘上重载 —— 跨实例保鲜）。"""
+        if ps is None or not hasattr(ps, '_get_lora_slider_configs_by_filepath'):
+            return []
+        try:
+            cfgs = ps._get_lora_slider_configs_by_filepath() or {}
+        except Exception:
+            return []
+        return [str(p).replace('\\', '/') for p, c in cfgs.items()
+                if isinstance(c, dict) and c.get('model_only')]
+
+    @staticmethod
+    def _mark_model_only(lora_items, mo_paths):
+        """给缺 `:model_only` 尾标的 lora 串按持久配置补标记。
+
+        context 里的串是 prompt 节点上次图执行时冻结的 —— 之后才打开的 model_only
+        只有在这里补标，同一趟 run 才能生效（ producers 侧的拼串只覆盖「新执行」）。
+        匹配按路径与文件名两个口径：同名副本共享同一指纹/同一份配置，标哪条都命中。
+        """
+        if not lora_items or not mo_paths:
+            return lora_items
+        mo_lower = [p.lower() for p in mo_paths]
+        mo_stems = []
+        for p in mo_lower:
+            name = p.rsplit('/', 1)[-1]
+            mo_stems.append(name.rsplit('.', 1)[0] if '.' in name else name)
+        out = []
+        for item in lora_items:
+            s = item.strip() if isinstance(item, str) else str(item)
+            if s.endswith(':model_only>') or not (s.startswith('<') and s.endswith('>')):
+                out.append(item)
+                continue
+            body = s[1:-1]
+            # 按 _apply_loras 的真实解析语义解出路径/名字，再与持久配置精确匹配 ——
+            # 不能拿原始串做尾段剥离（split-mode 串 :strength:tag 会让匹配落空）。
+            hit = False
+            try:
+                if body.startswith('lora_path:'):
+                    b = body[len('lora_path:'):]
+                    last = b.rfind(':')
+                    if last != -1 and b[last + 1:] != 'model_only':
+                        path_l = b[:last].replace('\\', '/').lower()
+                        nm = path_l.rsplit('/', 1)[-1]
+                        st = nm.rsplit('.', 1)[0] if '.' in nm else nm
+                        hit = any(path_l == pl or st == stem
+                                  for pl, stem in zip(mo_lower, mo_stems))
+                elif body.startswith('lora:'):
+                    parts = body.split(':', 2)
+                    if len(parts) >= 2:
+                        nm = parts[1].replace('\\', '/').lower()
+                        st = nm.rsplit('.', 1)[0] if '.' in nm else nm
+                        hit = any(nm == p.rsplit('/', 1)[-1] or nm == stem or st == stem
+                                  for p, stem in zip(mo_lower, mo_stems))
+            except Exception:
+                hit = False
+            out.append(s[:-1] + ':model_only>' if hit else s)
+        return out
+
+    def _await_query_answer(self, server, block, index):
+        """Park the chain on a Query block until the user answers its prompt dialog.
+
+        The run loop blocks on an Event while /api/status publishes the pending query and
+        /api/query_answer releases it. ComfyUI's interrupt still reaches a parked chain.
+        Cancelling the dialog (or never answering) ABORTS the whole chain — the user asked
+        for the run to stop rather than continue with a prompt they never chose.
+
+        A Query may bind the same shared preset a prompt block uses: the wait publishes it so
+        the dialog opens pre-ticked from it, and `persistent` rides along so the answer
+        handler can write the final selection back into that preset (see
+        `_answer_pending_query`). Without persistence the answer lives only in this run.
+        """
+        import threading as _threading
+        import time as _time
+        evt = _threading.Event()
+        bp = block.get('params', block) if isinstance(block, dict) else None
+        preset_id = bp.get('preset_id') if isinstance(bp, dict) else None
+        query = {
+            'id': 'query-%d-%d' % (index, int(_time.time() * 1000)),
+            'name': (block.get('name') if isinstance(block, dict) else None) or 'Query',
+            'index': index,
+            'preset_id': preset_id,
+            'persistent': bool(isinstance(bp, dict) and bp.get('persistent')) and bool(preset_id),
+            'event': evt,
+            'answer': None,
+            'cancelled': False,
+        }
+        server.pending_query = query
+        print(f"[PipelineBlock {index + 1}] Query block '{query['name']}' — waiting for the user's prompt choice"
+              + (f" (preset '{preset_id}'" + (', persistent)' if query['persistent'] else ')') if preset_id else ''))
+        timeout = float(getattr(server, 'query_timeout', 600) or 600)
+        deadline = _time.time() + timeout
+        try:
+            while not evt.wait(0.5):
+                mm.throw_exception_if_processing_interrupted()
+                if _time.time() >= deadline:
+                    raise RuntimeError(f'Query timed out after {int(timeout)}s — the chain was aborted')
+        finally:
+            # Whatever happens (answer / cancel / interrupt), nothing stays parked.
+            server.pending_query = None
+        if query['cancelled']:
+            raise RuntimeError('Query cancelled — the chain was aborted')
+        if query['answer'] is None:
+            raise RuntimeError('Query answered with nothing — the chain was aborted')
+        return query['answer']
+
+    def _resolve_ref_image_for_generate_text(self, server, key):
+        """取 Enable Edit 的 Ref Image（工作区条目 id），供 Generate Text 使用。
+
+        语义（用户确认）：只有 `enable_edit` 开着、且该 block 真的选了 Ref Image 时才送图；
+        取不到就返回 None（调用方静默降级为纯文本）。整体 fail-open —— 这里绝不抛异常，
+        否则会顺着生成链路把整条采样链带崩。返回 [B,H,W,C] float tensor 或 None。
+
+        ★ 类归属：必须留在 SnapshotDetailerSamplerNode（run 链路 `self.` 调用），
+        不能搬到 Server —— 跨顶层类会退化成只在实机 run 时才炸的 AttributeError。
+        """
+        if server is None or not key:
+            return None
+        try:
+            img = server.get_staging_image(key)
+            if img is None:
+                print(f"[GenerateText] ref image id '{key}' not found in staging — text-only")
+                return None
+            from ...libs.generate_text_utils import normalize_ref_image
+            return normalize_ref_image(img)
+        except Exception as e:
+            print(f"[GenerateText] ref image lookup failed ({e}) — text-only")
+            return None
+
+    def _debug_reference_slots(self, block_no, ref_image, ref_latent, injected, pipeline,
+                               work_limit=None, ref_limit=None,
+                               work_align=None, ref_align=None):
+        """把本块 conditioning **真正收到的每一张参考图**按槽位顺序记进 Debug。
+
+        编号对齐 `parse_prompt_image_refs` 解码出的 `<image N>`：1 = context 图，2 起 =
+        Extra Prompt 里的 staging 引用（首次出现顺序）。`<image 1>` 以前在面板上是空的 ——
+        它不经过注入循环，而是随 `reference_image`（或 Flux2Klein 的本块 latent）从另一条
+        入口进 get_conditioning，于是"看不到"被当成了"没嵌进去"。
+
+        ★ 类归属同 `_resolve_ref_image_for_generate_text`：只在 run 链路的 `self.` 上调用。
+        """
+        if dbg.current_trace() is None:
+            return
+        vae = pipeline.vae
+        slots = []
+        # QwenImage21 的第一格是"直传"：与本块 target latent 同一份像素、同一份 latent，
+        # 不再独立推尺寸重编码 —— 面板要说清楚，别让人以为它被 ref 旋钮管过。
+        is_qwen21 = bool(arch_qwen_image21.matches(pipeline.config))
+        first_note = ''
+        if is_qwen21:
+            first_note = '与 target latent 同源同尺寸，不再缩放；ref 旋钮只管第 2 张起'
+        if ref_image is not None:
+            if not (work_limit or work_align):
+                # 上游 interface 块换过工作图（或 Limit 关）：括号里没旋钮可显示，
+                # 就把"尺寸从哪来"写进正文，避免读数空着被误认成没约束。
+                first_note += ('；本块尺寸沿用上游产出，未被全局 pixels/align 缩放'
+                               if first_note else '尺寸 = 上游产出（未被全局 pixels/align 缩放）')
+            slots.append(('Context Image（本块工作图，Enable Edit 下即 <image 1>）', ref_image,
+                          work_limit, work_align, first_note))
+        elif ref_latent is not None and vae is not None:
+            try:
+                slots.append(('本块 latent（Flux2Klein 的第一张参考是 latent，此为解码预览）',
+                              VAEDecode().decode(vae=vae, samples={'samples': ref_latent['samples']})[0],
+                              work_limit, work_align, ''))
+            except Exception as e:
+                print(f"[Debug] reference slot latent decode failed: {e}")
+        for _key, _img in injected:
+            slots.append((f'Extra Prompt 嵌图 <image_id:{_key}> → reference_latents', _img,
+                          ref_limit, ref_align, ''))
+
+        if not slots:
+            dbg.record_stage(f'Block {block_no} · 参考图',
+                             '一张都没进 conditioning（Enable Edit 关着时引用图根本不注入）',
+                             block=block_no)
+            return
+        # pipeline 自带的 reference_latents 会插在 context 和嵌图之间，那样 <image N> 的
+        # 编号就和真实槽位错位了。正常情况下它是空的，一旦出现必须在面板上说清楚。
+        _extra = len((pipeline.reference.reference_latents if pipeline.reference else None) or []) - len(injected)
+        if _extra > 0:
+            dbg.record_stage(f'Block {block_no} · 参考图编号错位',
+                             f'pipeline 自带 {_extra} 条 reference_latents，排在嵌图之前 —— '
+                             f'嵌图的实际槽位比文本里的 <image N> 大 {_extra}',
+                             block=block_no)
+        for n, (_src, _img, _limit, _align, _note) in enumerate(slots, start=1):
+            dbg.record_image(f'Block {block_no} · Ref <image {n}>', _img, block=block_no,
+                             pixel_limit=_limit, align=_align,
+                             detail=f'共 {len(slots)} 张 · 第 {n} 张 · 来源：{_src}'
+                                    + (f' · {_note}' if _note else ''))
+
+    def _preflight_generate_text_images(self, images, clip, params):
+        """把「这批图到底能不能变成 embedding」实测一遍，供 Debug 显示。
+
+        用户反馈「感觉传进去的 image 并没有正确影响 text generate」—— 光看
+        `describe_image_support` 的名字推断不够，这里**真的跑一次 tokenize**，
+        数 token 流里有没有 `{'type': 'image'}` 元素：
+          · (True,  '已确认 N 个 image embedding 进入 token 流')
+          · (False, '★ 图不会生效 — use_default_template=False 绕过了视觉模板 …')
+          · (None,  '未验证（tokenize 探针不可用: …)）
+        全程 fail-open，绝不抛进采样链（探测用的 tokenize 不产生任何副作用：
+        不采样、不解码、不碰 model）。
+        """
+        if not images or clip is None:
+            return None, ''
+        # ★ 探测 helper 一律用「模块级 import」拿，别在函数里 `from ..libs import`：
+        #   相对导入会解析成 `kolid_comfy.libs.generate_text_utils`，一旦换了加载方式
+        #   （装包 / spec_from_file_location / 测试 exec）就会 ImportError，外部表现
+        #   是「静默不验证」—— 也就是说这个诊断自己会静默失效。
+        try:
+            from libs.generate_text_utils import (
+                normalize_ref_images, describe_image_support,
+                _tokens_contain_image_embedding, text_defeats_vision_template,
+                strip_leading_chat_template)
+        except Exception:
+            try:
+                from ...libs.generate_text_utils import (
+                    normalize_ref_images, describe_image_support,
+                    _tokens_contain_image_embedding, text_defeats_vision_template,
+                    strip_leading_chat_template)
+            except Exception as e:
+                return None, f'未验证（helper 不可用: {e}）'
+        try:
+            # ★★ 探针必须走与运行时**同一条入口**：`images=`（list of [1,H,W,C]），
+            #   而不是 `image=`；两者在 qwen3vl 里等价（内部会拆成同一个 list），
+            #   但统一入口能保证 Debug 结论与 run_generate_text 的实测结论一致。
+            #   踩过的坑：这里曾写成 `clip.tokenize(batch, ...)` —— 把整张图当 text 传，
+            #   于是永远数不到 image embedding，Debug 里长期假报「图不会生效」，
+            #   与 run_generate_text 的实测结论自相矛盾。
+            img_list, kept = normalize_ref_images(images, single=True)
+            if img_list is None:
+                return False, '★ 图不会生效 — 没有可用图（尺寸不一致 / 归一失败）'
+            ok, why = describe_image_support(clip, bool((params or {}).get(
+                'use_default_template', True)))
+            if not ok:
+                return False, f'★ 图不会生效 — {why}'
+            use_tpl = bool((params or {}).get('use_default_template', True))
+            # ★★ 还有一个更隐蔽的坑：文本若以 `<|im_start|>` 之类的 chat 模板标记开头，
+            #   编码器 qwen3vl.py:167 的 `skip_template = skip_template or
+            #   text.startswith('<|im_start|>')` 会直接绕掉视觉模板 → 图静默失效。
+            #   ★ 探针文本必须与运行时一致地做 strip（指令为空时文本就是 chat 模板本身，
+            #   运行时已经 strip 掉了，探针不 strip 就会得出相反的结论）。
+            instr = str((params or {}).get('_instruction') or '').strip()
+            probe_text = instr if instr else 'x'
+            try:
+                probe_text, _ = strip_leading_chat_template(probe_text)
+            except Exception:
+                pass
+            if not probe_text.strip():
+                probe_text = 'x'  # 编码器对空文本会走 prevent_empty_text 分支
+            tokens = clip.tokenize(
+                probe_text, images=img_list, skip_template=not use_tpl,
+                min_length=1, prevent_empty_text=True)
+            found, count = _tokens_contain_image_embedding(tokens)
+            if found:
+                return True, (f'已确认生效 — {count} 个 image embedding 进入 token 流'
+                              f'（{len(kept)} 张图）')
+            return False, ('★ 图不会生效 — clip.tokenize 收到了图，但 token 流里'
+                           '没有任何 image embedding（视觉模板被绕过 / 编码器非多模态）')
+        except Exception as e:
+            return None, f'未验证（tokenize 探针失败: {type(e).__name__}: {e}）'
+
+    # -------------------------------------------------------------------------
+    # Detailer
+    # -------------------------------------------------------------------------
+    def _run_pipeline_blocks(self, pipeline, user_mask, user_positive, user_loras, global_params, blocks, server=None, extra_prompt='', prompt_ref_ids=None):
+        seed = global_params['seed']
+        mask_grow = int(global_params.get('mask_grow', 32))
+        mask_blur = int(global_params.get('mask_blur', 32))
+        context_regex = global_params['context_regex']
+        next_pipeline = pipeline.copy()
+        if next_pipeline.cache is None:
+            raise ValueError('PipelineData cache is empty')
+        if next_pipeline.model is None:
+            raise ValueError('PipelineData model is empty, cannot Detailer')
+
+        # 两头都空 = 没有任何像素来源：pipeline 没带图，而画布也没交出合成图。这句话以前写在
+        # get_image() 下面，永远读不到 —— image 与 latent 皆空时 get_image 自己先抛一句中文长串。
+        if next_pipeline.image is None and next_pipeline.latent is None:
+            raise ValueError('No image available for detailer — the pipeline carries no image and the '
+                             'Blend canvas delivered no composite (add a layer, or open a .cud, first)')
+        original_image = next_pipeline.get_image()
+
+        dbg.record_block(0, f'链条开始（共 {len(blocks)} 个 block）',
+                         f'enable_mask={bool((blocks[0].get("params", blocks[0]) or {}).get("enable_mask", True))}')
+        dbg.record_stage('原始输入',
+                         f'image={tuple(original_image.shape)}',
+                         block=0,
+                         user_positive=user_positive,
+                         user_loras=debug_lora_entries(user_loras))
+        dbg.record_image('裁剪前原图（original_image）', original_image, block=0)
+        if user_mask is not None:
+            dbg.record_mask('原始 mask（未扩张）', user_mask, block=0)
+
+        if user_mask is not None:
+            user_mask = user_mask.clone()
+            user_mask = (user_mask > 0).float()
+        # First detailer block: Preprocess Settings 的开关存在它的 params 上（recover_crop /
+        # enable_mask / enable_limit），所以这些开关每个 Pipeline Preset 各自一份。
+        # crop_reserve / pixels / align 是 GLOBAL SETTINGS（server config → global_params），
+        # 不再按 preset 区分。必须在这里先取 —— mask 扩张也要看 enable_mask。
+        first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
+        first_bp = first_detailer.get('params', first_detailer)
+        # Enable Mask 关 = 不做围绕 mask 的三步预处理：grow/blur 归零、不按 mask 裁剪、
+        # 不 recover crop。mask 本身仍然限制重绘区域 —— 关掉的只是它外面那几层。
+        enable_mask = bool(first_bp.get('enable_mask', True))
+        if not enable_mask:
+            mask_grow = 0
+            mask_blur = 0
+        # mask 可能整体缺席（Enable Mask 关 + 没画 Mask 层）：expand_mask 不接受 None，
+        # 没有 mask 就没有可扩张的东西，直接置 None（下游全部对 None 容错）。
+        expanded_mask = (expand_mask(user_mask, grow=mask_grow, blur=mask_blur)
+                         if user_mask is not None else None)
+        dbg.record_mask('扩张 / 羽化后 mask', expanded_mask, block=0,
+                        detail=f'grow={mask_grow}, blur={mask_blur}')
+
+        # 整条链（含 interface block）都在 crop 工作区坐标系内运行；run 之前 crop，
+        # run 之后由 recover 系列复原。interface block 不重算/不操作 mask 的 crop，
+        # 但其输出尺寸须与 crop 工作区连贯（由用户/子图保证，pipeline 内不做 resize）。
+        first_crop_reserve = int(global_params.get('crop_reserve', 32))
+        # Preprocess Settings 的 Recover Crop 开关（与 crop_reserve 一样取自第一个
+        # detailer block）。关掉时这一趟产出停在 crop 工作区：不 recover_size、不
+        # recover_crop，patch 连同裁剪矩形交给前端，由 Blend 画布用 transform 贴回原位。
+        do_recover_crop = bool(first_bp.get('recover_crop', True))
+        if enable_mask:
+            cropped_image, cropped_mask, crop_info = crop_mask(
+                image=original_image,
+                mask=expanded_mask,
+                reserve=first_crop_reserve
+            )
+        else:
+            # Enable Mask 关：整幅图就是工作区。没有裁剪矩形（crop_info=None），收尾
+            # 也就不走 recover 与「patch 贴回」两条路 —— 产出本身就是整幅结果。
+            cropped_image, cropped_mask, crop_info = original_image, expanded_mask, None
+            print(f"[Detailer] Enable Mask off — no grow/blur, no crop, no recover; "
+                  f"workspace = the full image {tuple(original_image.shape)}")
+            dbg.record_stage('裁剪跳过（Enable Mask 关）',
+                             f'工作区 = 整幅图 {tuple(original_image.shape)}', block=0)
+
+        # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
+        # pixels / align 取自 GLOBAL SETTINGS（global_params ← server config），不再按
+        # preset 区分。interface 之后的 block 不再单独 limit，pipeline 内不做额外 resize。
+        limit_pixels_val = int(global_params.get('pixels', 1048576))
+        limit_align = int(global_params.get('align', 8))
+        # 输入侧显存封顶：ref image 与 generate text 的图在进 VAE / 多模态塔**之前**先按
+        # cap_only 语义 limit 一刀 —— pixels 是上限而不是目标（只压不涨），align 向下落格。
+        # pixels=0 = 不设上限（limit_pixels 的 cap_only 分支把 falsy pixels 当"无预算"）。
+        ref_cap_pixels = int(global_params.get('ref_pixels', 0))
+        ref_cap_align = int(global_params.get('ref_align', 8)) or 1
+        tgen_cap_pixels = int(global_params.get('tgen_pixels', 0))
+        tgen_cap_align = int(global_params.get('tgen_align', 8)) or 1
+        # QwenImage2.1: crop 尺寸需与 vision token / latent 共享的 32 像素格对齐
+        # 即使 Enable Limit 关掉也要保住 —— 它的 latent 网格不接受未对齐尺寸。
+        needs_grid_align = bool(arch_qwen_image21.matches(next_pipeline.config))
+        if needs_grid_align:
+            limit_align = arch_qwen_image21.adjust_align(limit_align)
+        enable_limit = bool(first_bp.get('enable_limit', True))
+        if not enable_limit and not needs_grid_align:
+            # Enable Limit 关：不缩放也不对齐，工作分辨率 = 裁剪（或整幅）分辨率。
+            resized_image, resized_mask, resize_info = cropped_image, cropped_mask, None
+        elif enable_limit:
+            # Pixels 是"目标"（limit_pixels 语义）：大图缩小、小图放大补足到预算。
+            resized_image, resized_mask, resize_info = limit_pixels(
+                cropped_image, limit_pixels_val, cropped_mask, limit_align)
+        else:
+            # Limit 关但架构要求格子对齐（QwenImage2.1 的 latent/vision 网格）：
+            # 同一次 limit_pixels 调用里只落格不缩放 —— pixels 传 None 即
+            # "不设像素目标"，仅就近吸附到 align 格，尺寸变动至多半格。
+            resized_image, resized_mask, resize_info = limit_pixels(
+                cropped_image, None, cropped_mask, limit_align)
+
+        current_image = resized_image
+        current_mask = resized_mask
+        last_resize_info = None
+        # 工作分辨率是被哪颗像素旋钮定下来的（None = Enable Limit 关，尺寸就是裁剪结果）。
+        # interface 块会把 current_image 换成子图产物 —— 那张没被 limit 过，届时置 None。
+        work_pixel_limit = limit_pixels_val if enable_limit else None
+        # 落格同理：没走 limit 也没走架构格子（或 align=1）时这张图不曾被对齐过，不给读数。
+        work_align = (limit_align if (enable_limit or needs_grid_align) and limit_align > 1
+                      else None)
+        dbg.record_stage('裁剪 + 缩放后工作区',
+                         f'image={tuple(resized_image.shape)}'
+                         + (f', mask={tuple(resized_mask.shape)}' if resized_mask is not None else ', mask=None'),
+                         block=0,
+                         crop_info=({k: (list(v) if isinstance(v, tuple) else v)
+                                     for k, v in crop_info.items()} if isinstance(crop_info, dict) else crop_info),
+                         resize_info=(list(resize_info) if isinstance(resize_info, (list, tuple)) else resize_info))
+        dbg.record_image('裁剪 / 缩放后工作图', resized_image, block=0,
+                         pixel_limit=work_pixel_limit, align=work_align)
+        dbg.record_mask('裁剪 / 缩放后工作 mask', resized_mask, block=0,
+                        pixel_limit=work_pixel_limit, align=work_align)
+        last_resized_mask = None
+
+        # Save original pipeline state for restoration after each block
+        _orig_enable_edit = next_pipeline.config.get("enable_edit") if next_pipeline.config else None
+        _orig_grounding_px = next_pipeline.config.get("grounding_px") if next_pipeline.config else None
+        _orig_ref_latents = list(next_pipeline.reference.reference_latents) if next_pipeline.reference and next_pipeline.reference.reference_latents else []
+        _orig_model = next_pipeline.model
+        _orig_model_negative = next_pipeline.config.get("model_negative") if next_pipeline.config else None
+
+        # Enable Edit: 在 block 循环之前对 pipeline model 统一打一次补丁（与
+        # PipelineEnableEditNode / 主 SamplerNode 路径相同的机制）。ref_boost 等
+        # 为 pipeline 级 config，对所有 block 相同；fit_mode 由 block 级
+        # edit_mode 逐 block 写入 pixel_state（forward 动态读取）。之后循环内
+        # get_model_clip() 的 clone 共享补丁闭包（含 pixel_state），节点级
+        # source 注入（source_images / source_latents）直接写入 pixel_state ——
+        # conditioning 只承载 grounded encode 语义输出（数据流分离，对齐
+        # krea2edit source patch 参考）。Krea2: source patch（fit/crop 双模式）；
+        # Flux2Klein: 原生 ref 路径。
+        _edit_patched = False
+        _edit_pixel_state = None
+        _any_edit = any(
+            (b.get('params', b) or {}).get('enable_edit', False)
+            for b in blocks if b.get('type') != 'interface'
+        )
+        if _any_edit:
+            architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+            if architecture and re.search(r"Krea2", architecture, re.IGNORECASE):
+                ref_boost = next_pipeline.config.get("ref_boost", 1.0)
+                ref_boost_a = next_pipeline.config.get("ref_boost_a", 1.0)
+                ref_boost_mask = next_pipeline.config.get("ref_boost_mask", None)
+                vae = next_pipeline.vae
+                pixel_state = {"fit_mode": "fit", "vae": vae, "source_images": None, "source_latents": None, "px_cache": {}}
+                next_pipeline.model = arch_krea2.apply_model_patch(
+                    next_pipeline.model, ref_boost, ref_boost_a, ref_boost_mask, "fit", vae, pixel_state)
+                if _orig_model_negative is not None:
+                    next_pipeline.config["model_negative"] = arch_krea2.apply_model_patch(
+                        _orig_model_negative, ref_boost, ref_boost_a, ref_boost_mask, "fit", vae, pixel_state)
+                _edit_patched = True
+                _edit_pixel_state = pixel_state
+                print(f"[Detailer] Krea2 edit patch applied to pipeline model (ref_boost={ref_boost}, ref_boost_a={ref_boost_a})")
+            elif architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE):
+                next_pipeline.model = arch_flux2klein.apply_model_patch(next_pipeline.model)
+                if _orig_model_negative is not None:
+                    next_pipeline.config["model_negative"] = arch_flux2klein.apply_model_patch(_orig_model_negative)
+                _edit_patched = True
+                print("[Detailer] Flux2Klein edit patch applied to pipeline model")
+
+        try:
+            for i, block in enumerate(blocks):
+                is_last = (i == len(blocks) - 1)
+
+                # 每个 block 执行前检查 interrupt 状态
+                mm.throw_exception_if_processing_interrupted()
+
+                if block.get('type') == 'interface':
+                    # Interface 块在 chain 内执行：以当前 pipeline 的 image/mask 作为输入，
+                    # 执行子图后把结果写回 pipeline，作为下一 block 的输入（不加入 history）。
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Interface block — executing sub-graph (chain mode)")
+                    bp = block.get('params', block)
+                    # 按接口名绑定（接口包重排/增删不会错绑到别的接口）；旧配置没有名字时
+                    # 回退到下标。名字解不出 = 接口已不存在 → 标记性跳过（bypass），不中断 chain。
+                    interface_name = bp.get('interface_name')
+                    interface_idx = -1
+                    if interface_name:
+                        interface_idx = next(
+                            (j for j, p in enumerate(server.interface_packages)
+                             if isinstance(p, dict) and (p.get('name') or '') == interface_name),
+                            -1)
+                        if interface_idx < 0:
+                            print(f"[PipelineBlock {i+1}] WARNING: interface '{interface_name}' not found "
+                                  f"({len(server.interface_packages)} interface packages) — MISSING, bypassing block")
+                            continue
+                    else:
+                        interface_idx = int(bp.get('interface_idx', block.get('interface_index', -1)))
+                    if interface_idx < 0 or interface_idx >= len(server.interface_packages):
+                        print(f"[PipelineBlock {i+1}] WARNING: invalid interface_idx={interface_idx}, skipping block")
+                        continue
+
+                    exec_options = {
+                        'operation': bp.get('operation', 'default'),
+                        'crop_reserve': int(bp.get('crop_reserve', 32)),
+                        'image_keys': bp.get('image_keys', {}) or {},
+                    }
+                    manual_values = bp.get('manual_values', {}) or {}
+
+                    # 输入图/mask：优先用本 block 显式选择的 context image；否则沿用
+                    # 上一 block 输出的 current_image / current_mask（即 pipeline 流水线传递）。
+                    # 注意：传入 interface 的 mask 需 clone 一个独立副本——interface 子图可能
+                    # in-place 修改传入的 mask tensor，若不隔离会通过引用共享污染上游 pipeline。
+                    block_input_img = current_image
+                    block_input_mask = current_mask.clone() if current_mask is not None else None
+                    ctx_img_key = bp.get('context_image_key')
+                    if ctx_img_key and server is not None:
+                        sel_img = server.get_staging_image(ctx_img_key)
+                        if sel_img is not None:
+                            block_input_img = sel_img
+                            print(f"[PipelineBlock {i+1}] Interface using staging image id={ctx_img_key}")
+                        else:
+                            print(f"[PipelineBlock {i+1}] WARNING: staging image id '{ctx_img_key}' not found, using pipeline image")
+                    ctx_mask_key = bp.get('context_mask_key')
+                    if ctx_mask_key and server is not None:
+                        sel_mask = server.get_staging_image(ctx_mask_key)
+                        if sel_mask is not None:
+                            block_input_mask = sel_mask
+                            print(f"[PipelineBlock {i+1}] Interface using context mask key={ctx_mask_key}")
+
+                    dbg.record_block(i + 1, f'Block {i+1} · Interface',
+                                     str(bp.get('interface_name') or f'idx={interface_idx}'),
+                                     operation=exec_options.get('operation'),
+                                     crop_reserve=exec_options.get('crop_reserve'),
+                                     image_keys=exec_options.get('image_keys') or {},
+                                     manual_values=manual_values)
+                    dbg.record_image(f'Block {i+1} · Interface 输入图', block_input_img, block=i + 1)
+                    dbg.record_mask(f'Block {i+1} · Interface 输入 mask', block_input_mask, block=i + 1)
+
+                    result_img, result_mask = self._execute_interface(
+                        server, interface_idx, manual_values,
+                        exec_options=exec_options,
+                        input_image=block_input_img,
+                        input_mask=block_input_mask,
+                        return_image=True,
+                        base_pipeline=next_pipeline,
+                    )
+
+                    # 写回 pipeline + 局部变量，供下一 block 串联（block 间以 pipeline 传递
+                    # 全部上下文：image/mask/model/clip/context/loras 等）。interface 子图
+                    # 的输出尺寸由其自身决定（与 crop 工作区连贯由用户/子图保证），直接注入
+                    # pipeline 原样往下传递——不在 pipeline 内做任何 image/mask 的 resize。
+                    # mask 也写回（但不做 mask 的 crop 重算等操作）。
+                    next_pipeline.image = result_img
+                    next_pipeline.mask = result_mask
+                    current_image = result_img
+                    current_mask = result_mask
+                    # 子图产物的尺寸由它自己决定，全局 pixels 目标没有作用在它身上。
+                    work_pixel_limit = None
+                    work_align = None
+                    print(f"[PipelineBlock {i+1}] Interface done: result shape={result_img.shape if hasattr(result_img, 'shape') else None}")
+                    dbg.record_image(f'Block {i+1} · Interface 输出图', result_img, block=i + 1)
+                    dbg.record_mask(f'Block {i+1} · Interface 输出 mask', result_mask, block=i + 1)
+                    continue
+
+                if block.get('type') == 'query':
+                    # Query 块：链条停在这里，前端弹 prompt UI 让用户现场挑；回答按 prompt 块
+                    # 的语义合并注入（全局在前 + 本次选择在后 + programs 在合并结果上执行），
+                    # 只影响其后的 detailer。取消/超时 = 中止整条链（用户明确要求）。
+                    # 绑定了 preset 的 Query 以 preset 为弹窗初始勾选；Persistent 的写回发生在
+                    # /api/query_answer 里（见 _answer_pending_query），这里只消费回答本身。
+                    answer = self._await_query_answer(server, block, i)
+                    user_positive, user_loras = self._resolve_prompt_selection(server, answer)
+                    # Extra Prompt has the final append: a Query block replaces the prompt-tab
+                    # content, but the extra typed in Blend right now must survive it.
+                    if extra_prompt:
+                        user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Query block answered: "
+                          f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
+                    dbg.record_prompt(f'Block {i+1} · Query 块回答后', user_positive,
+                                      block=i + 1, loras=debug_lora_entries(user_loras))
+                    continue
+
+                if block.get('type') == 'prompt':
+                    # Prompt 块：把「全局选择 + 块引用 preset 的 selection」合并后跑 preset
+                    # 的 programs（后端 quickjs 引擎），替换此后的 user_positive / user_loras。
+                    # 纯临时注入 —— 只影响排在该块之后的 detailer，不写回任何状态。
+                    bp = block.get('params', block)
+                    preset_id = bp.get('preset_id') if isinstance(bp, dict) else None
+                    if not preset_id or server._find_prompt_preset(preset_id) is None:
+                        print(f"[PipelineBlock {i+1}] Prompt block has no preset selected — skipped (prompt unchanged)")
+                        continue
+                    try:
+                        user_positive, user_loras = self._resolve_prompt_block(server, bp)
+                        # Extra Prompt has the final append: a prompt block replaces the prompt-tab
+                        # content, but the extra typed in Blend right now must survive it.
+                        if extra_prompt:
+                            user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
+                        print(f"[PipelineBlock {i+1}/{len(blocks)}] Prompt block applied: "
+                              f"positive='{user_positive[:200]}' ({len(user_positive)} chars), loras='{user_loras[:150]}'")
+                        dbg.record_prompt(f'Block {i+1} · Prompt 块生效后', user_positive,
+                                          block=i + 1, loras=debug_lora_entries(user_loras))
+                    except Exception as e:
+                        # fail-open：程序执行失败保留之前的 prompt，不中断整条链
+                        import traceback
+                        traceback.print_exc()
+                        print(f"[PipelineBlock {i+1}] WARNING: prompt block failed ({e}) — keeping previous prompt")
+                        dbg.record_error(f'Block {i+1} · Prompt 块失败', str(e),
+                                         block=i + 1, where='prompt_block')
+                    continue
+
+                # Detailer block params (support both nested 'params' dict and flat)
+                bp = block.get('params', block)
+                add_noise = bp.get('add_noise', 'enable')
+                start_step_rate = float(bp.get('start_step_rate', 0.8))
+                end_step_rate = float(bp.get('end_step_rate', 1.0))
+                enable_edit = bp.get('enable_edit', False)
+                # 块级 Generate Text 开关（默认关）：只有 pipeline config 的
+                # enable_generate_text 也开着时才真正生效（二级门控）。
+                enable_text_generate = bool(bp.get('enable_text_generate', False))
+                # Override Prompt（默认关）：开着时本块 Generate Text 的指令用块里的
+                # override_prompt 原样替代 pipeline 的 generate_text_prompt
+                # （留空 = 空指令，positive 原样进 CLIP）。只在 enable_text_generate
+                # 生效时有意义。
+                enable_override_prompt = bool(bp.get('enable_override_prompt', False))
+                override_prompt = str(bp.get('override_prompt', '') or '')
+                edit_mode = bp.get('edit_mode', 'fit')  # Krea2 source-patch 模式: fit | crop
+                ref_boost = float(bp.get('ref_boost', 4.0))
+                ref_boost_a = float(bp.get('ref_boost_a', 1.0))
+                enable_ref_boost_mask = bp.get('enable_ref_boost_mask', False)
+                grounding_px = int(bp.get('grounding_px', 768))
+                # Context Ref 没有开关：Ref 图不再逐块手选 —— Blend 工作台 Extra
+                # Prompt 文本里的 <image_id:...> 标记在 run 入口统一解析（见
+                # parse_prompt_image_refs），所有 detailer block 共用同一组引用图
+                # （context 工作图 = <image 1>，引用图 = <image 2>+）。旧配置里的
+                # per-block context_reference_keys / context_reference_key 已废弃。
+                context_reference_keys = list(prompt_ref_ids or [])
+                # 每个 detailer block 自带 context_regex（默认 ".+"），覆盖全局值，
+                # 用于决定该 block 解出 pipeline.context 中的哪些 lora/prompt。
+                block_context_regex = bp.get('context_regex', context_regex) or '.+'
+
+                # seed 链条：全局 seed 只是第一格，之后每格由前一格哈希出来（见 next_seed）。
+                # 共用同一个 seed 意味着每个块拿到**同一个**噪声张量，链子就成了自我重复。
+                block_seed = seed
+                seed = next_seed(seed)
+
+                print(f"[PipelineBlock {i+1}/{len(blocks)}] Detailer: noise={add_noise}, seed={block_seed}, steps={start_step_rate}-{end_step_rate}, edit={enable_edit}, textgen={enable_text_generate}, edit_mode={edit_mode}, ref_boost={ref_boost}/{ref_boost_a}, mask_boost={enable_ref_boost_mask}, grounding_px={grounding_px}, last={is_last}")
+                dbg.record_block(i + 1, f'Block {i+1} · Detailer',
+                                 f'{block.get("name", "")}',
+                                 add_noise=add_noise,
+                                 seed=block_seed,
+                                 start_step_rate=start_step_rate,
+                                 end_step_rate=end_step_rate,
+                                 enable_edit=enable_edit,
+                                 enable_text_generate=enable_text_generate,
+                                 enable_override_prompt=enable_override_prompt,
+                                 override_prompt_used=(override_prompt if (enable_text_generate and enable_override_prompt) else None),
+                                 edit_mode=edit_mode,
+                                 ref_boost=ref_boost,
+                                 ref_boost_a=ref_boost_a,
+                                 enable_ref_boost_mask=enable_ref_boost_mask,
+                                 grounding_px=grounding_px,
+                                 context_regex=block_context_regex,
+                                 is_last=is_last)
+                # 全局工作分辨率已在 crop 后一次性 limit 确定（见上方）。此处把当前 block
+                # 的实际输入（可能已被上游 interface 块替换）同步为处理图，不再重复 limit。
+                resized_image, resized_mask = current_image, current_mask
+                # 记录必须在同步之后：紧接着就是 VAEEncode(pixels=resized_image)，
+                # 同步前手里拿的还是上一块的工作图（interface 之后两者尺寸不同）。
+                dbg.record_image(f'Block {i+1} · 输入工作图', resized_image, block=i + 1,
+                                 pixel_limit=work_pixel_limit, align=work_align)
+                dbg.record_mask(f'Block {i+1} · 输入工作 mask', resized_mask, block=i + 1,
+                                pixel_limit=work_pixel_limit, align=work_align)
+
+                # VAEEncode
+                tmp_latent = VAEEncode().encode(
+                    vae=next_pipeline.vae,
+                    pixels=resized_image
+                )[0]
+
+                sampler_name = next_pipeline.sampler_name or 'euler'
+                scheduler = next_pipeline.scheduler or 'normal'
+                steps = next_pipeline.steps or 20
+                cfg = next_pipeline.cfg or 8.0
+
+                start_at_step = int(start_step_rate * steps)
+                end_at_step = int(end_step_rate * steps)
+
+                # Condition — 每个 detailer block 实时从当前 pipeline.context 解出
+                # lora/prompt（不提前解析），以捕获上游 interface 块对 pipeline 的修改。
+                context_positive, context_negative, context_loras = next_pipeline.context.get_context(block_context_regex)
+                current_positive = ','.join([p for p in [context_positive, user_positive] if p])
+                # Enable Output 的 `prompt` 键在此刻定格：user_positive 已是本块最终形态
+                # （prompt / Query 块与 extra prompt 都已处理，每块覆写一次 → 留下最后一个
+                # detailer 的输入），在这里剥掉打头的 lora 触发词串 —— pipeline context 的
+                # prompt（context_positive 与后面 get_prompt_context 的补全）和 Generate
+                # Text 的改写都只属于这一趟采样，不进读回用的用户选择。落盘键形见
+                # _save_run_output_png。
+                if server is not None:
+                    _clean_positive = user_positive
+                    _trigger_str = getattr(self, '_last_trigger_str', '') or ''
+                    if _trigger_str and _clean_positive.startswith(_trigger_str):
+                        _clean_positive = _clean_positive[len(_trigger_str):]
+                        if _clean_positive.startswith(','):
+                            _clean_positive = _clean_positive[1:]
+                        _clean_positive = _clean_positive.strip()
+                    server.last_output_positive = _clean_positive
+                dbg.record_prompt(f'Block {i+1} · a) context 解出（regex={block_context_regex}）',
+                                  context_positive, block=i + 1,
+                                  loras=list(context_loras or []))
+                dbg.record_prompt(f'Block {i+1} · b) context + user_positive 拼接', current_positive,
+                                  block=i + 1,
+                                  user_positive=user_positive)
+                # Generate Text（MARKER_GENERATE_TEXT_BLOCK）：上游 Pipeline 若启用了
+                # PipelineEnableGenerateTextNode，且本块 params 的 enable_text_generate
+                # 开着（默认关），就把指令 prompt 与当前 positive 拼起来交给文本生成
+                # CLIP，用生成结果完全替换 current_positive。参数与 clip 都来自上游
+                # 节点。产物只作用于当前块（current_positive 每块都从 context 重新解出，
+                # 不跨块传递）。pipeline 没开 enable_generate_text 时块开关无效。
+                if next_pipeline.config.get('enable_generate_text') and enable_text_generate:
+                    # Override Prompt 生效时用块级指令替代 pipeline 的 generate_text_prompt
+                    # （空字符串就是空指令：positive 原样进 CLIP，不套指令拼接）。
+                    _gt_instruction = (override_prompt if enable_override_prompt
+                                       else next_pipeline.config.get('generate_text_prompt', ''))
+                    _gt_before = current_positive
+                    # Enable Edit 开 → 送图（多模态 CLIP 看图改写）：
+                    #   第一张 = next_pipeline.image（链上传递的那张，pipeline 就是靠它
+                    #            在 block 间传图的；interface 块会写回，detailer 不改它）
+                    #   随后 = 本块选的所有 Ref Image（v2 多参考，按列表顺序能传几张传几张）
+                    # Edit 关 → 完全不传图（不做隐藏行为）。
+                    _gt_images = []
+                    _gt_sources = []
+                    _gt_ref_keys = []
+                    _gt_img_status = 'n/a（未送图）'
+                    if enable_edit:
+                        # 链上没像素时下面那句 `is not None` 本来就打算跳过送图（只带 refs），
+                        # 所以这里要 None，别让 get_image 抢先把整块打断。
+                        _chain_img = next_pipeline.get_image(required=False)
+                        if _chain_img is not None:
+                            _gt_images.append(_chain_img)
+                            _gt_sources.append('pipeline.image（链上工作图）')
+                        for _ref_key in context_reference_keys:
+                            _ref_img = self._resolve_ref_image_for_generate_text(server, _ref_key)
+                            if _ref_img is not None:
+                                _gt_images.append(_ref_img)
+                                _gt_sources.append(f'Ref Image（{_ref_key}）')
+                                _gt_ref_keys.append(_ref_key)
+                        # 输入侧封顶：这些图即将进多模态塔，先各自压到 tgen_pixels 上限
+                        # （cap_only = 只缩不涨，align 向下落格）。压不压、压到多大只由
+                        # (H,W) 决定，所以 normalize_ref_images 的"形状不一致就丢弃"分组
+                        # 不会因为封顶而新丢图。
+                        for _i, _gt in enumerate(_gt_images):
+                            _gt_capped, _, _ = limit_pixels(_gt, tgen_cap_pixels,
+                                                            align=tgen_cap_align, cap_only=True)
+                            _gt_images[_i] = _gt_capped
+                        # 明确告诉 Debug：这些图**会不会真的影响**生成。
+                        # 先按名字/模板做静态判断，再**实测一次 tokenize**（数 image
+                        # embedding）—— 后者才是「图真的进了 token 流」的唯一证据。
+                        if _gt_images:
+                            _gt_clip = (next_pipeline.config.get('generate_text_clip')
+                                        or next_pipeline.clip)
+                            _gt_params = next_pipeline.config.get('generate_text') or {}
+                            _gt_img_status = '未知'
+                            try:
+                                from ...libs.generate_text_utils import describe_image_support
+                                _ok, _why = describe_image_support(
+                                    _gt_clip,
+                                    bool(_gt_params.get('use_default_template', True)))
+                                _gt_img_status = ('会生效 — ' if _ok else '★ 不会生效 — ') + _why
+                            except Exception as _e:
+                                _gt_img_status = f'unknown ({_e})'
+                            try:
+                                _p_ok, _p_why = self._preflight_generate_text_images(
+                                    _gt_images, _gt_clip,
+                                    {**_gt_params,
+                                     '_instruction': _gt_instruction})
+                                if _p_why:
+                                    _gt_img_status = _p_why
+                                elif _p_ok is not None:
+                                    _gt_img_status = ('已确认生效 — ' if _p_ok
+                                                      else '★ 不会生效 — ') + _gt_img_status
+                            except Exception as _e:
+                                print(f'[GenerateText] preflight probe failed ({_e})')
+                            print(f'[GenerateText] [block {i + 1}] image status: {_gt_img_status}')
+                    dbg.record_prompt(f'Block {i+1} · c) Generate Text 输入（指令 + positive）',
+                                      current_positive, block=i + 1,
+                                      instruction=_gt_instruction,
+                                      override_prompt=enable_override_prompt,
+                                      params=next_pipeline.config.get('generate_text'),
+                                      image_count=len(_gt_images),
+                                      ref_image_keys=_gt_ref_keys,
+                                      image_status=_gt_img_status)
+                    # Debug：把每一张真正送进 Generate Text 的图单独画出来，标注来源
+                    for _gi, _gimg in enumerate(_gt_images):
+                        _gsrc = _gt_sources[_gi] if _gi < len(_gt_sources) else f'第 {_gi + 1} 张'
+                        dbg.record_image(f'Block {i+1} · c{_gi + 1}) Generate Text 输入图 — {_gsrc}',
+                                         _gimg, block=i + 1,
+                                         pixel_limit=(tgen_cap_pixels or None),
+                                         align=(tgen_cap_align if tgen_cap_align > 1 else None),
+                                         detail=f'第 {_gi + 1} 张 / 共 {len(_gt_images)} 张')
+                    try:
+                        current_positive, _gt_used = apply_generate_text_to_prompt(
+                            next_pipeline, current_positive,
+                            _gt_instruction,
+                            label=f' [block {i + 1}]',
+                            images=_gt_images or None)
+                        if _gt_used:
+                            print(f'[PipelineBlock {i + 1}/{len(blocks)}] Generate Text applied: '
+                                  f"positive='{current_positive[:200]}' ({len(current_positive)} chars)")
+                        dbg.record_prompt(f'Block {i+1} · d) Generate Text 输出（new_positive）',
+                                          current_positive, block=i + 1,
+                                          applied=bool(_gt_used),
+                                          images_sent=len(_gt_images),
+                                          before=_gt_before)
+                    except Exception as e:
+                        # fail-open：生成失败保留原 prompt，不中断整条链
+                        import traceback
+                        traceback.print_exc()
+                        print(f'[PipelineBlock {i + 1}] WARNING: Generate Text failed ({e}) — keeping previous prompt')
+                        dbg.record_error(f'Block {i+1} · Generate Text 失败', str(e),
+                                         block=i + 1, where='generate_text')
+                # Cancel 检查点：Generate Text 的 LLM 调用是同步长任务，块首的检查点
+                # 够不着它内部——这里在生成结束/conditioning 之前再吃一次 interrupt，
+                # 让「在 text generate 里点 Cancel」的请求在当前块内就生效。
+                mm.throw_exception_if_processing_interrupted()
+                current_positive_before_query = current_positive
+                current_negative = context_negative
+                current_loras = context_loras.copy()
+                current_loras.extend(get_loras_from_string(user_loras))
+                # Model-only 补标（持久配置为准）：context 里的串是 prompt 节点上次图执行
+                # 时冻结的，之后才打开的 model_only 在这里补上，同一趟立即生效。
+                _ps = server.prompt_server if server is not None else None
+                _mo_paths = self._model_only_paths(_ps)
+                if _mo_paths:
+                    _patched = self._mark_model_only(current_loras, _mo_paths)
+                    if _patched != current_loras:
+                        print(f"[PipelineBlock] model-only flags patched at run time: "
+                              f"{[x for x in _patched if ':model_only>' in str(x)]}")
+                    current_loras = _patched
+
+                tmp_positive, tmp_negative, tmp_loras = next_pipeline.context.get_prompt_context('', resized_image)
+                if tmp_positive:
+                    current_positive += ',' + tmp_positive
+                if tmp_negative:
+                    current_negative += ',' + tmp_negative
+                if tmp_loras:
+                    current_loras.extend(tmp_loras)
+
+                dbg.record_prompt(f'Block {i+1} · e) 最终 positive（送入 conditioning）',
+                                  current_positive, block=i + 1,
+                                  negative=current_negative,
+                                  loras=list(current_loras),
+                                  query_positive=tmp_positive or '',
+                                  query_negative=tmp_negative or '',
+                                  before_query=current_positive_before_query)
+                # Enable Output 的 `prompt` 键不再用这一整串（context 补全与触发词都混在
+                # 里面）。last_clip_positive 保留作调试对照；落盘编码的是用户自己的选择
+                # （server.last_output_positive，块循环在 context 拼接处捕获）。
+                if server is not None:
+                    server.last_clip_positive = current_positive
+
+                model_negative = next_pipeline.config.get("model_negative")
+                model_to_use, clip_to_use, model_negative_to_use = next_pipeline.cache.get_model_clip(
+                    model=next_pipeline.model,
+                    clip=next_pipeline.clip,
+                    loras=current_loras,
+                    model_negative=model_negative
+                )
+
+                # Restore reference_latents to original before per-block injection
+                next_pipeline.reference.reference_latents = list(_orig_ref_latents)
+
+                # Enable Edit 补丁已在循环前统一应用到 pipeline model（含
+                # model_negative），get_model_clip 返回的 clone 自动携带补丁闭包；
+                # 此处仅记录本 block 的开关状态供 debug / UI 使用。
+                next_pipeline.config["enable_edit"] = enable_edit
+                # block 级 grounding_px: Krea2 grounded encode 的 VLM 看图分辨率
+                # 上限（正/负条件共用 — 同一 get_conditioning 路径）
+                next_pipeline.config["grounding_px"] = grounding_px
+                # block 级 edit 参数: forward 从 pixel_state 动态读取，支持逐
+                # block 切换 —— edit_mode（fit/crop 几何）与 ref_boost 三参数
+                # （注意力增强; enable_ref_boost_mask 启用时以 context mask
+                # [当前块裁剪区 mask, 与源图同网格] 限定增强区域）
+                if _edit_pixel_state is not None:
+                    _edit_pixel_state["fit_mode"] = edit_mode
+                    _edit_pixel_state["ref_boost"] = ref_boost
+                    _edit_pixel_state["ref_boost_a"] = ref_boost_a
+                    _edit_pixel_state["ref_boost_mask"] = (
+                        resized_mask if (enable_edit and enable_ref_boost_mask) else None
+                    )
+
+                # Context Reference injection (per-block) — Ref 图来自 Extra Prompt 文本
+                # 解析出的全局 refs（prompt_ref_ids，首次出现顺序 = 注入顺序）。
+                # _injected_refs 把**编码前**的像素留给付费的槽位清单：那是 get_conditioning
+                # 解码回来的同一张图，省一次 VAEDecode。
+                _injected_refs = []
+                if enable_edit and context_reference_keys and server is not None:
+                    for _ref_key in context_reference_keys:
+                        ref_img = server.get_staging_image(_ref_key)
+                        if ref_img is not None:
+                            # 输入侧封顶：ref 马上要进 VAE 编码，像素数直接决定显存 ——
+                            # 编码前压到 ref_pixels 上限（cap_only = 只缩不涨，align 向下
+                            # 落格）。_injected_refs 记的也就是这张压过的图，Debug 槽位
+                            # 清单与真正进 get_conditioning 的像素保持一致。
+                            ref_img, _, _ = limit_pixels(ref_img, ref_cap_pixels,
+                                                         align=ref_cap_align, cap_only=True)
+                            ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
+                            next_pipeline.reference.reference_latents.append(ref_latent)
+                            _injected_refs.append((_ref_key, ref_img))
+                            print(f"[Block {i+1}] Context reference injected: id={_ref_key}")
+                        else:
+                            print(f"[Block {i+1}] WARNING: context reference id '{_ref_key}' not found in staging")
+                            dbg.record_error(
+                                f'Block {i+1} · Ref Image 缺失', f"staging id '{_ref_key}' 不存在",
+                                block=i + 1, where='context_reference')
+
+                print(f"[Block {i+1}] reference.reference_latents count: {len(next_pipeline.reference.reference_latents)}")
+
+                # Reference args by architecture — 普遍规则：Enable Edit 关 = 不送图。
+                # Krea2: source patch + grounded encode (语义+像素双路径)，两路都归 enable_edit 管。
+                # Flux2Klein: 原生 ref_latents — 当前块 latent 作为 reference（同样只跟 enable_edit）。
+                # 其余架构（QwenImage21 等）: edit 关时 reference_image=None，
+                #   第一格 pin 随之失效（architecture/QwenImage21.py:92），工作图彻底不进轨迹。
+                architecture = next_pipeline.config.get("architecture") if next_pipeline.config else None
+                is_krea2 = bool(architecture and re.search(r"Krea2", architecture, re.IGNORECASE))
+                is_flux2klein = bool(architecture and re.search(r"Flux2Klein", architecture, re.IGNORECASE))
+
+                ref_latent_arg = tmp_latent if (is_flux2klein and enable_edit) else None
+                ref_image_arg = resized_image if enable_edit and not is_flux2klein else None
+                # [EditGate] 门闸读数：这行**不出现**=进程跑的还是旧代码（没重载）；
+                # 出现且 ref_image=sent=该块 Enable Edit 开着，图按设计进 conditioning。
+                print(f"[Block {i+1}] EditGate: enable_edit={enable_edit} arch={architecture} "
+                      f"ref_image={'sent' if ref_image_arg is not None else 'NOT sent'} "
+                      f"ref_latent={'sent' if ref_latent_arg is not None else 'none'} "
+                      f"pipeline_ref_latents={len(next_pipeline.reference.reference_latents)}")
+
+                # 参考图槽位清单（含 <image 1>）—— 必须在 args 定下来之后、真正 conditioning
+                # 之前记，记的才是 get_conditioning 马上要收到的东西。
+                self._debug_reference_slots(i + 1, ref_image_arg, ref_latent_arg,
+                                            _injected_refs, next_pipeline,
+                                            work_limit=work_pixel_limit,
+                                            ref_limit=(ref_cap_pixels or None),
+                                            work_align=work_align,
+                                            ref_align=(ref_cap_align if ref_cap_align > 1 else None))
+
+                positive_condition = next_pipeline.get_conditioning(
+                    mode='positive',
+                    clip=clip_to_use,
+                    vae=next_pipeline.vae,
+                    prompt=current_positive,
+                    reference_latent=ref_latent_arg,
+                    reference_image=ref_image_arg,
+                    reference=next_pipeline.reference,
+                    # ref_image_arg 就是 resized_image，本块的 target latent 也由它编码而来
+                    # —— 把这份 latent 交下去，QwenImage21 的第一格就不再重推尺寸（见其模块头）
+                    source_latent=tmp_latent["samples"]
+                )
+
+                negative_condition = next_pipeline.get_conditioning(
+                    mode='negative',
+                    clip=clip_to_use,
+                    vae=next_pipeline.vae,
+                    prompt=current_negative,
+                    reference_latent=ref_latent_arg,
+                    reference_image=ref_image_arg,
+                    reference=next_pipeline.reference,
+                    source_latent=tmp_latent["samples"]
+                )
+
+                # 节点级 pixel_state 注入（对齐 krea2edit source patch 数据流）：
+                # source 由 snapshot 节点直接写入 patch 闭包，不经 conditioning 管道。
+                # - edit on: source_latents = 当前块 latent（identity edit: source==target
+                #   初始网格）；并在采样外预编码像素源（对齐参考 target_latent 用途，
+                #   避免 mid-sampling VAE 加载驱逐扩散模型）
+                # - edit off: 清空残留（覆盖 get_conditioning side-channel 写入），走原生 forward
+                if _edit_pixel_state is not None:
+                    if enable_edit and is_krea2:
+                        _edit_pixel_state["source_latents"] = [tmp_latent["samples"]]
+                        _edit_pixel_state["px_cache"] = {}
+                        if _edit_pixel_state.get("source_images"):
+                            Hh, Ww = tmp_latent["samples"].shape[-2], tmp_latent["samples"].shape[-1]
+                            arch_krea2.pre_encode_sources(_edit_pixel_state, Hh, Ww)
+                    else:
+                        _edit_pixel_state["source_images"] = None
+                        _edit_pixel_state["source_latents"] = None
+                        _edit_pixel_state["px_cache"] = {}
+
+                from ..pipeline.sampler_node import _ksampler
+                # Invert：噪声这一路彻底交给反演（_ksampler 把爬梯段和重绘段拼成一张
+                # 非单调梯子，一趟跑完），随机噪声不再叠加，所以 disable_noise 也一并成立。
+                invert_info = {} if add_noise == 'invert' else None
+                try:
+                    _pc = positive_condition[0][1] if positive_condition else {}
+                    _nc = negative_condition[0][1] if negative_condition else {}
+                    _slots = _pc.get('image_slots')
+                    if _slots is not None and hasattr(_slots, 'tolist'):
+                        _slots = _slots.tolist()
+                    _patches = getattr(model_to_use, 'patches', None)
+                    _patch_desc = {}
+                    if isinstance(_patches, dict):
+                        for _k in _patches:
+                            _arch = _k[0] if isinstance(_k, tuple) and _k else str(_k)
+                            _patch_desc[_arch] = _patch_desc.get(_arch, 0) + len(_patches[_k])
+                    _mo = getattr(model_to_use, 'model_options', None) or {}
+                    _ptext = str(positive_condition[0][0]) if positive_condition else ''
+                    _ntext = str(negative_condition[0][0]) if negative_condition else ''
+                    dbg.record_stage('OffsetProbe 采样入口', block=i + 1,
+                                     latent_shape=list(tmp_latent['samples'].shape),
+                                     has_noise_mask=('noise_mask' in tmp_latent),
+                                     steps=steps, start_step=start_at_step, end_step=end_at_step,
+                                     cfg=cfg, sampler=sampler_name, scheduler=scheduler,
+                                     seed=block_seed,
+                                     has_model_negative=model_negative_to_use is not None,
+                                     sigmas_override=bool(next_pipeline.config.get('sigmas')),
+                                     pos_cond_keys=sorted(_pc.keys()),
+                                     neg_cond_keys=sorted(_nc.keys()),
+                                     image_slots=_slots,
+                                     model_patch_counts=_patch_desc,
+                                     model_options_keys=sorted(_mo.keys()))
+                    dbg.record_prompt('OffsetProbe positive 全文', _ptext, block=i + 1)
+                    dbg.record_prompt('OffsetProbe negative 全文', _ntext, block=i + 1)
+                except Exception as _probe_err:
+                    dbg.record_error('OffsetProbe 失败', _probe_err, block=i + 1, where='detailer _ksampler 前')
+                sampled_latent = _ksampler(
+                    model=model_to_use,
+                    seed=block_seed,
+                    steps=steps,
+                    cfg=cfg,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
+                    positive=positive_condition,
+                    negative=negative_condition,
+                    latent=tmp_latent,
+                    disable_noise=(add_noise != "enable"),
+                    start_step=start_at_step,
+                    last_step=end_at_step,
+                    force_full_denoise=True,
+                    sigmas=next_pipeline.config.get("sigmas"),
+                    model_negative=model_negative_to_use,
+                    invert=(add_noise == 'invert'),
+                    invert_info=invert_info,
+                )[0]
+
+                if invert_info is not None:
+                    peak = invert_info.get('peak')
+                    if peak is not None:
+                        # 噪声 latent 进 pipeline cache：它是"这张图配的那份噪声"，
+                        # 下游块/节点想跳过自己那趟爬梯就直接取，不必再反演一次。
+                        inverted = dict(tmp_latent)
+                        inverted['samples'] = peak
+                        next_pipeline.cache.set_inverted_latent(i + 1, inverted)
+                    if invert_info.get('noop'):
+                        detail = '未执行（start_step 越界，本块梯子是空的）'
+                    else:
+                        detail = (f"爬 {invert_info.get('climb_rungs', 0)} 级 / 共 "
+                                  f"{invert_info.get('steps_total', 0)} 步（euler）· "
+                                  f"σ_peak={invert_info.get('sigma_peak', 0.0):.4f}")
+                    print(f"[Block {i+1}] Invert: {detail}")
+                    dbg.record_stage('Invert 往返', detail, block=i + 1,
+                                     steps_total=invert_info.get('steps_total'),
+                                     sigma_peak=invert_info.get('sigma_peak'),
+                                     sampler='euler',
+                                     peak_captured=(peak is not None),
+                                     noop=bool(invert_info.get('noop')))
+
+                decoded_image = VAEDecode().decode(vae=next_pipeline.vae, samples=sampled_latent)[0]
+
+                # Recover to pre-resize (cropped) resolution so next block starts at cropped size
+                if not is_last:
+                    if resize_info is not None:
+                        recovered_decoded, _ = recover_size(
+                            image=decoded_image,
+                            resize_info=resize_info,
+                            mask=resized_mask
+                        )
+                        current_image = recovered_decoded
+                    else:
+                        # Enable Limit 关：从没缩放过，工作区尺寸恒定，无需复原。
+                        current_image = decoded_image
+                    current_mask = cropped_mask
+                else:
+                    current_image = decoded_image
+                    current_mask = resized_mask
+
+                last_resize_info = resize_info
+                last_resized_mask = resized_mask
+
+                print(f"[Block {i+1}] Done: decoded shape={decoded_image.shape}")
+                # _ksampler 返回的是 LATENT dict（{'samples': tensor}），不是 tensor ——
+                # 这里统一取形状，避免直接 .shape 炸掉（曾栽过一次）。
+                def _latent_shape(lat):
+                    try:
+                        if isinstance(lat, dict):
+                            lat = lat.get('samples')
+                        return list(lat.shape) if hasattr(lat, 'shape') else None
+                    except Exception:
+                        return None
+                dbg.record_image(f'Block {i+1} · 采样解码输出', decoded_image, block=i + 1,
+                                 detail=f'latent={_latent_shape(sampled_latent)}')
+                dbg.record_stage(f'Block {i+1} · 输出 / 传递给下一块',
+                                 f'current_image={tuple(current_image.shape)}',
+                                 block=i + 1,
+                                 is_last=is_last,
+                                 decoded_shape=list(decoded_image.shape),
+                                 latent_shape=_latent_shape(sampled_latent),
+                                 has_resize_info=resize_info is not None)
+                if not is_last:
+                    dbg.record_image(f'Block {i+1} · 复原到裁剪分辨率（传给下一块）', current_image,
+                                     block=i + 1)
+        finally:
+            # Restore pipeline state
+            if next_pipeline.config is not None:
+                next_pipeline.config["enable_edit"] = _orig_enable_edit
+                if _orig_grounding_px is not None:
+                    next_pipeline.config["grounding_px"] = _orig_grounding_px
+                else:
+                    # 原值缺失时删除 key，避免 None 覆盖 get_conditioning 的默认值回退
+                    next_pipeline.config.pop("grounding_px", None)
+                if _edit_patched:
+                    next_pipeline.config["model_negative"] = _orig_model_negative
+            if next_pipeline.reference is not None:
+                next_pipeline.reference.reference_latents = _orig_ref_latents
+            if _edit_patched:
+                # 返回的 pipeline 会成为 _current_pipeline，必须还原为未打补丁的
+                # model，避免补丁闭包（含 source_images/px_cache）跨运行滞留
+                next_pipeline.model = _orig_model
+
+        # 收尾：整条链（含 interface block）都在 crop 工作区坐标系里跑，这里把它落地。
+        # Recover Crop 开 → recover_size（分辨率复原）+ recover_crop（按 crop_info 合成
+        # 回全图），即原行为。
+        # Recover Crop 关 → 两个都不做：patch 保持工作分辨率，工作区 mask 合进它的 alpha，
+        # 连同裁剪矩形一起交给前端，由 Blend 画布作为新图层用 transform 贴回原位 ——
+        # transform 的缩放本身就承担了 recover_size 的职责，所以可以一起省掉。
+        detail_meta = None
+        if not enable_mask:
+            # Enable Mask 关：整幅工作区即产出，没有裁剪矩形可复原。但 align 落格
+            # （Qwen2.1 + Limit 关）仍动过尺寸 —— resize_info 非 None 时必须按它把
+            # 工作分辨率还原回裁剪/整幅尺寸，产出尺寸才和输入一致。
+            if last_resize_info is not None:
+                recovered_image, recovered_mask = recover_size(
+                    image=current_image,
+                    resize_info=last_resize_info,
+                    mask=last_resized_mask
+                )
+                final_image, final_mask = recovered_image, recovered_mask
+            else:
+                final_image, final_mask = current_image, current_mask
+        elif do_recover_crop:
+            if last_resize_info is not None:
+                recovered_image, recovered_mask = recover_size(
+                    image=current_image,
+                    resize_info=last_resize_info,
+                    mask=last_resized_mask
+                )
+            else:
+                recovered_image, recovered_mask = current_image, current_mask
+
+            final_image, final_mask = recover_crop(
+                background=original_image,
+                image=recovered_image,
+                crop_info=crop_info,
+                recover_method='mask_blend',
+                mask=recovered_mask
+            )
+        else:
+            # 工作区 mask 合进产出图的 alpha：这张 RGBA 就是「要贴回原位的新图层」本身。
+            # 前端不再需要额外的 mask 字段 —— 图层自带的 alpha 就承担了裁剪，
+            # 贴回去的观感与 recover_crop(mask_blend) 一致，而这次得到的是一个
+            # 普通图层，可以继续改 transform / 继续画。
+            work_mask = last_resized_mask if last_resized_mask is not None else current_mask
+            # place 用 merge 之前的 current_image 量 patch 尺寸 —— merge 不动空间尺寸，
+            # 但这样就不依赖 merge 的返回形状。
+            place = detail_place_rect(crop_info, current_image)
+            final_image = merge_mask_alpha(current_image, work_mask)
+            detail_meta = {'place': place}
+            print(f"[Detailer] Recover Crop off — returning the RGBA crop-workspace patch "
+                  f"{tuple(final_image.shape)} covering the crop rect "
+                  f"({place['x']},{place['y']}) {place['w']}x{place['h']} of {place['ow']}x{place['oh']} "
+                  f"(patch scale sx={place['sx']:.4f} sy={place['sy']:.4f})")
+
+        detailed_image = final_image
+        dbg.record_stage('收尾 / 恢复',
+                         ('Enable Mask 关 → 整幅就是产出' if not enable_mask
+                          else ('Recover Crop 开 → recover_size + recover_crop' if do_recover_crop
+                                else 'Recover Crop 关 → 保持工作分辨率，产出为 RGBA patch')),
+                         block=0,
+                         enable_mask=enable_mask,
+                         do_recover_crop=do_recover_crop)
+        dbg.record_image('链条最终产出（recover 之后）', final_image, block=0)
+
+        # Context 就是 Blend 画布合成图，detailer 产出不再接管；关掉 Recover Crop 时产出
+        # 只是画布上的一块 patch，更不能顶替整幅 context，故保持原合成图。
+        next_pipeline.image = final_image if (enable_mask and do_recover_crop) else original_image
+        next_pipeline.latent = None
+        next_pipeline.mask = user_mask
+
+        gc.collect()
+        mm.soft_empty_cache()
+
+        return next_pipeline, original_image, detailed_image, detail_meta
+
+    # -------------------------------------------------------------------------
+    # 按 node_id 现加载一条 pipeline —— /api/switch_pipeline（Pipeline Settings 选）与
+    # run_detailer（preset 绑定）共用这一份。执行上游节点取 PIPELINE_DATA 是这里唯一昂贵
+    # 的一步（模型/VAE/CLIP 全在那条链上重建），所以 run 循环只在「这次要的 pipeline 和已
+    # 加载的不是同一条」时才调它。
+    # -------------------------------------------------------------------------
+    def _load_pipeline_from_node(self, server, upstream_node_id, pipeline_name=''):
+        """→ (ok, error). 成功时把 node 的 current/base pipeline 换成它，并记住身份。"""
+        if not upstream_node_id:
+            return False, 'Pipeline has no source node id'
+        from .interface_node import InterfaceExecutor
+        epi = getattr(server, 'extra_pnginfo', None)
+        if isinstance(epi, list):
+            epi = epi[0] if epi else {}
+        # Provide current pipeline as fallback for unresolved PIPELINE_DATA inputs
+        current_pipeline = self._current_pipeline
+        executor = InterfaceExecutor(
+            extra_pnginfo=epi,
+            get_pipeline=lambda: current_pipeline,
+        )
+        output_values = {}
+        try:
+            executor._try_execute_external(upstream_node_id, output_values)
+        except Exception as ex:
+            return False, f'Failed to execute upstream node {upstream_node_id}: {ex}'
+        if upstream_node_id not in output_values or not output_values[upstream_node_id]:
+            return False, (f'Failed to execute upstream node {upstream_node_id}: '
+                           f'execution returned no output')
+        new_pipeline = output_values[upstream_node_id][0]
+        if new_pipeline is None:
+            return False, 'Upstream node returned None pipeline'
+
+        # Inherit image/latent/mask from the current pipeline if the new one lacks them
+        if new_pipeline.image is None and current_pipeline is not None and current_pipeline.image is not None:
+            new_pipeline.image = current_pipeline.image
+        if new_pipeline.latent is None and current_pipeline is not None and current_pipeline.latent is not None:
+            new_pipeline.latent = current_pipeline.latent
+        if new_pipeline.mask is None and current_pipeline is not None and current_pipeline.mask is not None:
+            new_pipeline.mask = current_pipeline.mask
+        self._current_pipeline = new_pipeline.copy()
+        self._base_pipeline = self._current_pipeline
+        # 换到一条既无 image 又无 latent 的管线是合法状态（工作台那侧自己去要上次那一份 .cud），
+        # 所以这里要 None 就够，别让它抛 —— 以前这句把整条切换打成页面上的一行红字，run 循环走
+        # 同一个 loader 时更是直接打断整趟。有 latent 仍然解码（下面 required=False 不管这一路）。
+        new_image = new_pipeline.get_image(required=False) if hasattr(new_pipeline, 'get_image') else None
+        self._switch_image(server, new_image)
+        # Update lora_regex from the new pipeline's architecture
+        new_arch = new_pipeline.config.get("architecture") if new_pipeline.config else None
+        old_arch = current_pipeline.config.get("architecture") if current_pipeline and current_pipeline.config else None
+        print(f"[PipelineSwitch] old_arch={old_arch}, new_arch={new_arch}, config_keys={list(new_pipeline.config.keys()) if new_pipeline.config else 'None'}")
+        if new_arch:
+            new_arch = str(new_arch)
+            # 一条谓词管住 lora 侧的全部动作：架构没变（例如 preset 每趟都点名同一条）既不重扫
+            # 磁盘（update_lora_regex → refresh_loras 会顺带 propagate 给进程里每一个 prompt 实例），
+            # 也不惊动 Prompt tab。server 与它的 prompt server 都在构造时就带着同一枚 regex，所以
+            # 这里比出的"相等"不存在两边不一致的可能。
+            if new_arch != server.lora_regex:
+                server.lora_regex = new_arch
+                server.pipeline_lora_epoch += 1
+                if server.prompt_server:
+                    server.prompt_server.update_lora_regex(new_arch)
+        elif old_arch:
+            # If new pipeline didn't set architecture, keep old regex
+            print(f"[PipelineSwitch] WARNING: new pipeline has no architecture in config, keeping old lora_regex={server.lora_regex}")
+        # 身份记账：run 循环靠它判断「这次要不要重新加载」。
+        server.loaded_pipeline_node_id = upstream_node_id
+        server.loaded_pipeline_name = pipeline_name or ''
+        print(f"[PipelineSwitch] Switched to pipeline '{pipeline_name}' (node {upstream_node_id}), "
+              f"lora_regex='{new_arch or server.lora_regex}', epoch={server.pipeline_lora_epoch}")
+        return True, None
+
+    # -------------------------------------------------------------------------
+    # 切换图片时更新 mask server：尺寸相同则保留 mask，否则清除
+    # -------------------------------------------------------------------------
+    def _switch_image(self, server, new_image):
+        """切换 pipeline 的图片并更新 mask server。尺寸相同则保留 mask。"""
+        old_image = self._current_pipeline.image
+        old_h, old_w = (old_image.shape[1], old_image.shape[2]) if old_image is not None and hasattr(old_image, 'shape') and old_image.dim() >= 3 else (0, 0)
+        new_h, new_w = (new_image.shape[1], new_image.shape[2]) if new_image is not None and hasattr(new_image, 'shape') and new_image.dim() >= 3 else (0, 0)
+
+        self._current_pipeline.image = new_image
+
+
+        # 关键：切换 context 时同步 _base_pipeline 的 image/mask。
+        # run_detailer 每次基于 _base_pipeline.copy() 执行（见 sample()），若不在此同步，
+        # 注入的仍是初始化时的原始 image，导致用户切换 context 后 run 仍用旧图。
+        if self._base_pipeline is not None:
+            self._base_pipeline.image = new_image
+            self._base_pipeline.mask = self._current_pipeline.mask
+
+    # -------------------------------------------------------------------------
+    # Interface Package 执行
+    # -------------------------------------------------------------------------
+    def _sync_pipeline_updates(self, target, source):
+        """将 source pipeline（interface 子图返回的、被修改过的 pipeline）中
+        实际输出/修改的字段合并回 target pipeline（chain 中的上游 pipeline）。
+
+        只覆盖 source 中非 None 的字段，且跳过 image/mask（image/mask 由
+        interface 的结果图单独写回），其余字段（model/clip/vae/context/
+        reference/config/sampler_name/scheduler/steps/cfg 等）均按 interface
+        的修改生效，使后续 detailer block 拿到被 interface 修改后的 model 等。
+        """
+        if target is None or source is None:
+            return
+        sync_fields = (
+            'model', 'clip', 'vae',
+            'sampler_name', 'scheduler', 'steps', 'cfg',
+            'context', 'reference', 'config',
+        )
+        for f in sync_fields:
+            val = getattr(source, f, None)
+            if val is not None and getattr(target, f, None) is not val:
+                setattr(target, f, val)
+        # loras 以 list 形式存在于 context 中，已在 context 同步时覆盖；
+        # 若 PipelineData 另有显式 loras 字段也一并同步
+        if hasattr(source, 'loras') and getattr(source, 'loras', None) is not None:
+            setattr(target, 'loras', getattr(source, 'loras'))
+
+    def _execute_interface(self, server, interface_idx, manual_values, exec_options=None,
+                            input_image=None, input_mask=None, return_image=False,
+                            base_pipeline=None):
+        """Execute a sub-graph via InterfaceExecutor.
+
+        Args:
+            return_image: 若 True，执行结果只作为返回值 (result_img, result_mask)，
+                          不写入 history、不切换 context（用于 chain 内 interface 块，
+                          结果作为 pipeline 流转的中间图）。
+            input_image / input_mask: 显式指定的输入图/mask（chain 内由上一 block 提供）。
+                                      未指定时回退到 base_pipeline 的 image/mask。
+            base_pipeline: 执行所基于的 pipeline（chain 内为上一 block 输出的 pipeline，
+                          携带 model/clip/context/image/mask）。未指定时回退到
+                          self._current_pipeline（独立 interface tab 执行场景）。
+                          注意：chain 模式下不在此提前解析 prompt tab 的 lora/prompt，
+                          上下文完全由 pipeline 原样传递，由后续 detailer block 解析。
+        """
+        if interface_idx >= len(server.interface_packages):
+            raise ValueError(f"Interface index {interface_idx} out of range ({len(server.interface_packages)} interface packages)")
+
+        exec_options = exec_options or {}
+        operation = exec_options.get('operation', 'default')
+        image_keys = exec_options.get('image_keys', {})  # {port_num_str: history_key}
+        crop_reserve = int(exec_options.get('crop_reserve', 32))
+
+        pkg = server.interface_packages[interface_idx]
+        from .interface_node import InterfaceExecutor
+
+        # pipeline 来源：优先使用 chain 传入的 base_pipeline（上一 block 输出的 pipeline，
+        # 携带正确的 model/clip/context/image/mask）；否则回退独立 tab 的 _current_pipeline。
+        chain_mode = base_pipeline is not None
+        base_src = base_pipeline if chain_mode else self._current_pipeline
+        injected_pipeline = base_src.copy() if base_src else None
+
+        # Debug：独立执行（Interface tab Execute / 离线 Processor）开一份自己的 trace ——
+        # 与 run_detailer 的 trace 同一模型，Debug 窗口原样能读。chain 内的 interface 块
+        # 不在这里开：那份 trace 归整条 run，另开会把 run 已收集的过程整份丢掉。
+        own_trace = False
+        if not chain_mode:
+            dbg.begin_trace({
+                'from_blend': False,
+                'action': 'execute_interface',
+                'interface': pkg.get('name', ''),
+                'interface_index': interface_idx,
+                'offline': bool(exec_options.get('offline')),
+            })
+            own_trace = dbg.current_trace() is not None
+
+        # 仅在非 chain 模式（独立 interface tab）提前把 prompt tab 的 lora/prompt 注入到
+        # pipeline 上下文；chain 模式完全通过 pipeline 传递，不在此解析 prompt/lora。
+        if not chain_mode:
+            user_positive, user_loras = self._parse_prompt(server.prompt_server)
+            # Generate Text（MARKER_GENERATE_TEXT_INTERFACE）：独立 interface tab 时，
+            # 上游 pipeline 若启用了 PipelineEnableGenerateTextNode，同样在 prompt
+            # 注入点替换 positive（与 Draw tab block 链的语义保持一致）。
+            # 离线 Processor 不走这里：那是 block 链的环节（一次真实 LLM 调用 +
+            # 文本编码器整卡加载），Processor 只跑 interface 子图本身。
+            if (injected_pipeline and injected_pipeline.config.get('enable_generate_text')
+                    and not exec_options.get('offline')):
+                try:
+                    # interface 块没有 Enable Edit / Ref Image 概念 → 始终纯文本
+                    # （image 省略即 None），与 block 链里未选 Ref Image 时一致。
+                    user_positive, _gt_used = apply_generate_text_to_prompt(
+                        injected_pipeline, user_positive,
+                        injected_pipeline.config.get('generate_text_prompt', ''),
+                        label=' [interface]')
+                    if _gt_used:
+                        print(f"[interface] Generate Text applied: positive='{user_positive[:200]}'")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f'[interface] WARNING: Generate Text failed ({e}) — keeping previous prompt')
+            if injected_pipeline and (user_positive or user_loras):
+                from ..pipeline.sampler_node import SamplerContext
+                entry = SamplerContext()
+                entry.positive = user_positive
+                entry.negative = ''
+                entry.loras = get_loras_from_string(user_loras) if user_loras else []
+                # Model-only 补标（同块循环）：注入的串也要按持久配置补齐。
+                _mo = self._mark_model_only(entry.loras, self._model_only_paths(server.prompt_server if server else None))
+                if _mo != entry.loras:
+                    print(f"[interface] model-only flags patched at run time: {[x for x in _mo if ':model_only>' in str(x)]}")
+                entry.loras = _mo
+                injected_pipeline.context.contexts['__prompt_tab__'] = entry
+        if own_trace:
+            dbg.record_prompt('Prompt tab（注入 pipeline 上下文）', user_positive,
+                              loras=debug_lora_entries(user_loras))
+        # 默认注入的图 + mask (context image)
+        # chain 模式：优先使用调用方显式传入的输入图/mask（来自上一 block 的 pipeline）
+        base_img = input_image if input_image is not None else (
+            injected_pipeline.get_image(required=False) if injected_pipeline else None)
+        base_mask = input_mask if input_mask is not None else (
+            injected_pipeline.mask if injected_pipeline else None)
+
+        # 关键：把 resized 工作区图/mask 同步进 injected_pipeline，使子图内部通过
+        # pipeline.get_image()/pipeline.mask 取到的也是预处理后的工作区尺寸（而非原始全图）。
+        # 否则子图若从 pipeline 取 image，会拿到 crop/limit 之前的原始全图，与 mask 尺寸
+        # 不一致导致后续 recover_crop 崩溃。此处仅同步尺寸状态，不做额外 resize。
+        if injected_pipeline is not None:
+            if base_img is not None:
+                injected_pipeline.image = base_img
+            if base_mask is not None:
+                injected_pipeline.mask = base_mask
+
+        if own_trace:
+            dbg.record_stage(
+                '执行模式',
+                '离线 processor —— pipeline 当前图不改动' if exec_options.get('offline')
+                else 'Interface tab 独立执行',
+                interface=pkg.get('name', ''), index=interface_idx, operation=operation)
+            dbg.record_image('上下文图（pipeline 当前图）', base_img)
+            dbg.record_mask('上下文 mask', base_mask)
+
+        # 构建端口级图片覆盖。端口声明为 MASK 的走亮度转换 —— 覆盖值都是 staging 里
+        # 的 [1,H,W,C] 图，直接灌进 mask 端口形状不对。
+        start_types = pkg.get('start_types', {})
+        _start_names = ((getattr(server, 'interface_meta', None) or {})
+                        .get(pkg.get('name', '')) or {}).get('names', {}).get('start') or {}
+        port_overrides = {}
+        for port_num_str, key in image_keys.items():
+            if key:
+                img = server.get_staging_image(key)
+                if img is not None:
+                    declared = start_types.get(str(port_num_str))
+                    if declared == 'MASK':
+                        port_overrides[int(port_num_str)] = staging_image_to_mask(img)
+                    else:
+                        port_overrides[int(port_num_str)] = img
+                    if own_trace:
+                        _pname = _start_names.get(str(port_num_str)) or f'value{port_num_str}'
+                        _detail = f'staging {key}' + ('（亮度转 mask）' if declared == 'MASK' else '')
+                        if declared == 'MASK':
+                            dbg.record_mask(f'输入覆盖 · {_pname}',
+                                            port_overrides[int(port_num_str)], detail=_detail)
+                        else:
+                            dbg.record_image(f'输入覆盖 · {_pname}', img, detail=_detail)
+                    print(f"[InterfaceExec] Port {port_num_str} image override: id={key} ({declared or 'IMAGE'})")
+
+        injected_img = base_img
+        injected_mask = base_mask
+        pending_crop = None
+
+        # Crop mask 区域 (基于 context image + mask)
+        if operation == 'crop':
+            if base_img is None or base_mask is None:
+                raise ValueError("Crop operation requires both image and mask")
+            exp_mask = expand_mask(base_mask, grow=32, blur=32)
+            cropped_img, cropped_mask, crop_info = crop_mask(
+                image=base_img, mask=exp_mask, reserve=crop_reserve)
+            injected_img, injected_mask = cropped_img, cropped_mask
+            pending_crop = {
+                'crop_info': crop_info,
+                'original': base_img,
+                'mask': cropped_mask,
+            }
+            print(f"[InterfaceExec] cropped {base_img.shape} → {cropped_img.shape} crop_info={crop_info}")
+            if own_trace:
+                dbg.record_stage('Crop 工作区',
+                                 f'{tuple(base_img.shape)} → {tuple(cropped_img.shape)}',
+                                 reserve=crop_reserve)
+                dbg.record_image('Crop 后工作图', cropped_img)
+                dbg.record_mask('Crop 后工作 mask', cropped_mask)
+
+        # 记录 interface 结果 keys
+        server.interface_result_keys = []
+        server.interface_result_meta = []
+
+        # 不在执行期直接加 history——等 uncrop 之后再以最终图加入
+        def _on_result_image(img, name):
+            pass
+
+        # chain 模式：捕获 interface 返回的（被修改过的）pipeline，
+        # 将其 model/clip/context/lora 等修改写回上游 pipeline，
+        # 使后续 detailer block 拿到的就是被 interface 修改后的 model 等。
+        result_pipeline = None
+
+        def _on_result_pipeline(pipe, name):
+            nonlocal result_pipeline
+            if pipe is not None:
+                result_pipeline = pipe
+
+        executor = InterfaceExecutor(
+            extra_pnginfo=getattr(server, 'extra_pnginfo', None),
+            on_progress=lambda cur, total: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
+            get_pipeline=lambda: injected_pipeline,
+            get_image=lambda: injected_img,
+            get_mask=lambda: injected_mask,
+            on_result_image=_on_result_image,
+            on_result_pipeline=_on_result_pipeline if return_image else None,
+            on_sampler_progress=lambda cur, total, node_id: setattr(server, 'interface_current_step', cur) or setattr(server, 'interface_total_steps', total) or setattr(server, 'interface_progress', cur / max(total, 1)),
+        )
+
+        try:
+            results = executor.execute(pkg, manual_values, port_overrides=port_overrides)
+        except mm.InterruptProcessingException:
+            # Cancel（/api/cancel_run）触发的打断：标成 cancelled，别写成 error。
+            if own_trace:
+                dbg.record_stage('执行已取消', 'cancelled by user (interrupt)')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'cancelled'
+            raise
+        except Exception as e:
+            if own_trace:
+                dbg.record_error('interface 执行异常', str(e), where='_execute_interface')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'error'
+                    _tr.meta['error'] = str(e)
+            raise
+
+        # Uncrop：将裁剪结果复原回完整图
+        if pending_crop is not None:
+            uncropped_results = []
+            for item in results:
+                ptype, img, name = item
+                if ptype == 'IMAGE':
+                    uncropped, _ = recover_crop(
+                        background=pending_crop['original'],
+                        image=img,
+                        crop_info=pending_crop['crop_info'],
+                        recover_method='mask_blend',
+                        mask=pending_crop['mask'],
+                    )
+                    uncropped_results.append(('IMAGE', uncropped, name))
+                else:
+                    uncropped_results.append(item)
+            results = uncropped_results
+            print(f"[InterfaceExec] uncropped {len(results)} results back to full size")
+            if own_trace:
+                dbg.record_stage('Uncrop', f'{len(results)} 个结果复原回完整图')
+
+        # 离线 processor 语义：结果（IMAGE 与 MASK 都算）全部作为隐藏 staging 条目送回，
+        # 端口对应关系记进 interface_result_meta 供工作台按端口落位；pipeline 当前图
+        # 一概不动 —— processor 是「拿工作台的图去算一枚结果」，不是接力 run。
+        if exec_options.get('offline'):
+            _end_names = ((getattr(server, 'interface_meta', None) or {})
+                          .get(pkg.get('name', '')) or {}).get('names', {}).get('end') or {}
+            result_ports = getattr(executor, 'result_ports', [])
+            for i, (ptype, val, name) in enumerate(results):
+                port_num = result_ports[i] if i < len(result_ports) else None
+                if ptype == 'IMAGE':
+                    sid = server.add_staging(val, name=name, hidden=True)
+                elif ptype == 'MASK':
+                    sid = server.add_staging(staging_mask_to_image(val), name=name, hidden=True)
+                else:
+                    continue
+                server.interface_result_keys.append(sid)
+                server.interface_result_meta.append(
+                    {'key': sid, 'port': port_num, 'type': ptype, 'name': name})
+                if own_trace:
+                    _pname = (_end_names.get(str(port_num)) if port_num is not None else None) \
+                        or (f'value{port_num}' if port_num is not None else name)
+                    _detail = f'staging {sid}' + ('（mask→灰度图，工作台侧再落位）' if ptype == 'MASK' else '')
+                    if ptype == 'MASK':
+                        dbg.record_mask(f'输出 · {_pname}', val, detail=_detail)
+                    else:
+                        dbg.record_image(f'输出 · {_pname}', val, detail=_detail)
+            if own_trace:
+                dbg.record_stage('离线结果',
+                                 f'{len(server.interface_result_meta)} 个结果进图池（hidden），pipeline 当前图未改动')
+                _tr = dbg.current_trace()
+                if _tr is not None:
+                    _tr.meta['status'] = 'done'
+            print(f"[InterfaceExec] offline processor: {len(server.interface_result_meta)} results, pipeline untouched")
+            return None
+
+        # 提取结果图 / mask
+        result_img = None
+        result_mask = base_mask
+        for ptype, img, name in results:
+            if ptype == 'IMAGE' and result_img is None:
+                result_img = img
+                print(f"[InterfaceExec] result image: {name} {img.shape if hasattr(img, 'shape') else ''}")
+
+        if return_image:
+            # chain 模式：仅返回结果，不写 history / 不切换 context
+            if result_img is None:
+                print("[InterfaceExec] WARNING: no IMAGE result returned, keeping input")
+                result_img = base_img
+            # 将 interface 内部对 pipeline 的修改（model/clip/context/loras 等）写回上游
+            # pipeline，使后续 detailer block 拿到的是被 interface 修改后的 model 等。
+            if result_pipeline is not None and base_pipeline is not None:
+                self._sync_pipeline_updates(base_pipeline, result_pipeline)
+                print(f"[InterfaceExec] chain: synced interface pipeline updates (model/clip/context/loras) back to upstream pipeline")
+            return result_img, result_mask
+
+        # 以最终（可能已 uncrop）图加入内部图池（hidden：前端据条目 id 展示接口结果，
+        # 但接口产出不进工作区条带），并记录条目 id
+        for ptype, img, name in results:
+            if ptype == 'IMAGE':
+                server.interface_result_keys.append(
+                    server.add_staging(img, name=name, hidden=True))
+                if own_trace:
+                    dbg.record_image(f'输出 · {name}', img)
+
+        # 接口结果图同时接管 pipeline image（后续 block / 下一次 run 从它继续）
+        if results:
+            new_key = server.interface_result_keys[-1]
+            last_image = server.get_staging_image(new_key)
+            if last_image is not None:
+                self._switch_image(server, last_image)
+                print(f"[InterfaceExec] Pipeline image updated from staging {new_key}")
+        if own_trace:
+            dbg.record_stage('执行结束',
+                             f'{len(server.interface_result_keys)} 个结果进图池（hidden）')
+            _tr = dbg.current_trace()
+            if _tr is not None:
+                _tr.meta['status'] = 'done'
+
+    # -------------------------------------------------------------------------
+    # 主入口
+    # -------------------------------------------------------------------------
+    def sample(self, pipeline, seed, lora_regex="", detector=None, tagger=None, asset="",
+               package=None, extra_pnginfo=None, unique_id=None):
+        mm.throw_exception_if_processing_interrupted()
+
+        # pipeline 口是必需口，交回 None 就没有任何东西可跑（画布、Run、finish 落图全指着它）。
+        # 这句检查原来只在末尾，于是中途两处裸访问（_switch_image、finish 落图）会先炸成
+        # AttributeError —— 挪到这里，两条路一起断在一句话上。
+        if pipeline is None:
+            raise RuntimeError("[SnapshotDetailerSampler] Pipeline is None")
+
+        self._current_pipeline = pipeline.copy()
+        # 保存"原始 pipeline"引用：仅在初始化 / Pipeline tab 切换时设定。
+        # 每次 Run detailer 都基于它的副本执行，run 之间不共享、不累积修改。
+        self._base_pipeline = self._current_pipeline
+
+        # Derive lora_regex from pipeline's architecture config if not explicitly provided
+        if not lora_regex and pipeline.config:
+            arch = pipeline.config.get("architecture")
+            if arch:
+                lora_regex = str(arch)
+
+        server = SnapshotDetailerSamplerServer(
+            detector=detector,
+            tagger=tagger,
+            lora_regex=lora_regex,
+            asset=asset,
+            package=package,
+            node_instance=self,
+            unique_id=unique_id,
+            extra_pnginfo=extra_pnginfo,
+        )
+        server.start()
+
+        t0 = time.time()
+        while not server.started:
+            mm.throw_exception_if_processing_interrupted()
+            if time.time() - t0 > 15:
+                server.stop()
+                raise RuntimeError("[SnapshotDetailerSampler] Server startup timeout")
+            time.sleep(0.01)
+
+        # 初始图进内部图池（hidden：前端种子画布从这里取，但不占工作区条带 ——
+        # 工作区只收用户主动拖入的图）。没有图就没有种子，工作台那侧会自己去要上次那一份
+        # .cud（GET /api/recent_cud），所以这句写在日志里而不是让它静默成一块空画布。
+        if self._current_pipeline.image is not None:
+            server.original_key = server.add_staging(self._current_pipeline.image, name='Original', hidden=True)
+        else:
+            print("[SnapshotDetailerSampler] pipeline carries no image — the Blend canvas has no seed; "
+                  "the workbench will ask for the last .cud opened here")
+
+        print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
+        webbrowser.open(server.browser_url)
+
+        try:
+            while not server.finished:
+                try:
+                    mm.throw_exception_if_processing_interrupted()
+                except Exception as e:
+                    if "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                        break
+                    raise
+                if mm.processing_interrupted():
+                    break
+
+                # 等待前端 action
+                action = server.wait_for_action()
+                if action is None:
+                    break
+
+                act = action.get('action')
+
+                if act == 'window_closed':
+                    break
+
+                if act == 'finish':
+                    break
+
+                if act == 'run_detailer':
+                    server.detail_status = 'running'
+                    server.detail_error = None
+                    server.detail_progress = 0
+                    server.detail_current_step = 0
+                    server.detail_total_steps = 0
+                    # Debug：每一次 Run / Generate 开一份新 trace（丢弃上一份）。
+                    # Context 标题右侧的 Debug 按钮读的就是它。
+                    dbg.begin_trace({
+                        'from_blend': bool(action.get('from_blend')),
+                        'action': 'run_detailer',
+                    })
+                    # Set up progress tracking via ComfyUI's global hook
+                    import comfy.utils
+                    orig_hook = comfy.utils.PROGRESS_BAR_HOOK
+                    def _progress_hook(current, total, preview=None, **kwargs):
+                        server.detail_current_step = current
+                        server.detail_total_steps = total
+                        if total > 0:
+                            server.detail_progress = current / total
+                    comfy.utils.set_progress_bar_global_hook(_progress_hook)
+                    try:
+                        # 每次 run 重新记账：Enable Output 落盘只认这一趟里块出口暂存的选择与
+                        # 最后一份送进 CLIP 的串，上一趟的残留不能被复用。
+                        server.last_effective_prompt_selection = None
+                        server.last_clip_positive = ''
+                        server.last_output_positive = ''
+                        user_positive, user_loras = self._parse_prompt(server.prompt_server)
+                        # 可观测性：Generate / Run Detailer 实际注入的 prompt tab 内容。
+                        # 曾因 prefab 不展开而静默为空（见 _expand_prefabs 注释），这行让
+                        # 「没注入」在日志里一眼可见。
+                        print(f"[run_detailer] prompt tab: positive='{user_positive[:200]}' ({len(user_positive)} chars), loras={user_loras}")
+                        # Model-only 名单（这一趟哪些 lora 只改 model 不改 CLIP）——核对
+                        # 标记有没有在 payload / cache 往返中跟丢，就看这行和块内 [QueryLora]。
+                        _mo = [p.strip() for p in user_loras.split(',') if p.strip().endswith(':model_only>')]
+                        if _mo:
+                            print(f"[run_detailer] MODEL-ONLY loras this run ({len(_mo)}): {_mo}")
+                        else:
+                            print(f"[run_detailer] model-only loras this run: none (every lora patches model + CLIP)")
+                        dbg.record_prompt('1. Prompt tab（_parse_prompt 解析结果）', user_positive,
+                                          loras=debug_lora_entries(user_loras))
+
+                        # Blend 工作台：输入图 = 画布合成图，遮罩 = 纯 Mask 层，两者随 action 送达。
+                        # 走这条路时完全不动 _current_pipeline 的 image/mask，也就没有 context 切换。
+                        from_blend = bool(action.get('from_blend'))
+                        blend_image = server.blend_image if from_blend else None
+                        if from_blend:
+                            current_mask = server.blend_mask
+                        else:
+                            current_mask = self._current_pipeline.mask
+                        if current_mask is not None:
+                            current_mask = current_mask.clone()
+
+                        # 追加 prompt：只拼在 _parse_prompt 的结果之后，不写回 prompt 阶段状态，
+                        # 所以语义上是「追加描述」而不是「替换 prompt」。
+                        # <image_id:...> 嵌图标记在追加前统一解析：引用图 = 全局 refs
+                        # （所有 detailer block 共用），标记解码成 <image N> 后才进 positive。
+                        extra_prompt = (action.get('extra_prompt') or '').strip() if from_blend else ''
+                        prompt_ref_ids = []
+                        missing_ref_ids = []
+                        if extra_prompt:
+                            prompt_ref_ids, extra_prompt, missing_ref_ids = parse_prompt_image_refs(
+                                extra_prompt, lambda k: server.get_staging_image(k) is not None)
+                        if missing_ref_ids:
+                            print(f"[run_detailer] WARNING: extra prompt references missing staging ids "
+                                  f"(tokens removed from prompt): {missing_ref_ids}")
+                        if extra_prompt:
+                            user_positive = f"{user_positive}, {extra_prompt}" if user_positive else extra_prompt
+                        if extra_prompt:
+                            print(f"[run_detailer] extra prompt appended: '{extra_prompt}' "
+                                  f"(prompt refs: {prompt_ref_ids})")
+                            dbg.record_prompt('2. Extra Prompt 追加后', user_positive,
+                                              extra_prompt=extra_prompt,
+                                              ref_ids=list(prompt_ref_ids),
+                                              missing_ref_ids=list(missing_ref_ids),
+                                              loras=debug_lora_entries(user_loras))
+
+                        # 逐 run 的 preset 选择：取用即清空，下一次普通 Run 一定回落到当前
+                        # 激活 tab 的链（否则上一轮 Generate 选的 preset 会偷偷留下来）。
+                        # 这段解析必须排在"Mask is required"闸门与 pipeline 切换之前 ——
+                        # 闸门看哪条链、切哪条 pipeline、跑哪条链，三者必须是同一套 set。
+                        preset_id = server.pending_generate_preset
+                        server.pending_generate_preset = None
+                        preset_set = next(
+                            (s for s in (server.blocks_sets or [])
+                             if s.get('id') == preset_id and s.get('blocks')),
+                            None,
+                        ) if preset_id else None
+                        if preset_set is not None:
+                            print(f"[run_detailer] using pipeline preset '{preset_set.get('name')}' ({len(preset_set['blocks'])} blocks)")
+                        blocks = preset_set['blocks'] if preset_set is not None else server.blocks
+                        run_set_id = preset_set['id'] if preset_set is not None else server.active_block_set
+
+                        # 遮罩必须存在，否则 detailer 无意义 —— 例外：Enable Mask 总闸关
+                        # （生效链第一个 detailer 的 params.enable_mask）时整幅都是工作区，
+                        # Mask 层没画也允许跑。闸门与主循环共用 _first_detailer_enable_mask，
+                        # 两条路的选链优先级保持一致。
+                        if current_mask is None or (hasattr(current_mask, 'sum') and current_mask.sum().item() == 0):
+                            if server._first_detailer_enable_mask(preset_id):
+                                server.detail_status = 'error'
+                                server.detail_error = 'Mask is required — paint the mask layer before running the detailer'
+                                continue
+
+                        # 每次 Run 都基于"原始 pipeline"的副本执行——run 之间不共享、
+                        # 不累积上一轮对 pipeline 的修改。用户当前绘制的 mask 属于交互
+                        # 状态，单独合并进副本（原始 image / model 来自 base）。
+                        if self._base_pipeline is None:
+                            server.detail_status = 'error'
+                            server.detail_error = 'Pipeline not initialized — pick a pipeline in Pipeline Settings first'
+                            continue
+
+                        # Pipeline Settings：这套链绑定了具体 pipeline 名字才切换。
+                        # '' = [Default]、[Current Select] = 用当前已加载的那条，都不切。
+                        # 加载要走一遍上游、极耗性能，所以只有"这次要的和上次加载的不是同一条"
+                        # 时才真的 load —— node_id 是唯一稳定键（名字是推断出来的标题，会重名）。
+                        wanted_pipeline = server.preset_pipeline_name(run_set_id)
+                        if wanted_pipeline and wanted_pipeline != PIPELINE_CURRENT_SELECT:
+                            target = server.find_pipeline_by_name(wanted_pipeline)
+                            if target is None:
+                                server.detail_status = 'error'
+                                server.detail_error = (f"Pipeline '{wanted_pipeline}' is missing — "
+                                                       f"it no longer exists in the connected package; "
+                                                       f"rebind it in Pipeline Settings")
+                                continue
+                            if server.loaded_pipeline_node_id == target['node_id']:
+                                print(f"[run_detailer] pipeline '{wanted_pipeline}' already loaded — skip switch")
+                            else:
+                                print(f"[run_detailer] switching pipeline to '{wanted_pipeline}' "
+                                      f"(node_id={target['node_id']}) for set '{run_set_id}'")
+                                ok, err = self._load_pipeline_from_node(
+                                    server, target['node_id'], wanted_pipeline)
+                                if not ok:
+                                    server.detail_status = 'error'
+                                    server.detail_error = err
+                                    continue
+
+                        run_pipeline = self._base_pipeline.copy()
+                        run_pipeline.mask = current_mask.clone() if current_mask is not None else None
+
+                        # Blend 工作台：输入图就是画布合成图（Blend 画布 = Context Image）。
+                        if blend_image is not None:
+                            run_pipeline.image = blend_image.clone()
+
+                        # 诊断：打印 mask 和 image 的尺寸信息
+                        diag_img = run_pipeline.image
+                        if diag_img is not None:
+                            diag_img_h, diag_img_w = (diag_img.shape[1], diag_img.shape[2]) if diag_img.dim() == 4 else (diag_img.shape[0], diag_img.shape[1])
+                        else:
+                            diag_img_h, diag_img_w = 0, 0
+                        if current_mask is not None:
+                            diag_mask_shape = str(current_mask.shape)
+                            diag_mask_sum = current_mask.sum().item()
+                            diag_mask_max = current_mask.max().item()
+                        else:
+                            diag_mask_shape = 'None'
+                            diag_mask_sum = 0
+                            diag_mask_max = 0
+                        print(f"[DIAG] run_detailer: image={diag_img_w}x{diag_img_h} mask_shape={diag_mask_shape} mask_sum={diag_mask_sum:.1f} mask_max={diag_mask_max:.3f}")
+                        dbg.record_stage('3. Run 上下文',
+                                         f'image={diag_img_w}x{diag_img_h}, mask={diag_mask_shape}',
+                                         from_blend=bool(action.get('from_blend')),
+                                         image_size=f'{diag_img_w}x{diag_img_h}',
+                                         mask_shape=diag_mask_shape,
+                                         mask_sum=round(float(diag_mask_sum), 1),
+                                         mask_max=round(float(diag_mask_max), 3),
+                                         model=type(run_pipeline.model).__name__ if run_pipeline.model is not None else None,
+                                         architecture=(run_pipeline.config.get('architecture')
+                                                       if run_pipeline.config else None))
+                        dbg.record_image('输入图（Blend 画布合成图 / Context）', diag_img)
+                        dbg.record_mask('输入 Mask（Mask 层）', current_mask,
+                                        detail=f'sum={diag_mask_sum:.0f}')
+
+                        # Build global_params for pipeline execution.
+                        # 每个 GLOBAL SETTINGS 键都取 server 上的当前值（键名与 global_params
+                        # 完全一致，所以这里直接摊平）；Pipeline Settings 里当前 pipeline 打开的
+                        # override 逐项覆盖它（toggle 关的键压根不在 pipeline_overrides 里）。
+                        global_params = {
+                            'seed': seed,
+                            **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
+                            # 兜底值：每个 detailer block 自带 context_regex（Edit 页），
+                            # 只有没写这个键的遗留块才回落到 ".+"（全量 context）。
+                            'context_regex': '.+',
+                        }
+                        overrides = server.pipeline_overrides(server.loaded_pipeline_name)
+                        if overrides:
+                            global_params.update(overrides)
+                            print(f"[run_detailer] pipeline '{server.loaded_pipeline_name}' overrides applied: {overrides}")
+                        dbg.record_stage(
+                            '4. Pipeline 链',
+                            f"{len(blocks)} 个 block"
+                            + (f"（preset「{preset_set.get('name')}」）" if preset_set is not None else '（当前激活 tab）'),
+                            blocks=[{'index': i + 1, 'type': b.get('type'),
+                                     'name': b.get('name')} for i, b in enumerate(blocks)],
+                            global_params=dict(global_params),
+                        )
+
+                        next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(
+                            run_pipeline, current_mask, user_positive, user_loras, global_params, blocks, server=server,
+                            extra_prompt=extra_prompt, prompt_ref_ids=prompt_ref_ids
+                        )
+
+                        server.original_image = original_image
+                        server.detailed_image = detailed_image
+                        dbg.record_image('最终产出（detailed image）', detailed_image,
+                                         detail=f'detail_meta={"有 place 矩形" if detail_meta else "无"}')
+                        if detail_meta:
+                            dbg.record_stage('最终产出元数据', 'Recover Crop 关闭 — 产出是待贴回的 RGBA patch',
+                                             place=detail_meta.get('place'))
+                        # Context 就是 Blend 画布本身，detailer 产出不再接管 context，
+                        # 所以这里不记 context key（产出图由前端作为新图层叠加到画布上）。
+                        server.original_key = None
+                        server.detail_status = 'done'
+
+                        # 产出图进内部图池（hidden：不进工作区条带 —— 生成结果只有
+                        # 用户主动拖入才会出现在工作区；前端仍按 detailed_key 从
+                        # /api/staging 取到条目，作为新图层叠加到画布上，图层自带像素）。
+                        # Recover Crop 关闭时带放置矩形 —— 产出图本身已是
+                        # RGBA（alpha = 工作区 mask），Blend 工作台据此把它作为新图层
+                        # transform 贴回原位。
+                        server.detailed_key = server.add_staging(
+                            detailed_image,
+                            name=f'Detail #{len(server.staging_items)}',
+                            place=(detail_meta or {}).get('place'),
+                            hidden=True,
+                        )
+
+                        # 更新 pipeline（保留 model/vae/latent 等流转状态）
+                        self._current_pipeline = next_pipeline
+
+                        # Enable Output（Preprocess Settings 的开关，存在生效链第一个 detailer
+                        # 的 params 上 —— 与 Enable Mask / Recover Crop 同一份「每个 preset
+                        # 各自一份」的作用域）。落不落盘只看这一颗开关：整幅 Run 与一趟
+                        # 图层 Generate 都走这条，不分流。
+                        # 必须排在下面剥离 program 项之前 —— 那时 selected_* 还是这次的真值。
+                        first_d = next((b for b in blocks
+                                        if isinstance(b, dict) and b.get('type') == 'detailer'), None)
+                        if (first_d is not None
+                                and bool((first_d.get('params', first_d) or {}).get('enable_output', False))):
+                            self._save_run_output_png(server, detailed_image)
+
+                        # 清理 prompt 中的 program-sourced 项（parsing tag 保留，在 tag 阶段转换）
+                        if server.prompt_server:
+                            server.prompt_server.selected_prompts = [
+                                p for p in (server.prompt_server.selected_prompts or [])
+                                if not (isinstance(p, dict) and p.get('source', 'normal') == 'program')
+                            ]
+                            # 先保存完整的 program 处理后的结果（含 program 来源项），用于预览/快照，
+                            # 再剥离 program 项用于实际生成。
+                            full_loras = list(server.prompt_server.selected_loras) if isinstance(server.prompt_server.selected_loras, list) else []
+                            full_prefabs = list(server.prompt_server.selected_prefabs) if isinstance(server.prompt_server.selected_prefabs, list) else []
+                            server.prompt_server.selected_loras = [
+                                l for l in full_loras
+                                if l.get('source', 'normal') != 'program'
+                            ]
+                            server.prompt_server.selected_prefabs = [
+                                p for p in full_prefabs
+                                if p.get('source', 'normal') != 'program'
+                            ]
+                            server.prompt_server.last_selected = [
+                                p['text'] if isinstance(p, dict) else p
+                                for p in server.prompt_server.selected_prompts
+                                if (p.get('source', 'normal') if isinstance(p, dict) else 'normal') != 'program'
+                            ]
+                            # 快照/预览使用完整结果（保留 program 添加/修改的 lora 与 prefab）
+                            server.prompt_server.last_selected_loras = full_loras
+                            server.prompt_server.last_selected_prefabs = full_prefabs
+                            server.prompt_server.custom_prompts = ''
+
+                    except mm.InterruptProcessingException:
+                        # Cancel 按钮（/api/cancel_run）触发的打断。InterruptProcessingException
+                        # 继承 BaseException，下面的 except Exception 接不住——不接的话它会
+                        # 炸穿整个节点（server 一起被停掉）。这里转成干净的「已取消」。
+                        print("[SnapshotDetailerSampler] Run cancelled by user")
+                        server.detail_status = 'cancelled'
+                        server.detail_error = None
+                        dbg.record_stage('Run 已取消', 'cancelled by user (interrupt)')
+                    except Exception as e:
+                        # Check if this is a ComfyUI interrupt
+                        if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                            print("[SnapshotDetailerSampler] Interrupted during detailer")
+                            break
+                        import traceback
+                        traceback.print_exc()
+                        server.detail_status = 'error'
+                        server.detail_error = str(e)
+                        dbg.record_error('run_detailer 异常', str(e), where='run_detailer')
+                    finally:
+                        comfy.utils.set_progress_bar_global_hook(orig_hook)
+                        server.detail_progress = 1.0 if server.detail_status == 'done' else server.detail_progress
+                        dbg.record_stage('Run 结束', f"status={server.detail_status}"
+                                         + (f", error={server.detail_error}" if server.detail_error else ''))
+                        _tr = dbg.current_trace()
+                        if _tr is not None:
+                            _tr.meta['status'] = server.detail_status
+                            _tr.meta['error'] = server.detail_error
+                        # 本次 run 的 blend 输入已消费完，释放引用
+                        server.blend_image = None
+                        server.blend_mask = None
+                        server.blend_prompt = ''
+
+                    gc.collect()
+                    mm.soft_empty_cache()
+
+                if act == 'select_image':
+                    # 设为 pipeline 当前图（工作台右键/宿主入口均可触发）
+                    key = action.get('key', '')
+                    img = server.get_staging_image(key)
+                    if img is not None:
+                        self._switch_image(server, img)
+                        print(f"[SnapshotDetailerSampler] Pipeline image set from staging: {key}")
+
+                if act == 'execute_interface':
+                    interface_idx = action.get('interface_index', 0)
+                    manual_values = action.get('manual_values', {})
+                    exec_options = action.get('exec_options', {})
+                    server.interface_status = 'running'
+                    server.interface_error = None
+                    server.interface_progress = 0
+                    server.interface_current_step = 0
+                    server.interface_total_steps = 0
+                    try:
+                        self._execute_interface(server, interface_idx, manual_values, exec_options)
+                        server.interface_status = 'done'
+                        server.interface_progress = 1.0
+                    except mm.InterruptProcessingException:
+                        # Cancel 打断（同 run_detailer 的处理）：转成干净的取消，
+                        # 不让异常炸穿节点。回 idle 让 Execute 按钮恢复可点。
+                        print("[SnapshotDetailerSampler] Interface run cancelled by user")
+                        server.interface_status = 'idle'
+                        server.interface_error = None
+                    except Exception as e:
+                        if mm.processing_interrupted() or "interrupt" in str(e).lower() or "processing" in str(e).lower():
+                            print("[SnapshotDetailerSampler] Interrupted during interface execution")
+                            break
+                        import traceback
+                        traceback.print_exc()
+                        server.interface_status = 'error'
+                        server.interface_error = str(e)
+                    finally:
+                        gc.collect()
+                        mm.soft_empty_cache()
+
+        finally:
+            print("[SnapshotDetailerSampler] Stopping servers...")
+            server.stop()
+            print("[SnapshotDetailerSampler] Servers stopped.")
+
+        # 如果是因 interrupt 而 break 出循环，抛 ComfyUI 的干净取消异常通知它 ——
+        # 裸 RuntimeError 会被执行框架当真正的故障渲染成红色 traceback，
+        # InterruptProcessingException 才是 Cancel 按钮同款的"已取消"。
+        if mm.processing_interrupted():
+            raise mm.InterruptProcessingException()
+
+        if server.window_closed and not server.finished:
+            raise RuntimeError("[SnapshotDetailerSampler] Window closed without finishing")
+
+        # 如果用户在 finish 时选了工作区图片，用它作为最终输出
+        # 先清空已有的 image 和 latent，再追加选中的图片
+        if server.finish_selected_keys and len(server.finish_selected_keys) > 0:
+            selected_images = []
+            for key in server.finish_selected_keys:
+                img = server.get_staging_image(key)
+                if img is not None:
+                    selected_images.append(img)
+            if selected_images:
+                self._current_pipeline.image = selected_images if len(selected_images) > 1 else selected_images[0]
+            self._current_pipeline.latent = None
+
+        result = self._current_pipeline
+        self._current_pipeline = None
+        return (result,)

@@ -13,6 +13,13 @@ import shutil
 PACK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_ROOT = os.path.join(PACK_ROOT, 'data')
 LEGACY_DATA_ROOT = os.path.join(os.path.dirname(PACK_ROOT), 'data')
+# 构建产物与运行时前端资产(fx/attr/js)的唯一落点;源码工作区在 ui/ 下。
+WEB_ROOT = os.path.join(PACK_ROOT, 'nodes', 'web')
+
+
+def web_file(*parts):
+    """<pack>/nodes/web/<parts> —— 各 http server 提供 html/js 的唯一入口。"""
+    return os.path.join(WEB_ROOT, *parts)
 
 
 def data_dir(kind):

@@ -39,7 +39,7 @@ function inferTypeFromOutput(node, output) {
 // output.type` 冻进 link.type (LGraphNode.ts:2798), 之后没有任何东西回头看槽位
 // (全量前端里给 link.type 重新赋值的只有 setOutputDataType 这一处, LGraphNode.ts:1032,
 // 且它没有任何调用者); 后端 infer_port_types 读的正是序列化出来的 link[5]
-// (nodes/interface_node.py:756)。value 口自己的槽类型是字符串 "*", 它在 `||` 左边就是真值,
+// (nodes/workbench/interface_node.py:756)。value 口自己的槽类型是字符串 "*", 它在 `||` 左边就是真值,
 // 所以冻进去的永远是 "*" —— 只改 out.type / inp.type 永远到不了 Interface。
 function setOutputSlotType(node, out, type) {
     if (node.graph && typeof node.setOutputDataType === "function") {

@@ -630,7 +630,7 @@ else:
 1. Pipeline 里 `use_default_template = True`（默认就是 True，**别关**）；
 2. `clip` 是多模态编码器（Gemma 3/4 vision、Qwen3-VL 家族…）。
 
-**自动诊断**：`_preflight_generate_text_images()`（`nodes/snapshot_sampler_node.py`）会在真正
+**自动诊断**：`_preflight_generate_text_images()`（`nodes/workbench/snapshot_sampler_node.py`）会在真正
 生成之前**实测一次 `clip.tokenize`**，把 token 流里的 image embedding 数出来，三态结论：
 
 | 结论 | 含义 |
@@ -726,7 +726,7 @@ trace 的过程图上限 `MAX_IMAGES_PER_TRACE = 240`，单图超过 `MAX_IMAGE_
 > - `libs/debug_trace.py` 的 `record_image/record_mask` 接受 tensor 或 numpy 数组；
 >   维度归一和缩放都在内部完成，不要在埋点处预处理。
 
-**前端**：`nodes/sampler_node/src/components/DebugModal.tsx`。按 block 折叠分组，支持
+**前端**：`ui/sampler_node/src/components/DebugModal.tsx`。按 block 折叠分组，支持
 筛选（全部 / Prompt 链路 / 过程图 / 只看 Block），缩略图点击放大（Esc 关闭）。
 
 ---

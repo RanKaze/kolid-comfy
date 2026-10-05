@@ -52,19 +52,18 @@ pip install -r requirements.txt
 
 ### 3. 构建前端资源（可选）
 
-交互式 Web UI 节点（PromptNode、AssetsNode）的 HTML 文件需要前端构建后才会生成。仓库已附带预构建的 `nodes/web/*.html`，如果需要修改前端代码则需手动构建：
+交互式 Web UI 节点（PromptNode、AssetsNode）的 HTML 文件需要前端构建后才会生成。仓库已附带预构建的 `nodes/web/*.html`，前端源码在顶层 `ui/` 目录（npm workspaces），如果需要修改前端代码则需手动构建：
 
 ```bash
-# 构建 PromptNode 前端
-cd nodes/prompt_node
+cd ui
 npm install
-npm run build
+
+# 构建 PromptNode 前端
+npm run build -w prompt_node
 # 输出: nodes/web/prompt_node.html
 
 # 构建 AssetsNode 前端
-cd nodes/assets_node
-npm install
-npm run build
+npm run build -w assets_node
 # 输出: nodes/web/assets_node.html
 ```
 
@@ -73,6 +72,29 @@ npm run build
 ### 4. 重启 ComfyUI
 
 重启 ComfyUI 后，节点会自动加载。在 ComfyUI 的节点搜索中输入节点名称（如 `ImageFitNode`、`PipelineNode`、`SnapshotPromptNode` 等）即可找到。
+
+---
+
+## 📁 目录结构
+
+```
+kolid-comfy/
+├── __init__.py        # 入口：合并各领域子包的 NODE_CONFIG
+├── nodes/             # Python 节点实现，按领域分子包
+│   ├── logic/         # 纯逻辑：字符串/字典/列表/分支/数学/脚本
+│   ├── image/         # 图像：fit/crop/mask/分割/gaussian
+│   ├── video/         # 视频与音频
+│   ├── io/            # 磁盘与网络读写
+│   ├── pipeline/      # 采样器与 pipeline 核心
+│   ├── workbench/     # 工作台套件（snapshot_* / prompt / assets / interface）
+│   └── web/           # 前端构建产物 + 运行时资产（fx/attr/js/supersplat）
+├── ui/                # 前端源码（npm workspaces，vite 构建到 nodes/web/）
+├── architecture/      # 模型架构适配（Krea2 / Flux2Klein / QwenEdit / QwenImage21）
+├── libs/              # 共享工具库（data_paths/video_utils/mask_utils 等）
+├── javascript/        # ComfyUI 前端扩展脚本（WEB_DIRECTORY）
+├── docs/              # 节点文档（按分类）
+└── data/              # 运行时用户内容（不入库）
+```
 
 ---
 
