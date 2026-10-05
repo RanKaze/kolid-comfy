@@ -58,3 +58,15 @@ nodes/recent_cud.json
 .codely-cli/**
 .workbuddy/**
 CODELY.md
+
+# 一次性脚本与临时产物：改产品用的正则 patcher、ast 探针、数据迁移脚本、抓下来的构建日志。
+# 10-05 起已从全部历史抹掉，文件仍留在本机磁盘上；列在这里只是防止再被 add 回仓库。
+/_patch1.py
+/_patch2.py
+/_patch3.py
+/_patch4.py
+/_test_mo.py
+/nodes/migrate_taggroup.py
+/nodes/_build_out.txt
+/nodes/prompt_node/ts_errors.txt
+/nodes/web/js/__test.psd
