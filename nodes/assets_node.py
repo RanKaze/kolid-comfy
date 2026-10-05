@@ -11,6 +11,7 @@ import io
 import comfy.model_management as mm
 from server import PromptServer
 from comfy_api.latest import InputImpl
+from ..libs.data_paths import data_dir
 
 
 def check_interrupted():
@@ -146,11 +147,9 @@ class SnapshotAssetsServer:
         self.audio_config = audio_config
         self.global_mode = global_mode
         self.should_stop = False
-        self.asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
-        os.makedirs(self.asset_cache_dir, exist_ok=True)
+        self.asset_cache_dir = data_dir('assets')
         # Snapshot save directory for global_mode
-        self.snapshot_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
-        os.makedirs(self.snapshot_cache_dir, exist_ok=True)
+        self.snapshot_cache_dir = data_dir('snapshots')
 
     def save_base64_image(self, data_url):
         """Save base64 image to cache directory and return URL path."""
@@ -924,7 +923,7 @@ class SnapshotAssetsNode:
         # Handle URL paths (e.g., /assets/abc123.png)
         if image_data.startswith('/assets/'):
             # Get the absolute path from the URL
-            base_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+            base_dir = data_dir('assets')
             filename = os.path.basename(image_data)
             filepath = os.path.join(base_dir, filename)
             if os.path.exists(filepath):
@@ -955,7 +954,7 @@ class SnapshotAssetsNode:
         canvas_snapshot = None
         if global_mode and data and data.strip():
             # global_mode: load snapshot from disk using data as name
-            snap_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "snapshots")
+            snap_dir = data_dir('snapshots')
             snap_path = os.path.join(snap_dir, f"{data.strip()}.json")
             if os.path.exists(snap_path):
                 with open(snap_path, 'r', encoding='utf-8') as f:
@@ -1069,7 +1068,7 @@ class SnapshotAssetsNode:
         # Process videos (video URLs from frontend, convert to file paths for VideoFromFile)
         videos = []
         # Get asset_cache_dir from server instance
-        asset_cache_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "assets")
+        asset_cache_dir = data_dir('assets')
         
         print(f"[SnapshotAssets] Processing {len(selected_videos)} video items")
         for vid_data in selected_videos:

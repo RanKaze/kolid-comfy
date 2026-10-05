@@ -14,6 +14,7 @@ from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 import folder_paths
 from server import PromptServer
 import comfy.model_management as mm
+from ..libs.data_paths import data_dir, data_file
 
 try:
     from PIL import ImageGrab
@@ -120,8 +121,8 @@ class SnapshotPromptServer:
         self.enable_region = False
         self.region_format = ""
         
-        # 数据路径改为当前文件夹下的 data/prompt
-        self.data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "prompt")
+        # 用户内容一律落 <pack>/data/<kind>（见 libs/data_paths.py）
+        self.data_dir = data_dir('prompt')
         self.images_dir = os.path.join(self.data_dir, "images")
         self.prompt_json = os.path.join(self.data_dir, "prompt.json")
         self.library_json = os.path.join(self.data_dir, "library.json")
@@ -3046,8 +3047,7 @@ class SnapshotPromptNode:
         
         Returns (last_selected, unmatched_segments), unmatched_segments being a list.
         """
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "prompt")
-        prompt_json = os.path.join(data_dir, "prompt.json")
+        prompt_json = data_file('prompt', 'prompt.json')
 
         prompts_data = {}
         if os.path.exists(prompt_json):
@@ -3288,7 +3288,7 @@ class SnapshotPromptNode:
                 pass
 
         if global_mode and asset_data and asset_data.strip():
-            snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "snapshots")
+            snap_dir = data_dir('snapshots')
             snap_path = os.path.join(snap_dir, f"{asset_data.strip()}.json")
             if os.path.exists(snap_path):
                 with open(snap_path, 'r', encoding='utf-8') as f:

@@ -49,24 +49,17 @@ nodes/web/supersplat/build/
 
 # 产生的cookies
 cookies/
-data/prompt/
-data/switch/
-# 上次打开的 .cud 是本机绝对路径，不入库
-nodes/recent_cud.json
+# 用户内容一律落在 <pack>/data/<kind>（assets / prompt / sampler / snapshots / switch），
+# 每台机器各写各的，跟包代码无关。10-05 起 workbench 的三份 JSON 从 nodes/ 搬进 data/sampler/，
+# 原本写歪到仓库外一级（custom_nodes/data）的 assets、snapshots 也搬了回来。
+# data/ 下没有任何一件入库（git ls-files data 为空），所以整目录忽略，不再按 kind 逐条列。
+data/
+# 临时的文件,比如临时的迁移测试脚本之类的
+temporary/
 
-.codely/**
-.codely-cli/**
-.workbuddy/**
+mem-log/
+.codely/
+.codely-cli/
+.workbuddy/
 CODELY.md
 
-# 一次性脚本与临时产物：改产品用的正则 patcher、ast 探针、数据迁移脚本、抓下来的构建日志。
-# 10-05 起已从全部历史抹掉，文件仍留在本机磁盘上；列在这里只是防止再被 add 回仓库。
-/_patch1.py
-/_patch2.py
-/_patch3.py
-/_patch4.py
-/_test_mo.py
-/nodes/migrate_taggroup.py
-/nodes/_build_out.txt
-/nodes/prompt_node/ts_errors.txt
-/nodes/web/js/__test.psd

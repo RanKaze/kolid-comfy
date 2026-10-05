@@ -13,6 +13,7 @@ import base64
 from urllib.parse import parse_qs, urlparse
 import io
 import copy
+import shutil
 import numpy as np
 from PIL import Image
 import torch
@@ -22,6 +23,7 @@ import comfy.model_management as mm
 # 导入现有模块
 # =============================================================================
 from ..libs.utils import AlwaysEqualProxy
+from ..libs.data_paths import data_dir, data_file
 
 try:
     from .prompt_node import SnapshotPromptServer, SnapshotPromptNode
@@ -248,7 +250,7 @@ def parse_prompt_image_refs(text, resolve):
 # 为什么单独一个常驻线程：Tk 不是线程安全的，而 HTTP handler 每个请求一个线程。所有对话框排进
 # 一条队列，由唯一那根线程上唯一的 root 执行；对话框本身是原生模态的，只挡住那根线程。
 #
-# "最近一份 .cud"记在 nodes/recent_cud.json，只在上面那条原生对话框的路上写（那是后端唯一拿得到
+# "最近一份 .cud"记在 data/sampler/recent_cud.json，只在上面那条原生对话框的路上写（那是后端唯一拿得到
 # 真实路径的一趟；浏览器 handle 与 <input type=file> 都没有路径可记）。读回来时同样由服务端自己
 # mint token，页面从头到尾无从指定路径 —— 这条记录的用途是"重开你自己上次挑过的那份文件"，
 # 不是第二个文件读取口。
@@ -274,7 +276,19 @@ IO_FILE_KINDS = {
     },
 }
 
-RECENT_CUD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'recent_cud.json')
+# 工作台自己那三份用户内容（blocks 链与 GLOBAL SETTINGS、Prompt 预设、最近一份 .cud 的路径）
+# 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
+# 里、其中两份还归了 git —— 那是每台机器各写各的运行状态，不是包的代码。
+def _workbench_file(name):
+    """data/sampler/<name>（落点由 libs/data_paths 定）；nodes/ 里那份旧文件首次访问时搬进来。"""
+    target = data_file('sampler', name)
+    legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    # 搬家那刻 ComfyUI 可能还带着旧代码在跑，它下一次写就写回 legacy —— 所以比 mtime，
+    # 而不是"target 有了就不管 legacy"，否则那之后的改动会静默丢在旧位置。
+    if os.path.exists(legacy) and (not os.path.exists(target)
+                                   or os.path.getmtime(legacy) > os.path.getmtime(target)):
+        shutil.move(legacy, target)
+    return target
 
 
 class DocumentIo:
@@ -396,7 +410,7 @@ class DocumentIo:
     def _remember_cud(self, path):
         """把这条路径写成"上次打开的那份文档"。写失败只记账，不影响这次的挑选。"""
         try:
-            with open(RECENT_CUD_FILE, 'w', encoding='utf-8') as f:
+            with open(_workbench_file('recent_cud.json'), 'w', encoding='utf-8') as f:
                 json.dump({'path': os.path.abspath(path)}, f, ensure_ascii=False)
         except Exception as e:
             print(f"[SnapshotDetailerSampler] could not record the recent .cud: {e}")
@@ -409,7 +423,7 @@ class DocumentIo:
         Save 照旧原地写回同一个文件。
         """
         try:
-            with open(RECENT_CUD_FILE, encoding='utf-8') as f:
+            with open(_workbench_file('recent_cud.json'), encoding='utf-8') as f:
                 recorded = json.load(f)
         except FileNotFoundError:
             return None, 'no .cud has been opened with the file dialog on this machine yet'
@@ -512,7 +526,7 @@ class SnapshotDetailerSamplerServer:
     """
 
     # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
-    # → 落盘 blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
+    # → 落盘 data/sampler/blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
     # 所以除了这份文件不存在第二个来源，不会出现互相覆盖。
     # ref_* / tgen_* 是输入侧的显存封顶（喂给 ref image / generate text 之前先 limit_pixels
     # 的 cap_only 模式压一刀），0 = 不设上限。
@@ -1053,7 +1067,7 @@ class SnapshotDetailerSamplerServer:
     # 全局参数 / block 链持久化
     # -------------------------------------------------------------------------
     def _blocks_sets_file(self):
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'blocks_sets.json')
+        return _workbench_file('blocks_sets.json')
 
     def _load_blocks_sets_file(self):
         """Persisted tab sets from disk, or (None, None) when absent/corrupt."""
@@ -1314,11 +1328,11 @@ class SnapshotDetailerSamplerServer:
 
     # ------------------------------------------------------------------
     # Prompt presets — 共享、持久化的 selection 模板；Prompt 块只存 preset_id 引用。
-    # 预设内容（tags/custom/loras/prefabs/programs 的 raw selection）存 nodes/prompt_presets.json，
+    # 预设内容（tags/custom/loras/prefabs/programs 的 raw selection）存 data/sampler/prompt_presets.json，
     # 编辑 preset 即影响所有引用它的块；run 时按块顺序注入其后的 detailer（纯临时）。
     # ------------------------------------------------------------------
     def _prompt_presets_file(self):
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prompt_presets.json')
+        return _workbench_file('prompt_presets.json')
 
     def _load_prompt_presets(self):
         """Persisted prompt presets: [{'id','name','selection'}]. Absent/corrupt file -> []."""
@@ -1823,7 +1837,7 @@ class SnapshotDetailerSamplerServer:
             if self.path == '/api/prompt_presets':
                 # Prompt preset 管理：Prompt 块引用的共享 selection 模板（prompt_node.html
                 # 的 preset 作用域 iframe 通过 action=save 写入），持久化到
-                # nodes/prompt_presets.json。action: create | save | rename | delete。
+                # data/sampler/prompt_presets.json。action: create | save | rename | delete。
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
@@ -2470,7 +2484,7 @@ class SnapshotDetailerSamplerNode:
                 pass
 
         if global_mode and asset_data and asset_data.strip():
-            snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "snapshots")
+            snap_dir = data_dir('snapshots')
             snap_path = os.path.join(snap_dir, f"{asset_data.strip()}.json")
             if os.path.exists(snap_path):
                 with open(snap_path, 'r', encoding='utf-8') as f:

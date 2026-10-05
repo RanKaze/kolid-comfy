@@ -11,6 +11,7 @@ import hashlib
 import comfy.model_management as mm
 
 from ..libs.utils import AlwaysEqualProxy, compare_revision
+from ..libs.data_paths import data_dir
 
 any_type = AlwaysEqualProxy("*")
 lazy_options = {"lazy": True} if compare_revision(2543) else {}
@@ -24,10 +25,11 @@ _HISTORY_MAX = 20  # max history snapshots per node
 
 
 def _get_switch_history_dir(unique_id, use_global=False):
+    base = data_dir('switch')
     if use_global:
-        base = os.path.join(os.path.dirname(__file__), "..", "data", "switch", "global")
+        base = os.path.join(base, "global")
     else:
-        base = os.path.join(os.path.dirname(__file__), "..", "data", "switch", str(unique_id))
+        base = os.path.join(base, str(unique_id))
     os.makedirs(base, exist_ok=True)
     return base
 
