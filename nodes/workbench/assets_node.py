@@ -3,6 +3,7 @@ import json
 import threading
 import http.server
 import webbrowser
+from ...libs.client_host import open_ui
 import time
 import base64
 import hashlib
@@ -996,7 +997,7 @@ class SnapshotAssetsNode:
             time.sleep(0.01)
 
         print(f"[SnapshotAssets] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         if not server.wait_for_confirm():
             print("[SnapshotAssets] Interrupted or timed out")

@@ -3,6 +3,7 @@ import json
 import threading
 import http.server
 import webbrowser
+from ...libs.client_host import open_ui
 import time
 import inspect
 import io
@@ -456,7 +457,7 @@ class SnapshotSwitchNode:
             time.sleep(0.01)
 
         print(f"[SnapshotSwitch] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         if not server.wait_for_selection():
             print("[SnapshotSwitch] Interrupted or timed out")

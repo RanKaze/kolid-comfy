@@ -11,6 +11,7 @@ import threading
 import http.server
 import socketserver
 import webbrowser
+from ...libs.client_host import open_ui
 import time
 
 import numpy as np
@@ -309,7 +310,7 @@ class SnapshotDrawNode:
             time.sleep(0.1)
 
         print(f"[SnapshotDraw] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         # Wait for draw to be submitted
         print("[SnapshotDraw] Waiting for drawing...")

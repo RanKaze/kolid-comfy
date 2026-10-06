@@ -8,6 +8,7 @@ import queue
 import http.server
 import socketserver
 import webbrowser
+from ...libs.client_host import open_ui
 import time
 import base64
 from urllib.parse import parse_qs, urlparse
@@ -2519,7 +2520,7 @@ class SnapshotDetailerSamplerNode:
             time.sleep(0.01)
 
         print(f"[load_from_assets] Opening browser at: {assets_server.browser_url}")
-        webbrowser.open(assets_server.browser_url)
+        open_ui(assets_server.browser_url)
 
         if not assets_server.wait_for_confirm():
             assets_server.stop()
@@ -4676,7 +4677,7 @@ class SnapshotDetailerSamplerNode:
                   "the workbench will ask for the last .cud opened here")
 
         print(f"[SnapshotDetailerSampler] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         try:
             while not server.finished:

@@ -2,6 +2,7 @@
 
 import os
 import webbrowser
+from ...libs.client_host import open_ui
 import threading
 import http.server
 import socketserver
@@ -675,7 +676,7 @@ class SnapshotGaussianNode:
             time.sleep(0.1)
 
         print(f"[SnapshotGaussian] Opening browser at: {server.bowser_url}")
-        webbrowser.open(server.bowser_url)
+        open_ui(server.bowser_url)
 
         # Wait for screenshot to be captured (indefinitely, but web page will notify on close)
         print("[SnapshotGaussian] Waiting for snapshot...")

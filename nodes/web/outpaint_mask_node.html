@@ -1,6 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script>
+/* Kolid Desktop(跨源 iframe 页签):window.close() 是 no-op,转发给宿主壳页关页签;
+   宿主点页签 × 时发来 {__kolid:'pageClose'},补一次 beforeunload 让本页的通知照常发出。
+   独立在普通浏览器里打开时(window.parent===window)整段不生效。 */
+(function () {
+  if (window.parent === window) return;
+  window.close = function () {
+    try { window.top.postMessage({ __kolid: 'closeTab' }, '*'); } catch (e) {}
+  };
+  window.addEventListener('message', function (e) {
+    if (e.data && e.data.__kolid === 'pageClose') {
+      try { window.dispatchEvent(new Event('beforeunload')); } catch (err) {}
+    }
+  });
+})();
+</script>
+
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Outpaint Mask</title>

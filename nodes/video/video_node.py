@@ -12,6 +12,7 @@ import http.server
 import threading
 import time
 import webbrowser
+from ...libs.client_host import open_ui
 from urllib.parse import urlparse
 from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 import folder_paths
@@ -774,7 +775,7 @@ class SnapshotVideoNode:
             time.sleep(0.1)
 
         print(f"[SnapshotVideo] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         print("[SnapshotVideo] Waiting for timestamp selection...")
         server.wait_for_timestamp()

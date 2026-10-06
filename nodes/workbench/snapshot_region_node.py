@@ -18,6 +18,7 @@ import socket
 import socketserver
 import threading
 import webbrowser
+from ...libs.client_host import open_ui
 import http.server
 import numpy as np
 
@@ -674,7 +675,7 @@ class SnapshotRegionNode:
             time.sleep(0.1)
 
         print(f"[SnapshotRegion] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         # Wait for user to confirm or cancel
         print("[SnapshotRegion] Waiting for region selection...")

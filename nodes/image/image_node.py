@@ -3,6 +3,7 @@
 import os
 from pickle import NONE
 import webbrowser
+from ...libs.client_host import open_ui
 import threading
 import http.server
 import socketserver
@@ -523,7 +524,7 @@ class SnapshotImageNode:
             time.sleep(0.1)
 
         print(f"[SnapshotImage] Opening browser at: {server.bowser_url}")
-        webbrowser.open(server.bowser_url)
+        open_ui(server.bowser_url)
 
         # Wait for image selection to be captured
         print("[SnapshotImage] Waiting for image selection...")
@@ -819,7 +820,7 @@ class SnapshotImagePointsNode:
                 time.sleep(0.1)
 
             print(f"[SnapshotImagePoints] Opening browser at: {server.bowser_url}")
-            webbrowser.open(server.bowser_url)
+            open_ui(server.bowser_url)
 
             # Wait for points selection to be captured
             print("[SnapshotImagePoints] Waiting for points selection...")
@@ -2394,7 +2395,7 @@ class SnapshotMaskNode:
             time.sleep(0.1)
 
         print(f"[SnapshotMask] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         # Wait for mask to be submitted
         print("[SnapshotMask] Waiting for mask drawing...")
@@ -2583,7 +2584,7 @@ class SnapshotOutpaintMaskNode:
             time.sleep(0.1)
 
         print(f"[SnapshotOutpaintMask] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         # Wait for user confirmation
         print("[SnapshotOutpaintMask] Waiting for user confirmation...")

@@ -4,6 +4,7 @@ import threading
 import weakref
 import http.server
 import webbrowser
+from ...libs.client_host import open_ui
 import time
 import hashlib
 import base64
@@ -3324,7 +3325,7 @@ class SnapshotPromptNode:
             time.sleep(0.01)
 
         print(f"[tag_from_assets] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         if not server.wait_for_confirm():
             server.stop()
@@ -3849,7 +3850,7 @@ class SnapshotPromptNode:
             time.sleep(0.01)  # 缩短检查间隔到0.01秒
 
         print(f"[SnapshotPrompt] Opening browser at: {server.browser_url}")
-        webbrowser.open(server.browser_url)
+        open_ui(server.browser_url)
 
         print("[SnapshotPrompt] Waiting for prompt selection...")
         if not server.wait_for_prompt():
