@@ -759,7 +759,7 @@ class SnapshotDetailerSamplerServer:
 
         # 2) Main server
         class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-            pass
+            daemon_threads = True  # server_close() must not join handlers stuck in sendall
         for port in range(8700, 8800):
             try:
                 self.main_server = ThreadedHTTPServer(

@@ -269,7 +269,7 @@ class SnapshotAssetsServer:
     def start(self):
         import socketserver
         class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-            pass
+            daemon_threads = True  # server_close() must not join handlers stuck in sendall
         for port in range(8800, 8900):
             try:
                 self.server = ThreadingHTTPServer(('localhost', port), self.AssetsHandler)

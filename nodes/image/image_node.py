@@ -2112,7 +2112,7 @@ class SnapshotMaskNodeServer:
     def start(self):
         # Find an available port
         class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-            pass
+            daemon_threads = True  # server_close() must not join handlers stuck in sendall
         for port in range(8080, 9000):
             try:
                 self.server = ThreadingTCPServer(('localhost', port), self.SnapshotMaskNodeHandler)
@@ -2429,7 +2429,7 @@ class SnapshotOutpaintMaskNodeServer:
 
     def start(self):
         class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-            pass
+            daemon_threads = True  # server_close() must not join handlers stuck in sendall
         for port in range(8080, 9000):
             try:
                 self.server = ThreadingTCPServer(('localhost', port), self.OutpaintMaskHandler)

@@ -370,6 +370,9 @@ const App: React.FC = () => {
           setError(data.error || 'Detailer failed');
         } else if (st === 'done') {
           post({ status: 'done' });
+          // Kolid Desktop 的壳页监听 {__kolid:'tinkle'}:pipeline blocks 整链跑完,
+          // 壳按铃铛开关响铃。浏览器直开时 parent 是自己,这条消息无人听,无副作用。
+          try { window.parent.postMessage({ __kolid: 'tinkle', event: 'pipeline-done' }, '*'); } catch { /* ignore */ }
           // The result never becomes the pipeline image by itself: it lands in the staging pool
           // and then either is written back over the layer it came from (a layer-initiated
           // Generate) or dropped on as a new layer (a preset run).

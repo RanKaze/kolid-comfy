@@ -37,6 +37,7 @@ WndProc 只能在窗口过程链上挂钩):
 打包:client/build_exe.bat → 仓库根目录 Kolid Desktop.exe
 """
 import atexit
+import base64
 import ctypes
 import ctypes.wintypes as wt
 import json
@@ -66,6 +67,26 @@ DISCOVERY_DIR = Path.home() / '.kolid_comfy'
 DISCOVERY_FILE = DISCOVERY_DIR / 'client.json'
 UI_STATE_FILE = DISCOVERY_DIR / 'ui_state.json'
 PROFILES_TODO = DISCOVERY_DIR / 'profiles.todo'
+# Tinkle(铃声):配置落 tinkle.json(sounds = 音频池,每条 {id,name,start,end}),
+# 音频原件存同目录 tinkle_audio_<id>.<ext>。触发时随机播池中一条;池空播内置合成铃声。
+# 持久化位置随程序走(相对定位,不落绝对路径):打包后 = exe 旁的 data/desktop/tinkle,
+# 源码直跑 = 仓库根的 data/desktop/tinkle;旧档在 ~/.kolid_comfy 的自动迁过来。
+def _program_root():
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+TINKLE_DIR = _program_root() / 'data' / 'desktop' / 'tinkle'
+TINKLE_CONFIG_FILE = TINKLE_DIR / 'tinkle.json'
+TINKLE_AUDIO_STEM = 'tinkle_audio_'
+TINKLE_DEFAULT = {'enabled': False, 'volume': 0.9, 'sounds': []}
+# 旧版(2026-10-06 早些时候)把铃声档放这里;只在迁移时读一次
+TINKLE_LEGACY_DIR = DISCOVERY_DIR
+TINKLE_CTYPE = {'.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+                '.oga': 'audio/ogg', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+                '.flac': 'audio/flac', '.opus': 'audio/ogg', '.webm': 'audio/webm',
+                '.weba': 'audio/webm'}
 PORT_RANGE = range(8790, 8800)
 MIN_W, MIN_H = 560, 420
 
@@ -179,6 +200,75 @@ def _load_ui_state():
                                           'maximized': bool(d.get('maximized'))}
     except Exception:
         pass
+
+
+def _load_tinkle_config():
+    """读铃声配置,缺的字段用默认值补齐。任何异常都回落默认(壳页面不因坏档哑火)。
+    兼容旧单文件档(audio/start/end):迁成池里一条,文件改名带上 id;
+    档在旧位置(~/.kolid_comfy)的整批挪到 TINKLE_DIR。"""
+    if any(TINKLE_LEGACY_DIR.glob('tinkle*')):
+        # 触发条件是旧目录还有残留,而不是新档不存在:否则半途而废的首次迁移
+        # (配置已复制、音频没搬)之后,余下的音频永远不会再迁
+        _migrate_tinkle_legacy()
+    raw = {}
+    try:
+        raw = json.loads(TINKLE_CONFIG_FILE.read_text(encoding='utf-8'))
+        if not isinstance(raw, dict):
+            raw = {}
+    except Exception:
+        pass
+    cfg = dict(TINKLE_DEFAULT)
+    for k in TINKLE_DEFAULT:
+        if k in raw:
+            cfg[k] = raw[k]
+    sounds = [s for s in (cfg['sounds'] or [])
+              if isinstance(s, dict) and isinstance(s.get('id'), str) and s['id'].isalnum()]
+    if not sounds and isinstance(raw.get('audio'), str) and raw['audio']:
+        old = TINKLE_DIR / raw['audio']
+        if old.is_file():
+            try:
+                new = TINKLE_DIR / (TINKLE_AUDIO_STEM + '0' + old.suffix)
+                old.rename(new)
+                sounds = [{'id': '0', 'name': raw['audio'],
+                           'start': float(raw.get('start') or 0.0),
+                           'end': float(raw.get('end') if raw.get('end') is not None else 1.0)}]
+                cfg['sounds'] = sounds
+                _write_tinkle_config(cfg)   # 老 schema 一次性转成 sounds 池,否则下次读回又丢了
+            except Exception:
+                sounds = []
+    cfg['sounds'] = sounds
+    return cfg
+
+
+def _migrate_tinkle_legacy():
+    """旧档(今天早些时候的单文件版)落在 ~/.kolid_comfy:整批搬到 data/desktop/tinkle。"""
+    try:
+        old_cfg = TINKLE_LEGACY_DIR / 'tinkle.json'
+        leftovers = list(TINKLE_LEGACY_DIR.glob('tinkle_audio*'))
+        if not old_cfg.is_file() and not leftovers:
+            return
+        TINKLE_DIR.mkdir(parents=True, exist_ok=True)
+        if old_cfg.is_file() and not TINKLE_CONFIG_FILE.exists():
+            TINKLE_CONFIG_FILE.write_text(old_cfg.read_text(encoding='utf-8'), encoding='utf-8')
+        for f in TINKLE_LEGACY_DIR.glob('tinkle_audio*'):
+            dst = TINKLE_DIR / f.name
+            if dst.exists():
+                f.unlink()
+            else:
+                # C: ~/.kolid_comfy → F: 仓库根是跨盘符,Path.rename 会 WinError 17,必须 move
+                shutil.move(str(f), str(dst))
+        old_cfg.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _write_tinkle_config(cfg):
+    try:
+        TINKLE_DIR.mkdir(parents=True, exist_ok=True)
+        TINKLE_CONFIG_FILE.write_text(json.dumps(cfg), encoding='utf-8')
+    except Exception:
+        pass
+    return cfg
 
 
 # ---------------- 原生窗口外壳(ctypes) ----------------
@@ -741,6 +831,77 @@ class Api:
         threading.Thread(target=_post_window_closed,
                          args=('%s://%s' % (u.scheme, u.netloc),), daemon=True).start()
 
+    # ---- Tinkle(铃声;User Setting Modal 配置)----
+    # 全是纯 Python 文件 IO,js_api 线程安全(规则:不碰 .NET)。
+
+    def get_tinkle_config(self):
+        return _load_tinkle_config()
+
+    def save_tinkle_config(self, cfg):
+        """壳页面整体回写配置(enabled/segment/volume)。未知字段忽略,不整档替换。"""
+        if not isinstance(cfg, dict):
+            return _load_tinkle_config()
+        cur = _load_tinkle_config()
+        for k in TINKLE_DEFAULT:
+            if k in cfg:
+                cur[k] = cfg[k]
+        return _write_tinkle_config(cur)
+
+    def save_tinkle_audio(self, name, data_b64):
+        """收下 Modal 里选的音频文件(base64),存为 tinkle_audio_<id>.<ext> 并追加进音频池。"""
+        name = str(name or '')
+        ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+        if ext not in TINKLE_CTYPE:
+            ext = 'mp3'
+        try:
+            raw = base64.b64decode(str(data_b64 or ''))
+        except Exception:
+            return {'ok': False, 'error': 'bad audio data'}
+        if not raw:
+            return {'ok': False, 'error': 'empty audio file'}
+        try:
+            TINKLE_DIR.mkdir(parents=True, exist_ok=True)
+            sid = os.urandom(4).hex()
+            fname = TINKLE_AUDIO_STEM + sid + '.' + ext
+            (TINKLE_DIR / fname).write_bytes(raw)
+        except Exception as e:
+            return {'ok': False, 'error': str(e)}
+        cfg = _load_tinkle_config()
+        entry = {'id': sid, 'name': name or fname, 'start': 0.0, 'end': 1.0}
+        cfg['sounds'].append(entry)
+        return {'ok': True, 'sound': entry, 'config': _write_tinkle_config(cfg)}
+
+    def remove_tinkle_audio(self, sid):
+        """从音频池移除一条:删文件 + 删条目。"""
+        sid = str(sid or '')
+        if not sid.isalnum():
+            return {'ok': False, 'error': 'bad id'}
+        try:
+            for old in TINKLE_DIR.glob(TINKLE_AUDIO_STEM + sid + '.*'):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        cfg = _load_tinkle_config()
+        cfg['sounds'] = [s for s in cfg['sounds'] if s.get('id') != sid]
+        return {'ok': True, 'config': _write_tinkle_config(cfg)}
+
+    def clear_tinkle_audio(self):
+        """清空音频池,回到内置合成铃声。"""
+        try:
+            for old in TINKLE_DIR.glob(TINKLE_AUDIO_STEM + '*'):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        cfg = _load_tinkle_config()
+        cfg['sounds'] = []
+        return {'ok': True, 'config': _write_tinkle_config(cfg)}
+
 
 SHELL_HTML = r"""<!DOCTYPE html>
 <html>
@@ -784,6 +945,67 @@ SHELL_HTML = r"""<!DOCTYPE html>
     #pillmenu .item:hover { background: #2c2c2e; color: #fff; }
     #pillmenu .item.active { color: #0a84ff; }
     #pillmenu .empty { padding: 10px; font-size: 12px; color: #666; text-align: center; }
+    /* ---- 左上角主菜单(menuBtn)---- */
+    #mainmenu { position: absolute; top: 34px; left: 4px; min-width: 190px; background: #1c1c1e;
+                border: 1px solid #2c2c2e; border-radius: 8px; padding: 4px; z-index: 99;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.5); display: none; }
+    #mainmenu.open { display: block; }
+    #mainmenu .item { padding: 7px 10px; border-radius: 6px; font-size: 12.5px; color: #ccc;
+                      cursor: pointer; white-space: nowrap; }
+    #mainmenu .item:hover { background: #2c2c2e; color: #fff; }
+    .tb-btn.on { color: #0a84ff; }
+    .tb-btn.on:hover { color: #3da0ff; }
+    /* ---- User Setting Modal ---- */
+    #modalOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000;
+                    display: none; align-items: center; justify-content: center;
+                    app-region: no-drag; -webkit-app-region: no-drag; }
+    #modalOverlay.open { display: flex; }
+    .modal { width: 540px; max-width: calc(100vw - 48px); background: #1c1c1e;
+             border: 1px solid #2c2c2e; border-radius: 12px;
+             box-shadow: 0 16px 48px rgba(0,0,0,0.6); overflow: hidden; }
+    .modal-head { display: flex; align-items: center; justify-content: space-between;
+                  padding: 12px 16px; border-bottom: 1px solid #2c2c2e;
+                  font-size: 13.5px; font-weight: 600; color: #fff; }
+    .modal-x { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+               border-radius: 6px; color: #888; cursor: pointer; font-size: 15px; }
+    .modal-x:hover { background: #2c2c2e; color: #fff; }
+    .modal-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+    .set-title { font-size: 13px; font-weight: 600; color: #eee; }
+    .set-hint { font-size: 11.5px; color: #777; line-height: 1.5; margin-top: -6px; }
+    .set-file-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    #tinkleStatus { font-size: 11.5px; color: #e05555; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+    /* 音频池条目:点击选中(波形条调它的段落),× 单独移除 */
+    #tinkleSounds { display: flex; flex-wrap: wrap; gap: 6px; min-height: 20px; }
+    #tinkleSounds .t-empty { font-size: 12px; color: #777; padding: 2px 0; }
+    .t-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 210px; padding: 4px 9px;
+              border: 1px solid #2c2c2e; border-radius: 12px; background: #232327; font-size: 11.5px;
+              color: #bbb; cursor: pointer; user-select: none; }
+    .t-chip:hover { background: #2c2c2e; }
+    .t-chip.sel { border-color: #0a84ff; background: rgba(10,132,255,0.16); color: #fff; }
+    .t-chip .t-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .t-chip .t-x { flex: 0 0 auto; width: 15px; height: 15px; display: inline-flex; align-items: center;
+                   justify-content: center; border-radius: 50%; color: #888; font-size: 11px; }
+    .t-chip .t-x:hover { background: #3a3a3c; color: #fff; }
+    .set-btn { padding: 6px 12px; border: 1px solid #2c2c2e; border-radius: 7px; background: #26262a;
+               color: #ddd; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .set-btn:hover { background: #303034; color: #fff; }
+    .set-btn.primary { background: #0a84ff; border-color: #0a84ff; color: #fff; }
+    .set-btn.primary:hover { background: #2f97ff; }
+    .set-btn.primary:disabled { opacity: 0.5; cursor: default; }
+    .set-btn.ghost { padding: 6px 9px; background: transparent; color: #888; }
+    .set-btn.ghost:hover { background: #2c2c2e; color: #fff; }
+    /* 音乐条:波形 + 选段 */
+    #waveWrap { position: relative; height: 84px; border: 1px solid #2c2c2e; border-radius: 8px;
+                background: #141416; overflow: hidden; }
+    #waveCanvas { width: 100%; height: 100%; display: block; touch-action: none;
+                  user-select: none; -webkit-user-drag: none; }
+    #waveCanvas.editable { cursor: ew-resize; }
+    .wave-times { display: flex; justify-content: space-between; font-size: 11px;
+                  color: #777; font-variant-numeric: tabular-nums; margin-top: -4px; }
+    .set-row { display: flex; align-items: center; gap: 12px; }
+    .set-vol { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #aaa; }
+    .set-vol input[type=range] { width: 130px; accent-color: #0a84ff; }
     /* ---- 标签栏 ---- */
     #tabbar { display: flex; align-items: stretch; height: 34px; background: #161618;
               border-bottom: 1px solid #232326; overflow-x: auto; scrollbar-width: none; }
@@ -826,6 +1048,9 @@ SHELL_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="spacer" id="dragzone3"></div>
     <div class="side">
+        <div class="tb-btn win-btn" id="bellBtn" title="Tinkle off — 在 User Setting 里配置铃声">
+            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        </div>
         <div class="tb-btn win-btn" id="minBtn" title="Minimize"><svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg></div>
         <div class="tb-btn win-btn" id="maxBtn" title="Maximize">
             <svg id="icoMax" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
@@ -835,6 +1060,32 @@ SHELL_HTML = r"""<!DOCTYPE html>
     </div>
 </div>
 <div id="pillmenu"></div>
+<div id="mainmenu">
+    <div class="item" id="userSettingItem">User Setting</div>
+</div>
+<div id="modalOverlay">
+    <div class="modal">
+        <div class="modal-head"><span>User Setting</span><span class="modal-x" id="settingsClose">&#215;</span></div>
+        <div class="modal-body">
+            <div class="set-title">Tinkle</div>
+            <div class="set-hint">Blend 工作台的 pipeline blocks 跑完时,随机播放音频池里的一条。标题栏最小化按钮左侧的铃铛是
+                总开关,只有亮起时才会响。池为空时播内置铃声。点选一个音频可以单独调它的播放段落。</div>
+            <div class="set-file-row">
+                <button class="set-btn" id="tinklePickBtn">Choose audio…</button>
+                <button class="set-btn ghost" id="tinkleClearBtn" title="Remove all sounds, back to built-in chime">&#10005;</button>
+                <span id="tinkleStatus"></span>
+            </div>
+            <div id="tinkleSounds"></div>
+            <div id="waveWrap"><canvas id="waveCanvas"></canvas></div>
+            <div class="wave-times"><span id="tinkleTStart">0:00.0</span><span>拖动两个手柄选择播放的段落</span><span id="tinkleTEnd">0:00.0</span></div>
+            <div class="set-row">
+                <button class="set-btn primary" id="tinklePreviewBtn">&#9654; Preview</button>
+                <label class="set-vol">Volume <input type="range" id="tinkleVol" min="0" max="100" value="90"></label>
+            </div>
+        </div>
+    </div>
+</div>
+<input type="file" id="tinkleFile" multiple accept="audio/*,.mp3,.wav,.ogg,.oga,.m4a,.aac,.flac,.opus,.webm,.weba" hidden>
 <div id="tabbar"></div>
 <div id="stage">
     <div id="empty">
@@ -960,7 +1211,404 @@ SHELL_HTML = r"""<!DOCTYPE html>
     document.getElementById('pagepill').onclick = (e) => { e.stopPropagation(); pillmenu.classList.toggle('open'); };
     document.addEventListener('click', (e) => {
         if (!pillmenu.contains(e.target) && e.target.closest && !e.target.closest('#pagepill')) pillmenu.classList.remove('open');
+        if (!mainmenu.contains(e.target) && e.target.closest && !e.target.closest('#menuBtn')) mainmenu.classList.remove('open');
     });
+
+    // ---- Tinkle(铃声)----
+    // 配置与音频池都在 Python 侧(~/.kolid_comfy/):tinkle.json 存 enabled/volume/sounds,
+    // 音频原件 tinkle_audio_<id>.<ext> 由 /tinkle_audio?id= 同源取。Blend 工作台(sampler 页)
+    // 跑完 pipeline blocks 时向父窗口 postMessage {__kolid:'tinkle'},触发时随机播池中一条;
+    // 响不响由铃铛总开关(tinkleCfg.enabled)决定。
+    const bellBtn = document.getElementById('bellBtn');
+    const mainmenu = document.getElementById('mainmenu');
+    const modalOverlay = document.getElementById('modalOverlay');
+    const waveCanvas = document.getElementById('waveCanvas');
+    const tinkleFileInput = document.getElementById('tinkleFile');
+    let tinkleCfg = { enabled: false, volume: 0.9, sounds: [] };   // sounds: [{id,name,start,end}]
+    let tinkleAC = null;                 // 共享 AudioContext
+    let tinkleSelId = null;              // 波形条正在编辑的音频(选段按条独立保存)
+    const tinkleBuffers = new Map();     // id → AudioBuffer(解码缓存)
+    let tinkleNodes = [];        // 正在响的节点(Preview 可停)
+    let lastTinkleAt = 0;        // 1.5s 节流:连续完成不叠罗汉
+    let waveDrag = null;         // 'start' | 'end'
+
+    const fmtTime = (s) => {
+        if (!isFinite(s)) s = 0;
+        const m = Math.floor(s / 60), sec = s - m * 60;
+        return m + ':' + (sec < 10 ? '0' : '') + sec.toFixed(1);
+    };
+
+    const selSound = () => tinkleCfg.sounds.find(s => s.id === tinkleSelId) || null;
+
+    function saveTinkleCfg() {
+        try { const a = api(); a && a.save_tinkle_config(JSON.parse(JSON.stringify(tinkleCfg))); } catch (err) {}
+    }
+
+    function updateBellBtn() {
+        bellBtn.classList.toggle('on', !!tinkleCfg.enabled);
+        bellBtn.title = tinkleCfg.enabled
+            ? 'Tinkle on — run finished will chime (click to turn off)'
+            : 'Tinkle off — 在 User Setting 里配置铃声';
+    }
+
+    function stopTinkle() {
+        for (const n of tinkleNodes) {
+            try {
+                // stop() 同样会触发 onended:先摘掉,别让旧源的收尾把新一次播放的
+                // 状态(Preview 按钮/节点表)清掉
+                n.onended = null;
+                n.stop ? n.stop() : n.disconnect();
+            } catch (err) {}
+        }
+        tinkleNodes = [];
+        setPreviewPlaying(false);
+    }
+
+    function setPreviewPlaying(on) {
+        const b = document.getElementById('tinklePreviewBtn');
+        b.innerHTML = on ? '&#9632; Stop' : '&#9654; Preview';
+    }
+
+    function tinkleAudioCtx() {
+        if (!tinkleAC) tinkleAC = new (window.AudioContext || window.webkitAudioContext)();
+        if (tinkleAC.state === 'suspended') tinkleAC.resume();
+        return tinkleAC;
+    }
+
+    // 内置铃声:三连上行铃音(E6-G6-C7),双正弦分音模拟铃的金属感
+    function playBuiltInChime(vol) {
+        const ac = tinkleAudioCtx();
+        const t0 = ac.currentTime + 0.02;
+        [[1318.51, 0], [1567.98, 0.16], [2093.00, 0.32]].forEach(([f, dt]) => {
+            [[1, 0.32], [2.756, 0.07]].forEach(([mul, amp]) => {
+                const o = ac.createOscillator(), g = ac.createGain();
+                o.type = 'sine'; o.frequency.value = f * mul;
+                g.gain.setValueAtTime(0.0001, t0 + dt);
+                g.gain.exponentialRampToValueAtTime(Math.max(0.0002, amp * vol), t0 + dt + 0.008);
+                g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 1.1);
+                o.connect(g); g.connect(ac.destination);
+                o.start(t0 + dt); o.stop(t0 + dt + 1.2);
+                tinkleNodes.push(o);
+            });
+        });
+    }
+
+    async function loadTinkleBuffer(id, force) {
+        if (!force && tinkleBuffers.has(id)) return tinkleBuffers.get(id);
+        const r = await fetch('/tinkle_audio?id=' + encodeURIComponent(id), { cache: 'no-store' });
+        if (!r.ok) throw new Error('no audio');
+        const buf = await r.arrayBuffer();
+        const ab = await tinkleAudioCtx().decodeAudioData(buf);
+        tinkleBuffers.set(id, ab);
+        return ab;
+    }
+
+    function playSegment(buffer, start, end) {
+        const ac = tinkleAudioCtx();
+        const src = ac.createBufferSource(), g = ac.createGain();
+        src.buffer = buffer;
+        g.gain.value = Math.min(1, Math.max(0, Number(tinkleCfg.volume) || 0));
+        src.connect(g); g.connect(ac.destination);
+        const dur = Math.max(0.05, (end - start) * buffer.duration);
+        src.start(0, start * buffer.duration, dur);
+        src.onended = () => { tinkleNodes = tinkleNodes.filter(n => n !== src); setPreviewPlaying(false); };
+        tinkleNodes.push(src);
+        setPreviewPlaying(true);
+    }
+
+    // 触发入口:随机挑池中一条播;池空或拉取失败回退内置铃声
+    async function playTinkle(force) {
+        if (!force && !tinkleCfg.enabled) return;
+        stopTinkle();
+        const pool = tinkleCfg.sounds;
+        if (!pool.length) {
+            playBuiltInChime(Math.min(1, Math.max(0, Number(tinkleCfg.volume) || 0)));
+            setPreviewPlaying(true);
+            return;
+        }
+        const pick = pool[Math.floor(Math.random() * pool.length)];
+        try {
+            const buf = await loadTinkleBuffer(pick.id);
+            stopTinkle();
+            playSegment(buf, pick.start, pick.end);
+        } catch (err) {
+            tinkleBuffers.delete(pick.id);
+            playBuiltInChime(Math.min(1, Math.max(0, Number(tinkleCfg.volume) || 0)));
+            setPreviewPlaying(true);
+        }
+    }
+
+    // pipeline blocks 跑完(仅 'done';取消/报错不响)
+    window.addEventListener('message', (e) => {
+        if (!e.data || e.data.__kolid !== 'tinkle' || e.data.event !== 'pipeline-done') return;
+        const now = Date.now();
+        if (now - lastTinkleAt < 1500) return;
+        lastTinkleAt = now;
+        playTinkle(false);
+    });
+
+    // ---- 波形选段(音乐条;编辑的是当前选中的那条音频)----
+    function drawWave() {
+        const wrap = document.getElementById('waveWrap');
+        const snd = selSound();
+        const buf = snd ? tinkleBuffers.get(snd.id) : null;
+        const dpr = window.devicePixelRatio || 1;
+        const w = wrap.clientWidth, h = wrap.clientHeight;
+        if (waveCanvas.width !== w * dpr || waveCanvas.height !== h * dpr) {
+            waveCanvas.width = w * dpr; waveCanvas.height = h * dpr;
+        }
+        const ctx = waveCanvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        const mid = h / 2;
+        if (!buf) {
+            waveCanvas.classList.remove('editable');
+            ctx.strokeStyle = '#3a3a3c'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+            ctx.fillStyle = '#666'; ctx.font = '12px -apple-system, Segoe UI, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(snd ? 'Loading audio…' : 'No audio — built-in chime', w / 2, mid - 10);
+            document.getElementById('tinkleTStart').textContent = '0:00.0';
+            document.getElementById('tinkleTEnd').textContent = '0:00.0';
+            return;
+        }
+        waveCanvas.classList.add('editable');
+        const ch = buf.getChannelData(0);
+        const bars = Math.max(60, Math.floor(w / 3));
+        const per = Math.floor(ch.length / bars) || 1;
+        const peaks = new Float32Array(bars);
+        for (let i = 0; i < bars; i++) {
+            let mx = 0;
+            for (let j = i * per; j < (i + 1) * per && j < ch.length; j += 4) {
+                const v = Math.abs(ch[j]);
+                if (v > mx) mx = v;
+            }
+            peaks[i] = mx;
+        }
+        const mx = Math.max(0.02, ...peaks);
+        const s = Math.round(snd.start * bars), e = Math.max(s + 1, Math.round(snd.end * bars));
+        const bw = w / bars;
+        for (let i = 0; i < bars; i++) {
+            const bh = Math.max(2, (peaks[i] / mx) * (h - 14));
+            const inSel = i >= s && i < e;
+            ctx.fillStyle = inSel ? '#0a84ff' : 'rgba(255,255,255,0.22)';
+            ctx.fillRect(i * bw, mid - bh / 2, Math.max(1, bw - 1), bh);
+        }
+        // 两个选段手柄
+        for (const f of [snd.start, snd.end]) {
+            const x = f * w;
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(x, 4); ctx.lineTo(x, h - 4); ctx.stroke();
+            ctx.fillStyle = '#0a84ff';
+            ctx.beginPath(); ctx.arc(x, 8, 4.5, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+        const total = buf.duration;
+        document.getElementById('tinkleTStart').textContent = fmtTime(snd.start * total);
+        document.getElementById('tinkleTEnd').textContent = fmtTime(snd.end * total);
+    }
+
+    // 拖拽监听挂在 document 上,不依赖 setPointerCapture:WebView2 开着非客户区
+    // 支持(NC region),画布级 capture 在真实鼠标下会丢 move;document 级
+    // down/move/up 只要按下点落在画布内就接管,拖出边界也不断。
+    const fracFromEvent = (e) => {
+        const r = waveCanvas.getBoundingClientRect();
+        return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    };
+
+    document.addEventListener('pointerdown', (e) => {
+        if (!modalOverlay.classList.contains('open') || !selSound() || !tinkleBuffers.get(tinkleSelId)) return;
+        const r = waveCanvas.getBoundingClientRect();
+        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return;
+        const f = fracFromEvent(e);
+        waveDrag = Math.abs(f - selSound().start) <= Math.abs(f - selSound().end) ? 'start' : 'end';
+        e.preventDefault();   // 别让浏览器起原生拖拽/选区
+        applyWaveDrag(f);
+    });
+    document.addEventListener('pointermove', (e) => {
+        if (!waveDrag) return;
+        applyWaveDrag(fracFromEvent(e));
+    });
+    const endWaveDrag = () => {
+        if (!waveDrag) return;
+        waveDrag = null;
+        saveTinkleCfg();
+    };
+    document.addEventListener('pointerup', endWaveDrag);
+    document.addEventListener('pointercancel', endWaveDrag);
+
+    function applyWaveDrag(f) {
+        const snd = selSound();
+        if (!snd) return;
+        const minGap = Math.min(0.02, 0.05 / Math.max(0.1, tinkleBuffers.get(snd.id).duration));  // ≈50ms
+        if (waveDrag === 'start') snd.start = Math.min(f, snd.end - minGap);
+        else snd.end = Math.max(f, snd.start + minGap);
+        snd.start = Math.min(1, Math.max(0, snd.start));
+        snd.end = Math.min(1, Math.max(0, snd.end));
+        drawWave();
+    }
+
+    // ---- 音频池条目(chips)----
+    function renderChips() {
+        const box = document.getElementById('tinkleSounds');
+        box.innerHTML = '';
+        if (!tinkleCfg.sounds.length) {
+            tinkleSelId = null;
+            const d = document.createElement('span');
+            d.className = 't-empty';
+            d.textContent = 'Built-in chime';
+            box.appendChild(d);
+            return;
+        }
+        if (!selSound()) tinkleSelId = tinkleCfg.sounds[0].id;
+        for (const s of tinkleCfg.sounds) {
+            const chip = document.createElement('span');
+            chip.className = 't-chip' + (s.id === tinkleSelId ? ' sel' : '');
+            const nm = document.createElement('span');
+            nm.className = 't-name'; nm.textContent = s.name; nm.title = s.name;
+            const x = document.createElement('span');
+            x.className = 't-x'; x.textContent = '\u00d7'; x.title = 'Remove';
+            x.onclick = (e) => { e.stopPropagation(); removeSound(s.id); };
+            chip.onclick = () => {
+                if (tinkleSelId === s.id) return;
+                tinkleSelId = s.id;
+                renderChips();
+                drawWave();
+                if (!tinkleBuffers.has(s.id)) {
+                    loadTinkleBuffer(s.id).then(() => { if (tinkleSelId === s.id) drawWave(); })
+                        .catch(e => { document.getElementById('tinkleStatus').textContent = 'Load failed: ' + e; });
+                }
+            };
+            chip.append(nm, x);
+            box.appendChild(chip);
+        }
+    }
+
+    async function removeSound(id) {
+        try {
+            const a = api();
+            const r = a && await a.remove_tinkle_audio(id);
+            if (r && r.config) tinkleCfg = { ...tinkleCfg, ...r.config };
+        } catch (err) {}
+        tinkleBuffers.delete(id);
+        if (tinkleSelId === id) tinkleSelId = (tinkleCfg.sounds[0] || {}).id || null;
+        renderChips();
+        drawWave();
+    }
+
+    // ---- User Setting Modal ----
+    function openSettings() {
+        mainmenu.classList.remove('open');
+        modalOverlay.classList.add('open');
+        stopTinkle();
+        document.getElementById('tinkleVol').value = Math.round((tinkleCfg.volume || 0.9) * 100);
+        renderChips();
+        drawWave();
+        const snd = selSound();
+        if (snd && !tinkleBuffers.has(snd.id)) loadTinkleBuffer(snd.id).then(drawWave).catch(() => {});
+    }
+    function closeSettings() {
+        modalOverlay.classList.remove('open');
+        stopTinkle();
+    }
+    document.getElementById('menuBtn').onclick = (e) => {
+        e.stopPropagation();
+        pillmenu.classList.remove('open');
+        mainmenu.classList.toggle('open');
+    };
+    document.getElementById('userSettingItem').onclick = openSettings;
+    document.getElementById('settingsClose').onclick = closeSettings;
+    modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeSettings(); });
+    document.getElementById('tinkleVol').addEventListener('input', (e) => {
+        tinkleCfg.volume = Number(e.target.value) / 100;
+        saveTinkleCfg();
+    });
+    document.getElementById('tinklePickBtn').onclick = () => tinkleFileInput.click();
+    document.getElementById('tinkleClearBtn').onclick = async () => {
+        try {
+            const a = api();
+            const r = a && await a.clear_tinkle_audio();
+            if (r && r.config) tinkleCfg = { ...tinkleCfg, ...r.config };
+        } catch (err) {}
+        tinkleBuffers.clear();
+        document.getElementById('tinkleStatus').textContent = '';
+        renderChips();
+        drawWave();
+    };
+    tinkleFileInput.addEventListener('change', async () => {
+        const files = Array.from(tinkleFileInput.files || []);
+        tinkleFileInput.value = '';
+        const status = document.getElementById('tinkleStatus');
+        status.textContent = '';
+        for (const file of files) {
+            // 整文件 base64 上传给 Python 落盘(铃声文件一般都很小)
+            const buf = await file.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            try {
+                const a = api();
+                const r = a && await a.save_tinkle_audio(file.name, btoa(bin));
+                if (r && r.ok && r.config) {
+                    tinkleCfg = { ...tinkleCfg, ...r.config };
+                    tinkleSelId = r.sound ? r.sound.id : tinkleSelId;
+                } else {
+                    status.textContent = 'Failed: ' + ((r && r.error) || file.name);
+                }
+            } catch (err) {
+                status.textContent = 'Failed: ' + file.name;
+            }
+        }
+        renderChips();
+        drawWave();
+        const snd = selSound();
+        if (snd) loadTinkleBuffer(snd.id).then(drawWave).catch(() => {});
+    });
+    document.getElementById('tinklePreviewBtn').onclick = () => {
+        if (tinkleNodes.length) { stopTinkle(); return; }
+        const snd = selSound();
+        if (!snd) {
+            // 池空:直接听内置铃声
+            playBuiltInChime(Math.min(1, Math.max(0, Number(tinkleCfg.volume) || 0)));
+            setPreviewPlaying(true);
+            return;
+        }
+        setPreviewPlaying(true);
+        loadTinkleBuffer(snd.id, true).then((buf) => {
+            stopTinkle();
+            playSegment(buf, snd.start, snd.end);   // Preview 是显式动作,不受铃铛开关限制
+        }).catch(() => {
+            tinkleBuffers.delete(snd.id);
+            playBuiltInChime(Math.min(1, Math.max(0, Number(tinkleCfg.volume) || 0)));
+            setPreviewPlaying(true);
+        });
+    };
+    bellBtn.onclick = () => {
+        tinkleCfg.enabled = !tinkleCfg.enabled;
+        updateBellBtn();
+        saveTinkleCfg();
+        if (tinkleCfg.enabled) playTinkle(true);   // 开启即时反馈:当场随机响一条
+    };
+
+    // 启动:等 pywebview 桥就绪后读回配置,预解码整个音频池(第一次响铃不迟到)
+    function initTinkle() {
+        const a = api();
+        if (!a || !a.get_tinkle_config) {
+            initTinkle.tries = (initTinkle.tries || 0) + 1;
+            if (initTinkle.tries < 50) setTimeout(initTinkle, 200);
+            return;
+        }
+        a.get_tinkle_config().then((c) => {
+            if (c && typeof c === 'object') tinkleCfg = { ...tinkleCfg, ...c };
+            updateBellBtn();
+            for (const s of tinkleCfg.sounds) loadTinkleBuffer(s.id).catch(() => {});
+        }).catch(() => {});
+    }
+    window.addEventListener('pywebviewready', initTinkle);
+    initTinkle();
+
 
     // ---- JS 队列自拉(替代注入;原生侧不执行 JS,见 kolid_client.py 文件头)----
     // 长轮询握手服务,拿到的脚本在全局作用域 eval。页面 Reload 后自动重启,
@@ -984,13 +1632,15 @@ class HandshakeHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, data, ctype, code=200):
+    def _send(self, data, ctype, code=200, extra_headers=None):
         # 写失败(页面刷新/关窗掐断长轮询)静默 —— 否则 socketserver 会往
         # stderr 打整条 traceback
         try:
             self.send_response(code)
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(data)))
+            for k, v in (extra_headers or ()):
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
         except Exception:
@@ -1010,6 +1660,21 @@ class HandshakeHandler(BaseHTTPRequestHandler):
             return self._html(SHELL_HTML.replace('__PULL_TOKEN__', _PULL_TOKEN))
         if path == '/ping':
             return self._json({'ok': True, 'client': 'kolidui'})
+        if path == '/tinkle_audio':
+            # 壳页面同源拉铃声原件(?id= 音频池条目;no-store:增删后立即跟上)
+            q = urllib.parse.parse_qs(query)
+            sid = q.get('id', [''])[0]
+            if sid and not sid.isalnum():
+                return self._json({'error': 'bad id'}, 400)
+            pattern = TINKLE_AUDIO_STEM + (sid + '.*' if sid else '*')
+            TINKLE_DIR.mkdir(parents=True, exist_ok=True)
+            matches = sorted(TINKLE_DIR.glob(pattern)) if sid else []
+            f = matches[0] if matches else None
+            if not f or not f.is_file():
+                return self._json({'error': 'no audio'}, 404)
+            return self._send(f.read_bytes(),
+                              TINKLE_CTYPE.get(f.suffix.lower(), 'application/octet-stream'),
+                              extra_headers=[('Cache-Control', 'no-store')])
         if path == '/pull':
             q = urllib.parse.parse_qs(query)
             if q.get('token', [''])[0] != _PULL_TOKEN:
