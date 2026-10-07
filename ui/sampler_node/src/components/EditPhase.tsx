@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -116,11 +116,12 @@ const ContextMenu: React.FC<{
 
 // What the "Add +" dropdown offers. Query is the only kind that interacts with the user
 // mid-run: the chain stops there and waits for a prompt choice.
-const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query'; label: string; color: string; hint: string }[] = [
+const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger'; label: string; color: string; hint: string }[] = [
   { kind: 'detailer', label: 'Detailer', color: '#30d158', hint: 'Refine the masked region' },
   { kind: 'interface', label: 'Interface', color: '#bf5af2', hint: 'Run an interface sub-graph inside the chain' },
   { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
   { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
+  { kind: 'tagger', label: 'Tagger', color: '#ff9f0a', hint: 'Tag the current image and append the tag to the prompt for the blocks after it' },
 ];
 
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
@@ -278,7 +279,7 @@ interface EditPhaseProps {
   onBlocksChange: (blocks: PipelineBlock[]) => void;
   onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
     | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => void;
-  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query') => void;
+  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger') => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
   /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
@@ -1203,7 +1204,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {/* Centered title. For a Query card the name doubles as the hint's host. */}
                     <span title={block.type === 'query' ? QUERY_BLOCK_HINT : undefined} style={{
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
-                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : '#bf5af2',
+                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : block.type === 'tagger' ? '#ff9f0a' : '#bf5af2',
                     }}>{block.name}</span>
                     {ifaceIsMissing(block) && (
                       <span title="The bound interface no longer exists — this block will be bypassed at run time"
@@ -1223,6 +1224,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   {/* Block params */}
                   <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {block.type === 'prompt' && renderPresetBinding(block, 'Which shared prompt preset this block injects')}
+                    {block.type === 'tagger' && (() => {
+                      const tp = block.params as TaggerBlockParams;
+                      return (
+                        <div style={styles.paramRow}
+                          title="Mask Tag：裁出 mask 区域打标。Covered Tag：mask 区域合成到白底打标。Full Tag：整图打标。
+                                 Mask/Covered 在链中该位置没有 mask 会报错中止整条链。tag 追加到 prompt，只影响其后的 detailer。">
+                          <label style={styles.paramLabel}>Mode</label>
+                          <select style={styles.paramSelect} value={tp.mode ?? 'full'} onChange={e => updateBlockParam(block.id, 'mode', e.target.value)}>
+                            <option value="mask" style={{ background: '#1c1c1e', color: '#fff' }}>Mask Tag</option>
+                            <option value="covered" style={{ background: '#1c1c1e', color: '#fff' }}>Covered Tag</option>
+                            <option value="full" style={{ background: '#1c1c1e', color: '#fff' }}>Full Tag</option>
+                          </select>
+                        </div>
+                      );
+                    })()}
                     {block.type === 'query' && (() => {
                       const qp = block.params as QueryBlockParams;
                       const bound = !!qp.preset_id;

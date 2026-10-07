@@ -174,6 +174,14 @@ export interface PromptBlockParams {
   preset_id?: string | null;
 }
 
+/** Tagger 块：对链中当前图（上一块的输出）跑 tagger，把 tag 追加到 user_positive ——
+ *  只影响其后的 detailer（后续 prompt/query 块替换 prompt 时自然被替换掉）。
+ *  mode: mask = 裁 mask 区域打标；covered = mask 区域合成到白底打标；full = 整图打标。
+ *  mask/covered 在链中该位置没有 mask = 报错中止整条链。 */
+export interface TaggerBlockParams {
+  mode: 'mask' | 'covered' | 'full';
+}
+
 /** Query 块：run 到它时链条暂停并弹出 prompt UI，用户挑完 Confirm 才继续。
  *  回答按 prompt 块同样的语义合并（全局在前 + 本次选择在后 + programs 跑在合并结果上），
  *  只影响其后的 detailer；关掉弹窗 = 中止整条链。
@@ -189,9 +197,9 @@ export interface QueryBlockParams {
 
 export interface PipelineBlock {
   id: string;
-  type: 'detailer' | 'interface' | 'prompt' | 'query';
+  type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger';
   name: string;
-  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams | TaggerBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
 }

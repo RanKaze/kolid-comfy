@@ -2806,6 +2806,7 @@ class SnapshotDetailerSamplerNode:
             if isinstance(g, dict):
                 merged_tags.append(copy.deepcopy(g))
 
+
         # --- 合并 loras（全局优先）与 prefabs（按 guid 去重）---
         # 去重键要先过 _resolve_lora_file_path：全局那份的 file_path 在落盘时被换成了指纹
         # （prompt_node.py:1154），preset/Query 回答带的是真实路径，字面比较会把同一条 lora
@@ -3603,6 +3604,49 @@ class SnapshotDetailerSamplerNode:
                         print(f"[PipelineBlock {i+1}] WARNING: prompt block failed ({e}) — keeping previous prompt")
                         dbg.record_error(f'Block {i+1} · Prompt 块失败', str(e),
                                          block=i + 1, where='prompt_block')
+                    continue
+
+                if block.get('type') == 'tagger':
+                    # Tagger 块：对链中当前图（上一块的输出）跑 tagger，把 tag 追加到
+                    # user_positive —— 只影响其后的 detailer（后续 prompt/query 块替换
+                    # prompt 时自然被替换掉）。mode = mask（裁 mask 区域）| covered
+                    # （mask 区域合成到白底）| full（整图）。
+                    # mask/covered 在链中该位置没有 mask = 报错中止整条链（用户指定语义）。
+                    bp = block.get('params', block)
+                    tag_mode = (bp.get('mode', 'full') or 'full') if isinstance(bp, dict) else 'full'
+                    if self.tagger is None:
+                        print(f"[PipelineBlock {i+1}] WARNING: Tagger block but the node has no tagger input — skipped (prompt unchanged)")
+                        dbg.record_error(f'Block {i+1} · Tagger 块跳过', '节点没有 tagger 输入',
+                                         block=i + 1, where='tagger_block')
+                        continue
+                    if tag_mode in ('mask', 'covered') and current_mask is None:
+                        raise RuntimeError(
+                            f"Tagger block (mode={tag_mode}) requires a mask at this point in the chain — "
+                            f"paint a Mask layer first or switch the block to Full Tag")
+                    tag_img = current_image
+                    tag_mask = current_mask if tag_mode != 'full' else None
+                    dbg.record_block(i + 1, f'Block {i+1} · Tagger', str(tag_mode), tag_mode=tag_mode)
+                    dbg.record_image(f'Block {i+1} · Tagger 输入图', tag_img, block=i + 1)
+                    if tag_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Tagger 输入 mask', tag_mask, block=i + 1)
+                    tag = self._run_tag_on_image(tag_img, tag_mask, self.tagger, tag_mode)
+                    tag = (tag or '').strip()
+                    if tag:
+                        # 与 Blend 的 Tag 工具同一条 parsing 通道:解析后写入 prompt 阶段的
+                        # parsing 来源条目(selected_prompts)与 temporary_prompts。后续 prompt/
+                        # query 块的合并会带上这些 parsing tag,programs 因此能逐 tag 过滤/改写
+                        # (用户要求:tagger 结果必须受后续 prompt 块的 program 影响);
+                        # user_positive 仍直接追加,让 tagger 与下一个 prompt 块之间的 detailer 也拿到。
+                        if server is not None:
+                            try:
+                                server._apply_tag_result(tag)
+                            except Exception as tag_apply_err:
+                                print(f"[PipelineBlock {i+1}] WARNING: applying tag result failed ({tag_apply_err})")
+                        user_positive = f"{user_positive}, {tag}" if user_positive else tag
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Tagger block ({tag_mode}): "
+                          f"tag='{tag[:200]}' -> positive='{user_positive[:200]}'")
+                    dbg.record_prompt(f'Block {i+1} · Tagger 块追加后', user_positive,
+                                      block=i + 1, loras=debug_lora_entries(user_loras))
                     continue
 
                 # Detailer block params (support both nested 'params' dict and flat)
