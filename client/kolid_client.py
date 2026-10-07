@@ -34,6 +34,15 @@ WndProc 只能在窗口过程链上挂钩):
     POST /open {url, title} → 注入一个新标签页(仅 localhost URL)并前置窗口
     POST /focus             → 二次启动时只聚焦已有窗口
 
+桌面文档会话(.cud 双击,见 DesktopDocs):壳进程自任 blend 页面与它的 5 个接口,
+不依赖 ComfyUI —— 离线双击也能编辑:
+    POST /open_file {path}  → 二次实例把双击路径交给已开实例(铸 token、开/聚焦页签)
+    GET  /tabs              → 已开文档页签意图(壳页每次加载同步,Reload 丢通知自愈)
+    GET  /blend_node.html   → 自任页面(读 exe 同目录 nodes/web);/js|/fx|/attr/*.js
+                              只认直属 .js、realpath 验归属、禁缓存 —— 与节点服务器同款
+    GET  /api/config|io_caps|io_read?token=  POST /api/io_pick|io_write?token=
+                            → 页面仅认 token,路径只在本进程流转(节点服务器同一安全模型)
+
 打包:client/build_exe.bat → 仓库根目录 Kolid Desktop.exe
 """
 import atexit
@@ -42,14 +51,17 @@ import ctypes
 import ctypes.wintypes as wt
 import hashlib
 import json
+import mimetypes
 import os
 import shutil
 import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -129,6 +141,274 @@ _PULL_TOKEN = os.urandom(16).hex()
 # 壳页当前页签 URL 镜像(Api.tabs_changed 逐次同步):应用退出时给每个
 # 还开着页签的节点补发 /window_closed 用,见 _notify_tabs_window_closed。
 _tabs = {'urls': []}
+
+
+# =============================================================================
+# 桌面文档会话(.cud 双击)—— 壳进程自任 blend 页面与它的 5 个接口
+# =============================================================================
+# 页面(blend_node.html)在壳页 iframe 里跑到本服务(127.0.0.1:<端口>),与全部
+# 路由同源;真实路径只在进程内流转,页面拿到的永远只是 token —— 与节点服务器
+# (snapshot_sampler_node.py 的 DocumentIo)同一安全模型、同名同形的载荷。
+WEB_ROOT = _program_root() / 'nodes' / 'web'
+IO_FILE_KINDS = {
+    'cud': {'label': 'Context document', 'patterns': ['*.cud'],
+            'extension': '.cud', 'mime': 'application/octet-stream'},
+    'png': {'label': 'PNG image', 'patterns': ['*.png'],
+            'extension': '.png', 'mime': 'image/png'},
+    'image': {'label': 'Image',
+              'patterns': ['*.png', '*.jpg', '*.jpeg', '*.webp', '*.gif', '*.bmp',
+                           '*.tif', '*.tiff', '*.avif', '*.svg', '*.psd'],
+              'extension': '.png', 'mime': 'image/*'},
+}
+
+# comdlg32 原生对话框(不用 tkinter:exe 里没有 Tk,而且这台机器上"系统对话框"
+# 就该是系统对话框)。OFN 旗标照 Win32 头文件取值。
+OFN_OVERWRITEPROMPT = 0x00000002
+OFN_HIDEREADONLY = 0x00000004
+OFN_NOCHANGEDIR = 0x00000008
+OFN_ALLOWMULTISELECT = 0x00000200
+OFN_PATHMUSTEXIST = 0x00000800
+OFN_FILEMUSTEXIST = 0x00001000
+OFN_EXPLORER = 0x00080000
+
+
+class _OpenFileNameW(ctypes.Structure):
+    # OPENFILENAMEW(x64 自然对齐;字段顺序与顺序敏感,少一个都会读崩)
+    _fields_ = [
+        ('lStructSize', wt.DWORD),
+        ('hwndOwner', wt.HWND),
+        ('hInstance', wt.HINSTANCE),
+        ('lpstrFilter', wt.LPCWSTR),
+        ('lpstrCustomFilter', wt.LPWSTR),
+        ('nMaxCustFilter', wt.DWORD),
+        ('nFilterIndex', wt.DWORD),
+        ('lpstrFile', wt.LPWSTR),
+        ('nMaxFile', wt.DWORD),
+        ('lpstrFileTitle', wt.LPWSTR),
+        ('nMaxFileTitle', wt.DWORD),
+        ('lpstrInitialDir', wt.LPCWSTR),
+        ('lpstrTitle', wt.LPCWSTR),
+        ('Flags', wt.DWORD),
+        ('nFileOffset', wt.WORD),
+        ('nFileExtension', wt.WORD),
+        ('lpstrDefExt', wt.LPCWSTR),
+        ('lCustData', wt.LPARAM),
+        ('lpfnHook', ctypes.c_void_p),
+        ('lpTemplateName', wt.LPCWSTR),
+        ('pvReserved', ctypes.c_void_p),
+        ('dwReserved', wt.DWORD),
+        ('FlagsEx', wt.DWORD),
+    ]
+
+
+def _filter_string(kind):
+    """'desc\\0pattern\\0' 对拼接,末尾补一个 \\0 收尾(OPENFILENAMEW 的过滤器格式)。"""
+    spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+    pairs = [('%s (%s)' % (spec['label'], ';'.join(spec['patterns'])), ';'.join(spec['patterns'])),
+             ('All files (*.*)', '*.*')]
+    return '\0'.join('%s\0%s' % (label, pats) for label, pats in pairs) + '\0\0'
+
+
+def _run_common_dialog(mode, kind, suggested='', multiple=False):
+    """弹 comdlg32 原生对话框,返回选中的路径列表(取消为空表)。
+
+    在本调用线程上同步跑(GetOpenFileNameW 自带模态消息循环);owner 取主窗体
+    句柄,对话框不会沉到窗口后面。多选结果是 "目录\\0文件名\\0...",单文件与
+    保存结果是整条路径 —— 用 parts 长度分流。
+    """
+    spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+    buf = ctypes.create_unicode_buffer(32768)   # 多选:目录 + 最多一万多个文件名
+    if mode == 'save' and suggested:
+        buf.value = suggested
+    ofn = _OpenFileNameW()
+    ofn.lStructSize = ctypes.sizeof(_OpenFileNameW)
+    hwnd = _shell.get('hwnd') or 0
+    ofn.hwndOwner = hwnd or None
+    ofn.lpstrFilter = _filter_string(kind)
+    ofn.lpstrFile = ctypes.cast(buf, wt.LPWSTR)
+    ofn.nMaxFile = len(buf)
+    ofn.lpstrDefExt = spec['extension'].lstrip('.')
+    ofn.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_HIDEREADONLY
+    if mode == 'save':
+        ofn.lpstrTitle = 'Save as'
+        ofn.Flags |= OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST
+    else:
+        ofn.lpstrTitle = 'Open'
+        ofn.Flags |= OFN_FILEMUSTEXIST
+        if multiple:
+            ofn.Flags |= OFN_ALLOWMULTISELECT
+    # 服务器线程未必初始化过 COM:现代样式(位置栏/最近使用)走 IFileDialog,
+    # 给它一个 STA。RPC_E_CHANGED_MODE(0x80010106)说明线程已是别的套间,照用。
+    hr = None
+    try:
+        hr = ctypes.windll.ole32.CoInitializeEx(None, 2)   # COINIT_APARTMENTTHREADED
+    except Exception:
+        pass
+    try:
+        comdlg32 = ctypes.windll.comdlg32
+        fn = comdlg32.GetSaveFileNameW if mode == 'save' else comdlg32.GetOpenFileNameW
+        fn.argtypes = [ctypes.POINTER(_OpenFileNameW)]
+        fn.restype = wt.BOOL
+        if not fn(ctypes.byref(ofn)):
+            return []
+    finally:
+        if hr in (0, 1):   # S_OK / S_FALSE:成对的 CoUninitialize
+            try:
+                ctypes.windll.ole32.CoUninitialize()
+            except Exception:
+                pass
+    parts = [p for p in buf[:].split('\0') if p]
+    if not parts:
+        return []
+    if len(parts) == 1:
+        return parts
+    return [os.path.join(parts[0], name) for name in parts[1:]]
+
+
+class DesktopDocs:
+    """桌面文档会话的登记表:token→路径 + 页签级"打开意图"。
+
+    - token 表与节点服务器同款:页面按 token 说话,路径永不外流(描述符里那份
+      path/name 只是给页面读数与去重用的)。
+    - 意图表(_intents)是壳页自愈的锚:壳页每次加载都 fetch /tabs,把还该开着
+      的文档页签按意图重建 —— Reload 会掐断 /pull 长轮询,投递在途的 openDocTab
+      可能被垂死的页面消费掉,意图表让这类投递不再需要"不丢"。
+    - 同一文件(按 normcase 全路径)只有一枚意图:重复双击只聚焦已有页签,
+      不重导(重导会把未保存的改动糊掉)。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tokens = {}          # token -> {'path', 'mime', 'size'}
+        self._intents = []         # [{'url', 'title', 'doc'}] 按开档顺序
+        self._url_by_key = {}      # normcase(abspath) -> url
+        self._seq = 0
+
+    # ---- token 表(与节点服务器同款)----
+    def _document(self, path, kind):
+        spec = IO_FILE_KINDS.get(kind) or IO_FILE_KINDS['cud']
+        mime = mimetypes.guess_type(path)[0] or spec['mime']
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+        abspath = os.path.abspath(path)
+        token = uuid.uuid4().hex
+        with self._lock:
+            self._tokens[token] = {'path': abspath, 'mime': mime, 'size': size}
+        return {'token': token, 'name': os.path.basename(abspath), 'path': abspath,
+                'size': size, 'mime': mime}
+
+    def entry(self, token):
+        with self._lock:
+            entry = self._tokens.get(token or '')
+            return dict(entry) if entry else None
+
+    def read(self, token):
+        entry = self.entry(token)
+        if not entry:
+            return None, 'unknown document token'
+        try:
+            with open(entry['path'], 'rb') as f:
+                return f.read(), None
+        except Exception as e:
+            return None, str(e)
+
+    def write(self, token, data):
+        """覆盖写回:先落 .tmp 再 os.replace,中途失败不把原文练废(与节点服务器同款)。"""
+        entry = self.entry(token)
+        if not entry:
+            return False, 'unknown document token'
+        path = entry['path']
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'wb') as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except PermissionError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, 'the file is open elsewhere or is read-only'
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return False, str(e)
+        with self._lock:
+            if token in self._tokens:
+                self._tokens[token]['size'] = len(data)
+        return True, None
+
+    # ---- 原生对话框 ----
+    def pick(self, mode, kind, suggested='', multiple=False):
+        """弹对话框,把选中的文件收进登记表;取消返回空表(不是错误)。
+        保存目标可以还不存在(getsize 落 0),登记照样成立 —— 写时创建。"""
+        paths = _run_common_dialog(mode, kind, suggested=suggested, multiple=multiple)
+        return [self._document(p, kind) for p in (paths or []) if p]
+
+    # ---- 打开/页签意图 ----
+    def open_path(self, path):
+        """登记一条"打开这份文档"的意图;已开(按全路径命中)只聚焦。
+        返回是否受理(文件不存在 = 不受理,调用方据此报错)。"""
+        try:
+            abspath = os.path.abspath(str(path))
+        except Exception:
+            return False
+        if not os.path.isfile(abspath):
+            print(f'[KolidUI] cannot open (missing): {abspath}', file=sys.stderr)
+            return False
+        key = os.path.normcase(abspath)
+        with self._lock:
+            url = self._url_by_key.get(key)
+            intent = next((it for it in self._intents if it['url'] == url), None) if url else None
+        if intent:
+            # 同一文件再次双击:聚焦已有页签,不重导 —— 未保存的改动不动。
+            self._push('openDocTab(%s, %s)' % (
+                json.dumps(intent['url']), json.dumps(intent['title'], ensure_ascii=False)))
+            return True
+        doc = self._document(abspath, 'cud')
+        with self._lock:
+            self._seq += 1
+            url = '/blend_node.html?doc=%d' % self._seq
+            self._url_by_key[key] = url
+            self._intents.append({'url': url, 'title': doc['name'], 'doc': doc})
+        print(f"[KolidUI] document tab: {doc['name']} ({abspath})")
+        self._push('openDocTab(%s, %s, %s)' % (
+            json.dumps(url), json.dumps(doc['name'], ensure_ascii=False),
+            json.dumps(doc, ensure_ascii=False)))
+        return True
+
+    @staticmethod
+    def _push(script):
+        """只在壳页稳定时投递;否则留给它下次加载时按 /tabs 自愈。
+        loaded 为假=页面还没起;ncr_set 为假=装 NCR 的那次 Reload 还没发生,
+        此刻投的脚本会被垂死的页面消费掉。两个都不是问题 —— 意图表在。"""
+        if _state['loaded'] and _state.get('ncr_set'):
+            _post_js(script)
+            _bring_to_front()
+
+    def prune(self, url):
+        """壳页关掉一枚文档页签:意图与 key 映射跟着收,下次双击便是新页签。"""
+        url = str(url or '')
+        with self._lock:
+            it = next((x for x in self._intents if x['url'] == url), None)
+            if not it:
+                return
+            self._intents.remove(it)
+            key = os.path.normcase(it['doc']['path'])
+            if self._url_by_key.get(key) == url:
+                self._url_by_key.pop(key, None)
+
+    def intents(self):
+        with self._lock:
+            return [{'url': it['url'], 'title': it['title'], 'doc': dict(it['doc'])}
+                    for it in self._intents]
+
+
+docs = DesktopDocs()
 
 
 def _free_port(start):
@@ -845,6 +1125,9 @@ class Api:
         页面自己的 beforeunload,这里替它补发 /window_closed(取消语义,
         节点才能从等待里醒来)。后台线程发出,绝不阻塞 js_api 线程。"""
         url = str(url or '')
+        # 文档页签(.cud 双击)不需要补发 —— 但意图表要跟着收,否则下次双击
+        # 同一个文件会"聚焦"一枚早关掉的页签。
+        docs.prune(url)
         if not (url.startswith('http://') or url.startswith('https://')) or not _is_localhost(url):
             return
         u = urllib.parse.urlparse(url)
@@ -1062,6 +1345,20 @@ SHELL_HTML = r"""<!DOCTYPE html>
              align-items: center; justify-content: center; color: #555; }
     #empty .logo { font-size: 40px; font-weight: 200; letter-spacing: 2px; color: #3a3a3c; }
     #empty.hidden { display: none; }
+    /* ---- 桌面壳的提示条 ---- */
+    /* blend 页面自己不再有状态行(setStatus 只发 blend-log 给宿主)—— 桌面壳里
+       这些消息没有 Log 面板可落,toast 就是它们唯一的出口:没有它,页面是哑的 */
+    #toasts { position: fixed; right: 14px; bottom: 14px; z-index: 60; display: flex;
+              flex-direction: column; gap: 6px; align-items: flex-end; pointer-events: none;
+              max-width: min(440px, 62vw); }
+    .toast { background: rgba(24,24,28,.95); border: 1px solid rgba(255,255,255,.14);
+             color: #e8e8ec; font-size: 12px; line-height: 1.55; padding: 7px 12px;
+             border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.45);
+             transition: opacity .25s ease; word-break: break-word; }
+    .toast.error { border-color: rgba(240,96,96,.55); color: #ffdada; }
+    .toast.success { border-color: rgba(96,200,120,.5); color: #d9f5df; }
+    @keyframes toastIn { from { transform: translateY(6px); opacity: 0; }
+                         to { transform: none; opacity: 1; } }
 </style>
 </head>
 <body>
@@ -1129,6 +1426,7 @@ SHELL_HTML = r"""<!DOCTYPE html>
         <div style="font-size:12px">在 ComfyUI 里执行带界面的节点,页面会自动注入为本窗口的标签页</div>
     </div>
 </div>
+<div id="toasts"></div>
 <script>
     const api = () => window.pywebview && window.pywebview.api;
     const tabbar = document.getElementById('tabbar');
@@ -1178,7 +1476,7 @@ SHELL_HTML = r"""<!DOCTYPE html>
 
     function addTab(url, title) {
         const existing = tabs.find(t => t.url === url);
-        if (existing) { activate(existing.id); return; }
+        if (existing) { activate(existing.id); return existing; }
         const id = 'tab-' + Date.now() + '-' + Math.floor(Math.random() * 1e6);
         const root = document.createElement('div');
         root.className = 'page';
@@ -1187,10 +1485,12 @@ SHELL_HTML = r"""<!DOCTYPE html>
         frame.allow = 'clipboard-read; clipboard-write';
         root.appendChild(frame);
         stage.appendChild(root);
-        tabs.push({ id, url, title: title || url, root, frame });
+        const t = { id, url, title: title || url, root, frame };
+        tabs.push(t);
         activeId = id;
         render();
         syncTabs();
+        return t;
     }
 
     function activate(id) { activeId = id; render(); }
@@ -1230,6 +1530,127 @@ SHELL_HTML = r"""<!DOCTYPE html>
     function reloadActive() {
         const act = tabs.find(t => t.id === activeId);
         if (act) act.frame.src = act.frame.src;  // 跨端口 iframe,重设 src 重新导航
+    }
+
+    // ==================== 桌面文档会话(.cud 双击)====================
+    // 双击 .cud 时 blend 页面被开成本窗口的一个页签,宿主协议(blend-*)由这里
+    // 以"最小宿主"应答:没有管线(桌面进程够不到 ComfyUI),所以 Run/Tag/Detect/
+    // Processor 一律回失败、状态全靠 toast;文档字节走同源的 /api/io_*,
+    // 由 Python 侧的 token 登记表兜着(路径从不经过页面)。
+
+    // ---- 提示条:blend 页把每条状态都发到这里(页面自己不再显示状态行)----
+    const toastsEl = document.getElementById('toasts');
+    function toast(text, kind) {
+        text = String(text || '').trim();
+        if (!text) return;
+        const el = document.createElement('div');
+        el.className = 'toast' + (kind === 'error' ? ' error' : (kind === 'success' ? ' success' : ''));
+        el.textContent = text;
+        el.style.animation = 'toastIn .18s ease';
+        toastsEl.appendChild(el);
+        while (toastsEl.children.length > 5) toastsEl.removeChild(toastsEl.firstChild);
+        setTimeout(() => {
+            el.style.opacity = '0';
+            setTimeout(() => el.remove(), 260);
+        }, kind === 'error' ? 6500 : 4200);
+    }
+
+    const GUIDANCE_CARD_ID = 'staging_guidance';   // 与 blend_node.html 同号(去重与清卡都按它)
+    const NO_PIPELINE = 'no pipeline in this desktop window — run it from the Detailer Sampler in ComfyUI';
+
+    function postTo(t, msg) {
+        try {
+            if (t && t.frame && t.frame.contentWindow) t.frame.contentWindow.postMessage(msg, '*');
+        } catch (err) {}
+    }
+
+    // 工作区镜像:页面(windows 里的唯一写入口)把拖入/产出/移除/换水都发过来,
+    // 页签重载时再由 blend-config 原样还给它。id 跟图走,Extra Prompt 的
+    // <image_id:> 与 fx 绑定贴图都按号解析。
+    let stageSeq = 0;
+    function stageItem(t, name, src, id) {
+        if (!Array.isArray(t.staging)) t.staging = [];
+        t.staging.push({ id: id || ('sd' + (++stageSeq)), name: name || 'Image', src: src });
+    }
+
+    function handleBlendMsg(t, d) {
+        if (d.type === 'blend-request-init') {
+            postTo(t, { type: 'blend-config',
+                hasTagger: false, hasDetector: false, mask_required: false,
+                staging: t.staging || [] });
+            // 双击来的文档:init 一到就把描述符交回去 —— 页面走的是普通 Load
+            // 路径(token→/api/io_read),drop_pristine 让它收掉起步的 Untitled
+            if (t.doc) postTo(t, { type: 'blend-reopen-cud', doc: t.doc, drop_pristine: true });
+            return;
+        }
+        if (d.type === 'blend-staging-upload') {
+            const images = Array.isArray(d.images) ? d.images : [];
+            const names = Array.isArray(d.names) ? d.names : [];
+            const ids = Array.isArray(d.ids) ? d.ids : [];
+            if (d.replace === true) {
+                t.staging = [];   // 整池换水(.cud 导入/tab 激活):空 images 也是一次纯清空
+                images.forEach((src, i) => stageItem(t, names[i], src, ids[i]));
+            } else {
+                if (!images.length) return;
+                images.forEach((src, i) => stageItem(t, names[i], src));
+            }
+            return;
+        }
+        if (d.type === 'blend-staging-remove') {
+            if (Array.isArray(t.staging)) t.staging = t.staging.filter(s => s.id !== d.id);
+            return;
+        }
+        if (d.type === 'blend-guidance-card') {
+            if (!Array.isArray(t.staging)) t.staging = [];
+            t.staging = t.staging.filter(s => s.id !== GUIDANCE_CARD_ID);
+            if (d.image) t.staging.push({ id: GUIDANCE_CARD_ID, name: d.name || 'Guidance', src: d.image });
+            return;
+        }
+        if (d.type === 'blend-action' || d.type === 'blend-layer-generate') {
+            // 桌面没有管线:立即以失败回执收尾,否则页面的按钮会一直转。
+            postTo(t, { type: 'blend-action-result',
+                action: d.type === 'blend-layer-generate' ? 'layer-generate' : (d.action || 'blend'),
+                success: false, error: NO_PIPELINE });
+            return;
+        }
+        if (d.type === 'blend-processor-run') {
+            postTo(t, { type: 'blend-processor-result', ok: false, error: NO_PIPELINE });
+            return;
+        }
+        if (d.type === 'blend-log') { toast(d.text, d.kind); return; }
+        // blend-preview / blend-cancel-run / 未来的消息:桌面端无事可做,静默
+    }
+
+    // blend-* 消息只可能来自我们自己的页面 iframe:按 e.source 认领页签
+    window.addEventListener('message', (e) => {
+        const d = e.data;
+        if (!d || typeof d.type !== 'string' || d.type.indexOf('blend-') !== 0) return;
+        const t = tabs.find(x => x.frame && x.frame.contentWindow === e.source);
+        if (t) handleBlendMsg(t, d);
+    });
+
+    // 打开/聚焦一枚文档页签。已存在(同 URL)只聚焦 —— 重导会把未保存的改动
+    // 糊掉,重开同一文件应在页面里显式做。doc 只随新页签落仓,init 时回给页面。
+    function openDocTab(url, title, doc) {
+        const existing = tabs.find(t => t.url === url);
+        if (existing) { activate(existing.id); return; }
+        const t = addTab(url, title);
+        if (!t) return;
+        if (doc) t.doc = doc;
+        if (!Array.isArray(t.staging)) t.staging = [];
+    }
+
+    // 壳页每次加载都跟 Python 的意图表对齐:Reload 会掐断 /pull 长轮询,
+    // 在途的 openDocTab 可能被垂死的页面消费掉 —— 这里把还该开着的页签重建出来
+    function syncDocTabs() {
+        fetch('/tabs').then(r => r.ok ? r.json() : null).then(d => {
+            (d && d.tabs || []).forEach(it => {
+                const t = tabs.find(x => x.url === it.url);
+                if (t) { if (it.doc) t.doc = it.doc; return; }
+                const nt = addTab(it.url, it.title || 'Document');
+                if (nt) { nt.doc = it.doc || null; nt.staging = []; }
+            });
+        }).catch(() => {});
     }
 
     // Python 侧在最大化/还原后回调:交换标题栏图标 + 最大化时把内容内缩 band
@@ -1744,6 +2165,8 @@ SHELL_HTML = r"""<!DOCTYPE html>
     // ---- JS 队列自拉(替代注入;原生侧不执行 JS,见 kolid_client.py 文件头)----
     // 长轮询握手服务,拿到的脚本在全局作用域 eval。页面 Reload 后自动重启,
     // 队列存服务端,不丢。
+    // 先跟 Python 的文档页签意图对齐(每次加载都做,Reload 自愈),再进拉取循环。
+    syncDocTabs();
     (function pullLoop() {
         fetch('/pull?token=__PULL_TOKEN__')
             .then(r => r.ok ? r.json() : { scripts: [] })
@@ -1791,6 +2214,48 @@ class HandshakeHandler(BaseHTTPRequestHandler):
             return self._html(SHELL_HTML.replace('__PULL_TOKEN__', _PULL_TOKEN))
         if path == '/ping':
             return self._json({'ok': True, 'client': 'kolidui'})
+        # ---- 桌面文档会话(.cud 双击)----
+        if path == '/tabs':
+            # 壳页每次加载都来同步:把还该开着的文档页签按意图重建(Reload 掐断
+            # 长轮询,在途投递可能被垂死页面消费 —— 意图表让投递不再需要"不丢")
+            return self._json({'tabs': docs.intents()})
+        if path == '/blend_node.html':
+            f = WEB_ROOT / 'blend_node.html'
+            if not f.is_file():
+                return self._json({'error': 'blend_node.html not found'}, 404)
+            # no-store:页面就是要允许改 nodes/web 下的文件即时生效(不重新打包)
+            return self._send(f.read_bytes(), 'text/html',
+                              extra_headers=[('Cache-Control', 'no-store')])
+        for sub in ('fx', 'js', 'attr'):
+            prefix = '/' + sub + '/'
+            if not path.startswith(prefix):
+                continue
+            # 只认三个目录直属的 .js:realpath 之后再验归属,../ 与绝对路径都翻不出去
+            # (与节点服务器的静态路由同款)。禁缓存是开发回路的命门。
+            root = os.path.realpath(str(WEB_ROOT / sub))
+            name = path[len(prefix):]
+            fp = os.path.realpath(os.path.join(root, name))
+            if (not name.endswith('.js') or os.path.dirname(fp) != root
+                    or not os.path.isfile(fp)):
+                return self._json({'error': '%s module not found' % sub}, 404)
+            with open(fp, 'rb') as f:
+                return self._send(f.read(), 'text/javascript; charset=utf-8',
+                                  extra_headers=[('Cache-Control',
+                                                  'no-store, no-cache, must-revalidate, proxy-revalidate')])
+        if path == '/api/config':
+            # blend 页面读它取 GLOBAL SETTINGS 的 pixels(动态分辨率的上限);
+            # 桌面没有管线,给节点默认档(1M 像素)
+            return self._json({'pixels': 1048576})
+        if path == '/api/io_caps':
+            return self._json({'pick': True})   # comdlg32 恒可用,没有 unavailable 态
+        if path == '/api/io_read':
+            token = (urllib.parse.parse_qs(query).get('token') or [''])[0]
+            data, err = docs.read(token)
+            if err:
+                return self._json({'success': False, 'error': err}, 404)
+            entry = docs.entry(token) or {}
+            return self._send(data, entry.get('mime') or 'application/octet-stream',
+                              extra_headers=[('Cache-Control', 'no-store')])
         if path == '/tinkle_audio':
             # 壳页面同源拉铃声原件(?id= 池条目 id;多个条目可共享同一文件)。
             # no-store:增删后波形/播放立即跟上
@@ -1830,15 +2295,41 @@ class HandshakeHandler(BaseHTTPRequestHandler):
         self._json({'error': 'not found'}, 404)
 
     def do_POST(self):
+        path = self.path.split('?')[0]
         length = int(self.headers.get('Content-Length') or 0)
+        # 原始字节路由要排在 JSON 分派前:io_write 的 body 是 .cud 本身(几百 MB)
+        if path == '/api/io_write':
+            try:
+                token = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                         .get('token') or [''])[0]
+                data = self.rfile.read(length) if length else b''
+                ok, err = docs.write(token, data)
+                return self._json({'success': ok, 'error': err, 'size': len(data)})
+            except Exception as e:
+                return self._json({'success': False, 'error': str(e)}, 500)
         try:
             body = json.loads(self.rfile.read(length) or b'{}')
         except Exception:
             return self._json({'error': 'bad json'}, 400)
-        path = self.path.split('?')[0]
         if path == '/focus':
             _bring_to_front()
             return self._json({'ok': True})
+        if path == '/open_file':
+            # 二次实例把双击路径交给已开实例(docs.open_path 自己铸 token、开/聚焦页签)
+            ok = docs.open_path(str(body.get('path') or ''))
+            return self._json({'ok': bool(ok),
+                               'error': None if ok else 'no such file'})
+        if path == '/api/io_pick':
+            mode = 'save' if body.get('mode') == 'save' else 'open'
+            kind = body.get('kind') if body.get('kind') in IO_FILE_KINDS else 'cud'
+            try:
+                picks = docs.pick(mode, kind,
+                                  suggested=str(body.get('suggested') or ''),
+                                  multiple=bool(body.get('multiple')))
+            except Exception as e:
+                print(f'[KolidUI] file dialog failed: {e}', file=sys.stderr)
+                return self._json({'cancelled': True, 'picks': [], 'error': str(e)}, 500)
+            return self._json({'cancelled': not picks, 'picks': picks})
         if path == '/open':
             url = str(body.get('url') or '')
             title = str(body.get('title') or '')
@@ -1967,31 +2458,53 @@ def _on_loaded():
         _user32.PostMessageW(wt.HWND(hwnd), WM_APP_SETUP, 0, 0)
 
 
-def _focus_existing(timeout_s=3.0):
-    """发现文件指向活着的实例就聚焦它并返回 True;文件缺失/陈旧返回 False。"""
+def _focus_existing(open_path=None, timeout_s=3.0):
+    """发现文件指向活着的实例就聚焦它并返回 True;文件缺失/陈旧返回 False。
+    带 open_path(双击 .cud 的二次启动)时把路径交给已开实例处理 —— 那边铸
+    token、开/聚焦页签,本进程只管退出。"""
     if not DISCOVERY_FILE.exists():
         return False
     try:
-        import urllib.request
         info = json.loads(DISCOVERY_FILE.read_text(encoding='utf-8'))
         port = int(info['port'])
     except Exception:
         return False
     deadline = time.time() + timeout_s
     while time.time() < deadline:
+        if open_path:
+            route = '/open_file'
+            payload = json.dumps({'path': open_path}).encode('utf-8')
+        else:
+            route = '/focus'
+            payload = b'{}'
         try:
-            req = urllib.request.Request(f'http://127.0.0.1:{port}/focus', data=b'{}', method='POST')
+            req = urllib.request.Request(f'http://127.0.0.1:{port}{route}', data=payload,
+                                         headers={'Content-Type': 'application/json'},
+                                         method='POST')
             with urllib.request.urlopen(req, timeout=1):
-                print('[KolidUI] already running — focused existing window')
-                return True
+                pass
+            print('[KolidUI] already running — ' + (
+                'handed over %s' % open_path if open_path else 'focused existing window'))
+            return True
+        except urllib.error.HTTPError as e:
+            # 旧实例没有 /open_file 路由:退成只聚焦 —— 也比再开一个窗口强
+            if open_path and e.code == 404:
+                open_path = None
+                continue
         except Exception:
-            time.sleep(0.3)
+            pass
+        time.sleep(0.3)
     return False
 
 
 def main():
-    # 二次启动:已有实例在跑就聚焦它,然后退出
-    if _focus_existing():
+    # 双击 .cud 启动时,资源管理器把路径放在 argv(打包后 exe 亦然);
+    # 拖到 exe 图标上、命令行直跑也走同一条。旗标不是路径,忽略。
+    args = [a for a in sys.argv[1:] if not a.startswith('-')]
+    open_path = args[0] if args and os.path.isfile(args[0]) else None
+
+    # 二次启动:已有实例在跑就聚焦它(双击时把路径交给它),然后退出
+    if _focus_existing(open_path):
         return
 
     _load_ui_state()
@@ -2000,6 +2513,11 @@ def main():
     # 不占启动时间;正常关闭的运行也走这条路,删的是上一次的目录
     threading.Thread(target=_sweep_old_profiles, daemon=True).start()
     atexit.register(_clear_discovery)
+
+    # 文件先登记再起窗:意图表在,壳页首次加载 fetch /tabs 就会把页签建出来,
+    # 不需要往还没有的页面投递任何东西。双击失败(文件消失)窗口照常开。
+    if open_path:
+        docs.open_path(open_path)
 
     win = webview.create_window(
         WINDOW_TITLE,

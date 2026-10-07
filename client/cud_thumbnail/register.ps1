@@ -76,6 +76,18 @@ Set-Item -Path "HKCU:\Software\Classes\.cud\shellex\$thumbGuid" -Value $clsid
 Remove-Item -Path "HKCU:\Software\Classes\cud.document\shellex\$legacyGuid" -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -Path "HKCU:\Software\Classes\.cud\shellex\$legacyGuid" -Recurse -Force -ErrorAction SilentlyContinue
 
+# 双击 .cud → Kolid Desktop(Blend 窗口自任页面与文档接口,不依赖 ComfyUI)。
+# exe 在仓库根,缺失只跳过双击关联 —— 缩略图注册与它无关。
+$exe = Join-Path (Join-Path $PSScriptRoot '..\..') 'Kolid Desktop.exe'
+if (Test-Path $exe) {
+    $cmd = '"{0}" "%1"' -f (Resolve-Path $exe).Path
+    New-Item -Path 'HKCU:\Software\Classes\cud.document\shell\open\command' -Force | Out-Null
+    Set-Item -Path 'HKCU:\Software\Classes\cud.document\shell\open\command' -Value $cmd
+    Write-Host "Double-click opens with: $cmd"
+} else {
+    Write-Host 'Kolid Desktop.exe not at the repo root — double-click association skipped.'
+}
+
 # 通知外壳"关联已变更",免重启 explorer 生效
 Add-Type -Namespace CudThumb -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern void SHChangeNotify(int eventId, uint flags, IntPtr item1, IntPtr item2);'
 [CudThumb.Shell]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)

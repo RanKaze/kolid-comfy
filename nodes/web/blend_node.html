@@ -11933,6 +11933,9 @@ function setCurrentDocument(handle, name) {
 let documents = [];
 let docSeq = 0;
 let activeDoc = null;         // the entry whose state the globals currently hold
+// 开机落脚的那一枚 Untitled（见文件尾部 adoptDocument）。桌面双击流导入成功后由它确认
+// 「起始页还没被动过、可以收掉」——只认这一枚 uid，用户自己 New 出来的空白项目不在列。
+let bootDocument = null;
 // 图池是文档态（staging 跟着 .cud 走）：这一枚记下宿主/后端当前的池属于哪个 uid。
 // uid 没变就不必重传整池；boot 那一次激活特殊 —— 池是宿主镜像进来的，不是我们推上去的。
 let stagingPoolOwner = null;
@@ -12129,6 +12132,17 @@ function dropDocument(entry) {
     if (next) switchDocument(next.uid);
     else createDocument('Untitled', null, blankContext(), true);
     setStatus(`Closed ${entry.name}`);
+}
+
+// 桌面双击流专用（blend-reopen-cud 带 drop_pristine:true）：导入落地后，把还没被动过的
+// 开机 Untitled 收掉 —— 那个 tab 是页面启动的落脚点，不是用户的项目。动过（dirty）、
+// 正被激活、或已被别处收掉的一律保留/原地不动。工作台流的 reopen 不带标记，行为不变。
+function dropPristineBootDocument() {
+    const d = bootDocument;
+    if (!d || d === activeDoc || d.dirty || !documents.includes(d)) return false;
+    bootDocument = null;
+    dropDocument(d);
+    return true;
 }
 
 function createBlankProject() {
@@ -13226,9 +13240,12 @@ function requestImportCud(file, doc) {
 // Reopen without a dialog. The host only ever hands back a descriptor the *server* recorded from a
 // dialog it showed, so this is Load with the picking step already done: same token→bytes read, same
 // new tab, same in-place Save. openCudDocument reports its own failures on this status line.
-async function reopenCudDocument(doc) {
+// dropPristine 只来自桌面双击流：这次重开就是「打开这个文件」本身，成功后顺手收掉未动过的起始
+// Untitled（见 dropPristineBootDocument）；失败/取消时原样留着，页面不会因此空掉。
+async function reopenCudDocument(doc, dropPristine) {
     try {
-        requestImportCud(await docToFile(doc), doc);
+        const ok = await requestImportCud(await docToFile(doc), doc);
+        if (ok && dropPristine) dropPristineBootDocument();
     } catch (err) {
         setStatus('Reopen failed: ' + ((err && err.message) || err), 'error');
     }
@@ -14612,7 +14629,7 @@ window.addEventListener('message', event => {
         // so from here it is the ordinary Load path. A refusal is reported, never retried by
         // throwing a dialog at the user.
         if (!d.doc) { setStatus(d.reason || 'No recent .cud to reopen'); return; }
-        reopenCudDocument(d.doc);
+        reopenCudDocument(d.doc, d.drop_pristine === true);
         return;
     }
     if (d.type === 'blend-add-layer') {
@@ -14713,7 +14730,7 @@ syncActionButtons();
 resetHistory();          // the empty canvas is step 0; everything from here on is undoable
 // The page opens on exactly one project: what the globals already hold becomes the first tab, so the
 // workbench is never in the state of "drawing with nowhere to put it".
-adoptDocument(createDocument('Untitled', null, captureContext(), false));
+bootDocument = adoptDocument(createDocument('Untitled', null, captureContext(), false));
 // 字体库是异步的: 先让页面完整起来, 装好之后再作废一次文字缓冲 (缺了这一步, .cud 里存着自定义字体
 // 名的图层会一直顶着回落脸)。
 loadTextFontLibrary();
