@@ -1,4 +1,4 @@
-# 为 .cud 注册资源管理器缩略图提供器(机器级,HKLM,需要管理员)
+﻿# 为 .cud 注册资源管理器缩略图提供器(机器级,HKLM,需要管理员)
 # 键布局与 regasm /codebase 的输出一致(InprocServer32\<版本> 子键是 mscoree
 # 真正读取的地方,缺了它激活报 0x80040154)。
 #
@@ -15,7 +15,7 @@ $thumbGuid = '{E357FCCD-A995-4576-B01F-234630154E96}'
 $legacyGuid = '{e357fccd-a995-45da-9450-b2c9ded750c0}'   # 早期误用值,写它等于没注册
 $version = '1.0.0.0'
 $dll = Join-Path $PSScriptRoot 'CudThumbnail.dll'
-if (-not (Test-Path $dll)) { throw "CudThumbnail.dll not found — run install.bat first" }
+if (-not (Test-Path $dll)) { throw "CudThumbnail.dll not found — run install_windows_integration.bat (repo root) first" }
 $codebase = (New-Object System.Uri($dll)).AbsoluteUri
 
 $mscoree = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\mscoree.dll'

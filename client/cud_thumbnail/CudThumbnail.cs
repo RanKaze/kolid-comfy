@@ -1,13 +1,11 @@
 // CudThumbnail — Windows 资源管理器缩略图提供器:让 .cud 文件在图标上直接显示
 // 画布合成图(就像 jpeg/png 那样)。
 //
-// .cud 布局(见 blend_node.html buildCudBlob):
-//   'CUD1' | uint32 LE headerLen | JSON header | payload
-//   payload = header.assets 按序连放的 PNG;composite 资产(role='composite')就是
-//   保存那一刻的画布合成。这里只读它,不解析图层。
+// .cud 布局与 composite 资产的定位规则在 CudDoc.cs(与右键导出 CudPng.exe 共用)。
 //
-// 注册:install.bat 用系统自带 csc 编译,再写 HKCU\Software\Classes 的 per-user
-// COM 注册(不需要管理员):CLSID 指向 mscoree + CodeBase,.cud 的
+// 注册:仓库根的 install_windows_integration.bat 用系统自带 csc 编译,再写
+// HKCU\Software\Classes 的 per-user COM 注册(不需要管理员):CLSID 指向
+// mscoree + CodeBase,.cud 的
 // shellex\{E357FCCD-A995-4576-B01F-234630154E96} 指向本 CLSID。
 // 注意:绝不能给本 CLSID 写 DisableProcessIsolation=1 —— Win11 的缩略图
 // 抽取宿主({AB8902B4-...})会因此拒绝加载,表现为静默失败。
@@ -17,9 +15,8 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
-using System.Text;
 using System.Reflection;
-using System.Web.Script.Serialization;
+using Kolid.Cud;
 
 [assembly: AssemblyVersion("1.0.0.0")]
 
@@ -176,48 +173,13 @@ namespace CudThumbnail
             catch (Exception e) { Log("RenderThumbnail exception: " + e); return unchecked((int)0x80004005); }
         }
 
-        // ---- .cud 解析:定位 composite 资产并解码 ----
+        // ---- .cud 解析:定位 composite 资产(见 CudDoc.cs)并解码 ----
         internal static Bitmap ExtractComposite(byte[] data)
         {
-            if (data.Length < 8 || data[0] != 'C' || data[1] != 'U' || data[2] != 'D' || data[3] != '1')
-                return null;
-            int headerLen = BitConverter.ToInt32(data, 4);
-            if (headerLen <= 0 || headerLen > 128 * 1024 * 1024 || 8 + headerLen > data.Length)
-                return null;
-            string json = Encoding.UTF8.GetString(data, 8, headerLen);
-            var ser = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-            var header = ser.Deserialize<Header>(json);
-            if (header == null || header.assets == null || header.assets.Length == 0)
-                return null;
-
-            // composite 资产:优先 role == 'composite',否则用 header.composite 的 id
-            Asset target = null;
-            int compositeId = -1;
-            if (header.composite is int) compositeId = (int)header.composite;
-            else if (header.composite != null) int.TryParse(header.composite.ToString(), out compositeId);
-            foreach (var a in header.assets)
-            {
-                if (a != null && a.role == "composite") { target = a; break; }
-            }
-            if (target == null && compositeId >= 0)
-            {
-                foreach (var a in header.assets)
-                    if (a != null && a.id == compositeId) { target = a; break; }
-            }
-            if (target == null || target.length <= 0) return null;
-
-            // payload 里资产的偏移 = 前面所有资产的 length 之和(按 id 顺序连放)
-            int offset = 8 + headerLen;
-            foreach (var a in header.assets)
-            {
-                if (a == null || a.id == target.id) continue;
-                if (a.id < target.id || (target.id < 0 && a.role != "composite"))
-                    offset += a.length;
-            }
-            if (offset + target.length > data.Length) return null;
-
-            using (var png = new MemoryStream(data, offset, target.length, false))
-            using (var img = Image.FromStream(png))
+            byte[] png = CudDoc.CompositePng(data);
+            if (png == null) return null;
+            using (var ms = new MemoryStream(png))
+            using (var img = Image.FromStream(ms))
                 return new Bitmap(img);
         }
 
@@ -235,21 +197,6 @@ namespace CudThumbnail
                 g.DrawImage(src, new Rectangle(0, 0, tw, th));
             }
             return dst;
-        }
-
-        private class Header
-        {
-            public Asset[] assets;
-            public object composite;
-        }
-
-        private class Asset
-        {
-            public int id;
-            public string role;
-            public int w;
-            public int h;
-            public int length;
         }
     }
 }

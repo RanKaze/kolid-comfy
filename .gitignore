@@ -57,6 +57,10 @@ data/
 # 临时的文件,比如临时的迁移测试脚本之类的
 temporary/
 
+# Win11 一级菜单:makeappx 工具集缓存(首次安装时下载一次)+ 打包产物
+client/cud_thumbnail/win11_menu/tools/
+client/cud_thumbnail/win11_menu/build/
+
 mem-log/
 .codely/
 .codely-cli/

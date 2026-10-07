@@ -1,4 +1,4 @@
-# 为 .cud 注册资源管理器缩略图提供器(当前用户级,HKCU,不需要管理员)
+﻿# 为 .cud 注册资源管理器缩略图提供器、双击打开与右键导出菜单(当前用户级,HKCU,不需要管理员)
 # 键布局与 regasm /codebase 的输出一致(InprocServer32\<版本> 子键是 mscoree
 # 真正读取的地方,缺了它激活报 0x80040154)。
 #
@@ -12,7 +12,7 @@ $thumbGuid = '{E357FCCD-A995-4576-B01F-234630154E96}'
 $legacyGuid = '{e357fccd-a995-45da-9450-b2c9ded750c0}'   # 早期误用值,写它等于没注册
 $version = '1.0.0.0'
 $dll = Join-Path $PSScriptRoot 'CudThumbnail.dll'
-if (-not (Test-Path $dll)) { throw "CudThumbnail.dll not found — run install.bat first" }
+if (-not (Test-Path $dll)) { throw "CudThumbnail.dll not found — run install_windows_integration.bat (repo root) first" }
 $codebase = (New-Object System.Uri($dll)).AbsoluteUri
 
 $mscoree = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\mscoree.dll'
@@ -86,6 +86,24 @@ if (Test-Path $exe) {
     Write-Host "Double-click opens with: $cmd"
 } else {
     Write-Host 'Kolid Desktop.exe not at the repo root — double-click association skipped.'
+}
+
+# 右键菜单:KolidUI > PNG(纯注册表级联子菜单,不需要常驻 shell 扩展)。
+# 父键挂 MUIVerb + ExtendedSubCommandsKey 指向自身,子项放 ...\shell\KolidUI\shell\* 下。
+# PNG 项的执行体 CudPng.exe 把 .cud 里保存的画布合成写成同名 .png(测试.cud → 测试.png)。
+$cudPng = Join-Path $PSScriptRoot 'CudPng.exe'
+if (Test-Path $cudPng) {
+    $parent = 'HKCU:\Software\Classes\cud.document\shell\KolidUI'
+    New-Item -Path $parent -Force | Out-Null
+    Set-ItemProperty -Path $parent -Name 'MUIVerb' -Value 'KolidUI'
+    Set-ItemProperty -Path $parent -Name 'ExtendedSubCommandsKey' -Value 'cud.document\shell\KolidUI'
+    $item = "$parent\shell\PNG"
+    New-Item -Path "$item\command" -Force | Out-Null
+    Set-ItemProperty -Path $item -Name 'MUIVerb' -Value 'PNG'
+    Set-Item -Path "$item\command" -Value ('"{0}" "%1"' -f (Resolve-Path $cudPng).Path)
+    Write-Host "Context menu: KolidUI > PNG -> $cudPng"
+} else {
+    Write-Host 'CudPng.exe not built — right-click menu skipped (run install_windows_integration.bat first).'
 }
 
 # 通知外壳"关联已变更",免重启 explorer 生效

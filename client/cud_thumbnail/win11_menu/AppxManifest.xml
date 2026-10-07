@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- KolidUI>PNG 的 Win11 现代(一级)右键菜单:打包声明(本文件是唯一来源)。
+     com:SurrogateServer 里的 CLSID 与 KolidCtxMenu.cpp / desktop5:Verb@Clsid 三处一致。
+     调试注册走 Add-AppxPackage -Register(loose,开发者模式),Publisher 用本文件的朴素 CN:
+     实测带未签名 OID 标记会被 0x80073D2D 拒绝(-AllowUnsigned 只配 -Path/msix 用)。
+     正式安装由 install_win11_menu.ps1 打包:Publisher 换成 OID 变体 + 注入
+     <yy-2000>.<MMdd>.<hhmm>.<ss> 版本号,再走提权 Add-AppxPackage -AllowUnsigned。
+     Executable 必须是 .exe,故有 Stub 占位
+     (App@Executable 只在清单校验时被要求,真实入口是 com:SurrogateServer 的 DLL)。 -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 com desktop4 desktop5 rescap">
+
+  <Identity
+    Name="Kolid.CudContextMenu"
+    Publisher="CN=Kolid-Comfy"
+    Version="1.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Kolid UI</DisplayName>
+    <PublisherDisplayName>Kolid-Comfy</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="KolidCtxMenu"
+                 Executable="KolidCtxMenuStub.exe"
+                 uap10:TrustLevel="mediumIL"
+                 uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements
+        DisplayName="Kolid UI"
+        Description="Kolid UI shell commands"
+        BackgroundColor="transparent"
+        AppListEntry="none"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Kolid UI commands">
+              <com:Class
+                Id="D9BEBED3-C09F-4A12-AE23-7FCD98E7E5E7"
+                Path="KolidCtxMenu.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <!-- ItemType 官方只认 * (文件) / Directory / Directory\Background 三种值,
+                 写 ".cud" 永远不会被匹配(MS 文档 integrate-packaged-app-with-file-explorer)。
+                 所以这里用 "*" 全文件注册,KolidUI/PNG 对非 .cud 的隐藏由 DLL 的
+                 GetState(CollectCudArgs) 兜底 —— 现代菜单对每个文件都会问一次状态。 -->
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb
+                Id="KolidUI"
+                Clsid="D9BEBED3-C09F-4A12-AE23-7FCD98E7E5E7" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

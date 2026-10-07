@@ -73,6 +73,16 @@ npm run build -w assets_node
 
 重启 ComfyUI 后，节点会自动加载。在 ComfyUI 的节点搜索中输入节点名称（如 `ImageFitNode`、`PipelineNode`、`SnapshotPromptNode` 等）即可找到。
 
+### 5. 可选：配置 Windows 集成（.cud）
+
+双击仓库根的 `install_windows_integration.bat`，一键配置 `.cud` 文件的资源管理器集成（均按当前用户注册，无需管理员）：
+
+- **缩略图**：资源管理器把 `.cud` 图标显示为保存时的画布合成图；
+- **双击打开**：双击 `.cud` 直接用仓库根的 `Kolid Desktop.exe` 打开；
+- **右键菜单**：`KolidUI > PNG` 把画布合成按原名导出成旁边的 `.png`。
+
+`uninstall_windows_integration.bat` 解除全部配置（幂等，可重复运行）；若检测到旧版本写过的机器级（HKLM）遗留注册，会请求一次管理员权限清理。细节与排障见 `client/cud_thumbnail/README.md`。
+
 ---
 
 ## 目录结构
