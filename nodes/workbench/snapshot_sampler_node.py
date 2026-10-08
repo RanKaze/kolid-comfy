@@ -1556,6 +1556,34 @@ class SnapshotDetailerSamplerServer:
                     self.wfile.write(f.read())
                 return
 
+            # Pose attribute 的模型资产 (VNMHJS02 包 ~36MB + 三张皮肤贴图) 住在 git 外的
+            # data/pose/ 里。与上面三个模块目录不同: 这堆是**大文件且极少变**, 必须真缓存
+            # (immutable) —— 页面每次刷新都重拉 48MB 是不可接受的; 归属校验与上面同一套
+            # (realpath 之后再验直属), 只多放宽后缀 (png/md/gz/bin)。
+            if req_path.startswith('/pose-asset/'):
+                root = os.path.realpath(data_dir('pose'))
+                name = req_path[len('/pose-asset/'):]
+                file_path = os.path.realpath(os.path.join(root, name))
+                if (not name or os.path.dirname(file_path) != root
+                        or not os.path.isfile(file_path)):
+                    self.send_error(404, "pose asset not found")
+                    return
+                ctype = 'application/octet-stream'
+                if name.endswith('.png'):
+                    ctype = 'image/png'
+                elif name.endswith(('.md', '.txt')):
+                    ctype = 'text/plain; charset=utf-8'
+                elif name.endswith('.gz'):
+                    ctype = 'application/gzip'
+                self.send_response(200)
+                self.send_header('Content-type', ctype)
+                self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                with open(file_path, 'rb') as f:
+                    self.wfile.write(f.read())
+                return
+
             if self.path == '/api/config':
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',

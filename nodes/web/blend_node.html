@@ -266,10 +266,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .attr-type-badge.point { color: #19e0bc; }
 .attr-type-badge.ray { color: #ff7ab0; }
 .attr-type-badge.model { color: #7ee0d0; }
-/* 生成器 (文字/方向/3D) 的 chip:面画在自己那块 canvas 上,空面 = 底色透出 (停用另有角标说话)。 */
+.attr-type-badge.pose { color: #a8e06e; }
+/* 生成器 (文字/方向/3D/Pose) 的 chip:面画在自己那块 canvas 上,空面 = 底色透出 (停用另有角标说话)。 */
 .layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb,
-.layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb { cursor: pointer; background-color: #1b1d24; }
-.layer-thumb.text-attr-thumb canvas, .layer-thumb.direction-attr-thumb canvas, .layer-thumb.scene3d-attr-thumb canvas { width: 100%; height: 100%; display: block; }
+.layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb,
+.layer-thumb.pose-attr-thumb { cursor: pointer; background-color: #1b1d24; }
+.layer-thumb.text-attr-thumb canvas, .layer-thumb.direction-attr-thumb canvas, .layer-thumb.scene3d-attr-thumb canvas,
+.layer-thumb.pose-attr-thumb canvas { width: 100%; height: 100%; display: block; }
 /* `+` 与 chip 同尺寸同圆角,但它是按钮不是缩略图:虚线边说"这一步还没有东西",正是它该有的样子。 */
 .attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
 .attr-add:hover { border-color: rgba(0,122,255,0.9); color: #fff; background: rgba(0,122,255,0.16); }
@@ -295,6 +298,13 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .dir-hint b { color: #fff; font-weight: 600; }
 .dir-angles { margin-top: 2px; }
 .dir-angles input:disabled { opacity: 0.4; cursor: default; }
+/* Pose 小窗的舞台: rig 的 webgl canvas 被 js/pose_view.js 搬进这块取景框 (rgba 透明底, 底下垫
+   一层深色)。人形是竖着的, 所以比 direction 那块再高一点。 */
+.pose-stage { position: relative; height: 460px; border: 1px solid #2a2f3d; border-radius: 8px;
+    background: #101018; overflow: hidden; }
+.pose-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.pose-hint { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 10.5px; letter-spacing: 0.02em;
+    color: rgba(255,255,255,0.5); pointer-events: none; user-select: none; }
 /* Stash 的暖黄: direction 已经占了那支粉 (#ff9ec4), 两枚徽章并排时必须一眼分得开。 */
 .layer-type-badge.stash { color: #e3d17a; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
@@ -1087,6 +1097,48 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="s3d-note" id="scene3dNote">—</div>
                 </div>
             </div>
+            <!-- Pose 工具小窗: 一枚 Pose attribute 的工作台 —— 一只 3D 人形 (MakeHuman 网格) 在
+                 自己的舞台里摆姿态与取景, 烤成这一层的像素。舞台是 js/pose_view.js 挂的 rig 场景:
+                 左键点关节 (小黄球) 或身体拾取、把手转关节, 松手才提交; 右键转眼睛、中键平移、
+                 滚轮推拉 —— 三样都只动舞台那台相机, desc 一个字节不动。那条黄线框 = 捕获相机的
+                 取景 (FOV 30 / dist 45, 按**输出**比例画), 框就是输出的边界。
+                 形态七颗滑块会让 worker 重解网格 (异步); 取景五格直接改 desc.cam, 当场重烤。
+                 K3D/WebGL 缺席、资产没装或装配还没回来时窗照开: 舞台给一句话, 像素保持原样。 -->
+            <div class="panel-section tool-section foldable collapsed" id="poseSection" data-flyout-width="720">
+                <div class="panel-head">
+                    <div class="panel-label" id="poseLabel" title="Pose (P) — a 3D mannequin (a MakeHuman mesh) posed in its own window; the render bakes onto this layer automatically, transparent by default. Left-click a joint (or the body near one) to grab it, then turn the rotate handle — right-drag orbits your eye, middle-drag pans it, the wheel zooms it, none of the three touches the render. The yellow frame is the capture camera's framing: exactly what lands on the layer. The mesh sliders rebuild the body; Yaw/Pitch/Zoom/X/Y frame the capture (FOV 30, distance 45). Click the header to open or close its settings window."><span class="fold-caret"></span>Pose <span class="tool-key">P</span></div>
+                </div>
+                <div class="tool-body">
+                    <div class="pose-stage" id="poseStage">
+                        <div class="pose-hint" id="poseHint"></div>
+                    </div>
+                    <div class="control-row"><label>Age</label><input type="range" id="poseAgeRange" min="1" max="90" step="1" value="25" title="The mannequin's age (1-90) — reshapes the body through the morph targets, so the slider rebuilds the mesh in the background"><span id="poseAgeValue">25</span></div>
+                    <div class="control-row"><label>Gender</label><input type="range" id="poseGenderRange" min="0" max="1" step="0.01" value="0.5" title="Gender blend — 0 reads female, 1 reads male"><span id="poseGenderValue">0.50</span></div>
+                    <div class="control-row"><label>Weight</label><input type="range" id="poseWeightRange" min="0" max="1" step="0.01" value="0.5" title="Body weight"><span id="poseWeightValue">0.50</span></div>
+                    <div class="control-row"><label>Muscle</label><input type="range" id="poseMuscleRange" min="0" max="1" step="0.01" value="0.5" title="Muscle tone"><span id="poseMuscleValue">0.50</span></div>
+                    <div class="control-row"><label>Height</label><input type="range" id="poseHeightRange" min="0" max="1" step="0.01" value="0.5" title="Stature"><span id="poseHeightValue">0.50</span></div>
+                    <div class="control-row"><label>Breast</label><input type="range" id="poseBreastRange" min="0" max="1" step="0.01" value="0.5" title="Breast size"><span id="poseBreastValue">0.50</span></div>
+                    <div class="control-row"><label>Firmness</label><input type="range" id="poseFirmnessRange" min="0" max="1" step="0.01" value="0.5" title="Breast firmness — pairs with the size above"><span id="poseFirmnessValue">0.50</span></div>
+                    <div class="control-row"><label>Skin</label><div class="mini-group">
+                        <button class="mini-btn text-choice-btn" id="poseSkinNaked" title="The base skin texture — the photographed one, no markings">Naked</button>
+                        <button class="mini-btn text-choice-btn" id="poseSkinMarks" title="The base skin with its markings">Marks</button>
+                        <button class="mini-btn text-choice-btn active" id="poseSkinWhite" title="A plain white matte dummy — reads form, not skin. Falls back to this look whenever a texture is missing">White</button>
+                    </div></div>
+                    <div class="control-row"><label>Color</label><input type="color" id="poseColorInput" value="#ffffff" title="Tint over the skin texture (white = the texture's own colour)"><span id="poseColorValue">#FFFFFF</span></div>
+                    <div class="control-row"><label>Background</label><input type="checkbox" id="poseBgTransparent" checked title="Tick = a transparent background (the render keeps its alpha). Untick = fill with the colour on the right"><input type="color" id="poseBgInput" value="#202026" title="Background colour — used when Transparent is unticked"><span></span></div>
+                    <div class="rgba-fields" title="The capture camera's framing — exactly what the yellow frame on the stage shows. Yaw/Pitch orbit the camera around the mannequin, Zoom pulls it in (it always sits 45 units away, FOV 30), X/Y slide the framed centre. Angles fold to their range rather than sticking at an edge.">
+                        <span class="rgba-cell"><label>Yaw</label><input id="poseYawNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell"><label>Pitch</label><input id="posePitchNum" type="number" min="-89" max="89" step="1"><span class="unit">°</span></span>
+                        <span class="rgba-cell"><label>Zoom</label><input id="poseZoomNum" type="number" min="0.1" max="10" step="0.05"></span>
+                    </div>
+                    <div class="rgba-fields" title="Where the capture's centre sits relative to the mannequin, in world units (X runs across, Y lifts — up is positive).">
+                        <span class="rgba-cell"><label>X</label><input id="poseOffXNum" type="number" min="-20" max="20" step="0.1"></span>
+                        <span class="rgba-cell"><label>Y</label><input id="poseOffYNum" type="number" min="-20" max="20" step="0.1"></span>
+                        <span class="rgba-cell"></span>
+                    </div>
+                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="poseResetPoseBtn" title="Back to the rest pose — every joint straight again. The mesh and the framing stay">Pose</button><button type="button" class="mini-btn" id="poseResetAllBtn" title="The whole step back to its defaults: rest pose, default mesh, white dummy skin, transparent background, camera back to the front">All</button><span></span></div>
+                </div>
+            </div>
             <!-- The Detector section only exists when the node's detector input is actually
                  connected (blend-config's hasDetector): the tool has nothing to do otherwise, so
                  it ships hidden and the config is what unfolds it. The prompt speaks the mask
@@ -1513,6 +1565,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="attr/direction.js"></script>
 <script src="attr/geometry.js"></script>
 <script src="attr/3d.js"></script>
+<script src="attr/pose.js"></script>
 <!-- 图层特效链按特效拆在 fx/ 下: 一类特效一个文件 (注册数据 + 着色器 + pass + 读数 + 缩略图)。
      这些文件与页面本体同一个全局作用域, 顺序即依赖方向: core / maps / gl -> 特效 -> ui -> 页面。
      静态文件由工作台服务器的 /fx/ 路由提供 (snapshot_sampler_node.py), 改后端要重启。 -->
@@ -1551,6 +1604,12 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="js/scene3d_core.js"></script>
 <script src="js/scene3d_view.js"></script>
 <script src="js/scene3d_panel.js"></script>
+<!-- Pose 图层: morph worker 的包装 (js/pose_morph.js, 同一个 worker 服务全部记录)、headless
+     渲染核心 (js/pose_core.js, 装模型/摆姿态/捕获)、工具窗编辑器 (js/pose_view.js: 舞台、
+     轨道、关节拾取、把手、面板字段)。attr/pose.js 的 sync 只在运行时吃它们, 所以排序不论。 -->
+<script src="js/pose_morph.js"></script>
+<script src="js/pose_core.js"></script>
+<script src="js/pose_view.js"></script>
 <!-- Direction 小窗里那张"世界里的观察"= 挂在同一份 K3D 上的 three.js 场景 (平面贴参考图、
      三根轨道、箭头、把手, 中键转眼睛)。它只在运行时吃 direction.js 的世界坐标, 所以排在前面:
      这样 direction.js 加载时就能确定地拿到它, 或者确定地拿不到 (旧版节点进程没有 /js/ 路由)。 -->
@@ -5604,6 +5663,7 @@ function renderLayerList() {
     updateTextPanel();
     updateDirectionPanel();
     update3DPanel();
+    updatePosePanel();
 }
 
 // One row builder for both palettes: a guidance is not a different kind of object, it is the same
@@ -9928,7 +9988,7 @@ document.getElementById('viewFlipBtn').addEventListener('click', () => flipView(
 // the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
 // header while the panel scrolls or the column is dragged wider, and stack in list order so two of
 // them cannot sit on top of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'scene3dSection', 'detectorSection', 'processorSection'];
+const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'scene3dSection', 'poseSection', 'detectorSection', 'processorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -9973,6 +10033,9 @@ function openToolWindow(id) {
     // Direction 那一格要一开窗就有东西看: 平面上那张参考图是 render() 那一趟顺路抄出来的,
     // 而开窗本身不产生 render —— 不补这一下, 新开的窗里那张平面就是空的。
     if (id === 'directionSection') render();
+    // Pose 那一格同理, 而且更要紧: 开窗这一下要把 rig 的 canvas 挂进舞台 (挂载在 updatePosePanel 里,
+    // 它还会顺手催一趟还没装配完的 rig)。关窗的那一半在 closeToolWindow。
+    if (id === 'poseSection' && typeof updatePosePanel === 'function') updatePosePanel();
 }
 
 function closeToolWindow(id) {
@@ -9985,6 +10048,9 @@ function closeToolWindow(id) {
     toolWindows.delete(id);
     toolWindowObserver.unobserve(w.fly);
     layoutToolWindows();
+    // Pose: 关窗把 rig 的 canvas 摘出舞台 (它继续 headless 出图 —— 摘的只是舞台这一半), 顺手
+    // 收掉可能停在一半的拖动会话。
+    if (id === 'poseSection' && typeof poseViewOnWindowClose === 'function') poseViewOnWindowClose();
 }
 
 function toggleToolWindow(id) {
@@ -12532,10 +12598,17 @@ async function buildCudBlob() {
                     // 生成器入档的是描述符,不是派生面 —— 重开还要能改字、拖把手 (像素由 sync 重算)。
                     // 3D 例外:bake 是算不回来的唯一真相,照 surface 资产走;没烘过的记录没得存,
                     // 整枚不入档 (与"没有像素的面不入档"同一条)。
+                    // Pose 例外:desc 是唯一可编辑真相,但它的面要现装配才能重算 (rig + worker),
+                    // 资产在 git 外 —— 换台机器打开可能算不回来,档里那枚面就是唯一看得见的东西:
+                    // 两面同行,desc 供继续编辑,面供资产缺席时照旧显示 (4.a)。
                     if (r.type === '3d') {
                         e = (r.surface && r.surface.width && r.surface.height)
                             ? { id: r.id, type: '3d', ownsGrid: !!r.ownsGrid, surface: await addAsset('3d', r.surface, r.surface.width, r.surface.height) }
                             : null;
+                    } else if (r.type === 'pose') {
+                        e = r.desc ? { id: r.id, type: 'pose', desc: Object.assign({}, r.desc) } : null;
+                        if (e && r.surface && r.surface.width && r.surface.height)
+                            e.surface = await addAsset('pose', r.surface, r.surface.width, r.surface.height);
                     } else {
                         e = r.desc ? { id: r.id, type: r.type, desc: Object.assign({}, r.desc),
                             box: r.box ? Object.assign({}, r.box) : null, ownsGrid: !!r.ownsGrid } : null;
@@ -13061,6 +13134,10 @@ async function resolveRecAttrs(rec, blobs, cache, mapKeys) {
         } else if (a.desc !== undefined && a.desc !== null) {
             // 生成器 (文字/方向):入档的是描述符,回来原样接住 —— 面由 sync 在第一次折叠前重算。
             e = { id: key, type: a.type, desc: a.desc, box: a.box || null, ownsGrid: !!a.ownsGrid };
+            // Pose 入档时 desc 与面同行 (见 cudAttrs):算不回来时这枚面是唯一看得见的东西,这里接住。
+            // 面缺席 = 存档环境没烘过那一步,交给 sync 重算 (装配失败就仍是没面, fail-soft)。
+            const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
+            if (blob) e.surface = await blobToCanvas(blob);
         } else {
             const blob = a.surface !== null && a.surface !== undefined ? blobs.get(a.surface) : null;
             if (blob) {

@@ -2242,6 +2242,27 @@ class HandshakeHandler(BaseHTTPRequestHandler):
                 return self._send(f.read(), 'text/javascript; charset=utf-8',
                                   extra_headers=[('Cache-Control',
                                                   'no-store, no-cache, must-revalidate, proxy-revalidate')])
+        if path.startswith('/pose-asset/'):
+            # Pose attribute 的模型资产 (data/pose/: VNMHJS02 包 + 皮肤贴图) —— 与节点
+            # 服务器同款路由、同一个物理目录。大文件极少变: 真缓存, 别跟着开发回路
+            # no-store 一起把 48MB 每次刷新重拉。
+            root = os.path.realpath(str(_program_root() / 'data' / 'pose'))
+            name = path[len('/pose-asset/'):]
+            fp = os.path.realpath(os.path.join(root, name))
+            if (not name or os.path.dirname(fp) != root
+                    or not os.path.isfile(fp)):
+                return self._json({'error': 'pose asset not found'}, 404)
+            ctype = 'application/octet-stream'
+            if name.endswith('.png'):
+                ctype = 'image/png'
+            elif name.endswith(('.md', '.txt')):
+                ctype = 'text/plain; charset=utf-8'
+            elif name.endswith('.gz'):
+                ctype = 'application/gzip'
+            with open(fp, 'rb') as f:
+                return self._send(f.read(), ctype,
+                                  extra_headers=[('Cache-Control',
+                                                  'public, max-age=31536000, immutable')])
         if path == '/api/config':
             # blend 页面读它取 GLOBAL SETTINGS 的 pixels(动态分辨率的上限);
             # 桌面没有管线,给节点默认档(1M 像素)
