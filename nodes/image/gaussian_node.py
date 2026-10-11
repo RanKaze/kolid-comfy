@@ -346,10 +346,12 @@ class GSplatServer:
                 # Serve PLY data as JSON
                 if self.server_instance:
                     try:
+                        extrinsics = self.server_instance.extrinsics
+                        intrinsics = self.server_instance.intrinsics
                         response = {
                             'contents': self.server_instance.contents,
-                            'extrinsics': self.server_instance.extrinsics,
-                            'intrinsics': self.server_instance.intrinsics,
+                            'extrinsics': extrinsics.tolist() if hasattr(extrinsics, 'tolist') else extrinsics,
+                            'intrinsics': intrinsics.tolist() if hasattr(intrinsics, 'tolist') else intrinsics,
                             'width': self.server_instance.width,
                             'height': self.server_instance.height
                         }
@@ -639,7 +641,7 @@ class SnapshotGaussianNode:
     CATEGORY = "Kolid-Toolkit"
     
     @classmethod
-    def IS_CHANGED(s):
+    def IS_CHANGED(s, **kwargs):
         return float("nan")
 
     def take_snapshot(
@@ -680,10 +682,12 @@ class SnapshotGaussianNode:
 
         # Wait for screenshot to be captured (indefinitely, but web page will notify on close)
         print("[SnapshotGaussian] Waiting for snapshot...")
-        server.wait_for_screenshot()
-
-        # Stop the server
-        server.stop()
+        try:
+            server.wait_for_screenshot()
+        finally:
+            # Cancel/exception paths used to leave the bound port and its thread alive,
+            # so every later run drifted up to a new port.
+            server.stop()
 
         # Restore window focus with enhanced reliability
         if has_win32gui and focused_window:

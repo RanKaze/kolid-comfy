@@ -2182,6 +2182,46 @@ SHELL_HTML = r"""<!DOCTYPE html>
 """
 
 
+# ---- 姿态估计 (/api/pose_estimate) ----
+# 与节点服务器同一条 2D 关键点通路: 图 → DWPose (借 comfyui_controlnet_aux, CPU 推理) → POSE_KEYPOINT
+# 字典原样出去, 前端 nodes/web/js/pose_openpose.js 再把关键点折成人形的骨头角。离线这一侧的图只有
+# 浏览器递来的图层像素 (工作区图池住在节点进程里), 所以这条路由只认 source=layer。
+# torch/onnxruntime/controlnet_aux/模型 在打包好的 exe 里通常是缺席的 —— 缺席就 503 一句实话,
+# 界面报完把姿态留在原样, 别让这颗按钮变成按下去没反应的哑件。
+_POSE_ESTIMATOR = None
+_POSE_ESTIMATOR_LOCK = threading.Lock()
+
+
+def _pose_aux_src():
+    # 兄弟包 comfyui_controlnet_aux/src —— 节点那边由 ComfyUI 把它挂进 sys.path, 桌面这边自己找。
+    root = os.path.realpath(str(WEB_ROOT))                   # <pack>/nodes/web
+    cand = os.path.join(os.path.dirname(os.path.dirname(root)),
+                        'comfyui_controlnet_aux', 'src')
+    return cand if os.path.isdir(cand) else None
+
+
+def pose_estimate_png(png):
+    global _POSE_ESTIMATOR
+    import io as _io
+    import numpy as np
+    from PIL import Image
+    src = _pose_aux_src()
+    if src and src not in sys.path:
+        sys.path.insert(0, src)
+    from custom_controlnet_aux.dwpose import DwposeDetector
+    img = Image.open(_io.BytesIO(base64.b64decode(png.split(',', 1)[1]))).convert('RGB')
+    if _POSE_ESTIMATOR is None:
+        _POSE_ESTIMATOR = DwposeDetector.from_pretrained(
+            'hr16/UnJIT-DWPose', 'yzd-v/DWPose',
+            det_filename='yolox_l.onnx', pose_filename='dw-ll_ucoco.onnx',
+            torchscript_device='cpu')
+    with _POSE_ESTIMATOR_LOCK:
+        _, pose_json = _POSE_ESTIMATOR(np.asarray(img, dtype=np.uint8), include_body=True,
+                                       include_hand=False, include_face=False,
+                                       output_type='np', image_and_json=True)
+    return pose_json
+
+
 class HandshakeHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -2360,6 +2400,22 @@ class HandshakeHandler(BaseHTTPRequestHandler):
                 return self._json({'error': 'only localhost urls are accepted'}, 400)
             _open_tab(url, title)
             return self._json({'ok': True})
+        if path == '/api/pose_estimate':
+            # 图层的像素只活在浏览器里, 所以这边是 PNG 进、关键点出 (节点那条还认工作区 id)。
+            if body.get('source') != 'layer':
+                return self._json({'success': False,
+                                   'error': 'offline documents have no workspace image pool'}, 400)
+            png = body.get('png')
+            if not isinstance(png, str) or not png:
+                return self._json({'success': False, 'error': 'no image sent'}, 400)
+            try:
+                started = time.time()
+                pose = pose_estimate_png(png)
+                ms = int((time.time() - started) * 1000)
+            except Exception as est_err:
+                return self._json({'success': False, 'error': f'DWPose unavailable: {est_err}'}, 503)
+            people = (pose or {}).get('people') or []
+            return self._json({'success': True, 'pose': pose, 'people': len(people), 'ms': ms})
         return self._json({'error': 'not found'}, 404)
 
 

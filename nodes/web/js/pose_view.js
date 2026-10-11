@@ -41,6 +41,7 @@ const POSE_CAM_FIELDS = [
 ];
 const poseResetPoseBtn = document.getElementById('poseResetPoseBtn');
 const poseResetAllBtn = document.getElementById('poseResetAllBtn');
+const poseFromImageBtn = document.getElementById('poseFromImageBtn');
 
 // ---- 目标 (dirPinTarget/dirGizmoTarget 的同一套规矩) ----
 // 小窗编辑的是一枚记录, 不是"选中的层的那个老字段"。pin 只在它的层正是选中层时才算数; 没钉过就
@@ -477,6 +478,106 @@ if (poseResetAllBtn) {
         patchPoseTarget(t, Object.assign({}, ATTR_TYPES.pose.defaults));
         pushHistory('pose-reset');
         setStatus('Pose step reset to its defaults');
+    });
+}
+
+// ---- 从一张图取姿态 (From image) ----
+// 图从**图层**或**工作区图池**里挑 (选图 modal 与特效绑图共用那一格, 见 fx/ui.js 的 openFxMapModal)。
+// 关键点 → 骨头角在 js/pose_openpose.js (照参考的解析路, 躯干四肢), DWPose 在后端 /api/pose_estimate。
+// 两条来源的载荷不同是有道理的: 图池的字节本来就在服务器上, 只报 id 就够; 图层的像素只活在浏览器里,
+// 那张 PNG 必须递过去。
+async function poseImageGroups() {
+    const groups = [];
+    const layerItems = [];
+    for (const l of (typeof layers === 'undefined' ? [] : layers)) {
+        if (!l || l.isMaskLayer || !l.img) continue;
+        let png = null;
+        try {
+            const src = layerSource(l);        // 这条图层此刻的样子 (decal / 特效 / mask 全折进来)
+            const c = document.createElement('canvas');
+            c.width = src.width; c.height = src.height;
+            c.getContext('2d').drawImage(src, 0, 0);
+            png = c.toDataURL('image/png');
+        } catch (e) { continue; }
+        layerItems.push({ id: 'layer:' + l.id, name: l.name, src: png, ref: { source: 'layer', name: l.name, png } });
+    }
+    if (layerItems.length) groups.push({ title: 'Layers', items: layerItems });
+
+    // 全量图池: 生成产出与 Original 那些 hidden 条目也是图源 (条带的显示规则不动, 那是另一回事)。
+    let pool = typeof stagingItems === 'undefined' ? [] : stagingItems;
+    try {
+        const js = await (await fetch('/api/staging')).json();
+        if (Array.isArray(js.staging)) pool = js.staging;
+    } catch (e) { /* 拉不到就用条带那份镜像 */ }
+    const stageItems = [];
+    for (const s of pool) {
+        if (!s || !s.src || s.id === GUIDANCE_CARD_ID) continue;
+        stageItems.push({ id: s.id, name: s.name, src: s.src, width: s.width, height: s.height, ref: { source: 'staging', key: s.id, name: s.name } });
+    }
+    if (stageItems.length) groups.push({ title: 'Workspace', items: stageItems });
+    return groups;
+}
+
+// 姿态要写在**真 rig** 上: 骨头角是跟静止形的头位置比出来的, 所以装配没回来之前一处都不许改。
+// 面板的 pin 已经让 sync 敲过一趟解形, 这里只是等它 —— 顺带把那条失败支路认出来 (warned 且不在
+// building = 这一份形态已经放弃过, 不会再自己好了)。
+function poseRigReady(t) {
+    return new Promise((resolve, reject) => {
+        const started = performance.now();
+        let kicked = false;
+        const tick = () => {
+            const e = poseRigFor(t);
+            if (e && e.ready && e.rig) return resolve(e);
+            if (e && !e.building && e.warned) {
+                return reject(new Error('the mannequin could not be assembled — its assets are missing'));
+            }
+            if (!e && !kicked) { kicked = true; if (typeof render === 'function') render(); }
+            if (performance.now() - started > 120000) return reject(new Error('still assembling the mannequin'));
+            setTimeout(tick, 100);
+        };
+        tick();
+    });
+}
+
+async function poseFromImage(ref) {
+    const t = poseGizmoTarget();
+    if (!t) { setStatus('Open a Pose step first', 'error'); return; }
+    if (poseFromImageBtn) poseFromImageBtn.disabled = true;
+    setStatus(`Estimating a pose from「${ref.name || 'that image'}」…`);
+    try {
+        const body = ref.source === 'staging' ? { source: 'staging', id: ref.key } : { source: 'layer', png: ref.png };
+        const res = await fetch('/api/pose_estimate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const js = await res.json().catch(() => ({}));
+        if (!res.ok || !js.success) throw new Error(js.error || `HTTP ${res.status}`);
+        const parsed = poseOpenPoseParse(js.pose);
+        if (!parsed) throw new Error('no person found in that image');
+        const entry = await poseRigReady(t);
+        const pose = poseOpenPoseConvert(parsed, entry.rig);
+        if (!pose || !Object.keys(pose.bones).length) throw new Error('those keypoints mapped to no bone');
+        // 整只替换 (8.a): 老姿态不留一根骨头, bonePositions 一并清空 —— 一次 undo。
+        patchPoseTarget(t, { pose });
+        pushHistory('pose-from-image');
+        setStatus(`Pose from「${ref.name}」— ${poseSummary(pose)}, ${parsed.numKeypoints} keypoints (${js.ms || 0}ms)`, 'success');
+    } catch (err) {
+        setStatus('Pose estimate: ' + (err && err.message ? err.message : err), 'error');
+    } finally {
+        if (poseFromImageBtn) poseFromImageBtn.disabled = false;
+    }
+}
+
+if (poseFromImageBtn) {
+    poseFromImageBtn.addEventListener('click', async () => {
+        if (!poseGizmoTarget()) { setStatus('Open a Pose step first', 'error'); return; }
+        openFxMapModal(null, null, null, {
+            title: 'Pose from an image',
+            sub: 'Pick a photo of a person — the mannequin takes that pose and re-bakes onto this layer. Torso, limbs and head: fingers stay straight.',
+            groups: await poseImageGroups(),
+            hint: 'Nothing to read yet — drop an image into the workspace, or paint a layer first.',
+            file: false,
+            onPick: poseFromImage,
+        });
     });
 }
 

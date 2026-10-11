@@ -670,33 +670,27 @@ fxModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxModal(); }
 });
 
-// ---- 绑定贴图 (map picker) ----
-// 一个入口、一个 modal:工作区图池 + 文件都在这一格里选。选回来的永远只是 {key, name} ——
-// 图池条目用它的 staging id,文件走本地池 id(它不该挤进参考图池,但要能进 .cud 资产)。
+// ---- 选图 modal (map picker) ----
+// 一个入口、一个 modal,里面两副面孔:不给 opts 就是特效绑图那格(工作区图池 + 文件),给了 opts
+// 就是通用选图器 —— 标题、分组、以及"选回来干什么"全由调用方摆 (姿态识别走的那条)。
+// 共用的是这一格 modal 与它的键盘/外点关闭,不是各写一份近似实现。
 const fxMapModalEl = document.getElementById('fxMapModal');
 const fxMapGroupsEl = document.getElementById('fxMapGroups');
 const fxMapTitleEl = document.getElementById('fxMapTitle');
+const fxMapSubEl = document.getElementById('fxMapSub');
+const fxMapFileBtnEl = document.getElementById('fxMapFileBtn');
 const fxMapFileInput = document.getElementById('fxMapFile');
-let fxMapTarget = null;        // { layerId, effectId, slot } —— 一次只给一条特效的一个槽绑
+const fxMapSubDefault = fxMapSubEl ? fxMapSubEl.textContent : '';   // 两副面孔各自的说明句, 绑图这副的原文要留着
+let fxMapTarget = null;        // { onPick } —— 一次只收一张图
 
 function fxMapModalOpen() { return fxMapModalEl.classList.contains('open'); }
 function closeFxMapModal() { fxMapModalEl.classList.remove('open'); fxMapTarget = null; syncBrushCursor(); }
 
 function bindFxMap(ref) {
     const t = fxMapTarget;
-    if (!t) { setStatus('The picker was closed — that map is not bound', 'error'); return; }
-    const l = getLayer(t.layerId);
-    // 按 id 找它所属的那枚记录:老名字 `l.effects` 只看最左边那一枚容器,右边那枚里的一步绑图会
-    // 静默什么都不发生。
-    const e = l && effectById(l, t.effectId);
-    if (!e) return;
-    const slot = t.slot || 'map';
-    // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,槽对象在 undo 快照之间是共享的。
-    e.params[slot] = ref;
+    if (!t) { setStatus('The picker was closed — that image is not used', 'error'); return; }
     closeFxMapModal();
-    fxStructuralChange(l);
-    setStatus(ref ? `Bound「${ref.name}」as the ${fxMapRole(e, slot)} map`
-        : `Unbound the ${fxMapRole(e, slot)} map`, 'success');
+    t.onPick(ref);
 }
 
 function fxMapCardGroup(title, items) {
@@ -725,7 +719,7 @@ function fxMapCardGroup(title, items) {
         nm.textContent = s.name;
         card.appendChild(img);
         card.appendChild(nm);
-        card.addEventListener('click', () => bindFxMap({ key: s.id, name: s.name }));
+        card.addEventListener('click', () => bindFxMap(s.ref || { key: s.id, name: s.name }));
         cards.appendChild(card);
     }
     group.appendChild(head);
@@ -733,22 +727,61 @@ function fxMapCardGroup(title, items) {
     return group;
 }
 
-function openFxMapModal(l, effect, slotKey) {
-    if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
-    const slot = fxMapSlots(effect).find(s => s.key === (slotKey || 'map'));
-    if (!slot) return;
-    fxMapTarget = { layerId: l.id, effectId: effect.id, slot: slot.key };
-    fxMapTitleEl.textContent = `Bind a ${slot.role.toLowerCase()} map`;
+function openFxMapModal(l, effect, slotKey, opts) {
+    // 卡片的载荷默认还是 {key, name} —— 绑图要的就是这两下;别的用途(姿态识别)让条目自带
+    // ref,把"这是工作区的第几号图"还是"这是那一层的这张 PNG"分清楚。
+    let spec;
+    if (opts) {
+        spec = {
+            title: opts.title || 'Pick an image',
+            sub: opts.sub || '',
+            groups: opts.groups || [],
+            file: opts.file === true,
+            hint: opts.hint || 'Nothing to pick from yet.',
+            onPick: opts.onPick,
+        };
+    } else {
+        if (!layerTakesEffects(l) || !EFFECT_TYPES[effect.type]) return;
+        const slot = fxMapSlots(effect).find(s => s.key === (slotKey || 'map'));
+        if (!slot) return;
+        const layerId = l.id, effectId = effect.id;
+        spec = {
+            title: `Bind a ${slot.role.toLowerCase()} map`,
+            sub: fxMapSubDefault,
+            groups: [{ title: 'Workspace', items: stagingItems.filter(s => s && s.src && s.id !== GUIDANCE_CARD_ID) }],
+            file: true,
+            hint: 'The workspace holds no images yet — use From file below.',
+            onPick(ref) {
+                const layer = getLayer(layerId);
+                // 按 id 找它所属的那枚记录:老名字 `l.effects` 只看最左边那一枚容器,右边那枚里的一步绑图会
+                // 静默什么都不发生。
+                const e = layer && effectById(layer, effectId);
+                if (!e) return;
+                // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,槽对象在 undo 快照之间是共享的。
+                e.params[slot.key] = ref;
+                fxStructuralChange(layer);
+                setStatus(ref ? `Bound「${ref.name}」as the ${fxMapRole(e, slot.key)} map`
+                    : `Unbound the ${fxMapRole(e, slot.key)} map`, 'success');
+            },
+        };
+    }
+    fxMapTarget = { onPick: spec.onPick };
+    fxMapTitleEl.textContent = spec.title;
+    if (fxMapSubEl) fxMapSubEl.textContent = spec.sub;
     fxMapGroupsEl.textContent = '';
-    // Guidance 卡是 Layers 的投影,当深度/法线图没有意义;图池为空时只剩文件这条路。
-    const items = stagingItems.filter(s => s && s.src && s.id !== GUIDANCE_CARD_ID);
-    if (items.length) fxMapGroupsEl.appendChild(fxMapCardGroup('Workspace', items));
-    else {
+    let shown = false;
+    for (const g of spec.groups) {
+        if (!g.items.length) continue;
+        fxMapGroupsEl.appendChild(fxMapCardGroup(g.title, g.items));
+        shown = true;
+    }
+    if (!shown) {
         const hint = document.createElement('div');
         hint.className = 'modal-hint';
-        hint.textContent = 'The workspace holds no images yet — use From file below.';
+        hint.textContent = spec.hint;
         fxMapGroupsEl.appendChild(hint);
     }
+    if (fxMapFileBtnEl) fxMapFileBtnEl.style.display = spec.file ? '' : 'none';
     fxMapModalEl.classList.add('open');
     syncBrushCursor();
 }

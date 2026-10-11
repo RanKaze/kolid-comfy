@@ -63,52 +63,6 @@
             display: none;
         }
 
-        #controlsBar {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 16px;
-            background: #252525;
-            padding: 8px 12px;
-            border-top: 1px solid #333;
-            flex-shrink: 0;
-        }
-
-        #controlsBar button {
-            background: #444;
-            border: none;
-            color: #fff;
-            padding: 4px 10px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-        }
-
-        #controlsBar button:hover {
-            background: #555;
-        }
-
-        .scale-control {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-
-        .scale-control span {
-            color: #888;
-            font-size: 11px;
-        }
-
-        .scale-control input[type="number"] {
-            width: 60px;
-            background: #333;
-            border: 1px solid #555;
-            color: #fff;
-            font-size: 11px;
-            padding: 4px 6px;
-            border-radius: 3px;
-        }
-
         .info-panel {
             position: absolute;
             top: 8px;
@@ -128,7 +82,7 @@
 
         .instructions {
             position: absolute;
-            bottom: 60px;
+            bottom: 16px;
             left: 50%;
             transform: translateX(-50%);
             background: rgba(0,0,0,0.7);
@@ -215,7 +169,7 @@
         </div>
 
         <div class="instructions">
-            Press <strong>Enter</strong> to take snapshot and close window
+            Press <strong>Enter</strong> to take snapshot and close window &nbsp;·&nbsp; <strong>0</strong> to reset the view
         </div>
 
         <!-- Screenshot area indicator -->
@@ -234,21 +188,6 @@
             </div>
         </div>
     </div>
-
-    <div id="controlsBar">
-            <div class="scale-control">
-                <span>Scale:</span>
-                <input type="range" id="scaleSlider" min="0.01" max="100" step="1" value="2" title="Gaussian scale multiplier">
-                <input type="number" id="scaleInput" min="0.01" max="100" step="0.1" value="2" title="Gaussian scale multiplier">
-            </div>
-            <div class="scale-control">
-                <span>Focal:</span>
-                <input type="range" id="focalSlider" min="5" max="500" step="1" value="30" title="Focal length in mm">
-                <input type="number" id="focalInput" min="5" max="500" step="1" value="30" title="Focal length in mm">
-            </div>
-            <button id="resetCamera" title="Reset camera view">Reset View</button>
-            <button id="screenshot" title="Take screenshot">Screenshot</button>
-        </div>
 
     <!-- Load bundled gsplat.js -->
     <script src="./js/gsplat-bundle.js"></script>
@@ -276,13 +215,10 @@
         let controls = null;
         let animationId = null;
         let currentSplat = null;
-        let originalScales = null;  // Store original scales for dynamic adjustment
-        const SCALE_CHUNK_SIZE = 200000; // Number of float entries processed per animation frame
-        const DEFAULT_SCALE_MULTIPLIER = 1.0; // Default visual scale applied after loading
-        let scaleUpdateJob = null; // Tracks incremental scale updates to avoid UI stalls
 
-        // Default focal length
-        const DEFAULT_FOCAL_LENGTH = 30;
+        // Source-image intrinsics, kept so the canvas-scaled focal length can be
+        // recomputed whenever the canvas changes size.
+        let sourceIntrinsics = null;
 
         // Initialize the viewer
         function initViewer() {
@@ -296,41 +232,15 @@
                 // Handle resize
                 const resize = () => {
                     renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+                    applyFocalFromIntrinsics();
                 };
                 window.addEventListener('resize', resize);
                 resize();
 
-                // Set default focal length - reference setCameraFromExtrinsics design
-                const canvasWidth = canvas.clientWidth || 512;
-                const canvasHeight = canvas.clientHeight || 512;
-                
-                // Convert default focal length from mm to pixel units
-                // Based on the ratio between known real focal length and pixel focal length
-                // When real focal length is 30mm, pixel focal length is around 2911
-                const pixelFocal = (2911 * DEFAULT_FOCAL_LENGTH) / 30;
-                camera.data.fx = pixelFocal;
-                camera.data.fy = pixelFocal;
-                currentFocalLength = DEFAULT_FOCAL_LENGTH;
-                
-                // Initialize focal length input and display
-                if (focalInput) {
-                    focalInput.value = DEFAULT_FOCAL_LENGTH;
-                    const focalDisplay = document.getElementById('focalLengthDisplay');
-                    if (focalDisplay) {
-                        focalDisplay.textContent = DEFAULT_FOCAL_LENGTH;
-                    }
-                }
-                
-                console.log('[SnapshotGaussian] Initialized with default focal length:', DEFAULT_FOCAL_LENGTH);
-                console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
-
                 // Start render loop
                 const frame = () => {
-                    // Update camera to apply new focal length
-                if (camera.update) {
                     camera.update();
-                }
-                controls.update();
+                    controls.update();
                     renderer.render(scene, camera);
                     animationId = requestAnimationFrame(frame);
                 };
@@ -349,171 +259,102 @@
             errorEl.classList.remove('hidden');
         }
 
-        // Store initial camera params for reset
-        let initialCameraData = null;
+        // Camera pose taken from the node's extrinsics, restored by the reset key
+        let initialView = null;
 
-        // Scale compensation: when focal length is scaled down for canvas size,
-        // gaussian scales need to be multiplied by this factor to maintain correct screen-space size
-        let gaussianScaleCompensation = 1.0;
+        // gsplat.js builds its projection as ndcX = 2*fx*x/(width*z), i.e. fx in
+        // canvas pixels, while the node hands us fx in source-image pixels.
+        // One shared scale factor keeps fx/fy in the source ratio, so circles stay
+        // circles; scaling each axis independently would stretch the image whenever
+        // the canvas aspect differs from the source aspect.
+        function applyFocalFromIntrinsics() {
+            if (!camera || !sourceIntrinsics) return;
+            const width = canvas.clientWidth || 1;
+            const height = canvas.clientHeight || 1;
+            const scale = Math.min(width / sourceIntrinsics.imageWidth,
+                                   height / sourceIntrinsics.imageHeight);
+            camera.data.fx = sourceIntrinsics.fx * scale;
+            camera.data.fy = sourceIntrinsics.fy * scale;
+        }
 
-        // Set camera from extrinsics and intrinsics
-        // extrinsics: 4x4 matrix (identity for SHARP = camera at origin looking down +Z)
-        // intrinsics: 3x3 matrix [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
-        // splat: the loaded Gaussian splat object (optional, used for bounds)
+        // OrbitControls keeps no quaternion of its own: setCameraTarget derives the
+        // spherical state from (target - camera.position) and update() rebuilds the
+        // orientation from that direction. dampening 1 lands the very first frame on
+        // the requested pose instead of easing into it.
+        function applyPose(position, target) {
+            if (!camera || !controls) return;
+            camera.position = new SPLAT.Vector3(position[0], position[1], position[2]);
+            controls.dampening = 1;
+            controls.setCameraTarget(new SPLAT.Vector3(target[0], target[1], target[2]));
+            controls.update();
+            controls.dampening = 0.12;
+        }
+
+        // Place the camera exactly where the node's camera was.
+        // extrinsics: world -> camera, p_cam = R * p_world + t
+        // intrinsics: [[fx,0,cx],[0,fy,cy],[0,0,1]] in source-image pixels
+        // SHARP and gsplat agree on the camera frame (+X right, +Y down, +Z forward)
+        // and on image row order, so nothing here is axis-flipped.
         function setCameraFromExtrinsics(extrinsics, intrinsics, splat) {
             if (!camera || !controls) return;
 
-            console.log('[GaussianViewer] Setting camera from extrinsics/intrinsics');
-            console.log('[GaussianViewer] Extrinsics:', JSON.stringify(extrinsics));
-            console.log('[GaussianViewer] Intrinsics:', JSON.stringify(intrinsics));
-
-            // Parse extrinsics to get camera position
-            // For a 4x4 extrinsics matrix [R|t], camera position in world space is -R^T * t
-            // But for identity matrix, camera is simply at origin
-            let camPosX = 0, camPosY = 0, camPosZ = 0;
-
-            if (extrinsics && Array.isArray(extrinsics) && extrinsics.length === 4) {
-                // Extract rotation and translation from 4x4 extrinsics
-                const R = [
-                    [extrinsics[0][0], extrinsics[0][1], extrinsics[0][2]],
-                    [extrinsics[1][0], extrinsics[1][1], extrinsics[1][2]],
-                    [extrinsics[2][0], extrinsics[2][1], extrinsics[2][2]]
-                ];
-                const t = [extrinsics[0][3], extrinsics[1][3], extrinsics[2][3]];
-
-                // Camera position = -R^T * t
-                camPosX = -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]);
-                camPosY = -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]);
-                camPosZ = -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]);
-
-                console.log('[GaussianViewer] Computed camera position from extrinsics:', camPosX, camPosY, camPosZ);
+            let R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+            let t = [0, 0, 0];
+            if (Array.isArray(extrinsics) && extrinsics.length === 4) {
+                R = [extrinsics[0].slice(0, 3), extrinsics[1].slice(0, 3), extrinsics[2].slice(0, 3)];
+                t = [extrinsics[0][3], extrinsics[1][3], extrinsics[2][3]];
             }
 
-            // Calculate FOV and set camera focal length from intrinsics
-            // intrinsics[0][0] = fx (focal length in pixels)
-            // intrinsics[1][1] = fy (focal length in pixels)
-            // intrinsics[1][2] = cy (principal point y = image_height / 2)
-            let targetZ = 2; // default
-            if (intrinsics && Array.isArray(intrinsics) && intrinsics.length >= 2) {
+            // Camera origin in world space: C = -R^T * t
+            const position = [
+                -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]),
+                -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]),
+                -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]),
+            ];
+
+            // Camera +Z expressed in world space = third row of the world -> camera rotation
+            const fwd = [R[2][0], R[2][1], R[2][2]];
+            const fwdLen = Math.hypot(fwd[0], fwd[1], fwd[2]) || 1;
+            const forward = [fwd[0] / fwdLen, fwd[1] / fwdLen, fwd[2] / fwdLen];
+
+            if (Array.isArray(intrinsics) && intrinsics.length >= 2) {
                 const fx = intrinsics[0][0];
                 const fy = intrinsics[1][1];
-                const cx = intrinsics[0][2];
-                const cy = intrinsics[1][2];
-                const imageWidth = cx * 2;  // cx is typically image_width / 2
-                const imageHeight = cy * 2; // cy is typically image_height / 2
-
-                console.log('[GaussianViewer] Intrinsics: fx=', fx, 'fy=', fy, 'cx=', cx, 'cy=', cy);
-                console.log('[GaussianViewer] Image dimensions (from intrinsics):', imageWidth, 'x', imageHeight);
-
-                // Set camera focal length to match the original camera
-                // gsplat.js uses fx/fy in screen pixels, need to scale by canvas size
-                const canvasWidth = canvas.clientWidth || 512;
-                const canvasHeight = canvas.clientHeight || 512;
-
-                // Use uniform scale factor (canvas should have same aspect ratio as image)
-                // This keeps fx = fy for undistorted view
-                const scale = canvasWidth / imageWidth;
-                const scaledF = fx * scale;  // fx and fy are equal in SHARP
-
-                camera.data.fx = scaledF;
-                camera.data.fy = scaledF;
-                // Update camera to apply new focal length
-                if (camera.update) {
-                    camera.update();
+                // SHARP writes the principal point at the image center
+                const imageWidth = intrinsics[0][2] * 2;
+                const imageHeight = intrinsics[1][2] * 2;
+                if (fx > 0 && fy > 0 && imageWidth > 0 && imageHeight > 0) {
+                    sourceIntrinsics = { fx, fy, imageWidth, imageHeight };
                 }
-
-                // Calculate real focal length in mm from intrinsics
-                // Based on the ratio between known real focal length and pixel focal length
-                // When real focal length is 30mm, pixel focal length is around 2911
-                const focalLengthMM = (30 * scaledF) / 2911;
-                const roundedFocal = Math.round(focalLengthMM);
-                
-                // Update current focal length and UI
-                currentFocalLength = roundedFocal;
-                focalInput.value = roundedFocal;
-                const focalDisplay = document.getElementById('focalLengthDisplay');
-                if (focalDisplay) {
-                    focalDisplay.textContent = roundedFocal;
-                }
-
-                // IMPORTANT: Compensate gaussian scales for the focal length scaling
-                // Screen-space size = world_scale * fx / depth
-                // When we scale fx down, gaussians appear smaller. Multiply scales by inverse.
-                gaussianScaleCompensation = imageWidth / canvasWidth;
-
-                console.log('[GaussianViewer] Canvas size:', canvasWidth, 'x', canvasHeight);
-                console.log('[GaussianViewer] Uniform scale:', scale, 'scaled focal length:', scaledF);
-                console.log('[GaussianViewer] Gaussian scale compensation:', gaussianScaleCompensation.toFixed(2), 'x');
-
-                // Calculate vertical FOV in radians for logging
-                const fovY = 2 * Math.atan(imageHeight / (2 * fy));
-                const fovYDeg = fovY * 180 / Math.PI;
-                console.log('[GaussianViewer] Calculated FOV:', fovYDeg, 'degrees');
-
-                // For SHARP, the scene is in front of the camera
-                // Use focal length to estimate a reasonable target distance
-                // The disparity range in metadata can help estimate scene depth
-                // For now, use a simple heuristic based on typical SHARP output
-                targetZ = Math.max(1, fy / imageHeight * 2);
-                console.log('[GaussianViewer] Target Z distance:', targetZ);
             }
+            applyFocalFromIntrinsics();
 
-            // Determine the target position (what the camera looks at)
-            // For the INITIAL view (matching original image), look STRAIGHT AHEAD along Z axis
-            // NOT at the scene center - that would tilt the camera
-            let targetX = 0, targetY = 0;
-            let orbitZ = targetZ;  // For orbiting, use a closer point
+            // The controls pivot around a target, so put it on the view axis - every
+            // distance along it renders the same frame; only the orbit feel changes.
+            // The near edge of the splat keeps the swing centred on the visible subject.
+            let distance = 5;
             if (splat && splat.bounds) {
                 const center = splat.bounds.center();
                 const size = splat.bounds.size();
-
-                // Use scene center Z for the view direction
-                targetZ = center.z;
-
-                // For orbit center, use distance to closest object + 50%
-                // Camera is at origin, so minZ is the distance to closest point
-                const minZ = center.z - size.z / 2;
-                orbitZ = minZ * 1.5;  // 50% past the closest point
-
-                console.log('[GaussianViewer] Scene center:', center.x, -center.y, center.z);
-                console.log('[GaussianViewer] Closest point Z:', minZ.toFixed(1));
-                console.log('[GaussianViewer] Orbit center Z:', orbitZ.toFixed(1), '(closest + 50%)');
+                const along = forward[0] * (center.x - position[0])
+                            + forward[1] * (center.y - position[1])
+                            + forward[2] * (center.z - position[2]);
+                const half = (Math.abs(forward[0]) * size.x + Math.abs(forward[1]) * size.y + Math.abs(forward[2]) * size.z) / 2;
+                distance = Math.max(along - half, 1);
             }
+            const pivot = [
+                position[0] + forward[0] * distance,
+                position[1] + forward[1] * distance,
+                position[2] + forward[2] * distance,
+            ];
 
-            // SHARP uses Y-down coordinate system, so flip camera Y as well
-            camPosY = -camPosY;
+            applyPose(position, pivot);
+            initialView = { position, pivot };
 
-            // For SHARP: camera is at origin, scene is at positive Z
-            // The orbit controls work by having the camera orbit around a target point.
-            // To get the "original image view", we set camera at the computed position
-            // and look at the scene center.
-
-            const camPos = new SPLAT.Vector3(camPosX, camPosY, camPosZ);
-            // Use orbitZ for the target - closer to camera for better orbit feel
-            const targetPos = new SPLAT.Vector3(targetX, targetY, orbitZ);
-
-            // Store for reset
-            initialCameraData = {
-                position: camPos,
-                target: targetPos,
-                fx: camera.data.fx,
-                fy: camera.data.fy
-            };
-
-            // Set camera position - IMPORTANT: must set camera.position, not camera.data.position
-            // camera.position is used by OrbitControls
-            // camera.data.position is used for rendering
-            camera.position.x = camPosX;
-            camera.position.y = camPosY;
-            camera.position.z = camPosZ;
-
-            // Update orbit controls to orbit around the target point
-            // This recalculates the internal orbit state from current camera.position
-            controls.setCameraTarget(targetPos);
-
-            console.log('[GaussianViewer] Camera set to position:', camPosX, camPosY, camPosZ);
-            console.log('[GaussianViewer] Looking at target:', targetX, targetY, targetZ);
-            console.log('[GaussianViewer] This should match the original input image view');
+            console.log('[GaussianViewer] Camera:', position.map(v => v.toFixed(4)).join(', '));
+            console.log('[GaussianViewer] Forward:', forward.map(v => v.toFixed(4)).join(', '));
+            console.log('[GaussianViewer] Focal (canvas px):', camera.data.fx.toFixed(2), camera.data.fy.toFixed(2),
+                        'pivot distance:', distance.toFixed(2));
         }
 
         // Load a PLY file from ArrayBuffer data
@@ -528,26 +369,6 @@
                     }
                 }
                 currentSplat = null;
-                if (scaleUpdateJob) {
-                    scaleUpdateJob.cancelled = true;
-                    scaleUpdateJob = null;
-                }
-
-                // Pre-calculate scale compensation from intrinsics BEFORE loading
-                // This ensures gaussian scales are correct from the start
-                gaussianScaleCompensation = 1.0;  // Default if no intrinsics
-                if (intrinsics && Array.isArray(intrinsics) && intrinsics.length >= 2) {
-                    const fx = intrinsics[0][0];
-                    const cx = intrinsics[0][2];
-                    const imageWidth = cx * 2;
-                    const canvasWidth = canvas.clientWidth || 512;
-                    // Compensation = original_size / canvas_size
-                    // This makes gaussians appear at their correct world-space size
-                    gaussianScaleCompensation = imageWidth / canvasWidth;
-                    console.log('[SnapshotGaussian] Pre-calculated scale compensation:', gaussianScaleCompensation.toFixed(2), 'x');
-                    console.log('[SnapshotGaussian] (Image:', imageWidth, 'px -> Canvas:', canvasWidth, 'px)');
-                }
-
                 console.log('[SnapshotGaussian] Loading from data, size:', arrayBuffer.byteLength);
 
                 // Create a blob URL from the data
@@ -564,71 +385,17 @@
                 if (scene.objects && scene.objects.length > 0) {
                     currentSplat = scene.objects[scene.objects.length - 1];
 
-                    // Log bounds info for debugging
                     if (currentSplat.bounds) {
                         const center = currentSplat.bounds.center();
                         const size = currentSplat.bounds.size();
                         console.log('[SnapshotGaussian] Scene bounds center:', center.x, center.y, center.z);
                         console.log('[SnapshotGaussian] Scene bounds size:', size.x, size.y, size.z);
                     }
-
-                    // Store original scales and log statistics
-                    if (currentSplat.data && currentSplat.data.scales) {
-                        const scales = currentSplat.data.scales;
-                        const numGaussians = scales.length / 3;
-                        let minScale = Infinity, maxScale = -Infinity, sumScale = 0;
-
-                        // Store a copy of original scales (BEFORE compensation) for dynamic adjustment
-                        // The stored scales include the compensation factor so user scale=1 shows correct size
-                        originalScales = new Float32Array(scales.length);
-                        for (let i = 0; i < scales.length; i++) {
-                            // Apply compensation: gaussians need to be larger when focal length is scaled down
-                            originalScales[i] = scales[i] * gaussianScaleCompensation;
-                        }
-                        console.log('[SnapshotGaussian] Stored compensated scales (factor:', gaussianScaleCompensation.toFixed(2), 'x)');
-
-                        // Apply compensated scales immediately
-                        for (let i = 0; i < scales.length; i++) {
-                            scales[i] = originalScales[i];
-                        }
-
-                        // Mark data as changed so gsplat.js re-uploads to GPU
-                        currentSplat.data.changed = true;
-
-                        for (let i = 0; i < scales.length; i++) {
-                            const s = scales[i];
-                            minScale = Math.min(minScale, s);
-                            maxScale = Math.max(maxScale, s);
-                            sumScale += s;
-                        }
-
-                        const avgScale = sumScale / scales.length;
-                        console.log('[SnapshotGaussian] === GAUSSIAN SCALE DEBUG (after compensation) ===');
-                        console.log('[SnapshotGaussian] Number of Gaussians:', numGaussians);
-                        console.log('[SnapshotGaussian] Compensated scale min:', minScale.toFixed(6));
-                        console.log('[SnapshotGaussian] Compensated scale max:', maxScale.toFixed(6));
-                        console.log('[SnapshotGaussian] Compensated scale avg:', avgScale.toFixed(6));
-                        console.log('[SnapshotGaussian] =================================================');
-                    } else {
-                        console.log('[SnapshotGaussian] No scales data found on splat object');
-                        console.log('[SnapshotGaussian] Splat properties:', Object.keys(currentSplat));
-                        if (currentSplat.data) {
-                            console.log('[SnapshotGaussian] Splat.data properties:', Object.keys(currentSplat.data));
-                        }
-                        originalScales = null;
-                    }
-
-                    // Reset scale when loading new splat and apply default multiplier
-                    currentScale = 2.0;
-                    scaleSlider.value = 2.0;
-                    scaleInput.value = 2.0;
-                    scheduleScaleUpdate(2.0);
                 }
 
-                // Set camera from extrinsics and intrinsics if provided
+                // Place the camera at the pose the node rendered from
                 if (extrinsics || intrinsics) {
                     setCameraFromExtrinsics(extrinsics, intrinsics, currentSplat);
-                    if (controls) controls.update();
                 }
 
                 // Show info panel
@@ -643,75 +410,11 @@
             }
         }
 
-        // Reset camera to initial position
+        // Restore the pose the node handed us
         function resetCamera() {
-            if (camera && controls) {
-                // Get canvas size - reference setCameraFromExtrinsics design
-                const canvasWidth = canvas.clientWidth || 512;
-                const canvasHeight = canvas.clientHeight || 512;
-                
-                if (initialCameraData) {
-                    // Set camera.position (used by OrbitControls), not camera.data.position
-                    const pos = initialCameraData.position;
-                    camera.position.x = pos.x;
-                    camera.position.y = pos.y;
-                    camera.position.z = pos.z;
-
-                    // Restore focal lengths
-                    if (initialCameraData.fx) {
-                        camera.data.fx = initialCameraData.fx;
-                        camera.data.fy = initialCameraData.fy;
-                        // Calculate real focal length in mm from pixel focal length
-                        // Based on the ratio between known real focal length and pixel focal length
-                        // When real focal length is 30mm, pixel focal length is around 2911
-                        const focalLengthMM = (30 * initialCameraData.fx) / 2911;
-                        const roundedFocal = Math.round(focalLengthMM);
-                        // Update focal length input and display
-                        currentFocalLength = roundedFocal;
-                        focalInput.value = roundedFocal;
-                        const focalDisplay = document.getElementById('focalLengthDisplay');
-                        if (focalDisplay) {
-                            focalDisplay.textContent = roundedFocal;
-                        }
-                    }
-
-                    // Set the target - this recalculates orbit state from current camera.position
-                    if (initialCameraData.target) {
-                        controls.setCameraTarget(initialCameraData.target);
-                    }
-
-                    console.log('[SnapshotGaussian] Reset camera to position:', pos.x, pos.y, pos.z);
-                    console.log('[SnapshotGaussian] Reset camera target:', initialCameraData.target?.x, initialCameraData.target?.y, initialCameraData.target?.z);
-                    console.log('[SnapshotGaussian] Reset focal length:', initialCameraData.fx);
-                    console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
-                } else {
-                    // Default fallback
-                    camera.position.x = 0;
-                    camera.position.y = 0;
-                    camera.position.z = 5;
-                    // Reset focal length to default
-                    // Convert default focal length from mm to pixel units
-                    // Based on the ratio between known real focal length and pixel focal length
-                    // When real focal length is 30mm, pixel focal length is around 2911
-                    const pixelFocal = (2911 * DEFAULT_FOCAL_LENGTH) / 30;
-                    camera.data.fx = pixelFocal;
-                    camera.data.fy = pixelFocal;
-                    currentFocalLength = DEFAULT_FOCAL_LENGTH;
-                    focalInput.value = DEFAULT_FOCAL_LENGTH;
-                    const focalDisplay = document.getElementById('focalLengthDisplay');
-                    if (focalDisplay) {
-                        focalDisplay.textContent = DEFAULT_FOCAL_LENGTH;
-                    }
-                    console.log('[SnapshotGaussian] Reset camera to default position (0, 0, 5)');
-                    console.log('[SnapshotGaussian] Reset focal length to default:', DEFAULT_FOCAL_LENGTH);
-                    console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
-                }
-                // Update camera to apply new focal length
-                if (camera.update) {
-                    camera.update();
-                }
-                controls.update();
-            }
+            if (!initialView) return;
+            applyPose(initialView.position, initialView.pivot);
+            console.log('[SnapshotGaussian] Camera reset to the source view');
         }
 
         // Take screenshot and close window
@@ -781,166 +484,13 @@
             }
         }
 
-        // Gaussian scale control
-        const scaleSlider = document.getElementById('scaleSlider');
-        const scaleInput = document.getElementById('scaleInput');
-        let currentScale = 2.0;
-
-        // Focal length control
-        const focalSlider = document.getElementById('focalSlider');
-        const focalInput = document.getElementById('focalInput');
-        let currentFocalLength = DEFAULT_FOCAL_LENGTH;
-
-        function finalizeScaleUpdate(job) {
-            if (!job || job.cancelled || scaleUpdateJob !== job) {
-                return;
-            }
-
-            if (!(currentSplat && currentSplat.data)) {
-                scaleUpdateJob = null;
-                return;
-            }
-
-            currentSplat.data.changed = true;
-            currentSplat.data.detached = false;
-
-            const renderData = renderer?._renderData || renderer?.renderData;
-            if (renderData?.markDirty) {
-                renderData.markDirty(currentSplat);
-            }
-            if (renderData) {
-                renderData.dataChanged = true;
-            }
-
-            if (currentSplat.dispatchEvent && currentSplat._changeEvent) {
-                currentSplat.dispatchEvent(currentSplat._changeEvent);
-            }
-
-            console.log('[SnapshotGaussian] Finished gaussian scale update');
-            scaleUpdateJob = null;
-        }
-
-        function scheduleScaleUpdate(targetScale) {
-            if (!(currentSplat && currentSplat.data && currentSplat.data.scales && originalScales)) {
-                console.log('[SnapshotGaussian] Cannot schedule scale update - missing data');
-                return;
-            }
-
-            // Cancel any in-flight job so we only apply the latest value
-            if (scaleUpdateJob) {
-                scaleUpdateJob.cancelled = true;
-            }
-
-            const job = {
-                targetScale,
-                index: 0,
-                cancelled: false,
-                splat: currentSplat,
-                scales: currentSplat.data.scales,
-                originals: originalScales
-            };
-            scaleUpdateJob = job;
-
-            const total = job.originals.length;
-            console.log('[SnapshotGaussian] Scaling gaussians in chunks. Factor:', targetScale, 'Total entries:', total);
-
-            const processChunk = () => {
-                if (job.cancelled || scaleUpdateJob !== job || job.splat !== currentSplat) {
-                    return;
-                }
-
-                const start = job.index;
-                const end = Math.min(total, start + SCALE_CHUNK_SIZE);
-
-                for (let i = start; i < end; i++) {
-                    job.scales[i] = job.originals[i] * job.targetScale;
-                }
-
-                job.index = end;
-
-                if (job.index < total) {
-                    requestAnimationFrame(processChunk);
-                } else {
-                    finalizeScaleUpdate(job);
-                }
-            };
-
-            requestAnimationFrame(processChunk);
-        }
-
-        function updateGaussianScale(newScale) {
-            newScale = Math.max(0.01, Math.min(100, parseFloat(newScale) || 2.0));
-            currentScale = newScale;
-
-            // Update slider and input
-            scaleSlider.value = newScale;
-            scaleInput.value = newScale;
-
-            // Apply scale to current splat by modifying the underlying scale data
-            // gsplat.js applies Math.exp() during PLY loading, so data.scales contains LINEAR values
-            // To multiply visual size by factor f, we multiply the scale values directly
-            if (currentSplat && currentSplat.data && currentSplat.data.scales && originalScales) {
-                scheduleScaleUpdate(newScale);
-            } else if (currentSplat) {
-                console.log('[SnapshotGaussian] Cannot update scales - missing data or originalScales');
-                console.log('[SnapshotGaussian] currentSplat.data:', !!currentSplat.data);
-                console.log('[SnapshotGaussian] currentSplat.data.scales:', !!(currentSplat.data && currentSplat.data.scales));
-                console.log('[SnapshotGaussian] originalScales:', !!originalScales);
-            }
-        }
-
-        function updateFocalLength(newFocal) {
-            newFocal = Math.max(5, Math.min(500, parseFloat(newFocal) || DEFAULT_FOCAL_LENGTH));
-            currentFocalLength = newFocal;
-
-            // Update slider and input
-            focalSlider.value = newFocal;
-            focalInput.value = newFocal;
-
-            // Update camera focal length - reference setCameraFromExtrinsics design
-            if (camera) {
-                // Get canvas size
-                const canvasWidth = canvas.clientWidth || 512;
-                const canvasHeight = canvas.clientHeight || 512;
-
-                // Convert mm focal length to pixel focal length
-                // Based on the ratio between known real focal length and pixel focal length
-                // When real focal length is 30mm, pixel focal length is around 2911
-                const pixelFocal = (2911 * newFocal) / 30;
-
-                // Use the converted pixel focal length
-                camera.data.fx = pixelFocal;
-                camera.data.fy = pixelFocal;
-                // Update camera to apply new focal length
-                if (camera.update) {
-                    camera.update();
-                }
-
-                console.log('[SnapshotGaussian] Updated focal length:', newFocal, 'mm ->', pixelFocal.toFixed(2), 'pixels');
-                console.log('[SnapshotGaussian] Canvas size:', canvasWidth, 'x', canvasHeight);
-            }
-        }
-
-        // Use input event for real-time updates
-        scaleSlider.addEventListener('input', (e) => updateGaussianScale(e.target.value));
-        scaleInput.addEventListener('input', (e) => updateGaussianScale(e.target.value));
-        focalSlider.addEventListener('input', (e) => updateFocalLength(e.target.value));
-        focalInput.addEventListener('input', (e) => updateFocalLength(e.target.value));
-        
-        // Also keep change event for compatibility
-        scaleSlider.addEventListener('change', (e) => updateGaussianScale(e.target.value));
-        scaleInput.addEventListener('change', (e) => updateGaussianScale(e.target.value));
-        focalSlider.addEventListener('change', (e) => updateFocalLength(e.target.value));
-        focalInput.addEventListener('change', (e) => updateFocalLength(e.target.value));
-
-        // Event listeners
-        document.getElementById('resetCamera').addEventListener('click', resetCamera);
-        document.getElementById('screenshot').addEventListener('click', takeScreenshotAndClose);
-
-        // Listen for Enter key to take screenshot and close
+        // Enter captures, 0 restores the node's view (the controls already own
+        // WASD/arrows/QERF, so the pivot reset needs its own key)
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 takeScreenshotAndClose();
+            } else if (e.key === '0') {
+                resetCamera();
             }
         });
 

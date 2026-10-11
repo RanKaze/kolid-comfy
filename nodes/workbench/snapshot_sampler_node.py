@@ -163,6 +163,43 @@ def dataurl_to_tensor(image_b64):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
+# ---- Pose 估计的把手（模型与推理都不在本包里）----
+# 一条 2D 关键点通路：图 → DWPose → POSE_KEYPOINT 字典**原样**回前端，那边把 18 点映射成人形
+# 骨头角（nodes/web/js/pose_openpose.js，照参考 vnccs_openpose_import.js 的解析路）。认 runtime 里
+# 已装好的 comfyui_controlnet_aux：走 onnx 那一对（yolox_l 检框 + dw-ll_ucoco 解 133 点，它的前 18
+# 点换位后就是 COCO-18/OpenPose 序，controlnet_aux 的 custom_hf_download 先查自己 ckpts 再谈下载）。
+# 装不上 = 抛给调用方发 error 回执；装上过就复用同一份权重（DwposeDetector 内部还有全局缓存）。
+_POSE_ESTIMATOR = None
+_POSE_ESTIMATOR_LOCK = threading.Lock()
+
+
+def pose_estimator():
+    global _POSE_ESTIMATOR
+    if _POSE_ESTIMATOR is not None:
+        return _POSE_ESTIMATOR
+    from custom_controlnet_aux.dwpose import DwposeDetector
+    _POSE_ESTIMATOR = DwposeDetector.from_pretrained(
+        "hr16/UnJIT-DWPose", "yzd-v/DWPose",
+        det_filename="yolox_l.onnx", pose_filename="dw-ll_ucoco.onnx",
+        torchscript_device="cpu")
+    return _POSE_ESTIMATOR
+
+
+def pose_estimate(image_tensor):
+    """[1,H,W,3|4] float(0-1) → POSE_KEYPOINT 字典。
+
+    DWPose 吃 comfy 的 RGB uint8；alpha 不参与 —— 抠过底的图层就是它自己的颜色。
+    锁一把是因为 ort session 的 run 不赌它可重入（ThreadedHTTPServer 会并发进来）。
+    """
+    t = image_tensor[0] if image_tensor.dim() == 4 else image_tensor
+    rgb = (t[..., :3].clamp(0, 1) * 255 + 0.5).to(torch.uint8).cpu().numpy()
+    estimator = pose_estimator()
+    with _POSE_ESTIMATOR_LOCK:
+        _, pose_json = estimator(rgb, include_body=True, include_hand=False,
+                                 include_face=False, output_type='np', image_and_json=True)
+    return pose_json
+
+
 def staging_image_to_mask(img):
     """[1,H,W,C] 工作区图 → [1,H,W] float mask（取亮度）。
 
@@ -2162,6 +2199,54 @@ class SnapshotDetailerSamplerServer:
                         return
                     count = inst.node_instance._load_from_assets(inst, asset_data)
                     self._send_json({'success': True, 'count': count})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self._send_json({'success': False, 'error': str(e)}, 500)
+                return
+
+            if self.path == '/api/pose_estimate':
+                # 工作台「从图取姿态」那一颗按钮的背面。两种来源：
+                #   staging 给 id —— 图就在服务端手里（张量缓存, 淘汰了就从条目自带 src 恢复），
+                #                      不再走一次 base64 往返；
+                #   layer   给 dataURL —— 图层像素只活在浏览器里，前端折合完 decal/FX/蒙版再送来。
+                # 回的是 DWPose 的 POSE_KEYPOINT 字典原样（people 全给，选哪个人由前端按占幅决定）。
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    source = body.get('source')
+                    if source == 'staging':
+                        sid = body.get('id')
+                        tensor = inst.get_staging_image(sid) if isinstance(sid, str) and sid else None
+                        if tensor is None:
+                            self._send_json({'success': False,
+                                             'error': f'Workspace image {sid} is gone'}, 404)
+                            return
+                    elif source == 'layer':
+                        png = body.get('png')
+                        if not isinstance(png, str) or not png:
+                            self._send_json({'success': False, 'error': 'No layer pixels sent'}, 400)
+                            return
+                        tensor = dataurl_to_tensor(png)
+                    else:
+                        self._send_json({'success': False, 'error': f'Unknown pose source {source}'}, 400)
+                        return
+                    try:
+                        t0 = time.time()
+                        pose_json = pose_estimate(tensor)
+                    except Exception as est_err:
+                        # 缺 controlnet_aux / 缺 onnxruntime / 模型下不来，都是这一句。
+                        import traceback
+                        traceback.print_exc()
+                        self._send_json({'success': False,
+                                         'error': f'DWPose unavailable: {est_err}'}, 503)
+                        return
+                    people = len((pose_json or {}).get('people') or [])
+                    ms = round((time.time() - t0) * 1000)
+                    print(f"[Pose estimate] {pose_json.get('canvas_width')}×"
+                          f"{pose_json.get('canvas_height')} → {people} people in {ms}ms")
+                    self._send_json({'success': True, 'pose': pose_json,
+                                     'people': people, 'ms': ms})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
