@@ -233,6 +233,20 @@ def handleExtrinsics(severHandler, set_event):
     else:
         severHandler.send_error(500, "Server error")
 
+def handleWindowClosed(severHandler):
+    # Page fires this on unload (sendBeacon, no readable response). Only act when
+    # no snapshot exists yet: unblock the wait so the node reports the close
+    # instead of hanging. If a snapshot was already posted, ignore it.
+    instance = severHandler.server_instance
+    if instance and instance.image is None:
+        instance.window_closed = True
+        instance.screenshot_event.set()
+    severHandler.send_response(200)
+    severHandler.send_header('Content-type', 'application/json')
+    severHandler.send_header("Access-Control-Allow-Origin", "*")
+    severHandler.end_headers()
+    severHandler.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
+
 def getContents(ply_path) -> str:
     if not ply_path or ply_path.strip() == "":
         raise ValueError("PLY path cannot be empty")

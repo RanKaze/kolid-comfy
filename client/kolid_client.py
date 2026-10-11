@@ -642,6 +642,12 @@ _user32.IsIconic.restype = wt.BOOL
 _user32.IsIconic.argtypes = [wt.HWND]
 _user32.SetForegroundWindow.restype = wt.BOOL
 _user32.SetForegroundWindow.argtypes = [wt.HWND]
+_user32.GetForegroundWindow.restype = wt.HWND
+_user32.BringWindowToTop.restype = wt.BOOL
+_user32.BringWindowToTop.argtypes = [wt.HWND]
+_user32.AttachThreadInput.restype = wt.BOOL
+_user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+_kernel32.GetCurrentThreadId.restype = wt.DWORD
 _user32.EnumWindows.restype = wt.BOOL
 _user32.EnumWindows.argtypes = [_ENUMPROC_T, wt.LPARAM]
 _user32.GetWindowThreadProcessId.restype = wt.DWORD
@@ -2477,7 +2483,22 @@ def _bring_to_front():
         if _user32.IsIconic(h):
             _user32.ShowWindow(h, SW_RESTORE)
         _user32.ShowWindow(h, SW_SHOW)
-        _user32.SetForegroundWindow(h)
+        if _user32.GetForegroundWindow() != hwnd:
+            _user32.SetForegroundWindow(h)
+            if _user32.GetForegroundWindow() != hwnd:
+                # 前台锁:别的窗口刚吃过用户输入时,后台进程的 SetForegroundWindow
+                # 会被静默拒绝(实测 6/6)。把本线程输入队列临时挂到当前前台线程上,
+                # 借它的"拥有最近输入"身份来设,调用返回后立即解除挂接。
+                cur = _kernel32.GetCurrentThreadId()
+                fg = _user32.GetForegroundWindow()
+                fg_tid = _user32.GetWindowThreadProcessId(fg, None) if fg else 0
+                if fg_tid and fg_tid != cur:
+                    _user32.AttachThreadInput(cur, fg_tid, True)
+                    try:
+                        _user32.BringWindowToTop(h)
+                        _user32.SetForegroundWindow(h)
+                    finally:
+                        _user32.AttachThreadInput(cur, fg_tid, False)
     except Exception:
         pass
     _post_js('window.focus()')
