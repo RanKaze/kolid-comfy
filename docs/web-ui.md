@@ -154,6 +154,16 @@ SuperSplat 渲染模式（需要本机 Node.js 常驻进程）：
 
 ![SuperSplat 渲染](images/gaussian_supersplat_usage.png)
 
+两种模式均以 **git submodule** 形式引入上游源码，构建产物落在 `nodes/web/js/`：
+
+| 模式 | 上游项目 | 源码位置（submodule） | 构建产物 |
+|------|----------|----------------------|----------|
+| GSplat | [huggingface/gsplat.js](https://github.com/huggingface/gsplat.js) | `nodes/web/gsplat-js` | `nodes/web/js/gsplat-bundle.js` |
+| SuperSplat | [playcanvas/supersplat](https://github.com/playcanvas/supersplat) | `nodes/web/supersplat` | `nodes/web/supersplat/dist/index.js` |
+
+> GSplat 模式的 bundle 由 `nodes/web/gsplat-js/vite.bundle.config.js` 以 IIFE 格式打包（挂载 `window.GSPLAT`），
+> 重新构建与版本更新方法见 `nodes/web/gsplat-js/KOLID_INTEGRATION.md`。
+
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | ply_path | STRING | 是 | PLY 文件路径（来自上游节点） |
