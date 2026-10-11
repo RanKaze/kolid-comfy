@@ -1,3 +1,6 @@
 [submodule "nodes/web/supersplat"]
 	path = nodes/web/supersplat
 	url = https://github.com/playcanvas/supersplat.git
+[submodule "nodes/web/gsplat-js"]
+	path = nodes/web/gsplat-js
+	url = https://github.com/huggingface/gsplat.js.git
