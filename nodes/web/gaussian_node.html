@@ -357,8 +357,8 @@
                         'pivot distance:', distance.toFixed(2));
         }
 
-        // Load a PLY file from ArrayBuffer data
-        async function loadPLYFromData(arrayBuffer, filename, extrinsics, intrinsics) {
+        // Load .splat records (32 bytes per splat) handed over by the node
+        async function loadSplatFromData(arrayBuffer, filename, extrinsics, intrinsics) {
             try {
                 // Clear ALL existing objects from scene
                 if (scene.objects && scene.objects.length > 0) {
@@ -371,26 +371,19 @@
                 currentSplat = null;
                 console.log('[SnapshotGaussian] Loading from data, size:', arrayBuffer.byteLength);
 
-                // Create a blob URL from the data
-                const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
-                const blobUrl = URL.createObjectURL(blob);
+                if (arrayBuffer.byteLength % 32 !== 0) {
+                    throw new Error('Data is not a .splat stream (size is not a multiple of 32 bytes)');
+                }
 
-                // Load the PLY file from blob URL using PLYLoader
-                await SPLAT.PLYLoader.LoadAsync(blobUrl, scene);
+                // The .splat record layout is exactly what gsplat.js keeps internally, so the generic
+                // Loader deserializes the buffer directly - no blob URL and no conversion pass.
+                currentSplat = SPLAT.Loader.LoadFromArrayBuffer(arrayBuffer, scene);
 
-                // Clean up blob URL
-                URL.revokeObjectURL(blobUrl);
-
-                // Get the loaded splat (last object in scene)
-                if (scene.objects && scene.objects.length > 0) {
-                    currentSplat = scene.objects[scene.objects.length - 1];
-
-                    if (currentSplat.bounds) {
-                        const center = currentSplat.bounds.center();
-                        const size = currentSplat.bounds.size();
-                        console.log('[SnapshotGaussian] Scene bounds center:', center.x, center.y, center.z);
-                        console.log('[SnapshotGaussian] Scene bounds size:', size.x, size.y, size.z);
-                    }
+                if (currentSplat.bounds) {
+                    const center = currentSplat.bounds.center();
+                    const size = currentSplat.bounds.size();
+                    console.log('[SnapshotGaussian] Scene bounds center:', center.x, center.y, center.z);
+                    console.log('[SnapshotGaussian] Scene bounds size:', size.x, size.y, size.z);
                 }
 
                 // Place the camera at the pose the node rendered from
@@ -406,7 +399,7 @@
 
             } catch (err) {
                 console.error('[SnapshotGaussian] Load error:', err);
-                showError('Failed to load PLY: ' + err.message);
+                showError('Failed to load splat: ' + err.message);
             }
         }
 
@@ -980,7 +973,7 @@
             });
         }
 
-        // Load PLY data from server on startup
+        // Load splat data from server on startup
         async function loadDataFromServer() {
             try {
                 console.log('[SnapshotGaussian] Loading data from server...');
@@ -1003,7 +996,7 @@
                     
                     // Validate data
                     if (!data.contents) {
-                        throw new Error('Missing PLY data in response');
+                        throw new Error('Missing splat data in response');
                     }
                     
                     // Store screenshot size
@@ -1015,28 +1008,28 @@
                     console.log('[SnapshotGaussian] Screenshot size:', screenshotWidth, 'x', screenshotHeight);
                     console.log('[SnapshotGaussian] Initial screenshot size set for reset:', initialScreenshotWidth, 'x', initialScreenshotHeight);
                     
-                    // Decode base64 PLY data with error handling
+                    // Decode base64 splat records with error handling
                     try {
-                        const plyData = atob(data.contents);
-                        const arrayBuffer = new ArrayBuffer(plyData.length);
+                        const splatData = atob(data.contents);
+                        const arrayBuffer = new ArrayBuffer(splatData.length);
                         const uint8Array = new Uint8Array(arrayBuffer);
-                        for (let i = 0; i < plyData.length; i++) {
-                            uint8Array[i] = plyData.charCodeAt(i);
+                        for (let i = 0; i < splatData.length; i++) {
+                            uint8Array[i] = splatData.charCodeAt(i);
                         }
                         
-                        console.log('[SnapshotGaussian] Loaded PLY data, size:', arrayBuffer.byteLength);
+                        console.log('[SnapshotGaussian] Loaded splat data, size:', arrayBuffer.byteLength);
                         console.log('[SnapshotGaussian] Extrinsics:', data.extrinsics);
                         console.log('[SnapshotGaussian] Intrinsics:', data.intrinsics);
                         
                         // Check if data is valid
                         if (arrayBuffer.byteLength === 0) {
-                            throw new Error('Empty PLY data');
+                            throw new Error('Empty splat data');
                         }
                         
-                        // Load the PLY data with timeout
-                        const loadPromise = loadPLYFromData(arrayBuffer, 'gaussian.ply', data.extrinsics, data.intrinsics);
+                        // Load the splat data with timeout
+                        const loadPromise = loadSplatFromData(arrayBuffer, 'gaussian.splat', data.extrinsics, data.intrinsics);
                         const timeoutPromise = new Promise((_, reject) => 
-                            setTimeout(() => reject(new Error('PLY loading timeout')), 60000)
+                            setTimeout(() => reject(new Error('splat loading timeout')), 60000)
                         );
                         
                         await Promise.race([loadPromise, timeoutPromise]);
@@ -1046,7 +1039,7 @@
                         
                     } catch (decodeError) {
                         console.error('[SnapshotGaussian] Base64 decode error:', decodeError);
-                        showError('Failed to decode PLY data: ' + decodeError.message);
+                        showError('Failed to decode splat data: ' + decodeError.message);
                     }
                     
                 } catch (fetchError) {
@@ -1059,7 +1052,7 @@
                 
             } catch (err) {
                 console.error('[SnapshotGaussian] Error loading data from server:', err);
-                showError('Failed to load PLY data: ' + err.message);
+                showError('Failed to load splat data: ' + err.message);
             }
         }
 
@@ -1080,7 +1073,7 @@
                 console.log('[SnapshotGaussian] Received LOAD_MESH_DATA, size:', data.byteLength);
                 console.log('[SnapshotGaussian] Extrinsics:', extrinsics);
                 console.log('[SnapshotGaussian] Intrinsics:', intrinsics);
-                loadPLYFromData(data, filename || 'gaussian.ply', extrinsics, intrinsics);
+                loadSplatFromData(data, filename || 'gaussian.splat', extrinsics, intrinsics);
             }
         });
 

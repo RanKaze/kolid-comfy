@@ -145,6 +145,29 @@ CONTEXT_IMAGE_ID = 'context'
 # 只是全工作区固定只有这一张，重发布时由 /api/guidance_card 原地换像素。
 GUIDANCE_STAGING_ID = 'staging_guidance'
 
+# Prompt 正文里**用户手写**的引用编号（<Image2> / <image 2>）：<image 1> 恒为 context 图，
+# 2 起对应 Extra Prompt 里解析出的引用图（见 parse_prompt_image_refs）。Enable Edit 下若
+# 某个编号还没有对应的 ref image，Run 前会弹窗让用户从工作区补一张。
+# 只认裸编号 —— '<image_id:staging_2>' 里 'image' 后面是 '_'，不会误匹配。
+IMAGE_REF_TOKEN_RE = re.compile(r'<\s*image\s*(\d+)\s*>', re.IGNORECASE)
+
+
+def max_prompt_image_ref(text):
+    """Prompt 正文里出现的最大引用编号（没有就是 0）。
+
+    只认 <image N> 这种裸编号；<image_id:...> 不匹配（'image' 后面是 '_'）。
+    <image 1> 是 context 图、不占 ref 编号，所以调用方从 2 起算。
+    """
+    mx = 0
+    for m in IMAGE_REF_TOKEN_RE.finditer(text or ''):
+        try:
+            n = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if n > mx:
+            mx = n
+    return mx
+
 
 def dataurl_to_tensor(image_b64):
     """dataURL → [1, H, W, 3|4] float tensor（工作区入库用的那一个方向）。
@@ -953,6 +976,83 @@ class SnapshotDetailerSamplerServer:
         bp = next((b.get('params', b) for b in blocks
                    if isinstance(b, dict) and b.get('type') == 'detailer'), None)
         return bool(bp.get('enable_mask', True)) if isinstance(bp, dict) else True
+
+    def _run_enable_edit(self, preset_id=None):
+        """生效链里是否有任一 detailer 块开了 Enable Edit。
+
+        选链优先级与 _first_detailer_enable_mask / run_detailer 主循环一致。Enable Edit
+        决定 Run 前是否要检查 prompt 里的 <image N> 引用有没有对应的 ref image。
+        """
+        blocks = self.blocks or []
+        if preset_id:
+            preset_set = next(
+                (s for s in (self.blocks_sets or [])
+                 if isinstance(s, dict) and s.get('id') == preset_id and s.get('blocks')),
+                None,
+            )
+            if preset_set is not None:
+                blocks = preset_set['blocks']
+        for b in blocks:
+            if not isinstance(b, dict) or b.get('type') != 'detailer':
+                continue
+            bp = b.get('params', b)
+            if isinstance(bp, dict) and bp.get('enable_edit'):
+                return True
+        return False
+
+    def _current_prompt_text(self):
+        """Prompt tab 此刻的正文字符串（不含 lora / prefab 展开，够用来扫 <image N>）。
+
+        拼装规则与 _parse_prompt 的文本部分一致：selected / custom / temporary 三段。
+        """
+        ps = self.prompt_server
+        if ps is None:
+            return ''
+        parts = []
+        for p in (getattr(ps, 'selected_prompts', None) or []):
+            text = p['text'] if isinstance(p, dict) else p
+            text = text or ''
+            if text.startswith('<') and text.endswith('>'):
+                text = text[1:-1]
+            parts.append(text)
+        custom = getattr(ps, 'custom_prompts', None)
+        if custom:
+            parts.append(custom)
+        parts.extend(getattr(ps, 'temporary_prompts', None) or [])
+        # 当前已加载那条 pipeline 的正向提示词也一并扫（用户说 B 含 pipeline 正向）。
+        # 运行时若 preset 切换了 pipeline，这里用的是切换前那条 —— 宁可多扫不漏扫，
+        # 误报时用户取消弹窗即可。
+        try:
+            node = getattr(self, 'node_instance', None)
+            pipe = getattr(node, '_current_pipeline', None)
+            ctx = getattr(pipe, 'context', None)
+            if ctx is not None and hasattr(ctx, 'get_context'):
+                pos, _neg, _loras = ctx.get_context('.+')
+                if pos:
+                    parts.append(pos)
+        except Exception:
+            pass
+        return ','.join(parts)
+
+    def edit_ref_shortfall(self, preset_id, extra_prompt):
+        """Enable Edit 下 prompt 引用了 <image N>（N≥2）但工作区 ref image 不够时的缺口。
+
+        返回 None = 无需弹窗；否则 {'need': 需要的 ref 总数, 'have': 现有 ref 数}。
+        `<image 1>` 是 context 图、不占 ref，所以 need = 最大编号 - 1。
+        """
+        if not self._run_enable_edit(preset_id):
+            return None
+        need = max_prompt_image_ref(self._current_prompt_text()) - 1
+        if need <= 0:
+            return None
+        have = 0
+        if extra_prompt:
+            ref_ids, _decoded, _missing = parse_prompt_image_refs(
+                extra_prompt, lambda k: self.get_staging_image(k) is not None)
+            have = len(ref_ids)
+        if have >= need:
+            return None
+        return {'need': need, 'have': have}
 
     def get_staging_image(self, sid):
         """根据 id 获取工作区图片 tensor。优先返回 tensor 引用，避免 base64 decode。
@@ -2297,6 +2397,13 @@ class SnapshotDetailerSamplerServer:
                         preset_id = body.get('preset_id')
                         if not isinstance(preset_id, str) or not preset_id:
                             preset_id = None
+                        # Enable Edit 下 prompt 里 <image N> 引用缺 ref image 时不启动本次 run，
+                        # 把缺口回给前端，由它弹窗从工作区让用户补图（见 edit_ref_shortfall）。
+                        _shortfall = inst.edit_ref_shortfall(preset_id, (body.get('extra_prompt') or '').strip())
+                        if _shortfall is not None:
+                            self._send_json({'success': False, 'ref_request': _shortfall,
+                                             'error': 'This prompt references a ref image — pick one from the workspace'})
+                            return
                         inst.blend_image = layer_image
                         inst.blend_mask = layer_mask.squeeze(-1)
                         inst.blend_prompt = (body.get('extra_prompt') or '').strip()
@@ -2441,6 +2548,13 @@ class SnapshotDetailerSamplerServer:
                     if (inst._first_detailer_enable_mask(body.get('preset_id'))
                             and (mask is None or float(mask.sum()) == 0)):
                         self._send_json({'success': False, 'error': 'Mask is required — paint the mask layer before running the detailer'}, 400)
+                        return
+                    # Enable Edit 下 prompt 里 <image N> 引用缺 ref image 时不启动本次 run，
+                    # 把缺口回给前端，由它弹窗从工作区让用户补图（见 edit_ref_shortfall）。
+                    _shortfall = inst.edit_ref_shortfall(body.get('preset_id'), (body.get('extra_prompt') or '').strip())
+                    if _shortfall is not None:
+                        self._send_json({'success': False, 'ref_request': _shortfall,
+                                         'error': 'This prompt references a ref image — pick one from the workspace'})
                         return
                     inst.blend_image = image
                     inst.blend_mask = mask
@@ -3727,7 +3841,7 @@ class SnapshotDetailerSamplerNode:
                     # mask/covered 在链中该位置没有 mask = 报错中止整条链（用户指定语义）。
                     bp = block.get('params', block)
                     tag_mode = (bp.get('mode', 'full') or 'full') if isinstance(bp, dict) else 'full'
-                    if self.tagger is None:
+                    if server is None or getattr(server, 'tagger', None) is None:
                         print(f"[PipelineBlock {i+1}] WARNING: Tagger block but the node has no tagger input — skipped (prompt unchanged)")
                         dbg.record_error(f'Block {i+1} · Tagger 块跳过', '节点没有 tagger 输入',
                                          block=i + 1, where='tagger_block')
@@ -3742,7 +3856,7 @@ class SnapshotDetailerSamplerNode:
                     dbg.record_image(f'Block {i+1} · Tagger 输入图', tag_img, block=i + 1)
                     if tag_mask is not None:
                         dbg.record_mask(f'Block {i+1} · Tagger 输入 mask', tag_mask, block=i + 1)
-                    tag = self._run_tag_on_image(tag_img, tag_mask, self.tagger, tag_mode)
+                    tag = self._run_tag_on_image(tag_img, tag_mask, server.tagger, tag_mode)
                     tag = (tag or '').strip()
                     if tag:
                         # 与 Blend 的 Tag 工具同一条 parsing 通道:解析后写入 prompt 阶段的

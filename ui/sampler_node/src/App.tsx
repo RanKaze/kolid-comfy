@@ -38,6 +38,10 @@ const App: React.FC = () => {
   const processorRunRef = useRef<number | null>(null);
   // A Query block parked mid-run: the chain is blocked until the user answers (or cancels).
   const [pendingQuery, setPendingQuery] = useState<PendingQuery | null>(null);
+  // Enable Edit 下 prompt 引用的 <Image2>… 缺 ref image：后端拒绝启动本次 run，本页弹窗
+  // 让用户从工作区补图（补完写回工作台 Extra Prompt 并重跑）。见 handleRefConfirm。
+  const [refRequest, setRefRequest] = useState<{ need: number; have: number; action: 'blend' | 'layer'; body: Record<string, any> } | null>(null);
+  const [refSel, setRefSel] = useState<string[]>([]);
   /**
    * 最近 32 条行为记录。工作台画布顶部那颗常显的状态药丸已经撤掉，它每次说话都改发一条
    * 'blend-log' 到这里；本页自己触发的动作（跑 preset / Execute / 取消 / 载入 / Query）也写进
@@ -502,6 +506,15 @@ const App: React.FC = () => {
         }),
       });
       const data = await res.json();
+      if (data && data.ref_request) {
+        // Enable Edit 下 prompt 引用的 <Image N> 缺 ref image：后端没启动本次 run，
+        // 由本页弹窗从工作区补图后再重跑（见 handleRefConfirm）。
+        blendIframeRef.current?.contentWindow?.postMessage(
+          { type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have }, '*');
+        setRefSel([]);
+        setRefRequest({ need: data.ref_request.need, have: data.ref_request.have, action: 'blend', body });
+        return;
+      }
       if (!data.success) {
         setError(data.error || 'Blend action failed');
         reply(false, { error: data.error || 'Blend action failed' });
@@ -584,6 +597,14 @@ const App: React.FC = () => {
         }),
       });
       const data = await res.json();
+      if (data && data.ref_request) {
+        // 与 toolbar Run 同一条闸门：缺 ref image 时不启动，弹窗补图后重跑。
+        blendIframeRef.current?.contentWindow?.postMessage(
+          { type: 'blend-ref-request', need: data.ref_request.need, have: data.ref_request.have }, '*');
+        setRefSel([]);
+        setRefRequest({ need: data.ref_request.need, have: data.ref_request.have, action: 'layer', body });
+        return;
+      }
       if (!data.success) {
         setError(data.error || 'Generate failed');
         reply(false, { error: data.error || 'Generate failed' });
@@ -599,6 +620,22 @@ const App: React.FC = () => {
       reply(false, { error: e.message });
     }
   }, [syncPrompt]);
+
+  /**
+   * 用户在 ref image 弹窗里补完图：把选中的 staging id 追加进工作台 Extra Prompt（持久化，
+   * 下次手点 Run 也在），再把同样的 token 拼进本次 payload 重跑原来那条动作。
+   */
+  const handleRefConfirm = useCallback(async (ids: string[]) => {
+    const req = refRequest;
+    setRefRequest(null);
+    if (!req || ids.length === 0) return;
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-insert-image-ids', ids }, '*');
+    const tokens = ids.map(id => `<image_id:${id}>`).join(' ');
+    const prev = String(req.body.extra_prompt || '').trim();
+    const body = { ...req.body, extra_prompt: prev ? `${prev} ${tokens}` : tokens };
+    if (req.action === 'layer') await handleLayerGenerate(body);
+    else await handleBlendAction(body);
+  }, [refRequest, handleBlendAction, handleLayerGenerate]);
 
   // Processor run initiated by the workbench: upload the input images as hidden staging
   // entries, then kick an offline interface execution. Results come back through the poller.
@@ -1188,6 +1225,57 @@ const App: React.FC = () => {
         onSetPresetPipeline={handleSetPresetPipeline}
         actionLog={actionLog}
       />
+
+      {refRequest && (() => {
+        // Enable Edit 下 prompt 引用了 <Image N> 却没有对应 ref image：从这里补图。
+        // 新补的图按在 Extra Prompt 中的追加顺序排在已有 ref 之后，编号从 have+2 起。
+        const wanted = Math.max(1, refRequest.need - refRequest.have);
+        const baseIndex = refRequest.have + 2;
+        const toggle = (id: string) => setRefSel(prev => {
+          if (prev.includes(id)) return prev.filter(x => x !== id);
+          if (prev.length >= wanted) return prev;
+          return [...prev, id];
+        });
+        const label = wanted > 1 ? `<Image${baseIndex}>…<Image${baseIndex + wanted - 1}>` : `<Image${baseIndex}>`;
+        return (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ width: 720, maxWidth: '90vw', maxHeight: '80vh', display: 'flex', flexDirection: 'column', background: '#1c1c1e', borderRadius: 16, padding: 20, color: '#fff', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Pick reference image{wanted > 1 ? 's' : ''}</div>
+              <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', marginBottom: 14, lineHeight: 1.5 }}>
+                The prompt references <b>{label}</b> but no ref image is loaded. Select {wanted} from the workspace — the order becomes {label}.
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 1fr))', gap: 10, alignContent: 'start' }}>
+                {staging.length === 0 && (
+                  <div style={{ color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: 20 }}>No workspace items yet — drag an image in first, then Run again.</div>
+                )}
+                {staging.map(s => {
+                  const idx = refSel.indexOf(s.id);
+                  const on = idx >= 0;
+                  return (
+                    <div key={s.id} onClick={() => toggle(s.id)}
+                      style={{ position: 'relative', cursor: 'pointer', borderRadius: 10, overflow: 'hidden', border: on ? '2px solid #0a84ff' : '2px solid transparent', background: 'rgba(255,255,255,0.05)' }}>
+                      <img src={s.src} alt={s.name} style={{ width: '100%', height: 84, objectFit: 'cover', display: 'block' }} />
+                      <div style={{ fontSize: 11, padding: '4px 6px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'rgba(255,255,255,0.7)' }}>{s.name}</div>
+                      {on && (
+                        <div style={{ position: 'absolute', top: 4, right: 4, width: 20, height: 20, borderRadius: '50%', background: '#0a84ff', color: '#fff', fontSize: 12, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{baseIndex + idx}</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 16 }}>
+                <button onClick={() => { setRefRequest(null); setRefSel([]); }}
+                  style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: 'rgba(255,255,255,0.1)', color: '#fff', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
+                <button disabled={refSel.length !== wanted}
+                  onClick={() => { const ids = [...refSel]; setRefSel([]); void handleRefConfirm(ids); }}
+                  style={{ padding: '8px 18px', borderRadius: 8, border: 'none', background: refSel.length === wanted ? '#0a84ff' : 'rgba(10,132,255,0.3)', color: '#fff', cursor: refSel.length === wanted ? 'pointer' : 'default', fontSize: 13, fontWeight: 600 }}>
+                  Confirm ({refSel.length}/{wanted})
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {error && (
         <div style={{

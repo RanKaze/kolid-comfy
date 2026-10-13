@@ -1014,18 +1014,31 @@ class InterfaceCaptureNode:
 
 
 class PackageMergeNode:
-    """Merge multiple PACKAGE inputs into a single PACKAGE (list) output."""
+    """Merge a variable number of PACKAGE inputs into a single PACKAGE (list) output.
+
+    The frontend (javascript/interface_node.js) keeps exactly one empty trailing
+    input slot, adding `packageN` slots as inputs get connected and trimming
+    trailing empties on disconnect — same dynamic-slot design as BranchSwitchesNode.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
+        dyn_inputs = {"package1": ("PACKAGE", {"tooltip": "Connect a package to add another input slot."})}
+        # ComfyUI calls INPUT_TYPES() from get_input_info() while validating a
+        # specific (possibly dynamic) input name; accept any `packageN` then.
+        stack = inspect.stack()
+        if stack[2].function == "get_input_info":
+            class AllContainer:
+                def __contains__(self, item):
+                    return True
+
+                def __getitem__(self, key):
+                    return "PACKAGE", {}
+            dyn_inputs = AllContainer()
+
         return {
             "required": {},
-            "optional": {
-                "package1": ("PACKAGE",),
-                "package2": ("PACKAGE",),
-                "package3": ("PACKAGE",),
-                "package4": ("PACKAGE",),
-            },
+            "optional": dyn_inputs,
         }
 
     RETURN_TYPES = ("PACKAGE",)
@@ -1038,9 +1051,13 @@ class PackageMergeNode:
         return True
 
     def merge(self, **kwargs):
+        def sort_key(key):
+            suffix = key[len("package"):]
+            return int(suffix) if suffix.isdigit() else 0
+
         packages = []
-        for i in range(1, 5):
-            pkg = kwargs.get("package%d" % i)
+        for key in sorted((k for k in kwargs if k.startswith("package")), key=sort_key):
+            pkg = kwargs.get(key)
             if pkg is None:
                 continue
             if isinstance(pkg, list):
@@ -1634,6 +1651,12 @@ class InterfaceExecutor:
                         except Exception:
                             pass
 
+                # 宿主约定 (execution.py:359 get_output_from_returns): 节点返回
+                # {"ui": ..., "result": (...)} 时 result 才是出参, ui 给前端。KJNodes 的
+                # GetImageSizeAndCount 等这么写; 不解开就只有一个 dict 出参, 下游按槽位
+                # 取值全部落空, 输入会静默退回 widget 默认值。
+                if isinstance(result, dict):
+                    result = result.get("result", ())
                 if result is None:
                     result = ()
                 else:
@@ -2241,6 +2264,10 @@ class InterfaceExecutor:
             if getattr(class_def, "INPUT_IS_LIST", False):
                 inputs = {k: [v] if not isinstance(v, list) else v for k, v in inputs.items()}
             result = func(**inputs)
+            # 与 _evaluate_node 同一份宿主返回约定: {"ui": ..., "result": (...)} 里
+            # result 才是出参; 不解开, 下游按槽位取外部节点的输出全部落空。
+            if isinstance(result, dict):
+                result = result.get("result", ())
             if result is None:
                 result = ()
             else:

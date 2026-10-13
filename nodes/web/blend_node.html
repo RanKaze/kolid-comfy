@@ -242,6 +242,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
 .layer-thumb.attr-chip.drop-before::before { left: 0; }
 .layer-thumb.attr-chip.drop-after::after { right: 0; }
+/* 一枚链上的特效拖到容器自己的条带 chip 上 = 收进这条链 (收成尾步,没有缝位可画),整颗亮一道内缘。 */
+.layer-thumb.attr-chip.drop-into { box-shadow: inset 0 0 0 2px rgba(0,122,255,0.9); }
 /* 跨层拖到条带空隙 / `+` 上 = 追加尾步;整条条带亮一道内缘当落点反馈。 */
 .layer-row-thumbs.drop-tail { box-shadow: inset 0 0 0 1px rgba(0,122,255,0.6); border-radius: 6px; }
 /* 启用角标:启用时什么都不显示 —— chip 本身就是"这一步在跑"的样子。停用时整颗 chip 罩一枚
@@ -5418,6 +5420,15 @@ function attrChip(l, r) {
         attrDrag = null;
     });
     el.addEventListener('dragover', ev => {
+        // 链上的一枚特效拖到**容器自己的**条带 chip 上 = 收进这条链 (追加成尾步;魔棒那口子的
+        // 拖拽版)。空链没有 lane 可落,这里就是它唯一的落点 —— 高亮是整颗描边,与缝位线区分开。
+        if (dragFx && r.chain) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            ev.dataTransfer.dropEffect = 'move';
+            el.classList.add('drop-into');
+            return;
+        }
         const side = dropSide(ev, el, attrDrag, r.id);
         if (!side) return;
         ev.preventDefault();
@@ -5426,8 +5437,17 @@ function attrChip(l, r) {
         el.classList.toggle('drop-before', side === 'before');
         el.classList.toggle('drop-after', side === 'after');
     });
-    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after', 'drop-into'));
     el.addEventListener('drop', ev => {
+        if (dragFx && r.chain) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            el.classList.remove('drop-into');
+            const move = dragFx;
+            dragFx = null;
+            fxAdoptEffect(move, l, r, r.chain.length);
+            return;
+        }
         const side = dropSide(ev, el, attrDrag, r.id);
         if (!side) return;
         ev.preventDefault();
@@ -13879,6 +13899,17 @@ function insertImageIdToken(id) {
     insertTextAtCaret(`<image_id:${id}>`);
 }
 
+// 宿主在 Enable Edit 缺 ref image 时让用户选完图后下发的补充：把这几个 id 一律**追加到
+// Extra Prompt 末尾**（不依赖光标位置），每个长成一张 chip。选完即持久化，下次手点 Run 也在。
+function appendImageIdChips(ids) {
+    for (const id of (ids || [])) {
+        if (!id) continue;
+        extraPromptInput.appendChild(makeImageChip(id, chipSrcForId(id)));
+        extraPromptInput.appendChild(document.createTextNode(ZWSP));
+    }
+    syncExtraPromptEmpty();
+}
+
 // 退格 / Delete 落在 chip 旁边时整块删掉它 —— 否则只会吃掉零宽锚点，留下一个
 // 看不见却仍在文本里的标记（或光标钻进 chip 内部）。
 function chipBesideCaret(back) {
@@ -14744,6 +14775,18 @@ window.addEventListener('message', event => {
             || (isTextLayer(srcLayer) && !!String(srcLayer.text.content)) || isDirectionLayer(srcLayer));
         if (hasPixels) spawnGeneratedLayer(d.layer_id, item, { fit });
         else replaceLayerImage(d.layer_id, item);
+        return;
+    }
+    if (d.type === 'blend-insert-image-ids') {
+        // 宿主补完 ref image：落到 Extra Prompt（持久化），由宿主自己带新 prompt 重跑。
+        appendImageIdChips(d.ids);
+        return;
+    }
+    if (d.type === 'blend-ref-request') {
+        // Enable Edit 下 prompt 引用了 <image N> 但没有对应 ref image：本次 run 没启动，
+        // 宿主已弹出选图 modal。这里只收尾——清掉 toolbar 的忙碌态，提示用户去配置。
+        setActionBusy(false);
+        setStatus('This prompt references a ref image — pick one from the workspace', '');
         return;
     }
     if (d.type === 'blend-action-result') {

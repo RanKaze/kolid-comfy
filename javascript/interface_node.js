@@ -381,3 +381,84 @@ app.registerExtension({
         };
     }
 });
+
+
+// ═══════════════════════════════════════════════════════════════════
+// PackageMergeNode
+// Variable number of PACKAGE inputs, following the BranchSwitchesNode
+// design: always keep exactly one empty trailing `packageN` slot; add a
+// new slot when the last one gets connected; trim trailing empties on
+// disconnect; renumber slots so names stay package1, package2, ...
+// ═══════════════════════════════════════════════════════════════════
+
+function setupPackageMerge(node) {
+    function getPackageInputs() {
+        return node.inputs.filter(inp => inp.name && /^package\d+$/.test(inp.name));
+    }
+
+    function addDynamicInput() {
+        const idx = getPackageInputs().length + 1;
+        node.addInput("package" + idx, "PACKAGE");
+    }
+
+    function ensureInputCount() {
+        let dyn = getPackageInputs();
+        const connected = dyn.filter(inp => inp.link != null).length;
+
+        // Add slots until there is exactly one empty trailing slot (bounded by MAX).
+        while (dyn.length < connected + 1 && dyn.length < MAX_INTERFACE_NUM) {
+            addDynamicInput();
+            dyn = getPackageInputs();
+        }
+        // Trim trailing empty slots down to connected + 1.
+        while (dyn.length > connected + 1) {
+            for (let i = node.inputs.length - 1; i >= 0; i--) {
+                if (/^package\d+$/.test(node.inputs[i].name || "") && node.inputs[i].link == null) {
+                    node.removeInput(i);
+                    break;
+                }
+            }
+            dyn = getPackageInputs();
+        }
+        // Renumber for stable ordered names (links stay attached to the objects).
+        let index = 1;
+        for (const inp of node.inputs) {
+            if (inp.name && /^package\d+$/.test(inp.name)) inp.name = "package" + (index++);
+        }
+    }
+
+    const origOnConnectionsChange = node.onConnectionsChange;
+    node.onConnectionsChange = function (type, slot, connected) {
+        if (origOnConnectionsChange) origOnConnectionsChange.apply(this, arguments);
+        if (type === LiteGraph.INPUT) {
+            const inp = node.inputs[slot];
+            if (inp && inp.name && /^package\d+$/.test(inp.name)) ensureInputCount();
+        }
+        node.setDirtyCanvas(true, true);
+    };
+
+    // Restore slot count from existing connections (graph load).
+    ensureInputCount();
+}
+
+app.registerExtension({
+    name: "KleinBlue.PackageMergeNode",
+
+    async beforeRegisterNodeDef(nodeType, nodeData, app) {
+        if (nodeData.name !== "PackageMergeNode") return;
+
+        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            origOnNodeCreated?.apply(this, arguments);
+            const node = this;
+            requestAnimationFrame(() => setupPackageMerge(node));
+        };
+
+        const origOnConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            origOnConfigure?.apply(this, arguments);
+            const node = this;
+            requestAnimationFrame(() => setupPackageMerge(node));
+        };
+    }
+});

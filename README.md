@@ -135,7 +135,7 @@ kolid-comfy/
 - **SnapshotAssetsNode** — tldraw 画布。拖放式图片/视频/音频卡片管理，支持自定义配置（Float 参数）、Slot 插槽系统、prompt 输入
 - **SnapshotDetailerSamplerNode** — 交互式细节修复循环。mask 绘制 → prompt 选择 → AI 重绘 → 对比切换，多次迭代精修
 - **SnapshotSwitchNode** — 动态输入选择器。lazy 模式仅加载选中输入，历史快照缓存
-- **SnapshotGaussianNode** — 3D 高斯泼溅预览。支持 GSplat / SuperSplat 两种渲染器，按 Enter 截图，支持相机外参输入输出
+- **SnapshotGaussianNode** — 3D 高斯泼溅预览。输入上游的 SPLAT（ComfyUI 本体的点云类型，Get Splat / ImageToGaussianSplatNode 都出这个），支持 GSplat / SuperSplat 两种渲染器，按 Enter 截图，支持相机外参输入输出
 - **SnapshotMaskNode** — 浏览器 mask 绘制。画笔大小调节、detector 自动检测、mask 膨胀
 - **SnapshotRegionNode** — 区域编辑器。绘制 bbox 区域 + 描述，输出 caption JSON（支持 normalized/absolute 坐标、yx/xy 轴序、compact/pretty 格式），可嵌入 SnapshotPromptNode
 - **SnapshotCaptureNode** — 桌面截图。PySide6 浮动面板，Shot（框选截图）/ Previous（加载缓存）模式
@@ -218,11 +218,11 @@ PROCESSOR 面板把图层交给接口处理器(此处为 DLSS5 神经渲染),参
 
 ### SnapshotGaussianNode — 3D 高斯泼溅预览
 
-浏览器里渲染 .ply 高斯点云,Scale / Focal 可调,按 Enter 截图回传节点:
+浏览器里渲染上游送来的 SPLAT 点云(节点把 SPLAT 编成 .splat 的 32 字节记录送进页面),Scale / Focal 可调,按 Enter 截图回传节点:
 
 ![SnapshotGaussianNode 3D 预览](docs/images/gaussian_node.png)
 
-实际工作流:SHARP 从单张图预测 PLY 点云,直接进 Gaussian 节点:
+实际工作流:ImageToGaussianSplatNode 用 SHARP 把单张图 lift 成 SPLAT,直接进 Gaussian 节点(图里那条 PLY 连线是改造前的旧形态):
 
 ![SHARP 图生 PLY 工作流](docs/images/sharp_gaussian_graph.png)
 
@@ -246,7 +246,7 @@ SuperSplat 渲染(完整工具栏与轴向指示):
 
 | 分类 | 说明 | 文档 |
 |------|------|------|
-| 交互式 Web UI | 浏览器交互式选择器、绘制工具、截图等（13 个节点） | [docs/web-ui.md](docs/web-ui.md) |
+| 交互式 Web UI | 浏览器交互式选择器、绘制工具、截图等（14 个节点） | [docs/web-ui.md](docs/web-ui.md) |
 | 图像处理 | 适配缩放、裁剪、合批、Base64 转换等（12 个节点） | [docs/image.md](docs/image.md) |
 | 采样管线 (Pipeline) | 模块化采样工作流：上下文、参考、配置、采样器、Detailer（30 个节点） | [docs/pipeline.md](docs/pipeline.md) |
 | 视频和音频 | 视频下载/提取/预览、音频提取/编码（15 个节点） | [docs/media.md](docs/media.md) |

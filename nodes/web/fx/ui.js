@@ -5,7 +5,7 @@
 // 上那枚 Effects chip 的魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器
 // 时,魔棒开的是**被点那枚**的选择器,而这两块容器谁管哪一步由竖排次序说,不另写一行说明。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
-let dragFx = null;          // {layerId, ref} —— 链内重排序的进行中拖拽 (ref = 特效 id)
+let dragFx = null;          // {layerId, rec, ref} —— 进行中的特效拖拽 (ref = 特效 id, rec = 源链的容器 guid)
 const fxModalEl = document.getElementById('fxModal');
 const fxGroupsEl = document.getElementById('fxGroups');
 const fxBypassBtn = document.getElementById('fxBypassBtn');
@@ -257,11 +257,11 @@ function fxStepEl(l, r, effect) {
         renderLayerList();
     });
 
-    // 链内重排序:竖着一条、从下往上就是执行序,所以上半 = 插到它后面、下半 = 前面。缝位算法与落点
-    // 判定都是条带那一份 (`dropSide` / `listSlot`),只是交给它 'y' 这个轴 —— 两处不该各写一遍"插到
-    // 第几道缝"。dragstart 必须停在这里,否则图层行的重排序会跟着一起启动。
+    // 这一枚就是拖拽源:链内重排列、换个容器、搬到别的图层,都是同一个手势 —— 落点判定不在
+    // chip 上,在**整块链容器**上 (fxChainEl),因为"拖去的那条链"可能连 chip 都没有 (空链不
+    // 占位)。dragstart 必须停在这里,否则图层行的重排序会跟着一起启动。
     chip.addEventListener('dragstart', ev => {
-        dragFx = { layerId: l.id, ref: effect.id };
+        dragFx = { layerId: l.id, rec: r.id, ref: effect.id };
         chip.classList.add('dragging');
         ev.dataTransfer.effectAllowed = 'move';
         ev.dataTransfer.setData('text/plain', 'fx:' + effect.id);
@@ -270,32 +270,6 @@ function fxStepEl(l, r, effect) {
     chip.addEventListener('dragend', () => {
         chip.classList.remove('dragging', 'drop-before', 'drop-after');
         dragFx = null;
-    });
-    chip.addEventListener('dragover', ev => {
-        if (!dragFx || String(dragFx.layerId) !== String(l.id)) return;   // 链只在同层的本容器里重排
-        const side = dropSide(ev, chip, dragFx, effect.id, 'y');
-        if (!side) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        ev.dataTransfer.dropEffect = 'move';
-        chip.classList.toggle('drop-before', side === 'before');
-        chip.classList.toggle('drop-after', side === 'after');
-    });
-    chip.addEventListener('dragleave', () => chip.classList.remove('drop-before', 'drop-after'));
-    chip.addEventListener('drop', ev => {
-        if (!dragFx || String(dragFx.layerId) !== String(l.id)) return;   // 同上:外来层的 fx 不落
-        const side = dropSide(ev, chip, dragFx, effect.id, 'y');
-        if (!side) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        chip.classList.remove('drop-before', 'drop-after');
-        const movedId = dragFx.ref;
-        dragFx = null;
-        const at = listSlot(r.chain, movedId, effect.id, side === 'after', e => e && e.id);
-        if (at < 0) return;
-        const moved = r.chain[at];
-        setStatus(`「${EFFECT_TYPES[moved.type].label}」is now step ${at + 1} of ${r.chain.length} in this chain — it runs there`);
-        fxStructuralChange(l);
     });
 
     syncRead();
@@ -568,6 +542,60 @@ function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
     return row;
 }
 
+// ---- 特效拖拽的落点 (整个容器共用一份) ----
+// 指针在链容器里的落槽:数"中点在指针下方"的 chip —— 从下往上读,下方 = 更早,数出来的就是插入
+// 下标 k (0 = 最下 = 最先跑)。chip 上/下半与旧的半高判定同解 (上半 → k = i+1 = 插到它后面),
+// 而缝隙与参数区也各有明确的槽。链内重排、换容器、搬图层三种落法都读这一处 —— 缝位不写第二遍。
+function fxChainSlot(steps, clientY) {
+    let k = 0;
+    for (const c of steps.querySelectorAll('.fx-chip')) {
+        const rc = c.getBoundingClientRect();
+        if (rc.top + rc.height / 2 > clientY) k++;
+    }
+    return k;
+}
+
+// 槽 k 的插入线画在第 k 颗 chip 的下沿 (= 它前面那道缝);插到末尾 (k 到顶) 画在最后一步的上沿。
+// k 传 -1 = 全清 (指针离开容器)。
+function fxSlotPaint(steps, k) {
+    const chips = steps.querySelectorAll('.fx-chip');
+    const n = chips.length;
+    for (let i = 0; i < n; i++) {
+        chips[i].classList.toggle('drop-before', i === k && k < n);
+        chips[i].classList.toggle('drop-after', k >= n && i === n - 1);
+    }
+}
+
+// 把正在拖着的那枚特效放进 (l, r) 这条链的第 k 槽。k 按**摘之前**的数组说 (与 listSlot 同一条
+// 约定):链里由指针位置给,条带上那颗魔棒 chip 给的是"末尾" (k = 链长)。特效整只搬家 —— params
+// 里的绑定全是文档级引用 (图池 id / attribute guid),换宿主不散。同链原地 = 什么都不动,不记历史。
+function fxAdoptEffect(drag, l, r, k) {
+    if (!drag || !r || !Array.isArray(r.chain) || !layerTakesEffects(l)) return false;
+    const srcLayer = getLayer(drag.layerId);
+    const srcRec = (drag.rec && attrRecord(drag.rec)) || chainOwnerRecord(srcLayer, drag.ref);
+    if (!srcRec || !Array.isArray(srcRec.chain)) return false;
+    const from = srcRec.chain.findIndex(e => e && e.id === drag.ref);
+    if (from < 0) return false;
+    let at = Math.max(0, Math.min(k, r.chain.length));
+    if (srcRec === r) {
+        if (from < at) at--;
+        if (at === from) return false;                     // 落到自己那道缝上:原地不动
+    }
+    const [e] = srcRec.chain.splice(from, 1);
+    r.chain.splice(at, 0, e);
+    const label = (EFFECT_TYPES[e.type] && EFFECT_TYPES[e.type].label) || 'Effect';
+    if (srcRec === r) {
+        setStatus(`「${label}」is now step ${at + 1} of ${r.chain.length} in this chain — it runs there`);
+    } else if (srcLayer === l) {
+        setStatus(`「${label}」moved to another Effects container on「${l.name}」— it is now step ${at + 1} of ${r.chain.length} there`);
+    } else {
+        setStatus(`「${label}」moved from「${srcLayer.name}」to「${l.name}」— it is now step ${at + 1} of ${r.chain.length} in its Effects chain`);
+    }
+    if (srcLayer !== l) srcLayer.fxCache = null;
+    fxStructuralChange(l);
+    return true;
+}
+
 // 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,一步一行、**从下往上**读就是执行序 (紧挨着
 // 图层行那一步最先跑)。链里没有步就不占位 (空容器由条带上那枚 chip 自己说话)。展开参数的那一步,
 // 参数区排在它自己那颗 chip 的**下方** (= 朝图层行那一侧)。
@@ -596,6 +624,30 @@ function fxChainEl(l, r) {
         warn.textContent = `Chain skipped — ${why}`;
         box.appendChild(warn);
     }
+    // 整块容器都收拖拽:拖起一枚特效后,链内重排、换个容器、搬到别的图层,收下的都是这里 ——
+    // 落槽现算 (fxChainSlot),插入线现画 (fxSlotPaint)。判定只写这一份:chip 不各自接一半,
+    // 因为"拖去别条链"这件事本来就没有 chip 可依 (空链连 lane 都不占,那条路落在条带的魔棒
+    // chip 上,见 blend_node 的 attrChip)。
+    box.addEventListener('dragover', ev => {
+        if (!dragFx) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        ev.dataTransfer.dropEffect = 'move';
+        fxSlotPaint(steps, fxChainSlot(steps, ev.clientY));
+    });
+    box.addEventListener('dragleave', ev => {
+        if (ev.relatedTarget && box.contains(ev.relatedTarget)) return;   // 进出子元素不算离开
+        fxSlotPaint(steps, -1);
+    });
+    box.addEventListener('drop', ev => {
+        if (!dragFx) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        fxSlotPaint(steps, -1);
+        const move = dragFx;
+        dragFx = null;
+        fxAdoptEffect(move, l, r, fxChainSlot(steps, ev.clientY));
+    });
     return box;
 }
 

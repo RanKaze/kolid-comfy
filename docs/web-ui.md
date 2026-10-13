@@ -138,11 +138,11 @@ tldraw 画布资源管理节点。提供拖放式图片/视频卡片管理面板
 
 ### SnapshotGaussianNode
 
-高斯点云预览节点。加载 PLY 文件并在浏览器中渲染 3D 高斯泼溅场景。支持 **GSplat**（轻量渲染）和 **SuperSplat**（需要 Node.js，魔改 UI）两种渲染方式。按 Enter 截图输出。
+高斯点云预览节点。接收上游的 **SPLAT**（ComfyUI 本体的点云类型，`positions / scales / rotations / opacities / sh`，与 Get Splat 同一份），编成 `.splat` 的 32 字节记录送进浏览器渲染 3D 高斯泼溅场景；批量 SPLAT 的每一项都并进同一个场景。支持 **GSplat**（轻量渲染）和 **SuperSplat**（需要 Node.js，魔改 UI）两种渲染方式。按 Enter 截图输出。
 
 ![SnapshotGaussianNode 界面：浏览器里的 3D 高斯泼溅视口，可调 Scale / Focal，按 Enter 截图回传](images/gaussian_node.png)
 
-实际工作流：SHARP 预测 PLY，SnapshotGaussianNode 渲染并按 Enter 截图：
+实际工作流：ImageToGaussianSplatNode 用 SHARP 把单张图 lift 成 SPLAT，SnapshotGaussianNode 渲染并按 Enter 截图（下图是改造前的 PLY 连线）：
 
 ![SHARP 图生 PLY 工作流](images/sharp_gaussian_graph.png)
 
@@ -163,17 +163,37 @@ SuperSplat 渲染模式（需要本机 Node.js 常驻进程）：
 
 > GSplat 模式的 bundle 由 `nodes/web/gsplat-js/vite.bundle.config.js` 以 IIFE 格式打包（挂载 `window.GSPLAT`），
 > 重新构建与版本更新方法见 `nodes/web/gsplat-js/KOLID_INTEGRATION.md`。
+> 页面直接用 `SPLAT.Loader` 读 `.splat` 记录——gsplat.js 内部一行（`SplatData.RowLength = 32`）就是这个格式，
+> 所以换格式不需要重打 bundle。
 
 | 输入 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| ply_path | STRING | 是 | PLY 文件路径（来自上游节点） |
+| splat | SPLAT | 是 | 上游节点送来的高斯点云（ImageToGaussianSplatNode / Get Splat 等） |
 | method | COMBO | 是 | 渲染方式：GSplat / SuperSplat（默认 GSplat） |
 | width | INT | 是 | 截图宽度 64-2048（默认 512） |
 | height | INT | 是 | 截图高度 64-2048（默认 512） |
 | extrinsics | EXTRINSICS | 否 | 相机外参矩阵（来自上游节点） |
 | intrinsics | INTRINSICS | 否 | 相机内参矩阵（来自上游节点） |
 
-**输出:** `snapshot` (IMAGE), `snapshot_path` (STRING), `extrinsics` (EXTRINSICS)
+**输出:** `snapshot` (IMAGE), `extrinsics` (EXTRINSICS)（视口里挪动相机后按 Enter，回传的就是那台相机的外参；截图不再落盘）
+
+---
+
+### ImageToGaussianSplatNode
+
+用 SHARP 把图片 lift 成 3D 高斯点云，直接输出 ComfyUI 的 **SPLAT**，不落 PLY 文件。
+需要安装 [comfyui-sharp](../custom_nodes/comfyui-sharp)（`model` 口接它的 Load SHARP Model）。
+批次里每张图各自推理，凑成一个批量 SPLAT（按最长的一项补零 + `counts` 记录真实长度）。
+
+| 输入 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| model | SHARP_MODEL | 是 | Load SHARP Model 的输出 |
+| image | IMAGE | 是 | 源图，batch 维即点云 batch 维 |
+| focal_length_mm | FLOAT | 否 | 35mm 等效焦距 0-500（默认 30，0=按 30 处理）；同一张图只改焦距时命中编码缓存，几乎瞬时 |
+
+**输出:** `splat` (SPLAT), `extrinsics` (EXTRINSICS), `intrinsics` (INTRINSICS)
+
+`sh` 的 DC 项按 SHARP 的导出约定存 sRGB 折算后的系数（`(rgb-0.5)/C0`），所以接 GSplat / SuperSplat 的画面上色与旧的 PLY 通路一致。
 
 ---
 

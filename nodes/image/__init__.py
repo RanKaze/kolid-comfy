@@ -12,6 +12,7 @@ NODE_CONFIG = {
     "ImageRecoverMeetNode": {"class": ImageRecoverMeetNode, "name": "ImageRecoverMeetNode"},
 
     "SnapshotGaussianNode": {"class": SnapshotGaussianNode, "name": "SnapshotGaussianNode"},
+    "ImageToGaussianSplatNode": {"class": ImageToGaussianSplatNode, "name": "ImageToGaussianSplatNode"},
     "ExtrinsicsCompareNode": {"class": ExtrinsicsCompareNode, "name": "ExtrinsicsCompareNode"},
 
     "SnapshotImageNode": {"class": SnapshotImageNode, "name": "SnapshotImageNode"},

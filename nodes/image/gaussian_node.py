@@ -11,7 +11,6 @@ import base64
 import numpy as np
 from urllib.parse import urlparse, parse_qs, quote
 import urllib
-import folder_paths
 import torch
 import time
 import subprocess
@@ -28,6 +27,9 @@ import cv2
 import comfy.model_management as mm
 import signal
 import shutil
+import hashlib
+import torch.nn.functional as F
+from comfy_api.latest import Types
 
 # Try to import win32gui for Windows window focus management
 try:
@@ -132,6 +134,18 @@ def waitPort(port, host='localhost', timeout=30, interval=0.05):
     # 超时
     raise TimeoutError(f"[SnapshotGaussian] 等待端口 {port} 超时（{timeout} 秒）")
 
+class _SnapshotServer(socketserver.ThreadingTCPServer):
+    """Handle each browser connection in its own (daemon) thread.
+
+    The plain TCPServer runs one request inline, so a connection the webview opens
+    but never writes to - or one that stops reading the ~50 MB body - wedges
+    serve_forever, and BaseServer.shutdown() then waits for it: a cancel sat for
+    41 s in server.stop() before raising. daemon threads keep _Threads empty, so
+    neither shutdown() nor server_close() waits for those connections.
+    """
+    daemon_threads = True
+
+
 def checkPort(port, host='localhost'):
     """检查指定端口是否在本地主机上可用
     
@@ -186,16 +200,7 @@ def handleSnapShot(severHandler, set_event):
         severHandler.send_header("Access-Control-Allow-Origin", "*")
         severHandler.end_headers()
         severHandler.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
-        
-        # Create SnapShot directory in output folder
-        snapshot_dir = os.path.join(folder_paths.output_directory, "SnapShot")
-        os.makedirs(snapshot_dir, exist_ok=True)
-        # Generate unique filename
-        timestamp = int(time.time() * 1000)
-        severHandler.server_instance.image_path = os.path.join(snapshot_dir, f"snapshot_{timestamp}.png")
-        with open(severHandler.server_instance.image_path, 'wb') as f:
-            f.write(image_data)
-            
+
         # Signal that screenshot is ready
         if set_event: severHandler.server_instance.screenshot_event.set()
     else:
@@ -247,30 +252,57 @@ def handleWindowClosed(severHandler):
     severHandler.end_headers()
     severHandler.wfile.write(json.dumps({'status': 'ok'}).encode('utf-8'))
 
-def getContents(ply_path) -> str:
-    if not ply_path or ply_path.strip() == "":
-        raise ValueError("PLY path cannot be empty")
+# SH band-0 constant, same value comfy_extras/nodes_gaussian_splat.py uses to read sh[..., 0, :] back.
+_SH_C0 = 0.28209479177387814
+_SPLAT_RECORD = np.dtype([("xyz", "<f4", 3), ("scale", "<f4", 3),
+                          ("rgba", "u1", 4), ("quat", "u1", 4)])
+_SPLAT_MAX_SPLATS = 16_000_000  # ~500MB of records, the cap getContents used to put on the file it read
 
-    resolved = ply_path.strip().strip('"')
-    if not os.path.exists(resolved):
-        raise ValueError(f"PLY file not found: {resolved}")
-    if not resolved.lower().endswith(".ply"):
-        raise ValueError("File must be a .ply Gaussian splat")
-    
-    # Check file size to avoid memory issues
-    file_size = os.path.getsize(resolved)
-    max_file_size = 500 * 1024 * 1024  # 500MB limit
-    if file_size > max_file_size:
-        raise ValueError(f"PLY file is too large ({file_size / (1024*1024):.1f}MB). Maximum size is {max_file_size / (1024*1024)}MB")
-    
-    # Read PLY file data
-    try:
-        with open(resolved, 'rb') as f:
-            ply_data = f.read()
-        print(f"[SnapshotGaussian] Successfully read PLY file")
-        return base64.b64encode(ply_data).decode('utf-8')
-    except Exception as e:
-        raise ValueError(f"Failed to read PLY file: {e}")
+
+def _splat_record_view(splat, item):
+    """Batch item `item` of a ComfyUI SPLAT as one (N,) array of 32-byte .splat records.
+
+    SPLAT stores render-ready values (linear scale, opacity in [0,1], sh DC as (rgb-0.5)/C0), which is
+    exactly the .splat record layout, so this is a quantization pass and not a re-activation.
+    """
+    end = int(splat.counts[item].item()) if splat.counts is not None else splat.positions.shape[1]
+    if end <= 0:
+        return np.empty(0, _SPLAT_RECORD)
+    cut = lambda t: t[item, :end].cpu().float().numpy()
+
+    xyz = cut(splat.positions)
+    scale = cut(splat.scales)
+    quat = cut(splat.rotations)
+    quat = quat / np.linalg.norm(quat, axis=1, keepdims=True).clip(1e-12)
+    rgba = np.concatenate(
+        [np.clip(cut(splat.sh)[:, 0, :] * _SH_C0 + 0.5, 0.0, 1.0),
+         cut(splat.opacities).clip(0.0, 1.0)],
+        axis=1)
+
+    rec = np.empty(end, _SPLAT_RECORD)
+    rec["xyz"] = xyz
+    rec["scale"] = scale
+    rec["rgba"] = np.round(rgba * 255.0).astype(np.uint8)
+    rec["quat"] = np.round(quat * 128.0 + 128.0).clip(0, 255).astype(np.uint8)
+    return rec
+
+
+def getContents(splat) -> str:
+    if splat is None:
+        raise ValueError("No splat received from upstream node")
+
+    batch = splat.positions.shape[0]
+    total = sum(int(splat.counts[i].item()) if splat.counts is not None else splat.positions.shape[1]
+                for i in range(batch))
+    if total == 0:
+        raise ValueError("Splat is empty")
+    if total > _SPLAT_MAX_SPLATS:
+        raise ValueError(f"Splat is too large ({total:,} splats). Maximum is {_SPLAT_MAX_SPLATS:,}")
+
+    # Every batch item goes into the one scene the viewer renders.
+    records = [rec for rec in (_splat_record_view(splat, i) for i in range(batch)) if rec.size]
+    print(f"[SnapshotGaussian] Serialized {total:,} splats from {len(records)} batch item(s) to .splat")
+    return base64.b64encode(b"".join(rec.tobytes() for rec in records)).decode("utf-8")
     
     
 
@@ -284,7 +316,6 @@ class GSplatServer:
         self.width = width
         self.height = height
         self.image = None
-        self.image_path = None
         self.server = None
         self.started = False
         self.screenshot_event = threading.Event()
@@ -296,7 +327,7 @@ class GSplatServer:
         # Find an available port
         for port in range(8080, 9000):
             try:
-                self.server = socketserver.TCPServer(('localhost', port), self.GSplatHandler)
+                self.server = _SnapshotServer(('localhost', port), self.GSplatHandler)
                 self.started = True
                 print(f"[SnapshotGaussian] Server started on port {port}")
                 break
@@ -334,7 +365,10 @@ class GSplatServer:
         server_instance = None
 
         def do_GET(self):
-            if self.path == '/gaussian_node.html':
+            print(f"[SnapshotGaussian] Received GET request: {self.path}")
+            # The per-run token rides on the document URL and is not part of the route.
+            path = self.path.split('?', 1)[0]
+            if path == '/gaussian_node.html':
                 # Serve the gaussian_node.html file
                 file_path = web_file('gaussian_node.html')
                 if os.path.exists(file_path):
@@ -345,9 +379,9 @@ class GSplatServer:
                         self.wfile.write(f.read())
                 else:
                     self.send_error(404, "File not found")
-            elif self.path.startswith('/js/'):
+            elif path.startswith('/js/'):
                 # Serve JavaScript files
-                file_path = web_file(self.path[1:])
+                file_path = web_file(path[1:])
                 if os.path.exists(file_path):
                     self.send_response(200)
                     self.send_header('Content-type', 'application/javascript')
@@ -356,8 +390,8 @@ class GSplatServer:
                         self.wfile.write(f.read())
                 else:
                     self.send_error(404, "File not found")
-            elif self.path == '/contents':
-                # Serve PLY data as JSON
+            elif path == '/contents':
+                # Serve splat records as JSON
                 if self.server_instance:
                     try:
                         extrinsics = self.server_instance.extrinsics
@@ -377,7 +411,7 @@ class GSplatServer:
                         self.end_headers()
                         self.wfile.write(response_data)
                     except Exception as e:
-                        self.send_error(500, f"Error processing PLY data: {e}")
+                        self.send_error(500, f"Error processing splat data: {e}")
                         return
                 else:
                     self.send_error(500, "Server error")
@@ -385,6 +419,7 @@ class GSplatServer:
                 super().do_GET()
 
         def do_POST(self):
+            print(f"[SnapshotGaussian] Received POST request: {self.path}")
             if self.path == '/screenshot':
                 handleSnapShot(self, True)
             elif self.path == '/window_closed':
@@ -407,7 +442,6 @@ class SuperSplatServer:
         self.width = width
         self.height = height
         self.image = None
-        self.image_path = None
         self.server = None
         self.started = False
         self.screenshot_event = threading.Event()
@@ -421,7 +455,7 @@ class SuperSplatServer:
         # Find an available port
         for port in range(8080, 9000):
             try:
-                self.server = socketserver.TCPServer(('localhost', port), self.SuperSplatHandler)
+                self.server = _SnapshotServer(('localhost', port), self.SuperSplatHandler)
                 print(f"[SnapshotGaussian] Server started on port {port}")
                 success = True
                 break
@@ -609,15 +643,15 @@ class SuperSplatServer:
             pass
 
 class SnapshotGaussianNode:
-    """Preview a Gaussian splat PLY file in a browser and take a snapshot when Enter is pressed."""
+    """Preview a Gaussian splat in a browser and take a snapshot when Enter is pressed."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "ply_path": ("STRING", {
+                "splat": ("SPLAT", {
                     "forceInput": True,
-                    "tooltip": "PLY file path from upstream node",
+                    "tooltip": "Gaussian splat from upstream node (Image To Gaussian Splat, Get Splat, ...)",
                 }),
                 "method": ("COMBO", {
                     "default": "GSplat",
@@ -649,25 +683,25 @@ class SnapshotGaussianNode:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "EXTRINSICS")
-    RETURN_NAMES = ("snapshot", "snapshot_path", "extrinsics")
+    RETURN_TYPES = ("IMAGE", "EXTRINSICS")
+    RETURN_NAMES = ("snapshot", "extrinsics")
     FUNCTION = "take_snapshot"
     CATEGORY = "Kolid-Toolkit"
-    
+
     @classmethod
     def IS_CHANGED(s, **kwargs):
         return float("nan")
 
     def take_snapshot(
         self,
-        ply_path: str,
+        splat,
         extrinsics=None,
         intrinsics=None,
         method: str = "GSplat",
         width: int = 512,
         height: int = 512,
     ):
-        contents = getContents(ply_path)
+        contents = getContents(splat)
         focused_window = None
         if has_win32gui:
             focused_window = win32gui.GetForegroundWindow()
@@ -676,8 +710,7 @@ class SnapshotGaussianNode:
         if method == "GSplat":
             server = GSplatServer(contents, extrinsics, intrinsics, width, height)
         elif method == "SuperSplat":
-            filename = os.path.basename(ply_path)
-            server = SuperSplatServer(filename, contents, extrinsics, intrinsics, width, height)
+            server = SuperSplatServer("gaussian.splat", contents, extrinsics, intrinsics, width, height)
         else:
             raise ValueError(f"Unknown method: {method}")
         server_thread = threading.Thread(target=server.start)
@@ -691,8 +724,14 @@ class SnapshotGaussianNode:
                 raise RuntimeError(f"[SnapshotGaussian] Server startup timeout after {timeout} seconds")
             time.sleep(0.1)
 
-        print(f"[SnapshotGaussian] Opening browser at: {server.bowser_url}")
-        open_ui(server.bowser_url)
+        # KolidUI (and Chrome/Edge) bring an already-open tab with an identical URL to
+        # the foreground instead of reloading it, so a page left behind by a cancelled
+        # run would be re-shown with its server long gone and nothing to load. A
+        # per-run token makes every snapshot a fresh document.
+        url = server.bowser_url + ('&' if '?' in server.bowser_url else '?') + \
+            "run=%d" % (time.time() * 1000)
+        print(f"[SnapshotGaussian] Opening browser at: {url}")
+        open_ui(url)
 
         # Wait for screenshot to be captured (indefinitely, but web page will notify on close)
         print("[SnapshotGaussian] Waiting for snapshot...")
@@ -711,7 +750,165 @@ class SnapshotGaussianNode:
         if server.window_closed or server.image is None:
             raise ValueError("Window closed without taking screenshot")
         
-        return (server.image, server.image_path, server.out_extrinsics if server.out_extrinsics is not None else None)
+        return (server.image, server.out_extrinsics if server.out_extrinsics is not None else None)
+
+
+# SHARP's encoder is the slow part; the decoder only depends on the focal length. Single-entry cache,
+# same as the SHARP pack's own predict node, so re-running with a new focal_length_mm skips the encoder.
+_sharp_encode_cache = {"image_hash": None, "monodepth_output": None, "image_resized": None}
+
+
+def focal_length_px(width: int, height: int, f_mm: float) -> float:
+    """35mm-film focal length (mm) -> pixels, over the image diagonal (36x24mm frame)."""
+    return f_mm * np.sqrt(width**2 + height**2) / np.sqrt(36**2 + 24**2)
+
+
+class ImageToGaussianSplatNode:
+    """Lift image(s) into a Gaussian splat with SHARP and return it as a ComfyUI SPLAT (nothing on disk)."""
+
+    INTERNAL_SHAPE = (1536, 1536)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("SHARP_MODEL", {
+                    "tooltip": "SHARP model from Load SHARP Model",
+                }),
+                "image": ("IMAGE", {
+                    "tooltip": "Source image(s). The batch dim becomes the splat batch.",
+                }),
+            },
+            "optional": {
+                "focal_length_mm": ("FLOAT", {
+                    "default": 30.0,
+                    "min": 0.0,
+                    "max": 500.0,
+                    "step": 0.1,
+                    "tooltip": "Focal length in mm (35mm equivalent). 0 = auto (defaults to 30mm). "
+                               "Same image + new focal length only re-runs the cheap decode step.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("SPLAT", "EXTRINSICS", "INTRINSICS")
+    RETURN_NAMES = ("splat", "extrinsics", "intrinsics")
+    FUNCTION = "predict"
+    CATEGORY = "Kolid-Toolkit"
+
+    @torch.no_grad()
+    def predict(self, model: dict, image: torch.Tensor, focal_length_mm: float = 30.0):
+        from sharp.utils.gaussians import convert_rgb_to_spherical_harmonics
+        from sharp.utils.color_space import linearRGB2sRGB
+
+        if image.dim() == 3:
+            image = image.unsqueeze(0)
+
+        predictor = model["predictor"]
+        device = torch.device(model["device"])
+
+        # Per batch item: positions, linear scales, wxyz quats, opacities in [0,1], SH (N, 1, 3).
+        # SHARP predicts linearRGB colors and its own PLY export bakes sRGB into the SH DC term so
+        # public renderers show it unchanged - keep that, the viewers here read sh[..., 0, :] as color.
+        items = []
+        extrinsics = intrinsics = None
+        flat = lambda t: t.flatten(0, 1).float().cpu()
+        for i in range(image.shape[0]):
+            image_np = (image[i, :, :, :3].cpu().numpy() * 255).astype(np.uint8)
+            height, width = image_np.shape[:2]
+            f_px = focal_length_px(width, height, focal_length_mm if focal_length_mm > 0 else 30.0)
+
+            print(f"[ImageToGaussianSplat] Image {i + 1}/{image.shape[0]}: {width}x{height}, f={f_px:.1f}px")
+            g = self._predict_image(predictor, image_np, f_px, device)
+            flat = lambda t: t.flatten(0, 1).float().cpu()
+            sh = convert_rgb_to_spherical_harmonics(linearRGB2sRGB(g.colors.flatten(0, 1)))
+            items.append((flat(g.mean_vectors), flat(g.singular_values), flat(g.quaternions),
+                          flat(g.opacities).reshape(-1, 1), sh[:, None, :].cpu()))
+
+            if i == 0:
+                # One camera for the merged scene: the first image's, which is what SharpPredict
+                # hands over for a batch too.
+                extrinsics = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+                intrinsics = [[float(f_px), 0.0, width * 0.5], [0.0, float(f_px), height * 0.5], [0.0, 0.0, 1.0]]
+
+        return (self._to_splat(items), extrinsics, intrinsics)
+
+    def _predict_image(self, predictor, image_np: np.ndarray, f_px: float, device: torch.device):
+        from sharp.utils.gaussians import unproject_gaussians
+
+        internal_h, internal_w = self.INTERNAL_SHAPE
+        height, width = image_np.shape[:2]
+
+        image_pt = torch.from_numpy(image_np.copy()).float().to(device).permute(2, 0, 1) / 255.0
+        image_resized_pt = F.interpolate(
+            image_pt[None],
+            size=(internal_h, internal_w),
+            mode="bilinear",
+            align_corners=True,
+        )
+
+        image_hash = hashlib.sha256(image_np.tobytes()).hexdigest()[:16]
+        if _sharp_encode_cache["image_hash"] == image_hash:
+            print("[ImageToGaussianSplat] Cache hit - reusing encoded features")
+            monodepth_output = _sharp_encode_cache["monodepth_output"]
+            image_resized_pt = _sharp_encode_cache["image_resized"]
+        else:
+            print("[ImageToGaussianSplat] Cache miss - running encoder (the slow part)...")
+            monodepth_output, _ = predictor.encode(image_resized_pt)
+            _sharp_encode_cache["image_hash"] = image_hash
+            _sharp_encode_cache["monodepth_output"] = monodepth_output
+            _sharp_encode_cache["image_resized"] = image_resized_pt
+
+        # f_px is a numpy float64; the decoder broadcasts the factor into its float32 features,
+        # so it has to be pinned to float32 here (torch.tensor() alone would give double).
+        disparity_factor = torch.tensor([f_px / width], dtype=torch.float32, device=device)
+        gaussians_ndc = predictor.decode(monodepth_output, image_resized_pt, disparity_factor)
+
+        intrinsics = torch.tensor(
+            [
+                [f_px, 0, width / 2, 0],
+                [0, f_px, height / 2, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        intrinsics_resized = intrinsics.clone()
+        intrinsics_resized[0] *= internal_w / width
+        intrinsics_resized[1] *= internal_h / height
+
+        return unproject_gaussians(
+            gaussians_ndc, torch.eye(4, device=device), intrinsics_resized, self.INTERNAL_SHAPE
+        )
+
+    def _to_splat(self, items):
+        """Zero-pad the batch to the longest item, the way ComfyUI's own splat nodes store a batch."""
+        counts = torch.tensor([int(t[0].shape[0]) for t in items], dtype=torch.int32)
+        max_n = int(counts.max().item())
+
+        def pad(field_index, fill):
+            out = torch.full((len(items), max_n) + items[0][field_index].shape[1:], fill, dtype=torch.float32)
+            for b, item in enumerate(items):
+                t = item[field_index]
+                out[b, : t.shape[0]] = t
+            return out
+
+        positions = pad(0, 0.0)
+        rotations = pad(2, 0.0)
+        # Padded rows carry an identity quaternion instead of the degenerate all-zero one.
+        for b, item in enumerate(items):
+            rotations[b, item[2].shape[0]:, 0] = 1.0
+
+        return Types.SPLAT(
+            positions=positions,
+            scales=pad(1, 0.0),
+            rotations=rotations,
+            opacities=pad(3, 0.0),
+            sh=pad(4, 0.0),
+            counts=counts,
+        )
+
 
 def normalize_angle(angle, range_type='±180'):
     """
