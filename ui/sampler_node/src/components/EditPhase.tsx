@@ -10,15 +10,21 @@ const tabInputStyle: React.CSSProperties = {
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
 
-// The panels of the Draw tab (and of the Settings tab) collapse independently. Default is "all
-// open" — a collapsed panel is a choice the user made, so it is remembered; a browser that refuses
-// localStorage just gets the default every time, which is not worth an error banner over.
-// Both tabs are mounted at once (the Draw tab only hides with display:none), so this ONE store is
-// read by the host and shared down — a second copy in SettingsTab would overwrite the other's keys.
-// The Settings page is NOT in here: it has no foldable sections any more (a segmented control picks
+// The Draw tab's four dock units each collapse independently. Default is "all open" — a collapsed
+// unit is a choice the user made, so it is remembered; a browser that refuses localStorage just gets
+// the default every time, which is not worth an error banner over. Both tabs are mounted at once (the
+// Draw tab only hides with display:none), so this ONE store is read by the host and shared down.
+// The Settings page is NOT in here: it has no foldable sections (a segmented control picks
 // which screen shows), and what it does remember rides its own key — see SETTINGS_UI_STORE.
-type SectionKey = 'pipeline' | 'presets' | 'preprocess' | 'blocks';
-const SECTION_KEYS: SectionKey[] = ['pipeline', 'presets', 'preprocess', 'blocks'];
+// `pipeline` is one unit that carries BOTH the pipeline enum and the preset list — the dock moves
+// whole units around, and those two are one decision ("which chain am I editing"), not two.
+type UnitId = 'context' | 'pipeline' | 'preprocess' | 'blocks';
+type SectionKey = UnitId;
+const UNIT_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
+const UNIT_TITLES: Record<UnitId, string> = {
+  context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess', blocks: 'Pipeline Blocks',
+};
+const SECTION_KEYS: SectionKey[] = UNIT_IDS;
 const SECTIONS_STORE = 'sampler.editSections';
 const sectionsAllOpen = (): Record<SectionKey, boolean> =>
   SECTION_KEYS.reduce((a, k) => ({ ...a, [k]: true }), {} as Record<SectionKey, boolean>);
@@ -33,11 +39,11 @@ function loadSections(): Record<SectionKey, boolean> {
 }
 
 // The Draw tab's left column: a width the user sets by dragging its right edge. The default is
-// deliberately roomier than the old fixed 260 — a Settings rule row carries a long label AND a
-// number field AND a toggle on one line, and 260 clipped them. Same storage policy as the
-// collapsed sections: a browser that refuses localStorage just gets the default every time.
+// roomier than the old 300 — a dock unit's title bar carries a name, its actions and a chevron on
+// one line, and 300 started clipping them. Same storage policy as the collapsed units: a browser
+// that refuses localStorage just gets the default every time.
 const PANEL_W_STORE = 'sampler.drawPanelWidth';
-const PANEL_W_DEFAULT = 300, PANEL_W_MIN = 240, PANEL_W_MAX = 560, PANEL_W_STEP = 20;
+const PANEL_W_DEFAULT = 340, PANEL_W_MIN = 280, PANEL_W_MAX = 640, PANEL_W_STEP = 20;
 const clampPanelWidth = (w: number) => Math.min(PANEL_W_MAX, Math.max(PANEL_W_MIN, w));
 function loadPanelWidth(): number {
   try {
@@ -47,53 +53,407 @@ function loadPanelWidth(): number {
   return PANEL_W_DEFAULT;
 }
 
-// A section header that IS its own toggle. The chevron is the only thing that moves, so collapsing
-// never reflows the label. A per-section action (Add +) is NOT its child — the header only takes the
-// left half of the row, so the action sits beside it in a flex row both sections build the same way.
-const SectionHeader: React.FC<{
-  label: string; open: boolean; onToggle: () => void;
-}> = ({ label, open, onToggle }) => (
-  <div onClick={onToggle} title={open ? 'Collapse this section' : 'Expand this section'}
-    style={{
-      ...styles.sectionTitle, display: 'flex', alignItems: 'center', gap: 5,
-      cursor: 'pointer', userSelect: 'none',
-    }}>
-    <span style={{
-      display: 'flex', flexShrink: 0, transform: open ? 'rotate(90deg)' : 'none',
-      transition: 'transform 0.12s ease',
-    }}>
-      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
-        strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
-    </span>
-    {label}
-  </div>
-);
+// ── THE DOCK ────────────────────────────────────────────────────────────────────────────────
+// Where a unit sits is the user's call: stacked in a column, side by side, several units sharing one
+// slot behind a tab strip, or popped out as a window over the workbench. The tree answers only
+// "who lives where and how big"; what a unit contains stays in EditPhase — which is also why these
+// operations are plain functions over a Dock and can be exercised without a DOM.
+// `sz` is the size the user dragged this node to along its PARENT split's axis; absent means
+// "take what is left", so the default column is four content-sized rows and the panel scrolls.
+type DockSlot = { t: 'u'; id: UnitId; sz?: number }
+  | { t: 'g'; ids: UnitId[]; sel: number; sz?: number };
+type DockNode = DockSlot | { t: 's'; d: 'v' | 'h'; ks: DockNode[] };
+// A popped-out unit lives in viewport coordinates: it has to be able to sit on top of the
+// workbench iframe, which is outside the settings column.
+type DockFloat = { id: UnitId; x: number; y: number; w: number; h: number };
+type Dock = { tree: DockNode; floats: DockFloat[] };
+const DOCK_STORE = 'sampler.drawDock';
+const DOCK_MIN_SZ = 96, DOCK_MAX_SZ = 1200;
+const FLOAT_W = 300, FLOAT_MIN_W = 220, FLOAT_MIN_H = 60;
+const clampSz = (n: number) => Math.min(DOCK_MAX_SZ, Math.max(DOCK_MIN_SZ, Math.round(n)));
+const defaultDock = (): Dock => ({
+  tree: { t: 's', d: 'v', ks: UNIT_IDS.map(id => ({ t: 'u', id }) as DockNode) },
+  floats: [],
+});
+const dockUnits = (n: DockNode): UnitId[] =>
+  n.t === 'u' ? [n.id] : n.t === 'g' ? n.ids : n.ks.flatMap(dockUnits);
+// A layout is only a layout if every unit appears exactly once somewhere — tree or floating. Anything
+// else (a hand-edited store, a future fifth unit) falls back to the default instead of rendering a
+// hole in the panel.
+function loadDock(): Dock {
+  const fallback = defaultDock();
+  try {
+    const raw = localStorage.getItem(DOCK_STORE);
+    if (!raw) return fallback;
+    const saved = JSON.parse(raw);
+    const ids = dockUnits(saved.tree).concat((saved.floats || []).map((f: DockFloat) => f.id));
+    if (ids.length !== UNIT_IDS.length || UNIT_IDS.some(u => ids.filter(i => i === u).length !== 1)) return fallback;
+    return { tree: saved.tree, floats: Array.isArray(saved.floats) ? saved.floats : [] };
+  } catch { return fallback; }
+}
+const holds = (n: DockNode, id: UnitId): boolean =>
+  (n.t === 'u' && n.id === id) || (n.t === 'g' && n.ids.includes(id));
+// Take a unit out of the tree, collapsing whatever its removal leaves behind (an empty branch, or a
+// split that is down to one child — a one-child split is just the child).
+function detach(n: DockNode, id: UnitId): DockNode | null {
+  if (n.t === 'u') return n.id === id ? null : n;
+  if (n.t === 'g') {
+    const ids = n.ids.filter(i => i !== id);
+    if (!ids.length) return null;
+    if (ids.length === 1) return { t: 'u', id: ids[0] };
+    return { ...n, ids, sel: Math.min(n.sel, ids.length - 1) };
+  }
+  const ks = n.ks.map(k => detach(k, id)).filter((k): k is DockNode => !!k);
+  if (!ks.length) return null;
+  if (ks.length === 1) return ks[0];
+  return { ...n, ks };
+}
+// Rewrite the node that directly owns `id` (a leaf, or the tab group it belongs to).
+function rewriteHolder(n: DockNode, id: UnitId, fn: (holder: DockNode) => DockNode): DockNode {
+  if (holds(n, id)) return fn(n);
+  if (n.t === 's') return { ...n, ks: n.ks.map(k => rewriteHolder(k, id, fn)) };
+  return n;
+}
+// Drop `dragged` on the unit `targetId` at `zone`. Edges split (reusing the nearest ancestor split
+// that already runs that way, so repeated drops make a flat row rather than a spiral of nesting);
+// the centre tabs it in beside the target.
+type Zone = 'top' | 'bottom' | 'left' | 'right' | 'center';
+const zoneAxis = (z: Zone): 'v' | 'h' => (z === 'left' || z === 'right' ? 'h' : 'v');
+function placeInTree(n: DockNode, id: UnitId, axis: 'v' | 'h', before: boolean, leaf: DockNode): DockNode {
+  if (holds(n, id)) return { t: 's', d: axis, ks: before ? [leaf, n] : [n, leaf] };
+  if (n.t === 's') {
+    if (n.d === axis) {
+      const i = n.ks.findIndex(k => holds(k, id));
+      if (i >= 0) {
+        const ks = [...n.ks];
+        ks.splice(before ? i : i + 1, 0, leaf);
+        return { ...n, ks };
+      }
+    }
+    return { ...n, ks: n.ks.map(k => placeInTree(k, id, axis, before, leaf)) };
+  }
+  return n;
+}
+const dropInDock = (dock: Dock, dragged: UnitId, targetId: UnitId, zone: Zone): Dock => {
+  if (dragged === targetId) return dock;
+  const rest: Dock = { tree: detach(dock.tree, dragged) || dock.tree, floats: dock.floats.filter(f => f.id !== dragged) };
+  if (zone === 'center') {
+    const g: DockNode = { t: 'g', ids: [targetId, dragged], sel: 1 };
+    return { ...rest, tree: rewriteHolder(rest.tree, targetId, n => n.t === 'g' ? { ...n, ids: [...n.ids, dragged], sel: n.ids.length } : g) };
+  }
+  const axis = zoneAxis(zone);
+  return { ...rest, tree: placeInTree(rest.tree, targetId, axis, zone === 'top' || zone === 'left', { t: 'u', id: dragged }) };
+};
+const floatOf = (dock: Dock, id: UnitId) => dock.floats.find(f => f.id === id);
+// The first pop-out lands to the right of the column; each further one cascades so several windows
+// stay readable instead of stacking on top of each other.
+const floatSpot = (n: number, x: number, y: number): { x: number; y: number } => ({
+  x: Math.round(Math.min(Math.max(8, x), Math.max(8, window.innerWidth - FLOAT_W - 8))),
+  y: Math.round(Math.min(Math.max(8, y + n * 22), Math.max(8, window.innerHeight - 120))),
+});
+const popOutDock = (dock: Dock, id: UnitId, x?: number, y?: number): Dock => {
+  if (floatOf(dock, id)) return dock;
+  const n = dock.floats.length;
+  const spot = floatSpot(n, x ?? (window.innerWidth - FLOAT_W - 40), y ?? 90);
+  const f: DockFloat = { id, ...spot, w: FLOAT_W, h: 320 };
+  return { tree: detach(dock.tree, id) || dock.tree, floats: [...dock.floats, f] };
+};
+const setFloatDock = (dock: Dock, id: UnitId, patch: Partial<DockFloat>): Dock => ({
+  ...dock,
+  floats: dock.floats.map(f => f.id === id ? { ...f, ...patch } : f),
+});
+// Putting a unit back means the last row of the column — the place the user can see it from.
+const dockBackDock = (dock: Dock, id: UnitId): Dock => {
+  const floats = dock.floats.filter(f => f.id !== id);
+  const leaf: DockNode = { t: 'u', id };
+  const tree: DockNode = dock.tree.t === 's' && dock.tree.d === 'v' ? { ...dock.tree, ks: [...dock.tree.ks, leaf] } : { t: 's', d: 'v', ks: [dock.tree, leaf] };
+  return { tree: detach(tree, id) || tree, floats };
+};
+const resizeDock = (dock: Dock, id: UnitId, sz: number | undefined): Dock => ({
+  ...dock, tree: rewriteHolder(dock.tree, id, n => n.t === 's' ? n : { ...n, sz: sz === undefined ? undefined : clampSz(sz) }),
+});
 
-// Section 内部的分组折叠头：与 SectionHeader 同一套几何（chevron 是唯一动的东西），但
-// 字号与颜色都轻一档 —— 它折的是 section 里的一组开关，不是面板的一块。
-const GroupHeader: React.FC<{
-  label: string; open: boolean; onToggle: () => void;
-}> = ({ label, open, onToggle }) => (
-  <div onClick={onToggle} title={open ? 'Collapse this group' : 'Expand this group'}
-    style={{
-      ...styles.groupHeader, display: 'flex', alignItems: 'center', gap: 5,
-      cursor: 'pointer', userSelect: 'none',
-    }}>
-    <span style={{
-      display: 'flex', flexShrink: 0, transform: open ? 'rotate(90deg)' : 'none',
-      transition: 'transform 0.12s ease',
-    }}>
-      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
-        strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
-    </span>
-    {label}
-  </div>
+// How far into a unit's box the pointer has to be for that edge to count as a split. Kept well under
+// half so the middle of a unit stays the "tab me in beside it" zone, which is where a pointer aimed
+// at a unit usually lands.
+const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
+  const vt = Math.min(34, r.height * 0.32), hl = Math.min(46, r.width * 0.34);
+  if (y - r.top < vt) return 'top';
+  if (r.bottom - y < vt) return 'bottom';
+  if (x - r.left < hl) return 'left';
+  if (r.right - x < hl) return 'right';
+  return 'center';
+};
+// Content-sized rows by default so the panel scrolls as one; a size the user dragged in makes that
+// row fixed and moves the scrolling inside it. Only slots carry a size — a split is measured by
+// whatever its own parent says.
+const flexOf = (axis: 'v' | 'h', sz?: number): string =>
+  sz ? `0 0 ${sz}px` : axis === 'h' ? '1 1 0' : '0 0 auto';
+
+// The 6-dot grip every unit wears. Dragging IT is the only way to change where a unit lives; the rest
+// of the title bar folds, pops out, or shows whatever the unit keeps up there.
+const GripDots: React.FC<{ size?: number }> = ({ size = 12 }) => (
+  <svg width={size} height={size} viewBox="0 0 12 12" fill="currentColor" style={{ display: 'block' }}>
+    <circle cx="4" cy="3" r="1.2" /><circle cx="8" cy="3" r="1.2" />
+    <circle cx="4" cy="6" r="1.2" /><circle cx="8" cy="6" r="1.2" />
+    <circle cx="4" cy="9" r="1.2" /><circle cx="8" cy="9" r="1.2" />
+  </svg>
 );
+const PopIcon: React.FC = () => (
+  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3"
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <path d="M2 5.5V2h3.5M12 8.5V12H8.5" />
+  </svg>
+);
+const DockBackIcon: React.FC = () => (
+  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3"
+    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+    <path d="M12 2H8.5M12 2v3.5M2 12h3.5M2 12V8.5" />
+  </svg>
+);
+const ZoneArrow: React.FC<{ zone: Zone }> = ({ zone }) => {
+  if (zone === 'center') return null;
+  const d = zone === 'top' ? 'M7 2v10M3.5 5.5 7 2l3.5 3.5'
+    : zone === 'bottom' ? 'M7 12V2M3.5 8.5 7 12l3.5-3.5'
+      : zone === 'left' ? 'M2 7h10M5.5 3.5 2 7l3.5 3.5'
+        : 'M12 7H2M8.5 3.5 12 7l-3.5 3.5';
+  return (
+    <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="#0a84ff" strokeWidth="1.6"
+      strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d={d} /></svg>
+  );
+};
+
+// Everything the dock chrome needs, passed down as one object so a box and a branch take the same
+// three props (the node they render, the axis their parent measures them on, this context).
+type DockCtx = {
+  bodies: Record<UnitId, React.ReactNode>;
+  heads: Partial<Record<UnitId, React.ReactNode>>;
+  open: Record<UnitId, boolean>;
+  fold: (id: UnitId) => void;
+  dock: Dock;
+  // persist=false while a pointer drag is still running — the layout lands in localStorage when the
+  // pointer comes up, not once per mousemove.
+  setDock: (next: Dock, persist?: boolean) => void;
+  drag: UnitId | null;
+  setDrag: (id: UnitId | null) => void;
+  over: { id: UnitId; zone: Zone } | null;
+  setOver: (v: { id: UnitId; zone: Zone } | null) => void;
+};
+
+// A unit's landing band: an edge lights up the half it would split off, the centre says tab group.
+const dockTabStyle = (on: boolean): React.CSSProperties => ({
+  border: 'none', background: on ? 'rgba(255,255,255,0.10)' : 'transparent',
+  color: on ? '#fff' : '#8e8e93', fontSize: 10, fontWeight: 700, padding: '2px 7px',
+  borderRadius: 6, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
+  textOverflow: 'ellipsis', maxWidth: 110,
+});
+
+const zoneBand = (z: Zone): React.CSSProperties => {
+  const base: React.CSSProperties = { position: 'absolute', pointerEvents: 'none', borderRadius: 10, background: 'rgba(10,132,255,0.18)' };
+  if (z === 'top') return { ...base, top: 0, left: 0, right: 0, height: '38%' };
+  if (z === 'bottom') return { ...base, bottom: 0, left: 0, right: 0, height: '38%' };
+  if (z === 'left') return { ...base, top: 0, bottom: 0, left: 0, width: '34%' };
+  return { ...base, top: 0, bottom: 0, right: 0, width: '34%' };
+};
+
+// One box = one slot: a single unit, or several units sharing it behind a tab strip. The box is what
+// a drop lands on and what the user resizes, so it is also the thing that carries the size.
+const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?: DockFloat }> = ({ node, ctx, axis, float }) => {
+  const ids: UnitId[] = node.t === 'u' ? [node.id] : node.ids;
+  const id = ids[node.t === 'u' ? 0 : Math.min(node.sel, ids.length - 1)];
+  const open = !!ctx.open[id];
+  const isOver = !!ctx.drag && ctx.drag !== id && !float && ctx.over?.id === id;
+  // A window is not a place a unit can land in — it is already somewhere. Re-docking happens by
+  // dragging ITS grip onto a column box, which is the same gesture as any other move.
+  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (float || !ctx.drag || ctx.drag === id) return;
+    e.preventDefault(); e.stopPropagation();
+    e.dataTransfer.dropEffect = 'move';
+    const r = e.currentTarget.getBoundingClientRect();
+    const zone = zoneOf(r, e.clientX, e.clientY);
+    if (ctx.over?.id !== id || ctx.over?.zone !== zone) ctx.setOver({ id, zone });
+  };
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (float) return;
+    const dragged = (ctx.drag || e.dataTransfer.getData('text/plain')) as UnitId;
+    if (!UNIT_IDS.includes(dragged) || dragged === id) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    ctx.setDock(dropInDock(ctx.dock, dragged, id, zoneOf(r, e.clientX, e.clientY)));
+    ctx.setOver(null);
+  };
+  // Dragging a window by its title bar moves it; the grip beside it still means "move this unit".
+  // The bar's own click folds, so a move has to suppress the click that follows it.
+  const winDrag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
+  const suppressFold = useRef(false);
+  const barDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!float || e.button !== 0 || (e.target as HTMLElement).closest('button,[draggable]')) return;
+    e.stopPropagation();
+    winDrag.current = { dx: e.clientX - float.x, dy: e.clientY - float.y, moved: false };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
+  };
+  const barMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const b = winDrag.current;
+    if (!b) return;
+    b.moved = true;
+    ctx.setDock(setFloatDock(ctx.dock, id, {
+      x: Math.round(Math.min(Math.max(8, e.clientX - b.dx), window.innerWidth - 60)),
+      y: Math.round(Math.min(Math.max(8, e.clientY - b.dy), window.innerHeight - 40)),
+    }), false);
+  };
+  const barUp = () => {
+    const b = winDrag.current;
+    if (!b) return;
+    winDrag.current = null;
+    if (b.moved) suppressFold.current = true;
+    ctx.setDock(ctx.dock);
+  };
+  const pick = (i: number) => {
+    if (node.t !== 'g') return;
+    ctx.setDock({ ...ctx.dock, tree: rewriteHolder(ctx.dock.tree, ids[i], n => n.t === 'g' ? { ...n, sel: i } : n) });
+  };
+  const head = (
+    <div className="dock-bar" style={{ ...styles.dockBar, borderBottom: open ? styles.dockBar.borderBottom : undefined }}
+      onPointerDown={barDown} onPointerMove={barMove} onPointerUp={barUp} onPointerCancel={barUp}
+      onClick={e => {
+        if (suppressFold.current) { suppressFold.current = false; return; }
+        if ((e.target as HTMLElement).closest('button,[draggable]')) return;
+        ctx.fold(id);
+      }}>
+      <span className="dock-h" draggable
+        title={'Drag onto another unit to move this one.\nAn edge splits the other one, the centre tabs them together.'}
+        onDragStart={e => { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; ctx.setDrag(id); }}
+        onDragEnd={() => { ctx.setDrag(null); ctx.setOver(null); }}
+        onClick={e => e.stopPropagation()}
+        style={styles.dockGrip}><GripDots /></span>
+      {ids.length > 1 ? (
+        <div style={styles.dockTabs}>
+          {ids.map((u, i) => (
+            <button key={u} style={dockTabStyle(u === id)} title={'Show ' + UNIT_TITLES[u] + ' in this slot'}
+              onClick={() => pick(i)}>{UNIT_TITLES[u]}</button>
+          ))}
+        </div>
+      ) : (
+        <span style={styles.dockName}>{UNIT_TITLES[id]}</span>
+      )}
+      {/* A unit's own actions are part of its body, not of its frame: a collapsed unit must not keep
+          an action that works on what the user just hid (Log, Debug, Add +). */}
+      {open && ctx.heads[id] && <span style={styles.dockHeadSlot}>{ctx.heads[id]}</span>}
+      <button className="dock-h" style={styles.dockAct}
+        title={float ? 'Dock this window back into the column' : 'Pop this unit out as a floating window'}
+        onClick={() => ctx.setDock(float ? dockBackDock(ctx.dock, id) : popOutDock(ctx.dock, id))}>
+        {float ? <DockBackIcon /> : <PopIcon />}
+      </button>
+      <button className="dock-h" style={{ ...styles.dockAct, transform: open ? 'none' : 'rotate(-90deg)' }}
+        title={open ? 'Collapse this unit' : 'Expand this unit'} onClick={() => ctx.fold(id)}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6"
+          strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+      </button>
+    </div>
+  );
+  return (
+    <div style={{
+      ...(float ? styles.dockFloatBox : styles.dockBox),
+      flex: float ? undefined : flexOf(axis, node.sz),
+      position: float ? 'fixed' : 'relative',
+      left: float ? float.x : undefined, top: float ? float.y : undefined,
+      width: float ? float.w : undefined, height: float && open ? float.h : undefined,
+      zIndex: float ? 60 : undefined,
+    }} onDragOver={onDragOver} onDrop={onDrop}>
+      {head}
+      {open && <div className="dark-scroll" style={styles.dockBody}>{ctx.bodies[id]}</div>}
+      {open && <DockEdge id={id} ctx={ctx} axis={float ? 'f' : axis} />}
+      {isOver && ctx.over!.zone === 'center' && (
+        <div style={styles.dockNoteBox}><span style={styles.dockNote}>tab group</span></div>
+      )}
+      {isOver && ctx.over!.zone !== 'center' && (
+        <div style={{ ...zoneBand(ctx.over!.zone), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <ZoneArrow zone={ctx.over!.zone} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+// One handle per unit, and it always moves the axis the unit is measured on: the bottom strip sets a
+// row's height in a column, the corner sets a column's width side by side, a window's corner both.
+const DockEdge: React.FC<{ id: UnitId; ctx: DockCtx; axis: 'v' | 'h' | 'f' }> = ({ id, ctx, axis }) => {
+  const start = useRef<{ p: number; w: number; h: number } | null>(null);
+  const down = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const box = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+    start.current = { p: axis === 'v' ? e.clientY : e.clientX, w: box.width, h: box.height };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
+  };
+  const move = (e: React.PointerEvent<HTMLDivElement>) => {
+    const s = start.current;
+    if (!s) return;
+    // persist=false while the pointer is down: a drag re-renders, it does not hammer localStorage.
+    if (axis === 'f') {
+      ctx.setDock(setFloatDock(ctx.dock, id, {
+        w: Math.max(FLOAT_MIN_W, Math.round(s.w + (e.clientX - s.p))),
+        h: Math.max(FLOAT_MIN_H, Math.round(s.h + (e.clientY - s.p))),
+      }), false);
+    } else {
+      ctx.setDock(resizeDock(ctx.dock, id, axis === 'v' ? s.h + (e.clientY - s.p) : s.w + (e.clientX - s.p)), false);
+    }
+  };
+  const up = () => { if (!start.current) return; start.current = null; ctx.setDock(ctx.dock); };
+  if (axis === 'v') {
+    return <div className="dock-edge"
+      title="Drag to fix this height - double-click to let it size to its content again"
+      style={styles.dockEdge} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+      onDoubleClick={() => ctx.setDock(resizeDock(ctx.dock, id, undefined))} />;
+  }
+  return <div className="dock-corner" title="Drag to resize"
+    style={styles.dockCorner} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />;
+};
+
+const DockBranch: React.FC<{ node: DockNode; ctx: DockCtx; axis: 'v' | 'h' }> = ({ node, ctx, axis }) => {
+  if (node.t !== 's') return <DockBox node={node} ctx={ctx} axis={axis} />;
+  const row: React.CSSProperties = {
+    display: 'flex', flexDirection: node.d === 'v' ? 'column' : 'row', gap: 8,
+    minHeight: 0, minWidth: 0, flex: flexOf(axis),
+  };
+  return <div style={row}>{node.ks.map((k, i) => <DockBranch key={i} node={k} ctx={ctx} axis={node.d} />)}</div>;
+};
+
+// The whole dock: the column's tree, plus every popped-out window (which are positioned against the
+// viewport, so they can sit over the workbench). Dropping a unit on the column's background — the gap
+// between boxes, the dead space under a short tree — pops it out, which is a second way to reach a
+// window beside the ⤢ button and needs no aiming.
+const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
+  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!ctx.drag) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (ctx.over) ctx.setOver(null);
+  };
+  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    const dragged = (ctx.drag || e.dataTransfer.getData('text/plain')) as UnitId;
+    if (!UNIT_IDS.includes(dragged)) return;
+    e.preventDefault();
+    ctx.setDock(popOutDock(ctx.dock, dragged));
+    ctx.setDrag(null); ctx.setOver(null);
+  };
+  return (
+    <div className="dark-scroll" style={styles.dockRoot} onDragOver={onDragOver} onDrop={onDrop}>
+      <DockBranch node={ctx.dock.tree} ctx={ctx} axis="v" />
+      {ctx.dock.floats.map(f => <DockBox key={f.id} node={{ t: 'u', id: f.id }} ctx={ctx} axis="v" float={f} />)}
+      <div style={styles.dockReset}>
+        <button style={styles.dockResetBtn} title="Put every unit back in the column, in order, at its own height"
+          onClick={() => ctx.setDock(defaultDock())}>Reset layout</button>
+      </div>
+    </div>
+  );
+};
+
 
 // Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
 // second right-click anywhere), which beats wiring window listeners inside an iframe.
 const ContextMenu: React.FC<{
-  x: number; y: number; items: { label: string; color?: string; onClick: () => void }[];
+  x: number; y: number; items: { label: string; color?: string; hint?: string; onClick: () => void }[];
   onClose: () => void;
 }> = ({ x, y, items, onClose }) => (
   <div style={{ position: 'fixed', inset: 0, zIndex: 80 }}
@@ -107,7 +467,7 @@ const ContextMenu: React.FC<{
       boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
     }} onClick={e => e.stopPropagation()}>
       {items.map(it => (
-        <button key={it.label} onClick={() => { it.onClick(); onClose(); }}
+        <button key={it.label} title={it.hint} onClick={() => { it.onClick(); onClose(); }}
           style={{
             display: 'block', width: '100%', textAlign: 'left', padding: '5px 9px',
             background: 'none', border: 'none', borderRadius: 6, cursor: 'pointer',
@@ -129,6 +489,11 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | '
   { kind: 'scale', label: 'Scale', color: '#5e5ce6', hint: 'Resize the working image by a ratio and snap it to the align grid (limit_pixels semantics)' },
 ];
 
+
+// One palette per block kind: the Add menu's row and the card's dot read the same entry, so a kind
+// can never be one colour in the menu and another on its card.
+const BLOCK_TINT: Record<string, string> = ADD_BLOCK_KINDS.reduce(
+  (a, o) => ({ ...a, [o.kind]: o.color }), {} as Record<string, string>);
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
@@ -169,18 +534,8 @@ const addPillStyle = (open: boolean): React.CSSProperties => ({
   borderRadius: 999, color: open ? '#fff' : 'rgba(255,255,255,0.7)',
   fontSize: 11.5, fontWeight: 600, padding: '3px 10px', cursor: 'pointer', lineHeight: 1,
 });
-// A menu, not a modal: clicking anywhere else dismisses it.
-const addMenuBackdropStyle: React.CSSProperties = { position: 'fixed', inset: 0, zIndex: 40 };
-const addMenuPanelStyle: React.CSSProperties = {
-  position: 'absolute', top: '100%', right: 0, zIndex: 41, marginTop: 4,
-  background: '#1c1c1e', border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 10,
-  padding: 4, minWidth: 152, boxShadow: '0 12px 32px rgba(0,0,0,0.55)',
-};
-const addMenuItemStyle: React.CSSProperties = {
-  display: 'block', width: '100%', textAlign: 'left', padding: '6px 10px',
-  background: 'none', border: 'none', borderRadius: 7, cursor: 'pointer',
-  fontSize: 12, fontWeight: 600,
-};
+// A menu, not a modal: both Add menus are the shared ContextMenu (see Pipeline Presets).
+
 
 const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
   // SF Symbol style SVG icons (iOS style, 24x24, stroke-based)
@@ -398,9 +753,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // Inline rename of a preset (replaces the card's select while active).
   const [renamingPresetId, setRenamingPresetId] = useState<string | null>(null);
   // The Pipeline Blocks "Add +" dropdown (the four block kinds it can append).
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The Pipeline Presets "Add +" dropdown — same control, same behaviour as the Blocks one.
-  const [presetAddOpen, setPresetAddOpen] = useState(false);
+  const [presetAddMenu, setPresetAddMenu] = useState<{ x: number; y: number } | null>(null);
   // 四块面板的折叠状态（默认全展开，改动落 localStorage）。
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(loadSections);
   const toggleSection = (k: SectionKey) => setOpenSections(prev => {
@@ -408,11 +763,23 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
     return next;
   });
-  // Preprocess Settings 里的分组折叠（Mask / Limit / Output / Dynamic Layer）。
-  // 只活在当前会话：默认全展开，折起来是临时收视线，不进 localStorage。
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(
-    { mask: true, limit: true, output: true, dynamic: true });
-  const toggleGroup = (k: string) => setOpenGroups(prev => ({ ...prev, [k]: !prev[k] }));
+  // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
+  // is the user's layout call and lives in its own key; which are collapsed is a separate one.
+  const [dock, setDockState] = useState<Dock>(loadDock);
+  const applyDock = useCallback((next: Dock, persist = true) => {
+    setDockState(next);
+    if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
+  }, []);
+  // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
+  // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
+  const [dockDrag, setDockDrag] = useState<UnitId | null>(null);
+  const [dockOver, setDockOver] = useState<{ id: UnitId; zone: Zone } | null>(null);
+  useEffect(() => {
+    const end = () => { setDockDrag(null); setDockOver(null); };
+    window.addEventListener('dragend', end);
+    window.addEventListener('drop', end);
+    return () => { window.removeEventListener('dragend', end); window.removeEventListener('drop', end); };
+  }, []);
   // 左栏宽度：拖右边缘的把手来调，把手只有 8px，所以指针一旦移出宿主文档就会被右边的
   // 工作台 iframe 吞掉 —— setPointerCapture 把整段拖动钉在把手上，才能越过 iframe 继续。
   const [panelWidth, setPanelWidth] = useState<number>(loadPanelWidth);
@@ -744,6 +1111,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .draw-resizer > i { width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
         .draw-resizer:hover > i, .draw-resizer:focus-visible > i, .draw-resizer.dragging > i { background: rgba(10,132,255,0.8); }
         .draw-resizer:focus-visible { outline: none; }
+        /* The handle is always there; only its volume is hover's. The grip and the two actions sit
+           at a quarter strength until the pointer is over the bar, so a column of units reads as
+           content first and as chrome second. */
+        .dock-bar .dock-h { opacity: 0.28; }
+        .dock-bar:hover .dock-h { opacity: 1; }
+        .dock-edge:hover { background: rgba(10,132,255,0.22); }
+        .dock-corner:hover { filter: brightness(1.6); }
       `}</style>
       {/* Sidebar — vertical icon tabs */}
       <div style={styles.sidebar}>
@@ -786,29 +1160,51 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             the layer stack and the Mask layer, so unmounting it would lose them. */}
         <div style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
           {/* Left: settings */}
-            <div className="dark-scroll" style={{ ...styles.drawSettingsPanel, width: panelWidth }}>
-              {/* Live preview of the workbench composite. The composite IS the Context Image,
-                  so this is what Run Detailer feeds on (tinted where the Mask layer is painted). */}
-                <div style={styles.contextPreviewBox}>
-                  <div style={styles.contextTitleRow}>
-                    <div style={styles.sectionTitle}>Context</div>
-                    <div style={styles.contextTitleActions}>
-                      {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
-                          （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
-                      <button
-                        style={styles.logBtn}
-                        title="Log — 最近 32 条行为记录（工作台与本页每一步的反馈）"
-                        onClick={() => setShowLog(true)}
-                      ><DbgIcon name="log" size={15} /> Log{actionLog.length ? ` · ${actionLog.length}` : ''}</button>
-                      {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
-                          各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
-                      <button
-                        style={styles.debugBtn}
-                        title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
-                        onClick={() => setShowDebug(true)}
-                      ><DbgIcon name="bug" size={15} /> Debug</button>
-                    </div>
-                  </div>
+            <div style={{ ...styles.drawSettingsPanel, width: panelWidth }}>
+              <DockPanel ctx={{
+                open: openSections, fold: toggleSection,
+                dock, setDock: applyDock,
+                drag: dockDrag, setDrag: setDockDrag,
+                over: dockOver, setOver: setDockOver,
+                heads: {
+                  context: (<>
+                    {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
+                        （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
+                    <button
+                      style={styles.logBtn}
+                      title="Log — 最近 32 条行为记录（工作台与本页每一步的反馈）"
+                      onClick={() => setShowLog(true)}
+                    ><DbgIcon name="log" size={15} /> Log{actionLog.length ? ` · ${actionLog.length}` : ''}</button>
+                    {/* Debug：打开上一次 Run / Generate 的全过程快照（prompt 链路 +
+                        各 Block 调用后数据 + 中间过程图/遮罩）。数据来自 /api/debug_trace。 */}
+                    <button
+                      style={styles.debugBtn}
+                      title="Debug — 查看上一次 Run / Generate 的全过程快照（prompt 链路、各 Block 数据、中间过程图与遮罩）"
+                      onClick={() => setShowDebug(true)}
+                    ><DbgIcon name="bug" size={15} /> Debug</button>
+                  </>),
+                  blocks: (<>
+                    {/* The menu is anchored to the viewport (ContextMenu), not to this pill: the title
+                        bar is 26px inside a box that clips, so an in-flow menu would be cut off — and
+                        with the unit collapsed there would be nothing to cut it back to. */}
+                    <button
+                      title="Append a block to this preset"
+                      onClick={e => {
+                        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                        setAddMenu(addMenu ? null : { x: r.left, y: r.bottom + 4 });
+                      }}
+                      style={addPillStyle(!!addMenu)}>Add +</button>
+                    {addMenu && (
+                      <ContextMenu x={addMenu.x} y={addMenu.y} onClose={() => setAddMenu(null)}
+                        items={ADD_BLOCK_KINDS.map(opt => ({
+                          label: opt.label, color: opt.color, hint: opt.hint, onClick: () => onAddBlock(opt.kind),
+                        }))} />
+                    )}
+                  </>),
+                },
+                bodies: {
+              context: (<>
+                <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
                   {blendPreview ? (
                     <>
@@ -829,12 +1225,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   />
                   <span style={styles.previewTintValue}>{previewTint.toFixed(2)}</span>
                 </div>
-              </div>
-              {/* PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
-                  只剩一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择）；
-                  数值覆盖搬去了 Settings 页的架构规则，按 architecture 命中。 */}
-              <SectionHeader label="Pipeline Settings" open={openSections.pipeline} onToggle={() => toggleSection('pipeline')} />
-              {openSections.pipeline && (<div style={styles.nestedSection}>
+                </div>
+              </>),
+
+              // PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
+              // 只剩一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择）；
+              // 数值覆盖搬去了 Settings 页的架构规则，按 architecture 命中。
+              pipeline: (<>
+                <div style={styles.dockCard}>
                 <div style={styles.paramRow}
                   title={'Which pipeline is loaded on the node. Picking one switches it immediately.\n'
                     + PIPELINE_DEFAULT + ' = the pipeline wired into the node input — the workbench never learns its identity, '
@@ -860,29 +1258,26 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     )}
                   </select>
                 </div>
-              </div>)}
+                </div>
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
                   Preprocess Settings 下方，随激活 tab 联动。每个 tab 就是一个 Pipeline Preset，
                   也是 Blend 工作台 Generate 弹窗里那个 enum 的选项。 */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
-                <SectionHeader label="Pipeline Presets" open={openSections.presets} onToggle={() => toggleSection('presets')} />
-                {openSections.presets && (<button
+              <div style={{ ...styles.dockSubrow, position: 'relative' }}>
+                <span>Pipeline Presets</span>
+                <button
                   title="Add a pipeline preset"
-                  onClick={() => setPresetAddOpen(v => !v)}
-                  style={addPillStyle(presetAddOpen)}>Add +</button>)}
-                {presetAddOpen && (
-                  <>
-                    <div style={addMenuBackdropStyle} onClick={() => setPresetAddOpen(false)} />
-                    <div style={addMenuPanelStyle}>
-                      <button title="An empty preset — add blocks to it below"
-                        onClick={() => { onAddBlockSet(); setPresetAddOpen(false); }}
-                        style={{ ...addMenuItemStyle, color: '#0a84ff' }}>New Preset</button>
-                    </div>
-                  </>
+                  onClick={e => {
+                    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setPresetAddMenu(presetAddMenu ? null : { x: r.left, y: r.bottom + 4 });
+                  }}
+                  style={addPillStyle(!!presetAddMenu)}>Add +</button>
+                {presetAddMenu && (
+                  <ContextMenu x={presetAddMenu.x} y={presetAddMenu.y} onClose={() => setPresetAddMenu(null)}
+                    items={[{ label: 'New Preset', color: '#0a84ff', hint: 'An empty preset — add blocks to it below', onClick: onAddBlockSet }]} />
                 )}
               </div>
-              {openSections.presets && (<div style={styles.nestedSection}>
+                <div style={styles.dockCard}>
               {/* 一个 preset 一行：名字吃满整行，右边一个 ▶ 立刻能跑这一套。 */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {blockSets.map((set, setIdx) => {
@@ -983,17 +1378,18 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   { label: 'Delete', color: '#ff6961', onClick: () => onRemoveBlockSet(target.id) },
                 ]} />;
               })()}
-              </div>)}
+                </div>
+              </>),
 
-              {/* Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
-                  block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）都在
-                  Settings 页的 DEFAULT SETTING，不按 preset 区分。 */}
-              <SectionHeader label="Preprocess Settings" open={openSections.preprocess} onToggle={() => toggleSection('preprocess')} />
-              {openSections.preprocess && (<div style={styles.nestedSection}>
+              // Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
+              // block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）都在
+              // Settings 页的 DEFAULT SETTING，不按 preset 区分。
+              preprocess: (<>
+                <div style={styles.dockCard}>
               {/* Mask — mask 预处理三件套，Enable Mask 是总闸 */}
-              <div style={styles.groupBlock}>
-              <GroupHeader label="Mask" open={openGroups.mask} onToggle={() => toggleGroup('mask')} />
-              {openGroups.mask && (<div style={styles.groupBody}>
+              <div style={styles.dockGroup}>
+              <div style={styles.dockGtitle}>Mask</div>
+              <div style={styles.dockGbody}>
               <div style={styles.paramRow}
                 title="开 = mask 预处理全开：扩张/羽化 + 按 mask 裁剪 + recover crop。关 = 这四步全部跳过（grow/blur 归零、不裁剪、不复原），产出直接落在整幅图坐标系；mask 本身仍然限制重绘区域。">
                 <label style={styles.paramLabel}>Enable Mask</label>
@@ -1023,12 +1419,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
               </div>
-              </div>)}
+              </div>
               </div>
               {/* Limit — 工作分辨率上限 */}
-              <div style={styles.groupBlock}>
-              <GroupHeader label="Limit" open={openGroups.limit} onToggle={() => toggleGroup('limit')} />
-              {openGroups.limit && (<div style={styles.groupBody}>
+              <div style={styles.dockGroup}>
+              <div style={styles.dockGtitle}>Limit</div>
+              <div style={styles.dockGbody}>
               <div style={styles.paramRow}
                 title="开 = 按 Pixels / Align 限制工作分辨率。关 = 既不缩放也不对齐，工作分辨率就是裁剪（或整幅）分辨率；Qwen 架构仍会强制 32 对齐，否则 latent / vision token 网格不接受。">
                 <label style={styles.paramLabel}>Enable Limit</label>
@@ -1038,12 +1434,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_limit', v)}
                 />
               </div>
-              </div>)}
+              </div>
               </div>
               {/* Output — 产出落盘 */}
-              <div style={styles.groupBlock}>
-              <GroupHeader label="Output" open={openGroups.output} onToggle={() => toggleGroup('output')} />
-              {openGroups.output && (<div style={styles.groupBody}>
+              <div style={styles.dockGroup}>
+              <div style={styles.dockGtitle}>Output</div>
+              <div style={styles.dockGbody}>
               <div style={styles.paramRow}
                 title="开 = 这一趟的最终产出另外存一张 PNG 到 ComfyUI 的 outputs 文件夹（detailer_00001_.png 递增命名）——整幅 Run 和图层 Generate 都算「这一趟的最终产出」，落不落盘只看这颗开关，不分流。图里带和 SnapshotPromptNode 的 Cache 完全同形的 prompt 编码（prompt / prompts / lora / prefab / program / custom_prompts / prompt_parsing / filter_* / region），所以这张图能被 Prompt 节点的 Load From Image 原样读回；其中 prompt 一项编的是这次真正生效的用户选择（标签 / 自定义 / prefab 文本——不含 pipeline 自带的 prompt，也不含 lora 触发词：触发词由 lora 条目自己提供，读回后不会重复；Generate Text 的改写只属于那一趟采样，同样不编入），其余各项编的是这次真正生效的合并选择（链里没有 Prompt/Query 块时就是 Prompt 节点的全局选择）。关 = 结果只留在画布里，不落盘。">
                 <label style={styles.paramLabel}>Enable Output</label>
@@ -1053,12 +1449,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   onChange={v => firstDetailer && updateBlockParam(firstDetailer.id, 'enable_output', v)}
                 />
               </div>
-              </div>)}
+              </div>
               </div>
               {/* Dynamic Layer — ▶ Run 分流到框选建层自动 Generate，Dynamic Layer 是总闸 */}
-              <div style={styles.groupBlock}>
-              <GroupHeader label="Dynamic Layer" open={openGroups.dynamic} onToggle={() => toggleGroup('dynamic')} />
-              {openGroups.dynamic && (<div style={styles.groupBody}>
+              <div style={styles.dockGroup}>
+              <div style={styles.dockGtitle}>Dynamic Layer</div>
+              <div style={styles.dockGbody}>
               <div style={styles.paramRow}
                 title="开 = 这个 preset 的 ▶ Run 不再直接跑整幅链：工作台进入框选模式，拖完框跳过分辨率弹窗直接建出 Dynamic Layer，并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消框选 = 什么也不跑。关 = ▶ Run 保持原来的整幅 Run。">
                 <label style={styles.paramLabel}>Dynamic Layer</label>
@@ -1088,30 +1484,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 />
               </div>
               </div>
-              </div>)}
               </div>
-              </div>)}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative' }}>
-                <SectionHeader label="Pipeline Blocks" open={openSections.blocks} onToggle={() => toggleSection('blocks')} />
-                {openSections.blocks && (<button
-                  title="Append a block to this preset"
-                  onClick={() => setAddMenuOpen(v => !v)}
-                  style={addPillStyle(addMenuOpen)}>Add +</button>)}
-                {addMenuOpen && (
-                  <>
-                    <div style={addMenuBackdropStyle} onClick={() => setAddMenuOpen(false)} />
-                    <div style={addMenuPanelStyle}>
-                      {ADD_BLOCK_KINDS.map(opt => (
-                        <button key={opt.kind}
-                          title={opt.hint}
-                          onClick={() => { onAddBlock(opt.kind); setAddMenuOpen(false); }}
-                          style={{ ...addMenuItemStyle, color: opt.color }}>{opt.label}</button>
-                      ))}
-                    </div>
-                  </>
-                )}
               </div>
-              {openSections.blocks && (<div style={styles.nestedSection}>
+                </div>
+              </>),
+              blocks: (<>
+                <div style={styles.dockCard}>
               {blocks.map((block, blockIdx) => (
                 <div key={block.id} style={{
                   background: 'rgba(255,255,255,0.03)',
@@ -1142,9 +1520,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     </div>
                     {/* Centered title. For a Query card the name doubles as the hint's host. */}
                     <span title={block.type === 'query' ? QUERY_BLOCK_HINT : undefined} style={{
-                      flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
-                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : block.type === 'tagger' ? '#ff9f0a' : block.type === 'scale' ? '#5e5ce6' : '#bf5af2',
-                    }}>{block.name}</span>
+                      flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: BLOCK_TINT[block.type] || '#bf5af2' }} />
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.82)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{block.name}</span>
+                    </span>
                     {ifaceIsMissing(block) && (
                       <span title="The bound interface no longer exists — this block will be bypassed at run time"
                         style={{
@@ -1478,7 +1858,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </div>
                 </div>
               ))}
-              </div>)}
+                </div>
+              </>),
+              },
+            }} />
             </div>
 
           {/* The column's right edge is the handle. Colours live in the .draw-resizer rules below
@@ -1505,7 +1888,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
           <iframe
             ref={blendIframeRef}
             src="/blend_node.html"
-            style={styles.blendFrame}
+            // While a unit is being dragged the frame has to stop eating the pointer: an iframe is a
+            // separate document, so dragover never bubbles out of it and a window dragged across it
+            // would simply freeze mid-flight. Same reason the resizer uses pointer capture.
+            style={{ ...styles.blendFrame, pointerEvents: dockDrag ? 'none' : undefined }}
             title="Blend"
             allow="clipboard-write"
             onLoad={() => applyPreviewTint(previewTint)}
@@ -2345,22 +2731,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     cursor: 'col-resize', background: 'transparent', touchAction: 'none' as const,
   },
+  // The column no longer scrolls and no longer spaces its own children — the dock does both: rows
+  // scroll inside their box once the user pins a height, and the tree's gaps are the dock's.
   drawSettingsPanel: {
-    width: PANEL_W_DEFAULT, flexShrink: 0, padding: 16, display: 'flex', flexDirection: 'column', gap: 10,
-    background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflowY: 'auto',
+    width: PANEL_W_DEFAULT, flexShrink: 0, padding: '10px', display: 'flex', flexDirection: 'column',
+    background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflow: 'hidden',
   },
-  sectionTitle: { fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
-  // 折叠块的正文容器：继承设置面板原来的行距（面板本身 gap 10，行与行也隔 10），
-  // 否则把一段包进 div 会让行贴在一起。
-  nestedSection: { display: 'flex', flexDirection: 'column', gap: 10 },
-  // Section 内的分组（GroupHeader + 正文）：头与正文之间收窄到 6，正文整体缩进一道
-  // 左边线，让「这些行属于这个组」不用靠标题文字也能看出来。
-  groupBlock: { display: 'flex', flexDirection: 'column', gap: 6 },
-  groupHeader: { fontSize: 10.5, fontWeight: 700, color: 'rgba(255,255,255,0.42)', textTransform: 'uppercase', letterSpacing: 0.6 },
-  groupBody: { display: 'flex', flexDirection: 'column', gap: 10, paddingLeft: 12, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
-  // Context 标题 + 右侧的 Log / Debug 两颗按钮同行；按钮抱成一组贴右，标题留在左边。
-  contextTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
-  contextTitleActions: { display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' },
   logBtn: {
     display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
     fontSize: 10.5, fontWeight: 600, padding: '2px 9px', borderRadius: 999, cursor: 'pointer',
@@ -2373,7 +2749,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(255,159,10,0.14)', border: '0.5px solid rgba(255,159,10,0.42)',
     color: '#ff9f0a', lineHeight: 1.5,
   },
-  contextPreviewBox: { marginBottom: 12 },
   previewTintRow: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 },
   previewTintLabel: { fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 58 },
   previewTintRange: { flex: 1, minWidth: 0, accentColor: '#ff3b30' },
@@ -2383,9 +2758,9 @@ const styles: Record<string, React.CSSProperties> = {
   blendPreviewEmpty: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12, textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontSize: 11 } as React.CSSProperties,
   blendPreviewBadge: { position: 'absolute', right: 6, bottom: 6, padding: '2px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.78)', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
-  paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
+  paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   paramSelect: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
-  paramInput: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
+  paramInput: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
 
   // ── Settings 页的 iOS inset-grouped 词汇（系统色，不再手调白叠加）：卡片 #1c1c1e、分节标题
   // #8e8e93 大写、内缩分隔线 rgba(84,84,88,.55)、强调 #0a84ff、告警 #ff9f0a。Draw 页那套
@@ -2407,6 +2782,36 @@ const styles: Record<string, React.CSSProperties> = {
   iosHandle: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.55)', cursor: 'grab' },
   iosChev: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.45)', transition: 'transform 0.12s ease' },
   iosAddRow: { display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: 'transparent', border: 'none', outline: 'none', color: '#0a84ff', fontSize: 13.5, cursor: 'pointer' },
+
+  // ── Dock 的骨架 ──：一颗单元 = 卡片 + 标题把手。iOS 词汇（#1c1c1e 卡片、发丝内缩分隔、
+  // #8e8e93 大写小标题、#0a84ff 强调）从这里开始就是全页通用，不再只属于 Settings 页。
+  dockBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
+  dockFloatBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.14)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', boxShadow: '0 12px 34px rgba(0,0,0,0.62)' },
+  dockBar: { display: 'flex', alignItems: 'center', gap: 6, height: 26, padding: '0 4px', flexShrink: 0, background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)', userSelect: 'none' },
+  dockGrip: { flexShrink: 0, display: 'flex', alignItems: 'center', cursor: 'grab', color: '#8e8e93' },
+  dockName: { flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  dockTabs: { flex: 1, minWidth: 0, display: 'flex', gap: 2, overflow: 'hidden' },
+  dockAct: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0, transition: 'transform 0.12s ease' },
+  dockBody: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
+  // 一条下沿 = 列里的高度，一个角 = 并排时的宽 / 浮窗的宽高。hover 才现出蓝，靠 .dock-edge 规则。
+  dockEdge: { height: 6, flexShrink: 0, cursor: 'row-resize', borderTop: '0.5px solid rgba(84,84,88,0.55)' },
+  dockCorner: { position: 'absolute', right: 1, bottom: 1, width: 12, height: 12, cursor: 'nwse-resize', background: 'linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.26) 50%)' },
+  dockNoteBox: { position: 'absolute', inset: 0, zIndex: 3, boxShadow: 'inset 0 0 0 2px #0a84ff', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
+  dockNote: { fontSize: 10, fontWeight: 700, color: '#0a84ff', background: 'rgba(10,132,255,0.14)', padding: '2px 8px', borderRadius: 999 },
+  // The scroller is the dock root, not the panel: a row the user pinned a height to has to scroll
+  // inside its own box, and that only works if its parent gives it a definite height.
+  dockRoot: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', paddingRight: 2 },
+  dockReset: { display: 'flex', justifyContent: 'center', padding: '2px 0 6px', flexShrink: 0 },
+  dockResetBtn: { background: 'none', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 999, color: 'rgba(255,255,255,0.45)', fontSize: 10, fontWeight: 600, padding: '3px 12px', cursor: 'pointer' },
+  // A body's own interior cards/rows: same skin as the Settings page, one level inside a unit.
+  dockCard: { background: 'rgba(28,28,30,0.72)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '2px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
+  dockSubrow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', padding: '2px 2px 0' },
+  dockGtitle: { fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.42)', borderBottom: '0.5px solid rgba(84,84,88,0.55)', paddingBottom: 3 },
+  dockGbody: { display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
+  dockGroup: { display: 'flex', flexDirection: 'column', gap: 6 },
+  // A unit's own actions live in a positioned slot so an absolute child (a menu) has something tight
+  // to hang from rather than the whole box.
+  dockHeadSlot: { position: 'relative', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 
