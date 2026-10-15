@@ -463,3 +463,78 @@ export function firstDetailerFlag(
   const dp = fd ? (fd.params as DetailerBlockParams) : undefined;
   return dp ? (dp[key] ?? dflt) : dflt;
 }
+
+/** 工作台里打开着的每一份 .cud。文档本体、历史、合成全在 iframe 里，宿主只画它的 dock 窗口：
+ *  `uid` 既是文档单元的名字来源(doc:<uid>)，也是 activate / close 的句柄。工作台页面重载后
+ *  uid 从 1 重新发，所以记住的摆位从不替一个文档留窗口。 */
+export type BlendDoc = { uid: number; name: string; kind: string | null; dirty: boolean; path: string | null };
+
+/** 一次播报的全量快照：开着的文档、哪一份是当前活动文档、以及有没有一个 IO 动作把文档锁住
+ *  （锁住 = File 的六个动作全灰）。 */
+export type BlendDocs = { activeUid: number | null; busy: boolean; docs: BlendDoc[] };
+
+export const EMPTY_BLEND_DOCS: BlendDocs = { activeUid: null, busy: false, docs: [] };
+
+/** 宿主顶栏与文档窗口 tab 发回工作台的文档动作 —— 与 iframe 里 DOC_COMMANDS 的八个键一一对应。 */
+export type BlendDocCommand = 'new' | 'load' | 'save' | 'save-as' | 'export-png' | 'import' | 'activate' | 'close';
+
+/** 工作台把图层 / 工具 / 属性面板交还给宿主渲染时要读的状态：一次播报的全量快照。
+ *  标题条那句说明在注册表里，不在这里 —— 页面只在这句真会随状态改写时（Brush 落点、Mask 目标）
+ *  才把它补进快照，那一格搬过来时再加字段，不预先修一条没人读的通道。 */
+/** 一颗笔形工具（Brush / Eraser 同族）的读数：模式决定哪几根旋钮有可见差别，所以三块面板共用一条。 */
+export type BlendPen = { mode: string; size: number; strength: number; center: number; edge: number; gamma: number };
+
+export type BlendUi = {
+  /** 工作台当前工具，页面 `mode` 那颗变量的镜像（'transform' | 'rect' | 'lasso' | 'pan' | 'zoom'
+   *  | 'rotate' | 'canvasModify' | 'none' …）。一颗变量喂六个高亮，所以只镜像它本身。 */
+  mode: string;
+  canvas: { w: number; h: number };
+  transform: { readout: string };
+  /** 缩放 · 角度 ·（翻转），页面把三个数拼成一句的那串。 */
+  view: { readout: string };
+  /** 这一笔落在哪一层/哪一面，页面原来用三个谓词现拼 tooltip 那句；措辞搬到 React 一侧，
+   *  所以快照只给谓词，不给整句 —— 一句说明留一个作者。`ring` 是色环此刻的取值，页面算光标环
+   *  用的是同一句 paintRGBA()，两边因此不会各说一套。 */
+  paint: { maskLayer: boolean; decal: boolean; tool: string; selection: boolean; ring: string };
+  tools: { brush: BlendPen; eraser: BlendPen; bucket: { tolerance: number; continuous: boolean; allLayers: boolean } };
+  /** 调色盘那一格的全部状态。刻意不传 HSV —— 传的是页面自己那五个变量的原样（两颗 hex、两个
+   *  Alpha、一份单独存着的色相方向、盘式），盘上怎么画、拖出什么颜色，由边界这一侧用**同一份**
+   *  算术算出来（workbench/colour.ts，函数体逐字节相同，门禁相比）。灰/黑/白反解不出方向，所以
+   *  hue 必须单独传 —— 少了它，拖到黑再拖回来方向就丢了，那是页面早年踩过的坑。 */
+  color: { fg: string; bg: string; fgAlpha: number; bgAlpha: number; hue: number; mode: string };
+  /** Mask 那一格（页面原来的 #maskSection + #maskDock 合成一格）。它选中与否读的是 paint.maskLayer，
+   *  这一格里没有第二份。剩下的两颗仍是真值源：那颗层的显示开关，和它那张覆盖面 —— 覆盖面是这一页
+   *  绘制引擎里的活位图，宿主页画不出它，所以像素必须过边界，这是这一列里第一格需要传像素的面。
+   *  `still` 只在面真的动过时才重编（按 surface 身份 + paintGen 失效），编成 84 边长的 PNG；没动过时
+   *  快照里那句字符串一字不差，queueBlendUi 的等值去重因此整条都不发。 */
+  mask: { visible: boolean; still: string };
+};
+
+export const EMPTY_BLEND_UI: BlendUi = {
+  mode: 'none', canvas: { w: 0, h: 0 }, transform: { readout: '' }, view: { readout: '' },
+  paint: { maskLayer: false, decal: false, tool: 'brush', selection: false, ring: '' },
+  tools: {
+    brush: { mode: 'exponential', size: 40, strength: 1, center: 1, edge: 0, gamma: 2 },
+    eraser: { mode: 'exponential', size: 60, strength: 1, center: 1, edge: 0, gamma: 2 },
+    bucket: { tolerance: 0.2, continuous: true, allLayers: false },
+  },
+  // 与页面那三颗初值一字不差：第一条快照没到之前，格子也得报一个真颜色。
+  color: { fg: '#ff3b30', bg: '#ffffff', fgAlpha: 1, bgAlpha: 1, hue: 0, mode: 'rgba' },
+  // 这一格选中与否读的是 paint.maskLayer（它就是 selectedId === MASK_LAYER_ID），所以这里不再存第二份。
+  mask: { visible: true, still: '' },
+};
+
+/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应。旋钮类带 value，
+ *  开关类不带（点了就是点一下，没有取值）。 */
+export type BlendUiAction =
+  | 'canvas-size' | 'canvas-modify'
+  | 'transform-adjust' | 'transform-fill'
+  | 'select-rect' | 'select-lasso' | 'select-all' | 'select-none'
+  | 'view-pan' | 'view-zoom' | 'view-rotate' | 'view-fit' | 'view-reset'
+  | 'view-zoom-in' | 'view-zoom-out' | 'view-rot-ccw' | 'view-rot-cw' | 'view-flip'
+  | 'brush-mode' | 'brush-size' | 'brush-strength' | 'brush-center' | 'brush-edge' | 'brush-gamma'
+  | 'eraser-mode' | 'eraser-size' | 'eraser-strength' | 'eraser-center' | 'eraser-edge' | 'eraser-gamma'
+  | 'bucket-tolerance' | 'bucket-continuous' | 'bucket-all-layers'
+  | 'paint-color' | 'paint-alpha' | 'paint-hue' | 'paint-mode' | 'paint-swap'
+  | 'mask-invert' | 'mask-layer-invert' | 'mask-layer-full' | 'mask-layer-clear'
+  | 'mask-layer-eye' | 'mask-layer-select';

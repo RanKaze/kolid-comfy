@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey } from './types';
-import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, firstDetailerFlag } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendPen } from './types';
+import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
+import { setBlendUi } from './workbench/store';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -80,6 +81,23 @@ const App: React.FC = () => {
   // The Blend workbench stays mounted for the whole session: it owns the layer stack and the
   // Mask layer, which would be lost if React unmounted it on every tab switch.
   const blendIframeRef = useRef<HTMLIFrameElement>(null);
+  // The documents the workbench holds open, as the host draws them: one dock window each, one of them
+  // the live one. The iframe owns them — this is only the mirror it re-sends whenever the list, the
+  // active one or the IO lock changes.
+  const [blendDocs, setBlendDocs] = useState<BlendDocs>(EMPTY_BLEND_DOCS);
+  // The last frame each document showed before it stopped being the live one. The engine is one per
+  // page, so this is all a background window can show until the engine is scoped per document.
+  const [docStills, setDocStills] = useState<Record<number, string>>({});
+  const sendDocCommand = useCallback((action: BlendDocCommand, uid?: number) => {
+    blendIframeRef.current?.contentWindow?.postMessage(
+      { type: 'blend-doc-command', action, uid: uid === undefined ? null : uid }, '*');
+  }, []);
+  // 图层 / 工具 / 属性面板搬进宿主之后，控件按下的那一下发这一条；页面里那张 UI_COMMANDS 表是它唯一
+  // 的落点 —— 一个动作仍然只有一个执行处，只是按下的人换了地方。旋钮多带一个取值：滑到哪就是哪，
+  // 页面对它做的和被删掉的那颗 <input> 做的是同一行调用。
+  const sendBlendUiCommand = useCallback((action: BlendUiAction, value?: number | boolean | string) => {
+    blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-ui-command', action, value }, '*');
+  }, []);
   const stagingRef = useRef<StagingItem[]>([]);
   useEffect(() => { stagingRef.current = staging; }, [staging]);
   // Which detailer result has already been handed to the workbench. The done branch below is
@@ -482,6 +500,9 @@ const App: React.FC = () => {
    */
   const handleBlendAction = useCallback(async (body: Record<string, any>) => {
     setError(null);
+    // Several document windows can be open now, so a run has to say which canvas its pixels came out
+    // of. The workbench stamps the document it was looking at into the payload; this only reads it out.
+    if (body?.doc?.name) pushLog(`Run on 「${body.doc.name}」`);
     const reply = (success: boolean, extra: Record<string, any> = {}) => {
       blendIframeRef.current?.contentWindow?.postMessage(
         { type: 'blend-action-result', action: body?.action, success, ...extra }, '*');
@@ -567,7 +588,7 @@ const App: React.FC = () => {
       setError('Blend action error: ' + e.message);
       reply(false, { error: e.message });
     }
-  }, [refreshStaging, syncPrompt]);
+  }, [refreshStaging, syncPrompt, pushLog]);
 
   /**
    * Generate on a single layer, driven from the layer row's context menu.
@@ -582,6 +603,7 @@ const App: React.FC = () => {
    */
   const handleLayerGenerate = useCallback(async (body: Record<string, any>) => {
     setError(null);
+    if (body?.doc?.name) pushLog(`Generate on 「${body.doc.name}」`);
     const layerId = Number(body.layer_id);
     const reply = (success: boolean, extra: Record<string, any> = {}) => {
       blendIframeRef.current?.contentWindow?.postMessage(
@@ -627,7 +649,7 @@ const App: React.FC = () => {
       setError('Generate error: ' + e.message);
       reply(false, { error: e.message });
     }
-  }, [syncPrompt]);
+  }, [syncPrompt, pushLog]);
 
   /**
    * 用户在 ref image 弹窗里补完图：把选中的 staging id 追加进工作台 Extra Prompt（持久化，
@@ -816,6 +838,77 @@ const App: React.FC = () => {
         const t = typeof event.data.text === 'string' ? event.data.text : '';
         const k = event.data.kind === 'success' || event.data.kind === 'error' ? event.data.kind : '';
         pushLog(t, k);
+      } else if (event.data?.type === 'blend-docs') {
+        // The workbench's document list, its live one and its IO lock, in one announcement — the host
+        // draws a dock window per document and greys File while a .cud is being read or written.
+        const docs: BlendDoc[] = Array.isArray(event.data.docs) ? event.data.docs : [];
+        setBlendDocs({
+          activeUid: typeof event.data.activeUid === 'number' ? event.data.activeUid : null,
+          busy: event.data.busy === true,
+          docs,
+        });
+        // A closed document's kept frame goes with it: the workbench hands its uids out again from 1
+        // when its page reloads, and a fresh window must not open on some other project's last frame.
+        setDocStills(prev => {
+          const open = new Set(docs.map(d => d.uid));
+          const stale = Object.keys(prev).map(Number).filter(uid => !open.has(uid));
+          if (!stale.length) return prev;
+          const next = { ...prev };
+          for (const uid of stale) delete next[uid];
+          return next;
+        });
+      } else if (event.data?.type === 'blend-doc-still') {
+        const uid = typeof event.data.uid === 'number' ? event.data.uid : 0;
+        const image = typeof event.data.image === 'string' ? event.data.image : '';
+        if (!uid || !image) return;
+        setDocStills(prev => ({ ...prev, [uid]: image }));
+      } else if (event.data?.type === 'blend-ui') {
+        // 工作台面板的状态快照。页面那边等值去过重才发，所以这里换掉就算数；画布和整页都不订阅它，
+        // 只有读了这份快照的那几格正文会重绘 —— 拖动中每帧都在变的读数因此打扰不到采样器。
+        // 这是一条跨 iframe 的边界，所以逐格取值：读不出来的当作没说过，回默认而不是回 0。
+        const dec = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+        const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : 0);
+        const str = (v: unknown) => (typeof v === 'string' ? v : '');
+        const penOf = (p: Partial<BlendPen> | undefined, d: BlendPen): BlendPen => ({
+          mode: typeof p?.mode === 'string' ? p.mode : d.mode,
+          size: dec(p?.size, d.size), strength: dec(p?.strength, d.strength),
+          center: dec(p?.center, d.center), edge: dec(p?.edge, d.edge), gamma: dec(p?.gamma, d.gamma),
+        });
+        const ui = event.data;
+        const base = EMPTY_BLEND_UI;
+        setBlendUi({
+          mode: str(ui.mode) || 'none',
+          canvas: { w: num(ui.canvas?.w), h: num(ui.canvas?.h) },
+          transform: { readout: str(ui.transform?.readout) },
+          view: { readout: str(ui.view?.readout) },
+          paint: {
+            maskLayer: ui.paint?.maskLayer === true, decal: ui.paint?.decal === true,
+            tool: str(ui.paint?.tool) || 'brush', selection: ui.paint?.selection === true,
+            ring: str(ui.paint?.ring),
+          },
+          tools: {
+            brush: penOf(ui.tools?.brush, base.tools.brush),
+            eraser: penOf(ui.tools?.eraser, base.tools.eraser),
+            bucket: {
+              tolerance: dec(ui.tools?.bucket?.tolerance, base.tools.bucket.tolerance),
+              continuous: ui.tools?.bucket?.continuous === true,
+              allLayers: ui.tools?.bucket?.allLayers === true,
+            },
+          },
+          color: {
+            fg: str(ui.color?.fg) || base.color.fg, bg: str(ui.color?.bg) || base.color.bg,
+            fgAlpha: dec(ui.color?.fgAlpha, base.color.fgAlpha),
+            bgAlpha: dec(ui.color?.bgAlpha, base.color.bgAlpha),
+            hue: dec(ui.color?.hue, base.color.hue),
+            mode: str(ui.color?.mode) || 'rgba',
+          },
+          // 覆盖面那张图读不出来就当没说过（空 = 占位），显示开关缺字段时回默认的那颗 true 而不是 false：
+          // 一条旧快照没有 mask 这一格，不代表那一层是隐藏的。
+          mask: {
+            visible: ui.mask ? ui.mask.visible !== false : base.mask.visible,
+            still: str(ui.mask?.still),
+          },
+        });
       }
     };
     window.addEventListener('message', handler);
@@ -1268,6 +1361,10 @@ const App: React.FC = () => {
         onFinish={handleFinish}
         onCloseFinishDialog={() => setShowFinishDialog(false)}
         blendIframeRef={blendIframeRef}
+        blendDocs={blendDocs}
+        docStills={docStills}
+        onDocCommand={sendDocCommand}
+        onBlendUiCommand={sendBlendUiCommand}
         interfaces={interfaces}
         interfaceMeta={interfaceMeta}
         onChangeInterfaceMeta={handleChangeInterfaceMeta}

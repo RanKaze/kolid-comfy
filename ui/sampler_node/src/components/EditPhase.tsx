@@ -1,8 +1,11 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
+import { type DockRules, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, syncDocUnits } from '../dock/model';
+import { DockPanel } from '../dock/DockView';
+import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies } from '../workbench/registry';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -10,7 +13,7 @@ const tabInputStyle: React.CSSProperties = {
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
 
-// The Draw tab's four dock units each collapse independently. Default is "all open" — a collapsed
+// The Draw tab's dock units each collapse independently. Default is "all open" — a collapsed
 // unit is a choice the user made, so it is remembered; a browser that refuses localStorage just gets
 // the default every time, which is not worth an error banner over. Both tabs are mounted at once (the
 // Draw tab only hides with display:none), so this ONE store is read by the host and shared down.
@@ -18,13 +21,76 @@ const tabInputStyle: React.CSSProperties = {
 // which screen shows), and what it does remember rides its own key — see SETTINGS_UI_STORE.
 // `pipeline` is one unit that carries BOTH the pipeline enum and the preset list — the dock moves
 // whole units around, and those two are one decision ("which chain am I editing"), not two.
-type UnitId = 'context' | 'pipeline' | 'preprocess' | 'blocks';
+// The workbench itself is one UNIT PER OPEN DOCUMENT, named by that document and living or dying with
+// it — so `canvas` below is the canvas-resolution block that came out of the page's tool column, not
+// the painting surface. `toolbar` is the strip the document actions used to live in — a dock unit
+// like any other (it docks, tabs, pops out), only its skin is a row of buttons and it is as tall as
+// that row rather than as tall as the space left to it.
 type SectionKey = UnitId;
-const UNIT_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
-const UNIT_TITLES: Record<UnitId, string> = {
-  context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess', blocks: 'Pipeline Blocks',
+// 宿主自己的五格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
+const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'preprocess', 'blocks'];
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS];
+const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
+const UNIT_TITLES: Record<string, string> = {
+  toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess',
+  blocks: 'Pipeline Blocks',
+  ...WORKBENCH_TITLES,
 };
-const SECTION_KEYS: SectionKey[] = UNIT_IDS;
+const COLUMN_W = 340;
+// 工作台那一列原来就是 280 宽（页面的 `SIDE_W_DEFAULT`），搬过来照抄这颗数。
+const RIGHT_W = 280;
+const DOCK_STORE = 'sampler.drawDock';
+// A canvas window pops out at a working size. A settings card gets the dock's default 300px strip;
+// a project the user dragged out of the tab strip wants to be painted on.
+const DOC_POP_W = 760, DOC_POP_H = 560;
+// What the dock knows about the page, rebuilt whenever the workbench announces a different set of
+// documents: the panels — the host's five and every workbench unit lifted out of the page — are fixed,
+// a document unit (`doc:<uid>`) is known only while that .cud is open. A document window is the same
+// KIND of thing as a settings unit — it splits sideways, tabs beside another window, pops out over
+// them — so it wears the canvas skin (its content owns the box), takes a share of its split instead of
+// collapsing to a content height it does not have, and is hidden with display:none rather than
+// unmounted, because its body IS the document the user is working on.
+const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
+  const owners = new Set(docs.map(d => docUnit(d.uid)));
+  const byUnit = new Map(docs.map(d => [docUnit(d.uid), d] as const));
+  const isDoc = (id: UnitId) => owners.has(id);
+  return {
+    store: DOCK_STORE,
+    panels: PANEL_IDS,
+    known: (id: UnitId) => PANEL_IDS.includes(id) || isDoc(id),
+    // The trailing dot is the unsaved mark: a window has to say whether what is on screen is what is
+    // on disk, and the tab strip shows the same string as the single-unit title bar.
+    title: (id: UnitId) => {
+      const d = byUnit.get(id);
+      return d ? d.name + (d.dirty ? ' ●' : '') : UNIT_TITLES[id] ?? id;
+    },
+    keepMounted: isDoc,
+    // A document window never folds: its fold would be stored under a uid the workbench re-issues from
+    // 1 on its next boot, and a collapsed canvas box leaves the live frame with nowhere to be. Its title
+    // bar already has a job — it says which project the workbench is running.
+    foldable: (id: UnitId) => !isDoc(id),
+    fullBleed: (id: UnitId) => isDoc(id) || id === 'toolbar',
+    grows: isDoc,
+    top: 'toolbar',
+    column: COLUMN_IDS,
+    columnW: COLUMN_W,
+    // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里。
+    right: WORKBENCH_PANEL_IDS,
+    rightW: RIGHT_W,
+  };
+};
+// The document actions, in the order the retired `#fileMenu` listed them. Their tooltips are that
+// menu's, carried over word for word — only Load's had to change, because a .cud no longer opens as a
+// tab of the workbench but as a window of its own.
+const FILE_ACTIONS: { action: BlendDocCommand; label: string; title: string }[] = [
+  { action: 'new', label: 'New', title: 'New project — a blank document in its own window' },
+  { action: 'load', label: 'Load', title: 'Load a .cud document. It opens as a new project window beside the one you are editing.' },
+  { action: 'save', label: 'Save', title: 'Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.' },
+  { action: 'save-as', label: 'Save As', title: 'Save As: write the whole context to a file you pick, and the project becomes bound to it' },
+  { action: 'export-png', label: 'Export PNG', title: 'Export the composite as a PNG: visible LAYERS flattened at canvas resolution, transparency kept — guidances are references, they stay out of the exported image' },
+  { action: 'import', label: 'Import', title: 'Import images and PSD files as new layers. A .cud document belongs to Load.' },
+];
+const SECTION_KEYS: SectionKey[] = PANEL_IDS;
 const SECTIONS_STORE = 'sampler.editSections';
 const sectionsAllOpen = (): Record<SectionKey, boolean> =>
   SECTION_KEYS.reduce((a, k) => ({ ...a, [k]: true }), {} as Record<SectionKey, boolean>);
@@ -37,418 +103,6 @@ function loadSections(): Record<SectionKey, boolean> {
   } catch { /* unreadable store => all open */ }
   return open;
 }
-
-// The Draw tab's left column: a width the user sets by dragging its right edge. The default is
-// roomier than the old 300 — a dock unit's title bar carries a name, its actions and a chevron on
-// one line, and 300 started clipping them. Same storage policy as the collapsed units: a browser
-// that refuses localStorage just gets the default every time.
-const PANEL_W_STORE = 'sampler.drawPanelWidth';
-const PANEL_W_DEFAULT = 340, PANEL_W_MIN = 280, PANEL_W_MAX = 640, PANEL_W_STEP = 20;
-const clampPanelWidth = (w: number) => Math.min(PANEL_W_MAX, Math.max(PANEL_W_MIN, w));
-function loadPanelWidth(): number {
-  try {
-    const saved = parseFloat(localStorage.getItem(PANEL_W_STORE) || '');
-    if (isFinite(saved)) return clampPanelWidth(saved);
-  } catch { /* unreadable store => default */ }
-  return PANEL_W_DEFAULT;
-}
-
-// ── THE DOCK ────────────────────────────────────────────────────────────────────────────────
-// Where a unit sits is the user's call: stacked in a column, side by side, several units sharing one
-// slot behind a tab strip, or popped out as a window over the workbench. The tree answers only
-// "who lives where and how big"; what a unit contains stays in EditPhase — which is also why these
-// operations are plain functions over a Dock and can be exercised without a DOM.
-// `sz` is the size the user dragged this node to along its PARENT split's axis; absent means
-// "take what is left", so the default column is four content-sized rows and the panel scrolls.
-type DockSlot = { t: 'u'; id: UnitId; sz?: number }
-  | { t: 'g'; ids: UnitId[]; sel: number; sz?: number };
-type DockNode = DockSlot | { t: 's'; d: 'v' | 'h'; ks: DockNode[] };
-// A popped-out unit lives in viewport coordinates: it has to be able to sit on top of the
-// workbench iframe, which is outside the settings column.
-type DockFloat = { id: UnitId; x: number; y: number; w: number; h: number };
-type Dock = { tree: DockNode; floats: DockFloat[] };
-const DOCK_STORE = 'sampler.drawDock';
-const DOCK_MIN_SZ = 96, DOCK_MAX_SZ = 1200;
-const FLOAT_W = 300, FLOAT_MIN_W = 220, FLOAT_MIN_H = 60;
-const clampSz = (n: number) => Math.min(DOCK_MAX_SZ, Math.max(DOCK_MIN_SZ, Math.round(n)));
-const defaultDock = (): Dock => ({
-  tree: { t: 's', d: 'v', ks: UNIT_IDS.map(id => ({ t: 'u', id }) as DockNode) },
-  floats: [],
-});
-const dockUnits = (n: DockNode): UnitId[] =>
-  n.t === 'u' ? [n.id] : n.t === 'g' ? n.ids : n.ks.flatMap(dockUnits);
-// A layout is only a layout if every unit appears exactly once somewhere — tree or floating. Anything
-// else (a hand-edited store, a future fifth unit) falls back to the default instead of rendering a
-// hole in the panel.
-function loadDock(): Dock {
-  const fallback = defaultDock();
-  try {
-    const raw = localStorage.getItem(DOCK_STORE);
-    if (!raw) return fallback;
-    const saved = JSON.parse(raw);
-    const ids = dockUnits(saved.tree).concat((saved.floats || []).map((f: DockFloat) => f.id));
-    if (ids.length !== UNIT_IDS.length || UNIT_IDS.some(u => ids.filter(i => i === u).length !== 1)) return fallback;
-    return { tree: saved.tree, floats: Array.isArray(saved.floats) ? saved.floats : [] };
-  } catch { return fallback; }
-}
-const holds = (n: DockNode, id: UnitId): boolean =>
-  (n.t === 'u' && n.id === id) || (n.t === 'g' && n.ids.includes(id));
-// Take a unit out of the tree, collapsing whatever its removal leaves behind (an empty branch, or a
-// split that is down to one child — a one-child split is just the child).
-function detach(n: DockNode, id: UnitId): DockNode | null {
-  if (n.t === 'u') return n.id === id ? null : n;
-  if (n.t === 'g') {
-    const ids = n.ids.filter(i => i !== id);
-    if (!ids.length) return null;
-    if (ids.length === 1) return { t: 'u', id: ids[0] };
-    return { ...n, ids, sel: Math.min(n.sel, ids.length - 1) };
-  }
-  const ks = n.ks.map(k => detach(k, id)).filter((k): k is DockNode => !!k);
-  if (!ks.length) return null;
-  if (ks.length === 1) return ks[0];
-  return { ...n, ks };
-}
-// Rewrite the node that directly owns `id` (a leaf, or the tab group it belongs to).
-function rewriteHolder(n: DockNode, id: UnitId, fn: (holder: DockNode) => DockNode): DockNode {
-  if (holds(n, id)) return fn(n);
-  if (n.t === 's') return { ...n, ks: n.ks.map(k => rewriteHolder(k, id, fn)) };
-  return n;
-}
-// Drop `dragged` on the unit `targetId` at `zone`. Edges split (reusing the nearest ancestor split
-// that already runs that way, so repeated drops make a flat row rather than a spiral of nesting);
-// the centre tabs it in beside the target.
-type Zone = 'top' | 'bottom' | 'left' | 'right' | 'center';
-const zoneAxis = (z: Zone): 'v' | 'h' => (z === 'left' || z === 'right' ? 'h' : 'v');
-function placeInTree(n: DockNode, id: UnitId, axis: 'v' | 'h', before: boolean, leaf: DockNode): DockNode {
-  if (holds(n, id)) return { t: 's', d: axis, ks: before ? [leaf, n] : [n, leaf] };
-  if (n.t === 's') {
-    if (n.d === axis) {
-      const i = n.ks.findIndex(k => holds(k, id));
-      if (i >= 0) {
-        const ks = [...n.ks];
-        ks.splice(before ? i : i + 1, 0, leaf);
-        return { ...n, ks };
-      }
-    }
-    return { ...n, ks: n.ks.map(k => placeInTree(k, id, axis, before, leaf)) };
-  }
-  return n;
-}
-const dropInDock = (dock: Dock, dragged: UnitId, targetId: UnitId, zone: Zone): Dock => {
-  if (dragged === targetId) return dock;
-  const rest: Dock = { tree: detach(dock.tree, dragged) || dock.tree, floats: dock.floats.filter(f => f.id !== dragged) };
-  if (zone === 'center') {
-    const g: DockNode = { t: 'g', ids: [targetId, dragged], sel: 1 };
-    return { ...rest, tree: rewriteHolder(rest.tree, targetId, n => n.t === 'g' ? { ...n, ids: [...n.ids, dragged], sel: n.ids.length } : g) };
-  }
-  const axis = zoneAxis(zone);
-  return { ...rest, tree: placeInTree(rest.tree, targetId, axis, zone === 'top' || zone === 'left', { t: 'u', id: dragged }) };
-};
-const floatOf = (dock: Dock, id: UnitId) => dock.floats.find(f => f.id === id);
-// The first pop-out lands to the right of the column; each further one cascades so several windows
-// stay readable instead of stacking on top of each other.
-const floatSpot = (n: number, x: number, y: number): { x: number; y: number } => ({
-  x: Math.round(Math.min(Math.max(8, x), Math.max(8, window.innerWidth - FLOAT_W - 8))),
-  y: Math.round(Math.min(Math.max(8, y + n * 22), Math.max(8, window.innerHeight - 120))),
-});
-const popOutDock = (dock: Dock, id: UnitId, x?: number, y?: number): Dock => {
-  if (floatOf(dock, id)) return dock;
-  const n = dock.floats.length;
-  const spot = floatSpot(n, x ?? (window.innerWidth - FLOAT_W - 40), y ?? 90);
-  const f: DockFloat = { id, ...spot, w: FLOAT_W, h: 320 };
-  return { tree: detach(dock.tree, id) || dock.tree, floats: [...dock.floats, f] };
-};
-const setFloatDock = (dock: Dock, id: UnitId, patch: Partial<DockFloat>): Dock => ({
-  ...dock,
-  floats: dock.floats.map(f => f.id === id ? { ...f, ...patch } : f),
-});
-// Putting a unit back means the last row of the column — the place the user can see it from.
-const dockBackDock = (dock: Dock, id: UnitId): Dock => {
-  const floats = dock.floats.filter(f => f.id !== id);
-  const leaf: DockNode = { t: 'u', id };
-  const tree: DockNode = dock.tree.t === 's' && dock.tree.d === 'v' ? { ...dock.tree, ks: [...dock.tree.ks, leaf] } : { t: 's', d: 'v', ks: [dock.tree, leaf] };
-  return { tree: detach(tree, id) || tree, floats };
-};
-const resizeDock = (dock: Dock, id: UnitId, sz: number | undefined): Dock => ({
-  ...dock, tree: rewriteHolder(dock.tree, id, n => n.t === 's' ? n : { ...n, sz: sz === undefined ? undefined : clampSz(sz) }),
-});
-
-// How far into a unit's box the pointer has to be for that edge to count as a split. Kept well under
-// half so the middle of a unit stays the "tab me in beside it" zone, which is where a pointer aimed
-// at a unit usually lands.
-const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
-  const vt = Math.min(34, r.height * 0.32), hl = Math.min(46, r.width * 0.34);
-  if (y - r.top < vt) return 'top';
-  if (r.bottom - y < vt) return 'bottom';
-  if (x - r.left < hl) return 'left';
-  if (r.right - x < hl) return 'right';
-  return 'center';
-};
-// Content-sized rows by default so the panel scrolls as one; a size the user dragged in makes that
-// row fixed and moves the scrolling inside it. Only slots carry a size — a split is measured by
-// whatever its own parent says.
-const flexOf = (axis: 'v' | 'h', sz?: number): string =>
-  sz ? `0 0 ${sz}px` : axis === 'h' ? '1 1 0' : '0 0 auto';
-
-// The 6-dot grip every unit wears. Dragging IT is the only way to change where a unit lives; the rest
-// of the title bar folds, pops out, or shows whatever the unit keeps up there.
-const GripDots: React.FC<{ size?: number }> = ({ size = 12 }) => (
-  <svg width={size} height={size} viewBox="0 0 12 12" fill="currentColor" style={{ display: 'block' }}>
-    <circle cx="4" cy="3" r="1.2" /><circle cx="8" cy="3" r="1.2" />
-    <circle cx="4" cy="6" r="1.2" /><circle cx="8" cy="6" r="1.2" />
-    <circle cx="4" cy="9" r="1.2" /><circle cx="8" cy="9" r="1.2" />
-  </svg>
-);
-const PopIcon: React.FC = () => (
-  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3"
-    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
-    <path d="M2 5.5V2h3.5M12 8.5V12H8.5" />
-  </svg>
-);
-const DockBackIcon: React.FC = () => (
-  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3"
-    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
-    <path d="M12 2H8.5M12 2v3.5M2 12h3.5M2 12V8.5" />
-  </svg>
-);
-const ZoneArrow: React.FC<{ zone: Zone }> = ({ zone }) => {
-  if (zone === 'center') return null;
-  const d = zone === 'top' ? 'M7 2v10M3.5 5.5 7 2l3.5 3.5'
-    : zone === 'bottom' ? 'M7 12V2M3.5 8.5 7 12l3.5-3.5'
-      : zone === 'left' ? 'M2 7h10M5.5 3.5 2 7l3.5 3.5'
-        : 'M12 7H2M8.5 3.5 12 7l-3.5 3.5';
-  return (
-    <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="#0a84ff" strokeWidth="1.6"
-      strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><path d={d} /></svg>
-  );
-};
-
-// Everything the dock chrome needs, passed down as one object so a box and a branch take the same
-// three props (the node they render, the axis their parent measures them on, this context).
-type DockCtx = {
-  bodies: Record<UnitId, React.ReactNode>;
-  heads: Partial<Record<UnitId, React.ReactNode>>;
-  open: Record<UnitId, boolean>;
-  fold: (id: UnitId) => void;
-  dock: Dock;
-  // persist=false while a pointer drag is still running — the layout lands in localStorage when the
-  // pointer comes up, not once per mousemove.
-  setDock: (next: Dock, persist?: boolean) => void;
-  drag: UnitId | null;
-  setDrag: (id: UnitId | null) => void;
-  over: { id: UnitId; zone: Zone } | null;
-  setOver: (v: { id: UnitId; zone: Zone } | null) => void;
-};
-
-// A unit's landing band: an edge lights up the half it would split off, the centre says tab group.
-const dockTabStyle = (on: boolean): React.CSSProperties => ({
-  border: 'none', background: on ? 'rgba(255,255,255,0.10)' : 'transparent',
-  color: on ? '#fff' : '#8e8e93', fontSize: 10, fontWeight: 700, padding: '2px 7px',
-  borderRadius: 6, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
-  textOverflow: 'ellipsis', maxWidth: 110,
-});
-
-const zoneBand = (z: Zone): React.CSSProperties => {
-  const base: React.CSSProperties = { position: 'absolute', pointerEvents: 'none', borderRadius: 10, background: 'rgba(10,132,255,0.18)' };
-  if (z === 'top') return { ...base, top: 0, left: 0, right: 0, height: '38%' };
-  if (z === 'bottom') return { ...base, bottom: 0, left: 0, right: 0, height: '38%' };
-  if (z === 'left') return { ...base, top: 0, bottom: 0, left: 0, width: '34%' };
-  return { ...base, top: 0, bottom: 0, right: 0, width: '34%' };
-};
-
-// One box = one slot: a single unit, or several units sharing it behind a tab strip. The box is what
-// a drop lands on and what the user resizes, so it is also the thing that carries the size.
-const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?: DockFloat }> = ({ node, ctx, axis, float }) => {
-  const ids: UnitId[] = node.t === 'u' ? [node.id] : node.ids;
-  const id = ids[node.t === 'u' ? 0 : Math.min(node.sel, ids.length - 1)];
-  const open = !!ctx.open[id];
-  const isOver = !!ctx.drag && ctx.drag !== id && !float && ctx.over?.id === id;
-  // A window is not a place a unit can land in — it is already somewhere. Re-docking happens by
-  // dragging ITS grip onto a column box, which is the same gesture as any other move.
-  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (float || !ctx.drag || ctx.drag === id) return;
-    e.preventDefault(); e.stopPropagation();
-    e.dataTransfer.dropEffect = 'move';
-    const r = e.currentTarget.getBoundingClientRect();
-    const zone = zoneOf(r, e.clientX, e.clientY);
-    if (ctx.over?.id !== id || ctx.over?.zone !== zone) ctx.setOver({ id, zone });
-  };
-  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    if (float) return;
-    const dragged = (ctx.drag || e.dataTransfer.getData('text/plain')) as UnitId;
-    if (!UNIT_IDS.includes(dragged) || dragged === id) return;
-    e.preventDefault(); e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
-    ctx.setDock(dropInDock(ctx.dock, dragged, id, zoneOf(r, e.clientX, e.clientY)));
-    ctx.setOver(null);
-  };
-  // Dragging a window by its title bar moves it; the grip beside it still means "move this unit".
-  // The bar's own click folds, so a move has to suppress the click that follows it.
-  const winDrag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
-  const suppressFold = useRef(false);
-  const barDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!float || e.button !== 0 || (e.target as HTMLElement).closest('button,[draggable]')) return;
-    e.stopPropagation();
-    winDrag.current = { dx: e.clientX - float.x, dy: e.clientY - float.y, moved: false };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
-  };
-  const barMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const b = winDrag.current;
-    if (!b) return;
-    b.moved = true;
-    ctx.setDock(setFloatDock(ctx.dock, id, {
-      x: Math.round(Math.min(Math.max(8, e.clientX - b.dx), window.innerWidth - 60)),
-      y: Math.round(Math.min(Math.max(8, e.clientY - b.dy), window.innerHeight - 40)),
-    }), false);
-  };
-  const barUp = () => {
-    const b = winDrag.current;
-    if (!b) return;
-    winDrag.current = null;
-    if (b.moved) suppressFold.current = true;
-    ctx.setDock(ctx.dock);
-  };
-  const pick = (i: number) => {
-    if (node.t !== 'g') return;
-    ctx.setDock({ ...ctx.dock, tree: rewriteHolder(ctx.dock.tree, ids[i], n => n.t === 'g' ? { ...n, sel: i } : n) });
-  };
-  const head = (
-    <div className="dock-bar" style={{ ...styles.dockBar, borderBottom: open ? styles.dockBar.borderBottom : undefined }}
-      onPointerDown={barDown} onPointerMove={barMove} onPointerUp={barUp} onPointerCancel={barUp}
-      onClick={e => {
-        if (suppressFold.current) { suppressFold.current = false; return; }
-        if ((e.target as HTMLElement).closest('button,[draggable]')) return;
-        ctx.fold(id);
-      }}>
-      <span className="dock-h" draggable
-        title={'Drag onto another unit to move this one.\nAn edge splits the other one, the centre tabs them together.'}
-        onDragStart={e => { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; ctx.setDrag(id); }}
-        onDragEnd={() => { ctx.setDrag(null); ctx.setOver(null); }}
-        onClick={e => e.stopPropagation()}
-        style={styles.dockGrip}><GripDots /></span>
-      {ids.length > 1 ? (
-        <div style={styles.dockTabs}>
-          {ids.map((u, i) => (
-            <button key={u} style={dockTabStyle(u === id)} title={'Show ' + UNIT_TITLES[u] + ' in this slot'}
-              onClick={() => pick(i)}>{UNIT_TITLES[u]}</button>
-          ))}
-        </div>
-      ) : (
-        <span style={styles.dockName}>{UNIT_TITLES[id]}</span>
-      )}
-      {/* A unit's own actions are part of its body, not of its frame: a collapsed unit must not keep
-          an action that works on what the user just hid (Log, Debug, Add +). */}
-      {open && ctx.heads[id] && <span style={styles.dockHeadSlot}>{ctx.heads[id]}</span>}
-      <button className="dock-h" style={styles.dockAct}
-        title={float ? 'Dock this window back into the column' : 'Pop this unit out as a floating window'}
-        onClick={() => ctx.setDock(float ? dockBackDock(ctx.dock, id) : popOutDock(ctx.dock, id))}>
-        {float ? <DockBackIcon /> : <PopIcon />}
-      </button>
-      <button className="dock-h" style={{ ...styles.dockAct, transform: open ? 'none' : 'rotate(-90deg)' }}
-        title={open ? 'Collapse this unit' : 'Expand this unit'} onClick={() => ctx.fold(id)}>
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6"
-          strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
-      </button>
-    </div>
-  );
-  return (
-    <div style={{
-      ...(float ? styles.dockFloatBox : styles.dockBox),
-      flex: float ? undefined : flexOf(axis, node.sz),
-      position: float ? 'fixed' : 'relative',
-      left: float ? float.x : undefined, top: float ? float.y : undefined,
-      width: float ? float.w : undefined, height: float && open ? float.h : undefined,
-      zIndex: float ? 60 : undefined,
-    }} onDragOver={onDragOver} onDrop={onDrop}>
-      {head}
-      {open && <div className="dark-scroll" style={styles.dockBody}>{ctx.bodies[id]}</div>}
-      {open && <DockEdge id={id} ctx={ctx} axis={float ? 'f' : axis} />}
-      {isOver && ctx.over!.zone === 'center' && (
-        <div style={styles.dockNoteBox}><span style={styles.dockNote}>tab group</span></div>
-      )}
-      {isOver && ctx.over!.zone !== 'center' && (
-        <div style={{ ...zoneBand(ctx.over!.zone), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <ZoneArrow zone={ctx.over!.zone} />
-        </div>
-      )}
-    </div>
-  );
-};
-
-// One handle per unit, and it always moves the axis the unit is measured on: the bottom strip sets a
-// row's height in a column, the corner sets a column's width side by side, a window's corner both.
-const DockEdge: React.FC<{ id: UnitId; ctx: DockCtx; axis: 'v' | 'h' | 'f' }> = ({ id, ctx, axis }) => {
-  const start = useRef<{ p: number; w: number; h: number } | null>(null);
-  const down = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault(); e.stopPropagation();
-    const box = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
-    start.current = { p: axis === 'v' ? e.clientY : e.clientX, w: box.width, h: box.height };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
-  };
-  const move = (e: React.PointerEvent<HTMLDivElement>) => {
-    const s = start.current;
-    if (!s) return;
-    // persist=false while the pointer is down: a drag re-renders, it does not hammer localStorage.
-    if (axis === 'f') {
-      ctx.setDock(setFloatDock(ctx.dock, id, {
-        w: Math.max(FLOAT_MIN_W, Math.round(s.w + (e.clientX - s.p))),
-        h: Math.max(FLOAT_MIN_H, Math.round(s.h + (e.clientY - s.p))),
-      }), false);
-    } else {
-      ctx.setDock(resizeDock(ctx.dock, id, axis === 'v' ? s.h + (e.clientY - s.p) : s.w + (e.clientX - s.p)), false);
-    }
-  };
-  const up = () => { if (!start.current) return; start.current = null; ctx.setDock(ctx.dock); };
-  if (axis === 'v') {
-    return <div className="dock-edge"
-      title="Drag to fix this height - double-click to let it size to its content again"
-      style={styles.dockEdge} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
-      onDoubleClick={() => ctx.setDock(resizeDock(ctx.dock, id, undefined))} />;
-  }
-  return <div className="dock-corner" title="Drag to resize"
-    style={styles.dockCorner} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} />;
-};
-
-const DockBranch: React.FC<{ node: DockNode; ctx: DockCtx; axis: 'v' | 'h' }> = ({ node, ctx, axis }) => {
-  if (node.t !== 's') return <DockBox node={node} ctx={ctx} axis={axis} />;
-  const row: React.CSSProperties = {
-    display: 'flex', flexDirection: node.d === 'v' ? 'column' : 'row', gap: 8,
-    minHeight: 0, minWidth: 0, flex: flexOf(axis),
-  };
-  return <div style={row}>{node.ks.map((k, i) => <DockBranch key={i} node={k} ctx={ctx} axis={node.d} />)}</div>;
-};
-
-// The whole dock: the column's tree, plus every popped-out window (which are positioned against the
-// viewport, so they can sit over the workbench). Dropping a unit on the column's background — the gap
-// between boxes, the dead space under a short tree — pops it out, which is a second way to reach a
-// window beside the ⤢ button and needs no aiming.
-const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
-  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    if (!ctx.drag) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (ctx.over) ctx.setOver(null);
-  };
-  const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    const dragged = (ctx.drag || e.dataTransfer.getData('text/plain')) as UnitId;
-    if (!UNIT_IDS.includes(dragged)) return;
-    e.preventDefault();
-    ctx.setDock(popOutDock(ctx.dock, dragged));
-    ctx.setDrag(null); ctx.setOver(null);
-  };
-  return (
-    <div className="dark-scroll" style={styles.dockRoot} onDragOver={onDragOver} onDrop={onDrop}>
-      <DockBranch node={ctx.dock.tree} ctx={ctx} axis="v" />
-      {ctx.dock.floats.map(f => <DockBox key={f.id} node={{ t: 'u', id: f.id }} ctx={ctx} axis="v" float={f} />)}
-      <div style={styles.dockReset}>
-        <button style={styles.dockResetBtn} title="Put every unit back in the column, in order, at its own height"
-          onClick={() => ctx.setDock(defaultDock())}>Reset layout</button>
-      </div>
-    </div>
-  );
-};
-
 
 // Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
 // second right-click anywhere), which beats wiring window listeners inside an iframe.
@@ -711,6 +365,14 @@ interface EditPhaseProps {
   /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
    *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
   actionLog: ActionLogEntry[];
+  /** 工作台报上来的打开中的文档：一颗 dock 窗口一个，`activeUid` 那才是工作流真正执行的那块画布。 */
+  blendDocs: BlendDocs;
+  /** 每个非激活文档最后一次画出来的那一帧（uid → PNG data URL）。切换前由工作台自己拍下来。 */
+  docStills: Record<number, string>;
+  /** 文档动作的唯一出口：File 栏的六个按钮、点标题条激活、tab 上的 ✕ 关闭，全走这条消息。 */
+  onDocCommand: (action: BlendDocCommand, uid?: number) => void;
+  /** 工作台面板搬进宿主之后，控件按下的那一下走这条消息回到页面 —— 页面里那张 UI_COMMANDS 表是它唯一的落点。 */
+  onBlendUiCommand: (action: BlendUiAction, value?: number | boolean | string) => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -727,7 +389,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   interfaces, interfaceMeta, onChangeInterfaceMeta,
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
-  actionLog,
+  actionLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -765,11 +427,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   });
   // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
-  const [dock, setDockState] = useState<Dock>(loadDock);
+  const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
+  const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
   const applyDock = useCallback((next: Dock, persist = true) => {
     setDockState(next);
     if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
   }, []);
+  // The dock holds a window for every document the workbench has open and nothing more: a closed one
+  // loses its node, a newly loaded one gets a window, one the user already placed keeps its place.
+  // The workbench is the only thing that knows which projects exist, so this is where that knowledge
+  // enters the layout — the dock model itself never learns what a .cud is.
+  const openDocUnits = useMemo(() => blendDocs.docs.map(d => docUnit(d.uid)), [blendDocs]);
+  useEffect(() => {
+    const next = syncDocUnits(dock, openDocUnits);
+    if (next !== dock) applyDock(next);
+  }, [dock, openDocUnits, applyDock]);
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<UnitId | null>(null);
@@ -780,42 +452,69 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     window.addEventListener('drop', end);
     return () => { window.removeEventListener('dragend', end); window.removeEventListener('drop', end); };
   }, []);
-  // 左栏宽度：拖右边缘的把手来调，把手只有 8px，所以指针一旦移出宿主文档就会被右边的
-  // 工作台 iframe 吞掉 —— setPointerCapture 把整段拖动钉在把手上，才能越过 iframe 继续。
-  const [panelWidth, setPanelWidth] = useState<number>(loadPanelWidth);
-  const [panelResizing, setPanelResizing] = useState(false);
-  const panelDragRef = useRef<{ x: number; w: number } | null>(null);
-  const panelWidthRef = useRef(panelWidth);
-  const applyPanelWidth = (w: number, persist: boolean) => {
-    const next = clampPanelWidth(w);
-    panelWidthRef.current = next;
-    setPanelWidth(next);
-    if (persist) { try { localStorage.setItem(PANEL_W_STORE, String(next)); } catch { /* in-memory only */ } }
-  };
-  const onPanelResizeDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    panelDragRef.current = { x: e.clientX, w: panelWidthRef.current };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* fall back to bubbling events */ }
-    setPanelResizing(true);
-  };
-  const onPanelResizeMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = panelDragRef.current;
-    if (d) applyPanelWidth(d.w + (e.clientX - d.x), false);
-  };
-  const onPanelResizeUp = () => {
-    if (!panelDragRef.current) return;
-    panelDragRef.current = null;
-    setPanelResizing(false);
-    applyPanelWidth(panelWidthRef.current, true);
-  };
-  const onPanelResizeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'ArrowLeft') applyPanelWidth(panelWidthRef.current - PANEL_W_STEP, true);
-    else if (e.key === 'ArrowRight') applyPanelWidth(panelWidthRef.current + PANEL_W_STEP, true);
-    else if (e.key === 'Home' || e.key === 'Enter') applyPanelWidth(PANEL_W_DEFAULT, true);
-    else return;
-    e.preventDefault();
-  };
+  // ── THE LIVE WORKBENCH ──
+  // One frame for the whole page, because it owns every open project: an <iframe> moved in the DOM
+  // reloads, and a reload throws all of them away. So the frame is never re-parented — it is pinned
+  // over the ACTIVE document's body box instead, and every other window shows the last frame that
+  // document painted before the swap. That is what lets several canvas windows exist on one engine
+  // without ever mounting a second one (the engine itself goes per-document in the next stage).
+  const activeUnit = blendDocs.activeUid === null ? null : docUnit(blendDocs.activeUid);
+  const drawRef = useRef<HTMLDivElement | null>(null);
+  const frameBodyEls = useRef(new Map<UnitId, HTMLDivElement>());
+  const [frameRect, setFrameRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const measureFrame = useCallback(() => {
+    const host = drawRef.current;
+    const body = activeUnit ? frameBodyEls.current.get(activeUnit) : undefined;
+    // No box, or a box that is folded away (display:none measures zero): the frame stays mounted, it
+    // just has nowhere to be. Unmounting it here would reload the workbench.
+    let next: { x: number; y: number; w: number; h: number } | null = null;
+    if (host && body && body.clientWidth > 0 && body.clientHeight > 0) {
+      const a = body.getBoundingClientRect(), b = host.getBoundingClientRect();
+      next = { x: Math.round(a.left - b.left), y: Math.round(a.top - b.top), w: Math.round(a.width), h: Math.round(a.height) };
+    }
+    // Only a real change may re-render, or measuring would feed itself.
+    setFrameRect(prev => prev?.x === next?.x && prev?.y === next?.y && prev?.w === next?.w && prev?.h === next?.h ? prev : next);
+  }, [activeUnit]);
+  // Every render re-measures: a dock gesture that moves the active box is a re-render, and reading one
+  // rect is cheaper than enumerating every way the layout can move.
+  useLayoutEffect(measureFrame);
+  useEffect(() => {
+    // …but the page living inside a ComfyUI widget also moves and resizes with no render at all, so the
+    // box and its host are watched directly.
+    const els = [drawRef.current, activeUnit ? frameBodyEls.current.get(activeUnit) : null]
+      .filter((el): el is HTMLDivElement => !!el);
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => measureFrame());
+    els.forEach(el => ro?.observe(el));
+    window.addEventListener('resize', measureFrame);
+    return () => { ro?.disconnect(); window.removeEventListener('resize', measureFrame); };
+  }, [measureFrame, activeUnit]);
+  // What each open document's window shows: the live frame floats OVER the active one (see below), so
+  // its own box is only the dark ground beneath it; every other window holds the last frame that
+  // project painted before the workbench switched away from it. A document the workbench never showed
+  // — a 3D scene, whose canvas is not a composite this page can flatten — is simply dark.
+  const docBodies: Record<UnitId, React.ReactNode> = {};
+  for (const d of blendDocs.docs) {
+    const still = d.uid === blendDocs.activeUid ? null : docStills[d.uid];
+    docBodies[docUnit(d.uid)] = still
+      ? <img src={still} alt={d.name} style={styles.docStill} />
+      : <div style={styles.docVoid} />;
+  }
+  // A window closes from its own title bar — one entry, and the workbench is the only thing that knows
+  // whether the project on screen still owes a save.
+  const docHeads: Record<UnitId, React.ReactNode> = {};
+  for (const d of blendDocs.docs) {
+    docHeads[docUnit(d.uid)] = (
+      <button style={styles.docClose} title={'Close 「' + d.name + '」'}
+        onClick={() => onDocCommand('close', d.uid)}>
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+          strokeWidth="1.6" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
+      </button>
+    );
+  }
+  // The frame is painted into this page's stacking order; a popped-out window is at the float layer, so
+  // following one means going above it — otherwise the window's own background hides its canvas.
+  const activeIsWindow = !!activeUnit && dock.floats.some(f => f.id === activeUnit);
+  // 左栏不再有自己的把手：它就是 dock 树里的一个嵌套，宽度跟着画布那枚单元的边角一起改。
   // 右键某个 preset 行才出现的菜单；null = 没有菜单。
   const [presetMenu, setPresetMenu] = useState<{ x: number; y: number; setId: string } | null>(null);
   const [renamingPresetValue, setRenamingPresetValue] = useState('');
@@ -1108,9 +807,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .ios-val::-webkit-outer-spin-button, .ios-val::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         .ios-val { -moz-appearance: textfield; appearance: textfield; }
         .ios-val:focus { border-bottom-color: #0a84ff; }
-        .draw-resizer > i { width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
-        .draw-resizer:hover > i, .draw-resizer:focus-visible > i, .draw-resizer.dragging > i { background: rgba(10,132,255,0.8); }
-        .draw-resizer:focus-visible { outline: none; }
         /* The handle is always there; only its volume is hover's. The grip and the two actions sit
            at a quarter strength until the pointer is over the bar, so a column of units reads as
            content first and as chrome second. */
@@ -1158,15 +854,33 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
         {/* Blend workbench — this tab stays mounted for the whole session: the iframe owns
             the layer stack and the Mask layer, so unmounting it would lose them. */}
-        <div style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
-          {/* Left: settings */}
-            <div style={{ ...styles.drawSettingsPanel, width: panelWidth }}>
-              <DockPanel ctx={{
-                open: openSections, fold: toggleSection,
+        <div ref={drawRef} style={{ ...styles.drawLayout, display: tab === 'draw' ? 'flex' : 'none' }}>
+          {/* One dock, the whole page: the settings column and the canvas are two sides of a split the
+              user restacks, not a panel bolted beside a frame. */}
+          <DockPanel ctx={{
+                rules: dockRules,
+                isOpen: (id: UnitId) => openSections[id] !== false, fold: toggleSection,
                 dock, setDock: applyDock,
                 drag: dockDrag, setDrag: setDockDrag,
                 over: dockOver, setOver: setDockOver,
+                // 文档窗口的标题条是"切到这个项目"，不是折叠它：整页只有一颗画布是激活的，
+                // 折叠另有右边那颗箭头。面板照旧点了就折。
+                activate: (id: UnitId) => {
+                  const uid = docUidOf(id);
+                  if (uid !== null) onDocCommand('activate', Number(uid));
+                },
+                badge: (id: UnitId) => id === activeUnit
+                  ? <span style={styles.activeDot} title="Active — the workflows run on this canvas" />
+                  : null,
+                hint: (id: UnitId) => WORKBENCH_HINTS[id],
+                popSize: (id: UnitId) => docUidOf(id) ? { w: DOC_POP_W, h: DOC_POP_H } : null,
+                bodyRef: (id: UnitId, el: HTMLDivElement | null) => {
+                  if (el) frameBodyEls.current.set(id, el); else frameBodyEls.current.delete(id);
+                },
                 heads: {
+                  // A window closes from its own title bar — one entry, and the workbench is the only
+                  // thing that knows whether the project on screen is worth saving first.
+                  ...docHeads,
                   context: (<>
                     {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
                         （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
@@ -1203,6 +917,20 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                   </>),
                 },
                 bodies: {
+              // 顶栏那一排就是原来 File 菜单的六项，一项一个入口，说明全在 tooltip 里。
+              // 工作台读写档的时候整排变灰（`cudBusy`），跟原来那六个按钮的禁用是同一颗开关。
+              toolbar: (
+                <div style={styles.fileBar}>
+                  {FILE_ACTIONS.map(a => (
+                    <button key={a.action} title={a.title} disabled={blendDocs.busy}
+                      style={{ ...styles.fileBtn, opacity: blendDocs.busy ? 0.38 : 1, cursor: blendDocs.busy ? 'default' : 'pointer' }}
+                      onClick={() => onDocCommand(a.action)}>{a.label}</button>
+                  ))}
+                </div>
+              ),
+              ...docBodies,
+              // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。
+              ...workbenchBodies(onBlendUiCommand),
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
@@ -1860,53 +1588,46 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               ))}
                 </div>
               </>),
-              },
-            }} />
-            </div>
+            },
+          }} />
 
-          {/* The column's right edge is the handle. Colours live in the .draw-resizer rules below
-              (an inline style cannot express :hover), the geometry stays in `styles`. */}
-          <div
-            className={`draw-resizer${panelResizing ? ' dragging' : ''}`}
-            style={styles.panelResizer}
-            role="separator" aria-orientation="vertical" tabIndex={0}
-            aria-label="Settings panel width" aria-valuenow={panelWidth}
-            aria-valuemin={PANEL_W_MIN} aria-valuemax={PANEL_W_MAX}
-            title="Drag to resize this panel — double-click (or Home) restores the default width"
-            onPointerDown={onPanelResizeDown}
-            onPointerMove={onPanelResizeMove}
-            onPointerUp={onPanelResizeUp}
-            onPointerCancel={onPanelResizeUp}
-            onDoubleClick={() => applyPanelWidth(PANEL_W_DEFAULT, true)}
-            onKeyDown={onPanelResizeKey}
-          >
-            <i />
+          {/* ── the live workbench ──
+              One frame, always mounted, pinned over whichever window holds the active document. It is
+              NOT rendered into that window: an <iframe> that changes parent reloads, and a reload throws
+              every open project out with it. So the dock gives up the box's rect and this layer wears
+              it — which is also why a folded or tabbed-away active window parks the frame off-screen
+              instead of hiding it (hidden would leave the workbench running blind; unmounted would kill
+              it). While a unit is being dragged the frame stops eating the pointer and fades back: an
+              iframe is a separate document, so dragover never bubbles out of it and the landing bands
+              the dock draws underneath would be invisible behind a full-opacity canvas. */}
+          <div style={{
+            ...styles.frameLayer,
+            left: frameRect?.x ?? -12000, top: frameRect?.y ?? -12000,
+            width: frameRect?.w ?? 900, height: frameRect?.h ?? 640,
+            zIndex: activeIsWindow ? 61 : 5,
+            opacity: frameRect && !dockDrag ? 1 : 0,
+            pointerEvents: dockDrag ? 'none' : undefined,
+          }}>
+            <iframe
+              ref={blendIframeRef}
+              src="/blend_node.html"
+              style={styles.blendFrame}
+              title="Blend"
+              allow="clipboard-write"
+              onLoad={() => applyPreviewTint(previewTint)}
+              onMouseEnter={() => {
+                // Keyboard shortcuts inside the workbench (notably the Ctrl mask reveal, and
+                // Ctrl+Z / Esc) only fire when the iframe document holds focus — the iframe owns
+                // its own window, so a host-level key listener never sees its keys. Focus drifts
+                // out to the surrounding controls constantly, and then the modifier keys silently
+                // stop working. Handing focus back the moment the pointer enters the frame keeps
+                // focus in sync with where the user is actually working.
+                // Guarded so it never steals focus from an open dialog.
+                if (document.activeElement?.tagName === 'INPUT') return;
+                blendIframeRef.current?.contentWindow?.focus();
+              }}
+            />
           </div>
-
-          {/* Right: the workbench. Its canvas composite IS the Context Image, and the
-              pure Mask layer is the mask sent to the backend. */}
-          <iframe
-            ref={blendIframeRef}
-            src="/blend_node.html"
-            // While a unit is being dragged the frame has to stop eating the pointer: an iframe is a
-            // separate document, so dragover never bubbles out of it and a window dragged across it
-            // would simply freeze mid-flight. Same reason the resizer uses pointer capture.
-            style={{ ...styles.blendFrame, pointerEvents: dockDrag ? 'none' : undefined }}
-            title="Blend"
-            allow="clipboard-write"
-            onLoad={() => applyPreviewTint(previewTint)}
-            onMouseEnter={() => {
-              // Keyboard shortcuts inside the workbench (notably the Ctrl mask reveal, and
-              // Ctrl+Z / Esc) only fire when the iframe document holds focus — the iframe owns
-              // its own window, so a host-level key listener never sees its keys. Focus drifts
-              // out to the surrounding controls constantly, and then the modifier keys silently
-              // stop working. Handing focus back the moment the pointer enters the frame keeps
-              // focus in sync with where the user is actually working.
-              // Guarded so it never steals focus from an open dialog.
-              if (document.activeElement?.tagName === 'INPUT') return;
-              blendIframeRef.current?.contentWindow?.focus();
-            }}
-          />
         </div>
 
         {/* Interface — package-driven sub-graph execution */}
@@ -2721,21 +2442,28 @@ const styles: Record<string, React.CSSProperties> = {
   // Tag cards — flex:1 equal width
 
 
-  // Draw tab layout: left settings + right main area
-  drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' },
-  blendFrame: { flex: 1, minWidth: 0, alignSelf: 'stretch', height: '100%', border: 'none', background: '#0d0d0d', display: 'block' },
-  // The handle itself is 8px of nothing with a 3px pill in the middle; the negative margins pull it
-  // over the panel border and the iframe edge so dragging it never costs the layout a pixel of width.
-  panelResizer: {
-    width: 8, flexShrink: 0, alignSelf: 'stretch', margin: '0 -4px', zIndex: 5,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    cursor: 'col-resize', background: 'transparent', touchAction: 'none' as const,
-  },
-  // The column no longer scrolls and no longer spaces its own children — the dock does both: rows
-  // scroll inside their box once the user pins a height, and the tree's gaps are the dock's.
-  drawSettingsPanel: {
-    width: PANEL_W_DEFAULT, flexShrink: 0, padding: '10px', display: 'flex', flexDirection: 'column',
-    background: 'rgba(28,28,30,0.4)', borderRight: '0.5px solid rgba(255,255,255,0.06)', overflow: 'hidden',
+  // Draw tab layout: ONE dock, edge to edge. The column, the canvas and every popped-out window are
+  // placed by the dock's own tree, so there is no panel width, no separator and no side of the page
+  // the layout model does not know about.
+  drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', padding: 10, position: 'relative' },
+  blendFrame: { width: '100%', height: '100%', border: 'none', background: '#0d0d0d', display: 'block' },
+  // The single live workbench, pinned over the window that holds the active document. The layer is the
+  // size of that box (the frame can never be moved INTO the box — reparenting an iframe reloads it),
+  // so it is clipped and rounded like the box it stands in for.
+  frameLayer: { position: 'absolute', overflow: 'hidden', borderRadius: 10, background: '#0d0d0d', transition: 'opacity 0.12s ease' },
+  // A window that is not showing the live frame: the last frame that project painted, kept at its own
+  // aspect on the same ground so switching projects does not flash a different background.
+  docStill: { width: '100%', height: '100%', objectFit: 'contain', display: 'block', background: '#0d0d0d' },
+  docVoid: { flex: 1, minHeight: 0, background: '#0d0d0d' },
+  activeDot: { width: 7, height: 7, borderRadius: 999, background: '#30d158', flexShrink: 0, display: 'inline-block', marginRight: 5, verticalAlign: 'middle', boxShadow: '0 0 6px rgba(48,209,88,0.6)' },
+  docClose: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0 },
+  // The toolbar unit is a row of the File actions — the same pill vocabulary as the sibling units'
+  // head buttons, laid out left to right instead of hanging off a title.
+  fileBar: { display: 'flex', alignItems: 'center', gap: 5, padding: '5px 6px', flexWrap: 'wrap' },
+  fileBtn: {
+    fontSize: 10.5, fontWeight: 600, padding: '3px 10px', borderRadius: 999, cursor: 'pointer',
+    background: 'rgba(255,255,255,0.07)', border: '0.5px solid rgba(255,255,255,0.16)',
+    color: 'rgba(255,255,255,0.82)', lineHeight: 1.5,
   },
   logBtn: {
     display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0,
@@ -2783,35 +2511,13 @@ const styles: Record<string, React.CSSProperties> = {
   iosChev: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.45)', transition: 'transform 0.12s ease' },
   iosAddRow: { display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: 'transparent', border: 'none', outline: 'none', color: '#0a84ff', fontSize: 13.5, cursor: 'pointer' },
 
-  // ── Dock 的骨架 ──：一颗单元 = 卡片 + 标题把手。iOS 词汇（#1c1c1e 卡片、发丝内缩分隔、
-  // #8e8e93 大写小标题、#0a84ff 强调）从这里开始就是全页通用，不再只属于 Settings 页。
-  dockBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
-  dockFloatBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.14)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', boxShadow: '0 12px 34px rgba(0,0,0,0.62)' },
-  dockBar: { display: 'flex', alignItems: 'center', gap: 6, height: 26, padding: '0 4px', flexShrink: 0, background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)', userSelect: 'none' },
-  dockGrip: { flexShrink: 0, display: 'flex', alignItems: 'center', cursor: 'grab', color: '#8e8e93' },
-  dockName: { flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  dockTabs: { flex: 1, minWidth: 0, display: 'flex', gap: 2, overflow: 'hidden' },
-  dockAct: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0, transition: 'transform 0.12s ease' },
-  dockBody: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
-  // 一条下沿 = 列里的高度，一个角 = 并排时的宽 / 浮窗的宽高。hover 才现出蓝，靠 .dock-edge 规则。
-  dockEdge: { height: 6, flexShrink: 0, cursor: 'row-resize', borderTop: '0.5px solid rgba(84,84,88,0.55)' },
-  dockCorner: { position: 'absolute', right: 1, bottom: 1, width: 12, height: 12, cursor: 'nwse-resize', background: 'linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.26) 50%)' },
-  dockNoteBox: { position: 'absolute', inset: 0, zIndex: 3, boxShadow: 'inset 0 0 0 2px #0a84ff', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
-  dockNote: { fontSize: 10, fontWeight: 700, color: '#0a84ff', background: 'rgba(10,132,255,0.14)', padding: '2px 8px', borderRadius: 999 },
-  // The scroller is the dock root, not the panel: a row the user pinned a height to has to scroll
-  // inside its own box, and that only works if its parent gives it a definite height.
-  dockRoot: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', paddingRight: 2 },
-  dockReset: { display: 'flex', justifyContent: 'center', padding: '2px 0 6px', flexShrink: 0 },
-  dockResetBtn: { background: 'none', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 999, color: 'rgba(255,255,255,0.45)', fontSize: 10, fontWeight: 600, padding: '3px 12px', cursor: 'pointer' },
-  // A body's own interior cards/rows: same skin as the Settings page, one level inside a unit.
+  // The dock's own frame (its boxes, bars, handles and windows) is styled in src/dock/DockView.tsx —
+  // this is what a unit's BODY uses: interior cards and rows, same skin as the Settings page.
   dockCard: { background: 'rgba(28,28,30,0.72)', border: '0.5px solid rgba(255,255,255,0.07)', borderRadius: 10, padding: '2px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
   dockSubrow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', padding: '2px 2px 0' },
   dockGtitle: { fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.42)', borderBottom: '0.5px solid rgba(84,84,88,0.55)', paddingBottom: 3 },
   dockGbody: { display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.10)' },
   dockGroup: { display: 'flex', flexDirection: 'column', gap: 6 },
-  // A unit's own actions live in a positioned slot so an absolute child (a menu) has something tight
-  // to hang from rather than the whole box.
-  dockHeadSlot: { position: 'relative', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 

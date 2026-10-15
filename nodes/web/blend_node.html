@@ -9,53 +9,9 @@
 body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; }
 #mainArea { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 #canvasColumn { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-/* ---- the strip above the canvas: File on the left, the open .cud documents beside it ----
-   One tab per project the workbench holds in memory: click it to switch, × to close (a project with
-   unsaved changes asks first), + for a blank one. A tab is the file name it came from or Untitled,
-   and the dot is the unsaved mark — no labels, the explanation lives in the title, and the active
-   tab's title carries the full path a bound document writes back to.
-   File is the only place document actions live now, so the tab titles are also the document readout:
-   the name, the bound path and the unsaved dot all describe the project File acts on. */
-#docBar { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 8px; padding: 8px 16px 0 0; border-bottom: 1px solid rgba(255,255,255,0.10); }
-#fileGroup { position: relative; flex: 0 0 auto; }
-/* Flush against the column's left edge, so the corners touching that edge are square: only the top
-   right stays rounded. #docBar gives up its left inset to make that edge actually the column's.
-   Qualified with .io-btn because the File button carries that menu-row class further down the sheet,
-   and two single-class selectors leave it to source order — the menu row would win and these tabs
-   would come back rounded and menu-padded. */
-.io-btn.file-btn { flex: 0 0 auto; padding: 5px 12px; border-radius: 0 8px 0 0; font-size: 11.5px; }
-#fileMenu { left: 0; right: auto; width: 228px; }
-/* Export unfolds IN PLACE rather than flying out as a second card: one popover is easier to keep
-   honest about what is open, and the menu is already a column of choices. */
-#exportMenu { position: static; border: none; box-shadow: none; background: transparent;
-    padding: 0 0 0 12px; gap: 2px; }
-#exportBtn .io-menu-title::after { content: '\25B8'; font-size: 9px; opacity: 0.7; margin-left: 4px; }
-#exportBtn.open .io-menu-title::after { content: '\25BE'; }
-#docTabs { flex: 1 1 auto; min-width: 0; display: flex; align-items: flex-end; gap: 4px;
-    overflow-x: auto; scrollbar-width: thin; }
-#docTabs::-webkit-scrollbar { height: 4px; }
-.doc-tab { flex: 0 1 168px; min-width: 76px; display: flex; align-items: center; gap: 6px;
-    padding: 5px 6px 5px 10px; border-radius: 8px 8px 0 0; cursor: pointer; white-space: nowrap;
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-bottom: none;
-    color: rgba(255,255,255,0.62); font-size: 11.5px; font-weight: 600; transition: background 0.15s ease; }
-.doc-tab:hover { background: rgba(255,255,255,0.11); }
-.doc-tab.active { background: rgba(10,132,255,0.28); border-color: rgba(10,132,255,0.55); color: #fff; }
-.doc-tab .dt-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* 场景 tab 的立方体:中性墨色,靠明度分身份,不染强调蓝。 */
-.doc-tab .dt-kind { flex: 0 0 auto; display: inline-flex; align-items: center; color: rgba(255,255,255,0.55); }
-.doc-tab.active .dt-kind { color: rgba(255,255,255,0.85); }
-.doc-tab .dt-dirty { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
-    background: #fff; display: none; }
-.doc-tab.dirty .dt-dirty { display: block; }
-.doc-tab .dt-close { flex: 0 0 auto; width: 16px; height: 16px; display: inline-flex; align-items: center;
-    justify-content: center; padding: 0; border: none; border-radius: 4px; cursor: pointer;
-    background: transparent; color: rgba(255,255,255,0.6); }
-.doc-tab .dt-close:hover { background: rgba(255,69,58,0.8); color: #fff; }
-#docNewBtn { flex: 0 0 auto; width: 22px; align-self: stretch; display: inline-flex;
-    align-items: center; justify-content: center; cursor: pointer;
-    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.10); border-bottom: none;
-    border-radius: 8px 8px 0 0; color: rgba(255,255,255,0.62); transition: background 0.15s ease; }
-#docNewBtn:hover { background: rgba(255,255,255,0.11); }
+/* The strip above the canvas is gone: File now lives in a dockable toolbar of the host page and the
+   open documents are each a dock unit of their own, so the workbench has no tab bar or menu of its own
+   to draw. It only announces its documents (see syncDocList) and obeys the commands that come back. */
 #canvasArea { flex: 1; min-height: 0; position: relative; margin: 16px; overflow: hidden; }
 /* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
 #viewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; cursor: default; }
@@ -78,18 +34,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* The old centred status pill is gone: every message it used to show is now one row in the
    host's Log panel (Context 标题行 → Log，最近 32 条). setStatus keeps its name and every call
    site — only the destination changed. */
-/* ---- File menu buttons — .io-btn is the menu's own row style, shared with the Add menus ----
-   The document lives behind the File popover now: Load / Save / Save As / Export ▸ PNG / Import.
-   Each entry carries a one-line sub, because the explanation is needed mid-choice and a tooltip is
-   not readable while the pointer is still hunting. */
-.io-btn { flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-    background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 7px 4px;
-    color: #fff; font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background 0.15s ease; }
-.io-btn:hover:not(:disabled) { background: rgba(255,255,255,0.16); }
-.io-btn:disabled { opacity: 0.45; cursor: default; }
-/* The one entry in the File menu that ADDS something rather than moving the document around keeps
-   the blue accent the flat row of buttons used to carry. */
-.io-menu-item.primary .io-menu-title { color: #6ab0ff; }
 
 /* Right column: the tool sections scroll in the top part, the Layers palette stays docked at
    the bottom-right corner (Photoshop-style) with a scroll area of its own. */
@@ -113,11 +57,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
    up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
 #layersSpacer { flex: 0 0 16px; pointer-events: none; }
-/* The Mask layer has its OWN dock, above both stacks: it is a data channel handed to the backend,
-   never a member of the composite, so it belongs to neither list. Content-sized on purpose — one
-   pinned row plus its label, nothing to scroll. */
-#maskDock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
-#maskRowSlot { display: flex; flex-direction: column; gap: 4px; }
+/* Mask 那一格搬进了宿主的 dock（workbench/mask.tsx）：原来那两条 dock 规则、那七条行的规则，加上
+   给那一行垫 × 位置的那枚占位 span —— 一共十一条，主人全没了，所以整组删掉而不是留着没人认领。
+   那七条里最要紧的一条是整行 48px 的节拍：dock 里没有两行行的概念，格子多高由它自己的内容说。 */
 /* The two lists split the dock's leftover height between themselves by flex-GROWTH, with a basis of
    0: whatever the dock's height is, the heads and the splitter take theirs and the rest divides by
    this ratio. That is what makes the divider honest — the proportion you dragged to survives window
@@ -323,35 +265,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
 .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
-/* The pure Mask layer pins to the top of the list and lives outside `layers`: it is a data
-   channel handed to the backend (alpha = coverage), never something that gets composited. */
-.layer-row.mask-layer-row { background: rgba(255,59,48,0.10); }
-.layer-row.mask-layer-row:hover { background: rgba(255,59,48,0.16); }
-.layer-row.mask-layer-row.selected { border-color: rgba(255,59,48,0.9); background: rgba(255,59,48,0.2); }
-.layer-row.mask-layer-row .layer-name { font-weight: 600; color: rgba(255,255,255,0.92); }
-.layer-row.mask-layer-row.off .layer-thumb, .layer-row.mask-layer-row.off .layer-name { opacity: 0.35; }
-/* The Mask row is a *single* line: its head line, and nothing else. The Tint slider that used
-   to sit underneath is gone — the one remaining tint is the host's Mask Tint under the preview,
-   which the canvas overlay reads while Ctrl is held. Height is pinned so the row keeps the same
-   48px rhythm the two-line rows have (head 24px + chip line 24px). */
-.layer-row.mask-layer-row { height: 48px; justify-content: center; }
-/* The space a normal row gives its name goes to the row's own whole-layer actions. They act on
-   the Mask layer itself, never on whatever happens to be selected. */
-.mask-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; width: 100%; }
-.mask-row-actions { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-.mask-row-btn { background: rgba(255,255,255,0.08); border: none; border-radius: 7px; padding: 3px 7px;
-    color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
-    transition: background 0.15s ease; }
-.mask-row-btn:hover { background: rgba(255,255,255,0.18); }
-/* Every other row ends with [eye][×]. The Mask row has no ×, so this pad holds the slot
-   open and keeps its eye on the same rail as the rest of the list. */
-.layer-row-tail-gap { width: 13px; height: 1px; flex-shrink: 0; }
+/* 纯 Mask 层那一行（红底、单行、三颗整层动作加一枚眼睛）连它自己的五条规则一起搬进了宿主的 dock
+   （workbench/mask.tsx + workbench/skin.ts 里的 thumbBox/iconBtn 两条）。这一列里原本那七条规则没有
+   留下任何主人，连那枚只给那一行垫 × 位置的占位 span 也是 —— 所以整组删掉，门禁钉的就是这些名字
+   在这一页一个字都不出现。 */
 .layer-note { font-size: 9.5px; font-weight: 700; color: rgba(255,59,48,0.8); text-transform: uppercase; letter-spacing: 0.4px; }
-.layer-thumb.masklayer-thumb { background-color: #141414; cursor: default;
-    background-image: linear-gradient(45deg, #262626 25%, transparent 25%, transparent 75%, #262626 75%),
-                      linear-gradient(45deg, #262626 25%, transparent 25%, transparent 75%, #262626 75%);
-    background-size: 8px 8px; background-position: 0 0, 4px 4px; }
-.layer-thumb.masklayer-thumb canvas { width: 100%; height: 100%; display: block; }
 
 /* ---- 特效容器：摊在图层行的**上方**，链从下往上读 ----
    它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
@@ -535,10 +453,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .tool-section.active-tool { background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.5); }
 .tool-key { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 4px; border-radius: 4px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 10px; letter-spacing: 0; }
 .tool-section.active-tool .tool-key { background: rgba(0,122,255,0.9); color: #fff; }
-/* Ring swatch mirrors the on-canvas brush ring, so the active tool's colour is visible in the UI too */
+/* Small colour dot a panel puts beside a name. Brush's own ring left with its panel (it is a dock
+   unit now, painted from the same snapshot); the Text swatch is the one still drawn here. */
 .ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
 .ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
-.mini-btn.brush-mode-btn, .mini-btn.eraser-mode-btn, .mini-btn.text-choice-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
+.mini-btn.text-choice-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
 /* Enum rows inside a tool body: the label names the choice, the button group takes the same
    slack a range takes, so the value column lines up with the rows above and below it. */
 .control-row .mini-group { flex: 1; min-width: 0; flex-wrap: nowrap; }
@@ -581,40 +500,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
-/* Color 双色: 前景色块叠在背景色块之上 (PS 工具栏的那一对), 底下常驻一张调色盘 —— 盘调的永远是前景。
-   行尾不再有 #HEX 读数, 那个位置换成 RGBA / HSBA 两种盘式的分段按钮。 */
-.rgba-dual { position: relative; width: 48px; height: 28px; flex-shrink: 0; }
-.rgba-chip { position: absolute; padding: 0; overflow: hidden; border: 0.5px solid rgba(255,255,255,0.28);
-    border-radius: 6px; background-color: transparent; cursor: pointer;
-    background-image: linear-gradient(45deg, rgba(255,255,255,0.18) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.18) 75%),
-        linear-gradient(45deg, rgba(255,255,255,0.18) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.18) 75%);
-    background-size: 8px 8px; background-position: 0 0, 4px 4px; }
-.rgba-chip span { position: absolute; inset: 2px; border-radius: 4px; display: block; }
-.rgba-chip:hover { border-color: rgba(255,255,255,0.5); }
-.rgba-chip.front { left: 0; top: 0; width: 27px; height: 22px; z-index: 1; }
-.rgba-chip.back { left: 21px; top: 6px; width: 25px; height: 20px; }
-/* 行尾的 Mode 分段按钮与画笔那组同一套词汇, 只是收一点字号: 色块 + 两个四字母词得挤进同一行。 */
-.mini-group.paint-mode { flex-shrink: 0; }
-.mini-btn.paint-mode-btn { padding: 4px 6px; font-size: 10px; }
-/* 常驻面板铺在色块行下面。RGBA 模式: 方格吃掉栏宽剩下的 + 色相条 + Alpha 条。HSBA 模式: 定边 116 的
-   圆盘 (角度=色相, 半径=饱和度) + 明度条 + Alpha 条。两种排布都让第一格贴左缘、两条贴右缘, 圆盘为了
-   保持正圆让出来的那点空当留在中间。拇指一律按百分比落位, 格子宽度跟着栏宽走, 拖分隔条不用重算;
-   JS 里那几个常量只当绘制缓冲的分辨率。 */
-.rgba-panel { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
-.rgba-grid { display: flex; gap: 6px; height: 116px; }
-.rgba-grid.hsb { justify-content: space-between; }
-.rgba-field { position: relative; cursor: crosshair; touch-action: none; }
-.rgba-field.plate { flex: 1 1 auto; min-width: 0; }
-.rgba-grid.hsb .rgba-field.plate { flex: 0 0 auto; width: 116px; }
-.rgba-field.ramp { flex: 0 0 16px; }
-.rgba-field canvas { display: block; width: 100%; height: 100%; border-radius: 6px; }
-.rgba-field.grabbing { cursor: none; }
-.rgba-thumb { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
-    border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none; }
-.rgba-bar { position: absolute; left: -1px; right: -1px; height: 3px; margin-top: -1.5px; border-radius: 2px;
-    background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); pointer-events: none; }
-/* 四格手输: mode 决定前三格是 R/G/B (0..255) 还是 H/S/B, Alpha 恒为 0..100%。宽度按栏宽等分,
-   所以拖分隔条时它们自己缩, 不需要 JS 参与。 */
+/* 三格数字行的皮肤。Color 那一格连同色块/盘/拇指 (.rgba-dual / .rgba-chip* / .paint-mode* /
+   .rgba-panel / .rgba-grid / .rgba-field* / .rgba-thumb / .rgba-bar) 一起搬进了宿主的 dock
+   （workbench/color.tsx 用内联样式带了同一套外观），这里只剩 Direction / Pose 那两处 angles field 在穿。
+   宽度按栏宽等分, 所以拖分隔条时它们自己缩, 不需要 JS 参与。 */
 .rgba-fields { display: flex; align-items: center; gap: 5px; font-size: 11px; color: rgba(255,255,255,0.62); }
 .rgba-cell { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; }
 .rgba-cell input { flex: 1 1 0; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
@@ -656,7 +545,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
    眼睛会浮在指针上方两三个像素。光标的热点必须压在指针尖上,所以让它别参与行内排版。 */
 #lookCursor svg { display: block; }
 #lookCursor.on { display: block; }
-/* 右栏在 3D tab 期间整体换掉:#panelScroll / #maskDock / #layersDock 隐去,这一栏顶上。
+/* 右栏在 3D tab 期间整体换掉:#panelScroll / #layersDock 隐去,这一栏顶上。
    小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多
    出 Hierarchy 的行本身、Inspector 的分组标题,以及来源说明行。 */
 #scenePanel { display: none; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding-right: 6px; }
@@ -825,53 +714,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <body>
 <div id="mainArea">
     <div id="canvasColumn">
-        <!-- File 与打开中的 .cud 文档同一条：左边是文档动作，右边一个 tab 一个项目。
-             tab 内容由 renderDocTabs() 生成，这里只留容器和 + 新建入口。 -->
-        <div id="docBar">
-            <div id="fileGroup">
-                <button class="io-btn file-btn" id="fileBtn" aria-haspopup="menu" aria-expanded="false"
-                        title="The document: open and save a .cud, export a flattened image, bring images in as layers">File<span class="add-caret">&#9662;</span></button>
-                <div class="io-menu" id="fileMenu" role="menu" hidden>
-                    <button class="io-menu-item" id="loadBtn" role="menuitem"
-                            title="Load a .cud document. It opens as a new project tab beside the one you are editing.">
-                        <span class="io-menu-title">Load</span>
-                        <span class="io-menu-sub">Open a .cud as its own project tab.</span>
-                    </button>
-                    <button class="io-menu-item" id="saveBtn" role="menuitem"
-                            title="Save (Ctrl+S) writes the whole context back to the file it was loaded from. Never loaded? It asks where to put it.">
-                        <span class="io-menu-title">Save</span>
-                        <span class="io-menu-sub">Ctrl+S — back to the bound file, or ask once if there is none.</span>
-                    </button>
-                    <button class="io-menu-item" id="saveAsBtn" role="menuitem"
-                            title="Save As: write the whole context to a file you pick, and the project becomes bound to it">
-                        <span class="io-menu-title">Save As</span>
-                        <span class="io-menu-sub">Write to a file you pick and bind this project to it.</span>
-                    </button>
-                    <button class="io-menu-item" id="exportBtn" role="menuitem" aria-haspopup="menu" aria-expanded="false"
-                            title="Export the workbench as an image file">
-                        <span class="io-menu-title">Export</span>
-                        <span class="io-menu-sub">Flatten what you see into a file.</span>
-                    </button>
-                    <div class="io-menu" id="exportMenu" role="menu" hidden>
-                        <button class="io-menu-item" id="exportPngBtn" role="menuitem"
-                                title="Export the composite as a PNG: visible LAYERS flattened at canvas resolution, transparency kept — guidances are references, they stay out of the exported image">
-                            <span class="io-menu-title">PNG</span>
-                            <span class="io-menu-sub">The Layers composite, at canvas resolution.</span>
-                        </button>
-                    </div>
-                    <button class="io-menu-item primary" id="importBtn" role="menuitem"
-                            title="Import images and PSD files as new layers. A .cud document belongs to Load.">
-                        <span class="io-menu-title">Import</span>
-                        <span class="io-menu-sub">Images &amp; PSD in as layers — a .cud goes to Load.</span>
-                    </button>
-                </div>
-            </div>
-            <div id="docTabs">
-                <button id="docNewBtn" title="New project — a blank document in its own tab" aria-label="New project">
-                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11"/></svg>
-                </button>
-            </div>
-        </div>
         <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg,.psd" multiple hidden>
         <!-- Only used where the File System Access API is missing; a document picked this way
              has no handle to write back to, so Save turns into Save As. -->
@@ -937,103 +779,16 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         <!-- Tools scroll in the top part of the column; the Layers palette is docked at
              the bottom-right corner so it stays put no matter how long the tool list is. -->
         <div id="panelScroll">
-            <div class="panel-section">
-                <div class="panel-head">
-                    <div class="panel-label" id="canvasLabel" title="The canvas keeps its resolution while layers come and go. Until you set one by hand it grows to fit the largest layer at its native resolution, so placed images are never resampled.">Canvas</div>
-                    <button class="mini-btn" id="canvasSizeBtn" title="Set a fixed canvas resolution. Until you set one the canvas follows the bottom layer; image files can also be dropped onto the canvas to become layers.">Canvas Size…</button>
-                    <button class="mini-btn" id="canvasModifyBtn" title="Modify — drag the canvas border to resize it. Smart layers keep their pixels (top-left anchored); raster layers resample to the new canvas. Enter applies, Esc cancels.">Modify</button>
-                </div>
-            </div>
-            <div class="panel-section">
-                <div class="panel-head">
-                    <div class="panel-label" id="transformLabel">Transform</div>
-                    <div class="mini-group">
-                        <button class="mini-btn key-btn" id="transformAdjustBtn" title="Transform (T) — show the adjustment box: drag inside to move, handles to scale, the circle to rotate. Enter / Esc hides it, Shift snaps."><span class="tool-key">T</span></button>
-                        <button class="mini-btn" id="transformFillBtn" title="Stretch this layer to cover the whole canvas">Fill</button>
-                    </div>
-                </div>
-                <div class="panel-hint" id="transformReadout" title="This layer's transform: centre X/Y, size and rotation as a share of the canvas" style="display:none;"></div>
-            </div>
-            <div class="panel-section tool-section" id="maskSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="maskDecalLabel"><span id="maskDecalName">Mask / Decal</span> <span class="tool-key" title="The key for the mask: always paints the mask">`</span> <span class="tool-key" title="The key for the decal: always paints the decal">Tab</span></div>
-                    <div class="mini-group">
-                        <button class="mini-btn" id="maskInvertBtn" title="Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round">Invert</button>
-                        <button class="mini-btn" id="maskFullBtn" title="Cover the whole canvas with the Mask layer">Full</button>
-                    </div>
-                </div>
-            </div>
-            <div class="panel-section">
-                <div class="control-row" id="paintColorRow"><label>Color <span class="tool-key" title="Swap the two colours (X)">X</span></label>
-                    <div class="rgba-dual">
-                        <button class="rgba-chip front" id="rgbaChipFront" type="button" title="Foreground — the colour you paint with. On a decal it paints translucent strokes; on a mask that same Alpha IS the coverage you pour (0 = nothing, 1 = full). Alt+click on the canvas picks into it. The panel below edits this one."><span id="rgbaChipFrontFill"></span></button>
-                        <button class="rgba-chip back" id="rgbaChipBack" type="button" title="Background — the parked colour. Click to bring it forward, same as X."><span id="rgbaChipBackFill"></span></button>
-                    </div>
-                    <div class="mini-group paint-mode" id="paintModeGroup">
-                        <button class="mini-btn paint-mode-btn active" id="paintModeRgba" type="button" title="RGBA — the plate is Saturation × Brightness at the hue on the bar next to it; the four fields below read Red / Green / Blue (0..255) and Alpha %.">RGBA</button>
-                        <button class="mini-btn paint-mode-btn" id="paintModeHsb" type="button" title="HSBA — a colour wheel: angle is Hue, radius is Saturation, and the bar beside it dims the whole wheel to Brightness. The fields read Hue (0..360) / Saturation / Brightness (0..100) and Alpha %.">HSBA</button>
-                    </div>
-                </div>
-                <div class="rgba-panel" id="rgbaPanel">
-                    <div class="rgba-grid" id="rgbaGrid">
-                        <div class="rgba-field plate" id="rgbaPlateField"><canvas id="rgbaPlate"></canvas><span class="rgba-thumb" id="rgbaPlateThumb"></span></div>
-                        <div class="rgba-field ramp" id="rgbaRampField"><canvas id="rgbaRamp"></canvas><span class="rgba-bar" id="rgbaRampBar"></span></div>
-                        <div class="rgba-field ramp" id="rgbaAlphaField"><canvas id="rgbaAlpha"></canvas><span class="rgba-bar" id="rgbaAlphaBar"></span></div>
-                    </div>
-                    <div class="rgba-fields" title="Type a channel value — R/G/B 0..255 in RGBA, H 0..360 with S/B 0..100 in HSBA. The two buttons above pick which three.">
-                        <span class="rgba-cell"><label id="rgbaNumLabel0">R</label><input id="rgbaNum0" type="number" min="0" max="255" step="1"></span>
-                        <span class="rgba-cell"><label id="rgbaNumLabel1">G</label><input id="rgbaNum1" type="number" min="0" max="255" step="1"></span>
-                        <span class="rgba-cell"><label id="rgbaNumLabel2">B</label><input id="rgbaNum2" type="number" min="0" max="255" step="1"></span>
-                        <span class="rgba-cell"><label>A</label><input id="rgbaAlphaNum" type="number" min="0" max="100" step="1" title="Alpha as a percentage — strokes paint at this opacity; on a mask it is the coverage one pass pours"><span class="unit">%</span></span>
-                    </div>
-                </div>
-            </div>
-            <div class="panel-section tool-section foldable collapsed" id="brushSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="brushLabel"><span class="fold-caret"></span>Brush <span class="tool-key">B</span></div>
-                    <span class="ring-swatch" id="brushRingSwatch" title="Paints the decal colour (at its Alpha) / pours that Alpha into the mask"></span>
-                </div>
-                <div class="tool-body">
-                    <div class="mini-group">
-                        <button class="mini-btn brush-mode-btn" id="brushBinary" title="Hard edge: full strength inside the outline, nothing outside">Binary</button>
-                        <button class="mini-btn brush-mode-btn" id="brushLinear" title="Linear falloff from Center to Edge">Linear</button>
-                        <button class="mini-btn brush-mode-btn active" id="brushExpo" title="Exponential falloff shaped by Center, Edge and Gamma">Exponential</button>
-                    </div>
-                    <div class="control-row" id="brushStrengthRow"><label>Strength</label><input type="range" id="brushStrength" min="0" max="1" step="0.01" value="1.0" title="Opacity of a single pass (0 = nothing, 1 = full)"><span id="brushStrengthValue">1.00</span></div>
-                    <div class="control-row" id="brushCenterRow" style="display:none;"><label>Center</label><input type="range" id="brushCenter" min="0" max="1" step="0.01" value="1.0" title="Inner share of the radius that stays at full strength (Linear / Exponential)"><span id="brushCenterValue">1.00</span></div>
-                    <div class="control-row" id="brushEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="brushEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="brushEdgeValue">0.00</span></div>
-                    <div class="control-row" id="brushGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="brushGamma" min="0.1" max="10.0" step="0.1" value="2.0" title="Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in"><span id="brushGammaValue">2.0</span></div>
-                    <div class="control-row"><label>Size</label><input type="range" id="brushSize" min="2" max="9999" value="40" title="Brush size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="brushSizeValue">40</span></div>
-                </div>
-            </div>
-            <div class="panel-section tool-section foldable collapsed" id="bucketSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="bucketLabel" title="Bucket (G) — click flood-fills matching pixels with the Color onto the surface the Mask / Decal switch picks: a decal gets the colour (Alpha included), a mask gets the Color's Alpha poured in as coverage. Alt+click picks the Color from the canvas, like the brush. Click the header to open or close its settings window."><span class="fold-caret"></span>Bucket <span class="tool-key">G</span></div>
-                </div>
-                <div class="tool-body">
-                    <div class="control-row"><label>Tolerance</label><input type="range" id="bucketTolerance" min="0" max="1" step="0.01" value="0.2" title="How far a pixel may sit from the clicked colour and still be filled (0 = exact match, 1 = everything)"><span id="bucketToleranceValue">0.20</span></div>
-                    <div class="control-row"><label>Continuous</label><input type="checkbox" id="bucketContinuous" checked title="Only fill pixels connected to the clicked point. Off fills every matching pixel on the layer, however far away."><span></span></div>
-                    <div class="control-row"><label>All Layers</label><input type="checkbox" id="bucketAllLayers" title="Match against the layers composite (guidances are references, not pixels to pour into). Off matches against this layer's own image + decal. The fill always lands on the surface the Mask / Decal switch picks."><span></span></div>
-                </div>
-            </div>
-            <div class="panel-section tool-section foldable collapsed" id="eraserSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="eraserLabel"><span class="fold-caret"></span>Eraser <span class="tool-key">E</span></div>
-                    <span class="ring-swatch erase" title="Erases the decal colour / darkens the mask"></span>
-                </div>
-                <div class="tool-body">
-                    <div class="mini-group">
-                        <button class="mini-btn eraser-mode-btn" id="eraserBinary" title="Hard edge: full strength inside the outline, nothing outside">Binary</button>
-                        <button class="mini-btn eraser-mode-btn" id="eraserLinear" title="Linear falloff from Center to Edge">Linear</button>
-                        <button class="mini-btn eraser-mode-btn active" id="eraserExpo" title="Exponential falloff shaped by Center, Edge and Gamma">Exponential</button>
-                    </div>
-                    <div class="control-row" id="eraserStrengthRow"><label>Strength</label><input type="range" id="eraserStrength" min="0" max="1" step="0.01" value="1.0" title="Opacity of a single pass (0 = nothing, 1 = full)"><span id="eraserStrengthValue">1.00</span></div>
-                    <div class="control-row" id="eraserCenterRow" style="display:none;"><label>Center</label><input type="range" id="eraserCenter" min="0" max="1" step="0.01" value="1.0" title="Inner share of the radius that stays at full strength (Linear / Exponential)"><span id="eraserCenterValue">1.00</span></div>
-                    <div class="control-row" id="eraserEdgeRow" style="display:none;"><label>Edge</label><input type="range" id="eraserEdge" min="0" max="1" step="0.01" value="0.0" title="How soft the outer fade is (Linear / Exponential)"><span id="eraserEdgeValue">0.00</span></div>
-                    <div class="control-row" id="eraserGammaRow" style="display:none;"><label>Gamma</label><input type="range" id="eraserGamma" min="0.1" max="10.0" step="0.1" value="2.0" title="Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in"><span id="eraserGammaValue">2.0</span></div>
-                    <div class="control-row"><label>Size</label><input type="range" id="eraserSize" min="2" max="9999" value="60" title="Eraser size in layer pixels — the wheel or Alt + right-drag also changes it"><span id="eraserSizeValue">60</span></div>
-                </div>
-            </div>
+            <!-- Canvas / Transform 两格搬去了宿主的 dock（workbench/canvas.tsx、transform.tsx）。
+                 Mask / Decal 那一格与 Layers 旁边那颗 Mask 行也合成一格搬了过去（workbench/mask.tsx，
+                 拍板 6.a）：键徽章、目标名、笔尖那一面的 Invert，加整层的 Invert / Full / Clear 与眼睛，
+                 全在宿主的 dock 里画；覆盖面那张位图仍住在这一页，所以那一格是这一列里第一个要传像素的
+                 面（blendUiState.mask.still）。这一列从 Text 起。 -->
+            <!-- Color 那一格 (一对 PS 式双色 + 它下面那块常驻调色盘) 也搬去了宿主的 dock
+                 （workbench/color.tsx）。三张取色画布一起走：盘本来就是当前颜色的纯函数，页面只要
+                 把 brushColor / brushAlpha / brushHue / back* + 盘式交出去就够了（快照里的 color 那一格）。 -->
+            <!-- Brush / Bucket / Eraser 三格也搬去了宿主的 dock（workbench/brush.tsx、bucket.tsx、
+                 eraser.tsx）。这一列剩下的从 Text 起。 -->
             <!-- The Text section folds like the other tool sections and stays folded until its
                  header is clicked — selecting a text layer only lights the row up and refills the
                  controls, it never opens the window for you. -->
@@ -1172,41 +927,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                     <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorResetBtn" title="Forget every value typed in this window — each parameter goes back to the value the graph carries">Reset values</button><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button></div>
                 </div>
             </div>
-            <div class="panel-section">
-                <div class="panel-head">
-                    <div class="panel-label" title="A canvas-level selection: it belongs to the document, not to a layer, so every mask, decal and the Mask layer are painted inside it and nothing lands outside. Drag with Marquee (M) for a rectangle or Lasso (L) to trace one by hand; Shift adds, Alt subtracts, Shift+Alt intersects. Enter or Esc leaves the tool, Ctrl+D clears.">Selection</div>
-                    <div class="mini-group">
-                        <button class="mini-btn key-btn" id="rectSelectBtn" title="Rectangular Marquee (M) — drag a rectangle, or click to clear the selection. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">M</span></button>
-                        <button class="mini-btn key-btn" id="lassoSelectBtn" title="Lasso (L) — hold and sweep a freehand outline; it closes where you release. A click clears the selection. Shift adds, Alt subtracts, Shift+Alt intersects. Painting is clipped to what is inside."><span class="tool-key">L</span></button>
-                        <button class="mini-btn" id="selectAllBtn" title="Select the whole canvas (Ctrl+A)">All</button>
-                        <button class="mini-btn" id="deselectBtn" title="Clear the selection (Ctrl+D)">None</button>
-                    </div>
-                </div>
-            </div>
-            <div class="panel-section">
-                <div class="panel-head">
-                    <div class="panel-label" id="viewLabel" title="Esc straightens a rotated view — zoom, pan and flip are kept. The Reset button also drops those.">View</div>
-                    <div class="mini-group">
-                        <button class="mini-btn key-btn" id="panToolBtn" title="Hand (H) — drag with the left button to pan the view. Space or middle-drag pans too."><span class="tool-key">H</span></button>
-                        <button class="mini-btn key-btn" id="zoomToolBtn" title="Zoom (Z) — left click zooms in, right click zooms out; drag right/left to zoom continuously around the point you press."><span class="tool-key">Z</span></button>
-                        <button class="mini-btn key-btn" id="rotateToolBtn" title="Rotate (R) — turn the view like a knob: it follows how you swing the pointer around the view centre. Shift snaps to 15°, a plain click steps 15°."><span class="tool-key">R</span></button>
-                        <button class="mini-btn" id="viewFitBtn" title="Fit the canvas into the view">Fit</button>
-                        <button class="mini-btn" id="viewResetBtn" title="Reset zoom, rotation, flip and pan">Reset</button>
-                    </div>
-                </div>
-                <div style="display:flex; gap:4px;">
-                    <button class="mini-btn" id="viewZoomOutBtn" title="Zoom out" style="flex:1;">−</button>
-                    <button class="mini-btn" id="viewZoomInBtn" title="Zoom in" style="flex:1;">+</button>
-                    <button class="mini-btn" id="viewRotateCCWBtn" title="Rotate view counter-clockwise" style="flex:1;">⟲</button>
-                    <button class="mini-btn" id="viewRotateCWBtn" title="Rotate view clockwise" style="flex:1;">⟳</button>
-                    <button class="mini-btn" id="viewFlipBtn" title="Flip view horizontally" style="flex:1.4;">Flip H</button>
-                </div>
-                <div class="panel-hint" id="viewReadout">100% · 0°</div>
-            </div>
+            <!-- Selection / View 两格也搬去了宿主的 dock（workbench/selection.tsx、view.tsx）。 -->
         </div><!-- /panelScroll -->
         <!-- 3D tab 期间整栏换成这一份:Hierarchy / Inspector 用和中栏同一套控件词汇
            (.panel-section / .panel-head / .panel-label / .mini-group / .mini-btn / .control-row),
-           长说明一律进 title。#panelScroll、#maskDock、#layersDock 在这期间隐去。 -->
+           长说明一律进 title。#panelScroll、#layersDock 在这期间隐去。 -->
         <div id="scenePanel">
             <div id="sceneScroll">
                 <div class="panel-section">
@@ -1295,14 +1020,9 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
             </div>
         </div>
-        <!-- The pure Mask layer has its own dock: it is a data channel, not a member of either
-             stack, so it belongs to neither list. One pinned row, no Add, no dragging. -->
-        <div class="panel-section" id="maskDock">
-            <div class="panel-head">
-                <div class="panel-label" id="maskLayerLabel">Mask</div>
-            </div>
-            <div id="maskRowSlot"></div>
-        </div>
+        <!-- 那颗纯 Mask 层自己的 dock 也搬进了宿主同一格 Mask（workbench/mask.tsx）：它是一条数据通道，
+             不属于 Layers 也不属于 Guidances，所以原来谁都不在它那一列里 —— 现在它跟"笔落在哪一面"并成
+             一格的上下两行。 -->
         <div class="panel-section" id="layersDock">
             <!-- Guidances sit ABOVE Layers in the dock and above the Layers composite on the canvas:
                  whatever lands here is painted over the flattened image, and the whole stack is what
@@ -1636,7 +1356,6 @@ const blendCtx = blendCanvas.getContext('2d');
 const guidanceCtx = guidanceCanvas.getContext('2d');
 const layerListEl = document.getElementById('layerList');
 const guidanceListEl = document.getElementById('guidanceList');
-const maskRowSlotEl = document.getElementById('maskRowSlot');
 const blendBtn = document.getElementById('blendBtn');
 const extraPromptInput = document.getElementById('extraPrompt');
 const tagBtn = document.getElementById('tagBtn');
@@ -1656,17 +1375,10 @@ const dropOverlay = document.getElementById('dropOverlay');
 // Section headers carry the explanations as tooltips instead of permanent sidebar text.
 const layersLabel = document.getElementById('layersLabel');
 const guidanceLabel = document.getElementById('guidanceLabel');
-const maskLayerLabel = document.getElementById('maskLayerLabel');
-const transformLabel = document.getElementById('transformLabel');
-const maskDecalLabel = document.getElementById('maskDecalLabel');
-const brushLabel = document.getElementById('brushLabel');
-const eraserLabel = document.getElementById('eraserLabel');
-const viewLabel = document.getElementById('viewLabel');
 layersLabel.title = 'Top of list draws on top · drag rows to reorder, or drop a row on the Guidances list to MOVE it there. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
 guidanceLabel.title = 'Guidances stack ON TOP of the Layers composite — pose, composition or colour references that guide a run without becoming part of the artwork. The workspace Guidance card is this whole picture, updated in place. Drag a layer row here to MOVE it out of Layers; drag it back to give it up.';
-maskLayerLabel.title = 'The coverage channel. It is not a layer: it never composites into the image, it travels to the backend as its own alpha, and it belongs to neither the Layers nor the Guidances stack.';
-transformLabel.title = 'T shows the box, Enter hides it. Drag inside to move, handles to scale, the circle to rotate; Shift snaps. With several layers held (Shift+click) the box is their union: scaling it scales the whole arrangement, and any rotated layer inside makes the scale uniform.';
-viewLabel.title = 'H hand (left-drag to pan the view), Z zoom (left click in, right click out, drag right/left for continuous zoom around the point you press), R rotate (turn the view like a knob around the view centre; Shift snaps to 15°, a click steps 15°). Ctrl+F flips horizontally, the wheel zooms, Space or middle-drag pans, Fit restores the framing, Enter or Esc exits the active tool.';
+// Mask 那一格的两句话（coverage channel 那一串 + Mask/Decal 的目标说明）跟着这一格一起搬进了
+// workbench/mask.tsx：标题条的说明是注册表里那句 hint，行上的说明是那一行自己的 title。
 
 // layers[0] is the TOP layer (matches the panel list order); the last entry is the bottom layer.
 // TWO STACKS, ONE ARRAY. `layers` carries both the working layers and the guidance layers in a
@@ -1788,7 +1500,6 @@ let maskLayer = ownSource({
     maskCtx: null,
     decal: null,               // the mask surface itself — opaque where covered, transparent elsewhere
     decalCtx: null,
-    decalThumbEl: null,        // the one chip on its own row, painted by paintMaskLayerThumb
     canvasThumbEl: null,
     // Never a chain host (layerTakesEffects() says no for the Mask layer), but it keeps the
     // layer object shape so nothing downstream has to special-case it.
@@ -2788,9 +2499,9 @@ function ensureMaskLayer(reanchor) {
     return surface;
 }
 
-function refreshMaskLayerThumb() {
-    if (maskLayer.decalThumbEl && maskLayer.decalThumbEl.isConnected) paintMaskLayerThumb(maskLayer.decalThumbEl, maskLayer);
-}
+// 面被改写过就催一次播报。真正的"要不要重编那一帧"由 syncMaskStill() 按身份 + paintGen 判断，
+// 所以这里只是个提醒，不是第二份绘制 —— 原来那五处调用点一处不减。
+function refreshMaskLayerThumb() { queueBlendUi(); }
 
 // The three whole-layer Mask actions (invert / full / clear) are one move: swap in a fresh
 // surface rather than clearing the current one — the canvas on top of the undo stack is still
@@ -3155,20 +2866,50 @@ function setCanvasSize(w, h, scaleLayers) {
     return true;
 }
 
-// A readout only takes up sidebar space while it has something to say.
-function setReadout(el, text) {
-    if (el.textContent !== text) el.textContent = text;
-    el.style.display = text ? '' : 'none';
+// ==================== 面板状态播报 ====================
+// Canvas / Transform / Selection / View 四格的正文搬进了宿主的 dock，页面只留绘制与视口。面板要的
+// 读数与高亮都从这一份快照走：`mode` 喂六颗按钮的亮灭，两个 readout 是页面自己拼好的句子。
+// 一次 rAF 最多发一条，内容没变就一条都不发 —— 变换把手每帧都在动，不能每帧跨一次 iframe 边界。
+const blendUiState = {
+    mode: 'none', canvas: { w: 0, h: 0 }, transform: { readout: '' }, view: { readout: '' },
+    // 画笔落在哪一面：三个谓词 + 这一支笔的名字 + 色环此刻的取值（页面算好的那条 rgba()，
+    // 和光标环上那个字节不差），React 用它拼那句说明、点亮那一格、画那圈色环。
+    paint: { maskLayer: false, decal: false, tool: 'brush', selection: false, ring: '' },
+    tools: {
+        brush: { mode: 'exponential', size: 40, strength: 1, center: 1, edge: 0, gamma: 2 },
+        eraser: { mode: 'exponential', size: 60, strength: 1, center: 1, edge: 0, gamma: 2 },
+        bucket: { tolerance: 0.2, continuous: true, allLayers: false },
+    },
+    // 调色盘那一格交出去的是页面那五个变量的原样 + 盘式：两颗 hex、两个 Alpha、单独存着的色相方向、
+    // 'rgba' | 'hsb'。刻意不传 HSV —— 盘上怎么画、拇指落在哪、三格读什么数，宿主页用逐字节相同的算术
+    // 自己算（workbench/colour.ts），所以这里只交真值源，不交第二份派生状态。初值里的 mode 只能写死：
+    // paintMode 声明在下面，这一份字面量在它之前求值；boot 那次 setPaintColor() 会把真值补上。
+    color: { fg: brushColor, bg: backColor, fgAlpha: brushAlpha, bgAlpha: backAlpha, hue: brushHue, mode: 'rgba' },
+    // Mask 那一格交的是两颗真值源：显示开关，和那张覆盖面此刻的那一帧。覆盖面是这一页的绘制引擎里的
+    // 活位图，宿主页没有它，只能把像素送过去 —— 但它不在这里重算，只有面真的换过才重编，见 syncMaskStill()。
+    // 这一格选中与否不发第二份：那一句就是上面 paint.maskLayer 那个谓词。
+    mask: { visible: true, still: '' },
+};
+let blendUiFrame = 0;
+let blendUiSent = '';
+function queueBlendUi() {
+    if (blendUiFrame || window.parent === window) return;
+    blendUiFrame = requestAnimationFrame(() => {
+        blendUiFrame = 0;
+        // 这一格是唯一需要像素的面：先把"要不要重编那一帧"问过一遍，再去重。
+        syncMaskStill();
+        const json = JSON.stringify(blendUiState);
+        if (json === blendUiSent) return;
+        blendUiSent = json;
+        window.parent.postMessage({ type: 'blend-ui', ...blendUiState }, '*');
+    });
 }
 
+// A readout only takes up sidebar space while it has something to say — 现在这句判断交给 React。
 function updateCanvasReadout() {
-    const btn = document.getElementById('canvasSizeBtn');
-    if (btn) {
-        const text = canvasW && canvasH ? `${canvasW} × ${canvasH}` : 'Canvas Size…';
-        if (btn.textContent !== text) btn.textContent = text;
-    }
-    const modifyBtn = document.getElementById('canvasModifyBtn');
-    if (modifyBtn) modifyBtn.disabled = !canvasW;
+    blendUiState.canvas.w = canvasW;
+    blendUiState.canvas.h = canvasH;
+    queueBlendUi();
 }
 
 // ==================== 视图（缩放 / 旋转 / 翻转 / 平移） ====================
@@ -3269,12 +3010,11 @@ function flipView() {
 }
 
 function updateViewReadout() {
-    const el = document.getElementById('viewReadout');
-    if (!el) return;
     const deg = Math.round(((view.rotation * 180 / Math.PI) % 360 + 360) % 360);
     let text = `${Math.round(view.zoom * 100)}% · ${deg}°`;
     if (view.flipX < 0) text += ' · Flip H';
-    if (el.textContent !== text) el.textContent = text;
+    blendUiState.view.readout = text;
+    queueBlendUi();
 }
 
 function layoutCanvas() {
@@ -4338,7 +4078,6 @@ function commitSelectionShape(shape) {
         setStatus(`${what} ${selection.count.toLocaleString()} px selected`
             + (shape.mode === 'add' ? ' · added' : shape.mode === 'subtract' ? ' · subtracted' : shape.mode === 'intersect' ? ' · intersected' : ''));
     }
-    selectionUI();
     drawOverlay();
     syncAntTimer();
 }
@@ -4346,7 +4085,6 @@ function commitSelectionShape(shape) {
 function clearSelection() {
     if (!selection) return false;
     selection = null;
-    selectionUI();
     drawOverlay();
     syncAntTimer();
     return true;
@@ -4409,7 +4147,6 @@ function invertSelection() {
     } else {
         setStatus(`Inverted — ${selection.count.toLocaleString()} px selected`);
     }
-    selectionUI();
     drawOverlay();
     syncAntTimer();
 }
@@ -4683,11 +4420,6 @@ function cancelSelDrag() {
     return true;
 }
 
-// ---- panel ----
-function selectionUI() {
-    document.getElementById('rectSelectBtn').classList.toggle('active', mode === 'rect');
-    document.getElementById('lassoSelectBtn').classList.toggle('active', mode === 'lasso');
-}
 // ==================== 宿主预览 ====================
 // The canvas composite IS the Context Image, so the host shows a live thumbnail of it next to
 // the detailer settings. Throttled to ~8 fps: `render()` runs on every pointermove while
@@ -4894,21 +4626,26 @@ function publishGuidanceCard() {
 }
 
 function updateTransformReadout() {
-    const el = document.getElementById('transformReadout');
     const held = dragGroupMembers();
     if (held) {
         // A group has no single rotation, so the readout reports the union box it scales and moves
         // by — the members' own angles are what they are.
         const box = groupBox(held);
-        if (!box) { setReadout(el, ''); return; }
-        const tr = box.transform;
-        setReadout(el, `${held.length} layers  X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%`);
+        const tr = box && box.transform;
+        blendUiState.transform.readout = tr
+            ? `${held.length} layers  X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%`
+            : '';
+        queueBlendUi();
         return;
     }
     const l = getSelected();
-    if (!l || !canvasW) { setReadout(el, ''); return; }
-    const tr = effectiveTransform(l);
-    setReadout(el, `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`);
+    if (!l || !canvasW) {
+        blendUiState.transform.readout = '';
+    } else {
+        const tr = effectiveTransform(l);
+        blendUiState.transform.readout = `X ${(tr.cx * 100).toFixed(1)}%  Y ${(tr.cy * 100).toFixed(1)}%  W ${(tr.w * 100).toFixed(1)}%  H ${(tr.h * 100).toFixed(1)}%  R ${(tr.rotation * 180 / Math.PI).toFixed(1)}°`;
+    }
+    queueBlendUi();
 }
 
 // ==================== 撤销 / 重做 ====================
@@ -5079,7 +4816,6 @@ function restoreState(s, opts) {
     if (selectedId === MASK_LAYER_ID) groupIds = new Set();
     else if (selectedId !== null && !groupIds.has(selectedId)) groupIds = new Set([selectedId]);
     maskLayer.visible = s.maskVisible;
-    maskLayer.decalThumbEl = null;
     maskLayer.canvasThumbEl = null;
     adoptMaskSurface(s.maskDecal);
     // 重放换掉了整批活图层,上一批的源记录与 attribute 到此没人指了 —— 两张表都只给活图层当视图用,
@@ -5309,18 +5045,39 @@ function startRenameLayer(l, nameEl) {
     input.addEventListener('dblclick', ev => ev.stopPropagation());
 }
 
-// 条带上的 chip 由 attr/core.js 画 (每种 attribute 自己那一颗缩略图画法住在它的 spec 里),
-// 所以这里只剩 Mask 层那一颗 —— 它不属于任何条带:那张层只有一个覆盖面,attachAttrView 也不给它装 attribute。
-function paintMaskLayerThumb(el, l) {
-    const w = el.width, h = el.height;
-    const c = el.getContext('2d');
+// 条带上的 chip 由 attr/core.js 画 (每种 attribute 自己那一颗缩略图画法住在它的 spec 里)。
+// Mask 层那一颗本来不属于任何条带 —— 那张层只有一个覆盖面,attachAttrView 也不给它装 attribute ——
+// 所以它原来直接住在页面那颗 84×56 的 canvas 上。那一行如今在宿主的 dock 里 (workbench/mask.tsx),
+// 页面这边不再画 DOM, 只交一张图: 下面这函数算的还是原来那颗 thumb 的同一份几何 (84×56 里按源图长宽比
+// 居中缩放), 只是画进一块临时 buffer 再编成 PNG。宿主页拿到那句 data URL 原样铺满它的 36×24 格子 ——
+// 同一长宽比 (84/56 = 36/24), 所以看到的还是那些像素, 一格不多一格不少。
+const MASK_THUMB_W = 84, MASK_THUMB_H = 56;
+let maskStillBuf = null, maskStillSrc = null, maskStillGen = -1;
+
+function renderMaskStill() {
+    if (!maskLayer.decal) return '';
+    const w = MASK_THUMB_W, h = MASK_THUMB_H;
+    if (!maskStillBuf) maskStillBuf = document.createElement('canvas');
+    if (maskStillBuf.width !== w || maskStillBuf.height !== h) { maskStillBuf.width = w; maskStillBuf.height = h; }
+    const c = maskStillBuf.getContext('2d');
     resetCtx(c);
     c.clearRect(0, 0, w, h);
-    if (!l.decal) return;
-    const src = nativeSize(l.img);
+    const src = nativeSize(maskLayer.img);
     const s = Math.min(w / src.w, h / src.h);
     const dw = src.w * s, dh = src.h * s;
-    c.drawImage(l.decal, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    c.drawImage(maskLayer.decal, (w - dw) / 2, (h - dh) / 2, dw, dh);
+    return maskStillBuf.toDataURL('image/png');
+}
+
+// 什么时候才重编: 换 canvas 的是身份 (replaceMaskSurface / ensureMaskLayer / 存档回读 / undo 都换新对象),
+// 就地改写像素的是 paintGen (markPainted 每笔 +1)。这两样都没动, 那一帧就还是上一帧 —— 快照里那句字符串
+// 一字不差, queueBlendUi 的等值去重因此整条都不发, 在别的层上拖动一笔也打扰不到它。
+function syncMaskStill() {
+    blendUiState.mask.visible = maskLayer.visible;
+    if (maskStillSrc === maskLayer.decal && maskStillGen === (maskLayer.paintGen | 0)) return;
+    maskStillSrc = maskLayer.decal;
+    maskStillGen = maskLayer.paintGen | 0;
+    blendUiState.mask.still = renderMaskStill();
 }
 
 // ==================== 条带 (attribute strip) ====================
@@ -5591,70 +5348,14 @@ function applyAttrTitle(l, r) {
     return `Fold this decal's colour into${name}'s own pixels: what was painted on top becomes the image, then the step is gone. One-way — the decal cannot be repainted or moved afterwards.`;
 }
 
-// A fixed row pinned above the stack: not draggable, not removable, single surface.
-function renderMaskLayerRow() {
-    const row = document.createElement('div');
-    row.className = 'layer-row mask-layer-row';
-    row.dataset.id = String(MASK_LAYER_ID);
-    row.title = 'Mask layer — a canvas-sized coverage channel handed to the backend. It is never composited into the Context Image.';
-    if (selectedId === MASK_LAYER_ID) row.classList.add('selected');
-    if (!maskLayer.visible) row.classList.add('off');
-
-    const thumb = document.createElement('div');
-    thumb.className = 'layer-thumb masklayer-thumb';
-    thumb.title = 'Alpha = coverage. Brush and Bucket cover, eraser uncovers.';
-    const c = document.createElement('canvas');
-    c.width = 84;
-    c.height = 56;
-    paintMaskLayerThumb(c, maskLayer);
-    maskLayer.decalThumbEl = c;
-    thumb.appendChild(c);
-
-    // No name and no OUTPUT note: the row is pinned, unnamed and single-purpose, so the head
-    // line spends its width on the three whole-layer actions instead.
-    const actions = document.createElement('div');
-    actions.className = 'mask-row-actions';
-    for (const spec of [
-        { kind: 'invert', text: 'Invert', title: 'Invert the Mask layer — covered pixels become uncovered and the other way round' },
-        { kind: 'full',   text: 'Full',   title: 'Fill the Mask layer — every pixel of the canvas covered' },
-        { kind: 'clear',  text: 'Clear',  title: 'Clear the Mask layer — nothing covered, so the actions run on the whole image' },
-    ]) {
-        const b = document.createElement('button');
-        b.className = 'mask-row-btn';
-        b.textContent = spec.text;
-        b.title = spec.title;
-        b.addEventListener('click', ev => {
-            ev.stopPropagation();       // don't re-select the row and overwrite this action's status
-            runMaskRowAction(spec.kind);
-        });
-        actions.appendChild(b);
-    }
-
-    const eye = document.createElement('button');
-    eye.className = 'icon-btn';
-    eye.title = maskLayer.visible ? 'Hide the Mask layer (actions then run without a mask)' : 'Show the Mask layer';
-    eye.innerHTML = eyeSvg(maskLayer.visible);
-    eye.addEventListener('click', ev => {
-        ev.stopPropagation();
-        maskLayer.visible = !maskLayer.visible;
-        renderLayerList();
-        render();
-        setStatus(maskLayer.visible ? 'Mask layer shown' : 'Mask layer hidden — actions run without a mask');
-        pushHistory();
-    });
-
-    const head = document.createElement('div');
-    head.className = 'mask-row-main';
-    head.appendChild(thumb);
-    head.appendChild(actions);
-    head.appendChild(eye);
-    const tailGap = document.createElement('span');
-    tailGap.className = 'layer-row-tail-gap';   // stands in for the × a normal row has
-    head.appendChild(tailGap);
-    row.appendChild(head);
-
-    row.addEventListener('click', () => selectMaskLayer());
-    return row;
+// 那一行 DOM 如今由宿主的 dock 画（workbench/mask.tsx），这里只剩下它背后那一个开关本身。
+// 眼睛那一下的三句 —— 翻开关、重画、报一句 —— 一字未改，只是点它的人从页面里的按钮换成了动作键。
+function toggleMaskLayerVisibility() {
+    maskLayer.visible = !maskLayer.visible;
+    renderLayerList();
+    render();
+    setStatus(maskLayer.visible ? 'Mask layer shown' : 'Mask layer hidden — actions run without a mask');
+    pushHistory();
 }
 
 // Invert / Full / Clear on the Mask row. They act on the Mask layer itself — never on
@@ -5676,10 +5377,10 @@ function runMaskRowAction(kind) {
 
 
 function renderLayerList() {
-    // Three containers, one pass: the Mask layer has its own dock (it is a data channel, not a
-    // stack member), and the two stacks each get a list built by the very same row code.
-    maskRowSlotEl.innerHTML = '';
-    maskRowSlotEl.appendChild(renderMaskLayerRow());
+    // 两摞各建一份，用的还是同一套行代码。Mask 那一格不再在这里建 DOM —— 它住在宿主的 dock 里 ——
+    // 但这一趟仍旧是"覆盖面可能变了"的那个时刻（undo、回读、切 tab 都走这里），所以催一次播报在这里，
+    // 与原来那一行每次重建都重画那颗 thumb 同一个节拍。要不要真重编由 syncMaskStill() 判断。
+    queueBlendUi();
     renderStackList(guidanceListEl, GUIDANCE_STACK);
     renderStackList(layerListEl, WORK_STACK);
     updateTextPanel();
@@ -5843,8 +5544,8 @@ function renderStackList(listEl, stack) {
         }
 
         // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
-        // layer is a target (layerMaskIsMeaningful); the pinned Mask row never gets one because
-        // renderMaskLayerRow() builds its own head.
+        // layer is a target (layerMaskIsMeaningful); the Mask layer never reaches this builder at all —
+        // it is not a member of either stack, and its own line is the dock's Mask unit now.
         const hasImg = hasLayerImage(l) || stripGeneratorInk(l);
         const canGen = layerMaskIsMeaningful(l);
         const run = document.createElement('button');
@@ -6818,12 +6519,10 @@ function setMode(m) {
 function activateMode(m) { if (mode !== m) setMode(m); }
 
 function syncModeUI() {
-    document.getElementById('transformAdjustBtn').classList.toggle('active', mode === 'transform');
-    document.getElementById('canvasModifyBtn').classList.toggle('active', mode === 'canvasModify');
-    document.getElementById('zoomToolBtn').classList.toggle('active', mode === 'zoom');
-    document.getElementById('panToolBtn').classList.toggle('active', mode === 'pan');
-    document.getElementById('rotateToolBtn').classList.toggle('active', mode === 'rotate');
-    selectionUI();
+    // 那六颗工具钮（Transform / Canvas Modify / Zoom / Pan / Rotate / Marquee / Lasso）的亮灭不再由
+    // 页面画：`mode` 进快照，宿主的四块面板各读自己那几颗。
+    blendUiState.mode = mode;
+    queueBlendUi();
     syncToolUI();
     syncBrushCursor();
     refreshCursor();
@@ -6860,28 +6559,23 @@ function setToolSize(tool, v) {
     v = Math.max(2, Math.min(9999, Math.round(v)));
     if (tool === 'eraser' && !sharesBrushSize()) eraserSize = v;
     else brushSize = v;
-    syncSizeUI();
+    syncToolUI();
     updateBrushCursorSize();
 }
 
 function setActiveSize(v) { setToolSize(erasingNow() ? 'eraser' : 'brush', v); }
 
-function syncSizeUI() {
-    document.getElementById('brushSize').value = brushSize;
-    document.getElementById('brushSizeValue').textContent = brushSize;
-    document.getElementById('eraserSize').value = eraserSize;
-    document.getElementById('eraserSizeValue').textContent = eraserSize;
-}
-
 function syncToolUI() {
-    const active = mode === 'mask';
-    document.getElementById('brushSection').classList.toggle('active-tool', active && maskTool === 'brush');
-    document.getElementById('eraserSection').classList.toggle('active-tool', active && maskTool === 'eraser');
-    document.getElementById('bucketSection').classList.toggle('active-tool', active && maskTool === 'bucket');
-    document.getElementById('maskSection').classList.toggle('active-tool', active);
+    // Mask 那一格也搬进了宿主，它的高亮跟着 mode 那一格走（workbench/mask.tsx 读 ui.mode === 'mask'）；
+    // 这一句还留在这里的话，写的就是一颗已经不存在的 DOM。四支笔加 Mask 现在都是同一份快照的读者。
+    blendUiState.paint.tool = maskTool;
+    blendUiState.tools.brush = { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma };
+    blendUiState.tools.eraser = { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma };
+    blendUiState.tools.bucket = { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers };
     syncPaintUI();
     updateBrushCursorSize();
     updateCursorMode();
+    queueBlendUi();
 }
 
 // Mask vs decal is a property of the paint session: both tools follow it.
@@ -6889,33 +6583,13 @@ function syncToolUI() {
 function syncPaintUI() {
     const maskLayerSel = isMaskLayerTarget();
     const decal = isDecalTarget() && !maskLayerSel;
-    // One verb lives on this line: Invert, and only while the brush is on a mask. (maskFullBtn is
-    // kept hidden here — the Mask layer's own Invert / Full / Clear live on its row in the Layers
-    // list, where they act on the layer itself instead of on whatever happens to be selected.)
-    // There used to be a third slot that read Reset / Clear depending on the target: taking a step
-    // off is the chip menu's Remove now, and a sidebar button could not say WHICH step it cleared
-    // the way the chip you clicked can.
-    document.getElementById('maskInvertBtn').style.display = decal ? 'none' : '';
-    document.getElementById('maskInvertBtn').title =
-        'Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `: hidden areas become visible and the other way round';
-    document.getElementById('maskFullBtn').style.display = 'none';
-    document.getElementById('maskFullBtn').title = 'Fill the Mask layer — every pixel of the canvas covered';
-    // The label carries the two key badges, so the name is the inner span — writing the label's own
-    // textContent would erase them.
-    document.getElementById('maskDecalName').textContent = maskLayerSel ? 'Mask Layer' : 'Mask / Decal';
-    const target = decal ? 'the decal' : 'the mask';
-    // Each key names a fixed destination (Tab = the decal, ` = the mask), so one sentence serves both
-    // readings: neither key means "whatever is on the other side" the way a toggle key would. A kind
-    // can carry several attributes now, so the sentence has to say WHICH one the key lands on.
-    const keyNote = 'Tab paints the last Decal step, ` the last Mask step';
-    const selNote = hasSelection() ? ' A selection is live: it clips this tool, so nothing lands outside the ants.' : '';
-    maskDecalLabel.title = maskLayerSel
-        ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. The Mask row in Layers carries Invert / Full / Clear for the whole layer. It has one surface, so neither Tab nor ` has anywhere to put it.'
-        : decal
-        ? `Paint the decal (${keyNote}): colour sits on top of the image and under the mask. Left-drag paints with the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Decal chips on this layer's strip are the same switch, and clicking one names WHICH decal the brush lands on.`
-        : `Paint the mask (coverage) (${keyNote}): white shows the image, black hides it. The Color’s Alpha caps how much coverage one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Mask chips on this layer's strip are the same switch, and clicking one names WHICH mask the brush lands on.`;
-    brushLabel.title = `Brush (B) — left-drag paints ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Alt + left-drag picks a colour off the canvas (applied on release), Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click draws a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
-    eraserLabel.title = `Eraser (E) — left-drag erases ${target}; the right button does nothing. Wheel resizes it, Alt + right-drag scrubs the size, Shift snaps a drag to a straight horizontal/vertical line as seen in the view, and Shift+click erases a straight segment from the last point to where you click. Click the header to open or close its settings window.` + selNote;
+    // 这一格如今只交判断，不交句子：目标名（'Mask Layer' / 'Mask / Decal'）、那两枚键徽章亮不亮、
+    // Invert 在 decal 面上不出现在哪儿 —— 原来那三句 style.display / textContent / title 写的 DOM
+    // 已经不在这一页了，措辞的作者只剩 workbench/mask.tsx 一个。
+    // Brush / Eraser 两格自己不再被这里写标题：那两句现在由宿主的单元按这三个谓词现拼。
+    blendUiState.paint.maskLayer = maskLayerSel;
+    blendUiState.paint.decal = decal;
+    blendUiState.paint.selection = hasSelection();
     updateCursorMode();
 }
 
@@ -6959,8 +6633,10 @@ function paintRGBA() {
     return `rgba(${r}, ${g}, ${b}, ${brushAlpha})`;
 }
 
-// 色相 <-> 颜色: 调色盘里唯一的"第二种表示"。真值源仍然只有 brushColor / brushAlpha, HSV 只活在
-// 拖动的那一刻 (色相方向另存 brushHue, 因为灰/黑/白反解不出它)。
+// 颜色 -> 色相: 页面这一侧只剩这一个方向 —— setPaintColor 用它判断新颜色有没有 chroma, 有就把方向
+// 记进 brushHue (灰/黑/白反解不出它, 所以那份方向得单独存)。反方向 hsvToRgb 连同盘上的全部算术搬进了
+// workbench/colour.ts, 函数体与这一则是同一份 (门禁把两边相比), 所以"手指指在盘子的哪儿"和"落进变量的
+// 是那一个颜色"不会各说一套。
 function rgbToHsv(rgb) {
     const r = rgb[0] / 255, g = rgb[1] / 255, b = rgb[2] / 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
@@ -6974,265 +6650,42 @@ function rgbToHsv(rgb) {
     return [h, max === 0 ? 0 : d / max, max];
 }
 
-function hsvToRgb(h, s, v) {
-    const i = Math.floor(((h % 1) + 1) % 1 * 6), f = ((h % 1) + 1) % 1 * 6 - i;
-    const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
-    const rgb = i % 6 === 0 ? [v, t, p] : i % 6 === 1 ? [q, v, p] : i % 6 === 2 ? [p, v, t]
-        : i % 6 === 3 ? [p, q, v] : i % 6 === 4 ? [t, p, v] : [v, p, q];
-    return rgb.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255));
-}
-
-// ==================== Color 双色 + 常驻调色盘 (RGBA / HSBA 两种盘式) ====================
-// 侧栏一对 PS 式色块 (前景压在背景上) + 它下面常驻的调色盘。盘调的、笔刷用的都是**前景**; 背景只是停在
-// 那儿的另一色, X 或点它把它换到前台。
-// 盘式不是第二份状态, 只是同一份状态的两副手势与读数: paintMode 决定第一格画 SV 方块还是 HSB 圆盘、第二格
-// 是色相条还是明度条、下面三格是 R/G/B 还是 H/S/B。每一次改动仍旧只走 setPaintColor / setPaintAlpha, 而这
-// 两个 setter 反过来调 syncRgbaUI(), 所以 Alt+click 拾色、设置回读、手输、X 交换、切盘式全都会自动把色块、
-// 圆盘、拇指、四格读数同步过来, 不会出现两处读数各说各话。
-const RGBA_SV_W = 188, RGBA_SV_H = 116, RGBA_STRIP_W = 16, RGBA_STRIP_H = 116;
-// 圆盘在屏上必须是正圆, 所以它不像 SV 方块那样吃栏宽, 而是定边 116 (与 CSS 里 .rgba-grid.hsb .plate
-// 写死的同一个数)。
-const RGBA_WHEEL = 116;
+// ==================== Color 盘式 ====================
+// 侧栏那一对 PS 式色块和它下面那块常驻调色盘搬进了宿主的 dock（workbench/color.tsx 正文、
+// workbench/colour.ts 算术与绘制）：色块、盘、两条、拇指、四格读数全在边界那一侧画，手势算出来的
+// 那一个 hex 用的是逐字节相同的算术（门禁把两边的函数体相比）。页面这一侧只剩真值源 —— 上面那五颗
+// 变量，加盘式这一颗。
+// 盘式不是第二份状态, 只是同一份状态的两副手势与读数: paintMode 决定第一格画 SV 方块还是 HSB 圆盘、
+// 第二格是色相条还是明度条、下面三格是 R/G/B 还是 H/S/B。每一次改动仍旧只走 setPaintColor /
+// setPaintAlpha / setPaintMode, 而这三个 setter 反过来调 syncRgbaUI(), 所以 Alt+click 拾色、设置回读、
+// X 交换、切盘式全都会自动把宿主那一格同步过来, 不会出现两处读数各说各话。
 let paintMode = 'rgba';        // 'rgba' | 'hsb'
-const PAINT_MODES = {
-    rgba: { labels: ['R', 'G', 'B'], max: [255, 255, 255] },
-    hsb: { labels: ['H', 'S', 'B'], max: [360, 100, 100] },
-};
-const rgbaChipFront = document.getElementById('rgbaChipFront');
-const rgbaChipBack = document.getElementById('rgbaChipBack');
-const rgbaChipFrontFill = document.getElementById('rgbaChipFrontFill');
-const rgbaChipBackFill = document.getElementById('rgbaChipBackFill');
-const rgbaGrid = document.getElementById('rgbaGrid');
-const rgbaModeBtns = { rgba: document.getElementById('paintModeRgba'), hsb: document.getElementById('paintModeHsb') };
-const rgbaAlphaInput = document.getElementById('rgbaAlphaNum');
-const rgbaNum = [0, 1, 2].map(i => document.getElementById('rgbaNum' + i));
-const rgbaNumLabel = [0, 1, 2].map(i => document.getElementById('rgbaNumLabel' + i));
-const rgbaFields = {
-    plate: { box: document.getElementById('rgbaPlateField'), cv: document.getElementById('rgbaPlate'), thumb: document.getElementById('rgbaPlateThumb') },
-    ramp: { box: document.getElementById('rgbaRampField'), cv: document.getElementById('rgbaRamp'), thumb: document.getElementById('rgbaRampBar') },
-    alpha: { box: document.getElementById('rgbaAlphaField'), cv: document.getElementById('rgbaAlpha'), thumb: document.getElementById('rgbaAlphaBar') },
-};
-const rgbaHueCss = () => `hsl(${(brushHue * 360).toFixed(1)}, 100%, 50%)`;
-const hexOf = rgb => '#' + rgb.map(v => v.toString(16).padStart(2, '0')).join('');
 
-// 常量只决定绘制缓冲的分辨率; 屏幕上多大归 CSS 说 (SV 吃掉栏宽剩下的)。
-function rgbaCanvas(cv, w, h) {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
-    const g = cv.getContext('2d');
-    g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return g;
-}
-
-// 透明底纹: Alpha 条和色块都要它, 否则"半透明"看起来就是"黑"。
-function rgbaChecker(g, w, h) {
-    const cell = 6;
-    for (let y = 0; y < h; y += cell) for (let x = 0; x < w; x += cell) {
-        g.fillStyle = ((x / cell + y / cell) % 2) ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.05)';
-        g.fillRect(x, y, cell, cell);
-    }
-}
-
-// HSB 圆盘: 角度 = 色相, 半径 = 饱和度, 一律按 B=1 画 (跟 PS 的色相条一样, 盘/条本身只表示方向, 明暗
-// 交给旁边那条明度条)。形状与状态无关, 所以位图算一次存着, 之后每次重画只是贴一张图 —— 但那张图必须按
-// 画布的**设备像素**尺寸算, 否则 320 的源贴进 348 的目标会被重采样成一团糊。尺寸变了 (换屏/改 dpr) 才重算。
-let rgbaWheelCv = null, rgbaWheelPx = 0;
-function rgbaWheelBitmap(px) {
-    if (rgbaWheelCv && rgbaWheelPx === px) return rgbaWheelCv;
-    const size = Math.max(32, Math.round(px)), R = size / 2;
-    const cv = document.createElement('canvas'); cv.width = cv.height = size;
-    const g = cv.getContext('2d');
-    const img = g.createImageData(size, size);
-    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-        const dx = (x + 0.5 - R) / R, dy = (R - y - 0.5) / R;
-        const len = Math.hypot(dx, dy), i = (y * size + x) * 4;
-        const a = Math.max(0, Math.min(1, (1 - len) * R / 1.5)) * 255;
-        if (a <= 0) continue;
-        const c = hsvToRgb(len === 0 ? 0 : (Math.atan2(dy, dx) / (Math.PI * 2) + 1) % 1, Math.min(1, len), 1);
-        img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = Math.round(a);
-    }
-    g.putImageData(img, 0, 0);
-    rgbaWheelCv = cv; rgbaWheelPx = size;
-    return cv;
-}
-
-function drawRgbaFields() {
-    const rgb = paintColorRGB();
-    const hsv = rgbToHsv(rgb);
-    let g, grad;
-    if (paintMode === 'hsb') {
-        g = rgbaCanvas(rgbaFields.plate.cv, RGBA_WHEEL, RGBA_WHEEL);
-        g.clearRect(0, 0, RGBA_WHEEL, RGBA_WHEEL);
-        g.drawImage(rgbaWheelBitmap(rgbaFields.plate.cv.width), 0, 0, RGBA_WHEEL, RGBA_WHEEL);
-        // 明度条: 当前那份色相/饱和度下的纯色一路压到黑, 所以条上的位置就是盘里那点颜色的明暗。
-        const full = hsvToRgb(brushHue, hsv[1], 1);
-        g = rgbaCanvas(rgbaFields.ramp.cv, RGBA_STRIP_W, RGBA_STRIP_H);
-        grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
-        grad.addColorStop(0, `rgb(${full[0]}, ${full[1]}, ${full[2]})`);
-        grad.addColorStop(1, 'rgb(0, 0, 0)');
-        g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
-    } else {
-        g = rgbaCanvas(rgbaFields.plate.cv, RGBA_SV_W, RGBA_SV_H);
-        g.fillStyle = rgbaHueCss(); g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
-        grad = g.createLinearGradient(0, 0, RGBA_SV_W, 0);
-        grad.addColorStop(0, '#fff'); grad.addColorStop(1, 'rgba(255,255,255,0)');
-        g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
-        grad = g.createLinearGradient(0, 0, 0, RGBA_SV_H);
-        grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, '#000');
-        g.fillStyle = grad; g.fillRect(0, 0, RGBA_SV_W, RGBA_SV_H);
-
-        g = rgbaCanvas(rgbaFields.ramp.cv, RGBA_STRIP_W, RGBA_STRIP_H);
-        grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
-        for (let i = 0; i <= 6; i++) grad.addColorStop(i / 6, `hsl(${i * 60}, 100%, 50%)`);
-        g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
-    }
-
-    g = rgbaCanvas(rgbaFields.alpha.cv, RGBA_STRIP_W, RGBA_STRIP_H);
-    rgbaChecker(g, RGBA_STRIP_W, RGBA_STRIP_H);
-    grad = g.createLinearGradient(0, 0, 0, RGBA_STRIP_H);
-    grad.addColorStop(0, `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`);
-    grad.addColorStop(1, `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0)`);
-    g.fillStyle = grad; g.fillRect(0, 0, RGBA_STRIP_W, RGBA_STRIP_H);
-}
-
-// setter 的脸: 两块色块 + 那张常驻盘 (一格盘/方块、两条、四格数字)。盘式变了这里全变, 状态一个没多。
+// setter 的脸: 现在只剩一件事 —— 把这一份状态报给宿主 dock 里那一格。色块、盘、拇指、四格读数都由
+// workbench/color.tsx 用同一份算术画, 所以这里交的是五颗变量加盘式, 不交任何派生值。
 function syncRgbaUI() {
-    const rgb = paintColorRGB();
-    const hsv = rgbToHsv(rgb);
-    rgbaChipFrontFill.style.background = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${brushAlpha})`;
-    const back = paintColorRGB(backColor);
-    rgbaChipBackFill.style.background = `rgba(${back[0]}, ${back[1]}, ${back[2]}, ${backAlpha})`;
-    drawRgbaFields();
-    // 拇指一律按**百分比**落位: 格子宽度跟着栏宽走, 写 px 的话一拖分隔条拇指就歪了, 还得为此挂 resize 监听。
-    if (paintMode === 'hsb') {
-        // 圆盘上颜色那点 = 角度 brushHue、半径 S。灰 (S=0) 落在圆心, 角度在这一格里看不见, 与 PS 一致。
-        const a = brushHue * Math.PI * 2, r = hsv[1] * 50;
-        rgbaFields.plate.thumb.style.left = (50 + Math.cos(a) * r).toFixed(2) + '%';
-        rgbaFields.plate.thumb.style.top = (50 - Math.sin(a) * r).toFixed(2) + '%';
-        rgbaFields.ramp.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
-    } else {
-        rgbaFields.plate.thumb.style.left = (hsv[1] * 100).toFixed(2) + '%';
-        rgbaFields.plate.thumb.style.top = ((1 - hsv[2]) * 100).toFixed(2) + '%';
-        rgbaFields.ramp.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
-    }
-    rgbaFields.alpha.thumb.style.top = ((1 - brushAlpha) * 100).toFixed(2) + '%';
-    syncRgbaNumFields(rgb, hsv);
+    blendUiState.color.fg = brushColor;
+    blendUiState.color.bg = backColor;
+    blendUiState.color.fgAlpha = brushAlpha;
+    blendUiState.color.bgAlpha = backAlpha;
+    blendUiState.color.hue = brushHue;
+    blendUiState.color.mode = paintMode;
+    queueBlendUi();
 }
 
-// 三格读数 (加共享的 Alpha): RGBA 模式报 R/G/B 0..255, HSBA 模式报 H/S/B。H 读的是 brushHue 而不是从颜色
-// 反解的那一个 —— 灰阶反解不出方向, 而盘/条上指的方向正是用户上一回指的那个 (与色相条同一套规矩)。
-function paintModeValues(rgb, hsv) {
-    return paintMode === 'hsb'
-        ? [Math.round(brushHue * 360), Math.round(hsv[1] * 100), Math.round(hsv[2] * 100)]
-        : rgb;
-}
-
-function syncRgbaNumFields(rgb, hsv, force = false) {
-    const spec = PAINT_MODES[paintMode], vals = paintModeValues(rgb, hsv);
-    spec.labels.forEach((text, i) => {
-        if (rgbaNumLabel[i].textContent !== text) rgbaNumLabel[i].textContent = text;
-        const el = rgbaNum[i];
-        el.max = String(spec.max[i]);
-        if (force || document.activeElement !== el) el.value = String(vals[i]);
-    });
-    if (force || document.activeElement !== rgbaAlphaInput) rgbaAlphaInput.value = String(Math.round(brushAlpha * 100));
-}
-
-// 手输: 三格一起读 (空着或写歪的那格回落到现值), 夹到本 mode 的上限后一次落地 —— 逐格落地会让另一个格子的
-// 取整误差把色相拽偏, 也让 H/S/B 三格互相打架。
-function applyRgbaNumFromFields() {
-    const spec = PAINT_MODES[paintMode];
-    const rgb = paintColorRGB(), hsv = rgbToHsv(rgb), cur = paintModeValues(rgb, hsv);
-    const vals = rgbaNum.map((el, i) => {
-        const raw = String(el.value).trim(), n = Number(raw);
-        const v = raw !== '' && Number.isFinite(n) ? n : cur[i];
-        return Math.max(0, Math.min(spec.max[i], v));
-    });
-    if (paintMode === 'hsb') {
-        brushHue = vals[0] / 360;
-        setPaintColor(hexOf(hsvToRgb(brushHue, vals[1] / 100, vals[2] / 100)));
-    } else {
-        setPaintColor(hexOf(vals.map(Math.round)));
-    }
-}
-
-// 切盘式: 换的是手势与读数, 前景色本身一动不动。定宽的圆盘要靠 .hsb 这个类从 CSS 那儿拿到 (方块吃栏宽、
-// 圆盘保持正圆是两种不同的排布, 让 CSS 说)。
+// 切盘式: 换的是手势与读数, 前景色本身一动不动。那一格的排布 (方块吃栏宽、圆盘保持正圆) 归 React
+// 那一侧的样式说, 这里只改状态再播报一次。
 function setPaintMode(next) {
     if (paintMode === next) return;
     paintMode = next;
-    rgbaGrid.classList.toggle('hsb', next === 'hsb');
-    for (const [key, el] of Object.entries(rgbaModeBtns)) el.classList.toggle('active', key === next);
     syncRgbaUI();
     setStatus(next === 'hsb' ? 'Colour wheel — angle sets the hue, radius the saturation'
         : 'Colour square — saturation across, brightness down, hue on the bar');
 }
-for (const [key, el] of Object.entries(rgbaModeBtns)) el.addEventListener('click', () => setPaintMode(key));
 
-// 点背景色块 = 把它换到前台, 与 X 同一条路 (PS 里点后面那块也是提到前面)。
-rgbaChipBack.addEventListener('click', swapPaintColors);
-
-// 拖三格: 按下即定位、按住拖动连续改, 用 pointer capture 所以拖出格子也继续跟手。
-function bindRgbaField(field, apply) {
-    const at = ev => {
-        const r = field.box.getBoundingClientRect();
-        apply(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)),
-            Math.max(0, Math.min(1, (ev.clientY - r.top) / r.height)));
-    };
-    field.box.addEventListener('pointerdown', ev => {
-        if (ev.button !== 0) return;
-        ev.preventDefault();
-        field.box.setPointerCapture(ev.pointerId);
-        field.box.classList.add('grabbing');
-        at(ev);
-    });
-    field.box.addEventListener('pointermove', ev => { if (field.box.classList.contains('grabbing')) at(ev); });
-    const end = () => field.box.classList.remove('grabbing');
-    field.box.addEventListener('pointerup', end);
-    field.box.addEventListener('pointercancel', end);
-}
-
-bindRgbaField(rgbaFields.plate, (x, y) => {
-    const hsv = rgbToHsv(paintColorRGB());
-    if (paintMode === 'hsb') {
-        // 圆盘: 角度 = 色相, 半径 = 饱和度, 明度保持现在这一份。正圆心那一下方向无意义 (半径 0),
-        // 就留住原来的朝向, 免得拖到中心颜色突然跳到红。
-        const dx = x * 2 - 1, dy = 1 - y * 2, len = Math.hypot(dx, dy);
-        if (len > 0.0001) brushHue = (Math.atan2(dy, dx) / (Math.PI * 2) + 1) % 1;
-        setPaintColor(hexOf(hsvToRgb(brushHue, Math.min(1, len), hsv[2])));
-        return;
-    }
-    setPaintColor(hexOf(hsvToRgb(brushHue, x, 1 - y)));
-});
-bindRgbaField(rgbaFields.ramp, (x, y) => {
-    const hsv = rgbToHsv(paintColorRGB());
-    if (paintMode === 'hsb') {
-        // 明度条把当前这份色相/饱和度一路压到黑。灰阶也照样拖得动 (白→黑本来就是它的变化), 所以不需要
-        // 色相条那套"没颜色就只挪条"的分支。
-        setPaintColor(hexOf(hsvToRgb(brushHue, hsv[1], 1 - y)));
-        return;
-    }
-    brushHue = y;
-    // 有色就跟着新色相重算颜色; 灰阶 (s=0) 只挪色相条, 颜色本来就不该变。
-    if (hsv[1] > 0.004) {
-        setPaintColor(hexOf(hsvToRgb(brushHue, hsv[1], hsv[2])));
-    } else {
-        drawRgbaFields();
-        rgbaFields.ramp.thumb.style.top = (brushHue * 100).toFixed(2) + '%';
-    }
-});
-bindRgbaField(rgbaFields.alpha, (x, y) => setPaintAlpha(1 - y));
-
-for (const el of rgbaNum) {
-    el.addEventListener('input', applyRgbaNumFromFields);
-    // 松手把文本回写成规范值 (去掉 032 这种前导零、把越界的夹回来), 正在别的格子里打字不受影响。
-    el.addEventListener('blur', () => syncRgbaNumFields(paintColorRGB(), rgbToHsv(paintColorRGB()), true));
-}
-rgbaAlphaInput.addEventListener('input', () => {
-    const v = Number(rgbaAlphaInput.value);
-    if (Number.isFinite(v)) setPaintAlpha(v / 100);
-});
-rgbaAlphaInput.addEventListener('blur', () => { rgbaAlphaInput.value = String(Math.round(brushAlpha * 100)); });
+// 三格手势与手输同样搬进了 workbench/color.tsx —— 它算出的那一个 hex 走 'paint-color' /
+// 'paint-alpha' / 'paint-hue' 三条指令回到下面这几颗变量，所以 Alt+click 拾色、.cud 的工具回读
+// (setToolForBlock)、手输、X 交换仍然只有 setPaintColor / setPaintAlpha 这一个落点。
 
 function selectTool(tool) {
     if (!getSelected()) { setStatus('Select a layer first', 'error'); return; }
@@ -7261,7 +6714,9 @@ function updateCursorMode() {
     // Tint the ring (and its sidebar twin) with the paint colour, so the decal colour is visible while painting.
     const tint = (!erasing && isDecalTarget()) ? paintRGBA() : '';
     brushCursor.style.borderColor = tint;
-    document.getElementById('brushRingSwatch').style.borderColor = isDecalTarget() ? paintRGBA() : '';
+    // 侧栏那枚色环的孪生兄弟已经搬进宿主的 Brush 单元：同一个取值，走快照而不是走 DOM。
+    blendUiState.paint.ring = isDecalTarget() ? paintRGBA() : '';
+    queueBlendUi();
     // The brush and the eraser keep separate sizes, so switching tool by button has to resize the
     // ring too — otherwise the cursor would promise the brush's diameter and erase with another.
     updateBrushCursorSize();
@@ -8965,68 +8420,11 @@ viewport.addEventListener('touchend', () => {
     }
 });
 
-// ==================== 画笔 / 橡皮设置 ====================
-const modeConfigs = [
-    { id: 'brushBinary', mode: 'binary', rows: { brushStrengthRow: true, brushCenterRow: false, brushEdgeRow: false, brushGammaRow: false } },
-    { id: 'brushLinear', mode: 'linear', rows: { brushStrengthRow: true, brushCenterRow: true, brushEdgeRow: true, brushGammaRow: false } },
-    { id: 'brushExpo', mode: 'exponential', rows: { brushStrengthRow: true, brushCenterRow: false, brushEdgeRow: false, brushGammaRow: true } },
-];
-modeConfigs.forEach(m => {
-    const btn = document.getElementById(m.id);
-    btn.addEventListener('click', () => {
-        brushMode = m.mode;
-        modeConfigs.forEach(mm => document.getElementById(mm.id).classList.remove('active'));
-        btn.classList.add('active');
-        for (const [rowId, show] of Object.entries(m.rows))
-            document.getElementById(rowId).style.display = show ? 'flex' : 'none';
-    });
-});
-
-const bindRange = (inputId, valId, setter) => {
-    const el = document.getElementById(inputId);
-    const valEl = document.getElementById(valId);
-    el.addEventListener('input', () => { setter(parseFloat(el.value)); valEl.textContent = parseFloat(el.value).toFixed(2); });
-};
-bindRange('brushStrength', 'brushStrengthValue', v => brushStrength = v);
-bindRange('brushCenter', 'brushCenterValue', v => brushCenter = v);
-bindRange('brushEdge', 'brushEdgeValue', v => brushEdge = v);
-bindRange('brushGamma', 'brushGammaValue', v => brushGamma = v);
-bindRange('eraserStrength', 'eraserStrengthValue', v => eraserStrength = v);
-bindRange('eraserCenter', 'eraserCenterValue', v => eraserCenter = v);
-bindRange('eraserEdge', 'eraserEdgeValue', v => eraserEdge = v);
-bindRange('eraserGamma', 'eraserGammaValue', v => eraserGamma = v);
-bindRange('bucketTolerance', 'bucketToleranceValue', v => bucketTolerance = v);
-document.getElementById('bucketContinuous').addEventListener('change', e => { bucketContinuous = e.target.checked; });
-document.getElementById('bucketAllLayers').addEventListener('change', e => { bucketAllLayers = e.target.checked; });
-document.getElementById('brushSize').addEventListener('input', e => {
-    brushSize = parseInt(e.target.value);
-    document.getElementById('brushSizeValue').textContent = brushSize;
-    updateBrushCursorSize();
-});
-document.getElementById('eraserSize').addEventListener('input', e => {
-    eraserSize = parseInt(e.target.value);
-    document.getElementById('eraserSizeValue').textContent = eraserSize;
-    updateBrushCursorSize();
-});
-
-function setupEraserModeButtons() {
-    const modes = [
-        { id: 'eraserBinary', mode: 'binary', rows: { eraserStrengthRow: true, eraserCenterRow: false, eraserEdgeRow: false, eraserGammaRow: false } },
-        { id: 'eraserLinear', mode: 'linear', rows: { eraserStrengthRow: true, eraserCenterRow: true, eraserEdgeRow: true, eraserGammaRow: false } },
-        { id: 'eraserExpo', mode: 'exponential', rows: { eraserStrengthRow: true, eraserCenterRow: false, eraserEdgeRow: false, eraserGammaRow: true } },
-    ];
-    modes.forEach(m => {
-        const btn = document.getElementById(m.id);
-        btn.addEventListener('click', () => {
-            eraserMode = m.mode;
-            modes.forEach(mm => document.getElementById(mm.id).classList.remove('active'));
-            btn.classList.add('active');
-            for (const [rowId, show] of Object.entries(m.rows))
-                document.getElementById(rowId).style.display = show ? 'flex' : 'none';
-        });
-    });
-}
-setupEraserModeButtons();
+// ==================== 画笔 / 橡皮 / 油漆桶设置 ====================
+// 这三格的控件如今是宿主的 dock 单元：旋钮取值走 UI_COMMANDS（见那张表末尾的 brush-* / eraser-* /
+// bucket-*），落点仍是这里这几颗全局变量 —— 绘制引擎读的从来是变量，不是某颗 <input>。
+// 每模式该露哪几根旋钮也归单元自己判断（Binary 只给 Strength，Linear 给 Center/Edge，Exponential 给
+// Gamma），页面这边没有行要藏了。
 
 // ==================== 面板按钮 ====================
 // ---- the Add menus: one per palette, one shared state machine ----
@@ -9285,8 +8683,6 @@ addRasterToggleBtn.addEventListener('click', () => {
                          : 'Images will be placed as smart-object layers (original pixels kept)');
 });
 
-// Canvas Modify — border-drag canvas resizing, Enter applies, Esc cancels.
-document.getElementById('canvasModifyBtn').addEventListener('click', startCanvasModify);
 syncRasterToggleUI();
 
 // A blank layer whose image element is a canvas, so `nativeSize()` reports the pixel box we
@@ -9958,11 +9354,14 @@ document.getElementById('sidePanel').addEventListener('mouseup', e => {
     if (el && el.type !== 'range') el.blur();
 });
 
-document.getElementById('maskInvertBtn').addEventListener('click', () => {
+// 反"笔尖那一面"。原来这颗按钮住在被撤掉的小节标题上，现在它是宿主那一格的第一行发的动作键，
+// 守卫一句不减：没选中、整颗被组挡住、点的是 decal 面 —— 三种都各自说清为什么什么都没发生。
+// 选中 Mask 层时它反的还是那张整层（那一行自己的 Invert 干的是同一件事），因为这一句问的是
+// "笔此刻落在谁身上"。
+function invertPaintedMask() {
     const l = getSelected();
     if (!l) { setStatus('Select a layer first', 'error'); return; }
     if (groupPaintBlocked()) return;
-    // The Mask layer never reaches this button: its own row owns Invert / Full / Clear.
     if (l.isMaskLayer) { runMaskRowAction('invert'); return; }
     if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
     const flipped = invertMask(l);
@@ -9970,39 +9369,11 @@ document.getElementById('maskInvertBtn').addEventListener('click', () => {
     render();
     setStatus(attrStepNote('Mask inverted', flipped, l));
     pushHistory();
-});
-document.getElementById('maskFullBtn').addEventListener('click', () => {
-    if (!isMaskLayerTarget()) { setStatus('The Mask layer carries Full — select it in the Layers list', 'error'); return; }
-    runMaskRowAction('full');
-});
+}
 
-
-document.getElementById('transformAdjustBtn').addEventListener('click', () => {
-    if (mode !== 'transform' && !getSelected()) { setStatus('Select a layer first', 'error'); return; }
-    if (isMaskLayerTarget()) { setStatus('The Mask layer is canvas-locked — there is nothing to transform', 'error'); return; }
-    activateMode('transform');
-});
-document.getElementById('transformFillBtn').addEventListener('click', () => {
-    const l = getSelected();
-    if (!l) { setStatus('Select a layer first', 'error'); return; }
-    if (l.isMaskLayer) { setStatus('The Mask layer is canvas-locked — there is nothing to stretch', 'error'); return; }
-    // Commit the released gesture before overwriting the transform wholesale, so a pending box is
-    // never dropped on the floor.
-    applyTransformPending();
-    l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
-    setMode('transform');
-    setStatus('Layer stretched to canvas');
-    pushHistory();
-});
-
-// ---- View panel ----
-document.getElementById('viewFitBtn').addEventListener('click', () => { view.autoFit = true; fitView(true); });
-document.getElementById('viewResetBtn').addEventListener('click', () => resetView());
-document.getElementById('viewZoomInBtn').addEventListener('click', () => zoomAt(vpCenter(), 1.25));
-document.getElementById('viewZoomOutBtn').addEventListener('click', () => zoomAt(vpCenter(), 1 / 1.25));
-document.getElementById('viewRotateCWBtn').addEventListener('click', () => rotateView(Math.PI / 12));
-document.getElementById('viewRotateCCWBtn').addEventListener('click', () => rotateView(-Math.PI / 12));
-document.getElementById('viewFlipBtn').addEventListener('click', () => flipView());
+// 那一对小节标题上的按钮里，Full 那一颗从来没有露过面：syncPaintUI 每次都把它 display:none 掉，
+// 因为"盖满整张"这件事只有 Mask 层自己的那一行说得清（runMaskRowAction('full')）。合并成一格以后
+// 这一颗没有任何可观察差别，就按它本来的样子撤掉，而不是再画一枚藏起来的按钮。
 
 // ---- 工具设置小窗 ----
 // Brush, Bucket, Eraser, Text, Detector and Processor start folded. Clicking a header row docks
@@ -10010,7 +9381,7 @@ document.getElementById('viewFlipBtn').addEventListener('click', () => flipView(
 // the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
 // header while the panel scrolls or the column is dragged wider, and stack in list order so two of
 // them cannot sit on top of each other.
-const TOOL_WINDOW_IDS = ['brushSection', 'bucketSection', 'eraserSection', 'textSection', 'directionSection', 'scene3dSection', 'poseSection', 'detectorSection', 'processorSection'];
+const TOOL_WINDOW_IDS = ['textSection', 'directionSection', 'scene3dSection', 'poseSection', 'detectorSection', 'processorSection'];
 const TOOL_WINDOW_GAP = 8;
 const toolFlyHost = document.createElement('div');
 toolFlyHost.id = 'toolFlyHost';
@@ -10116,14 +9487,6 @@ window.addEventListener('resize', toolWindowRelayout);
 for (const id of TOOL_WINDOW_IDS) {
     document.getElementById(id).querySelector('.panel-head').addEventListener('click', () => toggleToolWindow(id));
 }
-
-document.getElementById('zoomToolBtn').addEventListener('click', () => activateMode('zoom'));
-document.getElementById('panToolBtn').addEventListener('click', () => activateMode('pan'));
-document.getElementById('rotateToolBtn').addEventListener('click', () => activateMode('rotate'));
-document.getElementById('rectSelectBtn').addEventListener('click', () => activateMode('rect'));
-document.getElementById('lassoSelectBtn').addEventListener('click', () => activateMode('lasso'));
-document.getElementById('selectAllBtn').addEventListener('click', selectAll);
-document.getElementById('deselectBtn').addEventListener('click', deselectAndReport);
 
 // Clear All is per stack: emptying the layers must never throw away the guidance stack sitting on
 // top of it (and the other way round). The Mask layer is a channel, not a stack member, so the
@@ -10293,6 +9656,10 @@ function sendBlendAction(action, opts) {
         width: canvasW,
         height: canvasH,
         mask,
+        // Which document this run was issued from. The engine is one per page, so this is the window
+        // the pixels came out of — what the host's Log and Debug say the run acted on, now that
+        // several documents are open at once and the workbench no longer names itself.
+        doc: activeDoc ? { uid: activeDoc.uid, name: activeDoc.name } : null,
     };
     if (layerTag) {
         // 预制作:把整幅合成按该 Layer 的原生网格抠好 + 该 Layer 自带蒙版,后端复用现成的
@@ -10818,6 +10185,7 @@ function sendLayerGenerate(l, presetId, withContext) {
         height: size.h,
         preset_id: presetId,
         extra_prompt: extraPromptInput.value.trim(),
+        doc: activeDoc ? { uid: activeDoc.uid, name: activeDoc.name } : null,
     }, '*');
     setActionBusy(true, 'detailer');
     setStatus(`Generating on 「${targetName}」…`);
@@ -11340,7 +10708,6 @@ function applyCanvasModal() {
     render();
 }
 
-document.getElementById('canvasSizeBtn').addEventListener('click', openCanvasModal);
 document.getElementById('canvasCancelBtn').addEventListener('click', closeCanvasModal);
 document.getElementById('canvasApplyBtn').addEventListener('click', applyCanvasModal);
 canvasModalEl.addEventListener('mousedown', e => { if (e.target === canvasModalEl) closeCanvasModal(); });
@@ -11927,93 +11294,93 @@ let cudBusy = false;
 let currentCudHandle = null;
 let currentCudName = '';
 
-const loadBtn = document.getElementById('loadBtn');
-const saveBtn = document.getElementById('saveBtn');
-const saveAsBtn = document.getElementById('saveAsBtn');
-const exportBtn = document.getElementById('exportBtn');
-const exportMenuEl = document.getElementById('exportMenu');
-const exportPngBtn = document.getElementById('exportPngBtn');
-const importBtn = document.getElementById('importBtn');
 const importFileInput = document.getElementById('importFile');
 const cudFileInput = document.getElementById('cudFile');
 // Where a no-picker .cud goes once the <input type=file> answers: opened as a project (Load) or
 // flattened into one linked layer (Add ▸ Cud Project). The action that raised the dialog sets it.
 let cudFileInputTarget = 'document';
 let cudFileInputStack = null;
-const fileBtn = document.getElementById('fileBtn');
-const fileMenuEl = document.getElementById('fileMenu');
-const fileGroupEl = document.getElementById('fileGroup');
-const docTabsEl = document.getElementById('docTabs');
-const docNewBtn = document.getElementById('docNewBtn');
 const docCloseModalEl = document.getElementById('docCloseModal');
 const docCloseSub = document.getElementById('docCloseSub');
 const docCloseSaveBtn = document.getElementById('docCloseSaveBtn');
 
-function syncIoUI() {
-    for (const b of [loadBtn, saveBtn, saveAsBtn, exportBtn, exportPngBtn, importBtn]) b.disabled = cudBusy;
+// ---- the document readout the host draws its windows from ----
+// The File menu and the tab strip live in the host page now, so this one draws neither; it answers
+// their questions over postMessage instead. One announcement function covers both halves of what a
+// document window shows — which projects exist, which of them is the live one, and whether an IO
+// action has the document locked — because a window that greyed its File menu without saying why (or
+// said why without greying) is a window that lies about one of the two.
+function syncDocList() {
+    if (window.parent === window) return;
+    window.parent.postMessage({
+        type: 'blend-docs',
+        activeUid: activeDoc ? activeDoc.uid : null,
+        busy: cudBusy,
+        docs: documents.map(d => ({
+            uid: d.uid,
+            name: d.name,
+            kind: d.kind || null,
+            dirty: !!d.dirty,
+            // Where a bound document writes back to; null = never saved to a file. The window is named
+            // by `name` and this only ever shows up in its tooltip.
+            path: d.doc ? (d.doc.path || d.doc.name || null) : null,
+        })),
+    }, '*');
 }
 
-// ---- the File menu ----
-// One popover, one sub-popover. Export is a GROUP, not an action: opening it reveals PNG, so adding
-// a format later costs one row and no new state. Clicking outside closes the whole thing, and any
-// entry that acts closes it first — a menu left open over a native dialog is a menu nobody can find.
-let fileMenuOpen = false;
-
-function closeFileMenu() {
-    if (!fileMenuOpen) return;
-    fileMenuOpen = false;
-    fileMenuEl.hidden = true;
-    exportMenuEl.hidden = true;
-    fileBtn.setAttribute('aria-expanded', 'false');
-    exportBtn.classList.remove('open');
-    exportBtn.setAttribute('aria-expanded', 'false');
+// A document stops being the live one the instant another is restored over its viewport, so the frame
+// it last showed has to be kept BEFORE the swap and handed over with it. Until the engine is scoped per
+// document rather than per page this is all a background window can show — the picture, not a live view
+// of it. A 3D scene tab is left without one: its canvas is a WebGL buffer with nothing kept after the
+// frame, so its window shows the placeholder rather than a black square.
+const DOC_STILL_MAX_SIDE = 1280;
+let docStillBuf = null;
+function captureStill(entry) {
+    if (!entry || window.parent === window || isSceneDoc(entry)) return;
+    if (!canvasW || !canvasH) return;
+    let image = null;
+    try {
+        const s = Math.min(1, DOC_STILL_MAX_SIDE / Math.max(canvasW, canvasH));
+        const w = Math.max(1, Math.round(canvasW * s)), h = Math.max(1, Math.round(canvasH * s));
+        if (!docStillBuf) docStillBuf = document.createElement('canvas');
+        if (docStillBuf.width !== w || docStillBuf.height !== h) { docStillBuf.width = w; docStillBuf.height = h; }
+        const ctx = docStillBuf.getContext('2d');
+        resetCtx(ctx);
+        ctx.clearRect(0, 0, w, h);
+        // The same merge the Guidance card publishes: working layers under guidances, as stacked on
+        // screen. The transform-box overlay is transient chrome and stays out of a kept frame.
+        ctx.drawImage(blendCanvas, 0, 0, w, h);
+        ctx.drawImage(guidanceCanvas, 0, 0, w, h);
+        image = docStillBuf.toDataURL('image/png');
+    } catch (e) { image = null; }   // a canvas that refuses to encode leaves the window on its placeholder
+    if (image === null) return;
+    window.parent.postMessage({ type: 'blend-doc-still', uid: entry.uid, image }, '*');
 }
 
-function openFileMenu() {
-    fileMenuOpen = true;
-    fileMenuEl.hidden = false;
-    fileBtn.setAttribute('aria-expanded', 'true');
-}
-
-fileBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (fileMenuOpen) closeFileMenu(); else openFileMenu();
-});
-exportBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    const open = exportMenuEl.hidden;
-    exportMenuEl.hidden = !open;
-    exportBtn.classList.toggle('open', open);
-    exportBtn.setAttribute('aria-expanded', String(open));
-});
-document.addEventListener('mousedown', e => {
-    if (fileMenuOpen && !fileGroupEl.contains(e.target)) closeFileMenu();
-});
-
-// The tab strip is the document readout: the name, the bound path and the unsaved dot all describe
-// the project File acts on, so binding a file stores it and lets renderDocTabs() say so.
+// A document window is named by its project: the name, the bound path and the unsaved dot all describe
+// the project File acts on, so binding a file stores it and lets syncDocList() say so.
 function setCurrentDocument(handle, name) {
     currentCudHandle = handle || null;
     currentCudName = name || '';
     // Every binding lands here — an opened project, a Save As destination — so this is where a
-    // document becomes a refresh target: a row in another tab that links this file finds its
+    // document becomes a refresh target: a row in another window that links this file finds its
     // document again, which is what makes the Jump button and the save hook work.
     if (currentCudHandle) registerCudDoc(currentCudHandle);
-    // The tab is the same project, so it carries the same binding and shows the same name. An empty
-    // name here means "this project has no file", not "rename it to nothing" — a tab keeps the name
+    // The window is the same project, so it carries the same binding and shows the same name. An empty
+    // name here means "this project has no file", not "rename it to nothing" — a window keeps the name
     // it was opened with.
     if (activeDoc) {
         activeDoc.doc = currentCudHandle;
         if (currentCudName) activeDoc.name = currentCudName;
-        renderDocTabs();
+        syncDocList();
     }
 }
 
-// ---- the open documents (the strip above the canvas) ----
-// One tab is one whole workbench context kept in memory: the live layer objects with their paint
+// ---- the open documents (one dock window each, drawn by the host) ----
+// One document is one whole workbench context kept in memory: the live layer objects with their paint
 // surfaces, the Mask layer, the canvas size, the selection, the view framing and the tool settings —
-// plus its own undo branches, so Ctrl+Z in one project can never reach into another. Switching tabs
-// copies no pixels and encodes nothing; only Save touches the disk.
+// plus its own undo branches, so Ctrl+Z in one project can never reach into another. Switching between
+// them copies no pixels and encodes nothing; only Save touches the disk.
 //
 // The staging pool does NOT travel with a tab on purpose. It is the host's workspace — swapping it
 // would re-upload every image on every click — so it stays workbench-wide, while a .cud still stores
@@ -12038,7 +11405,7 @@ function blankMaskLayer() {
         id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output',
         visible: true, transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         mask: null, maskCtx: null,
-        decal: null, decalCtx: null, decalThumbEl: null, canvasThumbEl: null,
+        decal: null, decalCtx: null, canvasThumbEl: null,
         // The singleton Mask layer never takes a chain (layerTakesEffects() says so),
         // but it shares the layer object shape so nothing has to special-case it.
         effects: [], fxCache: null,
@@ -12072,39 +11439,6 @@ function blankContext() {
         view: { zoom: 1, rotation: 0, flipX: 1, panX: 0, panY: 0, autoFit: true },
         tools,
     };
-}
-
-function renderDocTabs() {
-    if (!docTabsEl) return;
-    docTabsEl.innerHTML = '';
-    for (const entry of documents) {
-        const tab = document.createElement('div');
-        tab.className = 'doc-tab' + (entry === activeDoc ? ' active' : '') + (entry.dirty ? ' dirty' : '');
-        tab.setAttribute('data-uid', String(entry.uid));
-        const where = entry.doc && entry.doc.path ? entry.doc.path : entry.name;
-        tab.title = (entry.doc ? `${where} · Ctrl+S overwrites this file` : `${entry.name} · not saved to a file yet`)
-            + (entry.dirty ? ' · unsaved changes' : '');
-        const name = document.createElement('span');
-        name.className = 'dt-name'; name.textContent = entry.name;
-        if (isSceneDoc(entry)) {
-            // 场景 tab 长得和工程 tab 一样,只是名字前多一枚立方体 —— 一眼分得清这是 3D 那块。
-            const kind = document.createElement('span');
-            kind.className = 'dt-kind';
-            kind.innerHTML = '<svg viewBox="0 0 10 10" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.1"><path d="M5 1.2 8.8 3.1v3.8L5 8.8 1.2 6.9V3.1z"/><path d="M5 5.05v3.75M1.2 3.1 5 5.05l3.8-1.95"/></svg>';
-            kind.title = '3D scene tab';
-            tab.appendChild(kind);
-        }
-        const dot = document.createElement('span');
-        dot.className = 'dt-dirty'; dot.title = 'Unsaved changes';
-        const close = document.createElement('button');
-        close.className = 'dt-close'; close.title = 'Close this project';
-        close.innerHTML = '<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>';
-        tab.appendChild(name); tab.appendChild(dot); tab.appendChild(close);
-        tab.addEventListener('click', () => switchDocument(entry.uid));
-        close.addEventListener('click', e => { if (e && e.stopPropagation) e.stopPropagation(); closeDocument(entry.uid); });
-        docTabsEl.appendChild(tab);
-    }
-    docTabsEl.appendChild(docNewBtn);
 }
 
 function busyGestures() { return cudBusy || actionBusy || isDrawing || drag || viewDrag || textEditingId !== null || modalOpen()
@@ -12143,6 +11477,9 @@ function activateDocument(entry) {
     // 兜底新建同样 activeDoc===null，但那时池易主已经发生过了（stagingPoolOwner 非空）。
     const bootSwap = activeDoc === null && stagingPoolOwner === null;
     if (activeDoc) { activeDoc.ctx = captureContext(); activeDoc.staging = stagingItems; stashHistory(activeDoc); }
+    // Keep what the outgoing project last showed before its viewport is repainted with the new one —
+    // that frame is all its window can show until the engine is per document rather than per page.
+    captureStill(activeDoc);
     activeDoc = entry;
     undoStack = entry.undo || []; redoStack = entry.redo || []; lastActionKey = entry.lastActionKey || null;
     setCurrentDocument(entry.doc, entry.doc ? entry.name : '');
@@ -12165,7 +11502,7 @@ function activateDocument(entry) {
         stagingPoolOwner = entry.uid;
         if (!bootSwap) postStagingSync();
     }
-    renderDocTabs();
+    syncDocList();
     return true;
 }
 
@@ -12178,7 +11515,7 @@ function createDocument(name, doc, ctx, activate, opts) {
         kind: o.kind || null, hostUid: o.hostUid || null };
     documents.push(entry);
     if (activate) activateDocument(entry);
-    else renderDocTabs();
+    else syncDocList();
     return entry;
 }
 
@@ -12188,7 +11525,7 @@ function createDocument(name, doc, ctx, activate, opts) {
 function adoptDocument(entry) {
     activeDoc = entry;
     stashHistory(entry);       // the live stacks become this project's — Ctrl+Z is already wired to them
-    renderDocTabs();
+    syncDocList();
     return entry;
 }
 
@@ -12213,7 +11550,7 @@ function dropDocument(entry) {
     const wasActive = entry === activeDoc;
     documents.splice(at, 1);
     if (wasActive) activeDoc = null;
-    else { renderDocTabs(); setStatus(`Closed ${entry.name}`); return; }
+    else { syncDocList(); setStatus(`Closed ${entry.name}`); return; }
     // The workbench never runs out of somewhere to draw: the neighbour takes over, and closing the
     // last tab leaves a blank project standing.
     const next = documents[Math.min(at, documents.length - 1)];
@@ -12286,12 +11623,12 @@ function markDocumentDirty() {
     // Ctrl+Z 回去,关 tab 时也直接关 —— 烘进图层的那张像素才是留得下来的东西。
     if (docSwapping || isSceneDoc(activeDoc) || !activeDoc || activeDoc.dirty) return;
     activeDoc.dirty = true;
-    renderDocTabs();
+    syncDocList();
 }
 function markDocumentClean() {
     if (!activeDoc || !activeDoc.dirty) return;
     activeDoc.dirty = false;
-    renderDocTabs();
+    syncDocList();
 }
 
 // ==================== 3D 图层 ====================
@@ -12364,7 +11701,7 @@ function bake3DToRecord(host, canvas, W, H) {
         if (!host.layer.img || cur.w !== W || cur.h !== H) host.layer.img = makeBlankCanvas(W, H);
     }
     if (host.attr) host.attr.surface = canvas;
-    if (!host.doc.dirty) { host.doc.dirty = true; renderDocTabs(); }
+    if (!host.doc.dirty) { host.doc.dirty = true; syncDocList(); }
     const top = host.doc.undo;
     if (Array.isArray(top) && top.length) top[top.length - 1] = host.doc.ctx;
     const live = host.layer || (host.row && getLayer(host.row.id));
@@ -12632,7 +11969,7 @@ async function exportPng() {
     if (pick.error) { setStatus('Export failed: ' + pick.error, 'error'); return false; }
     if (pick.cancelled) { setStatus('Export cancelled'); return false; }
     const target = pick.docs ? pick.docs[0] : null;      // null = no picker: the file downloads
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     setStatus('Exporting the composite…');
     try {
         render();       // the pixels being written must be the pixels on screen
@@ -12648,7 +11985,7 @@ async function exportPng() {
         setStatus('Export failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -12861,7 +12198,7 @@ async function saveCudAs() {
     if (pick.error) { setStatus('Save failed: ' + pick.error, 'error'); return false; }
     if (pick.cancelled) { setStatus('Save As cancelled'); return false; }
     const target = pick.docs ? pick.docs[0] : null;      // null = no picker: the file downloads
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     setStatus('Writing the context…');
     try {
         const { blob, count } = await buildCudBlob();
@@ -12886,7 +12223,7 @@ async function saveCudAs() {
         setStatus('Save failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -12902,7 +12239,7 @@ async function saveCud() {
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
     if (!currentCudHandle) return saveCudAs();
     if (!layers.length || !canvasW || !canvasH) { setStatus('Nothing to save — add a layer first', 'error'); return false; }
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     setStatus(`Saving ${currentCudName}…`);
     try {
         const { blob, count } = await buildCudBlob();
@@ -12919,7 +12256,7 @@ async function saveCud() {
         setStatus('Save failed: ' + ((err && err.message) || err) + ' — use Save As', 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -12980,21 +12317,14 @@ function decodeCud(buffer) {
     return { header, blobs };
 }
 
-function setNumberControl(inputId, valId, v) {
-    const el = document.getElementById(inputId);
-    if (!el) return;
-    el.value = String(v);
-    const valEl = document.getElementById(valId);
-    if (valEl) valEl.textContent = Number(v).toFixed(2);
-}
-
-// The falloff buttons own both the variable and which rows are visible, so the restore presses
-// them instead of duplicating that logic here.
-function pressFalloffButton(prefix, falloff) {
-    const suffix = falloff === 'binary' ? 'Binary' : falloff === 'linear' ? 'Linear' : falloff === 'exponential' ? 'Expo' : null;
-    if (!suffix) return;
-    const btn = document.getElementById(prefix + suffix);
-    if (btn) btn.click();
+// The falloff choice used to be restored by pressing the page's own mode button, because that button
+// owned both the variable and which rows were visible. Neither is a DOM node any more — the unit reads
+// the mode out of the snapshot and shows the rows that mode has a visible use for — so the restore
+// names the mode, and an unknown one is simply not adopted.
+function setFalloffMode(prefix, falloff) {
+    const m = falloff === 'binary' || falloff === 'linear' || falloff === 'exponential' ? falloff : null;
+    if (!m) return;
+    if (prefix === 'brush') brushMode = m; else eraserMode = m;
 }
 
 // The tool settings a document carries. One shape serves both writers: the .cud header and an
@@ -13019,11 +12349,7 @@ function applyCudTools(t) {
         if (Number.isFinite(b.center)) brushCenter = clamp(b.center, 0, 1);
         if (Number.isFinite(b.edge)) brushEdge = clamp(b.edge, 0, 1);
         if (Number.isFinite(b.gamma)) brushGamma = clamp(b.gamma, 0.1, 10);
-        pressFalloffButton('brush', b.mode);
-        setNumberControl('brushStrength', 'brushStrengthValue', brushStrength);
-        setNumberControl('brushCenter', 'brushCenterValue', brushCenter);
-        setNumberControl('brushEdge', 'brushEdgeValue', brushEdge);
-        setNumberControl('brushGamma', 'brushGammaValue', brushGamma);
+        setFalloffMode('brush', b.mode);
         if (typeof b.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(b.color)) setPaintColor(b.color);
         if (Number.isFinite(b.alpha)) setPaintAlpha(b.alpha);
     }
@@ -13034,20 +12360,13 @@ function applyCudTools(t) {
         if (Number.isFinite(e.center)) eraserCenter = clamp(e.center, 0, 1);
         if (Number.isFinite(e.edge)) eraserEdge = clamp(e.edge, 0, 1);
         if (Number.isFinite(e.gamma)) eraserGamma = clamp(e.gamma, 0.1, 10);
-        pressFalloffButton('eraser', e.mode);
-        setNumberControl('eraserStrength', 'eraserStrengthValue', eraserStrength);
-        setNumberControl('eraserCenter', 'eraserCenterValue', eraserCenter);
-        setNumberControl('eraserEdge', 'eraserEdgeValue', eraserEdge);
-        setNumberControl('eraserGamma', 'eraserGammaValue', eraserGamma);
+        setFalloffMode('eraser', e.mode);
     }
     if (t.bucket && typeof t.bucket === 'object') {
         const bk = t.bucket;
         if (Number.isFinite(bk.tolerance)) bucketTolerance = clamp(bk.tolerance, 0, 1);
         if (typeof bk.continuous === 'boolean') bucketContinuous = bk.continuous;
         if (typeof bk.allLayers === 'boolean') bucketAllLayers = bk.allLayers;
-        setNumberControl('bucketTolerance', 'bucketToleranceValue', bucketTolerance);
-        document.getElementById('bucketContinuous').checked = bucketContinuous;
-        document.getElementById('bucketAllLayers').checked = bucketAllLayers;
     }
     maskTool = (t.maskTool === 'eraser' || t.maskTool === 'bucket') ? t.maskTool : 'brush';
     if (Number.isFinite(t.previewMaskOpacity)) previewMaskOpacity = clamp(t.previewMaskOpacity, 0, 1);
@@ -13055,7 +12374,7 @@ function applyCudTools(t) {
     // read (never written back) to keep old .cud files looking the way they were saved.
     else if (Number.isFinite(t.maskOpacity)) previewMaskOpacity = clamp(t.maskOpacity, 0, 1);
     extraPromptInput.value = typeof t.extraPrompt === 'string' ? t.extraPrompt : '';
-    syncSizeUI();
+    syncToolUI();
 }
 
 // ---- import routing: one entry point for the file picker and for a drop ----
@@ -13315,7 +12634,7 @@ function cudContext(header, records, maskSurface) {
 // happens before a tab exists, so a bad file leaves every open project exactly as it was.
 async function openCudDocument(file, doc) {
     if (cudBusy) return false;
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     setStatus(`Opening ${file.name}…`);
     try {
         const { header, blobs } = decodeCud(await file.arrayBuffer());
@@ -13427,7 +12746,7 @@ async function openCudDocument(file, doc) {
         setStatus('Load failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -13663,7 +12982,7 @@ async function refreshCudLinks(doc, blob) {
         if (entry === activeDoc) { markDocumentDirty(); renderLayerList(); render(); }
         else { entry.dirty = true; }
     }
-    renderDocTabs();
+    syncDocList();
     return { updated: touched.size, failed: 0 };
 }
 
@@ -13694,7 +13013,7 @@ async function addCudLayer(doc, stack) {
         setStatus('A project cannot be a layer of itself', 'error');
         return false;
     }
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     setStatus('Reading the linked project…');
     try {
         const file = await docToFile(doc);
@@ -13709,7 +13028,7 @@ async function addCudLayer(doc, stack) {
         setStatus('Add failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -13738,7 +13057,7 @@ async function refreshCudLayerFromFile(l) {
     const doc = cudDocFor(l.cud.link);
     if (!doc) { setStatus('This row lost its link when the page reloaded — right-click it to Relink', 'error'); return false; }
     if (cudBusy) { setStatus('Still working on the last one…'); return false; }
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     try {
         const file = await docToFile(doc);
         const flat = await flattenCudBytes(await file.arrayBuffer(), cudMapKeysFor(cudLinkKey(doc)));
@@ -13754,7 +13073,7 @@ async function refreshCudLayerFromFile(l) {
         setStatus('Refresh failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
@@ -13774,7 +13093,7 @@ async function relinkCudLayer(l) {
         setStatus('A project cannot be a layer of itself', 'error');
         return false;
     }
-    cudBusy = true; syncIoUI();
+    cudBusy = true; syncDocList();
     try {
         const file = await docToFile(doc);
         const flat = await flattenCudBytes(await file.arrayBuffer(), cudMapKeysFor(key));
@@ -13790,18 +13109,94 @@ async function relinkCudLayer(l) {
         setStatus('Relink failed: ' + ((err && err.message) || err), 'error');
         return false;
     } finally {
-        cudBusy = false; syncIoUI();
+        cudBusy = false; syncDocList();
     }
 }
 
 // ---- wiring ----
-// Every entry closes the menu on its way out: Load and Save As raise a native dialog, and a
-// popover left open above that dialog is a popover nobody can get back to.
-loadBtn.addEventListener('click', () => { closeFileMenu(); loadCud(); });
-saveBtn.addEventListener('click', () => { closeFileMenu(); saveCud(); });
-saveAsBtn.addEventListener('click', () => { closeFileMenu(); saveCudAs(); });
-exportPngBtn.addEventListener('click', () => { closeFileMenu(); exportPng(); });
-importBtn.addEventListener('click', () => { closeFileMenu(); importImages(); });
+// The document actions live in the host page now — File in its toolbar, switch/close on the window
+// title bars — so they arrive as messages instead of clicks (see the 'blend-doc-command' handler). Each
+// one is the same entry point the keyboard path and the dialogs call; only where the click came from moved.
+const DOC_COMMANDS = {
+    new: () => { createBlankProject(); },
+    load: () => { void loadCud(); },
+    save: () => { void saveCud(); },
+    'save-as': () => { void saveCudAs(); },
+    'export-png': () => { void exportPng(); },
+    import: () => { void importImages(); },
+    activate: uid => { switchDocument(uid); },
+    close: uid => { closeDocument(uid); },
+};
+// Canvas / Transform / Selection / View 四格现在是宿主的 dock 单元：按钮不再属于这一页，点下去发的
+// 是一个动作键。每一条就是那一颗按钮原来那行调用 —— 消息不是另一种点击，守卫一个都不减。
+const UI_COMMANDS = {
+    'canvas-size': () => openCanvasModal(),
+    'canvas-modify': () => startCanvasModify(),
+    'transform-adjust': () => {
+        if (mode !== 'transform' && !getSelected()) { setStatus('Select a layer first', 'error'); return; }
+        if (isMaskLayerTarget()) { setStatus('The Mask layer is canvas-locked — there is nothing to transform', 'error'); return; }
+        activateMode('transform');
+    },
+    'transform-fill': () => {
+        const l = getSelected();
+        if (!l) { setStatus('Select a layer first', 'error'); return; }
+        if (l.isMaskLayer) { setStatus('The Mask layer is canvas-locked — there is nothing to stretch', 'error'); return; }
+        applyTransformPending();
+        l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
+        setMode('transform');
+        setStatus('Layer stretched to canvas');
+        pushHistory();
+    },
+    'select-rect': () => activateMode('rect'),
+    'select-lasso': () => activateMode('lasso'),
+    'select-all': () => selectAll(),
+    'select-none': () => deselectAndReport(),
+    'view-pan': () => activateMode('pan'),
+    'view-zoom': () => activateMode('zoom'),
+    'view-rotate': () => activateMode('rotate'),
+    'view-fit': () => { view.autoFit = true; fitView(true); },
+    'view-reset': () => resetView(),
+    'view-zoom-in': () => zoomAt(vpCenter(), 1.25),
+    'view-zoom-out': () => zoomAt(vpCenter(), 1 / 1.25),
+    'view-rot-ccw': () => rotateView(-Math.PI / 12),
+    'view-rot-cw': () => rotateView(Math.PI / 12),
+    'view-flip': () => flipView(),
+    // Brush / Bucket / Eraser 三格。每一条就是那一颗控件原来那行调用：旋钮落回同一颗全局变量，
+    // 档位走 setFalloffMode 那一个收口点，尺寸走 setToolSize（它连滚轮和 Alt+右键拖都是这条 clamp）。
+    // 发完都要 syncToolUI —— 不是为画什么，是为了把新取值播回去；面板读的就是这一份。
+    'brush-mode': v => { setFalloffMode('brush', String(v)); syncToolUI(); },
+    'brush-size': v => setToolSize('brush', Number(v)),
+    'brush-strength': v => { brushStrength = Number(v); syncToolUI(); },
+    'brush-center': v => { brushCenter = Number(v); syncToolUI(); },
+    'brush-edge': v => { brushEdge = Number(v); syncToolUI(); },
+    'brush-gamma': v => { brushGamma = Number(v); syncToolUI(); },
+    'eraser-mode': v => { setFalloffMode('eraser', String(v)); syncToolUI(); },
+    'eraser-size': v => setToolSize('eraser', Number(v)),
+    'eraser-strength': v => { eraserStrength = Number(v); syncToolUI(); },
+    'eraser-center': v => { eraserCenter = Number(v); syncToolUI(); },
+    'eraser-edge': v => { eraserEdge = Number(v); syncToolUI(); },
+    'eraser-gamma': v => { eraserGamma = Number(v); syncToolUI(); },
+    'bucket-tolerance': v => { bucketTolerance = Number(v); syncToolUI(); },
+    'bucket-continuous': v => { bucketContinuous = !!v; syncToolUI(); },
+    'bucket-all-layers': v => { bucketAllLayers = !!v; syncToolUI(); },
+    // Color 那一格。同样是"那一颗控件原来那行调用"：颜色与 Alpha 只走两个 setter（它们才是真落点，
+    // 光标环、拾色、回读全从那儿过），盘式走 setPaintMode，X 走 swapPaintColors。'paint-hue' 是唯一
+    // 没有 setter 的那一颗 —— 它对应原来色相条灰阶那一支的 `brushHue = y`，夹到 0..1 也是当时 at() 做的。
+    'paint-color': v => setPaintColor(String(v)),
+    'paint-alpha': v => setPaintAlpha(Number(v)),
+    'paint-hue': v => { const n = Number(v); if (Number.isFinite(n)) { brushHue = Math.max(0, Math.min(1, n)); syncRgbaUI(); } },
+    'paint-mode': v => setPaintMode(String(v)),
+    'paint-swap': () => swapPaintColors(),
+    // Mask 那一格。上面那一行的 Invert 反的是笔尖那一步的面（invertPaintedMask 自己会分清是不是
+    // Mask 层），下面那一行的三颗永远只动 Mask 层自己 —— 两颗 Invert 目标不同，不是重复入口。
+    // 整行点一下 = 把笔交给它；眼睛那一下走 toggleMaskLayerVisibility，两句都还是原来那一段。
+    'mask-invert': () => invertPaintedMask(),
+    'mask-layer-invert': () => runMaskRowAction('invert'),
+    'mask-layer-full': () => runMaskRowAction('full'),
+    'mask-layer-clear': () => runMaskRowAction('clear'),
+    'mask-layer-eye': () => toggleMaskLayerVisibility(),
+    'mask-layer-select': () => selectMaskLayer(),
+};
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
     const files = Array.prototype.slice.call(importFileInput.files || []);
@@ -13825,9 +13220,8 @@ docCloseModalEl.addEventListener('mousedown', e => { if (e.target === docCloseMo
 document.getElementById('docCloseCancelBtn').addEventListener('click', closeDocCloseModal);
 document.getElementById('docCloseDiscardBtn').addEventListener('click', discardAndClose);
 docCloseSaveBtn.addEventListener('click', saveThenClose);
-docNewBtn.addEventListener('click', createBlankProject);
 
-syncIoUI();
+syncDocList();
 
 // ==================== 父窗口通信 ====================
 // 图层不再绑图池 id：每条消息里的图层自带像素（dataURL），没有"同一张图只能加一次"
@@ -14936,18 +14330,30 @@ window.addEventListener('message', event => {
         }
         return;
     }
+    if (d.type === 'blend-doc-command') {
+        // The host's toolbar and document windows drive the document actions: the six File buttons, and a
+        // window's title bar or its ✕ to focus or close it.
+        // The guards are the ones these actions always had — an IO action in flight or a gesture
+        // mid-drag refuses a switch here exactly as it did when the click came from this page.
+        const run = DOC_COMMANDS[d.action];
+        if (run) run(Number(d.uid) || null);
+        return;
+    }
+    if (d.type === 'blend-ui-command') {
+        // 四块薄面板（Canvas / Transform / Selection / View）的正文在宿主 dock 里，按钮发的是动作键。
+        // 动作只作用于**当前活着的这一份文档** —— 面板永远跟着活动文档，与 10 号拍板一致。
+        const run = UI_COMMANDS[d.action];
+        if (run) run(d.value);
+        return;
+    }
 });
 
 window.addEventListener('resize', () => { layoutCanvas(); render(); });
 
 // ==================== 初始化 ====================
-document.getElementById('brushCenterRow').style.display = 'none';
-document.getElementById('brushEdgeRow').style.display = 'none';
-document.getElementById('brushGammaRow').style.display = 'flex';
-document.getElementById('eraserCenterRow').style.display = 'none';
-document.getElementById('eraserEdgeRow').style.display = 'none';
-document.getElementById('eraserGammaRow').style.display = 'flex';
-syncSizeUI();
+// 那六行「按默认档位藏/露旋钮」的开关跟着三格面板一起没了：档位读数走快照，哪几根旋钮该露由
+// 单元自己按 mode 判断。这里只把初始状态播一次。
+syncToolUI();
 setPaintColor(brushColor);
 updateBrushCursorSize();
 sizeOverlay();
