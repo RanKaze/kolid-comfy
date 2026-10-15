@@ -3876,6 +3876,74 @@ class SnapshotDetailerSamplerNode:
                                       block=i + 1, loras=debug_lora_entries(user_loras))
                     continue
 
+                if block.get('type') == 'scale':
+                    # Scale 块：把链上当前工作图按比例缩放（scale × W/H 后就近落 align
+                    # 格，语义对齐 limit_pixels 的落格）。与 interface 块同理，结果写回
+                    # pipeline + 局部变量往下传；并且刷新 resize_info / last_resize_info
+                    # —— 收尾的 recover_size 只认 original_*（crop 前尺寸，= 复原落点，
+                    # 不变），resized_* 换成缩放后的工作分辨率后，「Recover Crop 关」的
+                    # patch 与「开」时的取整都沿新尺寸成立。
+                    bp = block.get('params', block)
+                    scale_val = float(bp.get('scale', 1.0) or 1.0)
+                    if not (scale_val > 0):  # 0 / 负数 / NaN（手改配置）→ 兜底为不缩放
+                        scale_val = 1.0
+                    # Use Pipeline Align（默认开）：沿用链首那颗 GLOBAL SETTINGS align
+                    # （limit_align 已按架构调整过：QwenImage2.1 抬到 32）。关 = 用块自己的
+                    # Align，仍需过一遍同样的架构调整。
+                    use_pipeline_align = bool(bp.get('use_pipeline_align', True))
+                    if use_pipeline_align:
+                        scale_align = limit_align
+                    else:
+                        scale_align = int(bp.get('align', 8) or 1)
+                        if arch_qwen_image21.matches(next_pipeline.config):
+                            scale_align = arch_qwen_image21.adjust_align(scale_align)
+                    in_h, in_w = int(current_image.shape[1]), int(current_image.shape[2])
+                    scaled_image, scaled_mask, scale_info = limit_pixels(
+                        current_image, mask=current_mask, align=scale_align, scale=scale_val)
+
+                    next_pipeline.image = scaled_image
+                    next_pipeline.mask = scaled_mask
+                    current_image = scaled_image
+                    current_mask = scaled_mask
+                    if scale_info is not None:
+                        # resize_info.original_* = 复原落点（crop 前尺寸，Enable Mask 关
+                        # 时 = 整幅），沿用链首记录，不随缩放移动；只有 resized_* 换成
+                        # 新工作分辨率。scale_factor 保留 scale_info 的实测值（落格后
+                        # 会与输入 scale 略有出入，如 1.5 → 0.5 格步长的实际比）。
+                        resize_info = {
+                            "original_width": int(cropped_image.shape[2]),
+                            "original_height": int(cropped_image.shape[1]),
+                            "resized_width": scale_info["resized_width"],
+                            "resized_height": scale_info["resized_height"],
+                            "aspect_ratio": scale_info["aspect_ratio"],
+                            "scale_factor": scale_info["scale_factor"],
+                            "align": scale_align,
+                            "was_upscaled": scale_info["was_upscaled"],
+                        }
+                        last_resize_info = resize_info
+                        last_resized_mask = scaled_mask
+                        # 缩放后的分辨率由 scale 旋钮决定，不再是像素目标/链首对齐。
+                        work_pixel_limit = None
+                        work_align = scale_align if scale_align > 1 else None
+
+                    out_h, out_w = int(scaled_image.shape[1]), int(scaled_image.shape[2])
+                    print(f"[PipelineBlock {i+1}/{len(blocks)}] Scale block: {in_w}x{in_h} → "
+                          f"{out_w}x{out_h} (scale={scale_val}, align={scale_align}"
+                          + (" pipeline)" if use_pipeline_align else " block)"))
+                    dbg.record_block(i + 1, f'Block {i+1} · Scale',
+                                     f"scale={scale_val} align={scale_align}",
+                                     scale=scale_val,
+                                     align=scale_align,
+                                     use_pipeline_align=use_pipeline_align,
+                                     from_size=[in_w, in_h],
+                                     to_size=[out_w, out_h])
+                    dbg.record_image(f'Block {i+1} · Scale 输出图', scaled_image, block=i + 1,
+                                     align=(scale_align if scale_align > 1 else None))
+                    if scaled_mask is not None:
+                        dbg.record_mask(f'Block {i+1} · Scale 输出 mask', scaled_mask, block=i + 1,
+                                        align=(scale_align if scale_align > 1 else None))
+                    continue
+
                 # Detailer block params (support both nested 'params' dict and flat)
                 bp = block.get('params', block)
                 add_noise = bp.get('add_noise', 'enable')

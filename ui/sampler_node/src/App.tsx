@@ -952,7 +952,7 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, []);
 
-  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger') => {
+  const handleAddBlock = useCallback((type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale') => {
     const id = 'block-' + blockIdCounter.current++;
     const newBlock: PipelineBlock = type === 'detailer'
       ? { id, type: 'detailer', name: 'Detailer', params: { ...defaultBlockParams } }
@@ -962,7 +962,9 @@ const App: React.FC = () => {
           ? { id, type: 'query', name: 'Query', params: {} }
           : type === 'tagger'
             ? { id, type: 'tagger', name: 'Tagger', params: { mode: 'mask' } }
-            : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
+            : type === 'scale'
+              ? { id, type: 'scale', name: 'Scale', params: { scale: 1.0, align: 8, use_pipeline_align: true } }
+              : { id, type: 'prompt', name: 'Prompt', params: { preset_id: null } };
     handleBlocksChange([...blocks, newBlock]);
   }, [blocks, handleBlocksChange]);
 

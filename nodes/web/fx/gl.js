@@ -519,6 +519,30 @@ function fxMirrorHidden(l, fn) {
     try { return fn(); } finally { if (mirror) mirror.enabled = was; }
 }
 
+// ---- 预解码源 (prewarmed source) ----
+// <img> 的像素是懒解码的:第一次 drawImage 才付解码税,图层多的文档就把这笔税全压在打开那几笔上。
+// blob 到手时立刻 createImageBitmap 解一份 (池宽 8 —— 无界时几十张的解码会和 GL 编译抢机器),
+// 记在 img 身份下;fxSrcOf 把它换给绘制侧当源。l.img 一处不动 —— 保存的字节复用表、naturalWidth、
+// 列表缩略图全按 img 身份走,只换 drawImage 的输入。位图与 <img> 在 1:1 与 0.83 档逐字节相同,
+// 缩小档有个别边缘像素的通道差 (0.35 档实测 max ~104) —— 各档实测见探针 5c/5d。
+const fxSrcBitmaps = new WeakMap();
+const fxWarmPool = (() => {
+    let act = 0; const q = [];
+    const next = () => { if (q.length && act < 8) q.shift()(); };
+    return fn => new Promise((res, rej) => {
+        const start = () => { act++; fn().then(v => { act--; next(); res(v); }, e => { act--; next(); rej(e); }); };
+        act < 8 ? start() : q.push(start);
+    });
+})();
+function fxWarmBitmap(img, blob) {
+    if (!img || !blob || fxSrcBitmaps.has(img) || typeof createImageBitmap !== 'function') return;
+    fxWarmPool(() => createImageBitmap(blob)).then(bm => {
+        if (!fxSrcBitmaps.has(img)) fxSrcBitmaps.set(img, bm);
+    }, () => { /* 解不动就继续走 <img>,老路照旧 */ });
+}
+// 绘制用的源:位图暖好了给它,没暖好原样还 <img>。
+function fxSrcOf(img) { return (img && fxSrcBitmaps.get(img)) || img; }
+
 // 画面那一趟:整条折完,蒙版一律裁。结果就是画布要盖的那张图,所以它带缓存 (注释见上)。
 function fxResolved(l) {
     if (!l || !l.img) return l && l.img;
@@ -530,7 +554,7 @@ function fxResolved(l) {
     if (!w || !h) return l.img;
     const recs = attrRecordsOf(l);
     // 纯像素层 (条带空着,或只挂了空蒙版) 每帧都走到这里就收工:签名与贴图戳一次都不算。
-    if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return l.img;
+    if (!recs.some((r, i) => attrInks(r, l, i, FX_CUT_ALL))) return fxSrcOf(l.img);
     const sig = fxSignature(l);
     const maps = fxMapStamp(l);
     const ext = fxExternalStamp(l);
@@ -543,7 +567,7 @@ function fxResolved(l) {
         && c.sig === sig && c.maps === maps && c.ext === ext && c.gen === gen) return c.surface;
     const reuse = !!(c && c.w === w && c.h === h && c.surface);
     const surface = reuse ? c.surface : fxScratch(w, h);
-    if (!fxDropStrip(l, surface, l.img, -1, FX_CUT_ALL)) return l.img;
+    if (!fxDropStrip(l, surface, fxSrcOf(l.img), -1, FX_CUT_ALL)) return fxSrcOf(l.img);
     l.fxCache = { w, h, img: l.img, faces, sig, maps, ext, gen, surface };
     // 命中缓存时 surface 是**同一块画布原地重画**的,身份键察觉不到「这一层现在长这样了」。Stash 层
     // 要认这一点 (它抄的是以下所有层的合成图),所以每重算一次就换一个代次 —— 见 blend_node.html 的
@@ -566,7 +590,7 @@ function fxSplitForBackend(l) {
     if (thru < 0) return { surface: l.img, rest: recs };
     const { w, h } = nativeSize(l.img);
     const surface = fxScratch(w, h);
-    if (!fxDropStrip(l, surface, l.img, thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
+    if (!fxDropStrip(l, surface, fxSrcOf(l.img), thru, FX_CUT_ALL)) return { surface: l.img, rest: recs };
     return { surface, rest: recs.slice(thru + 1) };
     });
 }
@@ -585,7 +609,7 @@ function fxSurfaceForGenerate(l, base) {
     const { w, h } = nativeSize(base || l.img);
     if (!w || !h) return null;
     const surface = fxScratch(w, h);
-    if (!fxDropStrip(l, surface, base || l.img, -1, cut)) return null;
+    if (!fxDropStrip(l, surface, base || fxSrcOf(l.img), -1, cut)) return null;
     return surface;
     });
 }

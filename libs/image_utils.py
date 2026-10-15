@@ -856,7 +856,7 @@ def _interpolate_chunked(src, dst, new_h, new_w, antialias, device):
         _collect(b)
 
 
-def limit_pixels(image, pixels=None, mask=None, align=1, cap_only=False):
+def limit_pixels(image, pixels=None, mask=None, align=1, cap_only=False, scale=None):
     """
     Limit image pixel count by resizing if needed, with optional dimension alignment.
 
@@ -866,6 +866,10 @@ def limit_pixels(image, pixels=None, mask=None, align=1, cap_only=False):
     cap_only=True：pixels 是**上限**而不是目标 —— 只允许缩小，永不放大，落格一律
     向下取整。用于输入侧显存封顶（ref image / generate text 图），此时没有
     recover 需求，所以预算内直接原样返回 resize_info=None。
+
+    scale=<float>：按比例缩放（Scale Block），宽高各自乘 scale 后**就近**落 align
+    格；不做像素上限循环（scale 1.01 → 就是 1.01 倍，不会因"超预算"被反噬）。
+    无需变化（缩放量被落格舍掉）时原样返回且 resize_info=None。
     """
     try:
         B, H, W, C = image.shape
@@ -873,15 +877,33 @@ def limit_pixels(image, pixels=None, mask=None, align=1, cap_only=False):
 
         # ==================== 仅保留这一行 print ====================
         print(f"[limit_pixels] {W}x{H} ({current_pixels:,} px) → "
-              + ("ceiling " if cap_only else "target ")
-              + (f"{pixels:,} px" if pixels else "none (align-snap only)")
-              + f" | align={align} cap_only={cap_only}")
+              + (f"scale x{scale}" if scale is not None
+                 else ("ceiling " if cap_only else "target ")
+                      + (f"{pixels:,} px" if pixels else "none (align-snap only)"))
+              + f" | align={align}" + ("" if scale is not None else f" cap_only={cap_only}"))
+
+        # ---------- scale：比例缩放分支（Scale Block）----------
+        # 宽高各自乘 scale，再就近吸附到 align 格。与下方 pixels 分支不同：这里
+        # 没有"像素预算"概念，落格后是多少就是多少（对齐优先于像素数）。
+        if scale is not None:
+            step = align if align and align > 1 else 1
+            s = max(float(scale), 1e-6)
+            new_width = max(step, int(round(W * s / step)) * step)
+            new_height = max(step, int(round(H * s / step)) * step)
+            if new_width == W and new_height == H:
+                print(f"[limit_pixels] scale x{s} keeps {W}x{H} on the {align}-grid — untouched")
+                return (image, mask, None)
+            ideal_width, ideal_height = float(new_width), float(new_height)
+            aspect_ratio = W / H if H != 0 else 1.0
+            was_upscaled = new_width * new_height > current_pixels
+            # antialias 仅缩小时启用（与 pixels=None 分支同判据）
+            need_antialias = new_height < H
 
         # ---------- cap_only：上限语义分支（只缩不涨）----------
         # pixels 是天花板而不是目标：预算内不缩放，只把宽高**向下**落 align 格；
         # 超预算才按原比例缩小到格内。输出宽高恒 ≤ 输入，所以调用方不需要
         # recover_size（resize_info 在无变化时为 None）。
-        if cap_only:
+        elif cap_only:
             step = align if align and align > 1 else 1
             aspect_ratio = W / H if H != 0 else 1.0
             if pixels and current_pixels > pixels:

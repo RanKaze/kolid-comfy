@@ -197,11 +197,26 @@ export interface QueryBlockParams {
 
 export interface PipelineBlock {
   id: string;
-  type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger';
+  type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale';
   name: string;
-  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams | TaggerBlockParams;
+  params: DetailerBlockParams | InterfaceBlockParams | PromptBlockParams | QueryBlockParams | TaggerBlockParams | ScaleBlockParams;
   interface_index?: number;
   exec_options?: InterfaceExecOptions;
+}
+
+/** Scale 块：把链上当前工作图按比例缩放并落 Align 格 —— 语义对齐 GLOBAL SETTINGS 的
+ *  limit_pixels（宽高各自乘 scale 后就近吸附到 align 像素格；scale=1 时只落格不缩放）。
+ *  只影响其后的 block：缩放后的尺寸就是后续 detailer 的采样分辨率；收尾仍按原 Recover
+ *  契约落回画布（Recover Crop 开 → 复原到裁剪尺寸后贴回全图；关 → patch 保留缩放后的
+ *  工作分辨率，随 place 交给前端变换贴回）。 */
+export interface ScaleBlockParams {
+  /** 缩放比例：1 = 不缩放（仍会落 align 格），>1 放大，<1 缩小 */
+  scale: number;
+  /** Use Pipeline Align 关时生效的块级像素格（同 limit_pixels 的 align；QwenImage2.1 会自动抬到 32） */
+  align: number;
+  /** 开（默认）：沿用 pipeline 的 align（GLOBAL SETTINGS 那一份，链首同一来源）；
+   *  关：用块自己的 align。 */
+  use_pipeline_align?: boolean;
 }
 
 /** 一个正停在链条里等用户回答的 Query 块（/api/status 下发；null = 没有块在等）。 */

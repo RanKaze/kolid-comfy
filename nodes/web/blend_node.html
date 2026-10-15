@@ -12488,7 +12488,77 @@ function downloadBlob(blob, name) {
     setTimeout(() => URL.revokeObjectURL(url), 20000);
 }
 
-function surfaceToPng(source, w, h) {
+// ── PNG 编码池 ────────────────────────────────────────────────────────────────
+// 主线程 toBlob 并行无效 (探针实测: Promise.all 12 张大图 274/785ms ≈ 串行 305/974ms),
+// 4 个 worker + OffscreenCanvas.convertToBlob 才是真并行 (149/225ms), 且字节与主线程
+// toBlob 逐字节一致 (探针 7e: 4.2MB 资产 eq=true)。池子只做 1:1 快照 —— 所有调用点都是
+// 1:1 (w/h 取自 source 自身), 要缩放的那条退回主线程路; 建不起来也整条退回。
+const pngPool = (() => {
+    if (typeof Worker !== 'function' || typeof OffscreenCanvas !== 'function') return null;
+    const CODE = 'self.onmessage = async e => { const d = e.data; try {'
+        + ' const c = new OffscreenCanvas(d.w, d.h);'
+        + ' c.getContext("2d").drawImage(d.bmp, 0, 0);'
+        + ' const blob = await c.convertToBlob({ type: "image/png" });'
+        + ' const buf = await blob.arrayBuffer();'
+        + ' if (d.bmp.close) d.bmp.close();'
+        + ' self.postMessage({ ok: true, buf }, [buf]);'
+        + ' } catch (err) { self.postMessage({ ok: false, err: String(err) }); } };';
+    let slots = null, url = '';
+    const ensure = () => {
+        if (slots) return true;
+        try {
+            url = URL.createObjectURL(new Blob([CODE], { type: 'text/javascript' }));
+            slots = [];
+            for (let i = 0; i < 4; i++) slots.push({ w: new Worker(url), chain: Promise.resolve(), queued: 0, broken: false });
+            return true;
+        } catch (e) { slots = null; return false; }
+    };
+    return {
+        // → Promise<ArrayBuffer>；null = 这条不该走池子 (要缩放 / 池子没了)；reject = 池内失败。
+        encode(source, w, h) {
+            if (!ensure()) return null;
+            const live = slots.filter(s => !s.broken);
+            if (!live.length) return null;
+            const slot = live.reduce((a, b) => (a.queued <= b.queued ? a : b));
+            slot.queued++;
+            const run = async () => {
+                const bmp = await createImageBitmap(source);
+                if (bmp.width !== Math.round(w) || bmp.height !== Math.round(h)) {
+                    if (bmp.close) bmp.close();
+                    return null;        // 要缩放: 池子只做 1:1
+                }
+                return await new Promise((resolve, reject) => {
+                    const off = () => {
+                        slot.w.removeEventListener('message', onMsg);
+                        slot.w.removeEventListener('error', onErr);
+                    };
+                    const onMsg = e => {
+                        off();
+                        const d = e.data || {};
+                        if (d.ok) resolve(d.buf);
+                        else reject(new Error(d.err || 'png encode failed'));
+                    };
+                    const onErr = () => {
+                        off();
+                        // 崩掉的 worker 换一枚新的, 绝不把下一笔派给尸体 (派过去就是永久挂起)。
+                        try { slot.w.terminate(); } catch (e2) {}
+                        try { slot.w = new Worker(url); } catch (e2) { slot.broken = true; }
+                        reject(new Error('png worker crashed'));
+                    };
+                    slot.w.addEventListener('message', onMsg);
+                    slot.w.addEventListener('error', onErr);
+                    slot.w.postMessage({ bmp, w: bmp.width, h: bmp.height }, [bmp]);
+                });
+            };
+            const result = slot.chain.then(run, run);   // 前一笔失败不堵这条链
+            slot.chain = result.then(() => { slot.queued--; }, () => { slot.queued--; });
+            return result;
+        },
+    };
+})();
+
+// 池子拿不到或池内失败时的那条路：原样保留的老实现 (也是缩放场景唯一的路)。
+function surfaceToPngMainThread(source, w, h) {
     return new Promise((resolve, reject) => {
         const c = document.createElement('canvas');
         c.width = Math.max(1, Math.round(w));
@@ -12501,13 +12571,35 @@ function surfaceToPng(source, w, h) {
     });
 }
 
+async function surfaceToPng(source, w, h) {
+    const pooled = pngPool && pngPool.encode(source, w, h);
+    if (pooled) {
+        try {
+            const buf = await pooled;
+            if (buf) return buf;
+        } catch (e) { /* 池内失败: 退回主线程, 让既有的报错路径照旧报 */ }
+    }
+    return surfaceToPngMainThread(source, w, h);
+}
+
+// ── 未改图层的原字节复用 ─────────────────────────────────────────────────────
+// 图层的 <img> 从不被原地修改 (任何像素操作都换成新对象), 所以按对象身份记「它那份 PNG
+// 字节」是诚实的。打开时用文件里的原 Blob 预填, 「打开后没动像素就保存」= 0 编码;
+// 动过的层换成新对象, 缓存里没有它, 自然重编。canvas (光栅 / 蒙版 / decal / 合成) 会
+// 原地变, 一律不进这张表。
+const cudAssetBytes = new WeakMap();
+const isImgSurface = s => !!(s && (s instanceof HTMLImageElement || s.tagName === 'IMG'));
+const pngPartLen = p => (p.byteLength !== undefined ? p.byteLength : p.size);
+
 // A layer's pixels stay an <img> (the row thumbnail renders `l.src`), so it gets its own URL.
 // That URL is intentionally never revoked: undo snapshots and the list both keep pointing at it.
+// The blob also buys one owned decode (fxWarmBitmap → fxSrcOf, fx/gl.js): the <img> would pay its
+// sync decode tax at the first drawImage instead, and on open that first draw is every layer at once.
 function blobToImage(blob) {
     const url = URL.createObjectURL(blob);
     return new Promise((resolve, reject) => {
         const img = new Image();
-        img.onload = () => resolve({ img, url });
+        img.onload = () => { fxWarmBitmap(img, blob); resolve({ img, url }); };
         img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('could not decode a layer image')); };
         img.src = url;
     });
@@ -12569,19 +12661,31 @@ async function buildCudBlob() {
     // gesture has to become pixels before the bytes are assembled.
     applyTransformPending();
     // `assetList` 是文件里那份资产表 (header.assets),跟文档级的源图表 `assets` 没关系 —— 同名会遮住它。
-    const assetList = [], payload = [];
-    const addAsset = async (role, source, w, h) => {
-        const bytes = await surfaceToPng(source, w, h);
+    // 派单式: id 同步落位、编码在池里并发跑, 组装前统一 await (encodes) —— 池子只有并发派单才真并行。
+    const assetList = [], payload = [], encodes = [];
+    const addAsset = (role, source, w, h) => {
         const id = assetList.length;
-        assetList.push({ id, role, w: Math.round(w), h: Math.round(h), length: bytes.byteLength });
-        payload.push(bytes);
+        const entry = { id, role, w: Math.round(w), h: Math.round(h), length: 0 };
+        assetList.push(entry);
+        const done = (async () => {
+            // 没动过的图层直取原字节 (见 cudAssetBytes); 动过的层是新对象, 走编码。
+            const hit = cudAssetBytes.get(source);
+            let bytes = hit ? hit.part : null;
+            if (!bytes) {
+                bytes = await surfaceToPng(source, w, h);
+                if (isImgSurface(source)) cudAssetBytes.set(source, { part: bytes, len: pngPartLen(bytes) });
+            }
+            entry.length = hit ? hit.len : pngPartLen(bytes);
+            payload[id] = bytes;
+        })();
+        encodes.push(done);
         return id;
     };
     // 链里绑定的贴图存成自己的资产:图池 id 由宿主在导入时重新编号,文件里那句 key 出了这个会话
     // 就不作数,所以像素必须自带。同一份像素一次存档只写一个资产。还没解码完成的图不写资产 ——
     // 那一层重开后读数为那张图写下「depth gone」、按钮转红,并且跳过该特效 —— 这比悄悄绑一张别的图诚实。
     const mapAssets = new Map();
-    const cudEffects = async list => {
+    const cudEffects = list => {
         const out = cloneEffects(list);
         for (const e of out) {
             // 一条特效可能占两个槽 (几何 warp 的「深度 + 法线」),各写各的资产;同一份像素在一次
@@ -12595,7 +12699,7 @@ async function buildCudBlob() {
                 let id = mapAssets.get(found.src);
                 if (id === undefined) {
                     const n = nativeSize(img);
-                    id = await addAsset('map', img, n.w, n.h);
+                    id = addAsset('map', img, n.w, n.h);
                     mapAssets.set(found.src, id);
                 }
                 e.params[slot.key] = Object.assign({}, ref, { asset: id });
@@ -12610,12 +12714,12 @@ async function buildCudBlob() {
     const attrTable = [];
     const attrSeen = new Map();          // 记录 guid -> 入档那条 (空面记成 null = 不入档)
     // 没有像素的面不入档:空蒙版与"没装蒙版"按规矩是同一件事,写进去就等于往文件里塞一枚幽灵 attribute。
-    const cudAttrs = async l => {
+    const cudAttrs = l => {
         const out = [];
         for (const r of attrRecordsOf(l)) {
             if (!attrSeen.has(r.id)) {
                 let e = null;
-                if (r.type === 'effects') e = { id: r.id, type: 'effects', chain: await cudEffects(r.chain) };
+                if (r.type === 'effects') e = { id: r.id, type: 'effects', chain: cudEffects(r.chain) };
                 else if (ATTR_TYPES[r.type].kind === 'generator') {
                     // 生成器入档的是描述符,不是派生面 —— 重开还要能改字、拖把手 (像素由 sync 重算)。
                     // 3D 例外:bake 是算不回来的唯一真相,照 surface 资产走;没烘过的记录没得存,
@@ -12625,12 +12729,12 @@ async function buildCudBlob() {
                     // 两面同行,desc 供继续编辑,面供资产缺席时照旧显示 (4.a)。
                     if (r.type === '3d') {
                         e = (r.surface && r.surface.width && r.surface.height)
-                            ? { id: r.id, type: '3d', ownsGrid: !!r.ownsGrid, surface: await addAsset('3d', r.surface, r.surface.width, r.surface.height) }
+                            ? { id: r.id, type: '3d', ownsGrid: !!r.ownsGrid, surface: addAsset('3d', r.surface, r.surface.width, r.surface.height) }
                             : null;
                     } else if (r.type === 'pose') {
                         e = r.desc ? { id: r.id, type: 'pose', desc: Object.assign({}, r.desc) } : null;
                         if (e && r.surface && r.surface.width && r.surface.height)
-                            e.surface = await addAsset('pose', r.surface, r.surface.width, r.surface.height);
+                            e.surface = addAsset('pose', r.surface, r.surface.width, r.surface.height);
                     } else {
                         e = r.desc ? { id: r.id, type: r.type, desc: Object.assign({}, r.desc),
                             box: r.box ? Object.assign({}, r.box) : null, ownsGrid: !!r.ownsGrid } : null;
@@ -12638,7 +12742,7 @@ async function buildCudBlob() {
                 }
                 else if (r.surface && r.surface.width && r.surface.height)
                     e = { id: r.id, type: r.type,
-                        surface: await addAsset(r.type, r.surface, r.surface.width, r.surface.height) };
+                        surface: addAsset(r.type, r.surface, r.surface.width, r.surface.height) };
                 // 停用的那一步要在文件里说得出"停用":稀疏字段,与 snapshotAttrs 同一读法 (缺席=开着)。
                 // 不落这一句的话,重开时折叠会把每一步都跑一遍 —— 关掉的那枚在屏幕上回来。
                 if (e && !attrEnabled(r)) e.enabled = false;
@@ -12689,18 +12793,20 @@ async function buildCudBlob() {
             // 链入档的是数据本身,不是它烘出来的像素 —— 文件里那张 image 永远是原图,重开还能改。
             // 绑定的贴图例外:它的像素走自己的 role='map' 资产(见 cudEffects)。
             // v4 起蒙版/贴片/链都住在这一串里,顺序就是应用顺序;老文件的三个平字段由读端折算回来。
-            attrs: await cudAttrs(l),
-            image: blank ? null : await addAsset('image', l.img, n.w, n.h),
+            attrs: cudAttrs(l),
+            image: blank ? null : addAsset('image', l.img, n.w, n.h),
         });
     }
     const maskSurface = (maskLayer.decal && maskLayer.decal.width && maskLayer.decal.height)
-        ? await addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
+        ? addAsset('masklayer', maskLayer.decal, maskLayer.decal.width, maskLayer.decal.height)
         : null;
     // 链接读的"最终图":保存那一刻画布上的合成(特效链已烘、视图变换不在位图里)直接入档 ——
     // cud 图层的像素就是它,读取端不必再猜链怎么跑。旧工作台读新文件不受影响(它不认这个字段,
     // 照旧逐层折);读老文件没有这张图,也退回逐层折叠。
     render();
-    const compositeAsset = await addAsset('composite', blendCanvas, canvasW, canvasH);
+    const compositeAsset = addAsset('composite', blendCanvas, canvasW, canvasH);
+    // 所有编码落地后 entry.length 与 payload 才齐, header 才能序列化。
+    await Promise.all(encodes);
     const header = {
         format: 'cud',
         version: CUD_VERSION,
@@ -13251,6 +13357,9 @@ async function openCudDocument(file, doc) {
                     const decoded = await blobToImage(imgBlob);
                     img = decoded.img;
                     url = decoded.url;
+                    // 保存提速 (2.1a): 把这份资产的原 Blob 挂在图上 —— 没动过的层保存时直取原字节,
+                    // 0 编码。链接它的是对象身份, 而这张图从不被原地修改。
+                    cudAssetBytes.set(img, { part: imgBlob, len: imgBlob.size });
                 }
             }
             const tr = rec.transform || {};

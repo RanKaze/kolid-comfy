@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -116,12 +116,13 @@ const ContextMenu: React.FC<{
 
 // What the "Add +" dropdown offers. Query is the only kind that interacts with the user
 // mid-run: the chain stops there and waits for a prompt choice.
-const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger'; label: string; color: string; hint: string }[] = [
+const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale'; label: string; color: string; hint: string }[] = [
   { kind: 'detailer', label: 'Detailer', color: '#30d158', hint: 'Refine the masked region' },
   { kind: 'interface', label: 'Interface', color: '#bf5af2', hint: 'Run an interface sub-graph inside the chain' },
   { kind: 'prompt', label: 'Prompt', color: '#64d2ff', hint: 'Inject a shared prompt preset for the blocks after it' },
   { kind: 'query', label: 'Query', color: '#ffd60a', hint: 'Stop the run here and ask you for a prompt' },
   { kind: 'tagger', label: 'Tagger', color: '#ff9f0a', hint: 'Tag the current image and append the tag to the prompt for the blocks after it' },
+  { kind: 'scale', label: 'Scale', color: '#5e5ce6', hint: 'Resize the working image by a ratio and snap it to the align grid (limit_pixels semantics)' },
 ];
 
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
@@ -279,7 +280,7 @@ interface EditPhaseProps {
   onBlocksChange: (blocks: PipelineBlock[]) => void;
   onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
     | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => void;
-  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger') => void;
+  onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale') => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
   /** 立刻以某个 pipeline preset 跑一趟（画布在 Blend 工作台里，由工作台发起） */
@@ -1204,7 +1205,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {/* Centered title. For a Query card the name doubles as the hint's host. */}
                     <span title={block.type === 'query' ? QUERY_BLOCK_HINT : undefined} style={{
                       flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 600,
-                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : block.type === 'tagger' ? '#ff9f0a' : '#bf5af2',
+                      color: block.type === 'detailer' ? '#30d158' : block.type === 'prompt' ? '#64d2ff' : block.type === 'query' ? '#ffd60a' : block.type === 'tagger' ? '#ff9f0a' : block.type === 'scale' ? '#5e5ce6' : '#bf5af2',
                     }}>{block.name}</span>
                     {ifaceIsMissing(block) && (
                       <span title="The bound interface no longer exists — this block will be bypassed at run time"
@@ -1238,6 +1239,34 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                           </select>
                         </div>
                       );
+                    })()}
+                    {block.type === 'scale' && (() => {
+                      const sp = block.params as ScaleBlockParams;
+                      const followPipeline = sp.use_pipeline_align ?? true;
+                      return (<>
+                        <div style={styles.paramRow}
+                          title="比例缩放：链上此刻的工作图宽高各自乘这个倍率，再就近吸附到 Align 像素格。>1 放大，<1 缩小；1 = 只落格不缩放。只影响它后面的 block（后续 detailer 按缩放后的分辨率采样）；收尾仍按 Recover 契约落回画布。">
+                          <label style={styles.paramLabel}>Scale</label>
+                          <input style={styles.paramInput} type="number" min={0.01} max={16} step={0.01}
+                            value={sp.scale ?? 1.0}
+                            onChange={e => updateBlockParam(block.id, 'scale', parseFloat(e.target.value))} />
+                        </div>
+                        <div style={styles.paramRow}
+                          title="开：沿用 pipeline 的 Align（GLOBAL SETTINGS 的那一颗，与链首同一来源；QwenImage2.1 自动抬到 32）。关：用块自己的 Align。">
+                          <label style={styles.paramLabel}>Use Pipeline Align</label>
+                          <IOSToggle checked={followPipeline}
+                            onChange={v => updateBlockParam(block.id, 'use_pipeline_align', v)} />
+                        </div>
+                        {!followPipeline && (
+                          <div style={styles.paramRow}
+                            title="缩放后的宽高就近吸附到这个像素格（语义同 GLOBAL SETTINGS 的 Align / limit_pixels）。QwenImage2.1 会自动抬到 32（vision/latent 网格）。">
+                            <label style={styles.paramLabel}>Align</label>
+                            <input style={styles.paramInput} type="number" min={1} max={64} step={1}
+                              value={sp.align ?? 8}
+                              onChange={e => updateBlockParam(block.id, 'align', parseInt(e.target.value) || 1)} />
+                          </div>
+                        )}
+                      </>);
                     })()}
                     {block.type === 'query' && (() => {
                       const qp = block.params as QueryBlockParams;
