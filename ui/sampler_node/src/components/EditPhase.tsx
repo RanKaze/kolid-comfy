@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, PipelineOverrideKey, ProcessorDst, ProcessorSrc } from '../types';
-import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, PIPELINE_OVERRIDE_KEYS, firstDetailerFlag } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc } from '../types';
+import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 
@@ -10,11 +10,15 @@ const tabInputStyle: React.CSSProperties = {
   color: '#fff', fontSize: 11.5, fontWeight: 600, padding: '4px 10px', outline: 'none', width: 120,
 };
 
-// The panels of the Draw tab collapse independently. Default is "all open" — a collapsed panel
-// is a choice the user made, so it is remembered; a browser that refuses localStorage just gets the
-// default every time, which is not worth an error banner over.
-type SectionKey = 'pipeline' | 'global' | 'presets' | 'preprocess' | 'blocks';
-const SECTION_KEYS: SectionKey[] = ['pipeline', 'global', 'presets', 'preprocess', 'blocks'];
+// The panels of the Draw tab (and of the Settings tab) collapse independently. Default is "all
+// open" — a collapsed panel is a choice the user made, so it is remembered; a browser that refuses
+// localStorage just gets the default every time, which is not worth an error banner over.
+// Both tabs are mounted at once (the Draw tab only hides with display:none), so this ONE store is
+// read by the host and shared down — a second copy in SettingsTab would overwrite the other's keys.
+// The Settings page is NOT in here: it has no foldable sections any more (a segmented control picks
+// which screen shows), and what it does remember rides its own key — see SETTINGS_UI_STORE.
+type SectionKey = 'pipeline' | 'presets' | 'preprocess' | 'blocks';
+const SECTION_KEYS: SectionKey[] = ['pipeline', 'presets', 'preprocess', 'blocks'];
 const SECTIONS_STORE = 'sampler.editSections';
 const sectionsAllOpen = (): Record<SectionKey, boolean> =>
   SECTION_KEYS.reduce((a, k) => ({ ...a, [k]: true }), {} as Record<SectionKey, boolean>);
@@ -29,7 +33,7 @@ function loadSections(): Record<SectionKey, boolean> {
 }
 
 // The Draw tab's left column: a width the user sets by dragging its right edge. The default is
-// deliberately roomier than the old fixed 260 — a Pipeline Settings row carries a long label AND a
+// deliberately roomier than the old fixed 260 — a Settings rule row carries a long label AND a
 // number field AND a toggle on one line, and 260 clipped them. Same storage policy as the
 // collapsed sections: a browser that refuses localStorage just gets the default every time.
 const PANEL_W_STORE = 'sampler.drawPanelWidth';
@@ -129,21 +133,31 @@ const ADD_BLOCK_KINDS: { kind: 'detailer' | 'interface' | 'prompt' | 'query' | '
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
 
-// The Pipeline Settings overrides mirror the GLOBAL SETTINGS rows one-for-one, so their
-// ranges are copied from those inputs rather than invented. The toggle decides whether the value
-// replaces the global one at run time; a row that was never enabled shows (and keeps) the current
-// global value, which is what it will run with the moment the toggle flips on.
-// ref_* / tgen_* are input-side ceilings (0 = off), hence min: 0 on the pixel rows.
-const PIPELINE_OVERRIDE_META: Record<PipelineOverrideKey, { label: string; min: number; max: number; step: number }> = {
-  mask_grow: { label: 'Override Mask Grow', min: 0, max: 256, step: 1 },
-  mask_blur: { label: 'Override Mask Blur', min: 0, max: 256, step: 1 },
-  crop_reserve: { label: 'Override Crop Reserve', min: 0, max: 256, step: 1 },
-  pixels: { label: 'Override Pixels', min: 65536, max: 16777216, step: 65536 },
-  align: { label: 'Override Align', min: 1, max: 64, step: 1 },
-  ref_pixels: { label: 'Override Ref Pixels', min: 0, max: 16777216, step: 65536 },
-  ref_align: { label: 'Override Ref Align', min: 1, max: 64, step: 1 },
-  tgen_pixels: { label: 'Override TGen Pixels', min: 0, max: 16777216, step: 65536 },
-  tgen_align: { label: 'Override TGen Align', min: 1, max: 64, step: 1 },
+// The nine numeric knobs of the Settings tab, in UI order — the same order as OVERRIDE_KEYS
+// (frontend) and ARCH_OVERRIDE_KEYS (backend). ONE table serves both surfaces: the Default Setting
+// rows and the per-rule rows, so a range can never drift between the two places it is edited.
+// ref_* / tgen_* are input-side CEILINGS (shrink only, 0 = off) — the opposite of Pixels, which is
+// a target (a small image is enlarged to fill the budget).
+type ParamMeta = { label: string; min: number; max: number; step: number; title: string };
+const DEFAULT_PARAM_META: Record<OverrideKey, ParamMeta> = {
+  mask_grow: { label: 'Mask Grow', min: 0, max: 256, step: 1,
+    title: 'Grow the working mask outwards by this many pixels before it is cropped.' },
+  mask_blur: { label: 'Mask Blur', min: 0, max: 256, step: 1,
+    title: 'Feather the grown mask by this many pixels, so the patch blends into its surroundings.' },
+  crop_reserve: { label: 'Crop Reserve', min: 0, max: 256, step: 1,
+    title: 'Extra pixels of context kept around the mask crop when the working area is cut out.' },
+  pixels: { label: 'Pixels', min: 65536, max: 16777216, step: 65536,
+    title: 'Target working resolution — the cropped area is resized to fit this budget, so a small crop is ENLARGED to reach it.' },
+  align: { label: 'Align', min: 1, max: 64, step: 1,
+    title: 'Pixel grid the working resolution is snapped to (QwenImage2.1 raises it to 32 on its own).' },
+  ref_pixels: { label: 'Ref Pixels', min: 0, max: 16777216, step: 65536,
+    title: 'Ceiling for a Ref Image before it is VAE-encoded — images already inside the budget are left alone, nothing is ever enlarged. 0 = no ceiling.' },
+  ref_align: { label: 'Ref Align', min: 1, max: 64, step: 1,
+    title: 'Grid a capped Ref Image is snapped DOWN to (never up).' },
+  tgen_pixels: { label: 'TGen Pixels', min: 0, max: 16777216, step: 65536,
+    title: 'Ceiling for every image handed to Generate Text (working image + Ref Images) before it enters the vision tower. Shrink-only. 0 = no ceiling.' },
+  tgen_align: { label: 'TGen Align', min: 1, max: 64, step: 1,
+    title: 'Grid a capped Generate Text image is snapped DOWN to (never up).' },
 };
 
 // The "Add +" both section headers share: a pill whose colour tracks the menu it drops, the click-out
@@ -213,6 +227,14 @@ const TabIcon: React.FC<{ icon: string }> = ({ icon }) => {
         <rect x="4" y="17" width="8" height="3" rx="1.5" />
       </svg>
     );
+    // Settings tab: the same gear glyph the preset rows use for their pipeline binding, drawn at
+    // the tab's 22px. One shape, one meaning ("settings of something").
+    case 'settings': return (
+      <svg {...props}>
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 2.6v2.5M12 18.9v2.5M21.4 12h-2.5M5.1 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2L5.4 5.4" />
+      </svg>
+    );
     default: return <svg {...props}><circle cx="12" cy="12" r="9" /></svg>;
   }
 };
@@ -267,6 +289,8 @@ interface EditPhaseProps {
   blocks: PipelineBlock[];
   /** 当前 pipeline 架构（edit 设置按架构渲染，目前仅 Krea2 提供Enable Edit） */
   architecture: string | null;
+  /** Settings tab 的九个数值旋钮 —— 即 DEFAULT SETTING（server config 持久化）。
+   *  它们是没被任何架构规则命中时用的那一组值。 */
   maskGrow: number;
   maskBlur: number;
   cropReserve: number;
@@ -278,8 +302,7 @@ interface EditPhaseProps {
   tgenPixelsVal: number;
   tgenAlignVal: number;
   onBlocksChange: (blocks: PipelineBlock[]) => void;
-  onGlobalParamChange: (key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
-    | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => void;
+  onDefaultParamChange: (key: OverrideKey, value: number) => void;
   onAddBlock: (type: 'detailer' | 'interface' | 'prompt' | 'query' | 'tagger' | 'scale') => void;
   /** 一个正等用户回答的 Query 块（run 停在它上面），由 /api/status 下发 */
   pendingQuery: PendingQuery | null;
@@ -312,7 +335,8 @@ interface EditPhaseProps {
   onChangeInterfaceMeta: (next: InterfaceMeta) => void;
   /** 所有可选 pipeline —— Draw 页 enum 与 preset ⚙ 的选项来源。绑定按名字（重名取第一条）。 */
   pipelinePackages: PipelinePackageInfo[];
-  /** Draw 页 Pipeline Settings 的全部状态：选中项 + 按 pipeline 名字绑定的九个 override */
+  /** Draw 页 Pipeline Settings 的选中项。`pipelineSettings.overrides` 是旧版按 pipeline 名字存的
+   *  那批覆盖 —— 覆盖能力已搬进架构规则，那份数据只随整份文档原样回写，界面不再编辑它。 */
   pipelineSettings: PipelineSettings;
   /** 此刻真正加载在节点上的 pipeline 名字（'' = 节点输入口那条，从未切换过） */
   loadedPipelineName: string;
@@ -321,6 +345,14 @@ interface EditPhaseProps {
   onPipelineSettingsChange: (next: PipelineSettings) => void;
   /** preset 行 ⚙：这套链跑起来时用哪条 pipeline（'' = 不切换，即 [Current Select] 语义） */
   onSetPresetPipeline: (setId: string, pipelineName: string) => void;
+  /** Settings tab 的架构规则整份（顺序 = 优先级：自上而下第一条命中本次 pipeline 架构的规则赢） */
+  archSettings: ArchSettings;
+  onArchSettingsChange: (next: ArchSettings) => void;
+  /** 追加一条空规则：id 由宿主现造（与 blocks_sets / blocks 的 id 计数器同一套做法） */
+  onAddArchRule: () => void;
+  onDuplicateArchRule: (id: string) => void;
+  onRemoveArchRule: (id: string) => void;
+  onReorderArchRules: (from: number, to: number) => void;
   /** 最近 32 条行为记录（工作台每次 setStatus + 宿主自身动作）。画布上那颗常显状态药丸撤掉后，
    *  反馈就攒在这里，由 Context 标题行的 Log 按钮按需展开。 */
   actionLog: ActionLogEntry[];
@@ -332,13 +364,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   staging, promptIframeRef,
   blocks, architecture, maskGrow, maskBlur, cropReserve, pixelsVal, alignVal,
   refPixelsVal, refAlignVal, tgenPixelsVal, tgenAlignVal,
-  onBlocksChange, onGlobalParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
+  onBlocksChange, onDefaultParamChange, onAddBlock, onRemoveBlock, onReorderBlocks,
   blockSets, activeBlockSetId, onAddBlockSet, onRenameBlockSet, onDuplicateBlockSet, onRemoveBlockSet, onReorderBlockSets, onSwitchBlockSet,
   pendingQuery, onRunPreset, onQueryAnswer, onQueryCancel,
   onFinishClick, showFinishDialog, onFinish, onCloseFinishDialog,
   blendIframeRef,
   interfaces, interfaceMeta, onChangeInterfaceMeta,
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
+  archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
   actionLog,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
@@ -438,7 +471,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   const selectedPipeline = pipelineSettings.selected || '';
   // '' = [Default]（节点输入口那条）。它的身份后端从来没收集过，所以既选不回去也切不回去 ——
-  // 这颗选项只在还没选过任何东西时出现，而它一旦不在，九排 override 也就没有名字可绑，整排禁用。
+  // 这颗选项只在还没选过任何东西时出现。
   const isDefaultPipeline = !selectedPipeline || selectedPipeline === PIPELINE_DEFAULT;
   const pipelineIsMissing = (name: string): boolean =>
     !!name && name !== PIPELINE_CURRENT_SELECT
@@ -446,30 +479,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 选中的名字解不出来（包断了/改名）。packages 还没到齐时不下结论，避免闪一下橙标。
   const selectedUnresolved = !isDefaultPipeline && selectedPipeline !== PIPELINE_CURRENT_SELECT
     && !pipelineNames.includes(selectedPipeline);
-
-  const globalOf = (key: PipelineOverrideKey): number =>
-    ({ mask_grow: maskGrow, mask_blur: maskBlur, crop_reserve: cropReserve, pixels: pixelsVal, align: alignVal,
-       ref_pixels: refPixelsVal, ref_align: refAlignVal, tgen_pixels: tgenPixelsVal, tgen_align: tgenAlignVal }[key]);
-
-  /** 写一份 override（值或开关）。整份 Pipeline Settings 由前端独家作者，后端只做归一化。 */
-  const setOverride = (key: PipelineOverrideKey, patch: { value?: number; enabled?: boolean }) => {
-    if (isDefaultPipeline) return;
-    const name = selectedPipeline;
-    const cur = pipelineSettings.overrides[name]?.[key];
-    onPipelineSettingsChange({
-      ...pipelineSettings,
-      overrides: {
-        ...pipelineSettings.overrides,
-        [name]: {
-          ...(pipelineSettings.overrides[name] || {}),
-          [key]: {
-            value: patch.value ?? cur?.value ?? globalOf(key),
-            enabled: patch.enabled ?? cur?.enabled ?? false,
-          },
-        },
-      },
-    });
-  };
 
   // 选 pipeline = 立刻加载那条（切换必须是即时的，昂贵的是加载而不是选择本身）。
   // [Default] / [Current Select] 都不触发加载：前者切不回去，后者明确"用当前这条"。
@@ -589,6 +598,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     { id: 'prompt', icon: 'prompt', color: '#0a84ff' },
     { id: 'draw', icon: 'draw', color: '#30d158' },
     ...(interfaces.length > 0 ? [{ id: 'interface' as Tab, icon: 'interface', color: '#bf5af2' }] : []),
+    { id: 'settings', icon: 'settings', color: '#5e5ce6' },
   ];
 
   const updateBlockParam = (blockId: string, key: string, value: string | number | boolean | Record<string, any> | null) => {
@@ -715,10 +725,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
 
   return (
     <div style={styles.container}>
-      {/* Two things an inline style prop cannot express: the panel's dark scrollbar (a
-          ::-webkit-scrollbar rule) and the resize handle's hover/focus tint. Both are scoped by
-          class here, matching the workbench's own overlay scrollbar — faint pill, transparent
-          track, no arrow buttons. */}
+      {/* Three things an inline style prop cannot express: the panel's dark scrollbar (a
+          ::-webkit-scrollbar rule), the resize handle's hover/focus tint, and the Settings page's
+          iOS value field (a :focus underline plus the number spinners it must not show). All scoped
+          by class here — the scrollbar matches the workbench's own (faint pill, transparent track,
+          no arrow buttons). */}
       <style>{`
         .dark-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.22) transparent; }
         .dark-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -727,6 +738,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .dark-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
         .dark-scroll::-webkit-scrollbar-corner { background: transparent; }
         .dark-scroll::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+        .ios-val::-webkit-outer-spin-button, .ios-val::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .ios-val { -moz-appearance: textfield; appearance: textfield; }
+        .ios-val:focus { border-bottom-color: #0a84ff; }
         .draw-resizer > i { width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
         .draw-resizer:hover > i, .draw-resizer:focus-visible > i, .draw-resizer.dragging > i { background: rgba(10,132,255,0.8); }
         .draw-resizer:focus-visible { outline: none; }
@@ -817,8 +831,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </div>
               {/* PIPELINE SETTINGS — 原先左侧的 Pipeline tab 收进这里。
-                  一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择），加九
-                  跟随 pipeline 名字持久化的 override。 */}
+                  只剩一颗 enum 选 pipeline（选中即切换 —— 昂贵的是加载，不是选择）；
+                  数值覆盖搬去了 Settings 页的架构规则，按 architecture 命中。 */}
               <SectionHeader label="Pipeline Settings" open={openSections.pipeline} onToggle={() => toggleSection('pipeline')} />
               {openSections.pipeline && (<div style={styles.nestedSection}>
                 <div style={styles.paramRow}
@@ -846,82 +860,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     )}
                   </select>
                 </div>
-                {/* 先 field 再 toggle：toggle 关 = 这项不 override，前面的数值格随之锁死。
-                    [Default] 没有名字可绑 → 整排禁用（后端也就永远不会去读这份 override）。 */}
-                <div style={isDefaultPipeline ? { ...styles.nestedSection, opacity: 0.4, pointerEvents: 'none' } : styles.nestedSection}>
-                  {PIPELINE_OVERRIDE_KEYS.map(key => {
-                    const meta = PIPELINE_OVERRIDE_META[key];
-                    const entry = pipelineSettings.overrides[selectedPipeline]?.[key];
-                    const on = !!entry?.enabled;
-                    return (
-                      <div key={key} style={{ ...styles.paramRow, gap: 6 }}
-                        title={`${meta.label} — off = this pipeline runs with the global ${meta.label.replace('Override ', '')} (${globalOf(key)}). `
-                          + 'On = the value on the left replaces it, and it is saved under this pipeline\'s name.'}>
-                        <label style={styles.overrideLabel}>{meta.label}</label>
-                        <input
-                          style={{ ...styles.paramInput, opacity: on ? 1 : 0.4 }}
-                          type="number" min={meta.min} max={meta.max} step={meta.step}
-                          disabled={!on}
-                          value={entry?.value ?? globalOf(key)}
-                          onChange={e => setOverride(key, { value: parseInt(e.target.value) || 0 })}
-                        />
-                        <IOSToggle checked={on} disabled={isDefaultPipeline}
-                          onChange={v => setOverride(key, { enabled: v })} />
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>)}
-              {/* GLOBAL SETTINGS — 所有 Pipeline Preset 共享的数值参数（server config 持久化）。
-                  与 preset 相关的开关在下方 Preprocess Settings。 */}
-              <SectionHeader label="Global Settings" open={openSections.global} onToggle={() => toggleSection('global')} />
-              {openSections.global && (<div style={styles.nestedSection}>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Mask Grow</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskGrow} onChange={e => onGlobalParamChange('mask_grow', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Mask Blur</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={maskBlur} onChange={e => onGlobalParamChange('mask_blur', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Crop Reserve</label>
-                <input style={styles.paramInput} type="number" min={0} max={256} step={1} value={cropReserve} onChange={e => onGlobalParamChange('crop_reserve', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Pixels</label>
-                <input style={styles.paramInput} type="number" min={65536} max={16777216} step={65536} value={pixelsVal} onChange={e => onGlobalParamChange('pixels', parseInt(e.target.value))} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Align</label>
-                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={alignVal} onChange={e => onGlobalParamChange('align', parseInt(e.target.value))} />
-              </div>
-              {/* 下面四排是**输入侧显存封顶**，与上面 Pixels 的"目标分辨率"语义相反：
-                  只压不涨（limit_pixels 的 cap_only 模式），0 = 不设上限。 */}
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Ref Pixels</label>
-                <input style={styles.paramInput} type="number" min={0} max={16777216} step={65536} value={refPixelsVal}
-                  title="Ceiling for a Ref Image before it is VAE-encoded — images already inside the budget are left alone, nothing is ever enlarged. 0 = no ceiling."
-                  onChange={e => onGlobalParamChange('ref_pixels', parseInt(e.target.value) || 0)} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>Ref Align</label>
-                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={refAlignVal}
-                  title="Grid a capped Ref Image is snapped DOWN to (never up)."
-                  onChange={e => onGlobalParamChange('ref_align', parseInt(e.target.value) || 1)} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>TGen Pixels</label>
-                <input style={styles.paramInput} type="number" min={0} max={16777216} step={65536} value={tgenPixelsVal}
-                  title="Ceiling for every image handed to Generate Text (working image + Ref Images) before it enters the vision tower. Shrink-only. 0 = no ceiling."
-                  onChange={e => onGlobalParamChange('tgen_pixels', parseInt(e.target.value) || 0)} />
-              </div>
-              <div style={styles.paramRow}>
-                <label style={styles.paramLabel}>TGen Align</label>
-                <input style={styles.paramInput} type="number" min={1} max={64} step={1} value={tgenAlignVal}
-                  title="Grid a capped Generate Text image is snapped DOWN to (never up)."
-                  onChange={e => onGlobalParamChange('tgen_align', parseInt(e.target.value) || 1)} />
-              </div>
               </div>)}
               {/* Pipeline Blocks tab bar — 多套 blocks 以 tabs 切换（可重命名/复制/删除，持久化在后端
                   config）；只有激活 tab 的 chain 会运行、会被发给 Blend 工作台。块列表本体在
@@ -1048,8 +986,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </div>)}
 
               {/* Preprocess Settings — 每个 Pipeline Preset 独立的开关（存在第一个 detailer
-                  block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）已上移
-                  到上方 GLOBAL SETTINGS，不按 preset 区分。 */}
+                  block 的 params 上）。数值参数（Grow/Blur/Crop Reserve/Pixels/Align）都在
+                  Settings 页的 DEFAULT SETTING，不按 preset 区分。 */}
               <SectionHeader label="Preprocess Settings" open={openSections.preprocess} onToggle={() => toggleSection('preprocess')} />
               {openSections.preprocess && (<div style={styles.nestedSection}>
               {/* Mask — mask 预处理三件套，Enable Mask 是总闸 */}
@@ -1132,7 +1070,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </div>
               <div style={{ opacity: dynLayer ? 1 : 0.4, pointerEvents: dynLayer ? 'auto' : 'none' }}>
               <div style={styles.paramRow}
-                title="开 = 建层分辨率自动按 GLOBAL SETTINGS 的 Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）。关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。">
+                title="开 = 建层分辨率自动按 DEFAULT SETTING 的 Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）。关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。">
                 <label style={styles.paramLabel}>Layer Limit</label>
                 <IOSToggle
                   checked={firstDp ? (firstDp.dynamic_layer_limit ?? true) : true}
@@ -1252,14 +1190,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                             onChange={e => updateBlockParam(block.id, 'scale', parseFloat(e.target.value))} />
                         </div>
                         <div style={styles.paramRow}
-                          title="开：沿用 pipeline 的 Align（GLOBAL SETTINGS 的那一颗，与链首同一来源；QwenImage2.1 自动抬到 32）。关：用块自己的 Align。">
+                          title="开：沿用 pipeline 的 Align（DEFAULT SETTING 的那一颗，与链首同一来源；QwenImage2.1 自动抬到 32）。关：用块自己的 Align。">
                           <label style={styles.paramLabel}>Use Pipeline Align</label>
                           <IOSToggle checked={followPipeline}
                             onChange={v => updateBlockParam(block.id, 'use_pipeline_align', v)} />
                         </div>
                         {!followPipeline && (
                           <div style={styles.paramRow}
-                            title="缩放后的宽高就近吸附到这个像素格（语义同 GLOBAL SETTINGS 的 Align / limit_pixels）。QwenImage2.1 会自动抬到 32（vision/latent 网格）。">
+                            title="缩放后的宽高就近吸附到这个像素格（语义同 DEFAULT SETTING 的 Align / limit_pixels）。QwenImage2.1 会自动抬到 32（vision/latent 网格）。">
                             <label style={styles.paramLabel}>Align</label>
                             <input style={styles.paramInput} type="number" min={1} max={64} step={1}
                               value={sp.align ?? 8}
@@ -1589,6 +1527,25 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         {tab === 'interface' && (
           <InterfaceTab interfaces={interfaces} interfaceMeta={interfaceMeta} onChangeInterfaceMeta={onChangeInterfaceMeta} />
         )}
+
+        {/* Settings — DEFAULT SETTING 九格 + 按 architecture 正则命中的覆盖规则 */}
+        {tab === 'settings' && (
+          <SettingsTab
+            values={{
+              mask_grow: maskGrow, mask_blur: maskBlur, crop_reserve: cropReserve,
+              pixels: pixelsVal, align: alignVal,
+              ref_pixels: refPixelsVal, ref_align: refAlignVal,
+              tgen_pixels: tgenPixelsVal, tgen_align: tgenAlignVal,
+            }}
+            onDefaultParamChange={onDefaultParamChange}
+            archSettings={archSettings}
+            onArchSettingsChange={onArchSettingsChange}
+            onAddArchRule={onAddArchRule}
+            onDuplicateArchRule={onDuplicateArchRule}
+            onRemoveArchRule={onRemoveArchRule}
+            onReorderArchRules={onReorderArchRules}
+          />
+        )}
       </div>
 
       {/* Prompt preset editor — the FULL prompt_node UI in preset scope. Its selection is
@@ -1678,11 +1635,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: '#ff9f0a' }}>
                   Missing — this pipeline is gone from the connected package. Running 「{target.name}」
                   stops with an error until it is rebound.
-                </div>
-              )}
-              {boundNamed && !boundMissing && (
-                <div style={{ marginTop: 10, fontSize: 11.5, color: 'rgba(255,255,255,0.4)' }}>
-                  This pipeline's overrides (Pipeline Settings) apply whenever it runs.
                 </div>
               )}
               <div style={styles.dialogActions}>
@@ -1807,6 +1759,217 @@ const EditPhase: React.FC<EditPhaseProps> = ({
       {/* Debug — 上一次 Run / Generate 的全过程快照 */}
       {showDebug && <DebugModal onClose={() => setShowDebug(false)} />}
       {showLog && <LogModal entries={actionLog} onClose={() => setShowLog(false)} />}
+    </div>
+  );
+};
+
+// ── SettingsTab ──
+// Two screens behind one iOS segmented control. DEFAULT SETTING is the nine numeric knobs every run
+// starts from (they used to sit at the bottom of the Draw column); ARCHITECTURE is a list of rules —
+// each one a regex matched against the architecture of the pipeline that actually runs — replacing
+// some of those nine for the runs it catches. The numbers stay the host's either way: this page only
+// edits what the Draw panel edited, so a value can never exist twice.
+// The look is the iOS inset-grouped list — system greys, cards that fill the column, hairline
+// separators inset from the label. Only this page wears it for now.
+type SettingsScreen = 'default' | 'arch';
+// Which screen is showing and which rule cards are open belong to the user, not to the program, so
+// they are remembered per browser — same policy as the section folds and the panel width, and ONE
+// key for both because they are one page's view state. An unreadable store just opens on Default.
+const SETTINGS_UI_STORE = 'sampler.settingsUI';
+type SettingsUI = { screen: SettingsScreen; openRules: string[] };
+const loadSettingsUI = (): SettingsUI => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_UI_STORE) || 'null');
+    return {
+      screen: saved?.screen === 'arch' ? 'arch' : 'default',
+      openRules: Array.isArray(saved?.openRules) ? saved.openRules.filter((s: unknown) => typeof s === 'string') : [],
+    };
+  } catch { return { screen: 'default', openRules: [] }; }
+};
+const saveSettingsUI = (next: SettingsUI) => {
+  try { localStorage.setItem(SETTINGS_UI_STORE, JSON.stringify(next)); } catch { /* nothing to remember */ }
+};
+
+// The nine knobs split into three cards, so the target semantics (a working resolution to reach) and
+// the input ceilings (a memory cap, 0 = off) never read as one undifferentiated list.
+const SETTINGS_GROUPS: { title: string; hint?: string; keys: OverrideKey[] }[] = [
+  { title: 'Output Preprocessing', keys: ['mask_grow', 'mask_blur', 'crop_reserve'] },
+  { title: 'Working Resolution', keys: ['pixels', 'align'] },
+  { title: 'Input Ceilings', hint: '0 = no limit', keys: ['ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align'] },
+];
+{
+  const lost = OVERRIDE_KEYS.filter(k => !SETTINGS_GROUPS.some(g => g.keys.includes(k)));
+  if (lost.length) console.warn(`[Settings] OVERRIDE_KEYS in no card: ${lost.join(', ')} — they would not render`);
+}
+
+const segBtnStyle = (on: boolean): React.CSSProperties => ({
+  flex: 1, padding: '5px 0', borderRadius: 6.5, border: 'none', outline: 'none', cursor: 'pointer',
+  fontSize: 12.5, fontWeight: 500, background: on ? '#39393d' : 'transparent',
+  color: on ? '#fff' : 'rgba(255,255,255,0.62)', boxShadow: on ? '0 1px 3px rgba(0,0,0,0.4)' : 'none',
+});
+
+const DragHandleIcon: React.FC = () => (
+  <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor" style={{ display: 'block' }}>
+    <circle cx="2.5" cy="3" r="1.3" /><circle cx="7.5" cy="3" r="1.3" />
+    <circle cx="2.5" cy="8" r="1.3" /><circle cx="7.5" cy="8" r="1.3" />
+    <circle cx="2.5" cy="13" r="1.3" /><circle cx="7.5" cy="13" r="1.3" />
+  </svg>
+);
+
+const SettingsTab: React.FC<{
+  values: Record<OverrideKey, number>;
+  onDefaultParamChange: (key: OverrideKey, value: number) => void;
+  archSettings: ArchSettings;
+  onArchSettingsChange: (next: ArchSettings) => void;
+  onAddArchRule: () => void;
+  onDuplicateArchRule: (id: string) => void;
+  onRemoveArchRule: (id: string) => void;
+  onReorderArchRules: (from: number, to: number) => void;
+}> = ({
+  values, onDefaultParamChange,
+  archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
+}) => {
+  const [ruleMenu, setRuleMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const [ui, setUi] = useState<SettingsUI>(loadSettingsUI);
+  const pickScreen = (screen: SettingsScreen) => { const next = { ...ui, screen }; setUi(next); saveSettingsUI(next); };
+  const toggleRule = (id: string) => {
+    const openRules = ui.openRules.includes(id) ? ui.openRules.filter(x => x !== id) : [...ui.openRules, id];
+    const next = { ...ui, openRules }; setUi(next); saveSettingsUI(next);
+  };
+
+  // A rule edits itself back into the whole list — the list, order included, IS the state.
+  const patchRule = (id: string, patch: Partial<ArchRule>) => {
+    onArchSettingsChange({ rules: archSettings.rules.map(r => r.id === id ? { ...r, ...patch } : r) });
+  };
+  const setRuleParam = (id: string, key: OverrideKey, patch: Partial<ParamOverride>) => {
+    const rule = archSettings.rules.find(r => r.id === id);
+    if (!rule) return;
+    const cur: ParamOverride = rule.overrides[key] ?? { value: values[key], enabled: false };
+    patchRule(id, { overrides: { ...rule.overrides, [key]: { ...cur, ...patch } } });
+  };
+
+  // The pattern is checked here only to flag it early; the backend skips the same two cases (empty
+  // pattern, uncompilable regex) so a flagged rule simply never matches. JS and Python regex
+  // dialects differ at the edges, so this is a heads-up, not a guarantee. The short string is what
+  // the badge shows; the sentence is what the tooltip explains.
+  const patternProblem = (raw: string): '' | 'never matches' | 'invalid regex' => {
+    if (!raw.trim()) return 'never matches';
+    try { new RegExp(raw, 'i'); return ''; } catch { return 'invalid regex'; }
+  };
+  const problemNote = (p: string) => p === 'never matches'
+    ? 'Empty pattern matches nothing — this rule never applies.'
+    : p === 'invalid regex' ? 'Not a valid regular expression — this rule is skipped.' : '';
+
+  return (
+    <div className="dark-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+      <div style={styles.iosScreen}>
+        {/* 子 tab：iOS 分段控件。选哪屏是视图状态，落 sampler.settingsUI（用户的选择，不自动跳）。 */}
+        <div style={styles.iosSeg}>
+          <button style={segBtnStyle(ui.screen === 'default')} onClick={() => pickScreen('default')}
+            title="The nine values every run falls back to">Default Setting</button>
+          <button style={segBtnStyle(ui.screen === 'arch')} onClick={() => pickScreen('arch')}
+            title="Regex rules that replace some of those values for the runs they catch">Architecture</button>
+        </div>
+
+        {/* DEFAULT SETTING — 三张卡：输出前处理 / 工作分辨率 / 输入封顶。范围与说明仍出自
+            DEFAULT_PARAM_META 那一张表（规则卡读同一张），这里只换外观。 */}
+        {ui.screen === 'default' && SETTINGS_GROUPS.map(group => (
+          <React.Fragment key={group.title}>
+            <div style={styles.iosGroupTitle}>{group.title}{group.hint && <em style={styles.iosGroupHint}>{group.hint}</em>}</div>
+            <div style={styles.iosCard}>
+              {group.keys.map((key, i) => {
+                const m = DEFAULT_PARAM_META[key];
+                return (
+                  <div key={key} style={i === group.keys.length - 1 ? styles.iosRow : { ...styles.iosRow, ...styles.iosRowLine }}
+                    title={m.title}>
+                    <span style={styles.iosLabel}>{m.label}</span>
+                    <input className="ios-val" style={styles.iosNum} type="number" min={m.min} max={m.max} step={m.step}
+                      value={values[key]}
+                      onChange={e => onDefaultParamChange(key, parseInt(e.target.value) || 0)} />
+                  </div>
+                );
+              })}
+            </div>
+          </React.Fragment>
+        ))}
+
+        {/* ARCHITECTURE — 一张卡一条规则：卡头是把手 + 正则 + 徽章 + 折叠箭头，九排在收起时不画。 */}
+        {ui.screen === 'arch' && (<>
+          <div style={styles.iosGroupTitle}>Rules<em style={styles.iosGroupHint}>first match wins</em></div>
+          {archSettings.rules.map((rule, idx) => {
+            const problem = patternProblem(rule.architecture);
+            const open = ui.openRules.includes(rule.id);
+            const onCount = OVERRIDE_KEYS.filter(k => !!rule.overrides[k]?.enabled).length;
+            return (
+              <div key={rule.id} style={{ ...styles.iosCard, ...(problem ? styles.iosCardBad : {}) }}
+                draggable
+                onDragStart={e => {
+                  // The card is the drag source, but its fields are where the pointer lands when
+                  // editing — a drag that starts inside an input is a text selection, not a move.
+                  if ((e.target as HTMLElement).closest('input')) { e.preventDefault(); return; }
+                  e.dataTransfer.setData('application/x-archrule', String(idx));
+                  e.dataTransfer.effectAllowed = 'move';
+                }}
+                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                onDrop={e => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('application/x-archrule')); if (!isNaN(from)) onReorderArchRules(from, idx); }}
+                onContextMenu={e => { e.preventDefault(); setRuleMenu({ x: e.clientX, y: e.clientY, id: rule.id }); }}
+              >
+                <div style={{ ...styles.iosRow, ...styles.iosRowLine, minHeight: 44 }}
+                  onClick={e => { if ((e.target as HTMLElement).closest('input')) return; toggleRule(rule.id); }}
+                  title={'Regex matched against the loaded pipeline\'s architecture (case-insensitive search). '
+                    + 'Rules go top to bottom and the first one that matches wins, whole.'
+                    + (problem ? '\n' + problemNote(problem) : '')}>
+                  <span style={styles.iosHandle}><DragHandleIcon /></span>
+                  <input className="ios-val" style={styles.iosPattern} value={rule.architecture}
+                    onChange={e => patchRule(rule.id, { architecture: e.target.value })} />
+                  <span style={problem ? { ...styles.iosBadge, ...styles.iosBadgeWarn } : styles.iosBadge}>
+                    {problem || `${onCount} / ${OVERRIDE_KEYS.length}`}
+                  </span>
+                  <span style={{ ...styles.iosChev, transform: open ? 'rotate(90deg)' : 'none' }}>
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"
+                      strokeLinecap="round" strokeLinejoin="round"><path d="M9 5l7 7-7 7" /></svg>
+                  </span>
+                </div>
+                {/* iOS 三段式：名字在左、值在右、开关在最右。开关关 = 这项不覆盖，
+                    右半边摆的就是 Default Setting 那一屏的现值（整行压暗）。 */}
+                {open && OVERRIDE_KEYS.map((key, i) => {
+                  const m = DEFAULT_PARAM_META[key];
+                  const entry = rule.overrides[key];
+                  const on = !!entry?.enabled;
+                  const last = i === OVERRIDE_KEYS.length - 1;
+                  return (
+                    <div key={key} style={last ? { ...styles.iosRow, paddingLeft: 26 } : { ...styles.iosRow, ...styles.iosRowLine, paddingLeft: 26 }}
+                      title={`${m.label} — off = runs matched by this rule use the Default Setting (${values[key]}). `
+                        + 'On = the number on the right replaces it.'}>
+                      <span style={{ ...styles.iosLabel, opacity: on ? 1 : 0.4 }}>{m.label}</span>
+                      <input className="ios-val" style={{ ...styles.iosNum, opacity: on ? 1 : 0.4 }}
+                        type="number" min={m.min} max={m.max} step={m.step} disabled={!on}
+                        value={entry?.value ?? values[key]}
+                        onChange={e => setRuleParam(rule.id, key, { value: parseInt(e.target.value) || 0 })} />
+                      <div onClick={e => e.stopPropagation()}>
+                        <IOSToggle checked={on}
+                          onChange={v => setRuleParam(rule.id, key, { enabled: v, value: entry?.value ?? values[key] })} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+          <div style={styles.iosCard}>
+            <button style={styles.iosAddRow} onClick={onAddArchRule}
+              title="A new rule matches nothing until you type its pattern">Add Rule</button>
+          </div>
+          {ruleMenu && (() => {
+            const target = archSettings.rules.find(r => r.id === ruleMenu.id);
+            if (!target) return null;
+            return <ContextMenu x={ruleMenu.x} y={ruleMenu.y} onClose={() => setRuleMenu(null)} items={[
+              { label: 'Duplicate', onClick: () => onDuplicateArchRule(target.id) },
+              { label: 'Delete', color: '#ff6961', onClick: () => onRemoveArchRule(target.id) },
+            ]} />;
+          })()}
+        </>)}
+      </div>
     </div>
   );
 };
@@ -2221,11 +2384,29 @@ const styles: Record<string, React.CSSProperties> = {
   blendPreviewBadge: { position: 'absolute', right: 6, bottom: 6, padding: '2px 6px', borderRadius: 6, background: 'rgba(0,0,0,0.55)', color: 'rgba(255,255,255,0.78)', fontSize: 10, fontVariantNumeric: 'tabular-nums' },
   paramRow: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 },
   paramLabel: { fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.6)', minWidth: 80 },
-  // A Pipeline Settings override row carries a longer label ("Override Crop Reserve") and has to fit
-  // a number field AND a toggle in 228px, so it drops the fixed 80px floor and the 13px size.
-  overrideLabel: { fontSize: 11.5, fontWeight: 500, color: 'rgba(255,255,255,0.6)', flexShrink: 0, minWidth: 0 },
   paramSelect: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '6px 12px', color: '#fff', fontSize: 13, outline: 'none', colorScheme: 'dark', WebkitAppearance: 'none', appearance: 'none', backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\' viewBox=\'0 0 10 6\' fill=\'none\'%3E%3Cpath d=\'M1 1L5 5L9 1\' stroke=\'rgba(255,255,255,0.4)\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")', backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28, transition: 'background 0.15s ease, border-color 0.15s ease' } as React.CSSProperties,
   paramInput: { flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.08)', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '5px 10px', color: '#fff', fontSize: 13, outline: 'none', fontVariantNumeric: 'tabular-nums' },
+
+  // ── Settings 页的 iOS inset-grouped 词汇（系统色，不再手调白叠加）：卡片 #1c1c1e、分节标题
+  // #8e8e93 大写、内缩分隔线 rgba(84,84,88,.55)、强调 #0a84ff、告警 #ff9f0a。Draw 页那套
+  // paramRow/paramInput 原样留着 —— 这页先换装，质感定了再谈推广。
+  iosScreen: { display: 'flex', flexDirection: 'column', paddingBottom: 8 },
+  iosSeg: { margin: '12px 12px 0', display: 'flex', padding: 2.5, borderRadius: 9, background: 'rgba(255,255,255,0.08)', flexShrink: 0 },
+  iosGroupTitle: { margin: '14px 14px 6px', display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 11, fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase', color: '#8e8e93' },
+  iosGroupHint: { fontStyle: 'normal', textTransform: 'none', letterSpacing: 0, fontWeight: 400, fontSize: 11, color: 'rgba(142,142,147,0.75)' },
+  iosCard: { margin: '0 12px 10px', background: '#1c1c1e', borderRadius: 10, overflow: 'hidden' },
+  iosCardBad: { boxShadow: 'inset 0 0 0 1px rgba(255,159,10,0.7)' },
+  iosRow: { display: 'flex', alignItems: 'center', gap: 8, padding: '0 14px', minHeight: 40, minWidth: 0 },
+  iosRowLine: { borderBottom: '0.5px solid rgba(84,84,88,0.55)' },
+  iosLabel: { flex: 1, minWidth: 0, fontSize: 13.5, color: 'rgba(255,255,255,0.92)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  // 值贴右、无边框，聚焦才现出下划线（:focus 在 <style> 里的 .ios-val）
+  iosNum: { flexShrink: 0, width: 92, textAlign: 'right', background: 'transparent', border: 'none', borderBottom: '0.5px solid transparent', outline: 'none', color: 'rgba(255,255,255,0.92)', fontSize: 13.5, fontVariantNumeric: 'tabular-nums' },
+  iosPattern: { flex: 1, minWidth: 0, background: 'transparent', border: 'none', borderBottom: '0.5px solid transparent', outline: 'none', color: 'rgba(255,255,255,0.92)', fontSize: 12.5, fontFamily: 'ui-monospace, Consolas, monospace' },
+  iosBadge: { flexShrink: 0, padding: '1.5px 6px', borderRadius: 8, background: 'rgba(255,255,255,0.07)', color: '#8e8e93', fontSize: 10.5, fontVariantNumeric: 'tabular-nums' },
+  iosBadgeWarn: { background: 'rgba(255,159,10,0.13)', color: '#ff9f0a' },
+  iosHandle: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.55)', cursor: 'grab' },
+  iosChev: { flexShrink: 0, display: 'flex', color: 'rgba(142,142,147,0.45)', transition: 'transform 0.12s ease' },
+  iosAddRow: { display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: 'transparent', border: 'none', outline: 'none', color: '#0a84ff', fontSize: 13.5, cursor: 'pointer' },
 
   editSubSection: { marginLeft: 8, paddingLeft: 10, borderLeft: '0.5px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 10 },
 

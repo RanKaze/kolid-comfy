@@ -37,7 +37,7 @@ from ...libs.image_utils import limit_pixels, recover_size, crop_mask, recover_c
 from ...libs.mask_utils import expand_mask
 from ...libs.caption_utils import get_tag
 from nodes import KSamplerAdvanced, VAEEncode, VAEDecode
-from ..pipeline.sampler_node import get_loras_from_string
+from ..pipeline.sampler_node import get_loras_from_string, ConditioningCacheStore
 from ...libs.generate_text_utils import apply_generate_text_to_prompt
 from ...libs import debug_trace as dbg
 from ...architecture import Krea2 as arch_krea2, Flux2Klein as arch_flux2klein, QwenImage21 as arch_qwen_image21
@@ -337,7 +337,7 @@ IO_FILE_KINDS = {
     },
 }
 
-# 工作台自己那三份用户内容（blocks 链与 GLOBAL SETTINGS、Prompt 预设、最近一份 .cud 的路径）
+# 工作台自己那三份用户内容（blocks 链与 DEFAULT SETTING、Prompt 预设、最近一份 .cud 的路径）
 # 住 data/sampler/，与 data/prompt、data/switch 同级，整目录进 .gitignore。以前它们躺在 nodes/
 # 里、其中两份还归了 git —— 那是每台机器各写各的运行状态，不是包的代码。
 def _workbench_file(name):
@@ -562,7 +562,8 @@ doc_io = DocumentIo()
 
 
 # =============================================================================
-# Pipeline Settings（按 pipeline 名字绑定）—— 与前端 types.ts 里的字面量一一对应
+# Pipeline Settings（选中项）/ Architecture Settings（按架构正则命中）
+# —— 与前端 types.ts 里的字面量一一对应
 # =============================================================================
 # preset 的 pipeline 绑定只有两类取值：
 #   ''                    = [Default]，节点输入口那条 pipeline。它的名字/信息从未被收集过，
@@ -570,11 +571,11 @@ doc_io = DocumentIo()
 #   PIPELINE_CURRENT_SELECT = [Current Select]，用当前已加载的那一条，不做任何切换。
 #   其余字符串            = pipeline 在 /api/pipeline_package 里的名字（重名时取第一个）。
 PIPELINE_CURRENT_SELECT = '[Current Select]'
-# Pipeline Settings 里可以按 pipeline 名字 override 的九个参数 —— 与 GLOBAL SETTINGS 同名同义，
-# 区别只是「这条 pipeline 跑的时候盖掉全局值」，且必须 toggle 开着才生效。
+# 架构规则可以覆盖的那九项 —— 与 DEFAULT SETTING 同名同义，区别只是「命中这条架构的规则跑的时候
+# 盖掉默认值」，且每一项必须 toggle 开着才生效。
 # 后四个（ref_*/tgen_*）是**输入侧上限**：pixels 只许往下压，永不放大。
-PIPELINE_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
-                          'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align')
+ARCH_OVERRIDE_KEYS = ('mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
+                      'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align')
 
 
 # =============================================================================
@@ -586,7 +587,7 @@ class SnapshotDetailerSamplerServer:
     后端通过 action queue 接收前端指令（run_detailer / select_image / finish）。
     """
 
-    # GLOBAL SETTINGS 的唯一一份状态：前端 Global Settings 改动 → POST /api/update_config
+    # DEFAULT SETTING 的唯一一份状态：前端 Settings 页的 Default Setting 改动 → POST /api/update_config
     # → 落盘 data/sampler/blocks_sets.json 的 global_params。每次执行都现读它 —— 节点上没有同名端口，
     # 所以除了这份文件不存在第二个来源，不会出现互相覆盖。
     # ref_* / tgen_* 是输入侧的显存封顶（喂给 ref image / generate text 之前先 limit_pixels
@@ -630,7 +631,7 @@ class SnapshotDetailerSamplerServer:
                   f"total={len(self.packages)}, interface={len(self.interface_packages)}, pipeline={len(self.pipeline_packages)}")
 
         cfg = config or {}
-        # GLOBAL SETTINGS 只有一个来源：前端 Global Settings 写入的那份落盘文件
+        # DEFAULT SETTING 只有一个来源：前端 Settings 页写入的那份落盘文件
         # （改动即 POST → _apply_params → _save_global_params_file）。server 是在 sample()
         # 里现建的，所以每次执行都是现读，取到的就是前端当前的值。节点上不再有这些端口 ——
         # 两处各存一份必然不同步。
@@ -697,12 +698,18 @@ class SnapshotDetailerSamplerServer:
             else:
                 self.active_block_set = None
                 self.blocks = []
-        # Pipeline Settings：选中的 pipeline 名字 + 每条 pipeline 自己的五个 override。
-        # 与 blocks_sets 同路（config 只是初值，落盘文件赢）—— 同样是纯 UI 状态。
+        # Pipeline Settings：选中的 pipeline 名字（`overrides` 是旧版按名字存的那份，原样保留、
+        # 无人再读）。与 blocks_sets 同路（config 只是初值，落盘文件赢）—— 同样是纯 UI 状态。
         self.pipeline_settings = self._normalize_pipeline_settings(cfg.get('pipeline_settings'))
         _f_ps = self._load_pipeline_settings_file()
         if _f_ps is not None:
             self.pipeline_settings = _f_ps
+        # Architecture Settings：按 pipeline architecture 正则命中的覆盖规则（Settings tab）。
+        # 顺序 = 优先级，所以整份列表就是状态本身。
+        self.arch_settings = self._normalize_arch_settings(cfg.get('arch_settings'))
+        _f_arch = self._load_arch_settings_file()
+        if _f_arch is not None:
+            self.arch_settings = _f_arch
         # Interface meta：Interface tab 里给每个 interface 配置的东西 —— 端口改名、
         # block/processor 模式开关、block 模式的两个端口绑定。接口包本身每次从工作流
         # 图现推导、不可持久化，所以这些「贴在包上的标注」按包名字单独落盘。
@@ -1260,7 +1267,11 @@ class SnapshotDetailerSamplerServer:
 
         {'selected': str, 'overrides': {<pipeline name>: {<key>: {'value': int, 'enabled': bool}}}}
         Unknown keys are dropped rather than kept — a stale key would silently win over a
-        GLOBAL SETTINGS value at run time.
+        DEFAULT SETTING value at run time.
+
+        `overrides` is LEGACY: the per-pipeline-name override was replaced by Architecture Settings
+        and nothing reads it any more. It is still normalized and written back untouched because the
+        frontend keeps sending the object it got, so a user who upgrades loses nothing.
         """
         out = {'selected': '', 'overrides': {}}
         if not isinstance(raw, dict):
@@ -1273,7 +1284,7 @@ class SnapshotDetailerSamplerServer:
                 if not isinstance(name, str) or not isinstance(entry, dict):
                     continue
                 one = {}
-                for k in PIPELINE_OVERRIDE_KEYS:
+                for k in ARCH_OVERRIDE_KEYS:
                     v = entry.get(k)
                     if not isinstance(v, dict):
                         continue
@@ -1299,6 +1310,94 @@ class SnapshotDetailerSamplerServer:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[SnapshotDetailerSampler] Failed to save pipeline_settings: {e}")
+
+    # -------------------------------------------------------------------------
+    # Architecture Settings（按 pipeline architecture 正则命中的覆盖规则）
+    # -------------------------------------------------------------------------
+    def _normalize_arch_settings(self, raw):
+        """Coerce anything on disk / from the frontend into the canonical shape.
+
+        {'rules': [{'id': str, 'architecture': <regex str>,
+                   'overrides': {<key>: {'value': int, 'enabled': bool}}}]}
+        Order is priority (first match wins), so the list is kept exactly as sent. A rule without a
+        usable id is dropped — nothing could target it. Unknown override keys are dropped, an
+        unknown/empty architecture pattern is kept verbatim (the matcher refuses to use it, which
+        is what the frontend already flags in the field's tooltip).
+        """
+        out = {'rules': []}
+        if not isinstance(raw, dict):
+            return out
+        rules = raw.get('rules')
+        if not isinstance(rules, list):
+            return out
+        for r in rules:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get('id')
+            if not isinstance(rid, str) or not rid:
+                continue
+            arch = r.get('architecture')
+            one = {}
+            ov = r.get('overrides')
+            if isinstance(ov, dict):
+                for k in ARCH_OVERRIDE_KEYS:
+                    v = ov.get(k)
+                    if not isinstance(v, dict):
+                        continue
+                    try:
+                        value = int(v.get('value'))
+                    except (TypeError, ValueError):
+                        continue
+                    one[k] = {'value': value, 'enabled': bool(v.get('enabled'))}
+            out['rules'].append({'id': rid,
+                                 'architecture': arch if isinstance(arch, str) else '',
+                                 'overrides': one})
+        return out
+
+    def _load_arch_settings_file(self):
+        """Persisted Architecture Settings, or None when the key is absent (first run)."""
+        a = self._read_sets_file().get('arch_settings')
+        return self._normalize_arch_settings(a) if isinstance(a, dict) else None
+
+    def _save_arch_settings_file(self):
+        try:
+            data = self._read_sets_file()
+            data['arch_settings'] = self.arch_settings
+            with open(self._blocks_sets_file(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SnapshotDetailerSampler] Failed to save arch_settings: {e}")
+
+    def arch_overrides(self, architecture):
+        """Resolve `architecture` against the rules: (enabled values, matched rule id or '').
+
+        The rules are read top to bottom and the FIRST one whose regex matches wins, whole — a
+        later rule can never add to it. Three refusals, in this order:
+          * no architecture on the run (None / '')      -> nothing matches, all rules skipped;
+          * empty pattern                               -> never matches (re.search('', x) would
+                                                            match anything, which is the opposite
+                                                            of an unset pattern);
+          * a pattern Python cannot compile             -> skipped with one warning per call.
+        A rule that matches but has every toggle off wins anyway: it just changes nothing.
+        """
+        if not architecture:
+            return {}, ''
+        for r in (self.arch_settings or {}).get('rules') or []:
+            pattern = r.get('architecture') or ''
+            if not pattern.strip():
+                continue
+            try:
+                hit = re.search(pattern, architecture, re.IGNORECASE)
+            except re.error as e:
+                print(f"[SnapshotDetailerSampler] Skipping arch rule '{r.get('id')}' — "
+                      f"invalid regex {pattern!r}: {e}")
+                continue
+            if not hit:
+                continue
+            ov = r.get('overrides') or {}
+            return {k: v['value'] for k, v in ov.items()
+                    if isinstance(v, dict) and v.get('enabled') and k in ARCH_OVERRIDE_KEYS}, r['id']
+        return {}, ''
 
     # -------------------------------------------------------------------------
     # Interface meta（按 interface 名字贴的标注：端口改名 / 模式 / block 端口绑定）
@@ -1411,14 +1510,6 @@ class SnapshotDetailerSamplerServer:
         name = s.get('pipeline_name') if isinstance(s, dict) else None
         return name if isinstance(name, str) else ''
 
-    def pipeline_overrides(self, name):
-        """Enabled override values bound to `name` ({} = nothing overrides the globals)."""
-        if not name:
-            return {}
-        entry = (self.pipeline_settings.get('overrides') or {}).get(name) or {}
-        return {k: v['value'] for k, v in entry.items()
-                if isinstance(v, dict) and v.get('enabled') and k in PIPELINE_OVERRIDE_KEYS}
-
     def _apply_params(self, data):
         for _k in self.GLOBAL_PARAM_DEFAULTS:
             if _k in data:
@@ -1447,10 +1538,14 @@ class SnapshotDetailerSamplerServer:
             self._save_blocks_sets_file()
         if 'blocks' in data:
             self._set_blocks(data['blocks'])
-        # Pipeline Settings 整份替换（前端是唯一作者：选中项 + 按名字的 override）。
+        # Pipeline Settings 整份替换（前端是唯一作者：选中项，外加旧版按名字的 override 原样带回）。
         if 'pipeline_settings' in data:
             self.pipeline_settings = self._normalize_pipeline_settings(data['pipeline_settings'])
             self._save_pipeline_settings_file()
+        # Architecture Settings 整份替换：列表顺序就是优先级，不能合并、只能整体覆盖。
+        if 'arch_settings' in data:
+            self.arch_settings = self._normalize_arch_settings(data['arch_settings'])
+            self._save_arch_settings_file()
         # Interface meta 整份替换（前端是唯一作者：Interface tab 的改名 / 模式 / 端口绑定）。
         if 'interface_meta' in data:
             self.interface_meta = self._normalize_interface_meta(data['interface_meta'])
@@ -1725,7 +1820,7 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({
                     'prompt_url': inst.prompt_url if inst else '',
                     'detail_status': inst.detail_status if inst else 'idle',
-                    # GLOBAL SETTINGS 的全部键（前端 Global Settings 的唯一真源）—— 按
+                    # DEFAULT SETTING 的全部键（前端 Settings 页的唯一真源）—— 按
                     # GLOBAL_PARAM_DEFAULTS 回显，加参数不必再来这里补一行。
                     **{k: (getattr(inst, k, d) if inst else d)
                        for k, d in SnapshotDetailerSamplerServer.GLOBAL_PARAM_DEFAULTS.items()},
@@ -1740,9 +1835,11 @@ class SnapshotDetailerSamplerServer:
                     'blocks': inst.blocks if inst else [],
                     'blocks_sets': inst.blocks_sets if inst else [],
                     'active_block_set': inst.active_block_set if inst else None,
-                    # Pipeline Settings（选中项 + 按名字的 override）与此刻真正加载在节点上的
-                    # 那条 pipeline 的名字。'' = 还没选过 = [Default]（节点输入口那条）。
+                    # Pipeline Settings（此刻选中的 pipeline 名字；overrides 是旧数据）与这条节点上
+                    # 真正加载的那条 pipeline 的名字。'' = 还没选过 = [Default]（节点输入口那条）。
                     'pipeline_settings': inst.pipeline_settings if inst else {'selected': '', 'overrides': {}},
+                    # Architecture Settings：Settings tab 那串按架构正则命中的规则。
+                    'arch_settings': getattr(inst, 'arch_settings', {'rules': []}) if inst else {'rules': []},
                     'interface_meta': getattr(inst, 'interface_meta', {}) if inst else {},
                     'loaded_pipeline_name': getattr(inst, 'loaded_pipeline_name', '') if inst else '',
                     # Prompt tab 的 LoRA 灰名单跟着哪一代 regex 拉的 —— 宿主页拿它判断要不要重拉。
@@ -2634,7 +2731,7 @@ class SnapshotDetailerSamplerNode:
     def INPUT_TYPES(s):
         # 采样参数不在节点上：add_noise / start_step_rate / end_step_rate / enable_edit /
         # context_regex 属于每个 detailer block（工作台 Edit 页），pixels / align /
-        # crop_reserve / mask_grow / mask_blur 属于 GLOBAL SETTINGS（落盘）。节点端口
+        # crop_reserve / mask_grow / mask_blur 属于 DEFAULT SETTING（落盘）。节点端口
         # 留着只会和前端各存一份、Run 时互相覆盖，所以全部取消。
         return {
             "required": {
@@ -3554,7 +3651,7 @@ class SnapshotDetailerSamplerNode:
             user_mask = (user_mask > 0).float()
         # First detailer block: Preprocess Settings 的开关存在它的 params 上（recover_crop /
         # enable_mask / enable_limit），所以这些开关每个 Pipeline Preset 各自一份。
-        # crop_reserve / pixels / align 是 GLOBAL SETTINGS（server config → global_params），
+        # crop_reserve / pixels / align 是 DEFAULT SETTING（server config → global_params），
         # 不再按 preset 区分。必须在这里先取 —— mask 扩张也要看 enable_mask。
         first_detailer = next((b for b in blocks if b.get('type') == 'detailer'), blocks[0])
         first_bp = first_detailer.get('params', first_detailer)
@@ -3595,7 +3692,7 @@ class SnapshotDetailerSamplerNode:
                              f'工作区 = 整幅图 {tuple(original_image.shape)}', block=0)
 
         # limit_pixels 提到 crop 之后只做一次，确定全局工作分辨率（所有 block 共享）。
-        # pixels / align 取自 GLOBAL SETTINGS（global_params ← server config），不再按
+        # pixels / align 取自 DEFAULT SETTING（global_params ← server config），不再按
         # preset 区分。interface 之后的 block 不再单独 limit，pipeline 内不做额外 resize。
         limit_pixels_val = int(global_params.get('pixels', 1048576))
         limit_align = int(global_params.get('align', 8))
@@ -3887,7 +3984,7 @@ class SnapshotDetailerSamplerNode:
                     scale_val = float(bp.get('scale', 1.0) or 1.0)
                     if not (scale_val > 0):  # 0 / 负数 / NaN（手改配置）→ 兜底为不缩放
                         scale_val = 1.0
-                    # Use Pipeline Align（默认开）：沿用链首那颗 GLOBAL SETTINGS align
+                    # Use Pipeline Align（默认开）：沿用链首那颗 DEFAULT SETTING align
                     # （limit_align 已按架构调整过：QwenImage2.1 抬到 32）。关 = 用块自己的
                     # Align，仍需过一遍同样的架构调整。
                     use_pipeline_align = bool(bp.get('use_pipeline_align', True))
@@ -4201,6 +4298,9 @@ class SnapshotDetailerSamplerNode:
                     loras=current_loras,
                     model_negative=model_negative
                 )
+                # 跨 run 文本编码 memo 的键部件：lora clone 每次 run 都是新对象，
+                # 只有集合值跨 run 稳定（键 = base clip 身份 + loras 集合 + prompt）。
+                next_pipeline._cache_loras = frozenset(current_loras)
 
                 # Restore reference_latents to original before per-block injection
                 next_pipeline.reference.reference_latents = list(_orig_ref_latents)
@@ -4228,6 +4328,9 @@ class SnapshotDetailerSamplerNode:
                 # 解析出的全局 refs（prompt_ref_ids，首次出现顺序 = 注入顺序）。
                 # _injected_refs 把**编码前**的像素留给付费的槽位清单：那是 get_conditioning
                 # 解码回来的同一张图，省一次 VAEDecode。
+                _cc_t0 = time.perf_counter()
+                _cc_h0 = self._cond_store.stats['hits']
+                _cc_m0 = self._cond_store.stats['misses']
                 _injected_refs = []
                 if enable_edit and context_reference_keys and server is not None:
                     for _ref_key in context_reference_keys:
@@ -4237,9 +4340,19 @@ class SnapshotDetailerSamplerNode:
                             # 编码前压到 ref_pixels 上限（cap_only = 只缩不涨，align 向下
                             # 落格）。_injected_refs 记的也就是这张压过的图，Debug 槽位
                             # 清单与真正进 get_conditioning 的像素保持一致。
-                            ref_img, _, _ = limit_pixels(ref_img, ref_cap_pixels,
-                                                         align=ref_cap_align, cap_only=True)
-                            ref_latent = VAEEncode().encode(vae=next_pipeline.vae, pixels=ref_img)[0]
+                            # 压+编码走跨 run memo（键含 staging id 与 vae 身份）——
+                            # 图没换就不重复编码；命中时返回同一份 latent 对象，
+                            # 下游的 decode/槽位编码缓存随之命中。
+                            _vae_now = next_pipeline.vae
+
+                            def _cap_encode(_img=ref_img, _vae=_vae_now):
+                                _capped, _, _ = limit_pixels(_img, ref_cap_pixels,
+                                                             align=ref_cap_align, cap_only=True)
+                                return _capped, VAEEncode().encode(vae=_vae, pixels=_capped)[0]
+
+                            ref_img, ref_latent = next_pipeline.memoized(
+                                ('ctxref', _ref_key, ref_cap_pixels, ref_cap_align, id(_vae_now)),
+                                (ref_img, _vae_now), _cap_encode)
                             next_pipeline.reference.reference_latents.append(ref_latent)
                             _injected_refs.append((_ref_key, ref_img))
                             print(f"[Block {i+1}] Context reference injected: id={_ref_key}")
@@ -4301,6 +4414,11 @@ class SnapshotDetailerSamplerNode:
                     reference=next_pipeline.reference,
                     source_latent=tmp_latent["samples"]
                 )
+
+                _st = self._cond_store.stats
+                print(f"[CondCache] block {i+1}: conditioning {time.perf_counter() - _cc_t0:.2f}s | "
+                      f"hits={_st['hits'] - _cc_h0} misses={_st['misses'] - _cc_m0} | "
+                      f"store {self._cond_store.report()}")
 
                 # 节点级 pixel_state 注入（对齐 krea2edit source patch 数据流）：
                 # source 由 snapshot 节点直接写入 patch 闭包，不经 conditioning 管道。
@@ -4979,6 +5097,13 @@ class SnapshotDetailerSamplerNode:
         # 保存"原始 pipeline"引用：仅在初始化 / Pipeline tab 切换时设定。
         # 每次 Run detailer 都基于它的副本执行，run 之间不共享、不累积修改。
         self._base_pipeline = self._current_pipeline
+        # 跨 run 条件缓存仓库：挂在节点实例上 —— 每次 Run 都用上游管线重建整条
+        # 链（副本不复用），仓库是唯一能活过 run 的载体。run 内一切沿 copy() 继承。
+        if getattr(self, '_cond_store', None) is None:
+            self._cond_store = ConditioningCacheStore()
+        self._cond_store.begin_run()
+        self._cond_store.sweep()
+        self._base_pipeline._cond_store = self._cond_store
 
         # Derive lora_regex from pipeline's architecture config if not explicitly provided
         if not lora_regex and pipeline.config:
@@ -5215,9 +5340,11 @@ class SnapshotDetailerSamplerNode:
                                         detail=f'sum={diag_mask_sum:.0f}')
 
                         # Build global_params for pipeline execution.
-                        # 每个 GLOBAL SETTINGS 键都取 server 上的当前值（键名与 global_params
-                        # 完全一致，所以这里直接摊平）；Pipeline Settings 里当前 pipeline 打开的
-                        # override 逐项覆盖它（toggle 关的键压根不在 pipeline_overrides 里）。
+                        # 每个 DEFAULT SETTING 键都取 server 上的当前值（键名与 global_params
+                        # 完全一致，所以这里直接摊平）；命中的那条架构规则把 toggle 开着的项覆盖掉
+                        # （toggle 关的键压根不在 arch_overrides 的返回里，于是继续吃默认值）。
+                        run_architecture = (run_pipeline.config.get('architecture')
+                                            if run_pipeline.config else None)
                         global_params = {
                             'seed': seed,
                             **{k: getattr(server, k) for k in server.GLOBAL_PARAM_DEFAULTS},
@@ -5225,10 +5352,11 @@ class SnapshotDetailerSamplerNode:
                             # 只有没写这个键的遗留块才回落到 ".+"（全量 context）。
                             'context_regex': '.+',
                         }
-                        overrides = server.pipeline_overrides(server.loaded_pipeline_name)
-                        if overrides:
-                            global_params.update(overrides)
-                            print(f"[run_detailer] pipeline '{server.loaded_pipeline_name}' overrides applied: {overrides}")
+                        arch_overrides, arch_rule_id = server.arch_overrides(run_architecture)
+                        if arch_overrides:
+                            global_params.update(arch_overrides)
+                            print(f"[run_detailer] arch '{run_architecture}' matched rule '{arch_rule_id}' "
+                                  f"— overrides applied: {arch_overrides}")
                         dbg.record_stage(
                             '4. Pipeline 链',
                             f"{len(blocks)} 个 block"
@@ -5236,6 +5364,8 @@ class SnapshotDetailerSamplerNode:
                             blocks=[{'index': i + 1, 'type': b.get('type'),
                                      'name': b.get('name')} for i, b in enumerate(blocks)],
                             global_params=dict(global_params),
+                            architecture=run_architecture,
+                            arch_rule=arch_rule_id or None,
                         )
 
                         next_pipeline, original_image, detailed_image, detail_meta = self._run_pipeline_blocks(

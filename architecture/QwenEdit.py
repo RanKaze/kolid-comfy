@@ -48,6 +48,13 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     - VLM 图像: 从 reference_image + 解码 reference.reference_latents → 384×384
     - reference_latents: 直接使用 reference.reference_latents 的原始潜空间 + VAE 编码 reference_image
     """
+    # 纯文本（无任何图参与）：整趟编码走跨 run memo。有工作图时首格每块都在变，到不了这条。
+    if reference_image is None and len(reference.reference_latents) == 0:
+        return self.memo_text_encode(
+            'qwenedit', prompt, None,
+            lambda: clip.encode_from_tokens_scheduled(
+                clip.tokenize(prompt, images=[], llama_template=LLAMA_TEMPLATE)))
+
     images_vl = []
     ref_latents = []
     image_prompt = ""
@@ -66,8 +73,10 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     # 处理额外参考潜空间 (来自 ReferenceImageNode / ReferenceLatentNode)
     for lat in reference.reference_latents:
         samples = lat["samples"]
-        # 解码为图像用于 VLM
-        decoded = VAEDecode().decode(vae=vae, samples={"samples": samples})[0]
+        # 解码为图像用于 VLM（跨 run memo：同 latent 对象 + 同 vae 命中同一份像素）
+        decoded = self.memoized(
+            ('dec', id(samples), id(vae)), (samples, vae),
+            lambda: VAEDecode().decode(vae=vae, samples={"samples": samples})[0])
         s = decoded.movedim(-1, 1)  # B,C,H,W
         # VLM 图像: 384×384
         s_vl = _fit_area(s, VLM_MAX_PIXELS)

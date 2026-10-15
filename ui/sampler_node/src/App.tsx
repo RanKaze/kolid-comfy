@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta } from './types';
-import { EMPTY_PIPELINE_SETTINGS, firstDetailerFlag } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey } from './types';
+import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, firstDetailerFlag } from './types';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -26,7 +26,8 @@ const App: React.FC = () => {
   const consumedPromptConfirmedRef = useRef(false);
   const [interfaces, setInterfaces] = useState<InterfaceInfo[]>([]);
   const [pipelinePackages, setPipelinePackages] = useState<PipelinePackageInfo[]>([]);
-  /** Draw 页 Pipeline Settings：选中项 + 按 pipeline 名字绑定的五个 override（后端落盘） */
+  /** Draw 页 Pipeline Settings：只剩选中项。`overrides` 是旧版按 pipeline 名字存的那批覆盖，
+   *  界面不再编辑，整份对象只原样回写（见 types.ts）。 */
   const [pipelineSettings, setPipelineSettings] = useState<PipelineSettings>(EMPTY_PIPELINE_SETTINGS);
   /** Interface tab 给每个 interface 配置的持久化标注：端口改名 / 模式开关 / block 端口绑定 */
   const [interfaceMeta, setInterfaceMeta] = useState<InterfaceMeta>({});
@@ -134,7 +135,7 @@ const App: React.FC = () => {
   const [architecture, setArchitecture] = useState<string | null>(null);
   const [maskGrow, setMaskGrow] = useState(32);
   const [maskBlur, setMaskBlur] = useState(32);
-  // GLOBAL SETTINGS：所有 preset 共享（server config 持久化）
+  // DEFAULT SETTING（Settings 页）：所有 preset 共享（server config 持久化）
   const [cropReserve, setCropReserve] = useState(32);
   const [pixelsVal, setPixelsVal] = useState(1048576);
   const [alignVal, setAlignVal] = useState(8);
@@ -144,6 +145,9 @@ const App: React.FC = () => {
   const [tgenPixelsVal, setTgenPixelsVal] = useState(1048576);
   const [tgenAlignVal, setTgenAlignVal] = useState(8);
   const blockIdCounter = useRef(2);
+  // 架构规则整份（顺序 = 优先级）：与 pipeline_settings 同一条落盘路径。
+  const [archSettings, setArchSettings] = useState<ArchSettings>(EMPTY_ARCH_SETTINGS);
+  const archRuleIdCounter = useRef(2);
 
   // Fetch config on mount
   useEffect(() => {
@@ -180,6 +184,10 @@ const App: React.FC = () => {
           : [{ id: 'set-1', name: 'Default', blocks: data.blocks ?? [] }];
         blockSetIdCounter.current = Math.max(2, maxIdSuffix(allSets.map(s => s.id), 'set-') + 1);
         blockIdCounter.current = Math.max(2, maxIdSuffix(allSets.flatMap(s => (s.blocks ?? []).map(b => b.id)), 'block-') + 1);
+        // 架构规则同一套记账：计数器跳过服务端已有的 arch-N，刷新后新建才不会撞号。
+        const archRules: ArchRule[] = data.arch_settings?.rules ?? [];
+        setArchSettings({ rules: archRules });
+        archRuleIdCounter.current = Math.max(2, maxIdSuffix(archRules.map(r => r.id), 'arch-') + 1);
         setDetailStatus(data.detail_status);
         setArchitecture(data.architecture ?? null);
         setPipelineSettings(data.pipeline_settings ?? EMPTY_PIPELINE_SETTINGS);
@@ -934,8 +942,7 @@ const App: React.FC = () => {
     }).catch(() => {});
   }, [blockSets, activeBlockSetId]);
 
-  const handleGlobalParamChange = useCallback((key: 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
-    | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align', value: number) => {
+  const handleDefaultParamChange = useCallback((key: OverrideKey, value: number) => {
     if (key === 'mask_grow') setMaskGrow(value);
     if (key === 'mask_blur') setMaskBlur(value);
     if (key === 'crop_reserve') setCropReserve(value);
@@ -1074,7 +1081,8 @@ const App: React.FC = () => {
     persistSets(blockSets, id);
   }, [blockSets, activeBlockSetId, persistSets]);
 
-  // Pipeline Settings（选中项 + 按名字的 override）整体落盘在后端 blocks_sets.json 里。
+  // Pipeline Settings 整体落盘在 blocks_sets.json：界面只编辑 selected，
+  // overrides 是旧版按名字存的那批覆盖，原样带回、无人再读。
   const handlePipelineSettingsChange = useCallback((next: PipelineSettings) => {
     setPipelineSettings(next);
     fetch('/api/update_config', {
@@ -1083,6 +1091,50 @@ const App: React.FC = () => {
       body: JSON.stringify({ pipeline_settings: next }),
     }).catch(() => {});
   }, []);
+
+  // Architecture Settings（按 pipeline architecture 正则命中的覆盖规则）：整份列表落盘，
+  // 顺序就是优先级，所以增删改序全部走同一条写路径。
+  const handleArchSettingsChange = useCallback((next: ArchSettings) => {
+    setArchSettings(next);
+    fetch('/api/update_config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arch_settings: next }),
+    }).catch(() => {});
+  }, []);
+
+  const handleAddArchRule = useCallback(() => {
+    const rule: ArchRule = { id: 'arch-' + archRuleIdCounter.current++, architecture: '', overrides: {} };
+    handleArchSettingsChange({ rules: [...archSettings.rules, rule] });
+  }, [archSettings, handleArchSettingsChange]);
+
+  // 复制插在源的那一条后面 —— 追加到末尾的话，"照着上面那条改一份"会把你扔到列表底部。
+  const handleDuplicateArchRule = useCallback((id: string) => {
+    const idx = archSettings.rules.findIndex(r => r.id === id);
+    if (idx < 0) return;
+    const src = archSettings.rules[idx];
+    const copy: ArchRule = {
+      id: 'arch-' + archRuleIdCounter.current++,
+      architecture: src.architecture,
+      overrides: JSON.parse(JSON.stringify(src.overrides)),
+    };
+    const next = [...archSettings.rules];
+    next.splice(idx + 1, 0, copy);
+    handleArchSettingsChange({ rules: next });
+  }, [archSettings, handleArchSettingsChange]);
+
+  const handleRemoveArchRule = useCallback((id: string) => {
+    handleArchSettingsChange({ rules: archSettings.rules.filter(r => r.id !== id) });
+  }, [archSettings, handleArchSettingsChange]);
+
+  const handleReorderArchRules = useCallback((from: number, to: number) => {
+    const rules = archSettings.rules;
+    if (from === to || from < 0 || to < 0 || from >= rules.length || to >= rules.length) return;
+    const next = [...rules];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    handleArchSettingsChange({ rules: next });
+  }, [archSettings, handleArchSettingsChange]);
 
   // Interface meta（端口改名 / 模式开关 / block 端口绑定）同一落盘路径，按 interface 名字索引。
   const handleChangeInterfaceMeta = useCallback((next: InterfaceMeta) => {
@@ -1195,7 +1247,7 @@ const App: React.FC = () => {
         tgenPixelsVal={tgenPixelsVal}
         tgenAlignVal={tgenAlignVal}
         onBlocksChange={handleBlocksChange}
-        onGlobalParamChange={handleGlobalParamChange}
+        onDefaultParamChange={handleDefaultParamChange}
         onAddBlock={handleAddBlock}
         pendingQuery={pendingQuery}
         onRunPreset={handleRunPreset}
@@ -1225,6 +1277,12 @@ const App: React.FC = () => {
         onSwitchPipeline={handleSwitchPipeline}
         onPipelineSettingsChange={handlePipelineSettingsChange}
         onSetPresetPipeline={handleSetPresetPipeline}
+        archSettings={archSettings}
+        onArchSettingsChange={handleArchSettingsChange}
+        onAddArchRule={handleAddArchRule}
+        onDuplicateArchRule={handleDuplicateArchRule}
+        onRemoveArchRule={handleRemoveArchRule}
+        onReorderArchRules={handleReorderArchRules}
         actionLog={actionLog}
       />
 

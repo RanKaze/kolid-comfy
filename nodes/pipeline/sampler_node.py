@@ -8,6 +8,7 @@ import gc
 import json
 import math
 import time
+import weakref
 from PIL import Image
 from nodes import common_ksampler, VAEEncode, VAEEncodeForInpaint, KSamplerAdvanced, VAEDecode, SetLatentNoiseMask, CLIPTextEncode
 from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
@@ -680,6 +681,115 @@ class SamplerCache:
         return (model_patcher, clip_patcher, model_negative_patcher)
 
 
+def _human_bytes(n):
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f"{int(n)}B" if unit == 'B' else f"{n:.1f}{unit}"
+        n /= 1024.0
+
+
+class ConditioningCacheStore:
+    """跨 run 的条件缓存仓库（宿主节点持有，PipelineData 经 copy() 继承引用）。
+
+    - 值统一下沉 CPU 存放：显存随存随卸 —— 消费端（VAE encode/decode、
+      BaseModel._apply_model 对 cond/kwargs 的设备转换）都会自己把张量搬回设备。
+    - 条目持源对象 weakref：源一死条目即作废，不存在 id 复用造成的假命中。
+    - 卸载：空闲超过 TTL_IDLE，或总量超过 MAX_BYTES / MAX_ENTRIES（LRU）。
+      sweep 在每次写入与 run 开始时执行，卸载量打印成一行账。
+    """
+
+    TTL_IDLE = 2 * 60 * 60   # 空闲 2 小时未再命中 → 卸载
+    MAX_BYTES = 1 << 30      # 1 GiB
+    MAX_ENTRIES = 256
+
+    def __init__(self):
+        self._entries = {}
+        self.stats = {'hits': 0, 'misses': 0}
+
+    @staticmethod
+    def _tensors(x):
+        if torch.is_tensor(x):
+            yield x
+        elif isinstance(x, (list, tuple)):
+            for item in x:
+                yield from ConditioningCacheStore._tensors(item)
+        elif isinstance(x, dict):
+            for item in x.values():
+                yield from ConditioningCacheStore._tensors(item)
+
+    @classmethod
+    def _to_cpu(cls, x):
+        if torch.is_tensor(x):
+            return x.cpu()
+        if isinstance(x, list):
+            return [cls._to_cpu(item) for item in x]
+        if isinstance(x, tuple):
+            return tuple(cls._to_cpu(item) for item in x)
+        if isinstance(x, dict):
+            return {k: cls._to_cpu(v) for k, v in x.items()}
+        return x
+
+    def begin_run(self):
+        self.stats['hits'] = 0
+        self.stats['misses'] = 0
+
+    def get(self, key, srcs):
+        entry = self._entries.get(key)
+        if entry is None or len(entry['srcs']) != len(srcs) or \
+                any(ref() is not obj for ref, obj in zip(entry['srcs'], srcs)):
+            if entry is not None:
+                self._entries.pop(key, None)  # 源已死 / 身份不符（id 复用）→ 作废
+            self.stats['misses'] += 1
+            return None
+        entry['last'] = time.monotonic()
+        self.stats['hits'] += 1
+        return entry['value']
+
+    def put(self, key, value, srcs):
+        try:
+            refs = [weakref.ref(s) for s in srcs]
+        except TypeError:
+            # 源不可弱引用（非类实例）→ 做不了身份校验，宁可放弃缓存
+            return
+        value = self._to_cpu(value)
+        self._entries[key] = {
+            'value': value,
+            'srcs': refs,
+            'last': time.monotonic(),
+            'bytes': sum(t.numel() * t.element_size() for t in self._tensors(value)),
+        }
+        self.sweep()
+
+    def sweep(self):
+        now = time.monotonic()
+        dead = idle = lru = freed = 0
+        for k in list(self._entries):
+            e = self._entries[k]
+            if any(r() is None for r in e['srcs']):
+                dead += 1
+            elif now - e['last'] > self.TTL_IDLE:
+                idle += 1
+            else:
+                continue
+            freed += e['bytes']
+            del self._entries[k]
+        total = sum(e['bytes'] for e in self._entries.values())
+        while self._entries and (total > self.MAX_BYTES or len(self._entries) > self.MAX_ENTRIES):
+            k = min(self._entries, key=lambda k: self._entries[k]['last'])
+            freed += self._entries[k]['bytes']
+            total -= self._entries[k]['bytes']
+            del self._entries[k]
+            lru += 1
+        if dead or idle or lru:
+            print(f"[CondCache] unloaded {dead + idle + lru} (dead-src {dead}, "
+                  f"idle>{self.TTL_IDLE / 3600:.1f}h {idle}, lru {lru}) · "
+                  f"freed ~{_human_bytes(freed)} · left {len(self._entries)}/{_human_bytes(total)}")
+
+    def report(self):
+        total = sum(e['bytes'] for e in self._entries.values())
+        return f"{len(self._entries)} entries / {_human_bytes(total)}"
+
+
 # ====================== PipelineData 类（只返回 condition） ======================
 import traceback
 
@@ -720,6 +830,9 @@ class PipelineData:
         
         # Conditioning 缓存: key = (clip_id, prompt, frozenset(loras)) → condition
         self._conditioning_cache = {}
+        # 跨 run 条件缓存仓库：由宿主节点注入（见 ConditioningCacheStore），
+        # copy() 按引用继承；None = 未注入（退化为上面的对象级缓存）。
+        self._cond_store = None
 
     @property
     def mask(self):
@@ -756,7 +869,49 @@ class PipelineData:
         )
         new.resize_info_stack = self.resize_info_stack.copy()  # 复制栈
         new._conditioning_cache = self._conditioning_cache.copy()
+        new._cond_store = self._cond_store  # 仓库按引用共享（跨 run 生命周期由宿主节点持有）
         return new
+    # ==================== 条件缓存（跨 run：仓库；无仓库：对象级） ====================
+    def memo_text_encode(self, tag, prompt, extra_key, compute):
+        """纯文本 text-encode 的 memo。键 = (tag, base clip 身份, 本块 loras,
+        prompt, extra_key)。loras 取集合本身 —— lora clone 每次都是新对象，
+        跨 run 只有集合值稳定；身份校验交给条目里的 weakref。"""
+        clip = self.clip
+        loras = getattr(self, '_cache_loras', None)
+        if self._cond_store is not None and clip is not None and loras is not None:
+            key = (tag, id(clip), loras, prompt, extra_key)
+            hit = self._cond_store.get(key, (clip,))
+            if hit is not None:
+                print(f"✓ CondCache hit [{tag}]")
+                return hit
+            print(f"x CondCache miss [{tag}]")
+            value = compute()
+            self._cond_store.put(key, value, (clip,))
+            return value
+        # 无仓库（其它调用方）：保持原有的对象级缓存语义
+        if clip is None:
+            return compute()
+        key = (tag, id(clip), prompt, extra_key)
+        if key in self._conditioning_cache:
+            print(f"✓ Conditioning cache hit")
+            return self._conditioning_cache[key]
+        print(f"x Conditioning cache miss")
+        value = compute()
+        self._conditioning_cache[key] = value
+        return value
+
+    def memoized(self, key, srcs, compute):
+        """通用 get-or-compute（参考图 decode/槽位编码/ref 注入等子件）。
+        仅宿主注入了跨 run 仓库时生效；否则原样计算。"""
+        store = self._cond_store
+        if store is None:
+            return compute()
+        hit = store.get(key, srcs)
+        if hit is not None:
+            return hit
+        value = compute()
+        store.put(key, value, srcs)
+        return value
     # ==================== 获取 Latent ====================
     def get_latent(self):
         if self.latent is not None:
@@ -836,16 +991,10 @@ class PipelineData:
             )
         else:
             if condition is None:
-                # 默认: 无 reference 处理
-                cache_key = (id(clip), prompt)
-                if cache_key in self._conditioning_cache:
-                    print(f"✓ Conditioning cache hit")
-                    condition = self._conditioning_cache[cache_key]
-                else:
-                    print(f"x Conditioning cache miss")
-                    condition = CLIPTextEncode().encode(clip=clip, text=prompt)[0]
-                    self._conditioning_cache[cache_key] = condition
-                return condition
+                # 默认: 无 reference 处理（纯文本 → 直接吃 memo）
+                return self.memo_text_encode(
+                    'default', prompt, None,
+                    lambda: CLIPTextEncode().encode(clip=clip, text=prompt)[0])
         
         if reference.reference_controls is not None:
             for control in reference.reference_controls:

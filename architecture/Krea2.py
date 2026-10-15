@@ -331,6 +331,15 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     system_prompt = self.config.get("krea2_system_prompt", "") if self.config else ""
     sp = system_prompt.strip() if system_prompt else SYSTEM_PROMPT_DEFAULT
 
+    # 纯文本（无任何图参与）：整趟编码走跨 run memo（sp 进键：模板内容随它变）。
+    if reference_image is None and len(reference.reference_latents) == 0:
+        template = ("<|im_start|>system\n" + sp + "<|im_end|>\n<|im_start|>user\n"
+                    + "{}<|im_end|>\n<|im_start|>assistant\n")
+        return self.memo_text_encode(
+            'krea2', prompt, sp,
+            lambda: clip.encode_from_tokens_scheduled(
+                clip.tokenize(prompt, images=[], llama_template=template)))
+
     images_vl = []
     source_images_pixel = []  # 像素空间源图（side-channel 写入 pixel_state）
 
@@ -353,7 +362,10 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     # 处理额外参考潜空间 (来自 ReferenceImageNode / ReferenceLatentNode / context_reference)
     for lat in reference.reference_latents:
         samples = lat["samples"]
-        decoded = VAEDecode().decode(vae=vae, samples={"samples": samples})[0]
+        # 解码（跨 run memo：同 latent 对象 + 同 vae 命中同一份像素）
+        decoded = self.memoized(
+            ('dec', id(samples), id(vae)), (samples, vae),
+            lambda: VAEDecode().decode(vae=vae, samples={"samples": samples})[0])
         s = decoded.movedim(-1, 1)  # B,C,H,W
 
         # VLM 图像

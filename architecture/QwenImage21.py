@@ -57,17 +57,27 @@ def _slot_size(samples, resolution):
     return max(SLOT_ALIGN, width), max(SLOT_ALIGN, height)
 
 
-def _slot_images(vae, reference_latent, reference_image, reference, VAEDecode):
-    """收集参考图像（HWC，槽位顺序）：当前 pipeline 图像优先，其余 reference_latents 解码。"""
+def _slot_images(vae, reference_latent, reference_image, reference, VAEDecode, owner=None):
+    """收集参考图像（HWC，槽位顺序）：当前 pipeline 图像优先，其余 reference_latents 解码。
+
+    owner: PipelineData —— 注入跨 run 仓库时 decode 走 memo（键 = latent 身份 + vae
+    身份），命中返回同一份像素对象，下游槽位编码缓存随之命中；None 直接解码。
+    """
+    def _decode(samples):
+        if owner is None:
+            return VAEDecode().decode(vae=vae, samples={"samples": samples})[0]
+        return owner.memoized(('dec', id(samples), id(vae)), (samples, vae),
+                              lambda: VAEDecode().decode(vae=vae, samples={"samples": samples})[0])
+
     images = []
     if reference_image is not None:
         images.append(reference_image)
     elif reference_latent is not None and vae is not None:
-        images.append(VAEDecode().decode(vae=vae, samples={"samples": reference_latent["samples"]})[0])
+        images.append(_decode(reference_latent["samples"]))
 
     if vae is not None:
         for lat in reference.reference_latents:
-            images.append(VAEDecode().decode(vae=vae, samples={"samples": lat["samples"]})[0])
+            images.append(_decode(lat["samples"]))
 
     return images
 
@@ -87,7 +97,15 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     if self.config:
         resolution = self.config.get("qwen_image21_resolution", RESOLUTION_DEFAULT)
 
-    images = _slot_images(vae, reference_latent, reference_image, reference, VAEDecode)
+    # 纯文本（无任何图参与）：整趟编码走跨 run memo。edit 开时首格嵌的是当块
+    # 工作图（每块都在变），到不了这条；edit 关且无 ref 才吃得上。
+    if reference_image is None and reference_latent is None and len(reference.reference_latents) == 0:
+        return self.memo_text_encode(
+            'qwen21', prompt, None,
+            lambda: clip.encode_from_tokens_scheduled(
+                clip.tokenize(prompt, images=[], keep_vision=True, prevent_empty_text=True)))
+
+    images = _slot_images(vae, reference_latent, reference_image, reference, VAEDecode, owner=self)
     # 第一格钉在 source_latent 的几何上，只对"就是这张工作图"的槽位成立
     pinned = source_latent is not None and reference_image is not None
 
@@ -111,11 +129,21 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
             rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
         images_vl.append(rgb)
         if vae is not None:
-            ref_latents.append(source_latent[:1] if first else vae.encode(s))
+            if first:
+                ref_latents.append(source_latent[:1])
+            elif image is reference_image:
+                # 未 pin 的槽位 0 = 当块工作图（一次性对象）—— 不进跨 run 缓存
+                ref_latents.append(vae.encode(s))
+            else:
+                ref_latents.append(self.memoized(
+                    ('slotenc', id(image), s.shape[2], s.shape[3], id(vae)), (image, vae),
+                    lambda: vae.encode(s)))
 
     if len(images_vl) > 0:
         print(f"[QwenImage21] {len(images_vl)} reference image(s) -> vision slots + "
               f"{len(ref_latents)} reference latent(s)")
+    # 无 vae 时 latent 路径不可用，保留 vision tokens 让图像只经 text encoder 生效
+    keep_vision = len(ref_latents) == 0
     try:
         from ..libs import debug_trace as dbg
         for _i, _img in enumerate(images_vl):
@@ -129,8 +157,6 @@ def get_conditioning(self, mode, clip, vae, prompt, reference_latent, reference_
     except Exception as _e:
         print(f"[QwenImage21] OffsetProbe record failed: {_e!r}")
 
-    # 无 vae 时 latent 路径不可用，保留 vision tokens 让图像只经 text encoder 生效
-    keep_vision = len(ref_latents) == 0
     tokens = clip.tokenize(prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
     condition = clip.encode_from_tokens_scheduled(tokens)
 

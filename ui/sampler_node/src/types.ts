@@ -1,8 +1,9 @@
 export interface ServerConfig {
   prompt_url: string;
   detail_status: 'idle' | 'running' | 'done' | 'error';
-  /** GLOBAL SETTINGS —— 节点端口已全部取消，这里就是前端唯一读写的地方。
-   *  ref_* / tgen_* 是输入侧显存**上限**（只压不涨，0 = 关闭），语义与 pixels 的"目标"相反。 */
+  /** DEFAULT SETTING（Settings tab）—— 节点端口已全部取消，这里就是前端唯一读写的地方。
+   *  ref_* / tgen_* 是输入侧显存**上限**（只压不涨，0 = 关闭），语义与 pixels 的"目标"相反。
+   *  架构规则命中的那几项会盖掉这里的值（见 ArchSettings）。 */
   pixels: number;
   align: number;
   crop_reserve: number;
@@ -25,8 +26,11 @@ export interface ServerConfig {
   /** 多套 Pipeline Blocks（工作台里的 tabs）；`blocks` 始终是激活那一套的镜像 */
   blocks_sets?: BlockSet[];
   active_block_set?: string | null;
-  /** Pipeline Settings（Draw 页）：选中的 pipeline + 按名字绑定的九个 override */
+  /** Draw 页 Pipeline Settings：选中要加载哪条 pipeline。`overrides` 是旧版按名字存的
+   *  那份数据 —— 后端不再读它，前端仍原样回写，免得一次保存就把磁盘内容洗掉。 */
   pipeline_settings?: PipelineSettings;
+  /** Settings tab：按 pipeline architecture 正则匹配的覆盖规则（自上而下第一条命中整条赢） */
+  arch_settings?: ArchSettings;
   /** Interface tab 的持久化配置：端口改名 / 模式开关 / block 端口绑定（按包名索引） */
   interface_meta?: InterfaceMeta;
   /** 此刻真正加载在节点上的那条 pipeline 名字（'' = 节点输入口那条，从未切换过） */
@@ -51,27 +55,46 @@ export const PIPELINE_DEFAULT = '[Default]';
 /** '[Current Select]' —— 不做任何切换，用当前已加载的那一条。 */
 export const PIPELINE_CURRENT_SELECT = '[Current Select]';
 
-/** 可 override 的九项，与后端 PIPELINE_OVERRIDE_KEYS 一一对应（顺序即 UI 顺序）。
- *  ref_* / tgen_* 是**输入侧上限**（只压不涨，0 = 关闭），其余是工作区/预处理参数。 */
-export type PipelineOverrideKey = 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
+/** Default Setting 的九项，也是架构规则能覆盖的九项 —— 与后端 ARCH_OVERRIDE_KEYS 一一对应
+ *  （顺序即 UI 顺序）。ref_* / tgen_* 是**输入侧上限**（只压不涨，0 = 关闭），
+ *  其余是工作区/预处理参数。 */
+export type OverrideKey = 'mask_grow' | 'mask_blur' | 'crop_reserve' | 'pixels' | 'align'
   | 'ref_pixels' | 'ref_align' | 'tgen_pixels' | 'tgen_align';
-export const PIPELINE_OVERRIDE_KEYS: PipelineOverrideKey[] =
+export const OVERRIDE_KEYS: OverrideKey[] =
   ['mask_grow', 'mask_blur', 'crop_reserve', 'pixels', 'align',
    'ref_pixels', 'ref_align', 'tgen_pixels', 'tgen_align'];
 
-export interface PipelineOverride {
+export interface ParamOverride {
   value: number;
   enabled: boolean;
 }
 
-/** 整份 Pipeline Settings。override 按 pipeline **名字**存（不是 node_id）—— 这是用户要的
- *  "跟随 pipeline 持久化"；代价是重名的两条会共享同一份 override。 */
+/** 整份 Pipeline Settings。`selected` 由 Draw 页 Pipeline Settings 独家作者；
+ *  `overrides` 是旧版按 pipeline **名字**存的那份覆盖 —— 覆盖能力已经搬进架构规则，
+ *  后端不再读它，但这份数据既读也回写，磁盘上已有的一次都不弄丢。 */
 export interface PipelineSettings {
   selected: string;
-  overrides: Record<string, Partial<Record<PipelineOverrideKey, PipelineOverride>>>;
+  overrides: Record<string, Partial<Record<OverrideKey, ParamOverride>>>;
 }
 
 export const EMPTY_PIPELINE_SETTINGS: PipelineSettings = { selected: '', overrides: {} };
+
+/** 一条架构规则：拿 `architecture` 当正则去匹配本次 run 那条 pipeline 的架构
+ *  （后端 re.search + IGNORECASE，与后端 Krea2/Flux2Klein 判据同口径）。
+ *  命中的**整条**规则生效，规则里 toggle 关着的键仍继承 Default Setting；自上而下
+ *  第一条命中就停，所以列表顺序就是优先级。
+ *  pattern 为空或正则非法 = 这条永远不命中（后端跳过）。 */
+export interface ArchRule {
+  id: string;
+  architecture: string;
+  overrides: Partial<Record<OverrideKey, ParamOverride>>;
+}
+
+export interface ArchSettings {
+  rules: ArchRule[];
+}
+
+export const EMPTY_ARCH_SETTINGS: ArchSettings = { rules: [] };
 
 export interface DetailerBlockParams {
   /** 'enable' = Random（加随机噪声）、'disable' = None、'invert' = DDIM 反演往返 */
@@ -106,7 +129,7 @@ export interface DetailerBlockParams {
    *  直接跑整幅链：工作台进入框选模式，用户拖完框跳过分辨率弹窗直接建出 Dynamic Layer，
    *  并立刻在该层上自动 Generate（跑的就是刚点的这条链）。Esc 取消 = 什么也不跑。 */
   enable_dynamic_layer?: boolean;
-  /** Dynamic Layer 的 Layer Limit（默认开）。开 = 建层分辨率自动按 GLOBAL SETTINGS 的
+  /** Dynamic Layer 的 Layer Limit（默认开）。开 = 建层分辨率自动按 DEFAULT SETTING 的
    *  Pixels 预算算（rate = √(Pixels ÷ 框面积)，与分辨率弹窗里的 Limit 勾选同一公式）；
    *  关 = rate 1，层按框的原生像素建。仅 Dynamic Layer 开时生效。 */
   dynamic_layer_limit?: boolean;
@@ -204,7 +227,7 @@ export interface PipelineBlock {
   exec_options?: InterfaceExecOptions;
 }
 
-/** Scale 块：把链上当前工作图按比例缩放并落 Align 格 —— 语义对齐 GLOBAL SETTINGS 的
+/** Scale 块：把链上当前工作图按比例缩放并落 Align 格 —— 语义对齐 DEFAULT SETTING 的
  *  limit_pixels（宽高各自乘 scale 后就近吸附到 align 像素格；scale=1 时只落格不缩放）。
  *  只影响其后的 block：缩放后的尺寸就是后续 detailer 的采样分辨率；收尾仍按原 Recover
  *  契约落回画布（Recover Crop 开 → 复原到裁剪尺寸后贴回全图；关 → patch 保留缩放后的
@@ -214,7 +237,7 @@ export interface ScaleBlockParams {
   scale: number;
   /** Use Pipeline Align 关时生效的块级像素格（同 limit_pixels 的 align；QwenImage2.1 会自动抬到 32） */
   align: number;
-  /** 开（默认）：沿用 pipeline 的 align（GLOBAL SETTINGS 那一份，链首同一来源）；
+  /** 开（默认）：沿用 pipeline 的 align（DEFAULT SETTING 那一份，链首同一来源）；
    *  关：用块自己的 align。 */
   use_pipeline_align?: boolean;
 }
@@ -364,11 +387,13 @@ export interface InterfaceExecOptions {
 /**
  * `draw` is now the Blend workbench: its canvas composite IS the Context Image, and the pure
  * Mask layer supplies the mask. The standalone `mask` / `blend` / `tag` tabs were folded into
- * it (the Tag buttons live in its toolbar). `context` and `pipeline` are gone for the same
- * reason — the pipeline switch lives in the Draw panel's Pipeline Settings section now, and
- * nothing in the workbench reads a separately-selected context image any more.
+ * it (the Tag buttons live in its toolbar). `context` and `pipeline` followed them — the pipeline
+ * switch lives in the Draw panel's Pipeline Settings section now, and nothing in the workbench
+ * reads a separately-selected context image any more.
+ * `settings` is the numeric home: the Default Setting (nine values) plus the architecture rules
+ * that may override them, taken out of the Draw panel so the workbench gets the width back.
  */
-export type Tab = 'prompt' | 'draw' | 'interface';
+export type Tab = 'prompt' | 'draw' | 'interface' | 'settings';
 
 export interface InterfacePort {
   num: number;

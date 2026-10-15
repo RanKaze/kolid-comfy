@@ -2310,7 +2310,7 @@ class HandshakeHandler(BaseHTTPRequestHandler):
                                   extra_headers=[('Cache-Control',
                                                   'public, max-age=31536000, immutable')])
         if path == '/api/config':
-            # blend 页面读它取 GLOBAL SETTINGS 的 pixels(动态分辨率的上限);
+            # blend 页面读它取 DEFAULT SETTING 的 pixels(动态分辨率的上限);
             # 桌面没有管线,给节点默认档(1M 像素)
             return self._json({'pixels': 1048576})
         if path == '/api/io_caps':
