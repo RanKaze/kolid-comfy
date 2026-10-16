@@ -38,18 +38,19 @@ const LAYER_ENTRIES: AddEntry[] = [
 
 const LayersBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 4 }}>
-      <StackHead stack="layer" entries={LAYER_ENTRIES} withBypass send={send} />
-      <LayerListView stack="layer" rows={ui.stacks.layers} send={send} />
-    </div>
-  );
+  return <LayerListView stack="layer" rows={ui.stacks.layers} send={send} />;
 };
+
+// 总开关 / Clear All / Add 那一排住进 dock 的动作条里（正文下面、滚动条之外）——图层再多也顶不走它们。
+const LayersFoot: React.FC<WorkbenchUnitProps> = ({ send }) => (
+  <StackHead stack="layer" entries={LAYER_ENTRIES} withBypass send={send} />
+);
 
 export const layersUnit: WorkbenchUnit = {
   id: 'layers',
   title: 'Layers',
   hint: 'One row per layer, topmost first: its two faces, the attributes on its strip, the effect chains laid out above it. '
-    + 'The head carries the total effect switch, Clear All and Add; the four ways to make a row are all there.',
+    + 'The row of actions — the total effect switch, Clear All and Add — is pinned under the list, outside the scroller.',
   Body: LayersBody,
+  Foot: LayersFoot,
 };

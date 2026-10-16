@@ -13,8 +13,9 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    open documents are each a dock unit of their own, so the workbench has no tab bar or menu of its own
    to draw. It only announces its documents (see syncDocList) and obeys the commands that come back. */
 #canvasArea { flex: 1; min-height: 0; position: relative; margin: 16px; overflow: hidden; }
-/* The bottom strip is reserved for the action toolbar, so the canvas never hides behind it. */
-#viewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; cursor: default; }
+/* 底部那条动作条（Extra Prompt + 动作钮 + 图池条 + Cancel / 进度）整条搬进宿主的 Staging dock 之后，
+   画布不再需要给它让出下边距 —— 两块视口都铺满整幅 #canvasArea。 */
+#viewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: default; }
 #blendCanvas { position: absolute; left: 0; top: 0; width: 0; height: 0; display: block; transform-origin: 0 0; will-change: transform; border-radius: 4px; box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 10px 40px rgba(0,0,0,0.45);
     /* The transparency checkerboard: two 45deg gradients with hard 25%/75% stops tile a 16px box
        into an 8px alternate of #1a1a1a / #242424. The host preview reproduces this in canvas 2D
@@ -134,53 +135,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .icon-btn:disabled:hover { background: transparent; color: rgba(255,255,255,0.45); }
 .icon-btn svg { display: block; width: 14px; height: 14px; }
 
-/* ---- Bottom action toolbar ----
-   The composite IS the Context Image: Blend archives it, the Tag button reads it, and the
-   detailer is run from the host (every run names its pipeline preset) — this bar only carries
-   the extra prompt and the floating Cancel while one is in flight. */
-#toolbar { position: absolute; left: 14px; right: 14px; bottom: 14px; z-index: 60; display: flex; flex-direction: column; align-items: stretch; gap: 6px;
-    padding: 8px 10px; border-radius: 14px; background: rgba(28,28,30,0.75); border: 0.5px solid rgba(255,255,255,0.1);
-    box-shadow: 0 6px 24px rgba(0,0,0,0.42); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
-#toolbarRow { display: flex; align-items: center; gap: 8px; }
-#toolbar input[type="text"] { flex: 1; min-width: 60px; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12);
-    border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none; color-scheme: dark; }
-#toolbar input[type="text"]:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
-#toolbar input[type="text"]::placeholder { color: rgba(255,255,255,0.32); }
-/* Extra Prompt（contenteditable）：文字与图片 chip 混排，样式贴齐上面的 input。 */
-#extraPrompt { flex: 1; min-width: 60px; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12);
-    border-radius: 9px; padding: 8px 11px; color: #fff; font-size: 12.5px; outline: none;
-    max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
-#extraPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
-#extraPrompt.is-empty::before { content: attr(data-placeholder); color: rgba(255,255,255,0.32); pointer-events: none; }
-/* chip = 一张被引用图片的缩略图。contenteditable=false 让它在编辑时是**原子**的：
-   光标不能进入内部，退格整块删除（见 keydown 处理）。 */
-#extraPrompt .prompt-chip { display: inline-flex; align-items: center; vertical-align: -14px; height: 44px; max-width: 264px;
-    padding: 0 3px; margin: 0 2px; border-radius: 8px; background: rgba(10,132,255,0.22);
-    border: 0.5px solid rgba(10,132,255,0.65); overflow: hidden; user-select: none; cursor: default; }
-#extraPrompt .prompt-chip img { height: 36px; width: auto; display: block; border-radius: 5px; }
-/* 引用失效（图已从工作区移除）→ 退回可读文本，而不是一个空洞的方块。 */
-#extraPrompt .prompt-chip.chip-broken { font-size: 10px; color: #ff9f0a; padding: 0 5px; }
-/* The two action buttons are icon-only twins in the accent blue every acting control here uses:
-   the glyph says which one it is, the sentence it used to carry lives on in the title. */
-.tb-btn { border: none; border-radius: 9px; padding: 8px 9px; cursor: pointer; color: #fff;
-    display: inline-flex; align-items: center; justify-content: center;
-    background: rgba(10,132,255,0.9); box-shadow: 0 2px 10px rgba(10,132,255,0.22);
-    transition: background 0.15s ease, transform 0.15s ease; }
-.tb-btn > svg { display: block; }
-.tb-btn:hover:not(:disabled) { background: rgba(10,132,255,1); }
-.tb-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
-/* 运行中才浮出来的 Cancel：画布中下区、toolbar（Extra Prompt 那一行）正上方。
-   绝对定位，不参与 flex 布局 —— 出现/消失都不会让工具条挪动一像素。 */
-#runCancelBtn { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%);
-    display: none; border: none; border-radius: 999px; padding: 7px 18px; font-size: 12.5px; font-weight: 700;
-    color: #fff; background: rgba(255,69,58,0.92); box-shadow: 0 4px 14px rgba(255,69,58,0.3);
-    cursor: pointer; white-space: nowrap; }
-#runCancelBtn.on { display: block; }
-#runCancelBtn:hover { background: rgba(255,69,58,1); transform: translateX(-50%) translateY(-1px); }
-/* Progress strip drawn over the toolbar while a run is in flight. */
-#toolbarProgress { position: absolute; left: 14px; right: 14px; bottom: 0; height: 3px; border-radius: 0 0 14px 14px; overflow: hidden; background: rgba(255,255,255,0.08); display: none; }
-#toolbarProgress.on { display: block; }
-#toolbarProgress > i { display: block; height: 100%; width: 0; background: #0a84ff; transition: width 0.2s ease; }
+/* `.hud` 是取色悬浮读数，`#dropOverlay` 是整幅拖放提示 —— 都还在画布上用。 */
 .hud { position: fixed; z-index: 120; display: none; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 10px; background: rgba(28,28,30,0.82); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 6px 24px rgba(0,0,0,0.45); pointer-events: none; transform: translate(14px, -50%); }
 .hud .pick-swatch { width: 18px; height: 18px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.35); flex-shrink: 0; }
 .hud .pick-hex { font-size: 12px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
@@ -188,9 +143,7 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 /* Drag-and-drop target: covers the canvas area, never swallows pointer events. */
 #dropOverlay { position: absolute; inset: 0; z-index: 110; display: none; align-items: center; justify-content: center; border-radius: 12px; background: rgba(0,122,255,0.10); border: 2px dashed rgba(0,122,255,0.8); pointer-events: none; }
 #dropOverlay .drop-card { padding: 12px 20px; border-radius: 12px; background: rgba(28,28,30,0.88); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.16); box-shadow: 0 6px 24px rgba(0,0,0,0.45); color: #fff; font-size: 13px; font-weight: 600; }
-/* Ctrl 悬浮放大预览：跟随指针的浮层，pointer-events 关掉——它永远不吃拖拽/点击。 */
-#hoverPreview { position: fixed; left: 0; top: 0; z-index: 300; display: none; padding: 6px; border-radius: 10px; background: rgba(28,28,30,0.92); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.18); box-shadow: 0 10px 32px rgba(0,0,0,0.5); pointer-events: none; }
-#hoverPreview canvas { display: block; border-radius: 6px; }
+/* Ctrl 悬浮放大预览搬进宿主后（Canvas 那一格的 hoverPreview）这一页不再画它。 */
 label { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); white-space: nowrap; }
 input[type="range"] { cursor: pointer; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.15); outline: none; width: 100px; }
 input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); cursor: pointer; margin-top: -6px; }
@@ -229,18 +182,18 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .control-row label { min-width: 46px; font-size: 11px; }
 .control-row input[type="range"] { flex: 1; width: auto; }
 .control-row span { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: rgba(255,255,255,0.7); }
-/* 侧栏里唯一用数字框的地方就是 3D 的 Inspector,给它一套和 #toolbar 文本框同色的深色皮肤
+/* 侧栏里唯一用数字框的地方就是 3D 的 Inspector,给它一套深色皮肤
    (浏览器默认的数字框在深色底上是白底黑字)。 */
 .control-row input[type="number"], .control-row input[type="text"] { flex: 1; min-width: 0; background: rgba(255,255,255,0.07); border: 0.5px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 3px 6px; color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; outline: none; color-scheme: dark; }
 .control-row input[type="number"]:focus, .control-row input[type="text"]:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 
 /* ==================== 3D 图层 ==================== */
 /* 两块视口同居 #canvasArea:2D 那块和 3D 那块靠 display 一进一出(Scene3D.enter/exit),
-   底部同样让出 132px 给动作条,所以切 tab 时画面位置不跳。 */
-#sceneViewport { position: absolute; inset: 0 0 132px 0; overflow: hidden; touch-action: none; display: none; }
+   两块都铺满整幅,所以切 tab 时画面位置不跳。 */
+#sceneViewport { position: absolute; inset: 0; overflow: hidden; touch-action: none; display: none; }
 #sceneCanvas { display: block; width: 100%; height: 100%; }
 /* 视口的两块浮层:Unity Scene 视图那两个小挂件 —— 左上角管水平面,右上角管朝向。都是 DOM 而不是
-   画进 GL,所以烘进图层的像素永远带不走它们。底盘沿用 #toolbar / .hud 那块玻璃,按钮沿用 .icon-btn。 */
+   画进 GL,所以烘进图层的像素永远带不走它们。底盘沿用 .hud 那块玻璃,按钮沿用 .icon-btn。 */
 .s3d-float { position: absolute; z-index: 12; display: flex; align-items: center; gap: 4px; padding: 3px 5px;
     border-radius: 10px; background: rgba(28,28,30,0.82); border: 0.5px solid rgba(255,255,255,0.14);
     box-shadow: 0 6px 24px rgba(0,0,0,0.45); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
@@ -374,56 +327,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .layer-menu-item:disabled { opacity: 0.4; cursor: default; }
 .layer-menu-item:disabled:hover { background: transparent; }
 </style>
-<style>
-/* 工作区（staging）条：toolbar 第二行，Extra Prompt 下方 — 固定高度、顶满宽度。
-   点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>（无焦点则追加末尾）。 */
-#stagingStrip {
-    display: flex; align-items: center; gap: 6px;
-    width: 100%; height: 68px; box-sizing: border-box;
-    padding: 6px 10px;
-    overflow-x: auto; overflow-y: hidden;
-    border-top: 0.5px solid rgba(255,255,255,0.08);
-}
-#stagingStrip.drag-over { outline: 1.5px dashed #0a84ff; outline-offset: -3px; background: rgba(10,132,255,0.08); }
-.staging-item {
-    position: relative; flex: 0 0 auto;
-    width: 54px; height: 54px; border-radius: 8px; overflow: hidden;
-    background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.16);
-    padding: 0; cursor: pointer;
-}
-.staging-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
-/* 两张钉死卡片：Context（最左）与 Guidance（紧随）。两者都常驻，与工作区里有没有
-   别的条目无关 —— 它们代表的不是"一张被丢进来的图"，而是两条恒定存在的引用
-   （<image_id:context> / <image_id:staging_guidance>），所以没有 ✕。
-   Enable Edit 下 context 永远作为 image 1 存在（无论是否插进文本），卡片只是把
-   <image 1> 写进 Extra Prompt 的手段。 */
-.staging-item.staging-context, .staging-item.staging-guidance {
-    display: flex; align-items: center; justify-content: center;
-    background: rgba(10,132,255,0.14); border: 0.5px dashed rgba(10,132,255,0.6);
-    color: rgba(255,255,255,0.9); font-size: 10px; font-weight: 700;
-    letter-spacing: 0.2px; text-align: center; line-height: 1.2; padding: 2px;
-}
-.staging-item.staging-context:hover, .staging-item.staging-guidance:hover { background: rgba(10,132,255,0.24); }
-/* 钉死卡片的实时预览：盖满卡片，标签悬浮在底部半透明条上。
-   没有画布内容时 img 无 src（display:none），退回纯文字标签。 */
-.staging-context .context-preview, .staging-guidance .context-preview { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
-.staging-context .context-label, .staging-guidance .context-label {
-    position: absolute; left: 0; right: 0; bottom: 0;
-    padding: 1px 0 2px; background: rgba(0,0,0,0.58);
-    font-size: 9px; font-weight: 700; letter-spacing: 0.2px; text-align: center; line-height: 1.2;
-}
-.staging-item .staging-remove {
-    position: absolute; top: 0; right: 0; width: 16px; height: 16px;
-    padding: 0; border: none; border-radius: 0 0 0 6px; cursor: pointer;
-    background: rgba(0,0,0,0.62); color: rgba(255,255,255,0.85);
-    font-size: 10px; line-height: 16px; text-align: center;
-}
-.staging-item .staging-remove:hover { background: rgba(255,69,58,0.85); color: #fff; }
-.staging-empty {
-    color: rgba(255,255,255,0.28); font-size: 11px; white-space: nowrap;
-    align-self: center; padding-left: 2px; pointer-events: none;
-}
-</style>
 </head>
 <body>
 <div id="mainArea">
@@ -463,28 +366,11 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
             <div id="sceneAxisDock" class="s3d-float"><svg id="sceneAxisGizmo" viewBox="-32 -32 64 64" width="62" height="62" aria-hidden="true" focusable="false"></svg></div>
         </div>
         <div id="dropOverlay"><div class="drop-card">Drop images as layers — or a .cud to restore a context</div></div>
-        <div id="hoverPreview"><canvas id="hoverPreviewCanvas"></canvas></div>
         <div id="brushCursor"></div>
         <!-- 按住右键那一路的眼睛光标:瞳孔正好钉在指针上,和 #brushCursor 同一套 DOM 光标。 -->
         <div id="lookCursor"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.4 12S5.9 6.2 12 6.2 21.6 12 21.6 12 18.1 17.8 12 17.8 2.4 12 2.4 12z"/><circle cx="12" cy="12" r="3.1" fill="currentColor" stroke="none"/></svg></div>
         <div id="pickHud" class="hud"><span class="pick-swatch" id="pickSwatch"></span><span class="pick-hex" id="pickHex">#000000</span><span class="pick-rgb" id="pickRgb">0, 0, 0</span></div>
         <div id="sizeHud" class="hud"><span class="pick-hex" id="sizeHudValue">40 px</span><span class="pick-rgb" id="sizeHudTool">Brush</span></div>
-        <div id="toolbar">
-            <button id="runCancelBtn" title="Cancel — interrupt the current run (works mid-block, mid-sampling or during Generate Text)">Cancel</button>
-            <div id="toolbarRow">
-                <!-- Extra Prompt 是 contenteditable：文字与 <image_id:xxx> 的**图片 chip** 混排。
-                     读回文本时 chip 序列化成 <image_id:xxx>；后端再解码成 <image N>。 -->
-                <div id="extraPrompt" class="is-empty" contenteditable="true" role="textbox" spellcheck="false"
-                     data-placeholder="Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor."></div>
-                <button class="tb-btn" id="blendBtn" aria-label="Blend" title="Composite the layers into a NEW smart layer on top (self-contained pixels — non-destructive). The workspace only ever holds images you drag in yourself."><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="12" r="6" opacity="0.45" /><circle cx="15" cy="12" r="6" /></svg></button>
-                <button class="tb-btn" id="tagBtn" aria-label="Tag" title="Tag the composite — pick which region the tagger reads. With an image layer selected you also get Layer tags (the composite over that layer, cut by its own mask), plus Clear Tag to wipe the tags from the prompt stage."><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.72 2.23l7.05 7.05a2.5 2.5 0 010 3.54l-6.36 6.36a2.5 2.5 0 01-3.54 0l-6.36-6.36a2.5 2.5 0 010-3.54l7.05-7.05a1.5 1.5 0 012.16 0z" /><circle cx="9.5" cy="9.5" r="1.4" fill="currentColor" stroke="none" /></svg></button>
-            </div>
-            <!-- 工作区（staging）：唯一的图池，toolbar 第二行（固定高度、顶满宽度）。
-                 拖文件进来上传；点击条目 = 在 Extra Prompt 光标处插入 <image_id:...>；✕ 移除。
-                 列表由宿主同步（后端 staging_tensors 支撑），引用图在 Run 时从文本解析得出。 -->
-            <div id="stagingStrip"></div>
-        </div>
-        <div id="toolbarProgress"><i></i></div>
         </div>
     </div>
     <div id="sideSplitter" role="separator" aria-orientation="vertical" tabindex="0"
@@ -842,14 +728,14 @@ const overlayCtx = overlayCanvas.getContext('2d');
 const brushCursor = document.getElementById('brushCursor');
 const blendCtx = blendCanvas.getContext('2d');
 const guidanceCtx = guidanceCanvas.getContext('2d');
-const blendBtn = document.getElementById('blendBtn');
-const extraPromptInput = document.getElementById('extraPrompt');
-const tagBtn = document.getElementById('tagBtn');
-const runCancelBtn = document.getElementById('runCancelBtn');
-const toolbarProgress = document.getElementById('toolbarProgress');
-const toolbarProgressFill = toolbarProgress.querySelector('i');
-const TAG_ACTION_BTNS = [tagBtn];
-const ACTION_BTNS = [blendBtn].concat(TAG_ACTION_BTNS);
+// Extra Prompt 的编辑整条搬进了宿主的 Staging dock（workbench/staging.tsx：文字与 <image_id:…> 图片
+// chip 混排的 contenteditable + 退格整块删 / 粘贴只吃纯文本 / 点图池条目在光标处插 token）。这一页只留
+// 那份**序列化字符串** —— 原来那个 contenteditable 的 DOM 不再存在，.cud 与 run payload 读的都是它。
+// 编辑时宿主发 staging-prompt 回来，这里存下并标脏；外部（applyCudTools / appendImageIdChips）改动时
+// 由 updateStagingPanel 送进快照，宿主那边的编辑器按快照重建。
+let extraPromptText = '';
+// 空态占位句：默认那句原来是 contenteditable 的 data-placeholder，blend-config 的 tagDisabledHint 覆写它。
+let extraPromptPlaceholder = 'Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor.';
 const pickHud = document.getElementById('pickHud');
 const pickSwatch = document.getElementById('pickSwatch');
 const pickHex = document.getElementById('pickHex');
@@ -987,6 +873,8 @@ let maskLayer = ownSource({
 }, null, '');                   // img 是一块画布尺寸的 scratch,由 adoptMaskSurface 换进来
 let actionBusy = false;
 let actionBusyLabel = '';
+// 本次 run 的进度（0..1），-1 = 未知 / 没在跑。随 Staging 那格的快照播出去，宿主照它画进度条。
+let actionProgress = -1;
 let hasTagger = true;
 // The Detector tool's total gate: hidden until blend-config confirms the node's detector input
 // is actually connected. Unlike the tagger there is no degraded mode — without a detector the
@@ -2377,6 +2265,10 @@ const blendUiState = {
     scene3d: { on: false, canOpen: false, note: '—' },
     detector: { available: false, prompt: '', threshold: 0.5, invert: false },
     processor: { names: [], choice: -1, inputs: [], params: [], outputs: [] },
+    // Staging 那一格（画布旧底栏整条搬进宿主）：这一页在那一格里只留三样 —— Extra Prompt 的序列化
+    // 字符串、空态占位句、以及 run 的状态（busy / Cancel 该不该浮 / 进度）。图池条目与两张钉卡预览
+    // 不进这一格：它们本就是宿主的（App.staging / blendPreview）。
+    staging: { prompt: '', placeholder: '', busy: false, cancelLive: false, progress: -1, hasTagger: true },
     // Geometry 家族 (direction/point/ray/plane)：舞台归宿主（那一格的 canvas 里画的 three.js 世界图），
     // 页面只交真值源 —— 当前那枚记录的类型与描述符（四元数 + 位置 + 颜色）那条通道，加那张参考图
     // （此刻的 context image，唯独不含正在编辑的这枚；宿主拿去当画布平面的贴图）。
@@ -4056,7 +3948,6 @@ function render() {
     queueBlendUi();
     drawOverlay();
     schedulePreview();
-    schedulePinnedCardPreview();
     scheduleGuidanceCard();
 }
 
@@ -4348,7 +4239,7 @@ function restoreState(s, opts) {
     refreshLayerPanels();
     if (asDocument) syncModeUI();
     syncPaintUI();
-    syncActionButtons();
+    updateStagingPanel();
     render();
     syncHistoryUI();
 }
@@ -4900,7 +4791,7 @@ function setFaceVisible(keys) {
 }
 
 // Alt+悬浮放大预览那一张。行内那颗 84×56 的缩略图放大到 480 是一团糊的像素，所以这一张按**原分辨率**
-// 现编、封顶 480（与页面那口放大预览 HP_MAX 同一个上限），而且只在指针按住 Alt 落到某一行时才编 ——
+// 现编、封顶 480，而且只在指针按住 Alt 落到某一行时才编 ——
 // 它是按需的一张，不进可见区/预算那套每帧算法，也不进 faceSigs（那张表的清理只认行描述符里的键）。
 // 签名沿用结果面那一份：同一帧反复悬浮不重编。
 const HP_HOVER = 480;
@@ -5073,6 +4964,7 @@ function refreshLayerPanels() {
     updateDirectionPanel();
     update3DPanel();
     updatePosePanel();
+    updateStagingPanel();
 }
 // 这一节里剩下的每一句都是"那一颗控件原来那一段"：眼睛那一下还是翻开关、重画、报一句、记一步，
 // 一个字没改，只是按下它的人从页面里的按钮换成了宿主发回来的动作键。所以动词只有一个实现处。
@@ -8454,96 +8346,6 @@ function patchSelectedText(patch, historyKey, label) {
     patchTextLayer(l, patch, { historyKey, label });
 }
 
-// ==================== Alt 悬浮放大预览 ====================
-// 按住 Alt 悬浮在工作区卡片 / 钉死的 Context·Guidance 卡 / 图层行上：浮出一张放大预览，
-// 跟随指针、贴边自动让位。图层给的是合成结果（layerSource —— decal / FX / mask 全部折入），
-// 工作区给的是条目原图，Context / Guidance 给的是全分辨率画布读法。
-// 预览浮层 pointer-events 关掉，永远不吃拖拽和点击。
-const hoverPreviewEl = document.getElementById('hoverPreview');
-const hoverPreviewCanvas = document.getElementById('hoverPreviewCanvas');
-const hoverPreviewCtx = hoverPreviewCanvas ? hoverPreviewCanvas.getContext('2d') : null;
-const HP_MAX = 480;
-let hpHover = null;    // () => canvas|Image|null —— 当前悬浮对象的预览源；null = 指针不在可预览对象上
-
-function hpHide() {
-    if (hoverPreviewEl) hoverPreviewEl.style.display = 'none';
-}
-
-function hpShow(ev) {
-    if (!hoverPreviewEl || !hoverPreviewCtx) return;
-    const src = hpHover && hpHover();
-    if (!src || !src.width || !src.height) { hoverPreviewEl.style.display = 'none'; return; }
-    const scale = Math.min(1, HP_MAX / src.width, HP_MAX / src.height);
-    const w = Math.max(1, Math.round(src.width * scale));
-    const h = Math.max(1, Math.round(src.height * scale));
-    if (hoverPreviewCanvas.width !== w || hoverPreviewCanvas.height !== h) {
-        hoverPreviewCanvas.width = w; hoverPreviewCanvas.height = h;
-    }
-    hoverPreviewCtx.setTransform(1, 0, 0, 1, 0, 0);
-    hoverPreviewCtx.clearRect(0, 0, w, h);
-    hoverPreviewCtx.drawImage(src, 0, 0, w, h);
-    hoverPreviewEl.style.display = 'block';
-    hpPosition(ev);
-}
-
-function hpPosition(ev) {
-    if (!hoverPreviewEl) return;
-    const r = hoverPreviewEl.getBoundingClientRect();
-    let x = ev.clientX + 18, y = ev.clientY + 18;
-    if (x + r.width > window.innerWidth - 8) x = Math.max(8, ev.clientX - r.width - 18);
-    if (y + r.height > window.innerHeight - 8) y = Math.max(8, ev.clientY - r.height - 18);
-    hoverPreviewEl.style.left = x + 'px';
-    hoverPreviewEl.style.top = y + 'px';
-}
-
-// 同一套三件套（enter / move / leave）喂给所有可预览对象：provider 每次现取，图层预览
-// 永远是当下的合成结果。Ctrl 是移动中读取的；指针不动时按下/松开由全局 keydown/up 补同步。
-function hpWire(el, provider) {
-    if (!el) return;
-    el.addEventListener('mouseenter', ev => {
-        hpHover = provider;
-        if (ev.altKey) hpShow(ev);
-    });
-    el.addEventListener('mousemove', ev => {
-        hpHover = provider;
-        if (ev.altKey) hpShow(ev);
-        else hpHide();
-    });
-    el.addEventListener('mouseleave', () => { hpHover = null; hpHide(); });
-}
-window.addEventListener('keydown', e => { if (e.key === 'Alt' && hpHover) { e.preventDefault(); hpShow(e); } });
-window.addEventListener('keyup', e => { if (e.key === 'Alt' && hpHover) hpHide(); });
-
-// 工作区条目的源是一张 URL：按条目 id 缓存解码结果，加载完成后的第一次移动就会出图。
-const hpImgCache = new Map();
-function hpStagingSource(s) {
-    if (!s || !s.src) return null;
-    let img = hpImgCache.get(s.id);
-    if (!img) {
-        img = new Image();
-        img.src = s.src;
-        hpImgCache.set(s.id, img);
-    }
-    return (img.complete && img.naturalWidth > 0) ? img : null;
-}
-
-// Guidance 卡片的预览源：blendCanvas + guidanceCanvas 1:1 合成（与卡片缩略图同一读法，
-// 只是全分辨率）。复用一份缓冲，预览不产生新的分配。
-let hpGuidBuf = null;
-function hpGuidanceSource() {
-    if (!canvasW || !canvasH) return null;
-    if (!hpGuidBuf) hpGuidBuf = document.createElement('canvas');
-    if (hpGuidBuf.width !== canvasW || hpGuidBuf.height !== canvasH) {
-        hpGuidBuf.width = canvasW; hpGuidBuf.height = canvasH;
-    }
-    const c = hpGuidBuf.getContext('2d');
-    c.setTransform(1, 0, 0, 1, 0, 0);
-    c.clearRect(0, 0, canvasW, canvasH);
-    c.drawImage(blendCanvas, 0, 0);
-    c.drawImage(guidanceCanvas, 0, 0);
-    return hpGuidBuf;
-}
-
 // ==================== 拖入本地图片 ====================
 // Local files have no history key, so the layer keeps its data URL and the Blend payload
 // hands the pixels to the backend directly.
@@ -8596,7 +8398,6 @@ window.addEventListener('drop', e => {
 // 又没落进任何落点的拖拽会把全屏提示永远留在屏幕上。
 window.addEventListener('dragend', () => {
     dropOverlay.style.display = 'none';
-    hpHide();       // Ctrl 预览开着时直接起拖：拖拽吞掉后续鼠标事件，靠这里收尾
 });
 
 // Don't let a focused sidebar control swallow the canvas shortcuts (T/M/B/E, space, arrows…).
@@ -8720,25 +8521,24 @@ function layerSpecs() {
     return { layers: specs, attributes };
 }
 
-function syncActionButtons() {
-    for (const b of ACTION_BTNS) b.disabled = actionBusy;
-    for (const b of TAG_ACTION_BTNS) b.disabled = actionBusy || !hasTagger;
+// 动作钮与图池条整条搬进了宿主的 Staging dock：这一页不再有按钮可禁用。`actionBusy` 只决定快照里
+// 那格"run 在飞吗 / Cancel 该不该浮 / 进度到哪"，宿主照着画（见 workbench/staging.tsx）。这一句是那
+// 格快照的唯一写入口，凡是"run 状态或 Extra Prompt 变了"的地方都调它一次。
+function updateStagingPanel() {
+    blendUiState.staging.prompt = extraPromptText;
+    blendUiState.staging.placeholder = extraPromptPlaceholder;
+    blendUiState.staging.busy = !!actionBusy;
+    blendUiState.staging.cancelLive = !!actionBusy && actionBusyLabel === 'detailer';
+    blendUiState.staging.progress = actionBusy ? actionProgress : -1;
+    blendUiState.staging.hasTagger = !!hasTagger;
+    queueBlendUi();
 }
 
 function setActionBusy(busy, label) {
     actionBusy = busy;
     actionBusyLabel = busy ? (label || '') : '';
-    if (!busy) {
-        toolbarProgress.classList.remove('on');
-        toolbarProgressFill.style.width = '0';
-        runCancelBtn.classList.remove('on');
-    } else {
-        // The buttons no longer carry a word to swap, so the progress strip is what says a run is
-        // in flight; only a detailer run additionally floats Cancel.
-        toolbarProgress.classList.add('on');
-        runCancelBtn.classList.toggle('on', label === 'detailer');
-    }
-    syncActionButtons();
+    if (!busy) actionProgress = -1;
+    updateStagingPanel();
 }
 
 function sendCancelRun() {
@@ -8822,7 +8622,7 @@ function sendBlendAction(action, opts) {
         // alpha 读图 —— 直接送它，而不是让后端按图层栈再合成一遍（两次合成的
         // 语义漂移就是蒙版边缘灰色条带的来源）。失败时返回 null，后端自动回退。
         payload.composite = surfaceDataUrl(blendCanvas);
-        payload.extra_prompt = extraPromptInput.value.trim();
+        payload.extra_prompt = extraPromptText.trim();
         // Which pipeline preset this run executes — named by the host's ▶. With no id
         // the backend falls back to the runner's own chain, i.e. the active tab.
         const runPreset = resolveRunPresetId();
@@ -8846,12 +8646,9 @@ function sendClearTag() {
     setStatus('Clearing tags…');
 }
 
-blendBtn.addEventListener('click', () => sendBlendAction('blend'));
-tagBtn.addEventListener('click', () => openTagModal());
-// 中断当前 run：只发消息、不等结果，收尾在宿主的 status 轮询（detail_status='cancelled'）。
-runCancelBtn.addEventListener('click', sendCancelRun);
-// Enter in the prompt box must not fall through to the canvas keyboard shortcuts.
-extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
+// 那三颗按钮（Blend / Tag / Cancel）的按下都改从宿主的 Staging dock 发回，落点是下面的
+// UI_COMMANDS 表（staging-blend / staging-tag / staging-cancel）；Enter 该不该换行的守卫也随
+// contenteditable 一起搬走了（宿主的 chip 编辑器自己 preventDefault）。
 
 // ==================== 图层右键菜单 · Generate ====================
 // Generate on a layer (the row's ▶ or its menu entry in the host dock): run the Detailer on THAT
@@ -9145,7 +8942,7 @@ function sendLayerGenerate(l, presetId, withContext) {
         width: size.w,
         height: size.h,
         preset_id: presetId,
-        extra_prompt: extraPromptInput.value.trim(),
+        extra_prompt: extraPromptText.trim(),
         doc: activeDoc ? { uid: activeDoc.uid, name: activeDoc.name } : null,
     }, '*');
     setActionBusy(true, 'detailer');
@@ -10473,12 +10270,11 @@ function activateDocument(entry) {
     setCurrentDocument(entry.doc, entry.doc ? entry.name : '');
     docSwapping = true;
     try {
-        // 换池要在 restoreState 之前落定：applyCudTools 会把 Extra Prompt 的 <image_id:>
-        // 序列重建成 chip，chip 能不能解出图读的就是这份 stagingItems。
+        // 换池要在 restoreState 之前落定：Extra Prompt 里的 <image_id:> 序列随快照送到宿主，那一边
+        // 的 chip 编辑器能不能解出图，读的就是这份 stagingItems（宿主镜像同款）。
         // 场景 tab 没有自己的池（它是宿主文档跳出来的），进出不换池、也不惊动宿主。
         if (!bootSwap && !isSceneDoc(entry)) {
             stagingItems = (entry.staging || []).filter(s => s && s.src);
-            renderStaging();
             syncProcessorUI();          // Processor 的输入下拉跟着图池走，与 'blend-staging' 镜像同款
         }
         restoreState(entry.ctx, { document: true });
@@ -11320,7 +11116,7 @@ function setFalloffMode(prefix, falloff) {
 function captureCudTools() {
     return {
         maskTool, previewMaskOpacity,
-        extraPrompt: extraPromptInput.value,
+        extraPrompt: extraPromptText,
         brush: { mode: brushMode, size: brushSize, strength: brushStrength, center: brushCenter, edge: brushEdge, gamma: brushGamma, color: brushColor, alpha: brushAlpha },
         eraser: { mode: eraserMode, size: eraserSize, strength: eraserStrength, center: eraserCenter, edge: eraserEdge, gamma: eraserGamma },
         bucket: { tolerance: bucketTolerance, continuous: bucketContinuous, allLayers: bucketAllLayers },
@@ -11361,7 +11157,9 @@ function applyCudTools(t) {
     // Legacy documents carried a second, canvas-only tint. There is one tint now, so it is still
     // read (never written back) to keep old .cud files looking the way they were saved.
     else if (Number.isFinite(t.maskOpacity)) previewMaskOpacity = clamp(t.maskOpacity, 0, 1);
-    extraPromptInput.value = typeof t.extraPrompt === 'string' ? t.extraPrompt : '';
+    extraPromptText = typeof t.extraPrompt === 'string' ? t.extraPrompt : '';
+    markDocumentDirty();
+    updateStagingPanel();
     syncToolUI();
 }
 
@@ -12472,6 +12270,21 @@ const UI_COMMANDS = {
     },
     'processor-run': () => runProcessor(),
     'processor-reset': () => resetProcessorValues(),
+    // ---- Staging 那一格（画布旧底栏整条搬进宿主后回来的那几下）----
+    // Extra Prompt 的每一次编辑：宿主把整串序列化文本发回来（编辑 / 退格整块删 / 粘贴 / 点条目插 token
+    // 都在那边算好），这一页存下它、标脏，并立刻播一次快照。Blend / Tag 就是原来那两颗按钮按下的那一
+    // 下；Cancel 只把消息转发出去，收尾仍在宿主的 status 轮询（detail_status='cancelled'）。图池条的
+    // 上传 / 删除不过这条边界 —— 那是宿主自己的后端动作。
+    'staging-prompt': v => {
+        const next = String(v == null ? '' : v);
+        if (next === extraPromptText) return;
+        extraPromptText = next;
+        markDocumentDirty();
+        updateStagingPanel();
+    },
+    'staging-blend': () => sendBlendAction('blend'),
+    'staging-tag': () => openTagModal(),
+    'staging-cancel': () => sendCancelRun(),
     // ---- 工作区那一格与两摞之间 ----
     // 行拖进图池 = 把这一层此刻的合成结果交出去存一张（exportLayerToStaging 今天就是行拖出去那颗 data
     // 载荷的落点，它自己会把 PNG 发给宿主并报那一句"staged"）；图池条目拖进某一摞 = 以智能图层加入。
@@ -12523,8 +12336,8 @@ function incomingItems(d) {
 let stagingItems = [];
 
 // 换工程后的整池同步：replace 模式下宿主会先清后按 ids 落回，条目保住自己在 .cud 里的
-// 编号 —— Extra Prompt chip（chipSrcForId）与 fx 绑定贴图（fxMapSource）都按这个号解析，
-// 重新 mint 会让它们集体指错图。
+// 编号 —— Extra Prompt 里的 <image_id:…>（宿主那一边按 id 解出缩略图）与 fx 绑定贴图
+// （fxMapSource）都按这个号解析，重新 mint 会让它们集体指错图。
 function postStagingSync() {
     window.parent.postMessage({
         type: 'blend-staging-upload',
@@ -12535,383 +12348,32 @@ function postStagingSync() {
     }, '*');
 }
 
-// ==================== Extra Prompt：文字与图片 chip 混排 ====================
-// 输入框是 contenteditable：<image_id:xxx> 显示成一张**不可编辑**的缩略图 chip，
-// 读回文本时再序列化成 <image_id:xxx>。外部读写仍一律走 .value —— 下面用
-// defineProperty 把 .value 桥到 DOM 上，run payload / .cud 存取一行都不用改。
-const IMAGE_ID_TOKEN = /<image_id:([^>\s]+)>/g;
-const IMAGE_ID_ONE = /^<image_id:([^>\s]+)>$/;
-const ZWSP = '\u200B';      // chip 后的零宽锚点：让光标能停在图片后面继续打字
-let contextChipSrc = '';    // context 图最近一次缩略图（Context 卡片预览的产物）
-
-function chipSrcForId(id) {
-    if (id === 'context') return contextChipSrc;
-    const s = stagingItems.find(it => it.id === id);
-    return s ? s.src : '';
-}
-
-function makeImageChip(id, src) {
-    const chip = document.createElement('span');
-    chip.className = 'prompt-chip';
-    chip.contentEditable = 'false';     // 原子：退格整块删，光标进不去内部
-    chip.dataset.imageId = id;
-    chip.title = `<image_id:${id}>`;
-    if (src) {
-        const im = document.createElement('img');
-        im.src = src;
-        im.alt = id;
-        im.draggable = false;
-        chip.appendChild(im);
-    } else {
-        // 引用失效（图已不在工作区）→ 退回可读文本，而不是一个空洞的方块。
-        chip.classList.add('chip-broken');
-        chip.textContent = `<image_id:${id}>`;
-    }
-    return chip;
-}
-
-// 文本 → DOM（.value 的 setter）
-function renderExtraPrompt(text) {
-    const host = extraPromptInput;
-    host.textContent = '';
-    IMAGE_ID_TOKEN.lastIndex = 0;
-    let last = 0, m;
-    while ((m = IMAGE_ID_TOKEN.exec(text || ''))) {
-        if (m.index > last) host.appendChild(document.createTextNode(text.slice(last, m.index)));
-        host.appendChild(makeImageChip(m[1], chipSrcForId(m[1])));
-        last = IMAGE_ID_TOKEN.lastIndex;
-    }
-    if (last < (text || '').length) host.appendChild(document.createTextNode(text.slice(last)));
-    syncExtraPromptEmpty();
-}
-
-// DOM → 文本（.value 的 getter）。零宽锚点不算内容。
-function serializeExtraPrompt() {
-    let out = '';
-    for (const node of extraPromptInput.childNodes) {
-        if (node.nodeType === 3) { out += node.nodeValue.replace(/\u200B/g, ''); continue; }
-        if (node.nodeType !== 1) continue;
-        const id = node.dataset && node.dataset.imageId;
-        if (id) { out += `<image_id:${id}>`; continue; }
-        if (node.tagName === 'BR') { out += '\n'; continue; }
-        out += (node.textContent || '').replace(/\u200B/g, '');
-    }
-    return out;
-}
-
-function syncExtraPromptEmpty() {
-    extraPromptInput.classList.toggle('is-empty', serializeExtraPrompt().trim() === '');
-    // The prompt is saved with the document but is not an undoable action, so it marks the tab here.
-    markDocumentDirty();
-}
-
-// 工作区条目变化后刷新已有 chip 的缩略图（失效引用退回文字态）。只换 chip 内部
-// 内容、不重建节点 —— 光标停在正文里时不会被打断。
-function refreshPromptChips() {
-    for (const chip of extraPromptInput.querySelectorAll('.prompt-chip')) {
-        const id = chip.dataset.imageId;
-        if (!id) continue;
-        const src = chipSrcForId(id);
-        const im = chip.querySelector('img');
-        if (src) {
-            chip.classList.remove('chip-broken');
-            if (im) { if (im.src !== src) im.src = src; }
-            else {
-                chip.textContent = '';
-                const n = document.createElement('img');
-                n.src = src; n.alt = id; n.draggable = false;
-                chip.appendChild(n);
-            }
-        } else if (im || !chip.classList.contains('chip-broken')) {
-            chip.classList.add('chip-broken');
-            chip.textContent = `<image_id:${id}>`;
-        }
-    }
-}
-
-// .value 仍是唯一读写口：读 = 序列化，写 = 重新渲染。
-Object.defineProperty(extraPromptInput, 'value', {
-    get: serializeExtraPrompt,
-    set: renderExtraPrompt,
-    configurable: true,
-});
-
-// 记住最近的光标（Range）：点击工作区条目会抢焦点，必须在 blur 前存下来。
-let extraPromptRange = null;
-function trackExtraPromptCaret() {
-    const sel = window.getSelection && window.getSelection();
-    if (!sel || !sel.rangeCount) return;
-    const r = sel.getRangeAt(0);
-    if (extraPromptInput.contains(r.startContainer)) extraPromptRange = r.cloneRange();
-}
-for (const ev of ['keyup', 'click', 'select', 'focus', 'input']) {
-    extraPromptInput.addEventListener(ev, trackExtraPromptCaret);
-}
-extraPromptInput.addEventListener('blur', trackExtraPromptCaret);
-extraPromptInput.addEventListener('input', syncExtraPromptEmpty);
-
-function currentExtraPromptRange() {
-    const sel = window.getSelection && window.getSelection();
-    if (document.activeElement === extraPromptInput && sel && sel.rangeCount
-        && extraPromptInput.contains(sel.anchorNode)) return sel.getRangeAt(0);
-    return extraPromptRange;
-}
-
-function insertNodeAtCaret(node) {
-    const sel = window.getSelection && window.getSelection();
-    let range = currentExtraPromptRange();
-    extraPromptInput.focus();
-    if (!range || !extraPromptInput.contains(range.startContainer)) {
-        range = document.createRange();
-        range.selectNodeContents(extraPromptInput);
-        range.collapse(false);          // 没有记忆光标 = 追加到末尾
-    }
-    range.deleteContents();
-    range.insertNode(node);
-    // chip 后面补一个零宽锚点，否则光标没法停在图后面继续打字。
-    const anchor = document.createTextNode(ZWSP);
-    node.parentNode.insertBefore(anchor, node.nextSibling);
-    const after = document.createRange();
-    after.setStart(anchor, 1);
-    after.collapse(true);
-    if (sel) { sel.removeAllRanges(); sel.addRange(after); }
-    extraPromptRange = after.cloneRange();
-    syncExtraPromptEmpty();
-}
-
-function insertTextAtCaret(text) {
-    const one = IMAGE_ID_ONE.exec(text);
-    insertNodeAtCaret(one ? makeImageChip(one[1], chipSrcForId(one[1])) : document.createTextNode(text));
-}
-
-function insertImageIdToken(id) {
-    insertTextAtCaret(`<image_id:${id}>`);
-}
+// ==================== Extra Prompt：宿主编辑，这一页只留那份字符串 ====================
+// 文字与 <image_id:…> 图片 chip 混排的那个 contenteditable 整条搬进了宿主的 Staging dock
+// （workbench/staging.tsx）：编辑 / 退格整块删 / 粘贴只吃纯文本 / 点图池条目在光标处插 token 全在那边，
+// 每一次改动经 staging-prompt 回到这里落进 extraPromptText（见 UI_COMMANDS 那一格）。这一页只剩两处
+// 会主动改它：.cud 的存取（读写整份工具状态）与宿主补 ref image 时的追加。
 
 // 宿主在 Enable Edit 缺 ref image 时让用户选完图后下发的补充：把这几个 id 一律**追加到
-// Extra Prompt 末尾**（不依赖光标位置），每个长成一张 chip。选完即持久化，下次手点 Run 也在。
+// Extra Prompt 末尾**（不依赖光标位置）。选完即持久化，下次手点 Run 也在。
 function appendImageIdChips(ids) {
+    let added = false;
     for (const id of (ids || [])) {
         if (!id) continue;
-        extraPromptInput.appendChild(makeImageChip(id, chipSrcForId(id)));
-        extraPromptInput.appendChild(document.createTextNode(ZWSP));
+        extraPromptText += `<image_id:${id}>`;
+        added = true;
     }
-    syncExtraPromptEmpty();
+    if (!added) return;
+    markDocumentDirty();
+    updateStagingPanel();
 }
 
-// 退格 / Delete 落在 chip 旁边时整块删掉它 —— 否则只会吃掉零宽锚点，留下一个
-// 看不见却仍在文本里的标记（或光标钻进 chip 内部）。
-function chipBesideCaret(back) {
-    const sel = window.getSelection && window.getSelection();
-    if (!sel || !sel.rangeCount || !sel.isCollapsed) return null;
-    const r = sel.getRangeAt(0);
-    const c = r.startContainer;
-    let node = null;
-    if (c.nodeType === 3) {
-        const before = c.nodeValue.slice(0, r.startOffset).replace(/\u200B/g, '');
-        const after = c.nodeValue.slice(r.startOffset).replace(/\u200B/g, '');
-        if (back && before === '') node = c.previousSibling;
-        else if (!back && after === '') node = c.nextSibling;
-    } else if (c === extraPromptInput) {
-        node = back ? c.childNodes[r.startOffset - 1] : c.childNodes[r.startOffset];
-    }
-    return (node && node.nodeType === 1 && node.dataset && node.dataset.imageId) ? node : null;
-}
+// 这一节其余的部分（chip 缩略图刷新、.value 的读写桥、光标记忆、点条目在光标处插 token、退格整块
+// 删、粘贴只吃纯文本）整条随 contenteditable 一起搬进了宿主（workbench/staging.tsx）。
 
-extraPromptInput.addEventListener('keydown', e => {
-    if (e.key !== 'Backspace' && e.key !== 'Delete') return;
-    const chip = chipBesideCaret(e.key === 'Backspace');
-    if (!chip) return;                  // 普通字符交给浏览器
-    e.preventDefault();
-    const prev = chip.previousSibling, next = chip.nextSibling;
-    chip.remove();
-    // 顺手吃掉紧邻的零宽锚点，否则留下一个看不见的空文本节点。
-    const anchor = e.key === 'Backspace' ? prev : next;
-    if (anchor && anchor.nodeType === 3 && anchor.nodeValue.replace(/\u200B/g, '') === '') anchor.remove();
-    const sel = window.getSelection && window.getSelection();
-    if (sel) {
-        const r = document.createRange();
-        // 光标落在删除点（prev 与 next 之间）。相邻 chip 时中间的零宽锚点会被
-        // 一并吃掉，prev 可能已不在 DOM —— 此时必须挂在 next 上，否则会退到
-        // selectNodeContents 的 collapse(start)，光标跳到整个文本最开头。
-        if (next && next.parentNode) r.setStartBefore(next);
-        else if (prev && prev.parentNode) r.setStartAfter(prev);
-        else { r.selectNodeContents(extraPromptInput); r.collapse(true); }
-        r.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(r);
-        extraPromptRange = r.cloneRange();
-    }
-    syncExtraPromptEmpty();
-});
-
-// 粘贴只吃纯文本：否则一段 HTML 会把别人的 <img> 与样式带进来，chip 语义就乱了。
-extraPromptInput.addEventListener('paste', e => {
-    e.preventDefault();
-    const cb = e.clipboardData || window.clipboardData;
-    const text = cb ? cb.getData('text') : '';
-    if (text) insertTextAtCaret(text);
-});
-
-// 固定卡片：Context Image 与 Guidance。两张都常驻条带最左侧，与图池里有没有条目无关：
-// 它们代表的不是"一张被丢进来的图"，而是两条恒定存在的引用（<image_id:context> /
-// <image_id:staging_guidance>），所以都没有 ✕、也不绑某个可删除的普通条目。
-// Enable Edit 下 context 图永远作为 image 1 存在（即使不插进文本 —— 编号 <image 2>+
-// 不受影响），点击卡片插入的标记由后端解析时才解码成 <image 1>。
-// 卡片同时是各自那幅画的**实时预览**，共用一套规矩：棋盘格底衬 + blendCanvas，
-// Guidance 那张再多叠一层 guidanceCanvas（JPEG 无 alpha，必须有 opaque 底衬）。
-let contextCardImg = null;
-let guidanceCardImg = null;
-const PINNED_CARD_PREVIEW_MS = 150;        // throttle — render() 在笔画期间每帧都跑
-let pinnedCardTimer = null;
-
-function schedulePinnedCardPreview() {
-    if (pinnedCardTimer) return;
-    pinnedCardTimer = setTimeout(() => { pinnedCardTimer = null; updatePinnedCardPreviews(); }, PINNED_CARD_PREVIEW_MS);
-}
-
-// 一次节流把两张卡都画了：它们读的是同一幅画布的两种读法，分两次只会白编码一遍。
-function updatePinnedCardPreviews() {
-    const ctxSrc = paintPinnedCard(contextCardImg, false);
-    paintPinnedCard(guidanceCardImg, true);
-    // 同一张缩略图也是 <image_id:context> chip 的预览源：画布一变，已经插进
-    // Extra Prompt 的 context chip 也跟着变。
-    if (ctxSrc) {
-        contextChipSrc = ctxSrc;
-        refreshPromptChips();
-    }
-}
-
-// withGuidance = 这张卡要不要把 guidance 叠层算进去。返回 dataURL，画不出就 null。
-function paintPinnedCard(img, withGuidance) {
-    if (!img) return null;
-    if (!canvasW || !canvasH) {
-        // 空画布：退回纯文字态。
-        if (img.getAttribute('src')) img.removeAttribute('src');
-        img.style.display = 'none';
-        return null;
-    }
-    const s = Math.min(1, 108 / Math.max(canvasW, canvasH));   // 2x of the 54px card
-    const w = Math.max(1, Math.round(canvasW * s)), h = Math.max(1, Math.round(canvasH * s));
-    if (!paintPinnedCard.buf) paintPinnedCard.buf = document.createElement('canvas');
-    const buf = paintPinnedCard.buf;
-    if (buf.width !== w || buf.height !== h) { buf.width = w; buf.height = h; }
-    const bctx = buf.getContext('2d');
-    resetCtx(bctx);
-    bctx.clearRect(0, 0, w, h);
-    paintCheckerboard(bctx, w, h);
-    bctx.drawImage(blendCanvas, 0, 0, w, h);
-    if (withGuidance) bctx.drawImage(guidanceCanvas, 0, 0, w, h);
-    try {
-        img.src = buf.toDataURL('image/jpeg', 0.8);
-        img.style.display = '';
-        return img.src;
-    } catch (e) { /* taint 等异常：保持文字态 */ return null; }
-}
-
-function makePinnedCard(cls, labelText, tokenId, title, previewProvider) {
-    const item = document.createElement('div');
-    item.className = 'staging-item ' + cls;
-    item.title = title;
-    const img = document.createElement('img');
-    img.className = 'context-preview';
-    img.alt = `${labelText} preview`;
-    img.draggable = false;      // 缩略图不是拖拽源：拖它经过图层列表不该触发排序线
-    img.style.display = 'none';
-    item.appendChild(img);
-    const label = document.createElement('span');
-    label.className = 'context-label';
-    label.textContent = labelText;
-    item.appendChild(label);
-    item.addEventListener('click', () => insertImageIdToken(tokenId));
-    // Alt 悬浮放大预览：Context = 当前 context image（blendCanvas），Guidance = 叠上
-    // guidance 栈的全分辨率合成 —— 都比卡片里那张 54px 缩略图大得多。
-    if (previewProvider) hpWire(item, previewProvider);
-    return item;
-}
-
-function renderStaging() {
-    const strip = document.getElementById('stagingStrip');
-    if (!strip) return;
-    strip.textContent = '';
-    // 两张钉死卡片恒在最左侧（空池时也在），Context 在前、Guidance 紧随。
-    const ctxCard = makePinnedCard('staging-context', 'Context', 'context',
-        'Context image — always <image 1> when Enable Edit is on (it is a reference even without being inserted here). Click to insert <image_id:context> at the cursor.',
-        () => (canvasW && canvasH) ? blendCanvas : null);
-    contextCardImg = ctxCard.querySelector('.context-preview');
-    strip.appendChild(ctxCard);
-    const gCard = makePinnedCard('staging-guidance', 'Guidance', GUIDANCE_CARD_ID,
-        'Guidance — the Layers composite with the whole Guidances stack painted over it. Always in the workspace as <image_id:staging_guidance>; with an empty Guidances stack it is the composite alone.',
-        hpGuidanceSource);
-    guidanceCardImg = gCard.querySelector('.context-preview');
-    strip.appendChild(gCard);
-    schedulePinnedCardPreview();
-    // 图池变了：已经插进 Extra Prompt 的 chip 要跟着换图（或退回失效文字态）。
-    refreshPromptChips();
-    if (!stagingItems.length) {
-        const hint = document.createElement('span');
-        hint.className = 'staging-empty';
-        hint.textContent = 'Staging — drop image files here, then click an item to insert <image_id:...> into the extra prompt';
-        strip.appendChild(hint);
-        return;
-    }
-    for (const s of stagingItems) {
-        // Guidance 已经由上面那张钉死卡片代表了，不再重复出一张普通条目。
-        if (s.id === GUIDANCE_CARD_ID) continue;
-        const item = document.createElement('div');
-        item.className = 'staging-item';
-        item.title = `${s.name} — click to insert <image_id:${s.id}> into the extra prompt at the cursor`;
-        const img = document.createElement('img');
-        img.src = s.src;
-        img.alt = s.name;
-        // 工作区条目点击 = 插入 <image_id:…> token；img 自身仍然不可拖（浏览器默认的图片
-        // 拖拽会带着 Files 语义到处触发落图），整张卡片才是真正的拖拽源 —— 拖到画布 /
-        // 图层列表 = 以智能图层加入。
-        img.draggable = false;
-        item.draggable = true;
-        item.addEventListener('dragstart', ev => {
-            ev.dataTransfer.effectAllowed = 'copy';
-            try { ev.dataTransfer.setData(STAGING_ITEM_TYPE, String(s.id)); } catch (e) { /* 老宿主不认就当没有 */ }
-        });
-        // Ctrl 悬浮：放大预览条目原图。
-        hpWire(item, () => hpStagingSource(s));
-        item.appendChild(img);
-        const rm = document.createElement('button');
-        rm.className = 'staging-remove';
-        rm.textContent = '✕';
-        rm.title = 'Remove from staging';
-        rm.addEventListener('click', ev => {
-            ev.stopPropagation();
-            window.parent.postMessage({ type: 'blend-staging-remove', id: s.id }, '*');
-        });
-        item.appendChild(rm);
-        item.addEventListener('click', () => {
-            // 点击 = 把该图引用嵌入 Extra Prompt（光标处），不再加图层
-            insertImageIdToken(s.id);
-        });
-        strip.appendChild(item);
-    }
-}
-
-function stageFiles(files) {
-    const imgs = Array.from(files || []).filter(f => f.type && f.type.startsWith('image/'));
-    if (!imgs.length) return;
-    void (async () => {
-        const images = [];
-        for (const f of imgs) {
-            const dataUrl = await new Promise(res => {
-                const r = new FileReader();
-                r.onload = () => res(r.result);
-                r.onerror = () => res(null);
-                r.readAsDataURL(f);
-            });
-            if (dataUrl) images.push(dataUrl);
-        }
-        if (images.length) {
-            window.parent.postMessage({ type: 'blend-staging-upload', images, name: 'Loaded' }, '*');
-        }
-    })();
-}
+// 固定卡片（Context / Guidance）、图池条的重绘、拖文件进池 —— 全都随那条底栏搬进了宿主的 Staging
+// dock（workbench/staging.tsx）。两张钉卡的实时预览那边直接读宿主自己的画布合成（blendPreview）与
+// 保留 id staging_guidance 的那张条目；跨 iframe 的那条长路只剩下面这一段。
 
 // ---- 图层 ⇆ 工作区的双向拖拽 ----
 
@@ -12940,62 +12402,6 @@ function addStagingAsLayer(id, stack) {
     addLayer({ src: s.src, name: s.name || 'Staged', smart: true }, stack);
     setStatus(`「${s.name || 'Staged'}」added from the workspace as a smart layer`);
 }
-
-const stagingStripEl = document.getElementById('stagingStrip');
-// 从画布一路拖到工作区条上时，画布的全屏 drop 提示必须让位给工作区自己的高亮 ——
-// 两者同时显示 = 用户不知道松手会发生什么。
-function hideGlobalDropOverlay() {
-    try {
-        const el = (typeof dropOverlay !== 'undefined' && dropOverlay)
-            || document.getElementById('dropOverlay');
-        if (el) el.style.display = 'none';
-    } catch (e) { /* 预览/测试宿主里没有这块遮罩 */ }
-}
-if (stagingStripEl) {
-    stagingStripEl.addEventListener('dragover', e => {
-        const hasFiles = dropHasFiles(e.dataTransfer);
-        const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
-        // 从条目自己起拖路过自己家：既不是文件也不是图层，别亮任何东西，
-        // 并把路过画布时亮起的全屏提示收掉。
-        if (!hasFiles && !hasLayer) {
-            if (dragHasType(e, STAGING_ITEM_TYPE)) {
-                e.stopPropagation();
-                hideGlobalDropOverlay();
-            }
-            return;
-        }
-        e.preventDefault();
-        e.stopPropagation();       // ★ 独占：window 的全局拖入不得再弹全屏 overlay
-        e.dataTransfer.dropEffect = hasFiles ? 'copy' : 'move';
-        hideGlobalDropOverlay();
-        stagingStripEl.classList.add('drag-over');
-    });
-    stagingStripEl.addEventListener('dragleave', e => {
-        e.stopPropagation();       // ★ 同理：别让 window 的 leave 逻辑碰这段区域
-        if (e.currentTarget.contains(e.relatedTarget)) return;
-        stagingStripEl.classList.remove('drag-over');
-    });
-    stagingStripEl.addEventListener('drop', e => {
-        const hasFiles = dropHasFiles(e.dataTransfer);
-        const hasLayer = dragHasType(e, STAGING_LAYER_TYPE);
-        // 图层排序的拖拽也可能在这上面松手（types 里没有 Files）—— 那不是我们的事，
-        // 不要拦也不要处理，让事件照常走完。staging 条目拖过自己家同理。
-        if (!hasFiles && !hasLayer) {
-            if (dragHasType(e, STAGING_ITEM_TYPE)) {
-                e.stopPropagation();
-                hideGlobalDropOverlay();
-            }
-            return;
-        }
-        e.preventDefault();
-        e.stopPropagation();       // 不让文件再落进画布变图层 —— 它们进图池
-        stagingStripEl.classList.remove('drag-over');
-        if (hasFiles) { stageFiles(e.dataTransfer.files); return; }
-        // 图层拖上来 = 导出合成结果进图池
-        try { exportLayerToStaging(Number(e.dataTransfer.getData(STAGING_LAYER_TYPE))); } catch (err) { /* ignore */ }
-    });
-}
-renderStaging();
 
 // ==================== Processor 工具 ====================
 // Interface tab 里开了 Processor 模式的 interface 在这里当离线处理器跑。这里负责三件事：
@@ -13354,16 +12760,15 @@ window.addEventListener('message', event => {
         syncDetectorSection();
         // 激活 tab 的 Enable Mask 总闸（宿主从第一个 detailer block 读出）。
         maskRequired = d.mask_required !== false;
-        // contenteditable 没有 placeholder 属性 —— 占位文本走 CSS 的 ::before。
-        if (d.tagDisabledHint) extraPromptInput.dataset.placeholder = d.tagDisabledHint;
+        // 空态占位句随主机的 tagDisabledHint 走（原来是 contenteditable 的 data-placeholder）。
+        if (d.tagDisabledHint) extraPromptPlaceholder = d.tagDisabledHint;
         // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
-        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); syncProcessorUI(); }
-        syncActionButtons();
+        if (Array.isArray(d.staging)) { stagingItems = d.staging; syncProcessorUI(); }
+        updateStagingPanel();
         return;
     }
     if (d.type === 'blend-staging') {
         stagingItems = Array.isArray(d.items) ? d.items : [];
-        renderStaging();
         syncProcessorUI();          // staging 输入的下拉跟着图池走
         return;
     }
@@ -13459,7 +12864,7 @@ window.addEventListener('message', event => {
     }
     if (d.type === 'blend-ref-request') {
         // Enable Edit 下 prompt 引用了 <image N> 但没有对应 ref image：本次 run 没启动，
-        // 宿主已弹出选图 modal。这里只收尾——清掉 toolbar 的忙碌态，提示用户去配置。
+        // 宿主已弹出选图 modal。这里只收尾——清掉宿主 Staging 那格的忙碌态，提示用户去配置。
         setActionBusy(false);
         setStatus('This prompt references a ref image — pick one from the workspace', '');
         return;
@@ -13485,7 +12890,8 @@ window.addEventListener('message', event => {
         if (st === 'running') {
             setActionBusy(true, 'detailer');
             const total = Number(d.total) || 0, cur = Number(d.current) || 0;
-            toolbarProgressFill.style.width = total ? `${Math.round((cur / total) * 100)}%` : '30%';
+            actionProgress = total ? Math.max(0, Math.min(1, cur / total)) : -1;
+            updateStagingPanel();
             const what = processorBusy ? 'processor' : 'detailer';
             setStatus(total ? `Running ${what} — step ${cur} / ${total}` : `Running ${what}…`);
         } else if (st === 'cancelled') {
@@ -13534,7 +12940,7 @@ setMode('transform');
 refreshLayerPanels();
 updateCanvasReadout();
 render();
-syncActionButtons();
+updateStagingPanel();
 resetHistory();          // the empty canvas is step 0; everything from here on is undoable
 // The page opens on exactly one project: what the globals already hold becomes the first tab, so the
 // workbench is never in the state of "drawing with nowhere to put it".

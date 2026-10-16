@@ -28,18 +28,20 @@ const GUIDANCE_ENTRIES: AddEntry[] = [
 
 const GuidancesBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 4 }}>
-      <StackHead stack="guidance" entries={GUIDANCE_ENTRIES} send={send} />
-      <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} />
-    </div>
-  );
+  return <LayerListView stack="guidance" rows={ui.stacks.guidances} send={send} />;
 };
+
+// 与 Layers 同一排：Clear All / Add 住进 dock 的动作条（正文下面、滚动条之外）。
+const GuidancesFoot: React.FC<WorkbenchUnitProps> = ({ send }) => (
+  <StackHead stack="guidance" entries={GUIDANCE_ENTRIES} send={send} />
+);
 
 export const guidancesUnit: WorkbenchUnit = {
   id: 'guidances',
   title: 'Guidances',
   hint: 'Guidance rows: composited over the layers image, and what the workspace Guidance card publishes. '
-    + 'The same strip, chains and menus as Layers — drag a row between the two stacks to move it.',
+    + 'The same strip, chains and menus as Layers — drag a row between the two stacks to move it. '
+    + 'Clear All and Add stay pinned under the list.',
   Body: GuidancesBody,
+  Foot: GuidancesFoot,
 };

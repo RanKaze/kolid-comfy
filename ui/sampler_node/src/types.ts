@@ -671,6 +671,23 @@ export type BlendProcessorUi = {
   inputs: BlendProcInRow[]; params: BlendProcParamRow[]; outputs: BlendProcOutRow[];
 };
 
+/** Staging 那一格（画布底部那条工作区整条搬进宿主后合成的一格）：Extra Prompt 的序列化文本 + 那一格
+ *  要亮的按钮 / 那根进度条读的几个布尔。
+ *  条目表**不在**这一格里 —— 工作区权威在宿主（App.staging 从 /api/staging 拉），条目、上传、删除都不
+ *  过页面。两张钉卡的预览也不在这里：Context 用宿主已收到的 `blendPreview`，Guidance 用图池里
+ *  `staging_guidance` 那一张（页面本来就把它传进图池）。
+ *  `prompt` 是唯一与页面共享的真值源：页面存它（.cud / run payload 都读它），宿主摆的是镜像；编辑的
+ *  那一下走 `staging-prompt` 回来。`busy` = 有一趟 run 在飞（Blend/Tag 都灰）、`cancelLive` = 这一趟是
+ *  detailer（Cancel 才浮出来）、`progress` 是那根条此刻的宽度（-1 = 未知，画成一段不定进度）。 */
+export type BlendStaging = {
+  prompt: string;
+  placeholder: string;
+  busy: boolean;
+  cancelLive: boolean;
+  progress: number;
+  hasTagger: boolean;
+};
+
 export type BlendUi = {
   /** 工作台当前工具，页面 `mode` 那颗变量的镜像（'transform' | 'rect' | 'lasso' | 'pan' | 'zoom'
    *  | 'rotate' | 'canvasModify' | 'none' …）。一颗变量喂六个高亮，所以只镜像它本身。 */
@@ -728,6 +745,8 @@ export type BlendUi = {
   detector: BlendDetectorUi;
   /** Processor：interface 枚举与三段端口行。 */
   processor: BlendProcessorUi;
+  /** Staging：画布底部那条工作区（Extra Prompt + Blend/Tag + 图池条 + Cancel / 进度）整条搬进宿主后合成的一格。 */
+  staging: BlendStaging;
   /** 缩略图本身（键 → data URL）。它是**增量**：一条快照只装这一帧新要给的几张，发完页面就清；
    *  宿主按键合并成一份 store（不住 React 树里，见 workbench/faces）。判据是逐张失效 + 只编可见区 +
    *  每帧封顶 —— 40 行 × 6 枚最坏一档两兆多一帧，那是把 postMessage 当显存用。 */
@@ -768,10 +787,17 @@ export const EMPTY_BLEND_UI: BlendUi = {
   scene3d: { on: false, canOpen: false, note: '—' },
   detector: { available: false, prompt: '', threshold: 0.5, invert: false },
   processor: { names: [], choice: -1, inputs: [], params: [], outputs: [] },
+  // Staging 空态：Extra Prompt 空着（占位句照页面那条 data-placeholder），没有 run 在飞、进度条不显，
+  // Tagger 默认在（blend-config 那一次播报会把真值补上）。
+  staging: {
+    prompt: '',
+    placeholder: 'Extra prompt — appended after the prompt stage (Run only). Click a staging item below to insert an image at the cursor.',
+    busy: false, cancelLive: false, progress: -1, hasTagger: true,
+  },
   faces: {},
 };
 
-/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应（门禁逐键对表，115 条）。旋钮类带
+/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应（门禁逐键对表，119 条）。旋钮类带
  *  value，开关类不带（点了就是点一下，没有取值）。
  *  行上那一批（一行、条带上的一枚、链里的一步、历史的一步）载荷一律是**坐标**：哪一层、哪一枚、第几步、
  *  落在谁的哪一侧 —— 本体永远留在页面那一侧。链里那一步的**参数面**（新添的 10 条：展开/收起、两笔落值、
@@ -808,6 +834,7 @@ export type BlendUiAction =
   | 'detector-prompt' | 'detector-threshold' | 'detector-invert' | 'detector-run'
   | 'processor-interface' | 'processor-pick' | 'processor-staging' | 'processor-param'
   | 'processor-run' | 'processor-reset'
+  | 'staging-prompt' | 'staging-blend' | 'staging-tag' | 'staging-cancel'
   | 'stage-layer' | 'layer-from-staging'
   | 'visible-faces';
 
@@ -982,6 +1009,13 @@ export type BlendUiPayloads = {
   'processor-param': { port: number; value: number | string | boolean };
   'processor-run': undefined;
   'processor-reset': undefined;
+  /** Staging 那一格：Extra Prompt 每次编辑（宿主序列化后的整串）发一次，页面存它并标脏；Blend / Tag /
+   *  Cancel 三颗就是画布底栏那三颗按钮原来那一下（Cancel 只发消息，收尾在宿主的 status 轮询）。图池条
+   *  的上传 / 删除不走这条边界 —— 那是宿主自己的后端动作（App 的 stageUpload / stageRemove）。 */
+  'staging-prompt': string;
+  'staging-blend': undefined;
+  'staging-tag': undefined;
+  'staging-cancel': undefined;
   'stage-layer': { id: number };
   'layer-from-staging': { id: string; stack?: BlendStack };
 };

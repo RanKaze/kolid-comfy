@@ -318,9 +318,21 @@ export const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
 // A unit with nothing to size itself by (a workbench, a popped-out window) always takes a share of its
 // split rather than `0 0 auto`, which would collapse it to a strip. `open` = false is the box folded:
 // a folded one is a bar and gives its share back, or a folded layers list would keep its half of the
-// column as an empty box (the fold itself hides only the body).
+// column as an empty box (the fold itself hides only the body). A size the user dragged is no
+// exception — a folded 400px panel that kept a 400px box would just be an empty half-screen under its
+// own title bar. Along `h` a box is measured by its WIDTH, and folding hides the body, not the column,
+// so a fold leaves that width alone.
 export const flexOf = (axis: 'v' | 'h', sz?: number, grow?: boolean, open = true): string =>
-  sz ? `0 0 ${sz}px` : axis === 'h' ? '1 1 0' : grow ? (open ? '1 1 0' : '0 0 auto') : '0 0 auto';
+  axis === 'h' ? (sz ? `0 0 ${sz}px` : '1 1 0')
+    : !open ? '0 0 auto'
+      : sz ? `0 0 ${sz}px`
+        : grow ? '1 1 0' : '0 0 auto';
+// The height a tab GROUP falls back to when the user has never dragged one. A slot holding more than
+// one unit has no single content height to size itself by: whichever tab is showing would set it, and
+// the box would jump every time the user switched. So a group is sized like a box the user dragged,
+// and switching tabs never moves it (the body scrolls instead). Grow units are exempt — they already
+// take a share of the column.
+export const DOCK_GROUP_H = 220;
 // The floor under an open grow box: `1 1 0` shares only what is LEFT, and a column whose other panels
 // alone already overflow has nothing left — the fallback layout opens every tool panel, and without
 // this the two lists under them resolve to 0 (a 0.5px-bordered hairline). Sized boxes are the user's

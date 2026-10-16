@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import EditPhase from './components/EditPhase';
 import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
-import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc } from './types';
+import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
 
 const POLL_INTERVAL = 500;
@@ -264,6 +264,25 @@ const poseUiOf = (v: unknown): BlendPoseUi => {
   };
 };
 
+/** Staging 那一格的快照：那条底栏里"属于页面"的三样 —— Extra Prompt 的序列化字符串（页面只留它这
+ *  一份，.cud 与 run payload 都读它）、空态占位句（blend-config 的 tagDisabledHint 会覆写它）、以及
+ *  run 的状态（busy / Cancel 该不该浮 / 进度，progress < 0 = 未知）。图池条目与两张钉卡预览不进这一格
+ *  —— 它们本就是宿主的（App.staging 与这里的 blendPreview）。缺字段一律回"没说过"：占位句回页面那句
+ *  默认、hasTagger 只有在页面明说 false 时才是假。 */
+const stagingUiOf = (v: unknown): BlendStaging => {
+  const base = EMPTY_BLEND_UI.staging;
+  if (!v || typeof v !== 'object') return base;
+  const o = v as Record<string, unknown>;
+  return {
+    prompt: typeof o.prompt === 'string' ? o.prompt : '',
+    placeholder: typeof o.placeholder === 'string' && o.placeholder ? o.placeholder : base.placeholder,
+    busy: o.busy === true,
+    cancelLive: o.cancelLive === true,
+    progress: typeof o.progress === 'number' && Number.isFinite(o.progress) ? o.progress : -1,
+    hasTagger: o.hasTagger !== false,
+  };
+};
+
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('draw');
   const tabRef = useRef<Tab>('draw');
@@ -515,6 +534,26 @@ const App: React.FC = () => {
     const run = () => op().catch(() => {});
     stagingChainRef.current = stagingChainRef.current.then(run, run);
   }, []);
+
+  // 图池的两个后端写口，直接摆在宿主里：工作台那条 Staging 底栏拖文件进来 / ✕ 移除时调用，不再绕
+  // iframe 消息。落到同一条串行链、同一个 /api/staging(_remove)，与下面那条消息分支的语义一字不差。
+  const stageUpload = useCallback((images: string[], names: string[]) => {
+    if (!images.length) return;
+    queueStaging(() => fetch('/api/staging', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ images, names, name: 'Loaded' }),
+    }).then(() => refreshStaging()));
+  }, [queueStaging, refreshStaging]);
+
+  const stageRemove = useCallback((id: string) => {
+    if (!id) return;
+    queueStaging(() => fetch('/api/staging_remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then(() => refreshStaging()));
+  }, [queueStaging, refreshStaging]);
 
   // Push staging list changes into the Blend workbench (its strip renders from this mirror).
   useEffect(() => {
@@ -1225,6 +1264,7 @@ const App: React.FC = () => {
           },
           // Processor 的三段行是描述符：逐行逐枚读回来，形状不对的丢掉（见 procUiOf）。
           processor: procUiOf(ui.processor),
+          staging: stagingUiOf(ui.staging),
           faces: mergeFaces(getBlendUi().faces, faceDelta(ui.faces)),
         });
       }
@@ -1683,6 +1723,8 @@ const App: React.FC = () => {
         docStills={docStills}
         onDocCommand={sendDocCommand}
         onBlendUiCommand={sendBlendUiCommand}
+        stageUpload={stageUpload}
+        stageRemove={stageRemove}
         interfaces={interfaces}
         interfaceMeta={interfaceMeta}
         onChangeInterfaceMeta={handleChangeInterfaceMeta}

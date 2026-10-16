@@ -5,7 +5,7 @@ import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
 import { type DockRules, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, syncDocUnits } from '../dock/model';
 import { DockPanel } from '../dock/DockView';
-import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies } from '../workbench/registry';
+import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -375,6 +375,9 @@ interface EditPhaseProps {
   onDocCommand: (action: BlendDocCommand, uid?: number) => void;
   /** 工作台面板搬进宿主之后，控件按下的那一下走这条消息回到页面 —— 页面里那张 UI_COMMANDS 表是它唯一的落点。 */
   onBlendUiCommand: BlendUiSend;
+  /** 图池的两个后端写口 —— 工作台那条 Staging 底栏拖文件进来 / ✕ 移除时直接调用，不再绕 iframe 消息。 */
+  stageUpload: (images: string[], names: string[]) => void;
+  stageRemove: (id: string) => void;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -392,6 +395,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   pipelinePackages, pipelineSettings, loadedPipelineName, onSwitchPipeline, onPipelineSettingsChange, onSetPresetPipeline,
   archSettings, onArchSettingsChange, onAddArchRule, onDuplicateArchRule, onRemoveArchRule, onReorderArchRules,
   actionLog, blendDocs, docStills, onDocCommand, onBlendUiCommand,
+  stageUpload, stageRemove,
 }) => {
   const [hoveredFinish, setHoveredFinish] = useState<StagingItem | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -420,16 +424,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The Pipeline Presets "Add +" dropdown — same control, same behaviour as the Blocks one.
   const [presetAddMenu, setPresetAddMenu] = useState<{ x: number; y: number } | null>(null);
-  // 四块面板的折叠状态（默认全展开，改动落 localStorage）。
+  // 四块面板的折叠状态（默认全展开，改动落 localStorage）。折叠是**那一格**（dock 的一个盒子 =
+  // 一条标题条）的事，不是某一个 tab 的事：所以这里收的是一串 id —— 同一个盒子里的单元一起折、一起开，
+  // 切 tab 不会换一个展开状态。
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(loadSections);
-  const toggleSection = (k: SectionKey) => setOpenSections(prev => {
-    const next = { ...prev, [k]: !prev[k] };
+  const setFold = (ids: UnitId[], open: boolean) => setOpenSections(prev => {
+    const next = { ...prev };
+    for (const id of ids) next[id] = open;
     try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
     return next;
   });
   // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
   const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
+  // 工作台那几格能碰到的宿主事实：图池镜像、画布合成预览、图池的两个后端写口。正文与动作条共用同一份。
+  const wbHost = useMemo(() => ({ staging, blendPreview, stageUpload, stageRemove }),
+    [staging, blendPreview, stageUpload, stageRemove]);
   const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
   const applyDock = useCallback((next: Dock, persist = true) => {
     setDockState(next);
@@ -820,7 +830,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
            ③ 停用那一步的暗淡：页面把魔棒直接 innerHTML 进 chip，所以那条规矩写的是「直接子 svg」；React
               里同一颗元素不能既塞 innerHTML 又放兄弟节点（角标必须活着），所以画法包了一层 .attr-visual，
               那一条因此多认 .attr-visual 下面的 svg。 */
-        /* 头部那一组按钮的容器（页面 .mini-group 那一条原样搬来：dock 的正文用它摆 Clear All / Add 那一排）。 */
+        /* 那一组动作的容器（页面 .mini-group 那一条原样搬来：Layers / Guidances / History 那一排
+           Clear All / Add / Undo / Redo 如今住 dock 画的动作条里，见 DockView 的 dockFoot）。 */
         .mini-group { position: relative; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
         .layer-list { display: flex; flex-direction: column; gap: 4px; }
         .layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
@@ -962,7 +973,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .mini-btn.ico-btn svg { display: block; width: 14px; height: 14px; }
         .mini-btn.ico-btn.fx-bypassed { background: rgba(255,159,10,0.22); color: #ff9f0a; }
         /* ---- History 这一格（拍板 24.a：右栏、紧贴 Layers 下面）----
-           头部三颗复用兄弟格的 .mini-group / .mini-btn（禁用那颗的暗淡是同一条 .mini-btn:disabled），
+           动作条那三颗复用兄弟格的 .mini-group / .mini-btn（禁用那颗的暗淡是同一条 .mini-btn:disabled），
            行自己这一族三条的写法照 .layer-row 那一族：高亮 = 蓝描边 + 蓝底、hover 提亮、名字一行截断。
            颗子摆法有两处与图层行不同，都是这一格的画法等出来的：
            ① 42×28 而不是 36×24 —— 步子的预览是整幅画面按长边 ≤108 编的一张，不像 orig/canvas 那两张
@@ -1033,7 +1044,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               user restacks, not a panel bolted beside a frame. */}
           <DockPanel ctx={{
                 rules: dockRules,
-                isOpen: (id: UnitId) => openSections[id] !== false, fold: toggleSection,
+                isOpen: (id: UnitId) => openSections[id] !== false, setFold,
                 dock, setDock: applyDock,
                 drag: dockDrag, setDrag: setDockDrag,
                 over: dockOver, setOver: setDockOver,
@@ -1103,8 +1114,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               ),
               ...docBodies,
-              // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。
-              ...workbenchBodies(onBlendUiCommand),
+              // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。Staging 那一格还要
+              // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
+              ...workbenchBodies(onBlendUiCommand, wbHost),
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
@@ -1763,6 +1775,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 </div>
               </>),
             },
+            // 几格自带的动作条（Clear All / Add / Undo / Redo）：dock 把它们画在各自正文下面、滚动条之外。
+            foots: workbenchFoots(onBlendUiCommand, wbHost),
           }} />
 
           {/* ── the live workbench ──

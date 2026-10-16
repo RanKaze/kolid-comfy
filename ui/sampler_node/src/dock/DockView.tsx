@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import {
   type Dock, type DockFloat, type DockNode, type DockRules, type DockSlot, type UnitId, type Zone,
-  FLOAT_MIN_W, FLOAT_MIN_H, DOCK_GROW_MIN_H,
+  FLOAT_MIN_W, FLOAT_MIN_H, DOCK_GROW_MIN_H, DOCK_GROUP_H,
   dockBackDock, defaultDock, docUidOf, dropInDock, flexOf, hasGrowth, popOutDock,
   resizeDock, rewriteHolder, setFloatDock, zoneOf,
 } from './model';
@@ -12,12 +12,16 @@ import {
 const dockStyles: Record<string, React.CSSProperties> = {
   dockBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.07)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' },
   dockFloatBox: { background: '#1c1c1e', borderRadius: 10, border: '0.5px solid rgba(255,255,255,0.14)', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', boxShadow: '0 12px 34px rgba(0,0,0,0.62)' },
-  dockBar: { display: 'flex', alignItems: 'center', gap: 6, height: 26, padding: '0 4px', flexShrink: 0, background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)', userSelect: 'none' },
+  // 标题条是一条会长的行：一格里塞进来一堆单元时，那一排 tab 换行，而不是挤成一行被剪掉。
+  dockBar: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 26, padding: '0 4px', flexShrink: 0, background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)', userSelect: 'none' },
   dockGrip: { flexShrink: 0, display: 'flex', alignItems: 'center', cursor: 'grab', color: '#8e8e93' },
   dockName: { flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  dockTabs: { flex: 1, minWidth: 0, display: 'flex', gap: 2, overflow: 'hidden' },
+  dockTabs: { flex: 1, minWidth: 0, display: 'flex', flexWrap: 'wrap', alignContent: 'center', gap: 2 },
   dockAct: { flexShrink: 0, width: 18, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 5, color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0, transition: 'transform 0.12s ease' },
   dockBody: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 8 },
+  // 一格的**动作条**（Clear All / Add / Undo / Redo 那一排）：它属于这个盒子，不属于那个 scroller ——
+  // 所以画在正文下面、dockBody 的 overflow 之外，列表再长也顶不走它。
+  dockFoot: { flexShrink: 0, padding: '6px 10px', background: '#232325', borderTop: '0.5px solid rgba(84,84,88,0.55)' },
   // A full-bleed unit: the content owns the box, so no card inset and no scroller of the dock's.
   dockBodyFull: { flex: '1 1 auto', minHeight: 0, overflow: 'hidden', padding: 0, display: 'flex', flexDirection: 'column' },
   // 一条下沿 = 列里的高度，一个角 = 并排时的宽 / 浮窗的宽高。hover 才现出蓝，靠 .dock-edge 规则。
@@ -42,10 +46,15 @@ const dockStyles: Record<string, React.CSSProperties> = {
 export type DockCtx = {
   rules: DockRules;
   bodies: Record<UnitId, React.ReactNode>;
+  // Anything a unit wants pinned UNDER its body — the row of actions that must not scroll away with a
+  // long list. Keyed by unit, drawn by the frame, so a unit still owns what it puts there.
+  foots?: Partial<Record<UnitId, React.ReactNode>>;
   heads: Partial<Record<UnitId, React.ReactNode>>;
   // Collapsed or not is the user's call, so a unit the page has no stored choice for is open.
   isOpen: (id: UnitId) => boolean;
-  fold: (id: UnitId) => void;
+  // A fold is the SLOT's, not one tab's: a box is one title bar, so every unit sharing it folds together
+  // and switching tabs must not change whether it is open.
+  setFold: (ids: UnitId[], open: boolean) => void;
   dock: Dock;
   // persist=false while a pointer drag is still running — the layout lands in localStorage when the
   // pointer comes up, not once per mousemove.
@@ -114,7 +123,7 @@ const dockTabStyle = (on: boolean): React.CSSProperties => ({
   border: 'none', background: on ? 'rgba(255,255,255,0.10)' : 'transparent',
   color: on ? '#fff' : '#8e8e93', fontSize: 10, fontWeight: 700, padding: '2px 7px',
   borderRadius: 6, cursor: 'pointer', whiteSpace: 'nowrap', overflow: 'hidden',
-  textOverflow: 'ellipsis', maxWidth: 110,
+  textOverflow: 'ellipsis', maxWidth: 148, flexShrink: 0,
 });
 
 const zoneBand = (z: Zone): React.CSSProperties => {
@@ -136,9 +145,18 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
   const ids: UnitId[] = node.t === 'u' ? [node.id] : node.ids;
   const id = ids[node.t === 'u' ? 0 : Math.min(node.sel, ids.length - 1)];
   // A unit the page says is not foldable has no choice to read: it is always open, so its body is never
-  // hidden and its frame button never appears.
-  const open = ctx.rules.foldable(id) ? ctx.isOpen(id) : true;
+  // hidden and its frame button never appears. A box is ONE title bar, so "open" is the slot's question
+  // and not whichever tab is showing: the group is open while any of its foldable units is, and the
+  // fold button folds all of them at once.
+  const folds = ids.filter(u => ctx.rules.foldable(u));
+  const open = folds.length ? folds.some(u => ctx.isOpen(u)) : true;
+  const fold = (v: boolean) => ctx.setFold(folds, v);
   const grow = ids.some(u => ctx.rules.grows(u));
+  // A slot holding more than one unit has no single content height to size itself by — the tab on
+  // screen would set it and the box would jump on every switch. So a group is always a sized box: the
+  // height the user dragged, or the group default. Only the vertical axis, where `flex` is the height,
+  // needs this; a group beside another already shares the row.
+  const sz = node.sz ?? (open && ids.length > 1 && !grow && axis === 'v' && !float ? DOCK_GROUP_H : undefined);
   const minH = !float && open && axis === 'v' && grow && !node.sz ? DOCK_GROW_MIN_H : undefined;
   const isOver = !!ctx.drag && ctx.drag !== id && !float && ctx.over?.id === id;
   // A window is not a place a unit can land in — it is already somewhere. Re-docking happens by
@@ -210,7 +228,7 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
         if ((e.target as HTMLElement).closest('button,[draggable]')) return;
         // One bar, two jobs, split by what the unit is: a foldable unit folds, a document window runs
         // the project it names.
-        if (ctx.rules.foldable(id)) ctx.fold(id); else ctx.activate?.(id);
+        if (folds.length) fold(!open); else ctx.activate?.(id);
       }}>
       <span className="dock-h" draggable
         title={'Drag onto another unit to move this one.\nAn edge splits the other one, the centre tabs them together.'}
@@ -241,9 +259,9 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
         {float ? <DockBackIcon /> : <PopIcon />}
       </button>
       {/* Only a unit that can be given back to the layout has a fold to show. */}
-      {ctx.rules.foldable(id) && (
+      {folds.length > 0 && (
         <button className="dock-h" style={{ ...dockStyles.dockAct, transform: open ? 'none' : 'rotate(-90deg)' }}
-          title={open ? 'Collapse this unit' : 'Expand this unit'} onClick={() => ctx.fold(id)}>
+          title={open ? 'Collapse this unit' : 'Expand this unit'} onClick={() => fold(!open)}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6"
             strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
         </button>
@@ -253,7 +271,7 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
   return (
     <div style={{
       ...(float ? dockStyles.dockFloatBox : dockStyles.dockBox),
-      flex: float ? undefined : flexOf(axis, node.sz, grow, open),
+      flex: float ? undefined : flexOf(axis, sz, grow, open),
       minHeight: minH,
       position: float ? 'fixed' : 'relative',
       left: float ? float.x : undefined, top: float ? float.y : undefined,
@@ -265,7 +283,10 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
       {/* A keep-mounted unit that shares its slot behind a tab strip stays mounted while another tab
           is showing, for the same reason a fold does not unmount it. */}
       {ids.map(u => (u === id || !ctx.rules.keepMounted(u)) ? null : showBody(u, true, false, u))}
-      {open && <DockEdge id={id} ctx={ctx} axis={float ? 'f' : axis} />}
+      {/* The unit's action row, if it has one: under the body and outside its scroller, so it stays
+          put no matter how long the list gets. */}
+      {open && ctx.foots?.[id] && <div style={dockStyles.dockFoot}>{ctx.foots[id]}</div>}
+      {open && <DockEdge id={id} ctx={ctx} axis={float ? 'f' : axis} grouped={ids.length > 1} />}
       {isOver && ctx.over!.zone === 'center' && (
         <div style={dockStyles.dockNoteBox}><span style={dockStyles.dockNote}>tab group</span></div>
       )}
@@ -280,7 +301,7 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
 
 // One handle per unit, and it always moves the axis the unit is measured on: the bottom strip sets a
 // row's height in a column, the corner sets a column's width side by side, a window's corner both.
-const DockEdge: React.FC<{ id: UnitId; ctx: DockCtx; axis: 'v' | 'h' | 'f' }> = ({ id, ctx, axis }) => {
+const DockEdge: React.FC<{ id: UnitId; ctx: DockCtx; axis: 'v' | 'h' | 'f'; grouped?: boolean }> = ({ id, ctx, axis, grouped }) => {
   const start = useRef<{ p: number; w: number; h: number } | null>(null);
   const down = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
@@ -305,7 +326,9 @@ const DockEdge: React.FC<{ id: UnitId; ctx: DockCtx; axis: 'v' | 'h' | 'f' }> = 
   const up = () => { if (!start.current) return; start.current = null; ctx.setDock(ctx.dock); };
   if (axis === 'v') {
     return <div className="dock-edge"
-      title="Drag to fix this height - double-click to let it size to its content again"
+      title={grouped
+        ? 'Drag to fix this height - double-click to go back to the group default'
+        : 'Drag to fix this height - double-click to let it size to its content again'}
       style={dockStyles.dockEdge} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
       onDoubleClick={() => ctx.setDock(resizeDock(ctx.dock, id, undefined))} />;
   }

@@ -2,7 +2,7 @@ import React from 'react';
 import { wbStyles } from './skin';
 import { useBlendUi } from './store';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
-import type { BlendUiAction } from '../types';
+import type { BlendUiAction, BlendUiSend } from '../types';
 
 // Brush 那一格：三颗档位 + 它此刻有可见差别的那几根旋钮。正文从快照读，按下发的是动作键 ——
 // 这一格不认识图层，也不认识画布，它只知道页面那一侧 `brushMode` 那一族变量现在是什么。
@@ -36,7 +36,8 @@ const ROW_TITLES: Record<string, string> = {
   gamma: 'Falloff curve (Exponential): above 1 pushes the fade outward, below 1 pulls it in',
 };
 
-export const PenBody: React.FC<WorkbenchUnitProps & {
+export const PenBody: React.FC<{
+  send: BlendUiSend;
   which: 'brush' | 'eraser';
   sentence: (target: string, selection: boolean) => string;
 }> = ({ send, which, sentence }) => {

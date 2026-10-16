@@ -49,25 +49,31 @@ const HistRow = ({ step, send }: { step: BlendHistoryStep; send: BlendUiSend }) 
   );
 };
 
+// Undo / Redo / Clear 住进 dock 的动作条（正文下面、滚动条之外）——步子攒到 264px 也顶不走它们。
+const HistoryFoot: React.FC<WorkbenchUnitProps> = ({ send }) => {
+  const ui = useBlendUi();
+  const h = ui.history;
+  return (
+    <div className="mini-group">
+      <button type="button" className="mini-btn ico-btn" disabled={!h.canUndo}
+        title="Undo (Ctrl+Z)" onClick={() => send('history-undo')}><Undo /></button>
+      <button type="button" className="mini-btn ico-btn" disabled={!h.canRedo}
+        title="Redo (Ctrl+Y or Ctrl+Shift+Z)" onClick={() => send('history-redo')}><Redo /></button>
+      <button type="button" className="mini-btn" disabled={!h.steps.length}
+        title={`Forget every step — the picture does not change, only this list (it holds the last ${h.limit})`}
+        onClick={() => send('history-clear')}>Clear</button>
+    </div>
+  );
+};
+
 const HistoryBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
   useFaceChannel(send);
   const h = ui.history;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 4 }}>
-      <div className="mini-group">
-        <button type="button" className="mini-btn ico-btn" disabled={!h.canUndo}
-          title="Undo (Ctrl+Z)" onClick={() => send('history-undo')}><Undo /></button>
-        <button type="button" className="mini-btn ico-btn" disabled={!h.canRedo}
-          title="Redo (Ctrl+Y or Ctrl+Shift+Z)" onClick={() => send('history-redo')}><Redo /></button>
-        <button type="button" className="mini-btn" disabled={!h.steps.length}
-          title={`Forget every step — the picture does not change, only this list (it holds the last ${h.limit})`}
-          onClick={() => send('history-clear')}>Clear</button>
-      </div>
-      <div className="hist-list dark-scroll">
-        {!h.steps.length && <div className="layer-empty">No steps yet — they appear as you edit</div>}
-        {h.steps.map(s => <HistRow key={s.i} step={s} send={send} />)}
-      </div>
+    <div className="hist-list dark-scroll">
+      {!h.steps.length && <div className="layer-empty">No steps yet — they appear as you edit</div>}
+      {h.steps.map(s => <HistRow key={s.i} step={s} send={send} />)}
     </div>
   );
 };
@@ -76,6 +82,7 @@ export const historyUnit: WorkbenchUnit = {
   id: 'history',
   title: 'History',
   hint: 'Every step since this document opened, newest at the bottom: click one to jump back to it. '
-    + 'Painting after a jump drops the steps you had skipped over — the head carries Undo, Redo and Clear.',
+    + 'Painting after a jump drops the steps you had skipped over — Undo, Redo and Clear stay pinned under the list.',
   Body: HistoryBody,
+  Foot: HistoryFoot,
 };

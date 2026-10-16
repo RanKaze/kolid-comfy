@@ -1,6 +1,6 @@
 import React from 'react';
 import type { UnitId } from '../dock/model';
-import type { BlendUiSend } from '../types';
+import type { BlendUiSend, StagingItem } from '../types';
 import { brushUnit } from './brush';
 import { bucketUnit } from './bucket';
 import { canvasUnit } from './canvas';
@@ -20,16 +20,31 @@ import { scene3dUnit } from './scene3d';
 import { poseUnit } from './pose';
 import { detectorUnit } from './detector';
 import { processorUnit } from './processor';
+import { stagingUnit } from './staging';
 
-/** 每一格正文拿到的唯一出口：泛型把动作键和它的载荷绑死（见 types 的 BlendUiPayloads）。 */
-export type WorkbenchUnitProps = { send: BlendUiSend };
+/** 一格工作台正文能碰到的宿主事实：图池镜像（App 的 staging）、画布合成预览、以及图池的两个后端写口。
+ *  绝大多数格子用不到 —— 只有 Staging 那一格要，因为它摆的就是宿主自己的那条图池条，条目 / 上传 /
+ *  删除都不经过页面。 */
+export type WorkbenchHostCtx = {
+  staging: StagingItem[];
+  blendPreview: { image: string; size: string } | null;
+  stageUpload: (images: string[], names: string[]) => void;
+  stageRemove: (id: string) => void;
+};
 
-/** 一格工作台面板 = 一行注册数据：它叫什么、标题条上那句说明、以及它的正文怎么画。 */
+/** 每一格正文拿到的出口：`send` 泛型把动作键和它的载荷绑死（见 types 的 BlendUiPayloads），
+ *  `host` 是那一小把宿主事实（只有 Staging 用）。 */
+export type WorkbenchUnitProps = { send: BlendUiSend; host: WorkbenchHostCtx };
+
+/** 一格工作台面板 = 一行注册数据：它叫什么、标题条上那句说明、以及它的正文怎么画。`Foot` 是可选的一条
+ *  动作条（Clear All / Add / Undo / Redo 那一类）：dock 把它画在**正文下面**、滚动条之外，所以列表再长
+ *  也顶不走它。没有这一条就照旧。 */
 export type WorkbenchUnit = {
   id: UnitId;
   title: string;
   hint: string;
   Body: React.ComponentType<WorkbenchUnitProps>;
+  Foot?: React.ComponentType<WorkbenchUnitProps>;
 };
 
 // 图层 / 工具 / 属性面板一块一个文件，这张表只负责点名和排序（序 = 工作台原来那一列的序：
@@ -39,6 +54,9 @@ export type WorkbenchUnit = {
 // Effect Parameters 压在最末：它说的是链里被点开的那一步，读的是快照 `fx.open`，没点开就是一句空态。
 // 搬完一块就往后加一行，页面那一侧同时删掉它自己那一格。
 export const WORKBENCH_UNITS: WorkbenchUnit[] = [
+  // Staging 那一格：画布底部原来那条工作区（Extra Prompt + Blend/Tag + 图池条 + Cancel / 进度）整条
+  // 搬进宿主后合成的一格，排在最前 —— 它是画布的底栏，最常伸手。
+  stagingUnit,
   canvasUnit, transformUnit, maskUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
   // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
   textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
@@ -52,8 +70,15 @@ export const WORKBENCH_HINTS: Record<string, string> =
   WORKBENCH_UNITS.reduce((a, u) => ({ ...a, [u.id]: u.hint }), {} as Record<string, string>);
 
 // 宿主只管发指令，正文每格自己读快照自己画 —— 所以这里遍历注册表，不写第二份 switch。
-export const workbenchBodies = (send: BlendUiSend): Record<UnitId, React.ReactNode> =>
+export const workbenchBodies = (send: BlendUiSend, host: WorkbenchHostCtx): Record<UnitId, React.ReactNode> =>
   WORKBENCH_UNITS.reduce((a, u) => {
     const Body = u.Body;
-    return { ...a, [u.id]: <Body send={send} /> };
+    return { ...a, [u.id]: <Body send={send} host={host} /> };
   }, {} as Record<UnitId, React.ReactNode>);
+
+// 同上，只是那张表里声明了动作条的那几格 —— dock 把它摆在自己的正文下面。
+export const workbenchFoots = (send: BlendUiSend, host: WorkbenchHostCtx): Partial<Record<UnitId, React.ReactNode>> =>
+  WORKBENCH_UNITS.reduce((a, u) => {
+    const Foot = u.Foot;
+    return Foot ? { ...a, [u.id]: <Foot send={send} host={host} /> } : a;
+  }, {} as Partial<Record<UnitId, React.ReactNode>>);
