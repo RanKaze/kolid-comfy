@@ -563,6 +563,114 @@ export type BlendFxOpenStep = {
 /** 参数面上每一句回发的坐标：哪一层、哪一枚 Effects 容器、链里的第几步。三样缺一就落不到那一步上。 */
 export type BlendFxCoord = { layerId: number; attrId: string; stepId: number };
 
+/** ---- 工具面板（原来挂在页面侧栏那六格：Text / Geometry / 3D / Pose / Detector / Processor）----
+ *  每格正文从这一份快照读、按下去发的是一条动作键 —— 与画布那几格同一套边界，只是这几格的控件比
+ *  按钮多一点（滑杆 / 颜色 / 枚举 / 输入框），所以形状也照着那几样的真值源写。 */
+
+/** Text 那一格：选中层最左那枚 Text 记录的样子，页面 `updateTextPanel` 原来摆给 DOM 的那几样。
+ *  `on` = 选中的层带一枚 Text 步骤（那一格因此点亮，字本身仍在画布上双击改）。`fontLabel` 是那一行
+ *  按钮上的字，`fontFace` 是它自己那张脸（按钮就用它画），`fontMissing` = 本机没有这个字体（按钮转红，
+ *  与缺失贴图同一套告警色）。`color` 是 6 位 hex —— 颜色输入的取值、色块和右边那句读数都由它来。 */
+export type BlendTextUi = {
+  on: boolean; fontLabel: string; fontFace: string; fontMissing: boolean;
+  padding: number; weight: string; color: string;
+};
+
+/** geometry 家族（direction / point / ray / plane）一枚记录此刻的形状 —— 世界位置、四元数朝向、
+ *  本色。与页面 `attr/geometry.js` 的 desc 同一套（页面那一侧的 `sanitizeDirectionDescriptor` 是唯一
+ *  的形状裁定），这里是它的只读镜像。 */
+export type BlendGeometryDesc = {
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number; w: number };
+  color: string;
+};
+
+/** Geometry 那一格：选中层那枚 geometry 家族记录的舞台与读数。`on` = 有这枚记录（那一格因此点亮、
+ *  摆出 three.js 舞台）。`desc` 就是上面那份镜像 —— 舞台、六格数字、色块与 Reset 读的都是它。
+ *  `ref` 是画布平面贴的那张参考图（此刻的 context image，唯独不含正在编辑的这一枚，页面缩到 ≤384
+ *  的 PNG；`refVersion` 只在参考图真变过之后才 ++，所以寻常一帧里字符串与版本都不动）。`canvasW/H`
+ *  是**文档画布**尺寸 —— 平面的比例由它折出，与舞台自己的取景框无关。相机轨道与 W/E/X 把手模式
+ *  是纯视图状态，住在宿主，不进这一份。 */
+export type BlendGeometryUi = {
+  on: boolean;
+  kind: string | null;
+  desc: BlendGeometryDesc | null;
+  ref: string;
+  refVersion: number;
+  canvasW: number;
+  canvasH: number;
+};
+
+/** Pose 记录此刻的形状 —— 与页面 `attr/pose.js` 的 `sanitizePoseDescriptor` 同一套（页面那一侧是唯一
+ *  的形状裁定），这里是它的只读镜像。形态七参 / 姿态（骨头角 + 骨位 + 模型旋转）/ 捕获取景（FOV 30、
+ *  dist 45）/ 皮肤档 / 颜色 / 背景（null = 透明底）。 */
+export type BlendPoseDesc = {
+  mesh: {
+    age: number; gender: number; weight: number; muscle: number;
+    height: number; breast_size: number; firmness: number; show_genitals?: boolean;
+  };
+  pose: {
+    bones: Record<string, [number, number, number]>;
+    bonePositions: Record<string, [number, number, number]>;
+    modelRotation: [number, number, number];
+  };
+  cam: { yaw: number; pitch: number; zoom: number; offsetX: number; offsetY: number };
+  skin: string;
+  color: string;
+  bg: [number, number, number] | null;
+};
+
+/** Pose 那一格：`on` = 选中层带一枚 Pose 步骤（那一格因此点亮、摆出 three.js 舞台）。`desc` 就是上面
+ *  那份镜像 —— 舞台（形态装配 + 姿态 + 捕获取景）、七颗滑块、皮肤三档、颜色、背景、取景五格、Reset 与
+ *  From image 读的都是它。`layerW/H` 是目标层的**原生**像素尺寸 —— 舞台那条黄线取景框按它的比例画
+ *  （框就是输出的边界），与舞台自己的取景框无关。相机轨道、关节选中、把手拖动是纯视图状态，住在宿主，
+ *  不进这一份。 */
+export type BlendPoseUi = { on: boolean; desc: BlendPoseDesc | null; layerW: number; layerH: number };
+
+/** 3D 那一格：选中层那枚 3D 记录的跳转与状态（`update3DPanel` 原来那三句话）。`on` = 有这枚记录，
+ *  `canOpen` = 它带着一个还能进去的 sceneUid（没有就整颗 Open Scene 灰掉），`note` 是那句状态 ——
+ *  措辞由页面按"烘了没有 / 场景 tab 还在不在"现拼，宿主只负责摆出来。 */
+export type BlendScene3dUi = { on: boolean; canOpen: boolean; note: string };
+
+/** Detector 那一格：detector 输入连着时才有得用。`available` 来自宿主的 hasDetector（不连时那一格
+ *  就是一句空态，页面原来是把整节 display:none 掉）；其余三样是小窗里那三颗控件此刻的取值 —— 它们
+ *  住在页面，宿主摆的是镜像，每次落值都走动作键回来。 */
+export type BlendDetectorUi = { available: boolean; prompt: string; threshold: number; invert: boolean };
+
+/** Processor 那一格的一枚候选（来源 / 落位共用一份形状）：值和它那张卡上的短名 + 说明。 */
+export type BlendProcChoice = { value: string; label: string; tip: string };
+
+/** 一行输入口（image / mask）：它叫什么、那句类型说明，和这一行此刻选中的来源 + 可选项。选了 Staging
+ *  的 image 输入多带一份工作区条目表（`staging`），null = 这一行不是那种情况。 */
+export type BlendProcInRow = {
+  num: number; name: string; hint: string; options: BlendProcChoice[]; cur: string;
+  staging: { options: { id: string; name: string }[]; cur: string } | null;
+};
+
+/** 一行参数（这个接口带的 widget）。控件跟着类型走 —— `bool` / `number` / `text` / `choices`（≤3 枚
+ *  分段按钮）/ `select`（候选多到一行铺不开）。`value` 是页面按"拧过没有"算出来的取值（数字与文字
+ *  统一成字符串发过来，bool 读 `on`）；`tip` 是那句说明（它把"图里派生的那个值"也写进去了，由页面现拼）；
+ *  `options` 只有枚举那两档才有，候选的说明（"the value the graph carries"）也随它一起来。 */
+export type BlendProcParamRow = {
+  num: number; name: string; tip: string;
+  kind: 'bool' | 'number' | 'text' | 'choices' | 'select';
+  on: boolean; value: string; step: string; placeholder: string;
+  options: BlendProcChoice[]; cur: string;
+};
+
+/** 一行输出口（image / mask / pipeline）：落位的候选与此刻选中。 */
+export type BlendProcOutRow = {
+  num: number; name: string; hint: string; options: BlendProcChoice[]; cur: string;
+};
+
+/** Processor 那一格的全部状态。`names` 是 interface 枚举（按声明序），`choice` 是它的下标（-1 = 一个
+ *  都没有，那一格给一句空态）；三段行由页面按当前 interface 现拼 —— 段为空就不出现（与页面那三句
+ *  `if (inPorts.length)` 一字不差）。行里的每一颗控件都是页面那一段 DOM 的等值物。 */
+export type BlendProcessorUi = {
+  names: string[]; choice: number;
+  inputs: BlendProcInRow[]; params: BlendProcParamRow[]; outputs: BlendProcOutRow[];
+};
+
 export type BlendUi = {
   /** 工作台当前工具，页面 `mode` 那颗变量的镜像（'transform' | 'rect' | 'lasso' | 'pan' | 'zoom'
    *  | 'rotate' | 'canvasModify' | 'none' …）。一颗变量喂六个高亮，所以只镜像它本身。 */
@@ -607,6 +715,19 @@ export type BlendUi = {
    *  也改不到它），所以它和行面共用同一道可见区/封顶闸，但一次都不重编。`limit` 与那两颗开关的读数
    *  同样出自页面（HISTORY_LIMIT 写死 60），这里不数步子。 */
   history: BlendHistory;
+  /** ---- 六格工具面板 ---- */
+  /** Text：选中层那枚 Text 步骤的四样读数（字体、padding、字重、颜色），和"这一格该不该亮"。 */
+  text: BlendTextUi;
+  /** Geometry：选中层那枚 direction/point/ray/plane 记录的世界形状 + 舞台参考图。 */
+  geometry: BlendGeometryUi;
+  /** Pose：选中层那枚 Pose 记录的形态/姿态/取景/皮肤形状 + 目标层原生尺寸。 */
+  pose: BlendPoseUi;
+  /** 3D：选中层那枚 3D 记录的跳转与状态那三句话。 */
+  scene3d: BlendScene3dUi;
+  /** Detector：总闸 + 小窗那三颗控件的取值。 */
+  detector: BlendDetectorUi;
+  /** Processor：interface 枚举与三段端口行。 */
+  processor: BlendProcessorUi;
   /** 缩略图本身（键 → data URL）。它是**增量**：一条快照只装这一帧新要给的几张，发完页面就清；
    *  宿主按键合并成一份 store（不住 React 树里，见 workbench/faces）。判据是逐张失效 + 只编可见区 +
    *  每帧封顶 —— 40 行 × 6 枚最坏一档两兆多一帧，那是把 postMessage 当显存用。 */
@@ -636,10 +757,21 @@ export const EMPTY_BLEND_UI: BlendUi = {
   attrKinds: [],
   // boot 之前没有任何步子可列：页面第一次播报（resetHistory 那一句）会把这一步自己补成列子的头一条。
   history: { limit: 0, canUndo: false, canRedo: false, steps: [] },
+  // 六格工具面板：第一条快照没到之前，各格都是"还没有人在编辑"那个样子 —— 与页面 boot 那一次播报相同。
+  // Text 的字体名给 '—'（页面 textFontLabel 对不上那一支的回落字），字号 / 字重 / 颜色照描述符初值。
+  text: { on: false, fontLabel: '—', fontFace: '', fontMissing: false, padding: 0, weight: 'normal', color: '#ffffff' },
+  // Geometry 空态：没有 geometry 记录、没有参考图、画布尺寸为 0 —— 与页面 boot 那一次播报同一个样子。
+  geometry: { on: false, kind: null, desc: null, ref: '', refVersion: 0, canvasW: 0, canvasH: 0 },
+  // Pose 空态：没有 Pose 记录、没有层面尺寸 —— 与页面 boot 那一次播报同一个样子。
+  pose: { on: false, desc: null, layerW: 0, layerH: 0 },
+  // 3D 与 Detector / Processor 一律空态：没有记录 / 没有 detector / 一个 processor interface 都没有。
+  scene3d: { on: false, canOpen: false, note: '—' },
+  detector: { available: false, prompt: '', threshold: 0.5, invert: false },
+  processor: { names: [], choice: -1, inputs: [], params: [], outputs: [] },
   faces: {},
 };
 
-/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应（门禁逐键对表，92 条）。旋钮类带
+/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应（门禁逐键对表，115 条）。旋钮类带
  *  value，开关类不带（点了就是点一下，没有取值）。
  *  行上那一批（一行、条带上的一枚、链里的一步、历史的一步）载荷一律是**坐标**：哪一层、哪一枚、第几步、
  *  落在谁的哪一侧 —— 本体永远留在页面那一侧。链里那一步的**参数面**（新添的 10 条：展开/收起、两笔落值、
@@ -669,6 +801,13 @@ export type BlendUiAction =
   | 'fx-step-open' | 'fx-param-live' | 'fx-param-commit' | 'fx-fold-toggle'
   | 'fx-map-pick' | 'fx-map-bind' | 'fx-dir-pick' | 'fx-dir-bind' | 'fx-lattice' | 'fx-curve'
   | 'history-undo' | 'history-redo' | 'history-jump' | 'history-clear'
+  | 'text-font' | 'text-padding' | 'text-weight' | 'text-color'
+  | 'geometry-desc' | 'geometry-commit' | 'geometry-reset'
+  | 'pose-desc' | 'pose-commit' | 'pose-reset-pose' | 'pose-reset-all' | 'pose-from-image'
+  | 'scene3d-open'
+  | 'detector-prompt' | 'detector-threshold' | 'detector-invert' | 'detector-run'
+  | 'processor-interface' | 'processor-pick' | 'processor-staging' | 'processor-param'
+  | 'processor-run' | 'processor-reset'
   | 'stage-layer' | 'layer-from-staging'
   | 'visible-faces';
 
@@ -806,6 +945,43 @@ export type BlendUiPayloads = {
   /** 跳到第 i 步：绝对下标，不是"再退一步"。页面自己数 |i - 现在| 次原语。 */
   'history-jump': number;
   'history-clear': undefined;
+  /** ---- 六格工具面板 ---- */
+  /** Text：Font 那一颗只开那一口选字器（取值由选择器自己回写，不进这条载荷）；Padding / Weight / Color
+   *  就是它们原来那行 `patchSelectedText` —— 值照控件给。 */
+  'text-font': undefined;
+  'text-padding': number;
+  'text-weight': string;
+  'text-color': string;
+  /** Geometry 家族：舞台与六格读数/色块/Reset 都在宿主，动作落到那枚记录的 desc 上 —— 与页面原来
+   *  那几颗控件同一个写口 `patchGizmoTarget`（整只换 desc）。`live` = 拖动/连续输入期间只重画、
+   *  不重修行列表；`geometry-commit` 那一趟才立一步历史（`label` 是这一步的名字）。 */
+  'geometry-desc': { patch: Partial<BlendGeometryDesc>; live?: boolean };
+  'geometry-commit': { label?: string };
+  'geometry-reset': undefined;
+  /** Pose：与 Geometry 同一条 desc 通道 —— 舞台/滑杆/色块/取景格/Reset/From image 都在宿主，动作落到
+   *  那枚记录的 desc 上（页面写口 `patchPoseTarget`）。`live` 同 Geometry。两条 Reset 有各自的落点：
+   *  `pose-reset-pose` 只回静止姿态（网格与取景不动），`pose-reset-all` 走 ATTR_TYPES.pose.defaults。
+   *  `pose-from-image` 开页面那一页的选图 modal + DWPose 估算，不改 desc 本身（估完由页面写）。 */
+  'pose-desc': { patch: Partial<BlendPoseDesc>; live?: boolean };
+  'pose-commit': { label?: string };
+  'pose-reset-pose': undefined;
+  'pose-reset-all': undefined;
+  'pose-from-image': undefined;
+  /** 3D 那一格的 Open Scene：把选中层那枚 3D 记录的场景开成 tab（页面 open3DSceneDocument）。 */
+  'scene3d-open': undefined;
+  /** Detector 那三颗控件：prompt 每敲一下发一次（页面存真值），滑杆与勾同理；Detect 那一颗开对话框。 */
+  'detector-prompt': string;
+  'detector-threshold': number;
+  'detector-invert': boolean;
+  'detector-run': undefined;
+  /** Processor：换 interface（下标）、挑来源/落位（`side` + 端口号 + 选中的值）、挑工作区条目、
+   *  拧一口参数（值按那一口的类型归：布尔 / 数字 / 字符串）。 */
+  'processor-interface': number;
+  'processor-pick': { side: 'in' | 'out'; port: number; value: string };
+  'processor-staging': { port: number; id: string };
+  'processor-param': { port: number; value: number | string | boolean };
+  'processor-run': undefined;
+  'processor-reset': undefined;
   'stage-layer': { id: number };
   'layer-from-staging': { id: string; stack?: BlendStack };
 };

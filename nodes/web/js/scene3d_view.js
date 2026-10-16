@@ -317,7 +317,10 @@
         document.getElementById('viewport').style.display = 'none';
         // CSS 给这两块写的都是 display:none,所以清空内联值等于「退回样式」= 还是不显示。
         host.style.display = 'block';
-        document.getElementById('panelScroll').style.display = 'none';
+        // 右栏（#sidePanel / #sideSplitter）在 2D 里默认 display:none（六格工具搬进宿主 dock 之后
+        // 这一栏就空了），只在 3D tab 里显出来 —— 此刻它摆的是 Hierarchy / Inspector。
+        document.getElementById('sidePanel').style.display = 'flex';
+        document.getElementById('sideSplitter').style.display = 'flex';
         document.getElementById('scenePanel').style.display = 'flex';
         Scene3D.loadRec(rec || (entry.ctx && entry.ctx.scene) || Scene3D.blankRecord(''));
         resize();
@@ -336,8 +339,12 @@
         if (raf) { cancelAnimationFrame(raf); raf = 0; }
         document.getElementById('viewport').style.display = '';
         host.style.display = 'none';
-        document.getElementById('panelScroll').style.display = '';
+        // 收起右栏（回到 CSS 的 display:none）并按新宽度重排一次 2D 画面 —— 这一栏一隐一现，画布
+        // 宽度就变了，而 iframe 内部布局变化不会发 window resize（见 applySideWidth 的同一课）。
+        document.getElementById('sidePanel').style.display = '';
+        document.getElementById('sideSplitter').style.display = '';
         document.getElementById('scenePanel').style.display = 'none';
+        if (typeof layoutCanvas === 'function') layoutCanvas();
     };
 
     // 换一份记录活下来:镜像全清,重新按记录建。

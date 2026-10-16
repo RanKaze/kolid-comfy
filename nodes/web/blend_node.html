@@ -35,17 +35,18 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    host's Log panel (Context 标题行 → Log，最近 32 条). setStatus keeps its name and every call
    site — only the destination changed. */
 
-/* Right column: the tool sections scroll in the top part, the Layers palette stays docked at
-   the bottom-right corner (Photoshop-style) with a scroll area of its own. */
-#sidePanel { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; padding: 12px; gap: 10px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow: hidden; }
+/* 右栏：2D 模式下六格工具全搬进宿主 dock 之后这一栏已经空了，所以默认 display:none —— 画布
+   吃满整宽，没有那条 280px 的空白带。只剩 3D tab 的 Hierarchy / Inspector 用它：Scene3D.enter
+   把 #sidePanel / #sideSplitter 显出来、exit 收起（js/scene3d_view.js）。#panelScroll 整块删除。 */
+#sidePanel { width: 280px; flex-shrink: 0; display: none; flex-direction: column; padding: 12px; gap: 10px; background: rgba(28,28,30,0.4); border-left: 0.5px solid rgba(255,255,255,0.06); overflow: hidden; }
 /* 右栏的调宽把手：10px 轨道 + 左右各 -5px 负 margin，所以它压在分界线上而不额外吃掉画布宽度。
-   ::after 是那颗可抓握的竖条；hover / 拖动 / 键盘聚焦才点亮，静止时几乎隐形。 */
+   ::after 是那颗可抓握的竖条；hover / 拖动 / 键盘聚焦才点亮，静止时几乎隐形。
+   只在 3D tab 里现（和 #sidePanel 一起显隐），2D 时整栏收起，把手一并收。 */
 #sideSplitter { position: relative; z-index: 5; flex: 0 0 10px; margin: 0 -5px; align-self: stretch;
-    display: flex; align-items: center; justify-content: center; cursor: col-resize; background: transparent; }
+    display: none; align-items: center; justify-content: center; cursor: col-resize; background: transparent; }
 #sideSplitter::after { content: ''; width: 3px; height: 38px; border-radius: 2px; background: rgba(255,255,255,0.14);
     transition: background 0.12s ease; }
 #sideSplitter:hover::after, #sideSplitter.dragging::after, #sideSplitter:focus-visible::after { background: rgba(10,132,255,0.8); }
-#panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
 /* Every section carries the same 6px inner rail. The highlight box of an active tool section
    is its own border box, which is full column width, so the label of a highlighted section and
    the label of a plain one land on the same x — and the box lines up with its neighbours
@@ -77,18 +78,18 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .add-caret { font-size: 8px; line-height: 1; opacity: 0.7; margin-left: 3px; }
 
 
-/* iOS-style dark scrollbar for the column's scroll area (the tool sections). Overlay look: no
+/* iOS-style dark scrollbar for the picker modals' list area (.tag-groups). Overlay look: no
    track, a slim translucent thumb that only reads as a faint grey pill against the dark panel.
    Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-* properties; everything
    else gets the WebKit set. `scrollbar-gutter: stable` keeps the rows from shifting sideways. */
-#panelScroll, .tag-groups {
+.tag-groups {
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.22) transparent;
 }
-#panelScroll::-webkit-scrollbar, .tag-groups::-webkit-scrollbar { width: 10px; height: 10px; }
-#panelScroll::-webkit-scrollbar-track, .tag-groups::-webkit-scrollbar-track { background: transparent; }
-#panelScroll::-webkit-scrollbar-thumb, .tag-groups::-webkit-scrollbar-thumb {
+.tag-groups::-webkit-scrollbar { width: 10px; height: 10px; }
+.tag-groups::-webkit-scrollbar-track { background: transparent; }
+.tag-groups::-webkit-scrollbar-thumb {
     background: rgba(255,255,255,0.22);
     border-radius: 999px;
     /* Inset the pill from both edges with a transparent border + padding-box clip: this is what
@@ -96,31 +97,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border: 3px solid transparent;
     background-clip: padding-box;
 }
-#panelScroll::-webkit-scrollbar-thumb:hover, .tag-groups::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
-#panelScroll::-webkit-scrollbar-thumb:active, .tag-groups::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
+.tag-groups::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+.tag-groups::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
 /* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
-#panelScroll::-webkit-scrollbar-corner, .tag-groups::-webkit-scrollbar-corner { background: transparent; }
-#panelScroll::-webkit-scrollbar-button, .tag-groups::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-/* Direction 小窗里那颗世界观察: 深色底才压得住 magenta/cyan 那三条轨道, 高度与 JS 里的 DIR_GIZMO_H 一致。
-   三格角度 field 借 RGBA 那四格的皮肤 (.rgba-fields/.rgba-cell), 只补一条没人在编辑时的暗态。 */
-/* Direction 小窗的舞台: three.js 那块 (js/direction_view.js 建的 webgl canvas) 与 2D 退路那块叠在
-   同一个取景框里, 谁在显示由 DirView.begin() 的成败决定; 指针一律吃舞台, 所以两种画法下指针落点一致。
-   舞台铺满窗宽、按窗口自己的高度走 (窗是 520 宽, 见下面那条 .tool-flyout-wide)。 */
-.dir-stage { position: relative; height: 420px; border: 1px solid #2a2f3d; border-radius: 8px;
-    background: #0b0d14; overflow: hidden; }
-.dir-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.dir-hint { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 10.5px; letter-spacing: 0.02em;
-    color: rgba(255,255,255,0.5); pointer-events: none; user-select: none; }
-.dir-hint b { color: #fff; font-weight: 600; }
-.dir-angles { margin-top: 2px; }
-.dir-angles input:disabled { opacity: 0.4; cursor: default; }
-/* Pose 小窗的舞台: rig 的 webgl canvas 被 js/pose_view.js 搬进这块取景框 (rgba 透明底, 底下垫
-   一层深色)。人形是竖着的, 所以比 direction 那块再高一点。 */
-.pose-stage { position: relative; height: 460px; border: 1px solid #2a2f3d; border-radius: 8px;
-    background: #101018; overflow: hidden; }
-.pose-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.pose-hint { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 10.5px; letter-spacing: 0.02em;
-    color: rgba(255,255,255,0.5); pointer-events: none; user-select: none; }
+.tag-groups::-webkit-scrollbar-corner { background: transparent; }
+.tag-groups::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+/* Pose 小窗整节搬去了宿主的 dock（workbench/pose.tsx）：舞台、七颗形态滑块、皮肤三档、颜色、背景、
+   取景五格与 Reset / From image 都在那一格，动作发回 UI_COMMANDS，读数从快照 `pose` 走。js/pose_view.js
+   那份编辑器随之退役，页面只剩 pin / From image / 快照播报（.pose-* 那三条规则没有主人，整组删掉）。 */
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -141,20 +125,8 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
    留下任何主人，连那枚只给那一行垫 × 位置的占位 span 也是 —— 所以整组删掉，门禁钉的就是这些名字
    在这一页一个字都不出现。 */
 
-/* Text 行的字体按钮: 那几个字就是它自己那张脸, 不用打开就知道选的是什么。本机没有这个字体时转红,
-   与缺失贴图同一套告警色 —— 文字仍旧在, 只是顶着栈尾的回落脸画。 */
-.text-font-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
-    border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 12px; font-weight: 600;
-    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.text-font-btn:hover { background: rgba(10,132,255,0.3); }
-.text-font-btn.gone { color: #ff453a; }
-/* Detector 行: 表达式要写词与阈值, 一行输入框装不下 —— 同 gen-preset-row select 的一套皮。 */
-.control-row textarea#detectPrompt { flex: 1 1 auto; min-width: 0; height: 58px; resize: vertical;
-    background: rgba(255,255,255,0.08); border: 0.5px solid rgba(255,255,255,0.18); border-radius: 8px;
-    color: rgba(255,255,255,0.9); font: inherit; font-size: 12.5px; line-height: 1.4; padding: 5px 8px;
-    box-sizing: border-box; outline: none; }
-.control-row textarea#detectPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
-.control-row textarea#detectPrompt::placeholder { color: rgba(255,255,255,0.3); }
+/* Text 的字体按钮与 Detector 的表达式输入框连同那两节一起搬进了宿主的 dock
+   （workbench/text.tsx 的 fontBtn、workbench/detector.tsx 的 area）—— 这一页不再画它们。 */
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
@@ -230,18 +202,10 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 /* Mask tools live in the sidebar (no floating panel) */
 /* Bleeds vertically only: horizontally the box already fills the column, so an active section
    never sticks out past a plain one. */
-/* 5px padding + a 1px transparent border = the same 6px inner rail a plain section has from
-   `.panel-section`, so toggling the highlight never shifts the label by a pixel. Bleeds
-   vertically only: horizontally the box already spans the whole column. */
-.tool-section { border: 1px solid transparent; border-radius: 10px; padding: 5px; margin: -5px 0; transition: background 0.15s ease, border-color 0.15s ease; }
-.tool-section.active-tool { background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.5); }
+/* 工具小窗的格皮（.tool-section / .tool-section.active-tool）随最后一扇窗（Pose）一起退役 —— 六格
+   工具都搬进宿主 dock 了，这一页再没有可折叠的小窗。.tool-key 留着：3D 场景栏那颗 key-btn 还在穿；
+   .mini-btn.text-choice-btn 随 Text / Pose 两处分段按钮（都已进宿主）一起删。 */
 .tool-key { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 4px; border-radius: 4px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.7); font-size: 10px; letter-spacing: 0; }
-.tool-section.active-tool .tool-key { background: rgba(0,122,255,0.9); color: #fff; }
-/* Small colour dot a panel puts beside a name. Brush's own ring left with its panel (it is a dock
-   unit now, painted from the same snapshot); the Text swatch is the one still drawn here. */
-.ring-swatch { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.92); box-shadow: 0 0 0 1px rgba(0,0,0,0.55); flex-shrink: 0; }
-.ring-swatch.erase { border-style: dashed; border-color: rgba(255,96,96,0.95); }
-.mini-btn.text-choice-btn { flex: 1; padding: 4px 2px; font-size: 10.5px; }
 /* Enum rows inside a tool body: the label names the choice, the button group takes the same
    slack a range takes, so the value column lines up with the rows above and below it. */
 .control-row .mini-group { flex: 1; min-width: 0; flex-wrap: nowrap; }
@@ -249,52 +213,17 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .mini-btn.key-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; padding: 4px 8px; }
 .mini-btn.key-btn .tool-key { margin-left: 0; min-width: 18px; height: 18px; font-size: 11px; font-weight: 700; }
 .panel-label[title] { cursor: help; }
-/* Brush / Eraser settings stay folded until the header row is clicked. */
-.tool-section.foldable > .panel-head { cursor: pointer; user-select: none; }
-.tool-section.foldable > .panel-head .panel-label { cursor: pointer; }
-.fold-caret { display: inline-block; width: 9px; margin-right: 5px; color: rgba(255,255,255,0.5); transition: transform 0.18s ease; }
-.fold-caret::before { content: '\25B8'; font-size: 9px; }
-.tool-section.foldable:not(.collapsed) .fold-caret { transform: rotate(90deg); }
-.tool-section.foldable.collapsed .tool-body { display: none; }
-/* 工具设置的小窗：Brush / Bucket / Eraser / Text 的 .tool-body 被搬进 body 下的 host，贴在 sidePanel
-   左缘成一列小窗，工具栏那一列的宽度和滚动位置都不再被展开挤动。 */
-#toolFlyHost { position: fixed; inset: 0; z-index: 150; pointer-events: none; }
-.tool-flyout { position: fixed; pointer-events: auto; width: 320px; display: flex; flex-direction: column;
-    gap: 8px; padding: 10px 12px 12px; border-radius: 14px; box-sizing: border-box;
-    background: rgba(28,28,30,0.92); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
-    border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 10px 32px rgba(0,0,0,0.45); }
-.tool-flyout-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.tool-flyout .tool-body { display: flex; flex-direction: column; gap: 8px; }
-/* Processor 窗里一行就是一个端口，段与段、行与行只靠空白分，不画框。松的是纵向（行距 8→12、
-   段距 12→18）和控件的命中高度；横轴不动 —— 窗宽还是 320，别的工具窗也完全不走这一支。
-   端口名长短不一（local_structure_strength 那种），所以标签定宽对齐、超长省略，全名在 title 里。
-   段标题下面的那些行整体右移一档，标题就成了它们的父级 —— 标题与行同宽同起头时这点区分不出来。 */
-.proc-body { gap: 12px; }
-#processorPorts { display: flex; flex-direction: column; gap: 18px; }
-.proc-group { display: flex; flex-direction: column; gap: 12px; }
-.proc-group > .control-row { padding-left: 16px; }
-.proc-group > .panel-label { font-size: 10.5px; color: rgba(255,255,255,0.42); }
-.proc-body .control-row { gap: 10px; }
-.proc-body .control-row label { min-width: 88px; max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 四个来源按钮在 320 宽里放不下时让它们自己折行，别从行尾溢出去 —— 一行还是一个端口。 */
-.proc-body .control-row .mini-group { flex-wrap: wrap; }
-.proc-body input[type="number"], .proc-body input[type="text"] { padding: 5px 8px; font-size: 12px; }
-.proc-body select { padding: 4px 6px; font-size: 12px; }
+/* 工具小窗那一整组（折叠 caret / #toolFlyHost / .tool-flyout*）随最后一扇窗（Pose）退役：六格工具
+   都住进宿主 dock，这一页不再有沿 sidePanel 左缘摞起来的小窗，也没有它们的 DOM。 */
+/* Processor 窗的 .proc-body / #processorPorts / .proc-group 三支随那一节一起走了：端口行现在由
+   宿主按快照里的描述符摆（workbench/processor.tsx），行距与列宽在那里用内联样式带了同一套外观。 */
 .control-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #0a84ff; cursor: pointer; }
 .control-row input[type="color"] { width: 34px; height: 22px; flex-shrink: 0; padding: 0; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 6px; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
 .control-row input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
 .control-row input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; }
-/* 三格数字行的皮肤。Color 那一格连同色块/盘/拇指 (.rgba-dual / .rgba-chip* / .paint-mode* /
-   .rgba-panel / .rgba-grid / .rgba-field* / .rgba-thumb / .rgba-bar) 一起搬进了宿主的 dock
-   （workbench/color.tsx 用内联样式带了同一套外观），这里只剩 Direction / Pose 那两处 angles field 在穿。
-   宽度按栏宽等分, 所以拖分隔条时它们自己缩, 不需要 JS 参与。 */
-.rgba-fields { display: flex; align-items: center; gap: 5px; font-size: 11px; color: rgba(255,255,255,0.62); }
-.rgba-cell { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 0; }
-.rgba-cell input { flex: 1 1 0; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
-    border-radius: 4px; font-size: 11px; padding: 2px 3px; outline: none; }
-.rgba-cell input::-webkit-inner-spin-button, .rgba-cell input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-.rgba-cell input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
-.rgba-cell .unit { flex-shrink: 0; }
+/* 三格数字行的皮肤（.rgba-fields / .rgba-cell*）的最后一处主人在 Pose —— 它随那一节一起进了宿主的
+   dock（workbench/pose.tsx 用内联样式带了同一套外观）。Color 那一格更早一步（workbench/color.tsx），
+   Direction 那一格随 workbench/geometry.tsx 走了 —— 这一页再没有穿这套皮的地方，整组删掉。 */
 .control-row input[type="color"]::-moz-color-swatch { border: none; border-radius: 4px; }
 .control-row { display: flex; align-items: center; gap: 8px; color: rgba(255,255,255,0.9); font-size: 13px; font-weight: 500; }
 .control-row label { min-width: 46px; font-size: 11px; }
@@ -329,7 +258,8 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
    眼睛会浮在指针上方两三个像素。光标的热点必须压在指针尖上,所以让它别参与行内排版。 */
 #lookCursor svg { display: block; }
 #lookCursor.on { display: block; }
-/* 右栏在 3D tab 期间整体换掉:#panelScroll 隐去,这一栏顶上。
+/* 3D tab 期间右栏(#sidePanel)由 Scene3D.enter 显出来、Hierarchy / Inspector 顶上；2D 时它默认
+   display:none（见上面 #sidePanel 规则）。
    小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多
    出 Hierarchy 的行本身、Inspector 的分组标题,以及来源说明行。 */
 #scenePanel { display: none; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding-right: 6px; }
@@ -560,162 +490,15 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
     <div id="sideSplitter" role="separator" aria-orientation="vertical" tabindex="0"
          title="Drag to resize the tools panel — double-click (or Home) restores 280px"></div>
     <div id="sidePanel">
-        <!-- Tools scroll in the top part of the column; the Layers palette is docked at
-             the bottom-right corner so it stays put no matter how long the tool list is. -->
-        <div id="panelScroll">
-            <!-- Canvas / Transform 两格搬去了宿主的 dock（workbench/canvas.tsx、transform.tsx）。
-                 Mask / Decal 那一格与 Layers 旁边那颗 Mask 行也合成一格搬了过去（workbench/mask.tsx，
-                 拍板 6.a）：键徽章、目标名、笔尖那一面的 Invert，加整层的 Invert / Full / Clear 与眼睛，
-                 全在宿主的 dock 里画；覆盖面那张位图仍住在这一页，所以那一格是这一列里第一个要传像素的
-                 面（blendUiState.mask.still）。这一列从 Text 起。 -->
-            <!-- Color 那一格 (一对 PS 式双色 + 它下面那块常驻调色盘) 也搬去了宿主的 dock
-                 （workbench/color.tsx）。三张取色画布一起走：盘本来就是当前颜色的纯函数，页面只要
-                 把 brushColor / brushAlpha / brushHue / back* + 盘式交出去就够了（快照里的 color 那一格）。 -->
-            <!-- Brush / Bucket / Eraser 三格也搬去了宿主的 dock（workbench/brush.tsx、bucket.tsx、
-                 eraser.tsx）。这一列剩下的从 Text 起。 -->
-            <!-- The Text section folds like the other tool sections and stays folded until its
-                 header is clicked — selecting a text layer only lights the row up and refills the
-                 controls, it never opens the window for you. -->
-            <!-- Text 的样式编辑器搬进了条带上方那条 lane (attr/text.js 的 spec.lane),侧栏不再有
-                 Text 段;画布上的 inline 编辑器与全局字体 picker (lane 的 Font 按钮开它) 留在原处。 -->
-            <!-- Text 的样式编辑回到工具小窗 (选中带 Text 步骤的层时点亮)。Size/Align 不给控件:
-                 这套渲染是"字填满盒子",字号由盒子尺寸驱动、对齐在贴内容盒子上没有可见差异。 -->
-            <div class="panel-section tool-section foldable collapsed" id="textSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="textLabel" title="Text — the settings of the selected layer's Text step. Edit the words themselves on the canvas: double-click the text (or press Enter with the row selected). Alt+T drags out a fresh text step of its own. Click the header to open or close its settings window."><span class="fold-caret"></span>Text <span class="tool-key">Alt+T</span></div>
-                    <span class="ring-swatch" id="textSwatch" title="The text colour" style="display:none;"></span>
-                </div>
-                <div class="tool-body">
-                    <div class="control-row"><label>Font</label><button type="button" class="text-font-btn" id="textFontBtn" title="Font — opens the picker: every name is drawn in its own face, grouped by family, with the fonts you loaded from disk at the bottom. Rendered by this browser, so the .cud shows whatever these fonts give on the machine that opens it">Arial</button><span></span></div>
-                    <div class="control-row"><label>Padding</label><input type="range" id="textPaddingRange" min="0" max="256" step="1" value="0" title="Clear space around the text, in layer pixels at the authored font size — the box grows outward and the glyphs keep their size. Outer effects (drop shadow, glow) need that room: they are cut at the layer's own edge"><span id="textPaddingValue">0</span></div>
-                    <div class="control-row"><label>Weight</label><div class="mini-group">
-                        <button class="mini-btn text-choice-btn active" id="textWeightNormal" title="Normal weight">Normal</button>
-                        <button class="mini-btn text-choice-btn" id="textWeightBold" title="Bold weight">Bold</button>
-                    </div><span></span></div>
-                    <div class="control-row"><label>Color</label><input type="color" id="textColorInput" value="#ffffff"><span id="textColorValue">#FFFFFF</span></div>
-                </div>
-            </div>
-            <!-- Direction 工具: 小窗是**世界里的观察** —— 一张 three.js 场景 (js/direction_view.js):
-                 画布平面贴着此刻的 context image。它现在是 geometry 家族 (direction/point/ray/plane,
-                 全是相对画布的 3D 对象) 共用的一扇窗: direction 是环/弧/滚转环/箭头 (钉在原点),
-                 point 是球+落地线, ray 是球+箭头, plane 是圆盘+法线短箭。
-                 中键拖动只转眼睛。图层自己的像素是**画布空间的观察** (正面看画布: 对象按世界坐标投影
-                 落位, 读数烘进像素)。两边吃的是同一份世界坐标, 不是同一次绘制 —— 相机本来就不同。
-                 选中的不是家族记录时整颗转暗、field 禁用, 那本身就是"没人在编辑"的话。
-                 K3D 缺席或 WebGL 起不来时舞台退回 direction.js 那张 2D 世界图。 -->
-            <div class="panel-section tool-section foldable collapsed" id="directionSection" data-flyout-width="720">
-                <div class="panel-head">
-                    <div class="panel-label" id="dirLabel" title="Direction (D) — the family window for the canvas-relative 3D objects: a Direction step (a pose, pinned at the origin), a Point (a world position), a Ray (a point plus a direction) or a Plane (a point plus a normal). The world is standard XYZ: the image lies on the XZ plane facing +Y — X runs across the canvas, Z down it, Y lifts off it. The window is a 3D view: the canvas plane textured with the current context image on a ground grid. Hold the middle mouse button and drag to orbit; scroll to zoom — both move your eye only. Drag the handles: the red/green/blue triad moves the object along world X/Y/Z, Yaw/Pitch (and Roll for Direction) steer the orientation — Shift snaps (15° angles, 0.05 positions). The layer's own pixels are the canvas view of the same object. Click the header to open or close its settings window."><span class="fold-caret"></span><span class="dir-kind">Direction</span> <span class="tool-key">D</span></div>
-                </div>
-                <div class="tool-body">
-                    <div class="dir-stage" id="dirStage">
-                        <canvas id="dirView"></canvas>
-                        <canvas id="dirGizmo"></canvas>
-                        <div class="dir-hint" id="dirHint"></div>
-                    </div>
-                    <div class="rgba-fields dir-angles" title="The object in world XYZ, typed directly — the image lies on the XZ plane facing +Y: X runs across the canvas, Z down it, Y lifts off the plane (in canvas heights) for Point/Ray/Plane; Yaw/Pitch/Roll steer the direction (Direction) or the ray/normal (Ray/Plane). Angles are folded, not clamped: 999° yaw lands on 279°.">
-                        <span class="rgba-cell" id="dirXCell"><label>X</label><input id="dirXNum" type="number" min="-1" max="2" step="0.01"></span>
-                        <span class="rgba-cell" id="dirYCell"><label>Y</label><input id="dirYNum" type="number" min="-2" max="2" step="0.01"></span>
-                        <span class="rgba-cell" id="dirZCell"><label>Z</label><input id="dirZNum" type="number" min="-1" max="2" step="0.01"></span>
-                    </div>
-                    <div class="rgba-fields dir-angles">
-                        <span class="rgba-cell" id="dirYawCell"><label>Yaw</label><input id="dirYawNum" type="number" min="0" max="359" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell" id="dirPitchCell"><label>Pitch</label><input id="dirPitchNum" type="number" min="-90" max="90" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell" id="dirRollCell"><label>Roll</label><input id="dirRollNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
-                    </div>
-                    <div class="control-row"><label>Color</label><input type="color" id="dirColorInput" value="#ff2e88" title="The object's own colour — the ring, arc and handles keep theirs"><span id="dirColorValue">#FF2E88</span></div>
-                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="dirResetBtn" title="Back to this object's default placement">Default</button><span></span></div>
-                </div>
-            </div>
-            <!-- 3D 工具小窗:选中带 3D 步骤的层时点亮。跳转与状态在这里;完整编辑 (fly、inspector、
-                 Render to Layer) 仍在场景 tab 的 #scenePanel 里 —— 它是另一个视口,不是一排参数。 -->
-            <div class="panel-section tool-section foldable collapsed" id="scene3dSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="scene3dLabel" title="3D — the scene behind the selected layer's 3D step. Open the scene as a tab, fly it, then Render to Layer bakes the frame onto that step of the strip. Click the header to open or close its window."><span class="fold-caret"></span>3D</div>
-                </div>
-                <div class="tool-body">
-                    <div class="control-row"><label>Scene</label><button type="button" class="mini-btn" id="scene3dOpenBtn" title="Open the 3D scene behind the selected layer's 3D step as a tab — fly it, then Render to Layer bakes the frame onto that step">Open Scene</button><span></span></div>
-                    <div class="s3d-note" id="scene3dNote">—</div>
-                </div>
-            </div>
-            <!-- Pose 工具小窗: 一枚 Pose attribute 的工作台 —— 一只 3D 人形 (MakeHuman 网格) 在
-                 自己的舞台里摆姿态与取景, 烤成这一层的像素。舞台是 js/pose_view.js 挂的 rig 场景:
-                 左键点关节 (小黄球) 或身体拾取、把手转关节, 松手才提交; 右键转眼睛、中键平移、
-                 滚轮推拉 —— 三样都只动舞台那台相机, desc 一个字节不动。那条黄线框 = 捕获相机的
-                 取景 (FOV 30 / dist 45, 按**输出**比例画), 框就是输出的边界。
-                 形态七颗滑块会让 worker 重解网格 (异步); 取景五格直接改 desc.cam, 当场重烤。
-                 K3D/WebGL 缺席、资产没装或装配还没回来时窗照开: 舞台给一句话, 像素保持原样。 -->
-            <div class="panel-section tool-section foldable collapsed" id="poseSection" data-flyout-width="720">
-                <div class="panel-head">
-                    <div class="panel-label" id="poseLabel" title="Pose (P) — a 3D mannequin (a MakeHuman mesh) posed in its own window; the render bakes onto this layer automatically, transparent by default. Left-click a joint (or the body near one) to grab it, then turn the rotate handle — right-drag orbits your eye, middle-drag pans it, the wheel zooms it, none of the three touches the render. The yellow frame is the capture camera's framing: exactly what lands on the layer. The mesh sliders rebuild the body; Yaw/Pitch/Zoom/X/Y frame the capture (FOV 30, distance 45). Click the header to open or close its settings window."><span class="fold-caret"></span>Pose <span class="tool-key">P</span></div>
-                </div>
-                <div class="tool-body">
-                    <div class="pose-stage" id="poseStage">
-                        <div class="pose-hint" id="poseHint"></div>
-                    </div>
-                    <div class="control-row"><label>Age</label><input type="range" id="poseAgeRange" min="1" max="90" step="1" value="25" title="The mannequin's age (1-90) — reshapes the body through the morph targets, so the slider rebuilds the mesh in the background"><span id="poseAgeValue">25</span></div>
-                    <div class="control-row"><label>Gender</label><input type="range" id="poseGenderRange" min="0" max="1" step="0.01" value="0.5" title="Gender blend — 0 reads female, 1 reads male"><span id="poseGenderValue">0.50</span></div>
-                    <div class="control-row"><label>Weight</label><input type="range" id="poseWeightRange" min="0" max="1" step="0.01" value="0.5" title="Body weight"><span id="poseWeightValue">0.50</span></div>
-                    <div class="control-row"><label>Muscle</label><input type="range" id="poseMuscleRange" min="0" max="1" step="0.01" value="0.5" title="Muscle tone"><span id="poseMuscleValue">0.50</span></div>
-                    <div class="control-row"><label>Height</label><input type="range" id="poseHeightRange" min="0" max="1" step="0.01" value="0.5" title="Stature"><span id="poseHeightValue">0.50</span></div>
-                    <div class="control-row"><label>Breast</label><input type="range" id="poseBreastRange" min="0" max="1" step="0.01" value="0.5" title="Breast size"><span id="poseBreastValue">0.50</span></div>
-                    <div class="control-row"><label>Firmness</label><input type="range" id="poseFirmnessRange" min="0" max="1" step="0.01" value="0.5" title="Breast firmness — pairs with the size above"><span id="poseFirmnessValue">0.50</span></div>
-                    <div class="control-row"><label>Skin</label><div class="mini-group">
-                        <button class="mini-btn text-choice-btn" id="poseSkinNaked" title="The base skin texture — the photographed one, no markings">Naked</button>
-                        <button class="mini-btn text-choice-btn" id="poseSkinMarks" title="The base skin with its markings">Marks</button>
-                        <button class="mini-btn text-choice-btn active" id="poseSkinWhite" title="A plain white matte dummy — reads form, not skin. Falls back to this look whenever a texture is missing">White</button>
-                    </div></div>
-                    <div class="control-row"><label>Color</label><input type="color" id="poseColorInput" value="#ffffff" title="Tint over the skin texture (white = the texture's own colour)"><span id="poseColorValue">#FFFFFF</span></div>
-                    <div class="control-row"><label>Background</label><input type="checkbox" id="poseBgTransparent" checked title="Tick = a transparent background (the render keeps its alpha). Untick = fill with the colour on the right"><input type="color" id="poseBgInput" value="#202026" title="Background colour — used when Transparent is unticked"><span></span></div>
-                    <div class="rgba-fields" title="The capture camera's framing — exactly what the yellow frame on the stage shows. Yaw/Pitch orbit the camera around the mannequin, Zoom pulls it in (it always sits 45 units away, FOV 30), X/Y slide the framed centre. Angles fold to their range rather than sticking at an edge.">
-                        <span class="rgba-cell"><label>Yaw</label><input id="poseYawNum" type="number" min="-180" max="180" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell"><label>Pitch</label><input id="posePitchNum" type="number" min="-89" max="89" step="1"><span class="unit">°</span></span>
-                        <span class="rgba-cell"><label>Zoom</label><input id="poseZoomNum" type="number" min="0.1" max="10" step="0.05"></span>
-                    </div>
-                    <div class="rgba-fields" title="Where the capture's centre sits relative to the mannequin, in world units (X runs across, Y lifts — up is positive).">
-                        <span class="rgba-cell"><label>X</label><input id="poseOffXNum" type="number" min="-20" max="20" step="0.1"></span>
-                        <span class="rgba-cell"><label>Y</label><input id="poseOffYNum" type="number" min="-20" max="20" step="0.1"></span>
-                        <span class="rgba-cell"></span>
-                    </div>
-                    <div class="control-row"><label>Estimate</label><button type="button" class="mini-btn" id="poseFromImageBtn" title="Read a pose off an image you already have — pick one from this document's layers or from the workspace, and the mannequin takes that pose (the render re-bakes onto this layer, one undo). Torso, limbs and head only: fingers stay straight. Runs DWPose on the server, so it takes a moment and needs its models — if they are missing it says so and your pose is untouched.">From image…</button><span></span></div>
-                    <div class="control-row"><label>Reset</label><button type="button" class="mini-btn" id="poseResetPoseBtn" title="Back to the rest pose — every joint straight again. The mesh and the framing stay">Pose</button><button type="button" class="mini-btn" id="poseResetAllBtn" title="The whole step back to its defaults: rest pose, default mesh, white dummy skin, transparent background, camera back to the front">All</button><span></span></div>
-                </div>
-            </div>
-            <!-- The Detector section only exists when the node's detector input is actually
-                 connected (blend-config's hasDetector): the tool has nothing to do otherwise, so
-                 it ships hidden and the config is what unfolds it. The prompt speaks the mask
-                 expression grammar VideoSegmentationNode established. -->
-            <div class="panel-section tool-section foldable collapsed" id="detectorSection" style="display:none;">
-                <div class="panel-head">
-                    <div class="panel-label" id="detectorLabel" title="Detector — runs the detector connected to the node's detector input and turns what it finds into a mask. Click the header to open or close its settings window."><span class="fold-caret"></span>Detector</div>
-                </div>
-                <div class="tool-body">
-                    <div class="control-row"><label>Prompt</label><textarea id="detectPrompt" rows="3" spellcheck="false" title="Mask expression, e.g. '(face:0.4)&amp;(hair:0.3)-mouth'. Operators (left-to-right): &amp; intersect, + union, - subtract, | union. Terms: name, name:0.3, name(0.3). Functions: max(a,b,…), min(a,b,…), grow(x,n) — n&gt;0 dilates, n&lt;0 erodes. Statements ';' or newline separated; 'x = expr' then reuse x." placeholder="e.g. (face:0.4)&amp;(hair:0.3)-mouth"></textarea></div>
-                    <div class="control-row"><label>Threshold</label><input type="range" id="detectThresholdRange" min="0" max="1" step="0.01" value="0.5" title="Confidence threshold used by terms without an explicit one — write 'face:0.3' to override it per term"><span id="detectThresholdValue">0.50</span></div>
-                    <div class="control-row"><label>Invert</label><input type="checkbox" id="detectInvert" title="Flip the final mask (1 - mask): what the detector found becomes the hole, everything else the coverage"><span></span></div>
-                    <div style="display:flex; gap:4px;"><button class="mini-btn" id="detectRunBtn" title="Open the Detect dialog — pick where the detector looks and where the mask lands" style="flex:1;">Detect</button></div>
-                </div>
-            </div>
-            <!-- Processor 工具：把 Interface tab 里开了 Processor 模式的 interface 当离线图像处理器
-                 跑 —— pipeline 的当前图不动，输入按行收集、输出按行落位。行由 JS 依所选 interface
-                 的端口动态填（#processorPorts），分三段：Inputs（image/mask 来源）、Parameters
-                 （这个接口带的 widget 值）、Outputs（结果落位）。枚举照工作台惯例用 mini-group
-                 分段按钮；这一支的 .proc-body 只是把行距和列宽松开，别的工具窗不受影响。 -->
-            <div class="panel-section tool-section foldable collapsed" id="processorSection">
-                <div class="panel-head">
-                    <div class="panel-label" id="processorLabel" title="Processor — runs an interface that has Processor mode on (toggle it in the Interface tab) as a fully offline pass: the pipeline's current image is never touched. Each image input reads the Layers composite, the selected layer or a staging entry; each mask input reads the main Mask, the selected layer's mask, its alpha, or mask AND alpha. The interface's own parameters (preset, strengths, switches) are set here too and travel with the run; leave one empty and the graph's own value runs. Outputs land as a new layer, back into the selected layer or its mask, or in the workspace. Click the header to open its window."><span class="fold-caret"></span>Processor</div>
-                </div>
-                <div class="tool-body proc-body">
-                    <div class="control-row"><label>Interface</label><select id="processorPick" title="Which processor-mode interface to run — the list is every interface with Processor mode on in the Interface tab"></select><span></span></div>
-                    <div id="processorPorts"></div>
-                    <div class="control-row"><label>Run</label><button type="button" class="mini-btn" id="processorResetBtn" title="Forget every value typed in this window — each parameter goes back to the value the graph carries">Reset values</button><button type="button" class="mini-btn" id="processorRunBtn" title="Run the chosen processor offline — inputs are gathered per the rows above, results land per each output row">Run</button></div>
-                </div>
-            </div>
-            <!-- Selection / View 两格也搬去了宿主的 dock（workbench/selection.tsx、view.tsx）。 -->
-        </div><!-- /panelScroll -->
+        <!-- 六格侧栏工具（Text / Geometry / 3D / Pose / Detector / Processor）连同 Canvas / Transform /
+             Mask / Color / Brush / Bucket / Eraser / Selection / View 一起搬进了宿主的 dock，这一栏在
+             2D 模式下再没有内容 —— 空着的 280px 收起来（#sidePanel 默认 display:none，见 CSS），
+             #panelScroll 整块删除。只剩 3D tab 的 Hierarchy / Inspector 用这一栏：Scene3D.enter 把
+             #sidePanel / #sideSplitter 显出来、exit 收起（js/scene3d_view.js）。哪一格搬去了哪个
+             workbench/*.tsx，见 CODELY.md 的迁移记录。 -->
         <!-- 3D tab 期间整栏换成这一份:Hierarchy / Inspector 用和中栏同一套控件词汇
            (.panel-section / .panel-head / .panel-label / .mini-group / .mini-btn / .control-row),
-           长说明一律进 title。#panelScroll 在这期间隐去。 -->
+           长说明一律进 title。 -->
         <div id="scenePanel">
             <div id="sceneScroll">
                 <div class="panel-section">
@@ -1027,16 +810,21 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <script src="js/scene3d_core.js"></script>
 <script src="js/scene3d_view.js"></script>
 <script src="js/scene3d_panel.js"></script>
-<!-- Pose 图层: morph worker 的包装 (js/pose_morph.js, 同一个 worker 服务全部记录)、headless
-     渲染核心 (js/pose_core.js, 装模型/摆姿态/捕获)、工具窗编辑器 (js/pose_view.js: 舞台、
-     轨道、关节拾取、把手、面板字段)。attr/pose.js 的 sync 只在运行时吃它们, 所以排序不论。 -->
+<!-- Pose 图层: morph worker 的包装 (js/pose_morph.js)、headless 渲染核心 (js/pose_core.js, 装模型/
+     摆姿态/捕获)、关键点换算 (js/pose_openpose.js)。attr/pose.js 的 sync 只在运行时吃前两份, 所以
+     排序不论。js/pose_view.js 那份**编辑器**已退役, 只剩页面这一半: pin / From image / 快照播报
+     (宿主 workbench/pose.tsx 运行时自己引 pose_morph.js + pose_core.js, 再起一只 rig 看/摆)。 -->
 <script src="js/pose_morph.js"></script>
 <script src="js/pose_core.js"></script>
 <script src="js/pose_openpose.js"></script>
 <script src="js/pose_view.js"></script>
+<!-- geometry 家族的世界数学 (四元数 / 世界坐标 / 把手 / 旋转环 / 命中判定 + 那组常量) 的唯一一份,
+     页面与宿主共用 —— 宿主 (ui/sampler_node 的 geometry dock 单元) 运行时引同一份。先于
+     direction.js / direction_view.js 加载 (那两份里的裸名字引用都从这里拿)。 -->
+<script src="js/geo_math.js"></script>
 <!-- Direction 小窗里那张"世界里的观察"= 挂在同一份 K3D 上的 three.js 场景 (平面贴参考图、
-     三根轨道、箭头、把手, 中键转眼睛)。它只在运行时吃 direction.js 的世界坐标, 所以排在前面:
-     这样 direction.js 加载时就能确定地拿到它, 或者确定地拿不到 (旧版节点进程没有 /js/ 路由)。 -->
+     三根轨道、箭头、把手, 中键转眼睛)。它只在运行时吃 geo_math.js 的世界坐标, 所以排在前面:
+     这样加载时就能确定地拿到它, 或者确定地拿不到 (旧版节点进程没有 /js/ 路由)。宿主也引同一份。 -->
 <script src="js/direction_view.js"></script>
 <!-- Direction 图层: 姿态数学 (世界坐标的唯一一份) + 图层像素那一次绘制 + 面板交互与 2D 退路。
      它只在运行时调页面本体的 render/pushHistory/getLayer, 加载时一个都不碰。 -->
@@ -2580,6 +2368,24 @@ const blendUiState = {
     // `current` 指到现在站着的那一步，`limit` 与每步预览的键都出自页面自己那一份常量与记录 —— 宿主
     // 只亮这一句，绝不自己数步子（HISTORY_LIMIT 在页面下面才声明，所以这里只能写 0，由 syncHistoryUI 补）。
     history: { limit: 0, canUndo: false, canRedo: false, steps: [] },
+    // 六格工具面板（Text / Geometry / 3D / Pose / Detector / Processor）搬进宿主 dock 以后，正文读的就是
+    // 这几份：Text 是选中层那枚 Text 记录的四样读数 + "这一格该不该亮"；3D 是那三句跳转与状态；
+    // Detector 是总闸 + 那三颗控件此刻的取值（它们住在这一页，宿主摆的是镜像）；Processor 是 interface
+    // 枚举 + 三段端口行的**描述符**（行怎么摆、每行什么控件、候选有哪几枚，由页面按端口现拼，见
+    // renderProcessorRows）—— 所以这一层不认识端口，也不认识图层，它只照描述符摆。
+    text: { on: false, fontLabel: '—', fontFace: '', fontMissing: false, padding: 0, weight: 'normal', color: '#ffffff' },
+    scene3d: { on: false, canOpen: false, note: '—' },
+    detector: { available: false, prompt: '', threshold: 0.5, invert: false },
+    processor: { names: [], choice: -1, inputs: [], params: [], outputs: [] },
+    // Geometry 家族 (direction/point/ray/plane)：舞台归宿主（那一格的 canvas 里画的 three.js 世界图），
+    // 页面只交真值源 —— 当前那枚记录的类型与描述符（四元数 + 位置 + 颜色）那条通道，加那张参考图
+    // （此刻的 context image，唯独不含正在编辑的这枚；宿主拿去当画布平面的贴图）。
+    // 舞台那台相机（轨道/缩放）与移动/旋转把手模式是纯视图状态，住在宿主里，不进这一份。
+    geometry: { on: false, kind: null, desc: null, ref: '', refVersion: 0, canvasW: 0, canvasH: 0 },
+    // Pose：选中层那枚 Pose 记录的世界形状（形态七参 + 姿态 + 取景 + 皮肤/颜色/背景）与目标层的原生
+    // 尺寸。舞台、七颗滑块、皮肤/颜色/背景、取景五格、Reset 与 From image 全在宿主，页面只交这一条
+    // 真值源；宿主的 rig 是它自己起的（页面那一只仍是权威烘面 rig，见 attr/pose.js）。
+    pose: { on: false, desc: null, layerW: 0, layerH: 0 },
     faces: {},
 };
 let blendUiFrame = 0;
@@ -8211,75 +8017,102 @@ function addStashLayer(stack) {
 // 文字的样式调节住在工具栏的 Text 小窗 (它作用于**选中层**最左那枚 Text 记录,与 lane 时代同一
 // 套点名);字本身在画布上双击改。Size/Align 不设控件 —— "字填满盒子"的渲染里它们没有读数。
 const textEditorEl = document.getElementById('textEditor');
-const textFontBtn = document.getElementById('textFontBtn');
-const textPaddingRange = document.getElementById('textPaddingRange');
-const textPaddingValue = document.getElementById('textPaddingValue');
-const TEXT_WEIGHT_CHOICES = [['normal', 'textWeightNormal'], ['bold', 'textWeightBold']];
-const textSwatch = document.getElementById('textSwatch');
-const textColorInput = document.getElementById('textColorInput');
-const textColorValue = document.getElementById('textColorValue');
 
-function setTextChoice(choices, value) {
-    for (const [v, id] of choices) document.getElementById(id).classList.toggle('active', v === value);
-}
-
-// A text step lights the section up the way an active paint tool does — the fold state itself
-// is the user's to change, never ours.
+// A text step lights that dock unit up the way an active paint tool does — the fold state itself was the
+// user's to change; a dock unit is always there, so the unit's body wears the tint and everything else
+// about which layer is being edited is read from this snapshot (see workbench/text.tsx).
 function updateTextPanel() {
     const l = getSelected();
     const on = !!l && isTextLayer(l);
-    document.getElementById('textSection').classList.toggle('active-tool', on);
-    textSwatch.style.display = on ? '' : 'none';
-    if (!on) return;
-    const t = l.text;
+    const t = on ? l.text : null;
     // 按钮上那几个字用的就是它自己那张脸; 本机没有这个字体时转红 (与缺失贴图同一套告警色) —— 文字
-    // 仍旧在, 只是顶着栈尾的回落脸画, 而 .cud 里存的还是这个名字。
-    textFontBtn.textContent = textFontLabel(t.fontFamily);
-    textFontBtn.style.fontFamily = t.fontFamily;
-    textFontBtn.classList.toggle('gone', !fontAvailable(t.fontFamily));
-    textPaddingRange.value = Math.min(256, t.padding);
-    textPaddingValue.textContent = String(t.padding);
-    setTextChoice(TEXT_WEIGHT_CHOICES, t.fontWeight);
-    textColorInput.value = TEXT_HEX6(t.color);
-    textColorValue.textContent = t.color.toUpperCase();
-    textSwatch.style.background = textColorInput.value;
+    // 仍旧在, 只是顶着栈尾的回落脸画, 而 .cud 里存的还是这个名字。措辞与告警都在这一侧算好，宿主只摆。
+    blendUiState.text = on ? {
+        on: true,
+        fontLabel: textFontLabel(t.fontFamily),
+        fontFace: t.fontFamily || '',
+        fontMissing: !fontAvailable(t.fontFamily),
+        padding: Math.max(0, Number(t.padding) || 0),
+        weight: t.fontWeight === 'bold' ? 'bold' : 'normal',
+        color: TEXT_HEX6(t.color),
+    } : { on: false, fontLabel: '—', fontFace: '', fontMissing: false, padding: 0, weight: 'normal', color: '#ffffff' };
+    queueBlendUi();
 }
-textFontBtn.addEventListener('click', () => openTextFontModal());
-textPaddingRange.addEventListener('input', () => {
-    textPaddingValue.textContent = textPaddingRange.value;
-    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding', 'Text padding set');
-});
-for (const [v, id] of TEXT_WEIGHT_CHOICES) {
-    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }, null, 'Text weight set'));
-}
-textColorInput.addEventListener('input', () => {
-    textColorValue.textContent = textColorInput.value.toUpperCase();
-    patchSelectedText({ color: textColorInput.value }, 'text-color', 'Text color picked');
-});
 
 // ==================== 3D 工具小窗 ====================
 // 选中层那枚 3D 记录的跳转与状态。完整编辑仍在场景 tab 的 #scenePanel —— 这里只是"哪枚记录、
 // 烘了没有、进去"这三句话。
-const scene3dOpenBtn = document.getElementById('scene3dOpenBtn');
-const scene3dNote = document.getElementById('scene3dNote');
+// 3D 那一格：正文在宿主 dock 里，页面只把"哪枚记录、烘了没有、进去"这三句话播进快照。
+// The 3D unit lights up the way a text step does — a dock unit is always there, so the unit's body wears the
+// tint and this is the only place that decides whether it should.
 function update3DPanel() {
     const l = getSelected();
     const r = l ? findAttr(l, '3d') : null;
-    document.getElementById('scene3dSection').classList.toggle('active-tool', !!r);
-    scene3dOpenBtn.disabled = !r || !r.sceneUid;
-    scene3dNote.textContent = !r
-        ? 'No 3D step on the selected layer — add one from the + chip on its row'
-        : r.surface && r.surface.width
-            ? (r.sceneUid ? `Baked ${r.surface.width} × ${r.surface.height} — re-render from the scene any time`
-                          : `Baked ${r.surface.width} × ${r.surface.height} — the scene tab was closed, these pixels are all that is left`)
-            : (r.sceneUid ? 'Not baked yet — open the scene, then press Render to Layer'
-                          : 'Scene tab was closed and nothing was ever baked');
+    blendUiState.scene3d = {
+        on: !!r,
+        canOpen: !!(r && r.sceneUid),
+        note: !r
+            ? 'No 3D step on the selected layer — add one from the + chip on its row'
+            : r.surface && r.surface.width
+                ? (r.sceneUid ? `Baked ${r.surface.width} × ${r.surface.height} — re-render from the scene any time`
+                              : `Baked ${r.surface.width} × ${r.surface.height} — the scene tab was closed, these pixels are all that is left`)
+                : (r.sceneUid ? 'Not baked yet — open the scene, then press Render to Layer'
+                              : 'Scene tab was closed and nothing was ever baked'),
+    };
+    queueBlendUi();
 }
-scene3dOpenBtn.addEventListener('click', () => {
+// 动作键那一头：Open Scene 那颗按下去就是这里 —— 与原来那颗按钮同一句，守卫一个都不减。
+function openSelected3DScene() {
     const l = getSelected();
     if (!l || !findAttr(l, '3d')) { setStatus('Select a layer that carries a 3D step', 'error'); return; }
     open3DSceneDocument(l);
-});
+}
+
+// ==================== Geometry 工具小窗 ====================
+// geometry 家族 (direction/point/ray/plane) 的舞台搬进宿主 dock (workbench/geometry.tsx) 之后，页面
+// 只播快照：当前那枚记录的类型与描述符（四元数 + 位置 + 颜色），加上那张参考图 —— 此刻的 context
+// image，唯独不含正在编辑的这枚（合成那趟见 render() 的 dirRefTarget/dirRefDone）。舞台那台相机
+// （轨道/缩放）与移动/旋转把手模式是纯视图状态，住在宿主里，不进这一份。
+// 这一句原来叫 updateDirectionPanel（在 direction.js 里改 DOM），现在 direction.js 那一份只喊这里。
+function updateGeometryPanel() {
+    const t = dirGizmoTarget();
+    if (!t) {
+        blendUiState.geometry = { on: false, kind: null, desc: null, ref: '', refVersion: 0, canvasW: 0, canvasH: 0 };
+        queueBlendUi();
+        return;
+    }
+    const d = t.r.desc;
+    blendUiState.geometry = {
+        on: true,
+        kind: t.r.type,
+        desc: {
+            position: { x: d.position.x, y: d.position.y, z: d.position.z },
+            rotation: { x: d.rotation.x, y: d.rotation.y, z: d.rotation.z, w: d.rotation.w },
+            color: d.color,
+        },
+        ref: geoRefDataUrl(),
+        refVersion: dirRefVersion,
+        canvasW, canvasH,
+    };
+    queueBlendUi();
+}
+// 参考图那条通道：dirRefCanvas 是 render() 那一趟顺手抄的，这里把它缩到 ≤384 编一张 PNG 送过去
+// （全尺寸每帧编码太重）。版本没动就复用上一张 —— dirRefVersion 只在参考图真的重抄过之后才 ++。
+let _geoRefUrl = '', _geoRefVer = -1;
+function geoRefDataUrl() {
+    if (!dirRefCanvas || !dirRefCanvas.width || !dirRefCanvas.height) return '';
+    if (dirRefVersion === _geoRefVer) return _geoRefUrl;
+    _geoRefVer = dirRefVersion;
+    const maxDim = 384;
+    const k = Math.min(1, maxDim / Math.max(dirRefCanvas.width, dirRefCanvas.height));
+    if (k >= 1) { _geoRefUrl = dirRefCanvas.toDataURL('image/png'); return _geoRefUrl; }
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(dirRefCanvas.width * k));
+    c.height = Math.max(1, Math.round(dirRefCanvas.height * k));
+    c.getContext('2d').drawImage(dirRefCanvas, 0, 0, c.width, c.height);
+    _geoRefUrl = c.toDataURL('image/png');
+    return _geoRefUrl;
+}
 
 // `box` (canvas px, from the armed rectangle) welds the layer's transform to that rectangle;
 // without it the new text falls back to the contain-fit rule every new entry obeys.
@@ -8794,119 +8627,9 @@ function invertPaintedMask() {
 // 因为"盖满整张"这件事只有 Mask 层自己的那一行说得清（runMaskRowAction('full')）。合并成一格以后
 // 这一颗没有任何可观察差别，就按它本来的样子撤掉，而不是再画一枚藏起来的按钮。
 
-// ---- 工具设置小窗 ----
-// Brush, Bucket, Eraser, Text, Detector and Processor start folded. Clicking a header row docks
-// that tool's settings as a small window on the sidePanel's left edge instead of opening them inside
-// the column, so the tool rows never jump and a slider gets a row of its own. Windows follow their
-// header while the panel scrolls or the column is dragged wider, and stack in list order so two of
-// them cannot sit on top of each other.
-const TOOL_WINDOW_IDS = ['textSection', 'directionSection', 'scene3dSection', 'poseSection', 'detectorSection', 'processorSection'];
-const TOOL_WINDOW_GAP = 8;
-const toolFlyHost = document.createElement('div');
-toolFlyHost.id = 'toolFlyHost';
-document.body.appendChild(toolFlyHost);
-const toolWindows = new Map();   // section id -> { fly, body, anchor }
-let toolWindowZ = 150;           // the host sits above the canvas overlays; the newest window on top
-
-function openToolWindow(id) {
-    const section = document.getElementById(id);
-    const body = section.querySelector('.tool-body');
-    const label = section.querySelector('.panel-label');
-    const anchor = body.nextSibling;
-    const fly = document.createElement('div');
-    fly.className = 'tool-flyout';
-    // 窗宽归那一节自己所有: Direction 那一格现在是一幅要转着看的 3D 场景, 320px 的一条横带里
-    // 三根轨道全糊成一团, 平面上的参考图也读不出内容。别的窗没写这个属性, 一律还是 320。
-    const flyWidth = Number(section.dataset.flyoutWidth);
-    if (flyWidth) fly.style.width = `${flyWidth}px`;
-    fly.style.zIndex = String(++toolWindowZ);   // a stacked column can still end up overlapping
-    const head = document.createElement('div');
-    head.className = 'tool-flyout-head';
-    // The header row keeps the caret, the window keeps the name and its shortcut chip — cloned from
-    // the panel label so the two can never read differently.
-    const title = document.createElement('div');
-    title.className = 'panel-label';
-    title.title = label.title;
-    title.append(...Array.from(label.childNodes)
-        .filter(n => n.nodeType === Node.TEXT_NODE || !n.classList.contains('fold-caret'))
-        .map(n => n.cloneNode(true)));
-    const close = document.createElement('button');
-    close.className = 'mini-btn';
-    close.textContent = '✕';
-    close.title = 'Close this window — the settings fold back into the header row';
-    close.addEventListener('click', () => toggleToolWindow(id));
-    head.append(title, close);
-    fly.append(head, body);
-    toolFlyHost.appendChild(fly);
-    toolWindows.set(id, { fly, body, anchor });
-    section.classList.remove('collapsed');
-    toolWindowObserver.observe(fly);
-    layoutToolWindows();
-    // Direction 那一格要一开窗就有东西看: 平面上那张参考图是 render() 那一趟顺路抄出来的,
-    // 而开窗本身不产生 render —— 不补这一下, 新开的窗里那张平面就是空的。
-    if (id === 'directionSection') render();
-    // Pose 那一格同理, 而且更要紧: 开窗这一下要把 rig 的 canvas 挂进舞台 (挂载在 updatePosePanel 里,
-    // 它还会顺手催一趟还没装配完的 rig)。关窗的那一半在 closeToolWindow。
-    if (id === 'poseSection' && typeof updatePosePanel === 'function') updatePosePanel();
-}
-
-function closeToolWindow(id) {
-    const w = toolWindows.get(id);
-    if (!w) return;
-    const section = document.getElementById(id);
-    section.insertBefore(w.body, w.anchor);
-    section.classList.add('collapsed');
-    w.fly.remove();
-    toolWindows.delete(id);
-    toolWindowObserver.unobserve(w.fly);
-    layoutToolWindows();
-    // Pose: 关窗把 rig 的 canvas 摘出舞台 (它继续 headless 出图 —— 摘的只是舞台这一半), 顺手
-    // 收掉可能停在一半的拖动会话。
-    if (id === 'poseSection' && typeof poseViewOnWindowClose === 'function') poseViewOnWindowClose();
-}
-
-function toggleToolWindow(id) {
-    if (toolWindows.has(id)) closeToolWindow(id);
-    else openToolWindow(id);
-}
-
-function layoutToolWindows() {
-    const panel = sidePanelEl.getBoundingClientRect();
-    const place = [];
-    let nextTop = TOOL_WINDOW_GAP;
-    for (const id of TOOL_WINDOW_IDS) {
-        const w = toolWindows.get(id);
-        if (!w) continue;
-        const box = w.fly.getBoundingClientRect();
-        const headTop = document.getElementById(id).querySelector('.panel-head').getBoundingClientRect().top;
-        let top = Math.max(headTop, nextTop);
-        if (top + box.height > window.innerHeight - TOOL_WINDOW_GAP)
-            top = Math.max(TOOL_WINDOW_GAP, window.innerHeight - TOOL_WINDOW_GAP - box.height);
-        let left = panel.left - box.width - TOOL_WINDOW_GAP;
-        if (left < TOOL_WINDOW_GAP) left = TOOL_WINDOW_GAP;
-        place.push([w.fly, left, top]);
-        nextTop = top + box.height + TOOL_WINDOW_GAP;
-    }
-    for (const [fly, left, top] of place) {
-        if (fly.style.left !== `${left}px`) fly.style.left = `${left}px`;
-        if (fly.style.top !== `${top}px`) fly.style.top = `${top}px`;
-    }
-}
-
-// Relayout is event-driven, never a per-frame loop: a window moves when the panel scrolls, when the
-// iframe resizes, or when anything in the column changes height — a readout line appearing shifts the
-// headers under it, so every row is observed, and a brush mode switch that makes its own window
-// taller is observed too.
-const toolWindowRelayout = () => { if (toolWindows.size) layoutToolWindows(); };
-const toolWindowObserver = new ResizeObserver(toolWindowRelayout);
-for (const el of document.querySelectorAll('#panelScroll .panel-section')) toolWindowObserver.observe(el);
-document.getElementById('panelScroll').addEventListener('scroll', toolWindowRelayout, { passive: true });
-window.addEventListener('resize', toolWindowRelayout);
-
-for (const id of TOOL_WINDOW_IDS) {
-    document.getElementById(id).querySelector('.panel-head').addEventListener('click', () => toggleToolWindow(id));
-}
-
+// 工具设置小窗那一整套（openToolWindow / closeToolWindow / toggleToolWindow / layoutToolWindows +
+// ResizeObserver / TOOL_WINDOW_IDS）随最后一扇窗（Pose）一起退役：六格工具全住进宿主的 dock，这一页
+// 不再有沿 sidePanel 左缘摞起来的小窗，也没有它们的 DOM 与监听。D/P 键改为只"钉目标"（见键处理那张表）。
 // Clear All is per stack: emptying the layers must never throw away the guidance stack sitting on
 // top of it (and the other way round). The Mask layer is a channel, not a stack member, so the
 // layers Clear All keeps clearing it — that is what the message has always promised.
@@ -9688,26 +9411,32 @@ tagModalEl.addEventListener('keydown', e => {
 const detectModalEl = document.getElementById('detectModal');
 const detectSourceSelect = document.getElementById('detectSourceSelect');
 const detectDestSelect = document.getElementById('detectDestSelect');
-const detectPromptInput = document.getElementById('detectPrompt');
-const detectThresholdRange = document.getElementById('detectThresholdRange');
-const detectThresholdValue = document.getElementById('detectThresholdValue');
-const detectInvertInput = document.getElementById('detectInvert');
-const detectRunBtn = document.getElementById('detectRunBtn');
+
+// 小窗那三颗控件（prompt / threshold / invert）的正文搬进了宿主 dock，真值源留在这一页：宿主那格摆的是
+// 镜像，每次落值走动作键回来写这三颗变量、再播一次（syncDetectorUI）。对话框（openDetectModal /
+// confirmDetectModal）读的也还是这三颗 —— 与它们原来读 DOM 那三颗是同一个判据、同一句话。
+let detectPromptValue = '';
+let detectThresholdValue = 0.5;
+let detectInvertValue = false;
 
 function detectModalOpen() { return detectModalEl.classList.contains('open'); }
 
-// The section's whole visibility contract: absent until blend-config says the detector input is
-// connected, and if the settings window is docked when that flips false, it folds back with it.
-function syncDetectorSection() {
-    const section = document.getElementById('detectorSection');
-    if (section) section.style.display = hasDetector ? '' : 'none';
-    if (!hasDetector && toolWindows.has('detectorSection')) closeToolWindow('detectorSection');
-    if (!hasDetector && detectModalOpen()) closeDetectModal();
+// 那一格现在的可见性契约：总闸关着时正文只给一句空态（dock 里一格不能凭空消失），开着时摆三颗控件。
+function syncDetectorUI() {
+    blendUiState.detector = {
+        available: hasDetector,
+        prompt: detectPromptValue,
+        threshold: detectThresholdValue,
+        invert: detectInvertValue,
+    };
+    queueBlendUi();
 }
 
-detectThresholdRange.addEventListener('input', () => {
-    detectThresholdValue.textContent = Number(detectThresholdRange.value).toFixed(2);
-});
+function syncDetectorSection() {
+    syncDetectorUI();
+    // 总闸翻掉时对话框也不再成立（原来那一句是关掉已经开着的小窗，现在是收起已经开着的对话框）。
+    if (!hasDetector && detectModalOpen()) closeDetectModal();
+}
 
 function openDetectModal() {
     if (guardAdjustMode()) return;
@@ -9853,9 +9582,9 @@ function confirmDetectModal() {
         detect: {
             composite,
             mask: maskUrl,
-            prompt: detectPromptInput.value.trim(),
-            threshold: Number(detectThresholdRange.value),
-            invert: detectInvertInput.checked,
+            prompt: detectPromptValue.trim(),
+            threshold: detectThresholdValue,
+            invert: detectInvertValue,
             source,
             dest,
         },
@@ -9865,7 +9594,6 @@ function confirmDetectModal() {
 detectModalEl.addEventListener('mousedown', e => { if (e.target === detectModalEl) closeDetectModal(); });
 document.getElementById('detectCancelBtn').addEventListener('click', closeDetectModal);
 document.getElementById('detectConfirmBtn').addEventListener('click', confirmDetectModal);
-detectRunBtn.addEventListener('click', openDetectModal);
 detectModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); closeDetectModal(); }
     else if (e.key === 'Enter') { e.preventDefault(); confirmDetectModal(); }
@@ -10413,14 +10141,27 @@ window.addEventListener('keydown', e => {
     // so unlike B/E/G they need no selected layer.
     if ((e.key === 'm' || e.key === 'M') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('rect'); return; }
     if ((e.key === 'l' || e.key === 'L') && !e.ctrlKey && !e.metaKey && !e.altKey) { activateMode('lasso'); return; }
-    // D opens the Direction window — the family window for the canvas-relative 3D objects
-    // (Direction / Point / Ray / Plane). It is a settings window, not a canvas mode — the steps are
-    // made from each strip's + menu — so it only folds the panel out, exactly like clicking its header.
+    // D points the geometry dock unit at the selected layer's first geometry step — the family window
+    // for the canvas-relative 3D objects (Direction / Point / Ray / Plane). It is a settings panel, not
+    // a canvas mode (the steps are made from each strip's + menu); the unit is always in the dock, so
+    // this only pins its target and lets it light up.
     // (Alt+D is not used: Chrome eats it for the address bar before the page ever sees it.)
     if ((e.key === 'd' || e.key === 'D') && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         e.stopPropagation();
-        toggleToolWindow('directionSection');
+        const geo = l ? (GEO_KINDS.map(k => findAttr(l, k)).find(Boolean)) : null;
+        if (l && geo) dirPinTarget(l, geo);
+        else setStatus('No geometry step on the selected layer — add one from its + chip', 'error');
+        return;
+    }
+    // P points the Pose dock unit at the selected layer's Pose step — same courtesy as D (it used to open
+    // the Pose tool window; the window is gone, the unit lives in the dock, so this only pins its target).
+    if ((e.key === 'p' || e.key === 'P') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const pose = l ? findAttr(l, 'pose') : null;
+        if (l && pose) posePinTarget(l, pose);
+        else setStatus('No Pose step on the selected layer — add one from its + chip', 'error');
         return;
     }
     if ((e.key === 'f' || e.key === 'F') && (e.ctrlKey || e.metaKey)) { e.preventDefault(); flipView(); return; }
@@ -10738,7 +10479,7 @@ function activateDocument(entry) {
         if (!bootSwap && !isSceneDoc(entry)) {
             stagingItems = (entry.staging || []).filter(s => s && s.src);
             renderStaging();
-            renderProcessorRows();      // Processor 的输入下拉跟着图池走，与 'blend-staging' 镜像同款
+            syncProcessorUI();          // Processor 的输入下拉跟着图池走，与 'blend-staging' 镜像同款
         }
         restoreState(entry.ctx, { document: true });
         applyCudTools(entry.ctx.tools);
@@ -12632,6 +12373,105 @@ const UI_COMMANDS = {
     'history-redo': () => redoAction(),
     'history-jump': v => jumpHistory(Number(v)),
     'history-clear': () => resetHistory('Cleared the history'),
+    // ---- 六格工具面板（Text / 3D / Detector / Processor；Geometry 与 Pose 是同一趟里的下半场）----
+    // 每一条就是那一颗控件原来那行调用，一个守卫都不减：载荷从另一个文档递过来，形状一个字都不能信
+    // （数字一律 Number()、字符串一律 String()、勾一律 !!），取不到就什么都不做 —— 与页面那几颗控件
+    // 自己的判据完全一致（例如没选中文字层时 patchSelectedText 自己就什么都不做）。
+    'text-font': () => openTextFontModal(),
+    'text-padding': v => patchSelectedText({ padding: Math.max(0, Number(v) || 0) }, 'text-padding', 'Text padding set'),
+    'text-weight': v => patchSelectedText({ fontWeight: String(v) === 'bold' ? 'bold' : 'normal' }, null, 'Text weight set'),
+    'text-color': v => patchSelectedText({ color: String(v) }, 'text-color', 'Text color picked'),
+    'scene3d-open': () => openSelected3DScene(),
+    // Geometry 家族（direction/point/ray/plane）：舞台与那六格读数/色块/Reset 都在宿主，动作落到这枚
+    // 记录的 desc 上 —— 与页面原来那几颗控件同一个写口 patchGizmoTarget（整只换 desc，sanitize 是
+    // spec 自己那道裁定）。live = 拖动/连续输入期间只重画、不重修行列表；commit 那一趟才立一步历史。
+    'geometry-desc': v => {
+        const t = dirGizmoTarget();
+        const o = v && typeof v === 'object' ? v : {};
+        if (!t || !o.patch) return;
+        patchGizmoTarget(t, o.patch, { live: !!o.live });
+    },
+    'geometry-commit': v => {
+        const t = dirGizmoTarget();
+        if (!t) return;
+        refreshLayerPanels();
+        pushHistory('geometry-' + String((v && v.label) || 'edit'), 'Geometry value set');
+    },
+    'geometry-reset': () => {
+        const t = dirGizmoTarget();
+        if (!t) return;
+        patchGizmoTarget(t, Object.assign({}, ATTR_TYPES[t.r.type].defaults));
+        setStatus(`「${t.r.type[0].toUpperCase() + t.r.type.slice(1)}」reset to its default`, 'success');
+    },
+    // Pose 那一格：舞台、七颗形态滑块、皮肤/颜色/背景、取景五格、Reset 与 From image 都在宿主，动作落到
+    // 这枚记录的 desc 上 —— 与页面原来那几颗控件同一个写口 patchPoseTarget（整只换 desc，sanitize 是 spec
+    // 自己那道裁定）。live = 拖动/连续输入期间只重画、不重修行列表；commit 那一趟才立一步历史。
+    // mesh / skin / color / bg / cam / pose 全走同一条 desc 通道；两条 Reset 有各自的落点（Pose 只回静止
+    // 姿态，All 走 ATTR_TYPES.pose.defaults）；From image 开的是这一页的选图 modal 与 DWPose 估算。
+    'pose-desc': v => {
+        const t = poseGizmoTarget();
+        const o = v && typeof v === 'object' ? v : {};
+        if (!t || !o.patch) return;
+        patchPoseTarget(t, o.patch, { live: !!o.live });
+    },
+    'pose-commit': v => {
+        const t = poseGizmoTarget();
+        if (!t) return;
+        refreshLayerPanels();
+        pushHistory('pose-' + String((v && v.label) || 'edit'), 'Pose value set');
+    },
+    'pose-reset-pose': () => {
+        const t = poseGizmoTarget();
+        if (!t) return;
+        patchPoseTarget(t, { pose: { bones: {}, bonePositions: {}, modelRotation: [0, 0, 0] } });
+        pushHistory('pose-reset-pose', 'Pose reset (bones)');
+        setStatus('Pose reset to rest — the mesh and framing stay');
+    },
+    'pose-reset-all': () => {
+        const t = poseGizmoTarget();
+        if (!t) return;
+        patchPoseTarget(t, Object.assign({}, ATTR_TYPES.pose.defaults));
+        pushHistory('pose-reset', 'Pose reset (all)');
+        setStatus('Pose step reset to its defaults');
+    },
+    'pose-from-image': () => openPoseFromImage(),
+    // Detector 那三颗控件写的就是页面这三颗真值源，写完播一次 —— 对话框读的与它们原来是同一份。
+    'detector-prompt': v => { detectPromptValue = String(v == null ? '' : v); syncDetectorUI(); },
+    'detector-threshold': v => { const n = Number(v); if (Number.isFinite(n)) { detectThresholdValue = Math.max(0, Math.min(1, n)); syncDetectorUI(); } },
+    'detector-invert': v => { detectInvertValue = !!v; syncDetectorUI(); },
+    'detector-run': () => openDetectModal(),
+    // Processor：换 interface / 挑来源落位 / 挑工作区条目 / 拧一口参数。每一句都落回页面那三样真值源，
+    // 再重拼一次描述符播出去 —— 换源可能带出或收起 staging 子行，所以每一次都要重拼。
+    'processor-interface': v => {
+        const n = Number(v);
+        if (Number.isFinite(n) && n >= 0 && n < processorList.length) { processorChoice = n; syncProcessorUI(); }
+    },
+    'processor-pick': v => {
+        const p = processorCurrent(); if (!p) return;
+        const o = uiRow(v);
+        const side = o.side === 'out' ? 'out' : 'in';
+        const port = Number(o.port);
+        if (!Number.isFinite(port)) return;
+        processorSel.set(procSelKey(p.index, side, port), String(o.value));
+        syncProcessorUI();
+    },
+    'processor-staging': v => {
+        const p = processorCurrent(); if (!p) return;
+        const o = uiRow(v);
+        const port = Number(o.port);
+        if (!Number.isFinite(port)) return;
+        processorSel.set(procSelKey(p.index, 'in:staging', port), String(o.id));
+        syncProcessorUI();
+    },
+    'processor-param': v => {
+        const p = processorCurrent(); if (!p) return;
+        const o = uiRow(v);
+        const port = p.start_ports.find(x => x.num === Number(o.port) && x.category === 'manual');
+        // 值按那一口的类型归：与页面那颗控件原来发回来的形状一字不差（勾是布尔、数字是 number、其余字符串）。
+        if (port) procSetParam(p.index, port, o.value);
+    },
+    'processor-run': () => runProcessor(),
+    'processor-reset': () => resetProcessorValues(),
     // ---- 工作区那一格与两摞之间 ----
     // 行拖进图池 = 把这一层此刻的合成结果交出去存一张（exportLayerToStaging 今天就是行拖出去那颗 data
     // 载荷的落点，它自己会把 PNG 发给宿主并报那一句"staged"）；图池条目拖进某一摞 = 以智能图层加入。
@@ -13257,208 +13097,101 @@ function processorCoverageUrl(surface) {
     return c.toDataURL('image/png');
 }
 
-function renderProcessorPick() {
-    const sel = document.getElementById('processorPick');
-    sel.innerHTML = '';
+// Processor 那一格的正文搬进了宿主 dock（workbench/processor.tsx）：这一页不再造 DOM，只按当前
+// interface 的端口现拼一份**描述符**（哪几段、每行什么控件、候选有哪几枚），播进快照由宿主照摆。
+// 落值仍是宿主发回来的动作键（见 UI_COMMANDS 那几条），真值源（processorChoice / processorSel /
+// stagingItems）一个字没动 —— 这一句只是把原来那一串 createElement 换成等价的纯数据。
+function syncProcessorUI() {
+    // interface 枚举那一段原来在 renderProcessorPick 里：空表 → -1，越界 → 回到第一枚。
     if (!processorList.length) {
-        const o = document.createElement('option');
-        o.textContent = '— none —';
-        sel.appendChild(o);
-        sel.disabled = true;
         processorChoice = -1;
-        return;
+    } else if (processorChoice < 0 || processorChoice >= processorList.length) {
+        processorChoice = 0;
     }
-    sel.disabled = false;
-    if (processorChoice < 0 || processorChoice >= processorList.length) processorChoice = 0;
-    for (let i = 0; i < processorList.length; i++) {
-        const o = document.createElement('option');
-        o.value = String(i);
-        o.textContent = processorList[i].name;
-        sel.appendChild(o);
-    }
-    sel.value = String(processorChoice);
-}
-
-function renderProcessorRows() {
-    const host = document.getElementById('processorPorts');
-    host.innerHTML = '';
     const p = processorCurrent();
-    if (!p) {
-        const hint = document.createElement('div');
-        hint.className = 'panel-hint';
-        hint.textContent = 'No processor interface yet — turn Processor mode on for one in the Interface tab.';
-        host.appendChild(hint);
-        return;
-    }
-    const row = (label, title) => {
-        const r = document.createElement('div');
-        r.className = 'control-row';
-        const lb = document.createElement('label');
-        lb.textContent = label;
-        lb.title = title || '';
-        r.appendChild(lb);
-        return r;
-    };
-    // 一段 = 一个小标题 + 它的行。段标题用面板那套大写小字（.panel-label），没有行的段不出现。
-    const group = (title) => {
-        const g = document.createElement('div');
-        g.className = 'proc-group';
-        const h = document.createElement('div');
-        h.className = 'panel-label';
-        h.textContent = title;
-        g.appendChild(h);
-        host.appendChild(g);
-        return g;
-    };
-    const choiceGroup = (side, port, table) => {
-        const g = document.createElement('div');
-        g.className = 'mini-group';
-        const cur = procPick(p.index, side, port.num, table, procDefaultPick(p.index, port.num));
-        for (const [val, text, tip] of table) {
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.className = 'mini-btn' + (val === cur ? ' active' : '');
-            b.textContent = text;
-            b.title = tip;
-            b.addEventListener('click', () => {
-                processorSel.set(procSelKey(p.index, side, port.num), val);
-                renderProcessorRows();     // 换源可能带出/收起 staging 子行
-            });
-            g.appendChild(b);
-        }
-        return g;
-    };
-    // 参数行的值走 procParamValue/procSetParam（存在 processorSel 那条 map 里）：重渲染、换
-    // interface、宿主重推端口都不会把拧过的值冲掉。
-    const paramVal = port => procParamValue(p.index, port);
-    const setParam = (port, v) => procSetParam(p.index, port, v);
+    const inputs = [], params = [], outputs = [];
+    if (p) {
+        const choices = table => table.map(([value, label, tip]) => ({ value, label, tip }));
+        const pick = (side, port, table) => procPick(p.index, side, port.num, table, procDefaultPick(p.index, port.num));
+        const inPorts = p.start_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK');
+        const paramPorts = p.start_ports.filter(x => x.category === 'manual');
+        const outPorts = p.end_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK' || x.type === 'PIPELINE_DATA');
 
-    // 控件跟着类型走：开关 checkbox、数字 number、文字 text；枚举候选 ≤3 用分段按钮（和来源/
-    // 落位那些行同一套词汇），候选多到一行铺不开才退成 select（和 Interface、staging 那两处同一
-    // 套）。COMBO 没读到候选（后端认不到那个消费节点）时跟着 STRING 走，由用户自己打字。
-    const paramRow = (port) => {
-        const cur = paramVal(port);
-        const graphV = procNoValue(port.value) ? null : port.value;
-        const r = row(port.name, `${port.name} — ${port.type}; ` + (
-            graphV !== null ? `the graph carries ${graphV}`
-                : port.type === 'COMBO' && (port.options || []).length
-                    ? `nothing derived from the graph, so this runs as the first candidate (${port.options[0]})`
-                    : 'nothing derived from the graph, so an empty field runs as unset'));
-        if (port.type === 'BOOLEAN') {
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.checked = cur === true || cur === 'true';
-            cb.addEventListener('change', () => setParam(port, cb.checked));
-            r.appendChild(cb);
-        } else if (port.type === 'INT' || port.type === 'FLOAT') {
-            const i = document.createElement('input');
-            i.type = 'number';
-            if (port.type === 'INT') i.step = '1';
-            if (!procNoValue(cur)) i.value = String(cur);
-            i.placeholder = 'graph default';
-            i.addEventListener('input', () => setParam(port, i.value === '' ? '' : Number(i.value)));
-            r.appendChild(i);
-        } else if (port.type === 'COMBO' && (port.options || []).length) {
-            // 绑定一律按字符串比。两档派生都落空时（存档对齐读不到、类定义又只写了候选没写
-            // default），ComfyUI 自己的 combo widget 就是落在候选第一项 —— 窗里跟着点亮同一项，
-            // 不摆一条谁都不亮的按钮带；后端 _class_input_default 用的是同一条规则，所以这里亮
-            // 的 = 实跑注进去的。反过来若后端推来一个不在候选表上的值（候选是现从类定义读的，
-            // 存档那条可能来自改版前的节点），把它自己补成一格，绝不让界面静默落在 opts[0] 上。
-            const opts = port.options.map(String);
-            const curStr = procNoValue(cur) ? (opts[0] || '') : String(cur);
-            const all = (!curStr || opts.includes(curStr)) ? opts : [curStr, ...opts];
-            if (all.length <= 3) {
-                const g = document.createElement('div');
-                g.className = 'mini-group';
-                for (const o of all) {
-                    const b = document.createElement('button');
-                    b.type = 'button';
-                    b.className = 'mini-btn' + (o === curStr ? ' active' : '');
-                    b.textContent = o;
-                    b.title = opts.includes(o) ? o : `${o} — the value the graph carries`;
-                    b.addEventListener('click', () => { setParam(port, o); renderProcessorRows(); });
-                    g.appendChild(b);
-                }
-                r.appendChild(g);
-            } else {
-                const sel = document.createElement('select');
-                sel.title = `Which value ${port.name} takes this run`;
-                for (const o of all) {
-                    const op = document.createElement('option');
-                    op.value = o;
-                    op.textContent = o;
-                    sel.appendChild(op);
-                }
-                // 先填选项再定 sel.value：逐项 option.selected 在脱管的 option 上不总成立，
-                // 而且谁都不匹配时浏览器会静默显示第一项，看起来像绑上了其实没有。
-                sel.value = curStr;
-                sel.addEventListener('change', () => setParam(port, sel.value));
-                r.appendChild(sel);
-            }
-        } else {
-            const i = document.createElement('input');
-            i.type = 'text';
-            if (!procNoValue(cur)) i.value = String(cur);
-            i.placeholder = port.type === 'COMBO' ? 'no candidates read from the graph' : '';
-            i.addEventListener('input', () => setParam(port, i.value));
-            r.appendChild(i);
-        }
-        return r;
-    };
-
-    const inPorts = p.start_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK');
-    const paramPorts = p.start_ports.filter(x => x.category === 'manual');
-    const outPorts = p.end_ports.filter(x => x.type === 'IMAGE' || x.type === 'MASK' || x.type === 'PIPELINE_DATA');
-
-    // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多一行工作区条目选择。
-    if (inPorts.length) {
-        const g = group('Inputs');
+        // 输入行：每个 image/mask 起端口一行；选 Staging 的 image 输入多带一行工作区条目选择。
         for (const port of inPorts) {
             const table = port.type === 'MASK' ? PROCESSOR_SRC_MASK : PROCESSOR_SRC_IMAGE;
-            const r = row(port.name, `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`);
-            r.appendChild(choiceGroup('in', port, table));
-            g.appendChild(r);
-            if (port.type === 'IMAGE' && procPick(p.index, 'in', port.num, table, procDefaultPick(p.index, port.num)) === 'staging') {
-                const sr = row('', 'Which workspace entry feeds this input');
-                const sel = document.createElement('select');
-                sel.title = 'Which workspace entry feeds this input';
-                if (!stagingItems.length) {
-                    const o = document.createElement('option');
-                    o.textContent = '— workspace is empty —';
-                    sel.appendChild(o);
-                    sel.disabled = true;
-                } else {
-                    const cur = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
-                    for (const s of stagingItems) {
-                        const o = document.createElement('option');
-                        o.value = s.id;
-                        o.textContent = s.name;
-                        if (cur ? cur === s.id : s === stagingItems[stagingItems.length - 1]) o.selected = true;
-                        sel.appendChild(o);
-                    }
-                    sel.addEventListener('change', () =>
-                        processorSel.set(procSelKey(p.index, 'in:staging', port.num), sel.value));
-                }
-                sr.appendChild(sel);
-                g.appendChild(sr);
+            const cur = pick('in', port, table);
+            let staging = null;
+            if (port.type === 'IMAGE' && cur === 'staging') {
+                // 页面这一侧没挑过就默认落在最后一枚（原来 `s === stagingItems[last]` 那一句）。
+                const stored = processorSel.get(procSelKey(p.index, 'in:staging', port.num));
+                const ids = stagingItems.map(s => String(s.id));
+                const curId = (stored !== undefined && ids.includes(String(stored)))
+                    ? String(stored)
+                    : (ids.length ? ids[ids.length - 1] : '');
+                staging = { options: stagingItems.map(s => ({ id: String(s.id), name: s.name })), cur: curId };
             }
+            inputs.push({
+                num: port.num, name: port.name, hint: `${PROCESSOR_HINTS.in[port.type]} — ${port.name}`,
+                options: choices(table), cur, staging,
+            });
         }
-    }
-    // 参数行：这个接口带的 widget 值，一行一个口。
-    if (paramPorts.length) {
-        const g = group('Parameters');
-        for (const port of paramPorts) g.appendChild(paramRow(port));
-    }
-    // 输出行：image 与 pipeline 出口落 New Layer/Staging，mask 出口另有写回两档。
-    if (outPorts.length) {
-        const g = group('Outputs');
+
+        // 参数行：这个接口带的 widget 值，一行一个口。控件跟着类型走：bool / number / text / choices
+        // （候选 ≤3 用分段按钮）/ select（候选多到一行铺不开）—— 与页面原来那段分流一字不差。
+        // COMBO 没读到候选（后端认不到那个消费节点）时跟着 STRING 走，由用户自己打字。
+        for (const port of paramPorts) {
+            const cur = procParamValue(p.index, port);
+            const graphV = procNoValue(port.value) ? null : port.value;
+            const tip = `${port.name} — ${port.type}; ` + (
+                graphV !== null ? `the graph carries ${graphV}`
+                    : port.type === 'COMBO' && (port.options || []).length
+                        ? `nothing derived from the graph, so this runs as the first candidate (${port.options[0]})`
+                        : 'nothing derived from the graph, so an empty field runs as unset');
+            const desc = {
+                num: port.num, name: port.name, tip,
+                kind: 'text', on: false, value: '', step: '', placeholder: '', options: [], cur: '',
+            };
+            if (port.type === 'BOOLEAN') {
+                desc.kind = 'bool';
+                desc.on = cur === true || cur === 'true';
+            } else if (port.type === 'INT' || port.type === 'FLOAT') {
+                desc.kind = 'number';
+                desc.step = port.type === 'INT' ? '1' : '';
+                desc.value = procNoValue(cur) ? '' : String(cur);
+                desc.placeholder = 'graph default';
+            } else if (port.type === 'COMBO' && (port.options || []).length) {
+                // 两档派生都落空时 ComfyUI 自己的 combo widget 落在候选第一项 —— 窗里跟着点亮同一项，
+                // 不摆一条谁都不亮的按钮带。后端推来一个不在候选表上的值（改版前的节点）就把它自己
+                // 补成一格，绝不让界面静默落在 opts[0] 上。
+                const opts = port.options.map(String);
+                const curStr = procNoValue(cur) ? (opts[0] || '') : String(cur);
+                const all = (!curStr || opts.includes(curStr)) ? opts : [curStr, ...opts];
+                desc.kind = all.length <= 3 ? 'choices' : 'select';
+                desc.cur = curStr;
+                desc.options = all.map(o => ({ value: o, label: o, tip: opts.includes(o) ? o : `${o} — the value the graph carries` }));
+            } else {
+                desc.value = procNoValue(cur) ? '' : String(cur);
+                desc.placeholder = port.type === 'COMBO' ? 'no candidates read from the graph' : '';
+            }
+            params.push(desc);
+        }
+
+        // 输出行：image 与 pipeline 出口落 New Layer/Staging，mask 出口另有写回两档。
         for (const port of outPorts) {
             const dstTable = port.type === 'MASK' ? PROCESSOR_DST_MASK : PROCESSOR_DST_IMAGE;
-            const r = row(port.name, `${PROCESSOR_HINTS.out[port.type] || 'Output'} — ${port.name}`);
-            r.appendChild(choiceGroup('out', port, dstTable));
-            g.appendChild(r);
+            outputs.push({
+                num: port.num, name: port.name, hint: `${PROCESSOR_HINTS.out[port.type] || 'Output'} — ${port.name}`,
+                options: choices(dstTable), cur: pick('out', port, dstTable),
+            });
         }
     }
+    blendUiState.processor = {
+        names: processorList.map(x => x.name),
+        choice: processorChoice,
+        inputs, params, outputs,
+    };
+    queueBlendUi();
 }
 
 // 输入收集：返回 dataURL，收集不了（没选图层、mask 没墨、工作区空）返回 null —— 状态已报。
@@ -13543,7 +13276,7 @@ function resetProcessorValues() {
     for (const port of p.start_ports) {
         if (port.category === 'manual') processorSel.delete(procSelKey(p.index, 'manual', port.num));
     }
-    renderProcessorRows();
+    syncProcessorUI();
     setStatus('Parameter values are back to what the graph carries', 'success');
 }
 
@@ -13609,14 +13342,8 @@ function finishProcessorRun(d) {
     else setStatus(`Processor done — ${results.length} result${results.length === 1 ? '' : 's'}`, 'success');
 }
 
-document.getElementById('processorPick').addEventListener('change', () => {
-    processorChoice = Number(document.getElementById('processorPick').value) || 0;
-    renderProcessorRows();
-});
-document.getElementById('processorRunBtn').addEventListener('click', runProcessor);
-document.getElementById('processorResetBtn').addEventListener('click', resetProcessorValues);
-renderProcessorPick();
-renderProcessorRows();
+// Interface 枚举与三段端口行的正文都在宿主（workbench/processor.tsx）—— 这里只把第一份描述符播出去。
+syncProcessorUI();
 
 window.addEventListener('message', event => {
     const d = event.data || {};
@@ -13630,21 +13357,20 @@ window.addEventListener('message', event => {
         // contenteditable 没有 placeholder 属性 —— 占位文本走 CSS 的 ::before。
         if (d.tagDisabledHint) extraPromptInput.dataset.placeholder = d.tagDisabledHint;
         // init 时随配置带一份工作区列表（此后靠 'blend-staging' 增量同步）。
-        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); renderProcessorRows(); }
+        if (Array.isArray(d.staging)) { stagingItems = d.staging; renderStaging(); syncProcessorUI(); }
         syncActionButtons();
         return;
     }
     if (d.type === 'blend-staging') {
         stagingItems = Array.isArray(d.items) ? d.items : [];
         renderStaging();
-        renderProcessorRows();      // staging 输入的下拉跟着图池走
+        syncProcessorUI();          // staging 输入的下拉跟着图池走
         return;
     }
     if (d.type === 'blend-processors') {
         // Interface tab 的 Processor 开关变了：重填 interface 枚举与端口行。
         processorList = Array.isArray(d.processors) ? d.processors : [];
-        renderProcessorPick();
-        renderProcessorRows();
+        syncProcessorUI();
         return;
     }
     if (d.type === 'blend-processor-result') {

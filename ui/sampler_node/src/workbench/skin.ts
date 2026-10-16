@@ -61,4 +61,41 @@ export const wbStyles: Record<string, React.CSSProperties> = {
     background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.45)', cursor: 'pointer',
     padding: 2, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
+  // ---- Text / 3D / Detector / Processor 四格要的那几样 ----
+  // 空态与提示句：页面那两条 .panel-hint 与 .s3d-note 同一套小字灰。
+  note: { fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.45 },
+  // 一格的纵列：控件一组一组往下摆，组间距照页面 .tool-body 的 gap。
+  stack: { display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 },
+  // 分段按钮带（来源 / 落位 / 参数枚举 ≤3 档）：页面 .mini-group 的读法。
+  miniGroup: { display: 'flex', gap: 4, flexWrap: 'wrap', minWidth: 0 },
+  // Processor 那三段的小标题（Inputs / Parameters / Outputs）：页面 .proc-group > .panel-label。
+  groupHead: { fontSize: 10.5, color: 'rgba(255,255,255,0.42)', fontWeight: 600, marginTop: 2 },
+  // Font 那一颗：占满一行、字左对齐、用它自己那张脸画；本机没有这个字体时转红（.text-font-btn.gone）。
+  fontBtn: {
+    flex: '1 1 0', minWidth: 0, textAlign: 'left' as const, background: 'rgba(255,255,255,0.08)',
+    border: 'none', borderRadius: 6, color: 'rgba(255,255,255,0.9)', fontSize: 11, padding: '4px 8px',
+    cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
+  },
+  fontBtnGone: { color: '#ff453a' },
+  // 下拉：取值照 EditPhase 的 paramSelect，只是这一列更窄，所以字号与内距各收一号。
+  select: {
+    flex: '1 1 0', minWidth: 0, background: 'rgba(255,255,255,0.06)',
+    border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '3px 6px',
+    color: 'rgba(255,255,255,0.9)', fontSize: 10.5, outline: 'none', colorScheme: 'dark',
+  },
+  // 多行输入（Detector 的 prompt）：页面 #detectPrompt 那一条的等价物。
+  area: {
+    flex: '1 1 auto', minWidth: 0, minHeight: 58, resize: 'vertical' as const,
+    background: 'rgba(255,255,255,0.06)', border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 6,
+    padding: '4px 6px', color: 'rgba(255,255,255,0.9)', fontSize: 10.5, outline: 'none',
+    fontFamily: 'ui-monospace, Consolas, monospace', colorScheme: 'dark',
+  },
+  // 单行数字 / 文字输入（Processor 的参数口）：和 select 同一套皮。
+  input: {
+    flex: '1 1 0', minWidth: 0, background: 'rgba(255,255,255,0.06)',
+    border: '0.5px solid rgba(255,255,255,0.1)', borderRadius: 6, padding: '3px 6px',
+    color: 'rgba(255,255,255,0.9)', fontSize: 10.5, outline: 'none', colorScheme: 'dark',
+  },
+  // 颜色输入：页面 <input type=color> 自己那颗，只把它收成一小枚方形。
+  color: { width: 26, height: 18, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer', flexShrink: 0 },
 };

@@ -14,6 +14,12 @@ import { maskUnit } from './mask';
 import { selectionUnit } from './selection';
 import { transformUnit } from './transform';
 import { viewUnit } from './view';
+import { textUnit } from './text';
+import { geometryUnit } from './geometry';
+import { scene3dUnit } from './scene3d';
+import { poseUnit } from './pose';
+import { detectorUnit } from './detector';
+import { processorUnit } from './processor';
 
 /** 每一格正文拿到的唯一出口：泛型把动作键和它的载荷绑死（见 types 的 BlendUiPayloads）。 */
 export type WorkbenchUnitProps = { send: BlendUiSend };
@@ -34,6 +40,8 @@ export type WorkbenchUnit = {
 // 搬完一块就往后加一行，页面那一侧同时删掉它自己那一格。
 export const WORKBENCH_UNITS: WorkbenchUnit[] = [
   canvasUnit, transformUnit, maskUnit, colorUnit, brushUnit, bucketUnit, eraserUnit, selectionUnit, viewUnit,
+  // 侧栏那六格工具小窗：Text、Geometry、3D、Pose、Detector、Processor（序 = 页面那一列的序）。
+  textUnit, geometryUnit, scene3dUnit, poseUnit, detectorUnit, processorUnit,
   guidancesUnit, layersUnit, historyUnit, fxParamsUnit,
 ];
 

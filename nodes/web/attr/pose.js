@@ -108,7 +108,6 @@ function poseRigEntry(r) {
 function poseSweepRigs() {
     for (const [id, entry] of Array.from(poseRigs)) {
         if (attrRecords.has(id)) continue;
-        if (typeof poseViewRigIs === 'function' && poseViewRigIs(entry.rig)) poseViewReleaseRig();
         entry.rig?.dispose();
         poseRigs.delete(id);
     }

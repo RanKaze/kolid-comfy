@@ -34,9 +34,9 @@ defineAttrType({
     // 那颗 jump 按钮 —— 建 step 与点 chip 都不把人拽进视口。开窗前强制刷一遍面板:selectLayer 对
     // "已选中"会早退,不重铺列表,面板可能还攥着上一刻的读数 (sceneUid 尚未落袋时按钮是灰的)。
     open(l, r) {
+        // 3D 工具小窗搬进宿主 dock 之后没有"开窗"这回事了：那一格常驻，点 chip 只换选中 + 播快照。
         selectLayer(l.id, 'transform');
         update3DPanel();
-        toggleToolWindow('scene3dSection');
     },
     // `+` 菜单装上这一枚时:开一枚新的场景 tab 交给它,人留在原地 —— 什么时候进去由用户决定。
     onAdded(l, r) {

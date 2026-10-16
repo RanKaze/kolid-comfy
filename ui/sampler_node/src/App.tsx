@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import EditPhase from './components/EditPhase';
 import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
-import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow } from './types';
+import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
 
 const POLL_INTERVAL = 500;
@@ -102,6 +102,165 @@ const fxOpenOf = (v: unknown): BlendFxOpenStep | null => {
       const row = fxRowOf(r);
       return row ? [row] : [];
     }),
+  };
+};
+
+/** Processor 那一格的描述符：一行一行读回来，读不出形状的行就丢掉 —— 摆一行找不到落点的控件比少一行更糟。
+ *  候选（来源 / 落位 / 参数枚举）同样逐枚读：值和短名缺一样就丢那一枚，别摆一条点了什么都不发生的按钮。 */
+const procChoicesOf = (v: unknown): BlendProcChoice[] => {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((o: unknown) => {
+    if (!o || typeof o !== 'object') return [];
+    const x = o as Record<string, unknown>;
+    const value = typeof x.value === 'string' ? x.value : '';
+    const label = typeof x.label === 'string' ? x.label : '';
+    if (!value || !label) return [];
+    return [{ value, label, tip: typeof x.tip === 'string' ? x.tip : '' }];
+  });
+};
+const procUiOf = (v: unknown): BlendProcessorUi => {
+  if (!v || typeof v !== 'object') return { names: [], choice: -1, inputs: [], params: [], outputs: [] };
+  const x = v as Record<string, unknown>;
+  const names = (Array.isArray(x.names) ? x.names : []).filter((n): n is string => typeof n === 'string');
+  const choice = typeof x.choice === 'number' && Number.isFinite(x.choice) ? Math.round(x.choice) : -1;
+  const inputs: BlendProcInRow[] = (Array.isArray(x.inputs) ? x.inputs : []).flatMap((r: unknown) => {
+    if (!r || typeof r !== 'object') return [];
+    const o = r as Record<string, unknown>;
+    const num = typeof o.num === 'number' ? o.num : NaN;
+    const options = procChoicesOf(o.options);
+    if (!Number.isFinite(num) || !options.length) return [];
+    const st = o.staging && typeof o.staging === 'object' ? o.staging as Record<string, unknown> : null;
+    const staging = st ? {
+      options: (Array.isArray(st.options) ? st.options : []).flatMap((s: unknown) => {
+        if (!s || typeof s !== 'object') return [];
+        const q = s as Record<string, unknown>;
+        return typeof q.id === 'string' ? [{ id: q.id, name: typeof q.name === 'string' ? q.name : '' }] : [];
+      }),
+      cur: typeof st.cur === 'string' ? st.cur : '',
+    } : null;
+    return [{
+      num, name: typeof o.name === 'string' ? o.name : '', hint: typeof o.hint === 'string' ? o.hint : '',
+      options, cur: typeof o.cur === 'string' ? o.cur : '', staging,
+    }];
+  });
+  const params: BlendProcParamRow[] = (Array.isArray(x.params) ? x.params : []).flatMap((r: unknown) => {
+    if (!r || typeof r !== 'object') return [];
+    const o = r as Record<string, unknown>;
+    const num = typeof o.num === 'number' ? o.num : NaN;
+    const kind = o.kind;
+    if (!Number.isFinite(num)) return [];
+    if (kind !== 'bool' && kind !== 'number' && kind !== 'text' && kind !== 'choices' && kind !== 'select') return [];
+    return [{
+      num, name: typeof o.name === 'string' ? o.name : '', tip: typeof o.tip === 'string' ? o.tip : '',
+      kind, on: o.on === true,
+      value: typeof o.value === 'string' ? o.value : (typeof o.value === 'number' ? String(o.value) : ''),
+      step: typeof o.step === 'string' ? o.step : '',
+      placeholder: typeof o.placeholder === 'string' ? o.placeholder : '',
+      options: procChoicesOf(o.options), cur: typeof o.cur === 'string' ? o.cur : '',
+    }];
+  });
+  const outputs: BlendProcOutRow[] = (Array.isArray(x.outputs) ? x.outputs : []).flatMap((r: unknown) => {
+    if (!r || typeof r !== 'object') return [];
+    const o = r as Record<string, unknown>;
+    const num = typeof o.num === 'number' ? o.num : NaN;
+    const options = procChoicesOf(o.options);
+    if (!Number.isFinite(num) || !options.length) return [];
+    return [{
+      num, name: typeof o.name === 'string' ? o.name : '', hint: typeof o.hint === 'string' ? o.hint : '',
+      options, cur: typeof o.cur === 'string' ? o.cur : '',
+    }];
+  });
+  return { names, choice, inputs, params, outputs };
+};
+
+/** Geometry 那一格的快照：一枚记录的世界形状 + 舞台参考图。位置 / 四元数 / 颜色三样里缺一样就把
+ *  整枚当成"没有记录"（`desc: null`）—— 摆一个画不出来的舞台比摆一句空态更糟。色值不是 hex 就回
+ *  默认那支（与页面 DIR_DEFAULTS.color 一字不差），参考图与版本只是搬运。 */
+const geometryUiOf = (v: unknown): BlendGeometryUi => {
+  const none: BlendGeometryUi = { on: false, kind: null, desc: null, ref: '', refVersion: 0, canvasW: 0, canvasH: 0 };
+  if (!v || typeof v !== 'object') return none;
+  const o = v as Record<string, unknown>;
+  const fin = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+  const d = (o.desc && typeof o.desc === 'object' ? o.desc : null) as Record<string, unknown> | null;
+  const p = d && d.position && typeof d.position === 'object' ? d.position as Record<string, unknown> : null;
+  const q = d && d.rotation && typeof d.rotation === 'object' ? d.rotation as Record<string, unknown> : null;
+  const pos = p && fin(p.x) && fin(p.y) && fin(p.z) ? { x: p.x, y: p.y, z: p.z } : null;
+  const rot = q && fin(q.x) && fin(q.y) && fin(q.z) && fin(q.w) ? { x: q.x, y: q.y, z: q.z, w: q.w } : null;
+  const color = d && /^#[0-9a-fA-F]{6}$/.test(String(d.color || '')) ? String(d.color) : '';
+  const desc: BlendGeometryDesc | null = o.on === true && pos && rot
+    ? { position: pos, rotation: rot, color: color || '#ff2e88' }
+    : null;
+  return {
+    on: !!desc,
+    kind: typeof o.kind === 'string' && o.kind ? o.kind : null,
+    desc,
+    ref: typeof o.ref === 'string' ? o.ref : '',
+    refVersion: fin(o.refVersion) ? o.refVersion : 0,
+    canvasW: fin(o.canvasW) ? Math.max(0, Math.round(o.canvasW)) : 0,
+    canvasH: fin(o.canvasH) ? Math.max(0, Math.round(o.canvasH)) : 0,
+  };
+};
+
+/** Pose 那一格的快照：一枚记录的形态/姿态/取景/皮肤形状 + 目标层原生尺寸。desc 逐字段兜住 —— 七参
+ *  与取景五格是要有限数、姿态三样（bones / bonePositions / modelRotation）缺一样就整枚当"没有记录"
+ *  （`desc: null`）。色值不是 hex 就回白（与页面 POSE_COLOR_DEFAULT 一字不差），皮肤档不在那三档里
+ *  就回 dummy_white，层面尺寸收成非负整数。 */
+const POSE_SKINS = ['naked', 'naked_marks', 'dummy_white'];
+const poseUiOf = (v: unknown): BlendPoseUi => {
+  const none: BlendPoseUi = { on: false, desc: null, layerW: 0, layerH: 0 };
+  if (!v || typeof v !== 'object') return none;
+  const o = v as Record<string, unknown>;
+  const fin = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+  const d = (o.desc && typeof o.desc === 'object' ? o.desc : null) as Record<string, unknown> | null;
+  if (o.on !== true || !d) return none;
+
+  const mi = (d.mesh && typeof d.mesh === 'object' ? d.mesh : null) as Record<string, unknown> | null;
+  const MESH = ['age', 'gender', 'weight', 'muscle', 'height', 'breast_size', 'firmness'] as const;
+  if (!mi || !MESH.every(k => fin(mi[k]))) return none;
+  const mesh: BlendPoseDesc['mesh'] = {
+    age: mi.age as number, gender: mi.gender as number, weight: mi.weight as number, muscle: mi.muscle as number,
+    height: mi.height as number, breast_size: mi.breast_size as number, firmness: mi.firmness as number,
+  };
+  if (mi.show_genitals === true) mesh.show_genitals = true;
+
+  const ci = (d.cam && typeof d.cam === 'object' ? d.cam : null) as Record<string, unknown> | null;
+  const CAM = ['yaw', 'pitch', 'zoom', 'offsetX', 'offsetY'] as const;
+  if (!ci || !CAM.every(k => fin(ci[k]))) return none;
+  const cam = {
+    yaw: ci.yaw as number, pitch: ci.pitch as number, zoom: ci.zoom as number,
+    offsetX: ci.offsetX as number, offsetY: ci.offsetY as number,
+  };
+
+  const pi = (d.pose && typeof d.pose === 'object' ? d.pose : null) as Record<string, unknown> | null;
+  if (!pi) return none;
+  const triple = (raw: unknown): Record<string, [number, number, number]> => {
+    const out: Record<string, [number, number, number]> = {};
+    if (raw && typeof raw === 'object') {
+      for (const [k, r] of Object.entries(raw as Record<string, unknown>)) {
+        if (Array.isArray(r) && r.length >= 3 && r.slice(0, 3).every(fin)) {
+          out[k] = [r[0] as number, r[1] as number, r[2] as number];
+        }
+      }
+    }
+    return out;
+  };
+  const bones = triple(pi.bones);
+  const bonePositions = triple(pi.bonePositions);
+  const mr = Array.isArray(pi.modelRotation) ? pi.modelRotation : [];
+  const modelRotation: [number, number, number] = mr.length >= 3 && mr.slice(0, 3).every(fin)
+    ? [mr[0] as number, mr[1] as number, mr[2] as number] : [0, 0, 0];
+
+  const skin = POSE_SKINS.includes(String(d.skin)) ? String(d.skin) : 'dummy_white';
+  const color = /^#[0-9a-fA-F]{3,8}$/.test(String(d.color || '')) ? String(d.color) : '#ffffff';
+  let bg: [number, number, number] | null = null;
+  if (Array.isArray(d.bg) && d.bg.length === 3 && d.bg.every(fin)) {
+    bg = d.bg.slice(0, 3).map(c => Math.max(0, Math.min(255, Math.round(c as number)))) as [number, number, number];
+  }
+  return {
+    on: true,
+    desc: { mesh, pose: { bones, bonePositions, modelRotation }, cam, skin, color, bg },
+    layerW: fin(o.layerW) ? Math.max(0, Math.round(o.layerW)) : 0,
+    layerH: fin(o.layerH) ? Math.max(0, Math.round(o.layerH)) : 0,
   };
 };
 
@@ -1037,6 +1196,35 @@ const App: React.FC = () => {
           // `faces` 是**增量**（页面发完就清），所以这一份 store 是累加的：合并这一帧新给的那几张，
           // 空串那一句是页面发来的"这张面不存在了"，跟着删 —— 删过的层不能一直占着一张没人读的 PNG。
           // 没有新面时回同一个对象引用：否则一条只动了读数的快照也要把整张表复制一遍、惊动每一格。
+          // ---- 六格工具面板（Text / Geometry / 3D / Pose / Detector / Processor）----
+          // 逐字段兜住"读不出来就当没说过"：这一条跨 iframe，一条旧快照没有这几格不代表它们真是空的。
+          text: {
+            on: ui.text?.on === true,
+            fontLabel: str(ui.text?.fontLabel) || base.text.fontLabel,
+            // 字体名 / 那道脸 / 缺字告警都由页面算好，这里只搬运；色值不是 6 位 hex 就回默认（不把脏值摆上去）。
+            fontFace: str(ui.text?.fontFace),
+            fontMissing: ui.text?.fontMissing === true,
+            padding: num(ui.text?.padding),
+            weight: str(ui.text?.weight) === 'bold' ? 'bold' : 'normal',
+            color: /^#[0-9a-fA-F]{6}$/.test(str(ui.text?.color)) ? str(ui.text?.color) : base.text.color,
+          },
+          scene3d: {
+            on: ui.scene3d?.on === true,
+            canOpen: ui.scene3d?.canOpen === true,
+            note: str(ui.scene3d?.note) || base.scene3d.note,
+          },
+          // Geometry：描述符逐字段兜住（位置 / 四元数 / 颜色三样齐了才算有记录），见 geometryUiOf。
+          geometry: geometryUiOf(ui.geometry),
+          // Pose：形态/姿态/取景三样齐了才算有记录，见 poseUiOf。
+          pose: poseUiOf(ui.pose),
+          detector: {
+            available: ui.detector?.available === true,
+            prompt: str(ui.detector?.prompt),
+            threshold: dec(ui.detector?.threshold, base.detector.threshold),
+            invert: ui.detector?.invert === true,
+          },
+          // Processor 的三段行是描述符：逐行逐枚读回来，形状不对的丢掉（见 procUiOf）。
+          processor: procUiOf(ui.processor),
           faces: mergeFaces(getBlendUi().faces, faceDelta(ui.faces)),
         });
       }
