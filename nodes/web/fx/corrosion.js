@@ -254,28 +254,6 @@ function fxglCorrosion(col, p) {
     col.slot = 1 - col.slot;
 }
 
-// 模式一换要用的参数行就换一批,所以这块面板自己铺行;每行仍是通用的 fxControlRow,默认值/
-// 读数/undo 语义和其它特效完全一致 (同 fx/warp.js、fx/tone_map.js 的写法)。
-function corrosionEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-corrosion';
-    const tail = document.createElement('div');
-    tail.className = 'fx-corrosion-tail';
-
-    function build() {
-        const p = effectParams(effect);
-        tail.replaceChildren(...CORR_PARAMS
-            .filter(d => d.key !== 'mode' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        syncRead();
-    }
-    // 第一行那颗分段钮照旧走通用控件,只多接一句「换完模式重铺剩下的行」。
-    box.appendChild(fxControlRow(l, effect, CORR_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'corrosion',
     label: 'Corrosion',
@@ -285,7 +263,6 @@ defineEffect({
     needsMapWhen: p => p.mode === 'Texture',
     desc: 'Eat the layer\u2019s alpha away along its own outline and bleed rust out of every hole. Where it bites is measured from the alpha contour, so a thick shape\u2019s edges go first while its interior holds, and the interior only starts to follow once Amount is pushed past the middle of its range \u2014 Amount says how much gets eaten, Bias is the radius of the edge zone that measurement runs over (a thin stroke is all edge, so it corrodes first; the zone itself reaches inward only about a tenth of that radius). The holes are placed by a noise field: Gaussian (a random value per cell, clouded by Smooth), FBM (multi-octave value noise), or a Noise map you bind and tile. Angle rotates the field\u2019s two axes, and Scale/Shift work along and across them separately, all in this layer\u2019s own pixels. Leak paints rust over the eaten boundary \u2014 over intact metal too, not just inside the holes \u2014 Spread is how far it bleeds, and Leak Side says whether it stains the metal, grows into the transparent margin around it (that needs clear room inside the layer box \u2014 a text layer gets it from Padding), or both.',
     params: CORR_PARAMS,
-    editor: corrosionEditorEl,
     shaders: { corrField: FX_FS_CORR_FIELD, corrHoles: FX_FS_CORR_HOLES, corrosion: FX_FS_CORR },
     run: fxglCorrosion,
     readout(p, n, effect) {

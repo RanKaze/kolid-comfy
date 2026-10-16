@@ -960,7 +960,7 @@ function patchGizmoTarget(hit, patch, opts) {
     markAttrPainted(hit.r);
     if (!(opts && opts.silent)) {
         render();
-        if (!(opts && opts.live)) renderLayerList();
+        if (!(opts && opts.live)) refreshLayerPanels();
     }
 }
 
@@ -1168,8 +1168,8 @@ function endDirGizmoDrag() {
     const moved = dirDrag.moved;
     dirDrag = null;
     if (l && r && moved) {
-        renderLayerList();
-        pushHistory('geometry-' + dirDragAxisKey(r.desc));
+        refreshLayerPanels();
+        pushHistory('geometry-' + dirDragAxisKey(r.desc), 'Direction handle dragged');
     }
     drawDirGizmo();
 }
@@ -1246,8 +1246,8 @@ for (const f of DIR_FIELDS) {
         const t = dirGizmoTarget();
         if (!t || !f.on(t.r.type)) return;
         f.input.value = dirFieldText(f.get(t.r.desc), f.fmt);   // 回读sanitize折回之后的实际读数
-        renderLayerList();
-        pushHistory();
+        refreshLayerPanels();
+        pushHistory(null, 'Direction value typed in');
     });
 }
 
@@ -1260,7 +1260,7 @@ if (dirGizmoColor) {
     });
     dirGizmoColor.addEventListener('change', () => {
         const t = dirGizmoTarget();
-        if (t) pushHistory();
+        if (t) pushHistory(null, 'Direction color picked');
     });
 }
 if (dirGizmoReset) {

@@ -90,7 +90,7 @@ const Scene3D = {
         Scene3D.sync();
         Scene3D.select(desc.id);
         // 新增物体是一次可撤销的结构变化,和 2D 那边 addLayer 的分寸一致。
-        pushHistory();
+        pushHistory(null, 'Added ' + (desc.kind || 'object') + ' to the scene');
         return desc;
     };
 
@@ -103,7 +103,7 @@ const Scene3D = {
         if (Scene3D.rec.selectedId === id) Scene3D.rec.selectedId = null;
         Scene3D.sync();
         Scene3D.select(null);
-        pushHistory();
+        pushHistory(null, 'Removed from the scene');
         setStatus('Removed from the scene');
         return true;
     };
@@ -113,7 +113,7 @@ const Scene3D = {
         if (!o || !name || o.name === name) return false;
         o.name = name;
         Scene3D.renderPanel();
-        pushHistory();
+        pushHistory(null, 'Renamed a scene object');
         return true;
     };
 

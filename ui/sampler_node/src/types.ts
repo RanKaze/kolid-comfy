@@ -484,6 +484,85 @@ export type BlendDocCommand = 'new' | 'load' | 'save' | 'save-as' | 'export-png'
 /** 一颗笔形工具（Brush / Eraser 同族）的读数：模式决定哪几根旋钮有可见差别，所以三块面板共用一条。 */
 export type BlendPen = { mode: string; size: number; strength: number; center: number; edge: number; gamma: number };
 
+/** 条带上的一枚 attribute。`face` 是这一枚在快照 `faces` 里的键（链没有面，所以交空串）；`glyph` 是
+ *  它没有面时**仍然要画**的那枚记号 —— 只有 effects 那一类有，内容是 fx 注册表自己的魔棒 SVG，
+ *  与页面 `ATTR_KINDS.chain.chip` 画的是同一位作者。`badge` 是 attribute 注册表自己报的那枚类型角标
+ *  —— 注册表还住在页面那一侧，原样交过来就是唯一一份。`title` 只有真值源那一句，"Ctrl+click …"那半句
+ *  是面板的措辞，归这一侧。 */
+export type BlendAttrChip = {
+  guid: string; type: string; label: string; kind: string; chipClass: string;
+  badge: string; badgeClass: string; face: string; glyph: string; enabled: boolean; armed: boolean; title: string;
+};
+
+/** 一条特效链里的一步。`icon` 与 `readout` 都由页面的 fx 注册表算好（图标库与那句读数都还在那边）。 */
+export type BlendChainStep = { id: number; type: string; label: string; icon: string; readout: string; enabled: boolean };
+
+/** 摊在图层行上方的那条链容器。空链不占位，所以 `steps` 永远至少一步（页面交数组那一趟就是这么过滤的）。 */
+export type BlendChainLane = { guid: string; bypass: boolean; skip: string; steps: BlendChainStep[] };
+
+/** 条带末尾那颗 `+` 菜单里的一类 attribute。顺序就是页面注册表的声明序，`addTitle` 是注册表自己那句
+ *  （它没写过才是页面那句模板补的）—— 有哪几类、加进去会做什么，只有注册表答得出。 */
+export type BlendAttrKind = { type: string; label: string; addTitle: string };
+
+/** 右键菜单每一条的出现/灰掉所问的那六个谓词。菜单归宿主摆（拍板 5.a），但这些事实只有页面答得出：
+ *  `genHasImg` 与行上 ▶ 那句用的不是同一个判据（方向层恒算有图，哪怕还没墨），`cudDocOpen` 问的是
+ *  "那个项目此刻开着"，与 `cudLinked`（链接注册表）不同源。条目文案与位置全在 React 那一侧。 */
+export type BlendRowMenu = {
+  genHasImg: boolean; hasBuffer: boolean; canvasReady: boolean;
+  groupSize: number; hasText: boolean; cudDocOpen: boolean;
+};
+
+/** 一行属于哪一摞。交的是页面自己那两个字面量（`WORK_STACK` / `GUIDANCE_STACK`），不是宿主 dock 的
+ *  单元名 —— 跨摞拖行与"从工作区落进哪一格"回发的都是这一句，两边因此不可能各造一套名字。 */
+export type BlendStack = 'layer' | 'guidance';
+
+/** 图层行 = 一行描述符。缩略图一律是键：真正的像素走 `BlendUi.faces`，见页面的 face 通道。
+ *  `badgeSvg` 是那枚类型角标本身的画法（七支，认的是图层谓词），与 attribute 的 `badge`、链里那枚
+ *  `icon` 同一套规矩：画法由页面那位唯一作者交过来，配色与摆位归这一侧的 CSS。 */
+export type BlendLayerRow = {
+  id: number; name: string; kind: string; badgeSvg: string; stack: BlendStack; cudName: string; cudLinked: boolean;
+  selected: boolean; grouped: boolean; visible: boolean; canGen: boolean; hasImg: boolean;
+  native: { w: number; h: number }; orig: string; canvas: string; hover: string;
+  menu: BlendRowMenu;
+  attrs: BlendAttrChip[]; chains: BlendChainLane[];
+};
+
+export type BlendHistoryStep = { i: number; label: string; face: string; current: boolean };
+
+export type BlendHistory = {
+  limit: number; canUndo: boolean; canRedo: boolean; steps: BlendHistoryStep[];
+};
+
+/** 参数面里的一行。页面按 fx 注册表把**那一步**声明的旋钮编成这一串 —— `when` 过滤、`kind:'fold'` 的
+ *  组内组外、贴图/方向槽的绑定状态全在页面判（判据只有注册表答得出），宿主只按 `kind` 画控件。
+ *  所以这里交的是画它要的全部事实，一行都不留"回过来问页面"的口子：值、读数、选项的显示文本、
+ *  绑没绑、绑的那张图此刻还在不在。十种 kind 就是注册表里那十种行的画法（`range` 是 def.kind 缺省
+ *  那一支；`lattice` 与 `curve` 是原来两块专用编辑面剩下的两块真内容 —— 专用编辑面这个概念已经没了）。 */
+type BlendFxRowBase = { key: string; label: string; tip: string; readout: string };
+export type BlendFxRow =
+  | (BlendFxRowBase & { kind: 'fold'; open: boolean })
+  | (BlendFxRowBase & { kind: 'range'; value: number; min: number; max: number; step: number })
+  | (BlendFxRowBase & { kind: 'check'; flag: boolean })
+  | (BlendFxRowBase & { kind: 'flag'; flag: boolean; onText: string; offText: string })
+  | (BlendFxRowBase & { kind: 'color'; value: string })
+  | (BlendFxRowBase & { kind: 'enum'; value: string; options: string[]; labels: string[] })
+  | (BlendFxRowBase & { kind: 'map'; role: string; optional: boolean; bound: boolean; missing: boolean; title: string })
+  | (BlendFxRowBase & { kind: 'dir'; bound: boolean; missing: boolean; title: string; types: string[] })
+  | (BlendFxRowBase & { kind: 'lattice'; hasGrid: boolean; active: boolean; editLabel: string; hint: string })
+  | (BlendFxRowBase & { kind: 'curve';
+      channels: { value: string; label: string }[]; channel: string;
+      points: [number, number][]; lut: [number, number][]; minGap: number });
+
+/** 此刻展开参数的那一步（一趟最多一步 —— `fxOpenId` 那一个变量说的就是它）。`rows` 按声明序，
+ *  折叠头后面跟着它组里的行；坐标三样就是宿主回发时带回来的那三样。 */
+export type BlendFxOpenStep = {
+  layerId: number; attrId: string; stepId: number;
+  type: string; label: string; readout: string; rows: BlendFxRow[];
+};
+
+/** 参数面上每一句回发的坐标：哪一层、哪一枚 Effects 容器、链里的第几步。三样缺一就落不到那一步上。 */
+export type BlendFxCoord = { layerId: number; attrId: string; stepId: number };
+
 export type BlendUi = {
   /** 工作台当前工具，页面 `mode` 那颗变量的镜像（'transform' | 'rect' | 'lasso' | 'pan' | 'zoom'
    *  | 'rotate' | 'canvasModify' | 'none' …）。一颗变量喂六个高亮，所以只镜像它本身。 */
@@ -508,6 +587,30 @@ export type BlendUi = {
    *  `still` 只在面真的动过时才重编（按 surface 身份 + paintGen 失效），编成 84 边长的 PNG；没动过时
    *  快照里那句字符串一字不差，queueBlendUi 的等值去重因此整条都不发。 */
   mask: { visible: boolean; still: string };
+  /** Layers / Guidances 两格的两摞行。这里只有描述符：谁、挂着哪几枚 attribute、链里有哪几步、哪一颗
+   *  该亮。文字、摆法、空态那句、七种类型角标都在这一侧；页面留的是谓词与真值源。 */
+  stacks: { layers: BlendLayerRow[]; guidances: BlendLayerRow[] };
+  /** 两格头部那颗「看加特效前的原样」开关的读数 —— 页面自己那份状态，宿主亮的就是它。链里每一步也带
+   *  同一个布尔（`BlendChainLane.bypass`），但一枚容器都没挂的时候，头部那颗按钮仍要知道自己按下去没有。
+   *  `wand` 是这颗按钮的画法等值：它不能由 React 自己抄一份魔棒 SVG（那是第二份真相），所以由页面把
+   *  `fxWandSvg()` 的原串放进快照 —— 条带上那枚链 chip 用的是同一个作者，一次赋值就不再变。 */
+  fx: { bypass: boolean; wand: string; open: BlendFxOpenStep | null };
+  /** Layers 那一格 Add 菜单里那条「往后的图是 raster 还是 smart object」的勾。它是页面那一份持久偏好
+   *  （`blend.rasterDrop`）的镜像 —— 宿主只管摆这条目与亮这颗勾，翻开与否落在页面那一句里。 */
+  rasterDrop: boolean;
+  /** 条带末尾那颗 `+` 的菜单条目（注册表的声明序）。boot 之前它是空表 —— 与页面同一个样子：那一格
+   *  菜单在没有快照时没有任何条目可摆。 */
+  attrKinds: BlendAttrKind[];
+  /** History 那一格。步子住在页面那两支摞里（undo/redo），这里只收一份列子：`i` 就是 `history-jump`
+   *  认的下标（redo 那一头按重做的先后排在 undo 之后），`label` 是那一步进栈时带上的那句话，`face`
+   *  是这一步在 `faces` 里的键 —— 预览 PNG 在**那一步刚落地**那一趟编好、从此不再动（画面后来往前走
+   *  也改不到它），所以它和行面共用同一道可见区/封顶闸，但一次都不重编。`limit` 与那两颗开关的读数
+   *  同样出自页面（HISTORY_LIMIT 写死 60），这里不数步子。 */
+  history: BlendHistory;
+  /** 缩略图本身（键 → data URL）。它是**增量**：一条快照只装这一帧新要给的几张，发完页面就清；
+   *  宿主按键合并成一份 store（不住 React 树里，见 workbench/faces）。判据是逐张失效 + 只编可见区 +
+   *  每帧封顶 —— 40 行 × 6 枚最坏一档两兆多一帧，那是把 postMessage 当显存用。 */
+  faces: Record<string, string>;
 };
 
 export const EMPTY_BLEND_UI: BlendUi = {
@@ -522,10 +625,28 @@ export const EMPTY_BLEND_UI: BlendUi = {
   color: { fg: '#ff3b30', bg: '#ffffff', fgAlpha: 1, bgAlpha: 1, hue: 0, mode: 'rgba' },
   // 这一格选中与否读的是 paint.maskLayer（它就是 selectedId === MASK_LAYER_ID），所以这里不再存第二份。
   mask: { visible: true, still: '' },
+  // 第一条快照没到之前，两格各是一摞空行 + 一张面都没有 —— 与页面 boot 那一次播报同一个样子。
+  stacks: { layers: [], guidances: [] },
+  // 第一条快照没到之前，头部那颗开关是按下与否都还没说过 —— off，魔棒还没有画法可摆（空串就是不画），
+  // 参数面也没有一步摊着（open = null 就是"这一列里没人展开"）。
+  fx: { bypass: false, wand: '', open: null },
+  // 页面的初值是 off（localStorage 没有记过就是 smart object），boot 那一次 syncRasterToggleUI 会把
+  // 真值补进快照 —— 在那之前这一格也不该亮着勾。
+  rasterDrop: false,
+  attrKinds: [],
+  // boot 之前没有任何步子可列：页面第一次播报（resetHistory 那一句）会把这一步自己补成列子的头一条。
+  history: { limit: 0, canUndo: false, canRedo: false, steps: [] },
+  faces: {},
 };
 
-/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应。旋钮类带 value，
- *  开关类不带（点了就是点一下，没有取值）。 */
+/** React 面板发回工作台的动作 —— 与 iframe 里 UI_COMMANDS 的键一一对应（门禁逐键对表，92 条）。旋钮类带
+ *  value，开关类不带（点了就是点一下，没有取值）。
+ *  行上那一批（一行、条带上的一枚、链里的一步、历史的一步）载荷一律是**坐标**：哪一层、哪一枚、第几步、
+ *  落在谁的哪一侧 —— 本体永远留在页面那一侧。链里那一步的**参数面**（新添的 10 条：展开/收起、两笔落值、
+ *  折叠开合、贴图与方向两类绑定、扭曲网格三颗钮、曲线那一格的全部手势）同样只交坐标 + 那一行的 key：
+ *  行有什么、值是什么，由页面按 fx 注册表现编（快照 `fx.open.rows`），这里不存在第二份旋钮清单。
+ *  `'visible-faces'` 仍压在最末：它是一条通道而不是一颗按钮，而且门禁钉的就是"`| 'visible-faces';`"这一句
+ *  在联合类型的最末 —— 顺序没有语义，动了它反而要重钉一条本来就成立的判据。 */
 export type BlendUiAction =
   | 'canvas-size' | 'canvas-modify'
   | 'transform-adjust' | 'transform-fill'
@@ -537,4 +658,166 @@ export type BlendUiAction =
   | 'bucket-tolerance' | 'bucket-continuous' | 'bucket-all-layers'
   | 'paint-color' | 'paint-alpha' | 'paint-hue' | 'paint-mode' | 'paint-swap'
   | 'mask-invert' | 'mask-layer-invert' | 'mask-layer-full' | 'mask-layer-clear'
-  | 'mask-layer-eye' | 'mask-layer-select';
+  | 'mask-layer-eye' | 'mask-layer-select'
+  | 'layer-select' | 'layer-rename' | 'layer-jump' | 'layer-generate' | 'layer-eye'
+  | 'layer-remove' | 'layer-duplicate' | 'layer-expand' | 'layer-fit-mask' | 'layer-split-mask'
+  | 'layer-rasterize' | 'layer-text-edit' | 'layer-combine' | 'layer-move'
+  | 'layer-add' | 'layer-clear' | 'raster-drop' | 'hover-face'
+  | 'cud-refresh' | 'cud-relink'
+  | 'attr-open' | 'attr-toggle' | 'attr-remove' | 'attr-duplicate' | 'attr-apply' | 'attr-add' | 'attr-move'
+  | 'fx-step-toggle' | 'fx-step-remove' | 'fx-step-move' | 'fx-bypass'
+  | 'fx-step-open' | 'fx-param-live' | 'fx-param-commit' | 'fx-fold-toggle'
+  | 'fx-map-pick' | 'fx-map-bind' | 'fx-dir-pick' | 'fx-dir-bind' | 'fx-lattice' | 'fx-curve'
+  | 'history-undo' | 'history-redo' | 'history-jump' | 'history-clear'
+  | 'stage-layer' | 'layer-from-staging'
+  | 'visible-faces';
+
+/** 每个动作键的载荷形状，一条边界一个作者：`undefined` = 这一条不需要取值。
+ *  它是这张边界的**唯一**一份形状说明 —— 页面落点 (`UI_COMMANDS` 里那五句 `uiRow`/`uiLayer`/`uiAttr`/
+ *  `uiFxStep`/`uiStack`) 逐个字段读回来并当场夹，所以这里写严一点漏不掉什么；反过来，这里漏一个键、
+ *  或多一个键，`BLEND_UI_PAYLOAD_COVERAGE` 那一句就编译不过。 */
+export type BlendUiPayloads = {
+  'canvas-size': undefined;
+  'canvas-modify': undefined;
+  'transform-adjust': undefined;
+  'transform-fill': undefined;
+  'select-rect': undefined;
+  'select-lasso': undefined;
+  'select-all': undefined;
+  'select-none': undefined;
+  'view-pan': undefined;
+  'view-zoom': undefined;
+  'view-rotate': undefined;
+  'view-fit': undefined;
+  'view-reset': undefined;
+  'view-zoom-in': undefined;
+  'view-zoom-out': undefined;
+  'view-rot-ccw': undefined;
+  'view-rot-cw': undefined;
+  'view-flip': undefined;
+  'brush-mode': string;
+  'brush-size': number;
+  'brush-strength': number;
+  'brush-center': number;
+  'brush-edge': number;
+  'brush-gamma': number;
+  'eraser-mode': string;
+  'eraser-size': number;
+  'eraser-strength': number;
+  'eraser-center': number;
+  'eraser-edge': number;
+  'eraser-gamma': number;
+  'bucket-tolerance': number;
+  'bucket-continuous': boolean;
+  'bucket-all-layers': boolean;
+  'paint-color': string;
+  'paint-alpha': number;
+  'paint-hue': number;
+  'paint-mode': string;
+  'paint-swap': undefined;
+  'mask-invert': undefined;
+  'mask-layer-invert': undefined;
+  'mask-layer-full': undefined;
+  'mask-layer-clear': undefined;
+  'mask-layer-eye': undefined;
+  'mask-layer-select': undefined;
+  /** 可见区：宿主那侧 IntersectionObserver 量出来的面键全集。它是**整份**而不是增量 —— 页面拿它当闸，
+   *  不在集合里的面一张都不编；发过一次就顶着，所以这条必须能传数组。 */
+  'visible-faces': string[];
+  /** `from` 说的是按在行的哪一处：缩略图那一下把笔交给变换，行身那一下只换选中。`shift` 按住 = 加进组。 */
+  'layer-select': { id: number; from?: 'thumb' | 'row'; shift?: boolean };
+  /** 头部那口 Add 菜单：一类一条，落到哪一摞由 `stack` 说。`dynamic` 是画布手势的起点（在画布上拉一个
+   *  矩形再问分辨率），所以这一条发的是"开始那一下"，不是"造好一层"。 */
+  'layer-add': { stack: BlendStack; kind: 'default' | 'stash' | 'dynamic' | 'cud' };
+  /** Clear All：只清点那一摞（Layers 那颗不动 Guidances，反之亦然），落点仍是页面的 clearStack。 */
+  'layer-clear': { stack: BlendStack };
+  /** Layers 那一格 Add 菜单里那条 `menuitemcheckbox`（Guidances 的菜单没有这条）：往后的图落成 raster
+   *  还是 smart object。它翻的是页面那一份持久偏好（`blend.rasterDrop`），所以这条不带值 ——
+   *  菜单里那颗勾的明暗读的是快照 `rasterDrop`，不是这里。 */
+  'raster-drop': undefined;
+  /** Alt+悬浮那一行的**原分辨率**放大图：发的是"请给我这一行的那一张"，像素照旧走面通道
+   *  （键 `layer:<id>:hover`，封顶 480）。按需的一张，不进每帧那套可见区 + 预算的算法。 */
+  'hover-face': { id: number };
+  'layer-rename': { id: number; name: string };
+  'layer-jump': { id: number };
+  'layer-generate': { id: number };
+  'layer-eye': { id: number };
+  'layer-remove': { id: number };
+  'layer-duplicate': { id: number };
+  'layer-expand': { id: number };
+  'layer-fit-mask': { id: number };
+  'layer-split-mask': { id: number };
+  'layer-rasterize': { id: number };
+  'layer-text-edit': { id: number };
+  'layer-combine': undefined;
+  /** `toId` 为 null = 落到这一摞的末尾（今天"拖到空列表"那一句）；`above` 是宿主量出来的上半还是下半。 */
+  'layer-move': { id: number; toId: number | null; above: boolean; stack: BlendStack };
+  'cud-refresh': { id: number };
+  'cud-relink': { id: number };
+  'attr-open': { layerId: number; attrId: string };
+  'attr-toggle': { layerId: number; attrId: string };
+  'attr-remove': { layerId: number; attrId: string };
+  'attr-duplicate': { layerId: number; attrId: string };
+  'attr-apply': { layerId: number; attrId: string };
+  'attr-add': { layerId: number; type: string };
+  /** 条带上的一步换位置：`beforeAttrId` 是落点那一枚，`after` 说的是插它前面还是后面；为空 = 追加尾步。 */
+  'attr-move': {
+    attrId: string; fromLayerId: number; toLayerId: number;
+    beforeAttrId?: string | null; after: boolean;
+  };
+  /** 那一步的 id 是数字（fx/core.js 的 ++fxSeq），页面的 `uiFxStep` 按 `x.id === stepId` 找 —— 传字符串
+   *  永远找不到，那两句会静默什么都不做。所以这里钉死 number。 */
+  'fx-step-toggle': { layerId: number; attrId: string; stepId: number };
+  'fx-step-remove': { layerId: number; attrId: string; stepId: number };
+  /** 链里的一步搬家：`index` 是宿主在那条链里量出来的落位（越靠下越早），跨层时连同记录一起交。 */
+  'fx-step-move': {
+    layerId: number; attrId: string; stepId: number;
+    toLayerId: number; toAttrId: string; index: number;
+  };
+  'fx-bypass': undefined;
+  /** 展开/收起**那一步**的参数面（就是 chip 上那一下点击，toggle 语义在页面 `fxOpenId` 那一句里）。
+   *  一趟只有一步摊着，所以这一格不需要"是哪几行"，坐标三样就够。 */
+  'fx-step-open': BlendFxCoord;
+  /** 一行旋钮的两次落笔，分工与 DOM 那对 input/change 一字不差：`live` 只清缓存重画布、不记账，
+   *  `commit` 才记一步历史（「某行」changed 那句由页面按 def.label 说）。值按那一行的 kind 归，
+   *  第三种形状一概不收。 */
+  'fx-param-live': BlendFxCoord & { key: string; value: number | string | boolean };
+  'fx-param-commit': BlendFxCoord & { key: string; value: number | string | boolean };
+  /** 折叠组头那一下：开合是纯 UI 状态，不进存档、不进撤销，翻完只是让组里那批行重播一次。 */
+  'fx-fold-toggle': BlendFxCoord & { key: string };
+  /** 贴图槽的**两个**动作：开那口选图器，和行尾那枚 ×（ref 给 null）。绑定本身落 params[slot.key]，
+   *  整块替换不原地改 —— 那个对象在 undo 快照之间是共享引用。 */
+  'fx-map-pick': BlendFxCoord & { key: string };
+  'fx-map-bind': BlendFxCoord & { key: string; ref: { key: string; name: string } | null };
+  /** 方向引用同一套：检索全项目的那口选择器，和行尾那枚 ×。这里交的是那枚记录的 guid。 */
+  'fx-dir-pick': BlendFxCoord & { key: string };
+  'fx-dir-bind': BlendFxCoord & { key: string; ref: string | null };
+  /** 扭曲网格那一行的三颗钮：摊开（没有网格就先铺一个四边形）、收起、丢掉。 */
+  'fx-lattice': BlendFxCoord & { which: 'edit' | 'hide' | 'drop' };
+  /** 曲线那一格的全部手势。宿主量出归一化坐标发回来，夹 x 的那道闸、"范围外不加"那条判据、
+   *  首末点删不得那一条都住在页面（fx/curves.js），所以 `settle` 不带标签 —— 那句话说的是**这一次
+   *  手势**（拖点 / 拖输入黑点 / 拖输入白点），由页面记得的那一样决定，不能由下一次按的东西代它说话。 */
+  'fx-curve': BlendFxCoord & {
+    op: 'focus' | 'add' | 'move' | 'input' | 'remove' | 'settle' | 'reset';
+    channel?: string; index?: number; x?: number; y?: number; which?: 'black' | 'white';
+  };
+  'history-undo': undefined;
+  'history-redo': undefined;
+  /** 跳到第 i 步：绝对下标，不是"再退一步"。页面自己数 |i - 现在| 次原语。 */
+  'history-jump': number;
+  'history-clear': undefined;
+  'stage-layer': { id: number };
+  'layer-from-staging': { id: string; stack?: BlendStack };
+};
+
+/** 发送口：泛型把动作键和它的载荷绑死 —— `'visible-faces'` 不给数组就编译不过，旋钮给了字符串也编译不过。
+ *  App 的 `sendBlendUiCommand`、EditPhase 的 `onBlendUiCommand`、每一格的 `send` 用的都是这一条，
+ *  所以这条边界上只有一个作者。 */
+export type BlendUiSend = <A extends BlendUiAction>(action: A, value?: BlendUiPayloads[A]) => void;
+
+// 编译期对表（不是运行时探针）：这张表与 BlendUiAction 少一键或多一键，这一句就赋不进 true。
+type BlendUiPayloadGap = Exclude<BlendUiAction, keyof BlendUiPayloads>
+  | Exclude<keyof BlendUiPayloads, BlendUiAction>;
+type BlendUiPayloadCoverage = [BlendUiPayloadGap] extends [never] ? true : BlendUiPayloadGap;
+export const BLEND_UI_PAYLOAD_COVERAGE: BlendUiPayloadCoverage = true;
+

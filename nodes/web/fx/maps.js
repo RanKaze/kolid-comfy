@@ -180,6 +180,6 @@ async function restoreFxMaps(list, blobs, mapKeys) {
 // 贴图迟到/失效、旁路切换,都是「整条链不再可信」—— 两处共用同一套失效动作。
 function invalidateAllFx() {
     for (const l of layers) l.fxCache = null;
-    renderLayerList();
+    refreshLayerPanels();
     render();
 }

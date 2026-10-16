@@ -161,18 +161,6 @@ defineEffect({
         return `${fxMapShort(effect)}  ${p.align === 'Local' ? 'local' : 'canvas'}  r${n(p.radius)}  `
             + `${n(p.strength)}%  n:${nrm}${p.near === 'bright' ? '  inv' : ''}`;
     },
-    // 一格一个控件、按 when 收无关行:通用面板会铺满 params,所以这块自己出编辑面 (同 tone/warp)。
-    editor(l, effect, syncRead, updaters) {
-        const box = document.createElement('div');
-        const build = () => {
-            const p = effectParams(effect);
-            box.replaceChildren(...FX_AO_PARAMS
-                .filter(d => !d.when || d.when(p))
-                .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        };
-        build();
-        return box;
-    },
     thumb(g, box) {
         // 两块砖相接:接缝那条暗带就是 AO —— 挡光的是身边的几何,不是某一盏灯,所以哪儿都没有光源。
         const w = box.w, h = box.h, x = box.x, y = box.y;

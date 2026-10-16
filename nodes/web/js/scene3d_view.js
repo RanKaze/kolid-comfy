@@ -286,7 +286,7 @@
             s: [o.scale.x, o.scale.y, o.scale.z],
         };
         Scene3D.renderPanel();
-        pushHistory();
+        pushHistory(null, (Scene3D.tool || 'gizmo') + ' gizmo dragged');
     }
 
     Scene3D.syncGizmo = function syncGizmo() {
@@ -318,8 +318,6 @@
         // CSS 给这两块写的都是 display:none,所以清空内联值等于「退回样式」= 还是不显示。
         host.style.display = 'block';
         document.getElementById('panelScroll').style.display = 'none';
-        document.getElementById('maskDock').style.display = 'none';
-        document.getElementById('layersDock').style.display = 'none';
         document.getElementById('scenePanel').style.display = 'flex';
         Scene3D.loadRec(rec || (entry.ctx && entry.ctx.scene) || Scene3D.blankRecord(''));
         resize();
@@ -339,8 +337,6 @@
         document.getElementById('viewport').style.display = '';
         host.style.display = 'none';
         document.getElementById('panelScroll').style.display = '';
-        document.getElementById('maskDock').style.display = '';
-        document.getElementById('layersDock').style.display = '';
         document.getElementById('scenePanel').style.display = 'none';
     };
 
@@ -558,7 +554,7 @@
         axes.visible = on;
         syncGridBtn();
         // 开关写进记录,所以它和改一个属性同量级 —— G 键和左上角那枚都从这里过一条撤销。
-        pushHistory();
+        pushHistory(null, on ? 'Grid shown' : 'Grid hidden');
         dirty = true;
     };
 })();

@@ -103,25 +103,6 @@ const CHROMA_PARAMS = [
     { key: 'thick', label: 'Thick', min: 0, max: 100, step: 1, def: 10, unit: '%', when: p => p.mode === 'Depth' },
 ];
 
-function chromaEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-chroma';
-    const tail = document.createElement('div');
-    tail.className = 'fx-chroma-tail';
-    const build = () => {
-        const p = effectParams(effect);
-        tail.replaceChildren(...CHROMA_PARAMS
-            .filter(d => d.key !== 'mode' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        syncRead();
-    };
-    // 模式是这张面板的第一行, 只多接一句「换完模式重铺剩下的行」—— 与 fx/warp.js 同一包法。
-    box.appendChild(fxControlRow(l, effect, CHROMA_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'chromatic_aberration',
     label: 'Chromatic Aberration',
@@ -131,7 +112,6 @@ defineEffect({
     needsMapWhen: p => p.mode === 'Depth',
     desc: 'Sample red and blue from slightly different places while green stays put, so every high-contrast edge grows a coloured fringe. Radial = the lens kind: the split points away from the optical centre of this layer and grows in proportion to the radius, reaching the full Amount at the corner. Directional = one offset shared by the whole layer, Angle being the way the red picture is pushed \u2014 a prism, not a lens. Depth reads a bound depth map and fringes only what sits off the focal plane: Focal stays clean, as does everything within Thick/2 of it, and the fringe reverses its colour order on the two sides of focus (near side cyan, far side magenta), which is what axial CA really does to a defocused highlight. Amount is the red\u2194blue separation in pixels and it is signed \u2014 negative puts blue on the outside instead of red. Colour only: alpha untouched, and where a channel\u2019s source leaves the grid that channel has nothing to pull in, so it comes back empty.',
     params: CHROMA_PARAMS,
-    editor: chromaEditorEl,
     shaders: { chroma: FX_FS_CHROMA },
     run: fxglChromaticAberration,
     // Canvas 对齐的深度吃的是「该层盒子落在画布哪儿」, 而拖图层既不改像素也不改 params —— 挪完层

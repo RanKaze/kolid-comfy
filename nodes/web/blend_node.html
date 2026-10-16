@@ -46,37 +46,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     transition: background 0.12s ease; }
 #sideSplitter:hover::after, #sideSplitter.dragging::after, #sideSplitter:focus-visible::after { background: rgba(10,132,255,0.8); }
 #panelScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
-/* Docked at the bottom of the right column. The dock sits outside #panelScroll, so it has to give
-   back the scroll gutter itself: `margin-right: 6px` keeps its divider and its buttons on the same
-   rails as the sections above it.
-   Height tracks the window instead of being a fixed 520px block: the palette's header stays put
-   and its lists scroll inside their own share, and a tall window should hand that extra room to the
-   stacks rather than to blank panel. `clamp` keeps a floor (never collapse the palette) and a
-   ceiling (the tool sections above keep their space). */
-#layersDock { flex: 0 0 auto; height: clamp(520px, 58vh, 660px); min-height: 0; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
-/* Blank breathing room under the palette. The dock is `flex: 0 0 auto` so this spacer pushes it
-   up by exactly its basis instead of letting it hug the bottom edge of the viewport. */
-#layersSpacer { flex: 0 0 16px; pointer-events: none; }
-/* Mask 那一格搬进了宿主的 dock（workbench/mask.tsx）：原来那两条 dock 规则、那七条行的规则，加上
-   给那一行垫 × 位置的那枚占位 span —— 一共十一条，主人全没了，所以整组删掉而不是留着没人认领。
-   那七条里最要紧的一条是整行 48px 的节拍：dock 里没有两行行的概念，格子多高由它自己的内容说。 */
-/* The two lists split the dock's leftover height between themselves by flex-GROWTH, with a basis of
-   0: whatever the dock's height is, the heads and the splitter take theirs and the rest divides by
-   this ratio. That is what makes the divider honest — the proportion you dragged to survives window
-   resizes, because neither list is sized by its content any more (both scroll in place). JS rewrites
-   both numbers from `guidanceSplit`; these are just the defaults, so the first paint is right. */
-#guidanceList { flex: 6 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
-/* The grab rail between them. It is deliberately wider than it looks: the visible pill is 3px, the
-   row is 10px, and the dock's own 6px gaps hang off each side of it, so the pointer only has to be
-   roughly on the line. `touch-action: none` keeps a touch drag from scrolling the page instead. */
-#stackSplitter { flex: 0 0 10px; margin: -5px 0; display: flex; align-items: center; justify-content: center;
-    cursor: ns-resize; touch-action: none; border-radius: 5px; outline: none; }
-#stackSplitter::after { content: ''; width: 38px; height: 3px; border-radius: 2px; background: rgba(255,255,255,0.14); transition: background 0.12s ease; }
-#stackSplitter:hover::after, #stackSplitter.dragging::after, #stackSplitter:focus-visible::after { background: rgba(10,132,255,0.8); }
-#stackSplitter.dragging { cursor: ns-resize; }
-/* While a row is being dragged, both lists say where it would land: the one under the pointer is
-   the stack the layer MOVES to. */
-.layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
 /* Every section carries the same 6px inner rail. The highlight box of an active tool section
    is its own border box, which is full column width, so the label of a highlighted section and
    the label of a plain one land on the same x — and the box lines up with its neighbours
@@ -93,7 +62,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .mini-btn.ico-btn { min-width: 26px; padding: 4px 7px; font-size: 13px; font-weight: 700; line-height: 1; }
 .mini-btn.ico-btn svg { display: block; width: 14px; height: 14px; }
 /* 整链旁路按下时:特效还在图层上,只是当前不生效 —— 用琥珀色而不是蓝色,免得和选中态混淆。 */
-.mini-btn.ico-btn.fx-bypassed { background: rgba(255,159,10,0.22); color: #ff9f0a; }
 /* The one popover card in the workbench. Each entry carries its own one-line explanation: the
    column is only 280px wide, and a tooltip is no use mid-choice. */
 .io-menu { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 90; display: flex; flex-direction: column;
@@ -106,30 +74,21 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .io-menu-item:disabled { opacity: 0.45; cursor: default; }
 .io-menu-title { font-size: 12px; font-weight: 700; color: #fff; }
 .io-menu-sub { font-size: 10.5px; line-height: 1.35; color: rgba(255,255,255,0.45); white-space: normal; }
-/* The Add menu reuses the .io-menu card but hangs off the Layers dock at the bottom of the
-   column, so it unfolds upward and anchors under the button rather than across the column. */
 .add-caret { font-size: 8px; line-height: 1; opacity: 0.7; margin-left: 3px; }
-.add-menu { top: auto; bottom: calc(100% + 6px); left: auto; right: 0; width: 216px; z-index: 95; }
 
-.layer-list { display: flex; flex-direction: column; gap: 4px; }
-/* The working half of the split above: same zero basis, so the two lists share the leftover dock
-   height by growth ratio and nothing is sized by its content. `min-height: 0` is what lets a flex
-   child actually shrink and scroll instead of growing past its parent. */
-#layerList { flex: 4 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; padding-right: 2px; }
 
-/* iOS-style dark scrollbar for the column's two scroll areas (the tool sections and the layer
-   list). Overlay look: no track, a slim translucent thumb that only reads as a faint grey pill
-   against the dark panel. Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-*
-   properties; everything else gets the WebKit set. `scrollbar-gutter: stable` keeps the layer
-   rows from shifting sideways when the thumb appears. */
-#panelScroll, #layerList, #guidanceList, .tag-groups {
+/* iOS-style dark scrollbar for the column's scroll area (the tool sections). Overlay look: no
+   track, a slim translucent thumb that only reads as a faint grey pill against the dark panel.
+   Firefox has no ::-webkit pseudo-elements, so it gets the scrollbar-* properties; everything
+   else gets the WebKit set. `scrollbar-gutter: stable` keeps the rows from shifting sideways. */
+#panelScroll, .tag-groups {
     scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.22) transparent;
 }
-#panelScroll::-webkit-scrollbar, #layerList::-webkit-scrollbar, #guidanceList::-webkit-scrollbar, .tag-groups::-webkit-scrollbar { width: 10px; height: 10px; }
-#panelScroll::-webkit-scrollbar-track, #layerList::-webkit-scrollbar-track, #guidanceList::-webkit-scrollbar-track, .tag-groups::-webkit-scrollbar-track { background: transparent; }
-#panelScroll::-webkit-scrollbar-thumb, #layerList::-webkit-scrollbar-thumb, #guidanceList::-webkit-scrollbar-thumb, .tag-groups::-webkit-scrollbar-thumb {
+#panelScroll::-webkit-scrollbar, .tag-groups::-webkit-scrollbar { width: 10px; height: 10px; }
+#panelScroll::-webkit-scrollbar-track, .tag-groups::-webkit-scrollbar-track { background: transparent; }
+#panelScroll::-webkit-scrollbar-thumb, .tag-groups::-webkit-scrollbar-thumb {
     background: rgba(255,255,255,0.22);
     border-radius: 999px;
     /* Inset the pill from both edges with a transparent border + padding-box clip: this is what
@@ -137,98 +96,11 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     border: 3px solid transparent;
     background-clip: padding-box;
 }
-#panelScroll::-webkit-scrollbar-thumb:hover, #layerList::-webkit-scrollbar-thumb:hover, #guidanceList::-webkit-scrollbar-thumb:hover, .tag-groups::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
-#panelScroll::-webkit-scrollbar-thumb:active, #layerList::-webkit-scrollbar-thumb:active, #guidanceList::-webkit-scrollbar-thumb:active, .tag-groups::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:hover, .tag-groups::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.36); background-clip: padding-box; }
+#panelScroll::-webkit-scrollbar-thumb:active, .tag-groups::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.48); background-clip: padding-box; }
 /* No corner box and no arrow buttons — both are desktop-Chrome artifacts iOS never shows. */
-#panelScroll::-webkit-scrollbar-corner, #layerList::-webkit-scrollbar-corner, #guidanceList::-webkit-scrollbar-corner, .tag-groups::-webkit-scrollbar-corner { background: transparent; }
-#panelScroll::-webkit-scrollbar-button, #layerList::-webkit-scrollbar-button, #guidanceList::-webkit-scrollbar-button, .tag-groups::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-/* The empty state IS the drop target, so it fills its list instead of sitting as a 34px dashed
-   strip at the top of a tall box — otherwise the Guidances floor would just read as blank panel. */
-.layer-empty { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
-/* PS-style two-line layer row: identity on the head line (original image, name, eye, remove),
-   the three working chips on the second line (result preview, Decal, Mask). */
-.layer-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
-.layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
-/* The strip grows by user action (a layer can hold several Masks), so a narrow panel wraps the
-   chips onto another line instead of overflowing out of the row. */
-.layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
-.layer-row:hover { background: rgba(255,255,255,0.08); }
-.layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
-.layer-row.dragging { opacity: 0.4; }
-.layer-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
-.layer-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
-.layer-row.hidden-layer .layer-thumb, .layer-row.hidden-layer .layer-name { opacity: 0.35; }
-.layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
-.layer-thumb img { width: 100%; height: 100%; object-fit: cover; }
-/* An image-less layer (Default / Dynamic Layer, before a Generate fills it in) has no `src`, so a
-   real <img> would render the browser's broken-image glyph. Show a deliberate red X instead. */
-.layer-thumb.no-image { background: #1c1113; box-shadow: inset 0 0 0 1px rgba(255,59,48,0.35); }
-.layer-thumb.no-image svg { width: 14px; height: 14px; display: block; }
-.layer-thumb.mask-thumb { background: #000; cursor: pointer; }
-.layer-thumb.mask-thumb canvas { width: 100%; height: 100%; display: block; }
-.layer-thumb.canvas-thumb { background: #0a0a0a; }
-.layer-thumb.canvas-thumb canvas { width: 100%; height: 100%; display: block; }
-/* Decal chip: transparency shows as a checkerboard, so painted pixels read as "added". */
-.layer-thumb.decal-thumb { cursor: pointer; background-color: #2a2a2a;
-    background-image: linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%),
-                      linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%);
-    background-size: 8px 8px; background-position: 0 0, 4px 4px; }
-.layer-thumb.decal-thumb canvas { width: 100%; height: 100%; display: block; }
-.layer-thumb.active { box-shadow: inset 0 0 0 2px #fff; }
-/* 条带上的每一枚 chip 就是执行序里的一步,从左到右排。拖它的左半边/右半边决定插在哪道缝上,插入线
-   画在内缘 (.layer-thumb 的 overflow 会剪掉外沿)。 */
-.layer-thumb.attr-chip { cursor: pointer; }
-.layer-thumb.effects-thumb { background: #171717; color: rgba(255,255,255,0.72); }
-.layer-thumb.effects-thumb svg { width: 15px; height: 15px; display: block; }
-.layer-thumb.attr-chip.dragging { opacity: 0.4; }
-.layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
-.layer-thumb.attr-chip.drop-before::before { left: 0; }
-.layer-thumb.attr-chip.drop-after::after { right: 0; }
-/* 一枚链上的特效拖到容器自己的条带 chip 上 = 收进这条链 (收成尾步,没有缝位可画),整颗亮一道内缘。 */
-.layer-thumb.attr-chip.drop-into { box-shadow: inset 0 0 0 2px rgba(0,122,255,0.9); }
-/* 跨层拖到条带空隙 / `+` 上 = 追加尾步;整条条带亮一道内缘当落点反馈。 */
-.layer-row-thumbs.drop-tail { box-shadow: inset 0 0 0 1px rgba(0,122,255,0.6); border-radius: 6px; }
-/* 启用角标:启用时什么都不显示 —— chip 本身就是"这一步在跑"的样子。停用时整颗 chip 罩一枚
-   居中的叉 (红,与告警色同一支),内容暗淡 (.attr-off) 照旧,两笔一起读才分得清"停用的面"
-   和"没画的面"。badge 元素常驻,只有 .attr-off 时才显形。 */
-.layer-thumb.attr-chip .attr-badge { display: none; pointer-events: none; }
-.layer-thumb.attr-chip.attr-off .attr-badge { display: block; position: absolute; inset: 0; }
-.layer-thumb.attr-chip.attr-off .attr-badge::before,
-.layer-thumb.attr-chip.attr-off .attr-badge::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 2px; border-radius: 1px; background: #ff453a; transform: translate(-50%, -50%) rotate(45deg); }
-.layer-thumb.attr-chip.attr-off .attr-badge::after { transform: translate(-50%, -50%) rotate(-45deg); }
-.layer-thumb.attr-chip.attr-off canvas, .layer-thumb.attr-chip.attr-off > svg { opacity: 0.32; }
-/* chip 的类型角标:与图层行那枚 (.layer-type-badge) 同款几何,SVG 与配色由各 attribute 的 spec
-   报上来 (spec.badge)。停用的叉 (.attr-badge) 在 DOM 里排它后面,叉永远压在类型角标之上。 */
-.attr-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
-.attr-type-badge svg { width: 9px; height: 9px; display: block; }
-.attr-type-badge.decal { color: #ffb86e; }
-.attr-type-badge.mask { color: #9ecbff; }
-.attr-type-badge.effects { color: #ffd76e; }
-.attr-type-badge.text { color: #d9b8ff; }
-.attr-type-badge.direction { color: #ff9ec4; }
-.attr-type-badge.plane { color: #f5c542; }
-.attr-type-badge.point { color: #19e0bc; }
-.attr-type-badge.ray { color: #ff7ab0; }
-.attr-type-badge.model { color: #7ee0d0; }
-.attr-type-badge.pose { color: #a8e06e; }
-/* 生成器 (文字/方向/3D/Pose) 的 chip:面画在自己那块 canvas 上,空面 = 底色透出 (停用另有角标说话)。 */
-.layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb,
-.layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb,
-.layer-thumb.pose-attr-thumb { cursor: pointer; background-color: #1b1d24; }
-.layer-thumb.text-attr-thumb canvas, .layer-thumb.direction-attr-thumb canvas, .layer-thumb.scene3d-attr-thumb canvas,
-.layer-thumb.pose-attr-thumb canvas { width: 100%; height: 100%; display: block; }
-/* `+` 与 chip 同尺寸同圆角,但它是按钮不是缩略图:虚线边说"这一步还没有东西",正是它该有的样子。 */
-.attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
-.attr-add:hover { border-color: rgba(0,122,255,0.9); color: #fff; background: rgba(0,122,255,0.16); }
-.layer-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
-.layer-type-badge svg { width: 9px; height: 9px; display: block; }
-.layer-type-badge.smart { color: #9ecbff; }
-.layer-type-badge.raster { color: #ffcf6e; }
-.layer-type-badge.cud { color: #8be3b6; }
-.layer-type-badge.cud.unlinked { color: #ff9d5c; }
-.layer-type-badge.text { color: #d9b8ff; }
-.layer-type-badge.direction { color: #ff9ec4; }
-.layer-type-badge.model { color: #7ee0d0; }
+#panelScroll::-webkit-scrollbar-corner, .tag-groups::-webkit-scrollbar-corner { background: transparent; }
+#panelScroll::-webkit-scrollbar-button, .tag-groups::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
 /* Direction 小窗里那颗世界观察: 深色底才压得住 magenta/cyan 那三条轨道, 高度与 JS 里的 DIR_GIZMO_H 一致。
    三格角度 field 借 RGBA 那四格的皮肤 (.rgba-fields/.rgba-cell), 只补一条没人在编辑时的暗态。 */
 /* Direction 小窗的舞台: three.js 那块 (js/direction_view.js 建的 webgl canvas) 与 2D 退路那块叠在
@@ -249,8 +121,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 .pose-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .pose-hint { position: absolute; top: 6px; left: 8px; z-index: 3; font-size: 10.5px; letter-spacing: 0.02em;
     color: rgba(255,255,255,0.5); pointer-events: none; user-select: none; }
-/* Stash 的暖黄: direction 已经占了那支粉 (#ff9ec4), 两枚徽章并排时必须一眼分得开。 */
-.layer-type-badge.stash { color: #e3d17a; }
 /* The text layer's inline editor: a transparent textarea laid exactly over the layer's box on
    canvas — same doc-space rect, same rotation, font size scaled by zoom. Its glyphs are INVISIBLE
    (color: transparent): the live-patched composite underneath is the only rendered text, so the
@@ -263,99 +133,14 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
 #textEditor::selection { background: rgba(0,122,255,0.35); }
 .control-row select { flex: 1; min-width: 0; background: #1c1c1e; color: #fff; border: 0.5px solid rgba(255,255,255,0.16);
     border-radius: 4px; font-size: 11px; padding: 2px 4px; outline: none; }
-.layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
-.layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
+/* 行名就地改名那颗输入框连它的规则一起搬进了宿主的 dock（workbench/layerRow.tsx 里那颗输入框，
+   skin 在 EditPhase.tsx）。这一页不再建那颗输入框，规则也就没有主人 —— 门禁钉的就是那个类名
+   在这一页一个字都不出现。 */
 /* 纯 Mask 层那一行（红底、单行、三颗整层动作加一枚眼睛）连它自己的五条规则一起搬进了宿主的 dock
    （workbench/mask.tsx + workbench/skin.ts 里的 thumbBox/iconBtn 两条）。这一列里原本那七条规则没有
    留下任何主人，连那枚只给那一行垫 × 位置的占位 span 也是 —— 所以整组删掉，门禁钉的就是这些名字
    在这一页一个字都不出现。 */
-.layer-note { font-size: 9.5px; font-weight: 700; color: rgba(255,59,48,0.8); text-transform: uppercase; letter-spacing: 0.4px; }
 
-/* ---- 特效容器：摊在图层行的**上方**，链从下往上读 ----
-   它属于这个图层，但执行发生在图层把自己的像素交出去之前，所以这块排在 head 之上，左侧竖线标归属。
-   容器内一步一行，**越贴近图层行的那一步越先执行** —— 从下往上就是执行序。同一种挂了两枚时两块各占
-   一段，贴近 head 的那一段先跑，于是整摞从下往上一路读到底，不另写说明行。
-   展开参数的那一步，参数区排在它自己那颗 chip 的**下方**（= 朝图层行那一侧）。空链不占位。
-   拖拽落在某颗的上半 = 插到它后面、下半 = 前面 —— 插入线因此是横的。 */
-.fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
-    padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
-.fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
-/* 倒过来排只靠这一句:DOM 里仍然写着链序 (params[0] 第一个),读法整个交给 CSS —— 于是缝位算法、
-   按 id 找回那一步、以及探针里的显示序都不必跟着翻。 */
-.fx-steps { display: flex; flex-direction: column-reverse; gap: 3px; min-width: 0; }
-.fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
-    background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
-.fx-chip:hover { background: rgba(255,255,255,0.09); }
-.fx-chip.open { background: rgba(0,122,255,0.16); }
-.fx-chip.disabled { opacity: 0.42; }
-.fx-chip.dragging { opacity: 0.4; }
-/* 整链旁路时暗下去的是那几步,不是展开着的参数区 (它照旧要点得动)。 */
-.fx-chain.bypassed > .fx-steps > .fx-chip { opacity: 0.5; }
-/* before = 更早 = 朝图层行那一侧,所以插入线落在**下沿**;条带上那颗 chip 是同一条规矩的横排版本。 */
-.fx-chip.drop-before::after, .fx-chip.drop-after::before { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: rgba(0,122,255,0.95); }
-.fx-chip.drop-before::after { bottom: 0; }
-.fx-chip.drop-after::before { top: 0; }
-.fx-chip input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: #0a84ff; cursor: pointer; }
-.fx-icon { width: 14px; height: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #9ecbff; }
-.fx-icon svg { width: 14px; height: 14px; display: block; }
-.fx-name { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.85); white-space: nowrap; }
-.fx-read { flex: 1; min-width: 0; font-size: 10.5px; color: rgba(255,255,255,0.55);
-    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
-/* 参数区紧挨在该步 chip 的下方 ⇒ 圆角留在下边，最底那一步的参数还与图层行隔 3px。 */
-.fx-params { display: flex; flex-direction: column; gap: 5px; padding: 5px 6px 7px 12px; margin: 0 2px 3px 5px;
-    border-left: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); border-radius: 0 0 7px 7px; }
-.fx-params .control-row { font-size: 11px; gap: 6px; }
-.fx-params .control-row label { min-width: 40px; font-size: 10.5px; }
-.fx-params .control-row span { min-width: 46px; font-size: 10.5px; }
-.fx-params input[type="color"] { width: 28px; height: 20px; }
-/* Anchor 这类两值枚举：分段按钮，选中项用全局的强调蓝。 */
-.fx-seg { display: flex; gap: 3px; flex: 1; min-width: 0; }
-.fx-seg button { flex: 1; background: rgba(255,255,255,0.08); border: none; border-radius: 6px; padding: 3px 4px;
-    color: rgba(255,255,255,0.75); font-size: 10.5px; font-weight: 600; cursor: pointer; }
-.fx-seg button.on { background: rgba(0,122,255,0.85); color: #fff; }
-/* 折叠组头 (fx/ui.js 的 kind:'fold'):小字大写组名 + 淡线,把一摞相关旋钮划在同一个折叠里。
-   收起时组下的行整个不渲染,不是藏 —— 面板的高度真的缩下去。 */
-.fx-params .fx-fold { display: block; }
-.fx-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; background: none; border: none;
-    padding: 3px 0 2px; cursor: pointer; text-align: left; color: rgba(255,255,255,0.45);
-    font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
-.fx-fold-head:hover { color: rgba(255,255,255,0.72); }
-.fx-fold-head .fx-fold-chev { font-size: 9px; width: 10px; flex-shrink: 0; line-height: 1; }
-.fx-fold-head::after { content: ''; flex: 1; height: 0.5px; background: rgba(255,255,255,0.14); }
-/* 曲线编辑面 (fx/curves.js 的 editor):图在左、Input/Output 读数在右,底边两个三角就是输入黑/白点。 */
-.fx-curves { display: flex; flex-direction: column; gap: 5px; }
-.fx-curve-row { display: flex; align-items: flex-start; gap: 8px; }
-.fx-curve-box { position: relative; width: 150px; height: 150px; flex-shrink: 0; }
-.fx-curve-canvas { display: block; width: 100%; height: 100%; border-radius: 4px; cursor: crosshair; touch-action: none; }
-.fx-curve-tri { position: absolute; bottom: 4px; width: 0; height: 0; padding: 0; border: none; background: none;
-    cursor: ew-resize; touch-action: none; }
-.fx-curve-tri.black { border-left: 7px solid rgba(255,255,255,0.72); border-top: 5px solid transparent; border-bottom: 5px solid transparent; }
-.fx-curve-tri.white { border-right: 7px solid rgba(255,255,255,0.72); border-top: 5px solid transparent; border-bottom: 5px solid transparent; }
-.fx-curve-tri:hover { filter: brightness(1.5); }
-.fx-curve-read { display: flex; flex-direction: column; gap: 4px; padding-top: 2px; }
-.fx-curve-read div { display: flex; gap: 5px; font-size: 10.5px; color: rgba(255,255,255,0.55); }
-.fx-curve-read b { min-width: 28px; color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
-.fx-curve-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.fx-curve-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
-.fx-curve-reset svg { width: 14px; height: 14px; }
-/* 靠 Mode 分段钮铺行的那几家 (fx/tone_map.js、fx/warp.js、fx/corrosion.js、fx/chromatic_aberration.js、
-   fx/pixel_sort.js、fx/data_bend.js、fx/rgb_split.js):
-   模式一行,下面只铺该模式要用的参数行 —— 四种情况版式完全一致,所以规则也只有一条。 */
-.fx-tone, .fx-tone-tail, .fx-warp, .fx-warp-tail, .fx-corrosion, .fx-corrosion-tail, .fx-chroma, .fx-chroma-tail,
-.fx-sort, .fx-sort-tail, .fx-bend, .fx-bend-tail, .fx-split, .fx-split-tail { display: flex; flex-direction: column; gap: 5px; }
-.fx-warp-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.fx-warp-foot span { font-size: 9.5px; color: rgba(255,255,255,0.4); }
-/* 绑定贴图那一行:名字就是按钮,没绑上时呈告警色 —— 缺失的贴图必须一眼看得见。 */
-.fx-map-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
-    border-radius: 6px; padding: 3px 6px; color: rgba(255,255,255,0.85); font-size: 10.5px; font-weight: 600;
-    font-family: inherit; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.fx-map-btn:hover { background: rgba(10,132,255,0.3); }
-.fx-map-btn.tight { flex: 0 0 auto; }
-/* 网格摊在画布上时 Edit 点亮:它是编辑态的开关读数,不能只靠旁边那颗 Hide 在不在。 */
-.fx-map-btn.active { background: rgba(10,132,255,0.55); color: #fff; }
-.fx-map-btn.unset { color: #ff9f0a; }
-.fx-map-btn.gone { color: #ff453a; }
 /* Text 行的字体按钮: 那几个字就是它自己那张脸, 不用打开就知道选的是什么。本机没有这个字体时转红,
    与缺失贴图同一套告警色 —— 文字仍旧在, 只是顶着栈尾的回落脸画。 */
 .text-font-btn { flex: 1; min-width: 0; text-align: left; background: rgba(255,255,255,0.08); border: none;
@@ -370,7 +155,6 @@ body { background: #0d0d0d; overflow: hidden; font-family: -apple-system, BlinkM
     box-sizing: border-box; outline: none; }
 .control-row textarea#detectPrompt:focus { border-color: #0a84ff; background: rgba(10,132,255,0.12); }
 .control-row textarea#detectPrompt::placeholder { color: rgba(255,255,255,0.3); }
-.fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
 
 .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
 .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
@@ -545,7 +329,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
    眼睛会浮在指针上方两三个像素。光标的热点必须压在指针尖上,所以让它别参与行内排版。 */
 #lookCursor svg { display: block; }
 #lookCursor.on { display: block; }
-/* 右栏在 3D tab 期间整体换掉:#panelScroll / #layersDock 隐去,这一栏顶上。
+/* 右栏在 3D tab 期间整体换掉:#panelScroll 隐去,这一栏顶上。
    小节词汇共用 .panel-section/.panel-head/.panel-label/.mini-group/.mini-btn,所以这里只多
    出 Hierarchy 的行本身、Inspector 的分组标题,以及来源说明行。 */
 #scenePanel { display: none; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding-right: 6px; }
@@ -565,7 +349,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 .s3d-vec-row label { min-width: 8px; text-align: center; font-size: 10px; color: rgba(255,255,255,0.45); }
 .s3d-dock { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding-top: 10px; margin-right: 6px; border-top: 0.5px solid rgba(255,255,255,0.09); }
 .s3d-dock .mini-group { justify-content: flex-start; }
-/* Hierarchy 的 Add 菜单在中栏上方,所以它向下展开(和 Layers  dock 那枚向上的 add-menu 相反)。 */
+/* Hierarchy 的 Add 菜单挂在栏顶的小节上,所以它向下展开。 */
 .s3d-menu { top: calc(100% + 6px); bottom: auto; left: auto; right: 0; width: 216px; }
 
 #brushCursor { position: fixed; pointer-events: none; border-radius: 50%; z-index: 100; display: none; transform: translate(-50%,-50%); box-sizing: border-box; border: 1.5px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3); }
@@ -931,7 +715,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
         </div><!-- /panelScroll -->
         <!-- 3D tab 期间整栏换成这一份:Hierarchy / Inspector 用和中栏同一套控件词汇
            (.panel-section / .panel-head / .panel-label / .mini-group / .mini-btn / .control-row),
-           长说明一律进 title。#panelScroll、#layersDock 在这期间隐去。 -->
+           长说明一律进 title。#panelScroll 在这期间隐去。 -->
         <div id="scenePanel">
             <div id="sceneScroll">
                 <div class="panel-section">
@@ -959,7 +743,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                             <button class="mini-btn ico-btn" id="sceneDeleteBtn" title="Remove the selected object from the scene">&times;</button>
                             <button class="mini-btn" id="sceneAddBtn" aria-haspopup="menu" aria-expanded="false"
                                     title="Add to the scene: a model from disk, a primitive, a light or a camera">Add<span class="add-caret">&#9662;</span></button>
-                            <!-- 挂在栏顶的小节上,所以往下展开(和 Layers dock 那枚向上的 add-menu 相反)。 -->
+                            <!-- 挂在栏顶的小节上,所以往下展开。 -->
                             <div class="io-menu s3d-menu" id="sceneAddMenu" role="menu" hidden>
                                 <button class="io-menu-item" id="s3dAddModel" role="menuitem"
                                         title="Pick a .fbx / .glb / .gltf / .obj — it is added at the origin and fitted to a sane size.">
@@ -1020,90 +804,6 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
                 </div>
             </div>
         </div>
-        <!-- 那颗纯 Mask 层自己的 dock 也搬进了宿主同一格 Mask（workbench/mask.tsx）：它是一条数据通道，
-             不属于 Layers 也不属于 Guidances，所以原来谁都不在它那一列里 —— 现在它跟"笔落在哪一面"并成
-             一格的上下两行。 -->
-        <div class="panel-section" id="layersDock">
-            <!-- Guidances sit ABOVE Layers in the dock and above the Layers composite on the canvas:
-                 whatever lands here is painted over the flattened image, and the whole stack is what
-                 the workspace Guidance card shows. Same rows, same menus — a row can be dragged
-                 between the two lists, which MOVES it rather than copying it. -->
-            <div class="panel-head">
-                <div class="panel-label" id="guidanceLabel">Guidances</div>
-                <div class="mini-group">
-                    <button class="mini-btn" id="clearGuidanceBtn" title="Remove every guidance layer">Clear All</button>
-                    <button class="mini-btn" id="addGuidanceBtn" aria-haspopup="menu" aria-expanded="false"
-                            title="Add a guidance: composited over the layers image, and what the workspace Guidance card publishes">Add<span class="add-caret">&#9662;</span></button>
-                    <div class="io-menu add-menu" id="addGuidanceMenu" role="menu" hidden>
-                        <button class="io-menu-item" id="addGuidanceDefaultBtn" role="menuitem"
-                                title="A blank guidance covering the canvas, one image pixel per canvas pixel.">
-                            <span class="io-menu-title">Default Guidance</span>
-                            <span class="io-menu-sub">Canvas sized and 1:1 with it — a transparent surface to paint on.</span>
-                        </button>
-                        <button class="io-menu-item" id="addGuidanceDynamicBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
-                            <span class="io-menu-title">Dynamic Guidance</span>
-                            <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
-                        </button>
-                        <button class="io-menu-item" id="addCudGuidanceBtn" role="menuitem"
-                                title="Choose a .cud file: its flattened Layers stack becomes this one guidance, and it repaints every time that file is saved. Stored in this file too, so it survives a lost link.">
-                            <span class="io-menu-title">Cud Project</span>
-                            <span class="io-menu-sub">Another .cud as one linked guidance that follows its file.</span>
-                        </button>
-                    </div>
-                </div>
-            </div>
-            <div class="layer-list" id="guidanceList"></div>
-            <!-- The rail between the two stacks: dragging it re-splits the dock's leftover height. -->
-            <div id="stackSplitter" role="separator" aria-orientation="horizontal"
-                 aria-valuemin="15" aria-valuemax="85" aria-valuenow="60"
-                 aria-label="Guidances / Layers split" tabindex="0"
-                 title="Drag to set how the dock is split between Guidances and Layers · double-click (or Alt+click) to reset"></div>
-            <div class="panel-head">
-                <div class="panel-label" id="layersLabel">Layers</div>
-                <div class="mini-group">
-                    <button class="mini-btn ico-btn" id="fxBypassBtn" title="Suspend every layer effect chain — the chains stay on their layers, nothing is deleted"></button>
-                    <button class="mini-btn ico-btn" id="undoBtn" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
-                    <button class="mini-btn ico-btn" id="redoBtn" title="Redo (Ctrl+Y or Ctrl+Shift+Z)" disabled>&#8631;</button>
-                    <button class="mini-btn" id="clearBtn" title="Remove every layer (guidances stay)">Clear All</button>
-                    <button class="mini-btn" id="addLayerBtn" aria-haspopup="menu" aria-expanded="false"
-                            title="Add a layer: one the size of the canvas, or one you draw out at any resolution">Add<span class="add-caret">&#9662;</span></button>
-                    <!-- Anchored to the Layers dock, so it unfolds upward over the palette.
-                         Text / Direction / 3D 不在这里 —— 它们是 attribute,不是图层种类:
-                         入口在每一行条带末尾的 `+` 菜单里。 -->
-                    <div class="io-menu add-menu" id="addLayerMenu" role="menu" hidden>
-                        <button class="io-menu-item" id="addDefaultLayerBtn" role="menuitem"
-                                title="A blank layer covering the canvas, one image pixel per canvas pixel.">
-                            <span class="io-menu-title">Default Layer</span>
-                            <span class="io-menu-sub">Canvas sized and 1:1 with it — a transparent surface to paint on.</span>
-                        </button>
-                        <button class="io-menu-item" id="addStashLayerBtn" role="menuitem"
-                                title="A live merged copy of every layer under it, re-read on each draw: an effect on this row is an effect on the whole stack below. It has no pixels of its own until it samples, it follows the layers underneath as you edit them, and its grid is the canvas — so it cannot be moved, scaled or rotated.">
-                            <span class="io-menu-title">Stash Layer</span>
-                            <span class="io-menu-sub">The layers under it, merged on every draw — effects here act on that stack.</span>
-                        </button>
-                        <button class="io-menu-item" id="addDynamicLayerBtn" role="menuitem"
-                                title="Drag a rectangle on the canvas, then choose its resolution in the dialog that follows.">
-                            <span class="io-menu-title">Dynamic Layer</span>
-                            <span class="io-menu-sub">Drag a rectangle on the canvas, then pick its resolution.</span>
-                        </button>
-                        <button class="io-menu-item" id="addCudLayerBtn" role="menuitem"
-                                title="Choose a .cud file: its flattened Layers stack becomes this one row's picture, and it repaints every time that file is saved. The composite is stored in this file too, so the row still draws — and still blends — if the link is ever lost.">
-                            <span class="io-menu-title">Cud Project</span>
-                            <span class="io-menu-sub">Another .cud as one linked layer that follows its file.</span>
-                        </button>
-                        <button class="io-menu-item" id="addRasterToggleBtn" role="menuitemcheckbox" aria-checked="false"
-                                title="When on, images added from here on — dropped files, Import picks and history injections — become raster layers: their buffer is the canvas, 1:1, and every transform resamples the pixels in place. One-way; rasterize a smart layer from its right-click menu instead.">
-                            <span class="io-menu-title"><span id="addRasterCheck" style="display:none;">&#10003;&nbsp;</span>Place images as raster</span>
-                            <span class="io-menu-sub" id="addRasterSub">Off — new image layers keep their original pixels (smart objects).</span>
-                        </button>
-                    </div>
-                </div>
-            </div>
-            <div class="layer-list" id="layerList"></div>
-        </div>
-        <!-- Blank area under the palette: lifts the whole Layers block up off the bottom corner. -->
-        <div id="layersSpacer" aria-hidden="true"></div>
     </div>
 </div>
 <div class="modal-overlay" id="canvasModal">
@@ -1354,8 +1054,6 @@ const overlayCtx = overlayCanvas.getContext('2d');
 const brushCursor = document.getElementById('brushCursor');
 const blendCtx = blendCanvas.getContext('2d');
 const guidanceCtx = guidanceCanvas.getContext('2d');
-const layerListEl = document.getElementById('layerList');
-const guidanceListEl = document.getElementById('guidanceList');
 const blendBtn = document.getElementById('blendBtn');
 const extraPromptInput = document.getElementById('extraPrompt');
 const tagBtn = document.getElementById('tagBtn');
@@ -1372,11 +1070,6 @@ const sizeHud = document.getElementById('sizeHud');
 const sizeHudValue = document.getElementById('sizeHudValue');
 const sizeHudTool = document.getElementById('sizeHudTool');
 const dropOverlay = document.getElementById('dropOverlay');
-// Section headers carry the explanations as tooltips instead of permanent sidebar text.
-const layersLabel = document.getElementById('layersLabel');
-const guidanceLabel = document.getElementById('guidanceLabel');
-layersLabel.title = 'Top of list draws on top · drag rows to reorder, or drop a row on the Guidances list to MOVE it there. Head line: 1 original image, 2 layer name. Second line: 3 result preview (this layer as it sits on the canvas, click to transform), 4 Decal (click to paint colour), 5 Mask (click to paint coverage). Shift+click rows to hold several layers: they move, scale and rotate together, and mask/decal painting is off until one layer is selected alone.';
-guidanceLabel.title = 'Guidances stack ON TOP of the Layers composite — pose, composition or colour references that guide a run without becoming part of the artwork. The workspace Guidance card is this whole picture, updated in place. Drag a layer row here to MOVE it out of Layers; drag it back to give it up.';
 // Mask 那一格的两句话（coverage channel 那一串 + Mask/Decal 的目标说明）跟着这一格一起搬进了
 // workbench/mask.tsx：标题条的说明是注册表里那句 hint，行上的说明是那一行自己的 title。
 
@@ -1500,7 +1193,6 @@ let maskLayer = ownSource({
     maskCtx: null,
     decal: null,               // the mask surface itself — opaque where covered, transparent elsewhere
     decalCtx: null,
-    canvasThumbEl: null,
     // Never a chain host (layerTakesEffects() says no for the Mask layer), but it keeps the
     // layer object shape so nothing downstream has to special-case it.
     effects: [], fxCache: null,
@@ -1588,10 +1280,6 @@ let backAlpha = 1;
 let backHue = 0;
 
 let drag = null;               // {kind:'move'|'rotate'|'scale', handle, layerId, startTransform, pos, anchor, cos, sin, tw0, th0}
-let dragRowId = null;
-// 条带内部的重排:一次只拖一颗 chip,{layerId, ref} 就是它的全部状态 —— 别的行的 chip 不接受它,
-// 图层那一套重排序 (dragRowId) 也不会在它起拖时被误触发。
-let attrDrag = null;
 // Dynamic Layer: after Add ▸ Dynamic Layer the next left-drag on the canvas sweeps out a
 // rectangle in canvas pixels. The rect is only a spec for a new layer, so it lives in doc
 // space and is thrown away (or taken to the modal) on release.
@@ -1770,23 +1458,6 @@ function nativeSize(img) { return img ? { w: img.naturalWidth || img.width || 1,
 // `src === ''` — it has pixels, but nothing to render in an <img>, and it is the case the row
 // must present as "no image yet" rather than letting the browser draw a broken-image glyph.
 function hasLayerImage(l) { return !!(l && l.img && l.src); }
-
-// The red X that stands in for a missing image. Inline SVG so it needs no asset and scales with
-// the chip; the stroke is currentColor so the CSS class owns the colour.
-function noImageGlyph() {
-    const NS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(NS, 'svg');
-    svg.setAttribute('viewBox', '0 0 16 16');
-    svg.setAttribute('aria-hidden', 'true');
-    const path = document.createElementNS(NS, 'path');
-    path.setAttribute('d', 'M4 4 L12 12 M12 4 L4 12');
-    path.setAttribute('stroke', '#ff3b30');
-    path.setAttribute('stroke-width', '2');
-    path.setAttribute('stroke-linecap', 'round');
-    path.setAttribute('fill', 'none');
-    svg.appendChild(path);
-    return svg;
-}
 
 // ==================== 画布尺寸 / 布局 ====================
 function sizeCanvasElement() {
@@ -2073,9 +1744,9 @@ function applyTransformPending(quiet) {
     // step (a canvas resize re-samples every raster buffer anyway): the bake rides along in that
     // step instead of landing as an undo entry that changes nothing on screen.
     if (quiet) return true;
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Transform baked into the pixels');
     return true;
 }
 
@@ -2092,7 +1763,7 @@ function cancelTransformPending() {
             ? { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 }
             : cloneTransform(e.from);
     }
-    renderLayerList();
+    refreshLayerPanels();
     render();
     return true;
 }
@@ -2253,7 +1924,7 @@ async function addTextFontFile(file) {
 // 丢缓存,下一次 sync 按新脸重算。
 function invalidateAllTextBuffers() {
     for (const l of layers) for (const r of attrRecordsOf(l)) if (r.type === 'text') r.genCache = null;
-    renderLayerList();
+    refreshLayerPanels();
     render();
 }
 async function loadTextFontLibrary() {
@@ -2451,9 +2122,9 @@ function patchTextLayer(l, patch, opts) {
     syncTextBuffer(l);
     if (!(opts && opts.silent)) {
         layoutCanvas();
-        renderLayerList();
+        refreshLayerPanels();
         render();
-        pushHistory(opts && opts.historyKey);
+        pushHistory(opts && opts.historyKey, (opts && opts.label) || 'Text changed');
     }
 }
 
@@ -2508,7 +2179,7 @@ function refreshMaskLayerThumb() { queueBlendUi(); }
 // referenced by it, and copy-on-write is what keeps that snapshot intact. They return false
 // when there is no canvas to act on, so a caller can say so instead of reporting a success
 // that never happened.
-function replaceMaskSurface(paint) {
+function replaceMaskSurface(paint, label) {
     if (!canvasW || !canvasH) return false;
     const w = Math.round(canvasW), h = Math.round(canvasH);
     const prev = maskLayer.decal;
@@ -2521,19 +2192,19 @@ function replaceMaskSurface(paint) {
     maskLayer.decalCtx = nctx;
     refreshMaskLayerThumb();
     render();
-    pushHistory();
+    pushHistory(null, label);
     return true;
 }
 
 // Clear: nothing covered, so the actions run on the whole image.
-function clearMaskLayer() { return replaceMaskSurface(null); }
+function clearMaskLayer() { return replaceMaskSurface(null, 'Mask cleared'); }
 
 // Full: every pixel covered — the missing "the whole canvas is the mask" case.
 function fillMaskLayer() {
     return replaceMaskSurface((ctx, _prev, w, h) => {
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, w, h);
-    });
+    }, 'Mask filled');
 }
 
 function invertMaskLayer() {
@@ -2545,14 +2216,14 @@ function invertMaskLayer() {
             ctx.drawImage(prev, 0, 0, w, h);
             ctx.globalCompositeOperation = 'source-over';
         }
-    });
+    }, 'Mask inverted');
 }
 
 
 function selectMaskLayer() {
     selectedId = MASK_LAYER_ID;
     setMode('mask');            // painting the mask is always a brush job
-    renderLayerList();
+    refreshLayerPanels();
     render();
     if (!canvasW || !canvasH) setStatus('Add an image (or set a canvas size) before painting the mask', 'error');
     else setStatus('Mask layer — this is the mask sent to the backend');
@@ -2862,7 +2533,7 @@ function setCanvasSize(w, h, scaleLayers) {
     }
     updateCanvasReadout();
     setStatus(`Canvas ${w} × ${h}` + (scaleLayers ? '' : ' · layers kept at original pixel size'));
-    pushHistory();
+    pushHistory(null, 'Canvas size set to ' + w + ' × ' + h);
     return true;
 }
 
@@ -2889,6 +2560,27 @@ const blendUiState = {
     // 活位图，宿主页没有它，只能把像素送过去 —— 但它不在这里重算，只有面真的换过才重编，见 syncMaskStill()。
     // 这一格选中与否不发第二份：那一句就是上面 paint.maskLayer 那个谓词。
     mask: { visible: true, still: '' },
+    // Layers / Guidances 两格：`stacks` 是两份行描述符（结构、读数、哪一颗该亮 —— 措辞与摆法在 React），
+    // `faces` 是**这一帧新要的那几张缩略图**（键在行描述符里，编法与失效判据见 face 通道）。发完即清。
+    stacks: { layers: [], guidances: [] },
+    // Layers / Guidances 两格头部那颗「看加特效前原样」开关的读数。它是页面自己的状态，宿主要亮的
+    // 就是它 —— 链里每一行也带着同一个布尔（行描述符的 chains[].bypass），但一条链都没挂的时候，
+    // 头部那颗按钮照样得知道自己是不是按下去的状态。
+    // `wand` 是这颗按钮的画法和条带上那枚链 chip 同一个作者（fxWandSvg 是 fx 那一侧的图标库）：
+    // 一次赋值就不再变，所以 queueBlendUi 的等值去重只会把它送出去一回。
+    fx: { bypass: false, wand: '', open: null },
+    // Add 菜单里那颗「往后的图是 raster 还是 smart object」的持久偏好读数。它是页面自己的变量，
+    // syncRasterToggleUI 是唯一 mirror 它的地方 —— 宿主菜单里那条勾亮的就是这一句。
+    rasterDrop: false,
+    // 条带末尾那颗 `+` 菜单的条目表：顺序 = 注册表的声明序，那句 addTitle 是注册表自己的话
+    // （没写过就用页面原来那句同一模板补上）。菜单归宿主摆，但"有哪几类、加进去会做什么"只有
+    // 注册表答得出 —— 抄进 React 才是第二份真相。
+    attrKinds: [],
+    // History 那一格：两支摞在一起就是面板里那一列（`i` 直接喂 `history-jump`，它认的就是这个下标），
+    // `current` 指到现在站着的那一步，`limit` 与每步预览的键都出自页面自己那一份常量与记录 —— 宿主
+    // 只亮这一句，绝不自己数步子（HISTORY_LIMIT 在页面下面才声明，所以这里只能写 0，由 syncHistoryUI 补）。
+    history: { limit: 0, canUndo: false, canRedo: false, steps: [] },
+    faces: {},
 };
 let blendUiFrame = 0;
 let blendUiSent = '';
@@ -2896,12 +2588,22 @@ function queueBlendUi() {
     if (blendUiFrame || window.parent === window) return;
     blendUiFrame = requestAnimationFrame(() => {
         blendUiFrame = 0;
-        // 这一格是唯一需要像素的面：先把"要不要重编那一帧"问过一遍，再去重。
+        // 这两格是唯一需要像素的面：先把"要不要重编那几张"问过一遍，再去重。
+        // 历史那几张要先编（它们只在进栈那一趟编一次，编法见 syncHistoryThumbs），再让面通道按
+        // 可见区与预算决定这一帧发哪几张。
+        syncHistoryThumbs();
         syncMaskStill();
+        syncStackFaces();
+        // Alt+悬浮那一张是在闸门外现编的（syncStackFaces 每帧先把增量清空、再按可见区与预算重算），
+        // 所以合并排在它之后 —— 否则这一帧刚要发的那张放大图会被自己清掉。
+        if (hoverPending) { blendUiState.faces[hoverPending.key] = hoverPending.url; hoverPending = null; }
         const json = JSON.stringify(blendUiState);
         if (json === blendUiSent) return;
         blendUiSent = json;
         window.parent.postMessage({ type: 'blend-ui', ...blendUiState }, '*');
+        // `faces` 是增量：这一帧给出去的那几张，下一帧的快照里不该再有 —— 留着就是把同一批 PNG
+        // 每帧重送一遍。宿主按键合并，所以清掉的只是这一份待发快照，不是两边任何一份真相。
+        for (const k in blendUiState.faces) delete blendUiState.faces[k];
     });
 }
 
@@ -3333,18 +3035,6 @@ function paintCanvasThumb(el, l) {
     c.strokeStyle = 'rgba(255,255,255,0.22)';
     c.lineWidth = 1;
     c.strokeRect(ox + 0.5, oy + 0.5, dw - 1, dh - 1);
-}
-
-function refreshCanvasThumb(l) {
-    if (l.canvasThumbEl && l.canvasThumbEl.isConnected) paintCanvasThumb(l.canvasThumbEl, l);
-}
-
-function refreshCanvasThumbs() {
-    for (const l of layers) {
-        refreshCanvasThumb(l);
-        refreshAttrChips(l);
-    }
-    refreshMaskLayerThumb();
 }
 
 function localToCanvas(l, u, v) {
@@ -4206,9 +3896,8 @@ function fillSelection() {
         pctx.drawImage(selInkCanvas, sm.x, sm.y);
     }
     markPainted(l);
-    pushHistory();
-    if (isMaskLayerTarget()) refreshMaskLayerThumb();
-    else refreshAttrChips(l, toMask ? 'mask' : 'decal');
+    pushHistory(null, 'Fill selection');
+    queueBlendUi();
     syncPaintUI();
     render();
     setStatus(`Fill — ${selection.count.toLocaleString()} px poured into ${l.name}'s ${toMask ? 'mask (coverage ' + Math.round(brushAlpha * 255) + '/255)' : 'decal'}`);
@@ -4339,9 +4028,9 @@ function pasteFromClipboard() {
     insertAtStackTop(l);
     selectedId = l.id;
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Pasted as a new layer');
     setStatus(`Pasted — 「${l.name}」 on top, with「${src.name}」's mask${liveEffects(l).length ? ' and live effects' : ''}`);
 }
 
@@ -4558,7 +4247,7 @@ function render() {
         if (dirRef) dirRefDone();       // 纹理看这个版本号决定要不要重传, 拖动期间它一个字节都没变
     }
     updateTransformReadout();
-    refreshCanvasThumbs();
+    queueBlendUi();
     drawOverlay();
     schedulePreview();
     schedulePinnedCardPreview();
@@ -4659,10 +4348,27 @@ function updateTransformReadout() {
 // costs a few dozen bytes each; only an actual paint step costs one canvas.
 const HISTORY_LIMIT = 60;       // how many steps you can walk back; the stack holds one extra "now"
 const HISTORY_MAX_ENTRIES = HISTORY_LIMIT + 1;
+const HIST_FACE_MAX = 108;      // 每步那一张预览的长边上限（拍板 19.a：编一次、只送看得见的行）
 let undoStack = [];
 let redoStack = [];
 let historyReplaying = false;   // guards against a restore being recorded as a new action
 let lastActionKey = null;       // lets a run of identical nudges collapse into one step
+let historyStepSeq = 0;         // 一步的身份号，只增不减（undoStack 的下标会变，这一枚不会）
+
+// 每步的身份、文案和那张预览都钉在快照记录自己身上 —— 不是第二份按下标对齐的表：undo/redo 两支之间
+// 搬的就是这一份对象，tab 的 stash 存的也是这一份数组，所以名字与预览跟着画面一起活过 undo、重做和
+// 切 tab，一个字都不用搬。传 `prev` 的那两处会**换掉**顶格这个对象（同一手势的 coalesce、取消文字
+// 编辑的 rewind），于是新记录把身份和文案接过来，只把版本号 +1 —— 版本号进了面通道的签名，所以宿主
+// 手里那一张会跟着换成 rewind 之后的画面，而不是留在手势开始时那一帧。
+function tagHistoryStep(rec, prev, label) {
+    if (!rec) return rec;
+    rec.histId = prev ? prev.histId : ++historyStepSeq;
+    rec.histLabel = label === undefined ? ((prev && prev.histLabel) || '') : label;
+    rec.histVer = (prev ? prev.histVer | 0 : 0) + 1;
+    rec.histThumb = '';
+    rec.histDirty = true;
+    return rec;
+}
 
 function cloneTransform(t) { return { cx: t.cx, cy: t.cy, w: t.w, h: t.h, rotation: t.rotation }; }
 
@@ -4790,7 +4496,6 @@ function restoreState(s, opts) {
         // 这几样已经从图层字段搬进 strip:面按引用带回 (它是 copy-on-write 的),链由 spec.load 另拷
         // 一份,所以重放永远不会把历史里那条数组接手过来当活链。
         attrs: adoptAttrPayloads(ls.attrs, byAttr),
-        canvasThumbEl: null,
         // fxCache 从不进快照 —— 它是派生数据,靠 fxResolved 的身份键自己判定失效。
         fxCache: null,
     }, ls, byRef);
@@ -4816,13 +4521,11 @@ function restoreState(s, opts) {
     if (selectedId === MASK_LAYER_ID) groupIds = new Set();
     else if (selectedId !== null && !groupIds.has(selectedId)) groupIds = new Set([selectedId]);
     maskLayer.visible = s.maskVisible;
-    maskLayer.canvasThumbEl = null;
     adoptMaskSurface(s.maskDecal);
     // 重放换掉了整批活图层,上一批的源记录与 attribute 到此没人指了 —— 两张表都只给活图层当视图用,
     // 不替历史保管画布。
     pruneAssets();
     pruneAttrs();
-    dragRowId = null;
     if (asDocument) {
         mode = s.mode === 'canvasModify' ? 'transform' : (s.mode || 'transform');
         paintTarget = s.paintTarget === 'decal' ? 'decal' : 'mask';
@@ -4836,7 +4539,7 @@ function restoreState(s, opts) {
     }
     layoutCanvas();
     updateCanvasReadout();
-    renderLayerList();
+    refreshLayerPanels();
     if (asDocument) syncModeUI();
     syncPaintUI();
     syncActionButtons();
@@ -4875,7 +4578,9 @@ function adoptMaskSurface(decal) {
 // `key` marks a repeatable micro-action (arrow-key nudging): while the same key keeps
 // arriving, the top entry is overwritten instead of pushed, so holding an arrow key is one
 // undo step rather than sixty.
-function pushHistory(key) {
+// `label` is this step's one line in the History panel. It travels on the snapshot record (see
+// tagHistoryStep), so nothing else has to be kept in index-sync with the two stacks.
+function pushHistory(key, label) {
     // ANY committed action kills a pending Shift-connect chain: an anchor is only ever valid
     // for the immediately previous painting gesture (bucket fills, transform drags, generated
     // write-backs ... all land here), and commitStroke re-arms its own anchor AFTER this call.
@@ -4883,16 +4588,16 @@ function pushHistory(key) {
     if (historyReplaying) return;
     markDocumentDirty();
     const coalesce = key && key === lastActionKey && undoStack.length > 1;
-    if (coalesce) undoStack[undoStack.length - 1] = snapshotState();
-    else undoStack.push(snapshotState());
+    if (coalesce) undoStack[undoStack.length - 1] = tagHistoryStep(snapshotState(), undoStack[undoStack.length - 1], label);
+    else undoStack.push(tagHistoryStep(snapshotState(), null, label));
     lastActionKey = key || null;
     while (undoStack.length > HISTORY_MAX_ENTRIES) undoStack.shift();
     redoStack.length = 0;        // a fresh action invalidates the redo branch
     syncHistoryUI();
 }
 
-function resetHistory() {
-    undoStack = [snapshotState()];
+function resetHistory(label) {
+    undoStack = [tagHistoryStep(snapshotState(), null, label === undefined ? 'Document opened' : label)];
     redoStack = [];
     lastActionKey = null;
     syncHistoryUI();
@@ -4920,11 +4625,42 @@ function detachPaintSurface(l) {
     }
 }
 
+// History 那一格唯一的播报口（#undoBtn / #redoBtn 那两颗按钮随栏底那列一起退休了，这里不再碰
+// DOM）。undo、redo、切 tab、取消文字编辑最后都走到 restoreState 尾巴上那一句，所以列子内不需要再
+// 有人替它记账。两支摞在一起 = 面板里那一列：redo 那一头按"重做的先后"排，于是行下标正是
+// `history-jump` 认的那个数（它自己就在两支之间数步子）。
 function syncHistoryUI() {
-    const u = document.getElementById('undoBtn');
-    const r = document.getElementById('redoBtn');
-    if (u) u.disabled = undoStack.length <= 1;
-    if (r) r.disabled = !redoStack.length;
+    const steps = [];
+    for (let i = 0; i < undoStack.length; i++) steps.push(historyStepView(i, undoStack[i]));
+    for (let j = redoStack.length - 1; j >= 0; j--) steps.push(historyStepView(steps.length, redoStack[j]));
+    blendUiState.history.limit = HISTORY_LIMIT;
+    blendUiState.history.canUndo = undoStack.length > 1;
+    blendUiState.history.canRedo = redoStack.length > 0;
+    blendUiState.history.steps = steps;
+    queueBlendUi();
+}
+
+function historyStepView(i, rec) {
+    return { i, label: (rec && rec.histLabel) || '', face: rec && rec.histId ? histFaceKey(rec) : '', current: i === undoStack.length - 1 };
+}
+
+// 每步那一张预览编在**播报那一趟**里，不编在 pushHistory 里：那一句散在八十多个动作的尾巴上，而动作
+// 自己那句 render() 有的排在它前、有的排在它后 —— 在 pushHistory 那一刻取 blendCanvas 会量到"动作前"
+// 的画面。rAF 那一趟跑在这一串同步提交之后，此刻的合成结果就是这一步的画面。版本号对上了就再也不
+// 重编：一张 PNG 只属于它那一步，画面后来往前走也动不到它（这就是"进栈时编一次"）。
+function syncHistoryThumbs() {
+    if (window.parent === window) return;     // 单独打开这一页时没有面板要喂，一张都不编
+    for (const rec of undoStack) encodeHistoryThumb(rec);
+    for (const rec of redoStack) encodeHistoryThumb(rec);
+}
+
+function encodeHistoryThumb(rec) {
+    if (!rec || !rec.histDirty) return;
+    rec.histDirty = false;
+    // 3D tab 的那块画面是 WebGL 缓冲，blendCanvas 里没有它 —— 和文档窗口那份存档同一条边界：
+    // 宁可这一格空着，也不交出一张黑方。
+    if (isSceneDoc(activeDoc) || !canvasW || !canvasH) { rec.histThumb = ''; return; }
+    rec.histThumb = stillDataUrl(HIST_FACE_MAX);
 }
 
 function undoAction() {
@@ -4951,23 +4687,25 @@ function redoAction() {
     setStatus('Redo');
 }
 
+// 历史列表里点第 i 步 = 站到那一步的画面上去。往前跳就是把中间那几步一份一份压进 redo 分支（PS 的读法：
+// 它们没有消失，只是成了"重做"那一排的头），往后跳就是把 redo 一份一份推回 undo。两句原语各自已经管好了
+// 手势守卫、shiftAnchor、coalesce 键与那一句报告，所以这里只数步子 —— 一份语义只有一个实现处。
+function jumpHistory(target) {
+    if (modalOpen() || drag || isDrawing || viewDrag) return;
+    const n = Number(target);
+    if (!Number.isFinite(n)) return;
+    const cur = undoStack.length - 1;
+    const i = Math.max(0, Math.min(cur + redoStack.length, Math.floor(n)));
+    if (i === cur) return;
+    while (undoStack.length - 1 > i) undoAction();
+    while (undoStack.length - 1 < i) redoAction();
+}
+
 // ==================== 图层列表 ====================
 function eyeSvg(visible) {
     const base = '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 3.6C4.7 3.6 2 5.9 1.1 8c.9 2.1 3.6 4.4 6.9 4.4S14.9 10.1 15 8c-.9-2.1-3.6-4.4-6.9-4.4z" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="8" cy="8" r="1.9" fill="currentColor"/></svg>';
     if (visible) return base;
     return base.replace('</svg>', '<path d="M2.4 2.4 13.6 13.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>');
-}
-
-// One-click Generate on a layer row — the play triangle mirrors the preset capsule's run half.
-function runSvg() {
-    return '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M5.4 3.2 12.8 8 5.4 12.8z" fill="currentColor"/></svg>';
-}
-
-// Jump on a cud row: an arrow leaving a frame — "this row opens something else".
-function cudJumpSvg() {
-    return '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-        + '<path d="M9.6 3.4h3v3"/><path d="M12.6 3.4 7.7 8.3"/>'
-        + '<path d="M11.1 9.6v2.1a1.2 1.2 0 0 1-1.2 1.2H4.3a1.2 1.2 0 0 1-1.2-1.2V6.3a1.2 1.2 0 0 1 1.2-1.2h2.1"/></svg>';
 }
 
 // Type badge for the row's image thumb: smart = non-destructive transform box with corner
@@ -5010,39 +4748,15 @@ function layerTypeBadgeSvg(l) {
         + '<rect x="7.2" y="7.2" width="2.4" height="2.4" fill="currentColor"/></svg>';
 }
 
-// Double-click a layer name to rename inline. Enter or blur commits, Esc rewinds. The suffixes
-// renderLayerList adds (· duplicate / · raster) are rebuilt by the re-render, so the input only
-// ever shows the raw name.
-function startRenameLayer(l, nameEl) {
-    if (nameEl.querySelector('input')) return;
-    const input = document.createElement('input');
-    input.className = 'layer-rename';
-    input.value = l.name;
-    nameEl.textContent = '';
-    nameEl.appendChild(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = commit => {
-        if (done) return;
-        done = true;
-        if (commit) {
-            const v = input.value.trim();
-            if (v && v !== l.name) {
-                l.name = v;
-                pushHistory();
-            }
-        }
-        renderLayerList();
-    };
-    input.addEventListener('keydown', ev => {
-        ev.stopPropagation();
-        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
-        else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
-    });
-    input.addEventListener('blur', () => finish(true));
-    input.addEventListener('click', ev => ev.stopPropagation());
-    input.addEventListener('dblclick', ev => ev.stopPropagation());
+// 改名的落点只有一处：trim 之后非空、且与现在不同才算真改了一次，改完记一步历史，然后刷新面板。
+// 宿主 dock 行内那颗 <input> 提交的那一句走这里 —— 页面侧双击起的那一颗随行 DOM 一起退休了。
+function renameLayer(l, raw) {
+    const v = String(raw == null ? '' : raw).trim();
+    if (v && v !== l.name) {
+        l.name = v;
+        pushHistory(null, 'Renamed to 「' + l.name + '」');
+    }
+    refreshLayerPanels();
 }
 
 // 条带上的 chip 由 attr/core.js 画 (每种 attribute 自己那一颗缩略图画法住在它的 spec 里)。
@@ -5080,17 +4794,344 @@ function syncMaskStill() {
     blendUiState.mask.still = renderMaskStill();
 }
 
-// ==================== 条带 (attribute strip) ====================
-// 一颗 chip 就是条带上的一步。缩略图**只在 attribute 存在时**才存在 —— 不给没装的能力画占位,也没有
-// "装了但停用"这一态;要它消失只有 Remove。`+` 钉在最右边,永远追加到最后一步。
-// 条带只管"这个图层按序挂着哪几枚",容器 (今天只有 Effects 的链) 摊在图层行的**上方** —— 见 renderStackList。
-function attrStripEls(l) {
-    const out = [];
-    for (const r of attrRecordsOf(l)) out.push(attrChip(l, r));
-    out.push(attrAddChip(l));
-    return out;
+// ==================== 行模型 + 面通道（dock 的 Layers / Guidances 两格）====================
+// 这两格的正文搬进宿主的 dock 之后，页面不再建行：它交出的是一份**行描述符** —— 这一行是谁、挂着
+// 哪几枚 attribute、链里有哪几步、哪一颗该亮。文字、摆法、按钮的说法全在 React 那一侧（与 Canvas /
+// Brush / Color / Mask 几格同规矩：一句话一个作者）。留在这边的只有谓词与真值源，因为图层、attribute
+// 记录和折叠出来的面都还住在这页的绘制引擎里。
+// 图形的归属按"还有谁在用"分：只有行在用的那几枚（红 ×、行尾的 ▶/眼睛、七种类型角标、`+`）归 React，
+// 门禁比 SVG 的 path 字节；attribute 注册表自己的角标（spec.badge）与特效图标（fxIconSvg）注册表还在
+// 这边，原样交出去就是唯一一份 —— 把它抄进 React 才是第二份真相。
+function layerRowKind(l) {
+    return is3DLayer(l) ? 'model'
+        : isCudLayer(l) ? 'cud'
+        : isTextLayer(l) ? 'text'
+        : isDirectionLayer(l) ? 'direction'
+        : isStashLayer(l) ? 'stash'
+        : isRasterLayer(l) ? 'raster' : 'smart';
 }
 
+function layerRowModel(l) {
+    const linked = cudLayerLinked(l);
+    const recs = attrRecordsOf(l);
+    const group = selectedGroup();
+    return {
+        id: l.id,
+        name: l.name,
+        kind: layerRowKind(l),
+        // 类型角标那七支画法认的是图层自己的谓词（is3DLayer / isCudLayer+link / isText…），不是 `kind`
+        // 那一个字符串能拼回来的东西 —— 所以标记本身由这里交过去，与 attribute 那枚 badge、链里那枚
+        // icon 同一个规矩：注册表留在页面，摆法过界。配色跟着 kind 走，那是纯样式，归 React。
+        badgeSvg: layerTypeBadgeSvg(l),
+        // 这一行属于哪一摞 —— 交的是页面自己的那两个栈 id（'layer' / 'guidance'），不是宿主 dock 的
+        // 单元名。跨摞拖行、从工作区落到哪一格里，回发的都是这一句，所以两边不可能各造一套名字。
+        stack: stackOf(l),
+        cudName: isCudLayer(l) ? String((l.cud && l.cud.name) || '') : '',
+        cudLinked: isCudLayer(l) ? !!linked : false,
+        // 高亮的两岔：单选点这一行、成组时组里每一行都亮（activeGroup 自己会退让成"只有选中那一枚"）。
+        selected: l.id === selectedId,
+        grouped: activeGroup().has(l.id),
+        visible: !!l.visible,
+        // ▶ 的两件事：这一行能不能当 Generate 的目标，和它现在到底有没有墨（那句 tooltip 的分支）。
+        canGen: layerMaskIsMeaningful(l),
+        hasImg: hasLayerImage(l) || stripGeneratorInk(l),
+        native: nativeSize(l.img),
+        // 右键菜单归宿主画（拍板 5.a），但它每一条的**出现与灰掉**问的都是这一页的真值，不是样式：
+        // 菜单里 Generate 那句 tooltip 的分支判据与行上 ▶ 那枚不是同一句（方向层恒算"有图"，哪怕还
+        // 没墨），Fit Mask / Split / Rasterize 认的是"这一层还有没有 buffer""画布尺寸定了没有"，
+        // Combine 只在按住两行以上时出现且那句 tooltip 要报数，cud 的 Refresh 认的是"那个项目此刻
+        // 开着"（与上面 cudLinked 那句链接注册表判据不同源）。这些谓词留在这儿，宿主只管摆条目。
+        menu: {
+            genHasImg: hasLayerImage(l) || (isTextLayer(l) && !!String(l.text.content)) || isDirectionLayer(l),
+            hasBuffer: !!l.img,
+            canvasReady: !!canvasW,
+            groupSize: group ? group.length : 0,
+            hasText: isTextLayer(l) && !!String(l.text.content),
+            cudDocOpen: isCudLayer(l) && !!cudDocFor(l.cud.link),
+        },
+        // 四张面：原图（没有面就交空串，React 因此画那枚红 ×）、这一层摊在画布上的样子、条带上每一枚
+        // 有面的 attribute，还有 Alt+悬浮那一张放大预览的键。键全部由 face 通道那四个函数在这里交出去 ——
+        // 宿主只读字段，一张都不自己拼，两边因此不可能各说一套。
+        orig: origFaceOf(l) ? origFaceKey(l) : '',
+        canvas: resultFaceKey(l),
+        hover: hoverFaceKey(l),
+        attrs: recs.map(r => {
+            const spec = ATTR_TYPES[r.type];
+            const hasFace = spec.kind === 'surface' || spec.kind === 'generator';
+            return {
+                guid: r.id, type: r.type, label: spec.label, kind: spec.kind,
+                chipClass: spec.chipClass || '',
+                badge: spec.badge ? spec.badge.svg : '',
+                badgeClass: spec.badge ? (spec.badge.class || '') : '',
+                // 链没有面：那枚魔棒是"顺序里有这么一步"的记号，不是内容预览。它照样得由注册表画
+                // （fxWandSvg 是 fx 那一侧的图标库），所以把标记本身交过去，而不是在 React 抄第二根魔棒。
+                face: hasFace ? attrFaceKey(r) : '',
+                glyph: spec.kind === 'chain' ? fxWandSvg() : '',
+                enabled: attrEnabled(r),
+                armed: isArmedChip(l, r),
+                // 只有真值源那一句；" · Ctrl+click turns this step …"那半句是面板的措辞，归 React。
+                title: spec.title ? spec.title(r, l) : spec.label,
+            };
+        }),
+        // 特效链摊在行的**上方**、从下往上读；这里交的是执行序（= r.chain 的先后），摆向归 React。
+        // 空链不占位：那一枚容器由条带上自己的 chip 说话，所以这里就是这一条判据唯一的作者。
+        chains: recs.filter(r => Array.isArray(r.chain) && r.chain.length).map(r => ({
+            guid: r.id,
+            bypass: !!effectsBypass,
+            skip: fxChainSkipReason(r),
+            steps: r.chain.map(e => {
+                const spec = EFFECT_TYPES[e.type];
+                return {
+                    id: e.id, type: e.type, label: spec ? spec.label : String(e.type),
+                    icon: spec ? fxIconSvg(spec.icon) : '',
+                    readout: describeEffect(e),
+                    enabled: e.enabled !== false,
+                };
+            }),
+        })),
+    };
+}
+
+// `+` 那一口菜单的条目表：声明序就是它该出现的序，addTitle 缺省时补的那一句也是页面原来那一句
+// （页面这一句现在是唯一的作者）。
+function attrKindsOf() {
+    return Object.keys(ATTR_TYPES).map(type => {
+        const spec = ATTR_TYPES[type];
+        return { type, label: spec.label,
+            addTitle: spec.addTitle || `Add a ${spec.label.toLowerCase()} as this layer's last step — what its left steps leave is what it gets.` };
+    });
+}
+
+function syncStackRows() {
+    blendUiState.stacks.layers = stackLayers(WORK_STACK).map(l => layerRowModel(l));
+    blendUiState.stacks.guidances = stackLayers(GUIDANCE_STACK).map(l => layerRowModel(l));
+    blendUiState.attrKinds = attrKindsOf();
+    // 头部那颗开关跟这两份行描述符同一趟播报：翻它的那一句（setEffectsBypass）本来就会作废所有折叠
+    // 缓存并重排图层列表，所以这一趟一定跑过，不需要谁再额外喊一次。
+    blendUiState.fx.bypass = !!effectsBypass;
+    // 头部那颗开关的画法与条带那枚链 chip 的魔棒是同一支（fx/ui.js 的 fxWandSvg），所以由这里交出去；
+    // 它一次都不会变，去重那一句因此不会为它多发一条快照。
+    blendUiState.fx.wand = fxWandSvg();
+    // 展开参数的那一步（没有就 null）。整块参数面是**这一格里唯一**要跨边界的内容：行由页面按
+    // spec.params 编成数据（when 过滤、折叠开合、map/dir 槽的绑定状态全在页面判），宿主只按 kind 画控件。
+    // 一趟最多一步展开（fxOpenId 那一个变量），所以这一格永远是一句描述符而不是一摞 —— 快照里因此
+    // 不会同时躺着九家的行，只有当前那一步的。
+    blendUiState.fx.open = fxOpenStepModel();
+}
+
+// ---- 面（像素）通道 ----
+// 缩略图是这一列里唯一过不去的东西：那几块 84×56 的小画布画的是这页绘制引擎里的活位图，宿主页没有
+// 它们，所以像素必须跨这条边界。但**不能每次播报都重编** —— 实测一张 84×56 的 PNG 从 154 B（全空）到
+// 4.7 KB（满噪点）不等，40 行 × 6 枚 ≈ 540 张，最坏一档两兆多**一帧**；那是把 postMessage 当显存用。
+// 三道闸与 Mask 那一格同一套理由：
+//   1  逐张失效：一张面的身份 = 画它的那块位图的对象身份 + 落笔代次 + 折叠代次 + 摆它用的几何。没变
+//      就连上次编好的那句 URL 一起留着，一行都不重编。
+//   2  只编看得见的：可见区由宿主报下来（'visible-faces'）；没报过就等于没人看着这两格，一张都不编。
+//      签名要读 layerSource()（它会把这条链折一遍），所以**先过可见区这道闸，再算签名**。
+//   3  每帧封顶：FACE_ENCODE_CAP 张，编不满的下一帧接着编。拖动途中只有被拖那一行的结果面在换，
+//      其余行的签名一动不动 —— 变化量决定编码量。
+// 交出去的是**增量**：blendUiState.faces 只装这一帧新要给的几张，发完就清（见 queueBlendUi）。宿主按键
+// 合并；行描述符里没有的键就是不存在的那张面，宿主自己丢。
+const FACE_W = 84, FACE_H = 56;
+const FACE_ENCODE_CAP = 24;
+const origFaceKey = l => 'layer:' + l.id + ':orig';
+const resultFaceKey = l => 'layer:' + l.id + ':canvas';
+const attrFaceKey = r => 'attr:' + r.id;
+// 历史那一张的键认的是**那一步的身份**，不是它的下标：undo/redo 之间搬来搬去、上面掉出 60 步的窗口
+// 往前滑，一步的键都不能变 —— 键一变宿主就把它手里那张当没人要的面丢了，而它明明还是同一步。
+const histFaceKey = rec => 'hist:' + rec.histId;
+let faceBuf = null;
+let faceObjSeq = 0;
+const faceObjIds = new WeakMap();
+const faceSigs = new Map();        // 键 -> 上一次**编码**时这张面的身份
+const faceUrls = new Map();        // 键 -> 那一张编好的 data URL
+const faceSent = new Set();        // 宿主手里现在有的那些键
+let faceVisible = new Set();       // 宿主报下来的可见区；空 = 还没报过
+
+// 一块位图的身份号。同一个对象原地重画时换不了号，所以每一处"就地重画会 bump 的那个代次"都得单独
+// 进签名串 —— 蒙版/贴片是 copy-on-write（换新对象，号就变），生成器与折叠面另有 paintGen /
+// fxResolveGen，见 fx/gl.js 的 fxResolved 末尾那一句。
+function objId(o) {
+    if (!o) return '0';
+    let v = faceObjIds.get(o);
+    if (v === undefined) { v = ++faceObjSeq; faceObjIds.set(o, v); }
+    return String(v);
+}
+
+// 行里那颗"原图"到底该摆什么：DOM 那三岔判据一字不差搬过来 —— 有文件摆文件，文字/方向有墨摆折叠结果，
+// Stash 摆它自己那张抄件；第四岔是空，空没有面，那一格由 React 画红 ×。
+function origFaceOf(l) {
+    if (hasLayerImage(l)) return l.img;
+    if ((isTextLayer(l) || isDirectionLayer(l)) && stripGeneratorInk(l)) return layerSource(l) || null;
+    if (isStashLayer(l) && l.img) return l.img;
+    return null;
+}
+
+function origFaceSig(l, src) {
+    const n = nativeSize(src);
+    // 有文件那一岔摆的就是那一份原图：落笔改的是贴片那一面，链跑没跑也不关它的事 —— 那些都由结果面
+    // 去说。文字/方向那一岔摆的才是折叠面，它命中缓存时是同一块画布原地重画，所以跟着折叠代次走。
+    const folded = !hasLayerImage(l) && !isStashLayer(l);
+    return objId(src) + ':' + n.w + 'x' + n.h + (folded ? ':' + (l.fxResolveGen | 0) : '');
+}
+
+// 结果面的身份 = paintCanvasThumb 读数的那几样，一样不少：它读什么，这张面就可能因为什么而变。
+function faceBox(t) {
+    return t ? [t.cx, t.cy, t.w, t.h, t.rotation].join(',') : 'raster';
+}
+function resultFaceSig(l) {
+    const frame = rasterLiveFrame(l);
+    const tr = isRasterLayer(l) ? null
+        : (expandState && expandState.layerId === l.id) ? expandState.startTransform : l.transform;
+    return [objId(l.img), l.paintGen | 0, attrPaintGens(l), l.fxResolveGen | 0, objId(layerSource(l)),
+        canvasW, canvasH, l.visible ? 1 : 0,
+        frame ? faceBox(frame.from) + '>' + faceBox(frame.to) : '', faceBox(tr)].join('|');
+}
+
+function attrFaceSig(l, r) {
+    const n = nativeSize(l.img);
+    // 面自己的身份与代次之外还要带图层网格的尺寸：surface 那类 chip 是把面**按图层网格比例**摆进这块
+    // 小画布的（见 ATTR_KINDS.surface.chip），格子换了尺寸，同一张面摆出来也不是同一张。
+    return objId(r.surface) + ':' + (r.paintGen | 0) + ':' + n.w + 'x' + n.h;
+}
+
+// 编一张：画进那块共享缓冲，立刻取走 URL（下一张会把它清掉，所以只有这一刻的像素作数）。
+function encodeFace(paint) {
+    if (!faceBuf) faceBuf = document.createElement('canvas');
+    faceBuf.width = FACE_W; faceBuf.height = FACE_H;   // 赋宽高本身就清屏
+    const c = faceBuf.getContext('2d');
+    resetCtx(c);
+    paint(c, faceBuf);
+    return faceBuf.toDataURL('image/png');
+}
+
+// 与行里那一岔一致：有文件那一颗走 <img> 的 object-fit: cover（裁到填满），折叠面与 Stash 那两颗等比
+// 留边居中。摆法跟着原来那格的样子搬，不在搬家时顺手改。
+function paintOrigFace(c, w, h, src, cover) {
+    const n = nativeSize(src);
+    if (!n.w || !n.h) return;
+    const k = cover ? Math.max(w / n.w, h / n.h) : Math.min(w / n.w, h / n.h);
+    const dw = Math.max(1, n.w * k), dh = Math.max(1, n.h * k);
+    c.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+
+function syncStackFaces() {
+    const out = blendUiState.faces;
+    for (const k in out) delete out[k];
+    if (!faceVisible.size) return;
+    const live = new Set();
+    const liveHover = new Set();
+    let budget = FACE_ENCODE_CAP;
+    // 一个槽：键先记下（它是这一行的键，编不编都在），过得了可见区与预算这两道闸才去算签名。
+    // jobOf() 回 null = 这张面此刻不存在；签名没变而宿主手里就有这一张，则一个字都不发。
+    // `job.url` 是**已经编好**的那一张（历史那几张在进栈那一趟就编完了，见 syncHistoryThumbs）：
+    // 三道闸一个字不改，只是省下 encodeFace 那一步 —— 因为那一帧的像素早就过去了，此刻重画不出它。
+    const slot = (key, jobOf) => {
+        live.add(key);
+        if (!faceVisible.has(key)) { faceSent.delete(key); return; }
+        if (budget <= 0) return;
+        const job = jobOf();
+        if (!job) return;
+        if (faceSigs.get(key) !== job.sig) {
+            faceUrls.set(key, job.url || encodeFace(job.paint));
+            faceSigs.set(key, job.sig);
+        } else if (faceSent.has(key)) return;
+        out[key] = faceUrls.get(key) || '';
+        faceSent.add(key);
+        budget--;
+    };
+    for (const stack of [WORK_STACK, GUIDANCE_STACK]) {
+        for (const l of stackLayers(stack)) {
+            liveHover.add(hoverFaceKey(l));
+            slot(origFaceKey(l), () => {
+                const src = origFaceOf(l);
+                if (!src) return null;
+                return { sig: origFaceSig(l, src), paint: (c, el) => paintOrigFace(c, el.width, el.height, src, hasLayerImage(l)) };
+            });
+            slot(resultFaceKey(l), () => ({ sig: resultFaceSig(l), paint: (c, el) => paintCanvasThumb(el, l) }));
+            for (const r of attrRecordsOf(l)) {
+                const spec = ATTR_TYPES[r.type];
+                if (spec.kind !== 'surface' && spec.kind !== 'generator') continue;
+                slot(attrFaceKey(r), () => ({ sig: attrFaceSig(l, r), paint: (c, el) => spec.chip(el, r, l) }));
+            }
+        }
+    }
+    // 历史那一列的每步预览：过的是同一套三道闸（可见区、每帧封顶、去重），区别只在编法 —— 那张 PNG
+    // 由 syncHistoryThumbs 在那一步进栈/改写的那趟编好、存在记录身上，所以这里只交出去，一笔都不重画。
+    // 签名带版本号：同一支手势 coalesce 时顶格会被换新（rewind 也算），画面换了就得跟着换一张。
+    for (const rec of undoStack) {
+        if (!rec || !rec.histId) continue;
+        slot(histFaceKey(rec), () => (rec.histThumb ? { sig: rec.histId + ':' + rec.histVer, url: rec.histThumb } : null));
+    }
+    for (const rec of redoStack) {
+        if (!rec || !rec.histId) continue;
+        slot(histFaceKey(rec), () => (rec.histThumb ? { sig: rec.histId + ':' + rec.histVer, url: rec.histThumb } : null));
+    }
+    // 这一行没了、这一层删了、这条链收掉了 —— 面跟着键一起丢，不然那张 PNG 会一直占着这一页的内存。
+    // 丢的时候在增量里留一句空串：宿主照这一句把自己那一份也删掉，两边不会各留一张没人读的面。
+    for (const key of Array.from(faceSigs.keys())) {
+        if (live.has(key)) continue;
+        faceSigs.delete(key); faceUrls.delete(key); faceSent.delete(key);
+        out[key] = '';
+    }
+    // 放大预览那一张不在 faceSigs 里（它不受可见区与预算那两道闸管），所以跟着图层一起丢也要单独说一句。
+    for (const key of Array.from(hoverSigs.keys())) {
+        if (liveHover.has(key)) continue;
+        hoverSigs.delete(key); hoverUrls.delete(key);
+        out[key] = '';
+    }
+}
+
+// 可见区换过一次才重播一条快照：新进来的那些键要**重发**（哪怕签名没变 —— 宿主那一格此刻是空白，
+// 不重发就永远缺这一张），滚出去的从 faceSent 掉出去，等它们再进来。
+function setFaceVisible(keys) {
+    const next = new Set(Array.isArray(keys) ? keys.map(String) : []);
+    let changed = next.size !== faceVisible.size;
+    if (!changed) { for (const k of next) if (!faceVisible.has(k)) { changed = true; break; } }
+    faceVisible = next;
+    if (changed) for (const k of faceSent) if (!faceVisible.has(k)) faceSent.delete(k);
+    queueBlendUi();
+}
+
+// Alt+悬浮放大预览那一张。行内那颗 84×56 的缩略图放大到 480 是一团糊的像素，所以这一张按**原分辨率**
+// 现编、封顶 480（与页面那口放大预览 HP_MAX 同一个上限），而且只在指针按住 Alt 落到某一行时才编 ——
+// 它是按需的一张，不进可见区/预算那套每帧算法，也不进 faceSigs（那张表的清理只认行描述符里的键）。
+// 签名沿用结果面那一份：同一帧反复悬浮不重编。
+const HP_HOVER = 480;
+const hoverFaceKey = l => 'layer:' + l.id + ':hover';
+const hoverSigs = new Map();
+const hoverUrls = new Map();
+let hoverPending = null;         // { key, url } —— 这一次要播出去的那张放大图（面是增量，发完即清）
+function encodeHoverFace(l) {
+    let src = null;
+    // 与今天那颗 provider 同一句判据：没有 buffer 就没有预览，layerSource 现取、抛了当没有。
+    if (l.img) { try { src = layerSource(l); } catch (e) { src = null; } }
+    if (!src || !src.width || !src.height) return null;
+    const key = hoverFaceKey(l), sig = resultFaceSig(l);
+    if (hoverSigs.get(key) === sig && hoverUrls.has(key)) return { key, url: hoverUrls.get(key) };
+    const k = Math.min(1, HP_HOVER / src.width, HP_HOVER / src.height);
+    const w = Math.max(1, Math.round(src.width * k)), h = Math.max(1, Math.round(src.height * k));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const c = cv.getContext('2d');
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.drawImage(src, 0, 0, w, h);
+    const url = cv.toDataURL('image/png');
+    hoverSigs.set(key, sig); hoverUrls.set(key, url);
+    return { key, url };
+}
+function sendHoverFace(id) {
+    const l = getLayer(id);
+    if (!l) return;
+    const made = encodeHoverFace(l);
+    if (!made) return;
+    hoverPending = made;
+    queueBlendUi();
+}
+
+// ==================== 条带残件 (attribute strip) ====================
+// 条带那排 chip、`+` 菜单与两摞 row DOM 一起退休了：宿主按快照重建条带，这里只留"笔落在哪一枚"的
+// 判据 (isArmedChip) 与重排、增删那几句动作落点。
 // 这颗 chip 是不是"笔现在落在它上面"。点名过就亮那一枚;只按键没点名,亮的就是这一种最右那枚
 // (paintRecord 自己会这么退让,所以这里不必重算一遍)。笔一次只落在**一个**面上,所以只问被武装
 // 的那一种: 否则 Decal 与 Mask 各亮一枚,四颗 chip 亮三颗,高亮就等于什么都没说。
@@ -5099,237 +5140,78 @@ function isArmedChip(l, r) {
         && paintRecord(l, r.type, false) === r;
 }
 
-// 启用态的两笔账:整颗 chip 的暗淡 (attr-off) 加右上角那枚角标。角标是 attrChip 在 chip 绘制之后
-// 追加的同一枚 <i>,这里只翻它的 class —— 重画 chip 内容的路径 (refreshAttrChips) 不经过这里,
-// 但也动不到角标,两不相扰。
-function attrBadgeEl(r) {
-    const b = document.createElement('i');
-    b.className = 'attr-badge';
-    return b;
-}
-function syncAttrChipState(el, r) {
-    const off = !attrEnabled(r);
-    el.classList.toggle('attr-off', off);
-    const badge = el.querySelector('.attr-badge');
-    if (badge) badge.classList.toggle('off', off);
-}
-
-function attrChip(l, r) {
-    const spec = ATTR_TYPES[r.type];
-    const el = document.createElement('div');
-    el.className = 'layer-thumb attr-chip ' + (spec.chipClass || '');
-    el.dataset.attr = r.id;
-    el.title = (spec.title ? spec.title(r, l) : spec.label)
-        + ` · Ctrl+click turns this step ${attrEnabled(r) ? 'off (its data stays, the fold just skips it)' : 'back on'}`;
-    el.draggable = true;
-    // 面画在自己那块 canvas 上 (它才是会被重画的东西);链没有面,图标直接摆进这颗 chip。
-    // 生成器有面 (派生的那张),与 surface 同一套画法。
-    const paint = (spec.kind === 'surface' || spec.kind === 'generator') ? document.createElement('canvas') : el;
-    if (paint !== el) {
-        paint.width = 84; paint.height = 56; paint.draggable = false;
-        el.appendChild(paint);
-    }
-    bindAttrChip(paint, r, l);
-    // 类型角标:与图层行那枚同款 (右下 12×12),这一步是什么 attribute,不看面也认得出 —— 空面、
-    // 停用的暗面都还挂着这枚名牌。排在停用叉之前,叉永远压在它上面。
-    if (spec.badge) {
-        const tb = document.createElement('span');
-        tb.className = 'attr-type-badge ' + (spec.badge.class || '');
-        tb.innerHTML = spec.badge.svg;
-        el.appendChild(tb);
-    }
-    // 启用角标:挂在每个 kind 的 chip 绘制**之后** (链的那次会整块重写 innerHTML,先挂会被抹掉)。
-    el.appendChild(attrBadgeEl(r));
-    syncAttrChipState(el, r);
-    if (isArmedChip(l, r)) el.classList.add('active');
-    // ctrl+左键 = 启用/停用这一步 (全体 attribute 同一套手势);普通点击才是 spec.open。
-    el.addEventListener('click', ev => {
-        ev.stopPropagation();
-        if (ev.ctrlKey || ev.metaKey) {
-            toggleAttrEnabled(r);
-            setStatus(`「${spec.label}」step ${attrRefList(l).indexOf(r.id) + 1} of「${l.name}」is now `
-                + (attrEnabled(r) ? 'enabled' : 'disabled — its data stays, the fold just skips it'));
-            pushHistory();
-            renderLayerList();
-            render();
-            return;
-        }
-        spec.open(l, r);
-    });
-    el.addEventListener('contextmenu', ev => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        if (selectedId !== l.id) selectLayer(l.id, mode);
-        openAttrMenu(l, r, ev.clientX, ev.clientY);
-    });
-    // 拖动重排:这一枚自己就是拖拽源,所以 dragstart 必须停在这里 —— 让它冒到行上,行的那套 (图层
-    // 重排序) 会把它当成整层被拖走。缝位落点认跨层:drop 时按源层分流 (moveAttr 同层重排 /
-    // moveAttrToLayer 搬层),空条带的落点在 chips 容器上 (见下一处)。
-    el.addEventListener('dragstart', ev => {
-        ev.stopPropagation();
-        attrDrag = { layerId: l.id, ref: r.id };
-        el.classList.add('dragging');
-        ev.dataTransfer.effectAllowed = 'move';
-        ev.dataTransfer.setData('text/plain', r.id);
-    });
-    el.addEventListener('dragend', () => {
-        el.classList.remove('dragging', 'drop-before', 'drop-after');
-        attrDrag = null;
-    });
-    el.addEventListener('dragover', ev => {
-        // 链上的一枚特效拖到**容器自己的**条带 chip 上 = 收进这条链 (追加成尾步;魔棒那口子的
-        // 拖拽版)。空链没有 lane 可落,这里就是它唯一的落点 —— 高亮是整颗描边,与缝位线区分开。
-        if (dragFx && r.chain) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            ev.dataTransfer.dropEffect = 'move';
-            el.classList.add('drop-into');
-            return;
-        }
-        const side = dropSide(ev, el, attrDrag, r.id);
-        if (!side) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        ev.dataTransfer.dropEffect = 'move';
-        el.classList.toggle('drop-before', side === 'before');
-        el.classList.toggle('drop-after', side === 'after');
-    });
-    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after', 'drop-into'));
-    el.addEventListener('drop', ev => {
-        if (dragFx && r.chain) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            el.classList.remove('drop-into');
-            const move = dragFx;
-            dragFx = null;
-            fxAdoptEffect(move, l, r, r.chain.length);
-            return;
-        }
-        const side = dropSide(ev, el, attrDrag, r.id);
-        if (!side) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        el.classList.remove('drop-before', 'drop-after');
-        const moved = attrRecord(attrDrag.ref);
-        const src = getLayer(attrDrag.layerId);
-        if (src && src !== l) {
-            if (moveAttrToLayer(src, l, attrDrag.ref, r.id, side === 'after')) {
-                setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${l.name}」— it is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length}`);
-                pushHistory();
-            }
-        } else if (moveAttr(l, attrDrag.ref, r.id, side === 'after')) {
-            setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length} — it runs there`);
-            pushHistory();
-        }
-        attrDrag = null;
-        renderLayerList();
-        render();
-    });
-    return el;
-}
-
-function attrAddChip(l) {
-    const b = document.createElement('button');
-    b.className = 'attr-add';
-    b.type = 'button';
-    b.draggable = false;
-    b.title = 'Add an attribute to「' + l.name + '」— it runs as the last step of this layer';
-    b.innerHTML = plusSvg();
-    b.addEventListener('click', ev => {
-        ev.stopPropagation();
-        if (selectedId !== l.id) selectLayer(l.id, mode);
-        openAttrAddMenu(l, ev.clientX, ev.clientY);
-    });
-    return b;
-}
-
-// plusSvg 的兄弟:行上那三颗按钮都是 14px 描边 SVG,这颗加号不能是字符。
-function plusSvg() {
-    return '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">'
-        + '<path d="M8 3.4v9.2M3.4 8h9.2"/></svg>';
-}
-
-// `+` 菜单 = 注册表里**所有**种类,一律追加到最后一步 (`insertAttr` 的 'tail')。注册数据里那套默认落点
-// (`at`)只管迁移和老入口,不再参与用户排出来的顺序 —— 用户自己拖过的位置不能被一次新增打乱。
-function openAttrAddMenu(l, clientX, clientY) {
-    const menu = ensureLayerMenu();
-    menu.innerHTML = '';
-    for (const type of Object.keys(ATTR_TYPES)) {
-        const spec = ATTR_TYPES[type];
-        layerMenuItem('Add ' + spec.label, spec.addTitle || `Add a ${spec.label.toLowerCase()} as this layer's last step — what its left steps leave is what it gets.`,
-            () => addAttrToLayer(l, type));
-    }
-    positionLayerMenu(clientX, clientY);
-    layerMenuLayerId = l.id;
-}
-
 function addAttrToLayer(l, type) {
     const spec = ATTR_TYPES[type];
     const r = insertAttr(l, type, 'tail');
     if (!r) return;
     setStatus(`「${spec.label}」is now ${l.name}'s last step (${attrRefList(l).length})`);
-    pushHistory();
+    pushHistory(null, 'Added 「' + spec.label + '」 as a step');
     // 装上一枚面就该能画它 —— 空面和没装在读法上是一回事 ("蒙版还没画"),所以这一句不是额外状态,
     // 只是把笔尖放到用户刚点名的那一步上。链没有面可画,由行上那根魔棒开口子。
     if (spec.kind === 'surface') setPaintTarget(type, l, r.id);
     // 到场动作 (3D 开一枚场景 tab 并写 sceneUid) 必须发生在 UI 刷新**之前**——工具小窗的面板
     // 读的是记录的最终形状,刷新完再动记录,面板就定格在旧读数上 (Open Scene 灰成一排的教训)。
     if (spec.onAdded) spec.onAdded(l, r);
-    // 生成器 (文字/方向/3D) 当场就有面可出 —— renderLayerList 只重修行上的缩略图 (它们各自走
-    // layerSource),主画布的合成必须在这里喊一遍 render(),不然新步骤要等下一记任何 render
-    // (transform 回车之类) 才显形。
-    renderLayerList();
+    // 生成器 (文字/方向/3D) 当场就有面可出 —— refreshLayerPanels 只播报(面的重编走快照那一趟),
+    // 主画布的合成必须在这里喊一遍 render(),不然新步骤要等下一记任何 render (transform 回车之类)
+    // 才显形。
+    refreshLayerPanels();
     syncPaintUI();
     render();
 }
 
-// chip 右键:Enable/Disable / Remove / Shallow Duplicate / Apply。启用那档与 chip 的 ctrl+click
-// 是同一个状态 (toggleAttrEnabled),菜单里再摆一份是给不记得手势的人留的入口。
-function openAttrMenu(l, r, clientX, clientY) {
+// 启用 / 停用条带上的一步。chip 的 ctrl+click 与它右键菜单里那一条一直是同一个状态（toggleAttrEnabled），
+// 如今也是同一句话：措辞只有一份，谁按都报同一句。停用那一档必须说清"数据还在，只是折叠时跳过"。
+function toggleAttrStep(l, r) {
     const spec = ATTR_TYPES[r.type];
-    const menu = ensureLayerMenu();
-    menu.innerHTML = '';
-    const step = attrRefList(l).indexOf(r.id);
-    const on = attrEnabled(r);
-    layerMenuItem(on ? 'Disable' : 'Enable',
-        (on ? 'The fold skips this step' : 'The fold runs this step again')
-        + ' — its data stays exactly where it is either way. Same as Ctrl+clicking the chip.',
-        () => {
-            toggleAttrEnabled(r);
-            pushHistory();
-            renderLayerList();
-            render();
-        });
-    layerMenuItem('Remove', `Take this ${spec.label.toLowerCase()} off「${l.name}」— its data leaves with it unless another layer shares it (a shared face stays painted wherever it is used).`,
-        () => removeAttrFromLayer(l, r));
-    layerMenuItem('Shallow Duplicate', `Add a second ${spec.label.toLowerCase()} step right after this one, `
-        + (spec.kind === 'chain'
-            ? `carrying the same effects as its own copy — editing one chain leaves the other alone.`
-            : `starting on the same pixels but owning a face of its own — the next stroke lands on one of them, not both.`),
-        () => shallowDuplicateAttr(l, r));
-    // Apply 只在最左边那一枚上出现:bake 是把它折进 `l.img`,前面还挂着别的东西就会改画面。
-    if (step === 0) {
-        layerMenuItem('Apply', applyAttrTitle(l, r), () => applyAttrToLayer(l, r));
+    toggleAttrEnabled(r);
+    setStatus(`「${spec.label}」step ${attrRefList(l).indexOf(r.id) + 1} of「${l.name}」is now `
+        + (attrEnabled(r) ? 'enabled' : 'disabled — its data stays, the fold just skips it'));
+    pushHistory(null, (attrEnabled(r) ? 'Enabled ' : 'Disabled ') + '「' + spec.label + '」 step');
+    refreshLayerPanels();
+    render();
+}
+
+// 条带上的一步换位置。同一条里换缝（moveAttr）与搬到别的层（moveAttrToLayer）报的不是同一件事 ——
+// 前者说"它就在那儿执行"，后者说"从哪一层搬到哪一层、现在是第几步" —— 所以分流留在这一句里，
+// 三个落点（chip 左右两侧、条带尾缝、`+` 那颗）共用同一套判据。落回自己原来那道缝 = 一行都不动。
+function moveAttrStep(attrId, fromLayerId, toLayerId, beforeAttrId, after) {
+    const src = getLayer(fromLayerId);
+    const dst = getLayer(toLayerId);
+    const moved = attrRecord(attrId);
+    if (!src || !dst || !moved) return false;
+    if (src === dst) {
+        // 同层拖到尾缝没有可说的位置（"最后一步"就是它自己在的地方），原样放走 —— 今天也是这样。
+        if (!beforeAttrId || !moveAttr(dst, attrId, beforeAttrId, !!after)) return false;
+        setStatus(`「${ATTR_TYPES[moved.type].label}」is now step ${attrRefList(dst).indexOf(moved.id) + 1} of ${attrRefList(dst).length} — it runs there`);
+        pushHistory(null, 'Reordered 「' + ATTR_TYPES[moved.type].label + '」');
+        refreshLayerPanels();
+        render();
+        return true;
     }
-    positionLayerMenu(clientX, clientY);
-    layerMenuLayerId = l.id;
+    if (!moveAttrToLayer(src, dst, attrId, beforeAttrId || null, !!after)) return false;
+    setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${dst.name}」— it is now step ${attrRefList(dst).indexOf(moved.id) + 1} of ${attrRefList(dst).length}`);
+    pushHistory(null, 'Moved 「' + ATTR_TYPES[moved.type].label + '」 to「' + dst.name + '」');
+    refreshLayerPanels();
+    render();
+    return true;
 }
 
 function removeAttrFromLayer(l, r) {
     removeAttr(l, r.id);
     if (paintRef === r.id) paintRef = null;
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Removed 「' + ATTR_TYPES[r.type].label + '」 step');
     setStatus(`「${ATTR_TYPES[r.type].label}」removed from「${l.name}」`);
 }
 
 function shallowDuplicateAttr(l, r) {
     const copy = dupAttrShallow(l, r.id);
     if (!copy) return;
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Duplicated 「' + ATTR_TYPES[r.type].label + '」 step');
     setStatus(`「${ATTR_TYPES[r.type].label}」duplicated right after itself — ${ATTR_TYPES[r.type].kind === 'chain'
         ? 'its own chain, edited apart from the first'
         : 'the same pixels on a face of its own, so the next stroke lands on one chip'}`);
@@ -5352,10 +5234,10 @@ function applyAttrTitle(l, r) {
 // 眼睛那一下的三句 —— 翻开关、重画、报一句 —— 一字未改，只是点它的人从页面里的按钮换成了动作键。
 function toggleMaskLayerVisibility() {
     maskLayer.visible = !maskLayer.visible;
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(maskLayer.visible ? 'Mask layer shown' : 'Mask layer hidden — actions run without a mask');
-    pushHistory();
+    pushHistory(null, maskLayer.visible ? 'Mask layer shown' : 'Mask layer hidden');
 }
 
 // Invert / Full / Clear on the Mask row. They act on the Mask layer itself — never on
@@ -5375,315 +5257,48 @@ function runMaskRowAction(kind) {
     setStatus('No canvas yet — drop an image in, or set a canvas size first', 'error');
 }
 
-
-function renderLayerList() {
-    // 两摞各建一份，用的还是同一套行代码。Mask 那一格不再在这里建 DOM —— 它住在宿主的 dock 里 ——
-    // 但这一趟仍旧是"覆盖面可能变了"的那个时刻（undo、回读、切 tab 都走这里），所以催一次播报在这里，
-    // 与原来那一行每次重建都重画那颗 thumb 同一个节拍。要不要真重编由 syncMaskStill() 判断。
+// ==================== 行上的动作（宿主 dock 发回来的那一句，落点全在这里）====================
+// refreshLayerPanels：页面侧"面板可能变了"的唯一哨声 —— 行模型重算一遍，值通道按帧合并发出去，
+// 几块小窗的面板各自刷新。宿主那两格 Layers/Guidances 面板读的是同一份快照，不再有页面 DOM 可碰。
+function refreshLayerPanels() {
+    syncStackRows();
     queueBlendUi();
-    renderStackList(guidanceListEl, GUIDANCE_STACK);
-    renderStackList(layerListEl, WORK_STACK);
     updateTextPanel();
     updateDirectionPanel();
     update3DPanel();
     updatePosePanel();
 }
+// 这一节里剩下的每一句都是"那一颗控件原来那一段"：眼睛那一下还是翻开关、重画、报一句、记一步，
+// 一个字没改，只是按下它的人从页面里的按钮换成了宿主发回来的动作键。所以动词只有一个实现处。
+function toggleLayerVisibility(id) {
+    const l = getLayer(id);
+    if (!l) return;
+    l.visible = !l.visible;
+    refreshLayerPanels();
+    render();
+    pushHistory(null, 'Show / hide 「' + l.name + '」');
+}
 
-// One row builder for both palettes: a guidance is not a different kind of object, it is the same
-// layer sitting in the other stack — same thumbs, same mask/decal chips, same right-click menu.
-function renderStackList(listEl, stack) {
-    listEl.innerHTML = '';
-    const rows = stackLayers(stack);
-    if (!rows.length) {
-        const empty = document.createElement('div');
-        empty.className = 'layer-empty';
-        empty.textContent = stack === GUIDANCE_STACK
-            ? 'No guidance yet — Add one, or drag a layer row here'
-            : 'No layers yet — click Add';
-        listEl.appendChild(empty);
-        return;
-    }
-    // 图层不再绑图池 id，"同 key 两个图层"的幽灵层从根上不存在了。
-    for (const l of rows) {
-        const row = document.createElement('div');
-        row.className = 'layer-row';
-        row.draggable = true;
-        row.dataset.id = String(l.id);
-        if (l.id === selectedId || activeGroup().has(l.id)) row.classList.add('selected');
-        if (!l.visible) row.classList.add('hidden-layer');
-        row.title = 'Drag to reorder · drop it on the other stack to move it there';
+// 跳转那枚按钮一直是"一个导航习惯，不是两个"：3D 行开它的场景 tab，cud 行开它的项目 tab。
+// 谁是谁由这一句判，不由按钮自己记 —— 行上只有一颗按钮，它只报这一行的 id。
+function jumpLayerRow(id) {
+    const l = getLayer(id);
+    if (!l) return;
+    if (is3DLayer(l)) open3DSceneDocument(l);
+    else if (isCudLayer(l)) openLinkedCudDocument(l);
+}
 
-        const thumb = document.createElement('div');
-        thumb.className = 'layer-thumb';
-        thumb.title = 'Original image — click to transform this layer';
-        if (l.id === selectedId && mode === 'transform') thumb.classList.add('active');
-        // A hand-made layer (Default / Dynamic) is a blank scratch canvas with `src === ''`, so it
-        // has no file to show. An <img src=""> would render the browser's broken-image glyph, so it
-        // gets an explicit red X instead — the row then says "no image yet" instead of "corrupt".
-        if (hasLayerImage(l)) {
-            const img = document.createElement('img');
-            img.src = l.src;
-            img.draggable = false;
-            thumb.appendChild(img);
-        } else if ((isTextLayer(l) || isDirectionLayer(l)) && stripGeneratorInk(l) && layerSource(l)) {
-            // A text/direction layer has no `src` to point an <img> at — its base is a blank
-            // scratch since the descriptor moved into the strip, so show the FOLDED strip (the
-            // render the canvas actually draws) letterboxed into the chip. An EMPTY text keeps
-            // the red × below ("double-click to type"): no ink, nothing to preview. A Stash
-            // keeps the branch below that: its picture is re-copied from the stack below on
-            // every draw, so the newest copy is all there is to show.
-            const s = layerSource(l);
-            const c = document.createElement('canvas');
-            c.width = 84; c.height = 56;
-            c.style.width = '100%';
-            c.style.height = '100%';
-            const cx2d = c.getContext('2d');
-            const k = Math.min(c.width / s.width, c.height / s.height);
-            const dw = Math.max(1, s.width * k), dh = Math.max(1, s.height * k);
-            cx2d.drawImage(s, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
-            thumb.appendChild(c);
-        } else if (isStashLayer(l) && l.img) {
-            // A Stash: its picture is re-copied from the stack below on every draw, so the newest
-            // copy is all there is to show, and the chip never reads "no image yet".
-            const c = document.createElement('canvas');
-            c.width = 84; c.height = 56;
-            c.style.width = '100%';
-            c.style.height = '100%';
-            const cx2d = c.getContext('2d');
-            const s = Math.min(c.width / l.img.width, c.height / l.img.height);
-            const dw = Math.max(1, l.img.width * s), dh = Math.max(1, l.img.height * s);
-            cx2d.drawImage(l.img, (c.width - dw) / 2, (c.height - dh) / 2, dw, dh);
-            thumb.appendChild(c);
-        } else {
-            thumb.classList.add('no-image');
-            thumb.title = isTextLayer(l)
-                ? '1 · Empty text layer — double-click it on the canvas (or press Enter) to type'
-                : '1 · No image yet — run Generate (the ▶ on the row, or right-click it) or drop an image here';
-            thumb.appendChild(noImageGlyph());
-        }
-        thumb.addEventListener('click', ev => {
-            ev.stopPropagation();
-            selectLayer(l.id, 'transform', ev.shiftKey);
-        });
-        const badge = document.createElement('span');
-        const linked = cudLayerLinked(l);
-        badge.className = 'layer-type-badge '
-            + (is3DLayer(l) ? 'model'
-                : isCudLayer(l) ? 'cud' + (linked ? '' : ' unlinked')
-                : isTextLayer(l) ? 'text'
-                : isDirectionLayer(l) ? 'direction'
-                : isStashLayer(l) ? 'stash'
-                : isRasterLayer(l) ? 'raster' : 'smart');
-        badge.innerHTML = layerTypeBadgeSvg(l);
-        badge.title = is3DLayer(l)
-            ? `3D layer — its picture was baked from a scene; the jump button opens that scene as a tab`
-            : isCudLayer(l)
-            ? (linked
-                ? `Cud layer — a flattened copy of「${l.cud.name}」, repainted whenever that file is saved`
-                : `Cud layer — its picture is a flattened copy of「${l.cud.name}」, but the link did not survive the page reload. The pixels are this file's own; right-click the row to Relink.`)
-            : isTextLayer(l)
-                ? 'Text layer — the picture is re-rendered from the text at any size; double-click it on the canvas to edit'
-                : isDirectionLayer(l)
-                    ? 'Direction layer — the picture is the canvas view of a direction; point it in the Direction tool (D)'
-                : isStashLayer(l)
-                    ? 'Stash layer — its picture is the layers under it, merged again on every draw; an effect here runs on that whole stack. Welded to the canvas, so it does not move, scale or rotate.'
-                : isRasterLayer(l)
-                    ? 'Raster layer — pixels are baked 1:1 to the canvas; every transform resamples'
-                    : 'Smart layer — transform is non-destructive and keeps the native image';
-        thumb.appendChild(badge);
-
-        const canvasThumb = document.createElement('div');
-        canvasThumb.className = 'layer-thumb canvas-thumb';
-        canvasThumb.title = 'Result preview — this layer as it sits on the canvas; click to transform';
-        const canvasThumbEl = document.createElement('canvas');
-        canvasThumbEl.width = 84;
-        canvasThumbEl.height = 56;
-        paintCanvasThumb(canvasThumbEl, l);
-        l.canvasThumbEl = canvasThumbEl;
-        canvasThumb.appendChild(canvasThumbEl);
-        canvasThumb.addEventListener('click', ev => {
-            ev.stopPropagation();
-            selectLayer(l.id, 'transform', ev.shiftKey);
-        });
-
-        const name = document.createElement('div');
-        name.className = 'layer-name';
-        // 名字后面的 "· fx" 撤了:条带上那颗 Effects chip 就是"这层挂着链"的读数,同一件事不该在
-        // 一行里说两遍。
-        name.textContent = l.name + (is3DLayer(l) ? ' · 3D'
-            : isCudLayer(l) ? (linked ? ' · cud' : ' · cud (unlinked)')
-            : isTextLayer(l) ? ' · text' : isDirectionLayer(l) ? ' · direction' : isStashLayer(l) ? ' · stash'
-            : isRasterLayer(l) ? ' · raster' : '');
-        name.title = 'Double-click to rename';
-        name.addEventListener('dblclick', ev => {
-            ev.stopPropagation();
-            startRenameLayer(l, name);
-        });
-
-        // Jump on a cud row: the source project opens as a tab of its own (or focuses the one that is
-        // already open). This is the deliberate navigation entry — the name's double-click stays the
-        // rename it has always been. No link, no jump: the row says so in its tooltip instead.
-        // A 3D row uses the very same button for its scene tab: one navigation idiom, not two.
-        let jump = null;
-        if (isCudLayer(l) || is3DLayer(l)) {
-            const three = is3DLayer(l);
-            jump = document.createElement('button');
-            jump.className = 'icon-btn';
-            jump.innerHTML = cudJumpSvg();
-            jump.disabled = !three && !linked;
-            jump.title = three
-                ? `Open the 3D scene behind「${l.name}」as a tab`
-                : linked
-                    ? `Open「${l.cud.name}」as a project tab`
-                    : 'Not linked any more — right-click the row to Relink';
-            jump.addEventListener('click', ev => {
-                ev.stopPropagation();
-                if (three) open3DSceneDocument(l);
-                else openLinkedCudDocument(l);
-            });
-        }
-
-        // Run on the row: the same openGenModal() the right-click menu item drives. Every normal
-        // layer is a target (layerMaskIsMeaningful); the Mask layer never reaches this builder at all —
-        // it is not a member of either stack, and its own line is the dock's Mask unit now.
-        const hasImg = hasLayerImage(l) || stripGeneratorInk(l);
-        const canGen = layerMaskIsMeaningful(l);
-        const run = document.createElement('button');
-        run.className = 'icon-btn';
-        run.innerHTML = runSvg();
-        run.disabled = !canGen;
-        run.title = !canGen ? `「${l.name}」is the Mask layer itself — not a Generate target`
-            : (hasImg ? `Refine「${l.name}」from its own image and mask (nothing painted = the whole layer)`
-                : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
-        run.addEventListener('click', ev => { ev.stopPropagation(); openGenModal(l.id); });
-
-        const eye = document.createElement('button');
-        eye.className = 'icon-btn';
-        eye.title = l.visible ? 'Hide layer' : 'Show layer';
-        eye.innerHTML = eyeSvg(l.visible);
-        eye.addEventListener('click', ev => {
-            ev.stopPropagation();
-            l.visible = !l.visible;
-            renderLayerList();
-            render();
-            pushHistory();
-        });
-
-        const del = document.createElement('button');
-        del.className = 'icon-btn';
-        del.title = 'Remove layer';
-        del.textContent = '×';
-        del.style.fontSize = '15px';
-        del.style.lineHeight = '1';
-        del.addEventListener('click', ev => { ev.stopPropagation(); removeLayer(l.id); });
-
-        // Head line — who this layer is: 1 · original image, 2 · layer name, then visibility/remove.
-        const head = document.createElement('div');
-        head.className = 'layer-row-main';
-        head.appendChild(thumb);
-        head.appendChild(name);
-        if (jump) head.appendChild(jump);
-        head.appendChild(run);
-        head.appendChild(eye);
-        head.appendChild(del);
-
-        // Second line — 结果缩略图先摆着 (它是这一层现在的样子,不是条带上的一步),然后是从左到右
-        // 每一枚 attribute,末尾钉一颗 `+`。缩略图只在 attribute 存在时才存在,不给缺席的能力画占位。
-        const chips = document.createElement('div');
-        chips.className = 'layer-row-thumbs';
-        chips.appendChild(canvasThumb);
-        for (const el of attrStripEls(l)) chips.appendChild(el);
-        // 条带空隙与 `+` 按钮也是落点:跨层拖到这里 = 追加为这一层的最后一步 (空条带唯一的缝)。
-        // 同层拖到缝里没有可说的位置,原样放走。chip 自己的 dragover/drop 会 stopPropagation,
-        // 事件能到这里的只剩空隙、`+` 和空条带。
-        chips.addEventListener('dragover', ev => {
-            if (!attrDrag) return;
-            ev.preventDefault();
-            ev.stopPropagation();
-            ev.dataTransfer.dropEffect = 'move';
-            chips.classList.add('drop-tail');
-        });
-        chips.addEventListener('dragleave', () => chips.classList.remove('drop-tail'));
-        chips.addEventListener('drop', ev => {
-            chips.classList.remove('drop-tail');
-            if (!attrDrag) return;
-            ev.preventDefault();
-            ev.stopPropagation();
-            const src = getLayer(attrDrag.layerId);
-            const moved = attrRecord(attrDrag.ref);
-            if (src && src !== l && moveAttrToLayer(src, l, attrDrag.ref, null, false)) {
-                setStatus(`「${ATTR_TYPES[moved.type].label}」moved from「${src.name}」to「${l.name}」— it is now step ${attrRefList(l).indexOf(moved.id) + 1} of ${attrRefList(l).length}`);
-                pushHistory();
-                renderLayerList();
-                render();
-            }
-        });
-
-        // 特效容器、文字/方向/3D 的编辑 lane 摊在 head **之上**:它们属于这个图层,但执行发生在图层
-        // 把自己的像素交出去之前/由 spec.lane 自己说话。同一种挂了两枚容器时,条带上越靠左 (越先执行)
-        // 的那一块排得越贴近 head —— 与链里"越贴近图层者越先执行"同向。
-        for (const r of attrRecordsOf(l).reverse()) {
-            const spec = ATTR_TYPES[r.type];
-            const lane = spec.lane ? spec.lane(l, r) : null;
-            if (lane) row.appendChild(lane);
-        }
-        row.appendChild(head);
-        row.appendChild(chips);
-
-        row.addEventListener('click', ev => selectLayer(l.id, mode, ev.shiftKey));
-        // Right-click acts on the row the user pointed at; a group the row belongs to survives the
-        // open (Combine is a group item), a click outside it collapses back to that one row. It also
-        // stops the canvas's own contextmenu from firing instead.
-        row.addEventListener('contextmenu', ev => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            if (selectedId !== l.id) selectLayer(l.id, mode);
-            else if (!activeGroup().has(l.id)) selectLayer(l.id, mode);
-            openLayerMenu(l, ev.clientX, ev.clientY);
-        });
-        row.addEventListener('dragstart', ev => {
-            dragRowId = l.id;
-            row.classList.add('dragging');
-            ev.dataTransfer.effectAllowed = 'move';
-            ev.dataTransfer.setData('text/plain', String(l.id));
-            // 同时带一枚图层标记：同一趟拖到工作区条上 = 把这条图层的合成结果
-            // （image + decal + FX 链 + mask，即 layerSource()）存进图池。
-            try { ev.dataTransfer.setData('application/x-blend-layer', String(l.id)); } catch (e) { /* 类型受限时只剩排序 */ }
-        });
-        row.addEventListener('dragend', () => { row.classList.remove('dragging'); dragRowId = null; });
-        // Ctrl 悬浮：放大预览这条图层的合成结果（layerSource 现取，永远跟着 attribute 走）。
-        hpWire(row, () => {
-            if (!l.img) return null;
-            try { return layerSource(l); } catch (e) { return null; }
-        });
-        // 行拖拽（图层重排序）只在真的是「拖动图层」时接管 —— 拖外部文件 / 拖工作区缩略图
-        // 经过这里时因为 dragRowId 为 null 而原样放行，让 window 的全局拖入去处理
-        // （否则会亮起插入线误导，也看不见画布的全屏 drop 提示）。
-        row.addEventListener('dragover', ev => {
-            if (dragRowId === null) return;
-            ev.preventDefault();
-            ev.stopPropagation();
-            ev.dataTransfer.dropEffect = 'move';
-            const r = row.getBoundingClientRect();
-            const above = (ev.clientY - r.top) < r.height / 2;
-            row.classList.toggle('drop-above', above);
-            row.classList.toggle('drop-below', !above);
-        });
-        row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
-        row.addEventListener('drop', ev => {
-            if (dragRowId === null) return;      // 不是图层重排序 → 不吞事件
-            ev.preventDefault();
-            ev.stopPropagation();
-            const above = row.classList.contains('drop-above');
-            row.classList.remove('drop-above', 'drop-below');
-            listEl.classList.remove('drop-target');
-            // `stack` is the list this row belongs to, so a row dropped here joins it — the same
-            // call covers a within-list reorder and a cross-palette move.
-            if (dragRowId !== null) moveLayer(dragRowId, l.id, above, stack);
-            dragRowId = null;
-        });
-
-        listEl.appendChild(row);
+// Rasterize 是这一节里唯一一句"做完了还要报"的：rasterizeLayer() 自己只管换缓冲，成功以后那五句
+// （重排布局、重画、合成、说一句、记一步）一直是菜单那颗条目补的，如今收进来一起走。
+function rasterizeLayerRow(id) {
+    const l = getLayer(id);
+    if (!l) return;
+    if (rasterizeLayer(l)) {
+        layoutCanvas();
+        refreshLayerPanels();
+        render();
+        setStatus(`「${l.name}」rasterized — the buffer is now the canvas, 1:1`, 'success');
+        pushHistory(null, 'Rasterized 「' + l.name + '」');
     }
 }
 
@@ -5697,7 +5312,7 @@ function selectLayer(id, nextMode, additive) {
     if (additive) {
         if (id === MASK_LAYER_ID) return;      // the Mask layer is a single, canvas-locked target
         toggleGroupMember(id);
-        renderLayerList();
+        refreshLayerPanels();
         render();
         const g = selectedGroup();
         setStatus(groupStatusText(g ? g.length : 1));
@@ -5709,7 +5324,7 @@ function selectLayer(id, nextMode, additive) {
     if (nextMode) mode = nextMode;
     if (!changed) return;
     syncModeUI();
-    renderLayerList();
+    refreshLayerPanels();
     render();
 }
 
@@ -5820,7 +5435,6 @@ function addLayer(item, stack) {
             img,
             visible: true,
             transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-            canvasThumbEl: null,
             fxCache: null,
             stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
             // A detailer patch that came back with a crop rect: it is a piece OF this canvas, not
@@ -5843,14 +5457,14 @@ function addLayer(item, stack) {
         // the global flips back before the async load lands, so it cannot carry the intent.
         if ((rasterDrop && !item.smart) && !l.fragment && !placed && !l.cud) rasterizeLayer(l);
         layoutCanvas();
-        renderLayerList();
+        refreshLayerPanels();
         render();
         setStatus(l.stack === GUIDANCE_STACK
             ? 'Guidance added — it composites over the Layers image and updates the Guidance card'
             : (l.cud ? `「${l.name}」is now a layer — it repaints when ${l.cud.name} is saved`
                 : (placed ? 'Result placed back at its crop position — tweak it, then Blend'
                     : (layers.length === 1 ? 'Stretch/scale the layer, paint its mask or decal, then Blend' : 'Layer added'))));
-        pushHistory();
+        pushHistory(null, 'Added image 「' + l.name + '」 as a layer');
     }, () => {
         // Decoding failed, so no layer was created: give the key back instead of keeping it
         // claimed forever by an image that never arrived.
@@ -5892,7 +5506,6 @@ function spawnGeneratedLayer(id, item, opts) {
             // raster 分支保持恒等：它的位置要烘进画布尺寸的 buffer，transform 动不得。
             transform: (placed && !raster) ? { ...placed } : { ...t },
             raster,
-            canvasThumbEl: null,
             // 和 attribute 一样:生成出来的是新图层,不继承源图层的蒙版、贴片和链。
             fxCache: null,
             // A generated variant belongs to its source's stack — refining a guidance image must
@@ -5940,12 +5553,12 @@ function spawnGeneratedLayer(id, item, opts) {
         selectedId = copy.id;
         applyCanvasSize();
         layoutCanvas();
-        renderLayerList();
+        refreshLayerPanels();
         render();
         setStatus(placed
             ? `Generated onto a new layer over 「${l.name}」— placed on its masked region${fitted ? ', trimmed to that mask' : ''}`
             : `Generated onto a new layer above 「${l.name}」— same size and position`, 'success');
-        pushHistory();
+        pushHistory(null, 'Generated onto a new layer over「' + l.name + '」');
     }, () => setStatus('Could not load the Generate result', 'error'));
 }
 
@@ -6020,9 +5633,9 @@ function replaceLayerImage(id, item) {
         }
         if (!raster) remapAttrFaces(l, resampleSurface);
         layoutCanvas();
-        renderLayerList();
+        refreshLayerPanels();
         render();
-        pushHistory();               // one Generate = one undo step
+        pushHistory(null, 'New pixels written onto 「' + l.name + '」');               // one Generate = one undo step
         setStatus(placed
             ? 'Generated result written back onto the layer — placed on its masked region'
             : 'Generated result written back onto the layer', 'success');
@@ -6040,10 +5653,10 @@ function removeLayer(id) {
     if (selectedId === id) selectedId = layers.length ? (layers[Math.min(i, layers.length - 1)] || layers[0]).id : null;
     applyCanvasSize();
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(layers.length ? 'Layer removed' : 'Add layers to start');
-    pushHistory();
+    pushHistory(null, 'Removed layer');
 }
 
 // What "a copy of this layer" carries, in one place so the right-click Duplicate and Ctrl+V can
@@ -6065,7 +5678,6 @@ function cloneLayerFields(l, name) {
         raster: !!l.raster,
         // 一份副本仍是一张 Stash:它抄的是「它下面那一叠」,位置变了抄的就是那一段的新合成图。
         stash: !!l.stash,
-        canvasThumbEl: null,
         // attribute 一律浅拷贝:strip 的顺序照搬,每枚自己的数据另立一份 (面是新画布、链是深拷贝),
         // guid 也全是新的 —— 副本之后改它的蒙版,不该牵动原本。可写的 attribute 不许被两层共指,
         // 所以复制从来没有"引用"这一档 (拍板过的设计标准,不是运行时要防的事)。
@@ -6098,10 +5710,10 @@ function duplicateLayer(l) {
     layers.splice(i, 0, copy);       // index 0 is the top, so this sits above the source
     selectedId = copy.id;
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(`Duplicated 「${l.name}」— same size and position, its own steps`, 'success');
-    pushHistory();
+    pushHistory(null, 'Duplicated 「' + l.name + '」');
 }
 
 // chip 右键的 Apply:把这**一步**折进图层自己的像素,然后它就离开条带。
@@ -6159,10 +5771,10 @@ function applyAttrToLayer(l, r) {
     removeAttr(l, r.id);
     if (paintRef === r.id) paintRef = null;
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(`「${l.name}」— ${armed ? `${armed.length} effect${armed.length === 1 ? '' : 's'} baked into its pixels` : `its ${label.toLowerCase()} baked into its pixels`}, that step is off the strip now`, 'success');
-    pushHistory();
+    pushHistory(null, armed ? 'Apply — ' + armed.length + ' effects baked into 「' + l.name + '」' : 'Apply — ' + label + ' baked into 「' + l.name + '」');
 }
 
 // Right-click "Fit Mask": the unattended counterpart of Expand. Shrink the layer's OWN picture to
@@ -6228,10 +5840,10 @@ function fitLayerToMask(l, opts) {
     l.transform = tr;
     if (!quiet) {
         layoutCanvas();
-        renderLayerList();
+        refreshLayerPanels();
         render();
         setStatus(`Fit「${l.name}」to what its mask leaves visible — ${b.w} × ${b.h} of ${ow} × ${oh}, every face on its strip came along`, 'success');
-        pushHistory();
+        pushHistory(null, 'Fit 「' + l.name + '」 to what its mask leaves visible');
     }
     return true;
 }
@@ -6367,7 +5979,6 @@ function splitLayerByMask(l) {
             transform: p.tr,
             raster: false,
             stash: false,
-            canvasThumbEl: null,
             attrs: [],
             fxCache: null,
             stack: stackOf(l),
@@ -6385,10 +5996,10 @@ function splitLayerByMask(l) {
     l.visible = false;
     selectedId = made[0].id;
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(`Split「${l.name}」into ${made.length} part${made.length === 1 ? '' : 's'} — the original stays on the list, hidden`, 'success');
-    pushHistory();
+    pushHistory(null, 'Split 「' + l.name + '」 by its mask');
     return true;
 }
 
@@ -6431,7 +6042,6 @@ function combineLayerGroup(members) {
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         raster: true,
         stash: false,
-        canvasThumbEl: null,
         attrs: [],
         fxCache: null,
         stack: stackOf(members[0]),
@@ -6449,10 +6059,10 @@ function combineLayerGroup(members) {
     pruneAttrs();
     applyCanvasSize();
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(`Combined ${drawn.length} layer${drawn.length === 1 ? '' : 's'} into one — the rest of the stack is untouched`, 'success');
-    pushHistory();                // one Combine = one undo step
+    pushHistory(null, 'Combined ' + drawn.length + ' layers into one');                // one Combine = one undo step
     return true;
 }
 
@@ -6484,9 +6094,9 @@ function moveLayer(fromId, toId, above, toStack) {
     layers.splice(at, 0, l);
     applyCanvasSize();
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Moved 「' + l.name + '」 in the ' + (l.stack === GUIDANCE_STACK ? 'Guidances' : 'Layers') + ' list');
 }
 
 // ==================== 模式 ====================
@@ -6510,7 +6120,7 @@ function setMode(m) {
     warpDrag = null;
     mode = m;
     syncModeUI();
-    renderLayerList();
+    refreshLayerPanels();
     render();
 }
 
@@ -6889,9 +6499,8 @@ function endTransformDrag() {
         if (!transformIsPending(id)) transformPending.set(id, { from: startTr, raster: isRasterLayer(target) });
         moved = true;
     }
-    // The row miniature draws the layer as it sits on the canvas, preview included — so it gets
-    // the same repaint a bake used to get.
-    if (moved) renderLayerList();
+    // The row miniature is a host face — its signature already carries the transform, so one repaint refreshes it.
+    if (moved) refreshLayerPanels();
     return moved;
 }
 
@@ -7135,7 +6744,7 @@ function applyCanvasModify() {
     if (!view.autoFit) { anchorView(sp, { x: 0, y: 0 }); applyView(); }
     updateCanvasReadout();
     setStatus(`Canvas ${w} × ${h} — smart layers kept their pixels, raster layers resampled`, 'success');
-    pushHistory();
+    pushHistory(null, 'Canvas Modify — ' + w + ' × ' + h);
     setMode('none');
 }
 
@@ -7230,9 +6839,9 @@ function endExpandCommit() {
     // 条带上每一枚面都按同一个 A 搬过去 (Expand 与 Fit Mask 是同一件事的两个方向):只搬最左那枚,右边
     // 那枚还停在旧格子里,画面看着对,合成时它却被拉伸到新格子。蒙版补满覆盖,贴片不补。
     remapAttrFaces(l, (s, r) => bake(r.type === 'mask', s));
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Expand — border dragged');
     setStatus(`「${l.name}」expanded to ${tw} × ${th}`, 'success');
     setMode('none');
 }
@@ -7261,11 +6870,10 @@ function paintRecord(l, type, create) {
     if (!create) return null;
     const r = insertAttr(l, kind, 'tail');
     if (r) {
-        // 当场立的这一枚要立刻在行上挂出名牌:落笔路径 (beginStroke/油漆桶) 从不重铺列表,不喊
-        // 这一句,` / Tab 进模式的第一笔要等下一记 renderLayerList 才看得见 chip。插入只发生在
-        // 第一次 (此后 lastAttr 直接命中),所以这不会跑在拖动笔画的路径上;renderStackList 里
-        // 的 isArmedChip 走 create=false,也绝无递归。
-        renderLayerList();
+        // 当场立的这一枚要立刻让面板看得见:落笔路径 (beginStroke/油漆桶) 从不重铺列表,不喊
+        // 这一句,` / Tab 进模式的第一笔要等下一记 refreshLayerPanels 才看得见 chip。插入只发生在
+        // 第一次 (此后 lastAttr 直接命中);它绝无递归 —— isArmedChip 走 create=false。
+        refreshLayerPanels();
     }
     return r;
 }
@@ -7307,7 +6915,7 @@ function setPaintTarget(which, l, ref) {
     paintTarget = which;
     paintRef = ref || null;
     selectLayer(l.id, 'mask');
-    renderLayerList();          // repaint the chip outlines even when the layer was already selected
+    refreshLayerPanels();          // repaint the chip outlines even when the layer was already selected
     syncPaintUI();
 }
 function ensurePaintSurface(l) {
@@ -7517,7 +7125,7 @@ function beginMaskStroke(pos, erase, label) {
         maskShortcutActive = true;
         selectedId = MASK_LAYER_ID;
         groupIds = new Set();          // the Mask layer is never a group member
-        renderLayerList();
+        refreshLayerPanels();
         render();
     }
     isErasing = erase;
@@ -7542,7 +7150,7 @@ function endMaskShortcut() {
     maskShortcutPrevSelected = null;
     if (maskShortcutPrevGroup) groupIds = maskShortcutPrevGroup;   // a Ctrl stroke keeps the group
     maskShortcutPrevGroup = null;
-    renderLayerList();
+    refreshLayerPanels();
     render();
     refreshCursor();
 }
@@ -7616,8 +7224,7 @@ function livePreviewStroke() {
     }
     if (maskInk) c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
-    if (isMaskLayerTarget()) refreshMaskLayerThumb();
-    else refreshAttrChips(l, isDecalTarget() ? 'decal' : 'mask');
+    queueBlendUi();
     render();
 }
 
@@ -7625,10 +7232,10 @@ function commitStroke() {
     previewQueued = false;         // this call draws the finished stroke itself
     livePreviewStroke();
     const l = getSelected();
-    if (l) refreshAttrChips(l);
+    if (l) queueBlendUi();
     resetCtx(strokeCtx);
     strokeCtx.clearRect(0, 0, strokeCanvas.width, strokeCanvas.height);
-    pushHistory();               // one stroke = one undo step (also clears any old anchor)
+    pushHistory(null, maskTool === 'eraser' ? 'Erase stroke' : 'Paint stroke');               // one stroke = one undo step (also clears any old anchor)
     // Only a Shift TAP may (re-)arm the connect chain — a plain or Shift DRAG in between, a
     // bucket fill or an undo are all interruptions just the same.
     if (keyShift && !strokeMoved && l) shiftAnchor = { x: lastX, y: lastY, layerId: l.id, target: paintTarget };
@@ -7739,9 +7346,8 @@ function bucketFillAt(pos) {
     }
     pctx.putImageData(surf, 0, 0);
     markPainted(l);
-    pushHistory();
-    if (isMaskLayerTarget()) refreshMaskLayerThumb();
-    else refreshAttrChips(l, toMask ? 'mask' : 'decal');
+    pushHistory(null, 'Bucket fill');
+    queueBlendUi();
     syncPaintUI();
     render();
     setStatus(`Bucket — filled ${(count - skipped).toLocaleString()} px of ${l.name}'s ${toMask ? 'mask (coverage ' + fa + '/255)' : 'decal'}`
@@ -7884,7 +7490,7 @@ function warpEditActive(l, effect) {
 // 不能和绘制/选区共存 —— 与 Canvas Modify 那条「边界拖拽吃掉每一次按下」同一读法。
 function beginWarpEdit(l, effect) {
     warpEdit = { layerId: l.id, effectId: effect.id };
-    renderLayerList();            // Edit 那颗的点亮与 Hide 那颗的出现,都靠这一次重建读到新状态
+    refreshLayerPanels();            // Edit 那颗的点亮与 Hide 那颗的出现,都靠这一次重建读到新状态
     drawOverlay();
     setStatus('Grid on canvas \u2014 drag a handle, click an edge to split the grid');
 }
@@ -7893,7 +7499,7 @@ function endWarpEdit() {
     if (!warpEdit) return;
     warpEdit = null;
     warpDrag = null;
-    renderLayerList();
+    refreshLayerPanels();
     drawOverlay();
 }
 
@@ -7916,7 +7522,7 @@ function warpTarget() {
 function warpPrune() {
     warpEdit = null;
     warpDrag = null;
-    requestAnimationFrame(renderLayerList);
+    requestAnimationFrame(refreshLayerPanels);
 }
 
 // 把手 i 画在哪儿:基准 + 位移 (归一化 0..1, y 向下) 映到该层网格,再走那条唯一的 图层→画布 仿射。
@@ -8019,7 +7625,7 @@ function warpPress(sp) {
     if (!cut) { setStatus(`Grid limit: ${WARP_MAX_HANDLES} handles`, 'error'); return true; }
     // 细分是一次看得见、值得撤销的改动;新把手紧接着就是这一笔要拖的那个。
     warpSetLattice(t.effect, cut.lat);
-    fxStructuralChange(t.l);
+    fxStructuralChange(t.l, 'Warp grid subdivided');
     warpDrag = { index: cut.index, moved: false };
     setCursor('move');
     return true;
@@ -8048,7 +7654,7 @@ function endWarpDrag() {
     const t = warpTarget();
     // 最后一帧可能还欠在 rAF 里:松手把它落到画面上,撤销才拍到同一张图。
     if (t) { fxLiveUpdate(t.l); drawOverlay(); }
-    if (d && d.moved) pushHistory();
+    if (d && d.moved) pushHistory(null, 'Warp handle moved');
     refreshCursor();
 }
 
@@ -8326,7 +7932,7 @@ window.addEventListener('mouseup', e => {
         const moved = endTransformDrag();
         render();
         // An open session owns the undo step: it lands when Enter bakes the pixels, not here.
-        if (moved && !transformPending) pushHistory();
+        if (moved && !transformPending) pushHistory(null, 'Transform moved');
         else if (moved) setStatus('Move kept as a preview — Enter applies, Esc cancels');
         const sp = toScreenCoords(e);
         updateHoverCursor(sp, screenToDoc(sp));
@@ -8415,7 +8021,7 @@ viewport.addEventListener('touchend', () => {
     if (drag) {
         const moved = endTransformDrag();   // nothing bakes here either — Enter does, like a mouse gesture
         render();
-        if (moved && !transformPending) pushHistory();
+        if (moved && !transformPending) pushHistory(null, 'Transform moved');
         else if (moved) setStatus('Move kept as a preview — Enter applies, Esc cancels');
     }
 });
@@ -8426,188 +8032,6 @@ viewport.addEventListener('touchend', () => {
 // 每模式该露哪几根旋钮也归单元自己判断（Binary 只给 Strength，Linear 给 Center/Edge，Exponential 给
 // Gamma），页面这边没有行要藏了。
 
-// ==================== 面板按钮 ====================
-// ---- the Add menus: one per palette, one shared state machine ----
-// Both menus offer the same two hand-made surfaces, so the open/close logic is shared and simply
-// carries the stack its result goes to. The old Add behaviour asked the host for the selected
-// history image; that is a different thing from "make a layer" and the host has its own button for
-// it, so Add only creates blank layers.
-const layersDockEl = document.getElementById('layersDock');
-const addLayerBtn = document.getElementById('addLayerBtn');
-const addLayerMenu = document.getElementById('addLayerMenu');
-const addDefaultLayerBtn = document.getElementById('addDefaultLayerBtn');
-const addDynamicLayerBtn = document.getElementById('addDynamicLayerBtn');
-const addGuidanceBtn = document.getElementById('addGuidanceBtn');
-const addGuidanceMenu = document.getElementById('addGuidanceMenu');
-const addGuidanceDefaultBtn = document.getElementById('addGuidanceDefaultBtn');
-const addGuidanceDynamicBtn = document.getElementById('addGuidanceDynamicBtn');
-const addCudLayerBtn = document.getElementById('addCudLayerBtn');
-const addCudGuidanceBtn = document.getElementById('addCudGuidanceBtn');
-const addStashLayerBtn = document.getElementById('addStashLayerBtn');
-const ADD_MENUS = {
-    [WORK_STACK]: { btn: addLayerBtn, menu: addLayerMenu },
-    [GUIDANCE_STACK]: { btn: addGuidanceBtn, menu: addGuidanceMenu },
-};
-let addMenuOpen = null;          // which stack's menu is unfolded — at most one, or none
-
-function openAddMenu(which) {
-    closeAddMenu();
-    addMenuOpen = which || WORK_STACK;
-    ADD_MENUS[addMenuOpen].menu.hidden = false;
-    ADD_MENUS[addMenuOpen].btn.setAttribute('aria-expanded', 'true');
-}
-function closeAddMenu() {
-    if (addMenuOpen) {
-        ADD_MENUS[addMenuOpen].menu.hidden = true;
-        ADD_MENUS[addMenuOpen].btn.setAttribute('aria-expanded', 'false');
-    }
-    addMenuOpen = null;
-}
-
-addLayerBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (addMenuOpen === WORK_STACK) closeAddMenu(); else openAddMenu(WORK_STACK);
-});
-addGuidanceBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    if (addMenuOpen === GUIDANCE_STACK) closeAddMenu(); else openAddMenu(GUIDANCE_STACK);
-});
-document.addEventListener('mousedown', e => {
-    if (addMenuOpen && !layersDockEl.contains(e.target)) closeAddMenu();
-});
-
-addDefaultLayerBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(WORK_STACK); });
-addStashLayerBtn.addEventListener('click', () => { closeAddMenu(); addStashLayer(WORK_STACK); });
-addDynamicLayerBtn.addEventListener('click', () => { dynAutoRun = null; closeAddMenu(); armRectDrag(WORK_STACK); });
-addGuidanceDefaultBtn.addEventListener('click', () => { closeAddMenu(); addDefaultLayer(GUIDANCE_STACK); });
-addGuidanceDynamicBtn.addEventListener('click', () => { closeAddMenu(); armRectDrag(GUIDANCE_STACK); });
-addCudLayerBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(WORK_STACK); });
-addCudGuidanceBtn.addEventListener('click', () => { closeAddMenu(); addCudLayerFromPick(GUIDANCE_STACK); });
-
-// A drop on the list ITSELF (below the last row, or on the empty hint) means "go to the bottom of
-// this stack". Rows stop propagation, so this only ever sees the gaps — and it is the only way into
-// a stack that has no rows to aim at yet.
-function wireStackListDrop(listEl, stack) {
-    const guidance = stack === GUIDANCE_STACK;
-    listEl.addEventListener('dragover', ev => {
-        // 工作区条目 = 智能图层落点（画布之外的第二落点，guidance 栈同理）。
-        if (dragHasType(ev, STAGING_ITEM_TYPE)) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            ev.dataTransfer.dropEffect = 'copy';
-            dropOverlay.style.display = 'none';    // 列表有自己的高亮，全屏提示让位
-            listEl.classList.add('drop-target');
-            return;
-        }
-        if (dropHasFiles(ev.dataTransfer)) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            ev.dataTransfer.dropEffect = 'copy';
-            dropOverlay.style.display = 'none';
-            listEl.classList.add('drop-target');
-            return;
-        }
-        if (dragRowId === null) return;               // workspace thumbs pass through
-        ev.preventDefault();
-        ev.stopPropagation();
-        ev.dataTransfer.dropEffect = 'move';
-        listEl.classList.add('drop-target');
-    });
-    listEl.addEventListener('dragleave', () => listEl.classList.remove('drop-target'));
-    listEl.addEventListener('drop', ev => {
-        listEl.classList.remove('drop-target');
-        // 工作区条目落进列表 = 以智能图层加入这条栈（行上的排序拖拽不认它，照常冒泡到这）。
-        if (dragHasType(ev, STAGING_ITEM_TYPE)) {
-            ev.preventDefault();
-            ev.stopPropagation();
-            let sid = '';
-            try { sid = ev.dataTransfer.getData(STAGING_ITEM_TYPE); } catch (err) { sid = ''; }
-            addStagingAsLayer(sid, stack);
-            return;
-        }
-        if (dropHasFiles(ev.dataTransfer)) {
-            // Files land in the stack the pointer is over, which is the one way to feed the
-            // Guidances list without first making a layer and dragging it across.
-            ev.preventDefault();
-            ev.stopPropagation();
-            dropOverlay.style.display = 'none';
-            routeImportFiles(ev.dataTransfer.files, stack);
-            return;
-        }
-        if (dragRowId === null) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        moveLayer(dragRowId, null, false, stack);
-        dragRowId = null;
-    });
-    if (guidance) listEl.title = 'Drop image files here to make them guidances';
-}
-wireStackListDrop(guidanceListEl, GUIDANCE_STACK);
-wireStackListDrop(layerListEl, WORK_STACK);
-
-// ==================== Guidances / Layers 分隔条 ====================
-// dock 的剩余高度按 guidanceSplit : (1 - guidanceSplit) 分给两块列表（两边都是
-// flex-basis 0，只长不缩），所以拖动定下的比例与窗口高度无关：窗口变高是两块一起变高。
-// 与 genPrefs 同轨存 localStorage —— 这是布局偏好，不进 .cud。
-const SPLIT_KEY = 'blend.stackSplit';
-const SPLIT_DEFAULT = 0.6;            // Guidances 先拿多一半：行多，且它是排序入口
-const SPLIT_MIN = 0.15, SPLIT_MAX = 0.85;
-let guidanceSplit = SPLIT_DEFAULT;
-try {
-    const saved = parseFloat(localStorage.getItem(SPLIT_KEY));
-    if (isFinite(saved)) guidanceSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, saved));
-} catch (e) { /* storage unavailable: the default split holds */ }
-
-function applyStackSplit() {
-    guidanceListEl.style.flexGrow = guidanceSplit;
-    layerListEl.style.flexGrow = 1 - guidanceSplit;
-    splitterEl.setAttribute('aria-valuenow', String(Math.round(guidanceSplit * 100)));
-}
-function saveStackSplit() {
-    try { localStorage.setItem(SPLIT_KEY, String(guidanceSplit)); } catch (e) { /* as above */ }
-}
-// persist=false 是给 pointermove 用的：那里每帧都调，落盘只在 pointerup 补一次。
-function setStackSplit(next, persist) {
-    guidanceSplit = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, next));
-    applyStackSplit();
-    if (persist) saveStackSplit();
-}
-
-const splitterEl = document.getElementById('stackSplitter');
-splitterEl.addEventListener('pointerdown', e => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    // 分母用两块列表此刻的 clientHeight 之和：basis 为 0 时它只随 dock 变，拖动全程不变，
-    // 所以指针位移能一比一地换算成比例，不用去猜 head/gap 占了多少。
-    const total = guidanceListEl.clientHeight + layerListEl.clientHeight;
-    if (!total) return;
-    const startY = e.clientY, startSplit = guidanceSplit;
-    // Capture is released by the browser on pointerup; without it a fast drag past the 10px rail
-    // would drop the move events. A pointer id the browser no longer knows about throws, which is
-    // not worth losing the drag over.
-    try { splitterEl.setPointerCapture(e.pointerId); } catch (err) { /* fall back to bubbling events */ }
-    splitterEl.classList.add('dragging');
-    const move = ev => setStackSplit(startSplit + (ev.clientY - startY) / total);
-    const up = () => {
-        splitterEl.classList.remove('dragging');
-        splitterEl.removeEventListener('pointermove', move);
-        saveStackSplit();
-    };
-    splitterEl.addEventListener('pointermove', move);
-    splitterEl.addEventListener('pointerup', up, { once: true });
-    splitterEl.addEventListener('pointercancel', up, { once: true });
-});
-// 复位有三条路：拖完双击、Alt+click、键盘 Home/Enter —— 都必须落盘，否则刷新又回到旧比例。
-splitterEl.addEventListener('dblclick', () => setStackSplit(SPLIT_DEFAULT, true));
-splitterEl.addEventListener('click', e => { if (e.altKey) setStackSplit(SPLIT_DEFAULT, true); });
-splitterEl.addEventListener('keydown', e => {
-    if (e.key === 'ArrowUp') setStackSplit(guidanceSplit + 0.05, true);
-    else if (e.key === 'ArrowDown') setStackSplit(guidanceSplit - 0.05, true);
-    else if (e.key === 'Home' || e.key === 'Enter') setStackSplit(SPLIT_DEFAULT, true);
-    else return;
-    e.preventDefault();
-});
-applyStackSplit();
 
 // 右栏（Tools / Layers）调宽。分的是**像素**不是比例：要变的是"工具面板给多宽"，画布只是被挤，
 // 所以和上面那根比例把手各存各的键；手感保持一致（capture、双击/Alt 复位、键盘可调、落盘）。
@@ -8667,21 +8091,19 @@ applySideWidth();
 
 // "Place images as raster" — a persisted preference, not a one-shot: it decides how every
 // future image arrives (drop, Import, history injection) until flipped back.
-const addRasterToggleBtn = document.getElementById('addRasterToggleBtn');
 function syncRasterToggleUI() {
-    addRasterToggleBtn.setAttribute('aria-checked', rasterDrop ? 'true' : 'false');
-    document.getElementById('addRasterCheck').style.display = rasterDrop ? '' : 'none';
-    document.getElementById('addRasterSub').textContent = rasterDrop
-        ? 'On — new image layers become canvas-sized raster buffers (transforms resample).'
-        : 'Off — new image layers keep their original pixels (smart objects).';
+    // 快照里那一格 Add 菜单的勾 = 同一个变量：宿主那条 menuitemcheckbox 亮的就是这一句 mirror。
+    blendUiState.rasterDrop = !!rasterDrop;
     try { localStorage.setItem(RASTER_DROP_KEY, rasterDrop ? '1' : '0'); } catch (e) { /* private mode */ }
 }
-addRasterToggleBtn.addEventListener('click', () => {
+// 这颗开关唯一的落点：偏好的翻转、落盘、那句状态说明与快照都从这里过（宿主菜单回发的 'raster-drop' 也调它）。
+function toggleRasterDrop() {
     rasterDrop = !rasterDrop;
     syncRasterToggleUI();
     setStatus(rasterDrop ? 'Images will be placed as raster layers (1:1 with the canvas)'
                          : 'Images will be placed as smart-object layers (original pixels kept)');
-});
+    queueBlendUi();
+}
 
 syncRasterToggleUI();
 
@@ -8719,7 +8141,6 @@ function addSurfaceLayer(opts) {
         // 蒙版交给 strip:这里只是"这张层生下来就带一份覆盖图"的入口,立记录的是 attachAttrView 里的
         // 迁移那一步 (见 attr/core.js),它按 opts.mask 有没有内容决定装不装 Mask attribute。
         mask: opts.mask || null,
-        canvasThumbEl: null,
         fxCache: null,
         stack: opts.stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
         fragment: false,
@@ -8732,9 +8153,9 @@ function addSurfaceLayer(opts) {
     insertAtStackTop(ownSource(l, l.img, l.src));   // top of its own stack, never above the guidance block
     selectedId = l.id;
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Added layer 「' + l.name + '」');
     return l;
 }
 
@@ -8826,14 +8247,14 @@ function updateTextPanel() {
 textFontBtn.addEventListener('click', () => openTextFontModal());
 textPaddingRange.addEventListener('input', () => {
     textPaddingValue.textContent = textPaddingRange.value;
-    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding');
+    patchSelectedText({ padding: Math.max(0, Number(textPaddingRange.value) || 0) }, 'text-padding', 'Text padding set');
 });
 for (const [v, id] of TEXT_WEIGHT_CHOICES) {
-    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }));
+    document.getElementById(id).addEventListener('click', () => patchSelectedText({ fontWeight: v }, null, 'Text weight set'));
 }
 textColorInput.addEventListener('input', () => {
     textColorValue.textContent = textColorInput.value.toUpperCase();
-    patchSelectedText({ color: textColorInput.value }, 'text-color');
+    patchSelectedText({ color: textColorInput.value }, 'text-color', 'Text color picked');
 });
 
 // ==================== 3D 工具小窗 ====================
@@ -8875,7 +8296,6 @@ function addTextLayer(box) {
         img: makeBlankCanvas(nat.w, nat.h),
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        canvasThumbEl: null,
         fxCache: null,
         stack: WORK_STACK,
         fragment: false,
@@ -8905,7 +8325,7 @@ function addTextLayer(box) {
     layoutCanvas();
     setStatus(box ? `Text added — the box is ${box.w} × ${box.h}; type it in · Enter commits`
                   : 'Text added — type it in · Enter commits · the Text lane restyles it');
-    pushHistory();
+    pushHistory(null, 'Added text layer');
     openTextEditor(l.id, true);
     return l;
 }
@@ -8923,7 +8343,6 @@ function addDirectionLayer(box) {
         img: makeBlankCanvas(nat.w, nat.h),
         visible: true,
         transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
-        canvasThumbEl: null,
         fxCache: null,
         stack: WORK_STACK,
         fragment: false,
@@ -8953,7 +8372,7 @@ function addDirectionLayer(box) {
     const dirE = geoEuler(l.dir.rotation);
     setStatus(box ? `Direction Layer added — ${box.w} × ${box.h}, pointing ${Math.round(dirWrap360(dirE.yaw))}° / ${Math.round(dirE.pitch)}°`
                   : `Direction Layer added — full canvas, pointing ${Math.round(dirWrap360(dirE.yaw))}° / ${Math.round(dirE.pitch)}°`);
-    pushHistory();
+    pushHistory(null, 'Added direction layer');
     return l;
 }
 
@@ -9046,10 +8465,10 @@ function commitTextEditor() {
     closeTextEditor();
     const l = getLayer(id);
     textEditSnapshot = null;
-    if (!isTextLayer(l)) { renderLayerList(); render(); return; }
+    if (!isTextLayer(l)) { refreshLayerPanels(); render(); return; }
     // The canvas already carries every keystroke (live input patches); committing only closes
     // the overlay. One typed-and-undone session leaves one coalesced 'text-content' undo step.
-    renderLayerList();
+    refreshLayerPanels();
     render();
 }
 
@@ -9064,14 +8483,14 @@ function cancelTextEditor() {
         // ones coalesced into it. If it coalesced into an older entry instead, overwrite that one
         // with the rewound state.
         if (undoStack.length > textEditSnapshot.len) undoStack.pop();
-        else if (undoStack.length > 1) undoStack[undoStack.length - 1] = snapshotState();
+        else if (undoStack.length > 1) undoStack[undoStack.length - 1] = tagHistoryStep(snapshotState(), undoStack[undoStack.length - 1]);
         lastActionKey = null;
         syncHistoryUI();
     }
     textEditSnapshot = null;
     closeTextEditor();
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus('Text edit cancelled');
 }
@@ -9088,7 +8507,7 @@ textEditorEl.addEventListener('blur', () => { if (textEditingId !== null) commit
 textEditorEl.addEventListener('input', () => {
     const l = getLayer(textEditingId);
     if (isTextLayer(l) && l.text.content !== textEditorEl.value) {
-        patchTextLayer(l, { content: textEditorEl.value }, { historyKey: 'text-content' });
+        patchTextLayer(l, { content: textEditorEl.value }, { historyKey: 'text-content', label: 'Text edited' });
     }
     positionTextEditor();
 });
@@ -9149,7 +8568,7 @@ function renderTextFontGroups() {
         textFontGroupsEl.appendChild(makeTagGroup(g.title, modes,
             (m, cv) => drawFontThumb(cv, m.stack, g.sample),
             {
-                onPick: m => { closeTextFontModal(); patchSelectedText({ fontFamily: m.stack }); },
+                onPick: m => { closeTextFontModal(); patchSelectedText({ fontFamily: m.stack }, null, 'Text font picked'); },
                 decorate: (card, m) => {
                     card.classList.toggle('active', m.stack === current);
                     card.classList.toggle('unavailable', !m.here);
@@ -9196,10 +8615,10 @@ textFontFileInput.addEventListener('change', async () => {
 });
 const TEXT_HEX6 = s => /^#[0-9a-fA-F]{6}$/.test(String(s || '')) ? String(s) : '#ffffff';
 
-function patchSelectedText(patch, historyKey) {
+function patchSelectedText(patch, historyKey, label) {
     const l = getSelected();
     if (!isTextLayer(l)) return;
-    patchTextLayer(l, patch, { historyKey });
+    patchTextLayer(l, patch, { historyKey, label });
 }
 
 // ==================== Alt 悬浮放大预览 ====================
@@ -9365,10 +8784,10 @@ function invertPaintedMask() {
     if (l.isMaskLayer) { runMaskRowAction('invert'); return; }
     if (isDecalTarget()) { setStatus('A decal has no coverage to invert', 'error'); return; }
     const flipped = invertMask(l);
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(attrStepNote('Mask inverted', flipped, l));
-    pushHistory();
+    pushHistory(null, 'Invert mask');
 }
 
 // 那一对小节标题上的按钮里，Full 那一颗从来没有露过面：syncPaintUI 每次都把它 display:none 掉，
@@ -9501,17 +8920,11 @@ function clearStack(stack) {
     applyCanvasSize();
     layoutCanvas();
     setMode('transform');
-    renderLayerList();
+    refreshLayerPanels();
     render();
     setStatus(guidance ? 'No guidance yet' : 'Add layers to start');
-    pushHistory();
+    pushHistory(null, 'Clear All — ' + (stack === GUIDANCE_STACK ? 'guidances' : 'layers'));
 }
-
-document.getElementById('clearBtn').addEventListener('click', () => clearStack(WORK_STACK));
-document.getElementById('clearGuidanceBtn').addEventListener('click', () => clearStack(GUIDANCE_STACK));
-
-document.getElementById('undoBtn').addEventListener('click', undoAction);
-document.getElementById('redoBtn').addEventListener('click', redoAction);
 
 // ==================== 动作工具栏 ====================
 // The composite IS the Context Image, so every button ships the same payload straight to the
@@ -9718,8 +9131,8 @@ runCancelBtn.addEventListener('click', sendCancelRun);
 extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.preventDefault(); });
 
 // ==================== 图层右键菜单 · Generate ====================
-// Right-clicking a layer row offers Generate: run the Detailer on THAT layer instead of on the
-// canvas composite. Unlike every other toolbar action, this one does not send the composite — the
+// Generate on a layer (the row's ▶ or its menu entry in the host dock): run the Detailer on THAT
+// layer instead of the canvas composite. Unlike every other toolbar action, this one does not send the
 // layer's own image becomes the context image and the layer's own mask becomes the context mask,
 // so a single image can be refined where it sits instead of adding another copy on top.
 //
@@ -9728,7 +9141,6 @@ extraPromptInput.addEventListener('keydown', e => { if (e.key === 'Enter') e.pre
 // the tab that is active in the host's settings panel. The preset's own start steps apply.
 
 let layerMenuEl = null;
-let layerMenuLayerId = null;
 let genTargetLayerId = null;
 
 // The presets the enum picks from, and which tab is active in the host right now.
@@ -9784,11 +9196,10 @@ function ensureLayerMenu() {
 
 function closeLayerMenu() {
     if (layerMenuEl) layerMenuEl.classList.remove('open');
-    layerMenuLayerId = null;
 }
 
-// One item on the shared menu. Both the layer-row menu and the canvas selection menu build through
-// this, so an entry cannot end up looking or behaving differently depending on where it opened.
+// One item on the canvas selection menu. Entries are built through one builder, so an item cannot
+// end up looking or behaving differently depending on where it opened.
 function layerMenuItem(label, title, handler, disabled) {
     const b = document.createElement('button');
     b.className = 'layer-menu-item';
@@ -9814,179 +9225,6 @@ function positionLayerMenu(clientX, clientY) {
     const y = Math.min(clientY, window.innerHeight - r.height - 6);
     menu.style.left = Math.max(6, x) + 'px';
     menu.style.top = Math.max(6, y) + 'px';
-}
-
-function openLayerMenu(l, clientX, clientY) {
-    const menu = ensureLayerMenu();
-    menu.innerHTML = '';
-    // Generate is available to every normal layer: an unpainted mask IS the full mask (a mask is
-    // a coverage multiplier, so "nothing painted" = "cover everything" = regenerate the layer).
-    // See layerMaskIsMeaningful() for why neither "the mask canvas exists" nor "the mask has ink"
-    // is the right question. An image-less layer is fine too: Generate synthesises a noise image
-    // at the layer's own resolution, so a blank Default/Dynamic layer is a legitimate start.
-    const hasImg = hasLayerImage(l) || (isTextLayer(l) && !!String(l.text.content)) || isDirectionLayer(l);
-    const canGenerate = layerMaskIsMeaningful(l);
-    const disabled = !canGenerate;
-
-    const item = document.createElement('button');
-    item.className = 'layer-menu-item';
-    item.type = 'button';
-    item.setAttribute('role', 'menuitem');
-    item.textContent = 'Generate';
-    item.disabled = disabled;
-    item.title = !canGenerate ? `「${l.name}」is the Mask layer itself — not a Generate target`
-        : (hasImg ? `Refine「${l.name}」from its own image and mask (nothing painted = the whole layer)`
-            : `Generate into「${l.name}」from noise — the whole layer (${nativeSize(l.img).w} × ${nativeSize(l.img).h})`);
-    item.addEventListener('click', ev => {
-        ev.stopPropagation();
-        closeLayerMenu();
-        openGenModal(l.id);
-    });
-    menu.appendChild(item);
-
-    // Edit text: the same inline editor the double-click and Enter keys drive. Only a text layer
-    // has authored content to edit.
-    if (isTextLayer(l)) {
-        const edit = document.createElement('button');
-        edit.className = 'layer-menu-item';
-        edit.type = 'button';
-        edit.setAttribute('role', 'menuitem');
-        edit.textContent = String(l.text.content) ? 'Edit text' : 'Type text';
-        edit.title = `Edit「${l.name}」's text in place on the canvas — Enter commits, Shift+Enter adds a line, Esc cancels. (Same as double-clicking the layer or pressing Enter with it selected.)`;
-        edit.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            openTextEditor(l.id);
-        });
-        menu.appendChild(edit);
-    }
-
-    // 这里不再有 "Effects / Add effect" 那一项:挂链的入口是条带上那颗 `+` (Add Effects),往那条链里
-    // 加一步的入口是那枚 chip 上的魔棒。同一个动作留一个可见入口,而这两件都不是右键菜单的活。
-
-    // Expand: border-drag that re-resolves the smart object's NATIVE resolution. The pixels on
-    // canvas stay put — the new box only decides how many pixels the layer gets. Raster layers
-    // have no native resolution left to change — their buffer is the canvas — so no entry. A text
-    // or direction layer's native resolution is recomputed from its descriptor on every draw, so
-    // there is nothing to expand — and Fit Mask would rewrite the buffer the descriptor owns.
-    if (!l.isMaskLayer && !isRasterLayer(l) && !isTextLayer(l) && !isDirectionLayer(l)) {
-        const expand = document.createElement('button');
-        expand.className = 'layer-menu-item';
-        expand.type = 'button';
-        expand.setAttribute('role', 'menuitem');
-        expand.textContent = 'Expand';
-        const n = nativeSize(l.img);
-        expand.title = `Change「${l.name}」's own resolution (${n.w} × ${n.h}) — drag its border to a new box; the image stays 1:1 and the new space is transparent. Esc cancels.`;
-        expand.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            startExpand(l);
-        });
-        menu.appendChild(expand);
-
-        // Fit Mask: the same native-resolution change Expand makes by dragging, done in one click
-        // from the layer's own visible pixels. Only a smart layer has a native resolution to shrink.
-        const fit = document.createElement('button');
-        fit.className = 'layer-menu-item';
-        fit.type = 'button';
-        fit.setAttribute('role', 'menuitem');
-        fit.textContent = 'Fit Mask';
-        fit.disabled = !l.img;
-        fit.title = `Shrink「${l.name}」's own picture (${n.w} × ${n.h}) to the smallest box holding what its mask leaves visible — the image stays 1:1 and exactly where it is, and every face on its strip comes along cropped`;
-        fit.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            fitLayerToMask(l);
-        });
-        menu.appendChild(fit);
-
-        // Split By Mask: the layer's final ink (source image with the whole strip folded over it)
-        // cut into its connected pieces, one layer per piece. A piece smaller than 8×8 px is not
-        // worth a row; more than 64 pieces land their leftovers together in one extra part.
-        const split = document.createElement('button');
-        split.className = 'layer-menu-item';
-        split.type = 'button';
-        split.setAttribute('role', 'menuitem');
-        split.textContent = 'Split By Mask';
-        split.disabled = !l.img;
-        split.title = `Cut「${l.name}」's final ink — its own picture with every step on its strip folded over — into its connected pieces, one layer per piece (part1 is the biggest). The original stays on the list but hidden.`;
-        split.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            splitLayerByMask(l);
-        });
-        menu.appendChild(split);
-    }
-
-    // Rasterize (one-way): bake the transform into a canvas-sized buffer. The Mask layer is not
-    // a layer at all, and a raster layer is already raster.
-    if (!l.isMaskLayer && !isRasterLayer(l)) {
-        const rast = document.createElement('button');
-        rast.className = 'layer-menu-item';
-        rast.type = 'button';
-        rast.setAttribute('role', 'menuitem');
-        rast.textContent = 'Rasterize';
-        rast.title = `Bake「${l.name}」into the canvas — one image pixel per canvas pixel from here on. Transforms will resample the pixels. One-way.`
-            + (isCudLayer(l) ? ` This row's link is dropped on the way in: a baked buffer has nothing for a refresh to repaint.` : '')
-            + (isTextLayer(l) ? ` The text descriptor is destroyed — you cannot type into this layer again.` : '')
-            + (isDirectionLayer(l) ? ` The three angles are destroyed — this row becomes a plain picture and the Direction window stops editing it.` : '');
-        rast.disabled = !canvasW || !l.img;
-        rast.addEventListener('click', ev => {
-            ev.stopPropagation();
-            closeLayerMenu();
-            if (rasterizeLayer(l)) {
-                layoutCanvas();
-                renderLayerList();
-                render();
-                setStatus(`「${l.name}」rasterized — the buffer is now the canvas, 1:1`, 'success');
-                pushHistory();
-            }
-        });
-        menu.appendChild(rast);
-    }
-
-    // Duplicate: a copy of this layer directly above it — image, mask, decal, placement and
-    // visibility all carried over, so the two can be edited apart from here on.
-    const dup = document.createElement('button');
-    dup.className = 'layer-menu-item';
-    dup.type = 'button';
-    dup.setAttribute('role', 'menuitem');
-    dup.textContent = 'Duplicate';
-    dup.title = `Copy「${l.name}」— picture, mask, decal and effect steps all come along, on a new layer right above it. Its steps are new ones, so editing the copy never writes on the original.`;
-    dup.addEventListener('click', ev => {
-        ev.stopPropagation();
-        closeLayerMenu();
-        duplicateLayer(l);
-    });
-    menu.appendChild(dup);
-
-    // Combine: only while MULTIPLE rows are held — the menu must stay the same single-layer menu
-    // otherwise. Merges the selection's current appearances into one raster row (see combineLayerGroup).
-    const group = selectedGroup();
-    if (group) {
-        layerMenuItem('Combine',
-            `Merge these ${group.length} layers into one picture — each row's CURRENT look (mask, decal, chain and placement folded in) is stacked bottom-to-top into a single raster layer sitting where the topmost one did; the selected rows leave the list, the rest of the stack is untouched. One-way, like Rasterize. Hidden rows are skipped. Text / direction / Stash rows must be Rasterized first.`,
-            () => { combineLayerGroup(group); });
-    }
-
-    // No Apply entry here any more: applying is a per-attribute command, and its one visible entry
-    // is the chip's own right-click menu (see openAttrMenu). A row-level "Apply Mask" would read
-    // only the leftmost Mask and silently disagree with the strip.
-
-    // A cud row gets its own two entries: pull the saved file back in, or hand the row a document
-    // again after a reload broke the link. Opening the project is not here — the row's own button
-    // does that, and a menu item for the same thing would only be a second place to look.
-    if (isCudLayer(l)) {
-        const link = cudDocFor(l.cud.link);
-        layerMenuItem('Refresh from file', link
-            ? `Re-read ${l.cud.name} from disk and repaint this row — the transform, mask and decal you set here stay.`
-            : 'Not linked any more — Relink the row first, then this reads the file you point at.', () => { refreshCudLayerFromFile(l); }, !link);
-        layerMenuItem('Relink…', `Point「${l.name}」at a .cud file — the row keeps its placement and paint, and takes that project's flattened picture.`,
-            () => { relinkCudLayer(l); });
-    }
-
-    positionLayerMenu(clientX, clientY);
-    layerMenuLayerId = l.id;
 }
 
 // Can THIS layer be a Generate target?
@@ -10548,7 +9786,7 @@ function applyDetectMask(dataUrl) {
         const onCanvas = inLayerGrid ? detectImageToCanvas(img, pend.transform) : detectImageToCanvasSurface(img);
         if (pend.dest === 'main_mask') {
             // replaceMaskSurface owns the copy-on-write swap, the thumb, render and history.
-            if (!replaceMaskSurface((ctx, _prev, w, h) => { ctx.drawImage(onCanvas, 0, 0, w, h); })) {
+            if (!replaceMaskSurface((ctx, _prev, w, h) => { ctx.drawImage(onCanvas, 0, 0, w, h); }, 'Detection onto the Mask layer')) {
                 setStatus('Add an image (or set a canvas size) before painting the mask', 'error');
                 return;
             }
@@ -10564,9 +9802,9 @@ function applyDetectMask(dataUrl) {
             if (!r) { setStatus('The layer that was selected is gone', 'error'); return; }
             r.surface = local;
             markAttrPainted(r);
-            renderLayerList();
+            refreshLayerPanels();
             render();
-            pushHistory();
+            pushHistory(null, 'Detection onto 「' + l.name + '」 own mask');
             setStatus(attrStepNote(`Detection landed on 「${l.name}」's own mask`, r, l), 'success');
         } else if (pend.dest === 'staging') {
             window.parent.postMessage({ type: 'blend-staging-upload', images: [surfaceDataUrl(onCanvas)], name: 'Detect' }, '*');
@@ -11088,7 +10326,6 @@ window.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
         e.preventDefault();
         if (layerMenuOpen()) { closeLayerMenu(); return; }
-        if (addMenuOpen) { closeAddMenu(); return; }
         // 摊开的网格先于工具:第一下 Esc 只把它从画布上收走,工具与视图不动 (再按才是原来的 Esc)。
         if (warpEdit) { endWarpEdit(); setStatus('Grid off canvas'); return; }
         if (cancelSelDrag()) return;      // a marquee mid-sweep is not yet a selection
@@ -11248,7 +10485,7 @@ window.addEventListener('keydown', e => {
         }
         render();
         // A run of nudges on the same set collapses to one step.
-        pushHistory('nudge:' + targets.map(t => t.id).sort((a, b) => a - b).join(','));
+        pushHistory('nudge:' + targets.map(t => t.id).sort((a, b) => a - b).join(','), 'Nudge');
     }
     else return;
 });
@@ -11335,12 +10572,15 @@ function syncDocList() {
 // frame, so its window shows the placeholder rather than a black square.
 const DOC_STILL_MAX_SIDE = 1280;
 let docStillBuf = null;
-function captureStill(entry) {
-    if (!entry || window.parent === window || isSceneDoc(entry)) return;
-    if (!canvasW || !canvasH) return;
-    let image = null;
+
+// 把"此刻的合成结果"缩到给定长边编成一张 PNG。文档窗口那份存档（1280、发给宿主）与历史那一格每步
+// 的预览（108、留在记录自己身上）要的是同一趟绘制，只是尺寸与去处不同，所以共用这一支、共用这一块
+// 缓冲 —— 近似函数写第二根就是第二份真相。编不出来回空串，由调用方决定退回占位还是干脆不给面。
+function stillDataUrl(maxSide) {
+    if (!canvasW || !canvasH) return '';
+    let image = '';
     try {
-        const s = Math.min(1, DOC_STILL_MAX_SIDE / Math.max(canvasW, canvasH));
+        const s = Math.min(1, maxSide / Math.max(canvasW, canvasH));
         const w = Math.max(1, Math.round(canvasW * s)), h = Math.max(1, Math.round(canvasH * s));
         if (!docStillBuf) docStillBuf = document.createElement('canvas');
         if (docStillBuf.width !== w || docStillBuf.height !== h) { docStillBuf.width = w; docStillBuf.height = h; }
@@ -11352,8 +10592,15 @@ function captureStill(entry) {
         ctx.drawImage(blendCanvas, 0, 0, w, h);
         ctx.drawImage(guidanceCanvas, 0, 0, w, h);
         image = docStillBuf.toDataURL('image/png');
-    } catch (e) { image = null; }   // a canvas that refuses to encode leaves the window on its placeholder
-    if (image === null) return;
+    } catch (e) { image = ''; }   // a canvas that refuses to encode leaves the caller on its fallback
+    return image;
+}
+
+function captureStill(entry) {
+    if (!entry || window.parent === window || isSceneDoc(entry)) return;
+    if (!canvasW || !canvasH) return;
+    const image = stillDataUrl(DOC_STILL_MAX_SIDE);
+    if (!image) return;
     window.parent.postMessage({ type: 'blend-doc-still', uid: entry.uid, image }, '*');
 }
 
@@ -11405,7 +10652,7 @@ function blankMaskLayer() {
         id: MASK_LAYER_ID, isMaskLayer: true, name: 'Mask', note: 'output',
         visible: true, transform: { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 },
         mask: null, maskCtx: null,
-        decal: null, decalCtx: null, canvasThumbEl: null,
+        decal: null, decalCtx: null,
         // The singleton Mask layer never takes a chain (layerTakesEffects() says so),
         // but it shares the layer object shape so nothing has to special-case it.
         effects: [], fxCache: null,
@@ -11705,7 +10952,7 @@ function bake3DToRecord(host, canvas, W, H) {
     const top = host.doc.undo;
     if (Array.isArray(top) && top.length) top[top.length - 1] = host.doc.ctx;
     const live = host.layer || (host.row && getLayer(host.row.id));
-    if (live) { renderLayerList(); }
+    if (live) { refreshLayerPanels(); }
 }
 
 // 场景 tab 关了把它带进来的模型字节放手:每张模型只被一个场景 tab 拥有(每一枚 3D 记录入场时
@@ -12470,7 +11717,6 @@ async function importPsdFile(file, stack) {
             src, img,
             visible: ent.visible !== false,
             transform: { cx: (x + w / 2) / canvasW, cy: (y + h / 2) / canvasH, w: w / canvasW, h: h / canvasH, rotation: 0 },
-            canvasThumbEl: null,
             fxCache: null,
             stack: stack === GUIDANCE_STACK ? GUIDANCE_STACK : WORK_STACK,
             fragment: false,
@@ -12494,9 +11740,9 @@ async function importPsdFile(file, stack) {
     }
     applyCanvasSize();
     layoutCanvas();
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, 'Import PSD ' + file.name);
     const skipped = [];
     if (psd.notes.groups) skipped.push(`${psd.notes.groups} group marker${psd.notes.groups === 1 ? '' : 's'}`);
     if (psd.notes.empty) skipped.push(`${psd.notes.empty} non-pixel layer${psd.notes.empty === 1 ? '' : 's'}`);
@@ -12979,7 +12225,7 @@ async function refreshCudLinks(doc, blob) {
     for (const entry of documents) {
         const recs = entry === activeDoc ? layers : ((entry.ctx && entry.ctx.layers) || []);
         if (!recs.some(r => touched.has(r))) continue;
-        if (entry === activeDoc) { markDocumentDirty(); renderLayerList(); render(); }
+        if (entry === activeDoc) { markDocumentDirty(); refreshLayerPanels(); render(); }
         else { entry.dirty = true; }
     }
     syncDocList();
@@ -13064,9 +12310,9 @@ async function refreshCudLayerFromFile(l) {
         if (flat.src === l.src) { setStatus(`${l.cud.name || 'That project'} has not changed since this layer was written`); return false; }
         l.src = flat.src;
         l.img = flat.canvas;
-        renderLayerList();
+        refreshLayerPanels();
         render();
-        pushHistory();
+        pushHistory(null, 'Refreshed 「' + l.name + '」 from its project');
         setStatus(`Refreshed「${l.name}」from ${l.cud.name || 'its project'}`, 'success');
         return true;
     } catch (err) {
@@ -13100,9 +12346,9 @@ async function relinkCudLayer(l) {
         l.cud = { link: key, name: file.name || '', path: doc.path || '' };
         l.src = flat.src;
         l.img = flat.canvas;
-        renderLayerList();
+        refreshLayerPanels();
         render();
-        pushHistory();
+        pushHistory(null, 'Relinked 「' + l.name + '」');
         setStatus(`「${l.name}」now follows ${l.cud.name}`, 'success');
         return true;
     } catch (err) {
@@ -13129,6 +12375,27 @@ const DOC_COMMANDS = {
 };
 // Canvas / Transform / Selection / View 四格现在是宿主的 dock 单元：按钮不再属于这一页，点下去发的
 // 是一个动作键。每一条就是那一颗按钮原来那行调用 —— 消息不是另一种点击，守卫一个都不减。
+// 载荷是从另一个文档递过来的，形状一个字都不能信：取不到字段就当没说，数字一律 Number()、字符串一律
+// String()，id 查不到图层就当这一行已经不在了 —— 页面自己那几颗按钮本来就是同一个判据（行没了就没有落点）。
+const uiRow = v => (v && typeof v === 'object' ? v : {});
+const uiLayer = v => getLayer(Number(uiRow(v).id));
+// 条带上的一枚 chip：先有层，再有那条记录。两者都在，才谈得上"点了这一枚"。
+const uiAttr = v => {
+    const o = uiRow(v);
+    const l = getLayer(Number(o.layerId));
+    const r = l ? attrRecord(String(o.attrId)) : null;
+    return l && r ? [l, r] : null;
+};
+// 链里的一步：那枚 chip 的 chain 数组里按 id 找。找不到就是这一步已经被摘掉了（宿主那一侧的行还没重画）。
+const uiFxStep = v => {
+    const p = uiAttr(v);
+    if (!p) return null;
+    const stepId = Number(uiRow(v).stepId);
+    const e = (Array.isArray(p[1].chain) ? p[1].chain : []).find(x => x && x.id === stepId);
+    return e ? [p[0], p[1], e] : null;
+};
+// 两摞的名字只认页面自己那两个字面量：别的都当"没说落到哪一格"。
+const uiStack = v => { const s = String(v); return s === GUIDANCE_STACK || s === WORK_STACK ? s : ''; };
 const UI_COMMANDS = {
     'canvas-size': () => openCanvasModal(),
     'canvas-modify': () => startCanvasModify(),
@@ -13145,7 +12412,7 @@ const UI_COMMANDS = {
         l.transform = { cx: 0.5, cy: 0.5, w: 1, h: 1, rotation: 0 };
         setMode('transform');
         setStatus('Layer stretched to canvas');
-        pushHistory();
+        pushHistory(null, 'Stretch layer to canvas');
     },
     'select-rect': () => activateMode('rect'),
     'select-lasso': () => activateMode('lasso'),
@@ -13196,6 +12463,185 @@ const UI_COMMANDS = {
     'mask-layer-clear': () => runMaskRowAction('clear'),
     'mask-layer-eye': () => toggleMaskLayerVisibility(),
     'mask-layer-select': () => selectMaskLayer(),
+    // Layers / Guidances 两格的面通道那道闸：宿主把自己那侧 IntersectionObserver 量出来的可见键报下来
+    // （见 face 通道）。它不是一颗按钮，但回发只走这一条通道 —— 一条边界一个入口。
+    'visible-faces': v => setFaceVisible(v),
+    // Alt+悬浮那一下要的原分辨率放大图（同一张面通道的第二颗闸：可见区管每帧那 24 张，这一张按需）。
+    // 指针离开宿主自己就不画了，所以这里没有对应的"关掉"一句 —— 页面只在这一句话进来时才编。
+    'hover-face': v => sendHoverFace(Number(uiRow(v).id)),
+    // ---- Layers / Guidances 两格：行上那一排、两枚缩略图、尾巴四颗按钮、右键菜单里的每一条 ----
+    // 每一条都是"那颗控件原来那一句"，落点全在上面那一节里（renameLayer / toggleLayerVisibility /
+    // jumpLayerRow / rasterizeLayerRow 就是行上那几个监听器如今喊的那四句）。宿主 dock 换的是按它的人，
+    // 语义、那一步历史、那句报告一个字都没多。Generate 与菜单里那条是同一句 openGenModal；▶ 与菜单
+    // 里的 Generate 从来就是一个动作的两个入口，不是两个动作。
+    'layer-select': v => {
+        const o = uiRow(v);
+        const l = getLayer(Number(o.id));
+        // 缩略图那一下照旧是把笔交给变换（它是"我要动这一层"的读法），行身那一下只换选中、档位不动。
+        if (l) selectLayer(l.id, o.from === 'thumb' ? 'transform' : mode, o.shift === true);
+    },
+    'layer-rename': v => { const l = uiLayer(v); if (l) renameLayer(l, uiRow(v).name); },
+    'layer-jump': v => { const l = uiLayer(v); if (l) jumpLayerRow(l.id); },
+    'layer-generate': v => { const l = uiLayer(v); if (l) openGenModal(l.id); },
+    'layer-eye': v => { const l = uiLayer(v); if (l) toggleLayerVisibility(l.id); },
+    'layer-remove': v => { const l = uiLayer(v); if (l) removeLayer(l.id); },
+    'layer-duplicate': v => { const l = uiLayer(v); if (l) duplicateLayer(l); },
+    'layer-expand': v => { const l = uiLayer(v); if (l) startExpand(l); },
+    'layer-fit-mask': v => { const l = uiLayer(v); if (l) fitLayerToMask(l); },
+    'layer-split-mask': v => { const l = uiLayer(v); if (l) splitLayerByMask(l); },
+    'layer-rasterize': v => { const l = uiLayer(v); if (l) rasterizeLayerRow(l.id); },
+    'layer-text-edit': v => { const l = uiLayer(v); if (l) openTextEditor(l.id); },
+    // Combine 只在按住两行以上时才是菜单里的一条；那条谓词（selectedGroup 非空）随快照的行描述符来
+    // （每一行的 grouped），所以这里不重问一遍"够不够两行"，只照今天那样把这组的成员交进去。
+    'layer-combine': () => { const g = selectedGroup(); if (g) combineLayerGroup(g); },
+    'layer-move': v => {
+        const o = uiRow(v);
+        // toId 为空 = 落到这一摞的末尾（今天"拖到空列表"那一句），above 是宿主量出来的上半还是下半。
+        const to = o.toId === null || o.toId === undefined ? null : Number(o.toId);
+        moveLayer(Number(o.id), to, !!o.above, uiStack(o.stack));
+    },
+    // 两格头部的三个动作：加一行（四种）、清空这一摞、翻那颗「往后的图怎么进来」的偏好。落点函数就是
+    // 页面那两颗按钮调的同一句。dynamic 那一支照搬今天的不对称：Layers 侧先清 dynAutoRun 再起框
+    // （那颗菜单项今天就是从那里进来的），Guidances 侧不清。stash 只有工作摞有 —— 栈不对时不响应。
+    'layer-add': v => {
+        const o = uiRow(v), st = uiStack(o.stack), kind = String(o.kind);
+        if (st !== GUIDANCE_STACK && st !== WORK_STACK) return;
+        if (kind === 'default') addDefaultLayer(st);
+        else if (kind === 'stash') { if (st === WORK_STACK) addStashLayer(st); }
+        else if (kind === 'dynamic') { if (st === WORK_STACK) dynAutoRun = null; armRectDrag(st); }
+        else if (kind === 'cud') addCudLayerFromPick(st);
+    },
+    'layer-clear': v => { const st = uiStack(uiRow(v).stack); if (st) clearStack(st); },
+    'raster-drop': () => toggleRasterDrop(),
+    // cud 那一行的两条自己的动作。两个函数本来就是 async（它们自己会开 tab / 起文件对话框并报那句
+    // "Not linked any more"），菜单那颗条目今天也没等它们，这里一样只管点火。
+    'cud-refresh': v => { const l = uiLayer(v); if (l && isCudLayer(l)) refreshCudLayerFromFile(l); },
+    'cud-relink': v => { const l = uiLayer(v); if (l && isCudLayer(l)) relinkCudLayer(l); },
+    // ---- 条带上每一枚 chip ----
+    // 普通点击 = 这一枚 attribute 自己的开法：mask/decal 把笔交给它、effects 开那口链、文字进原位编辑、
+    // 方向/姿态钉它的目标、3D 开它的场景 tab。分流住在各类型的 spec.open 里，这一句不替它们决定。
+    'attr-open': v => { const p = uiAttr(v); if (p) ATTR_TYPES[p[1].type].open(p[0], p[1]); },
+    'attr-toggle': v => { const p = uiAttr(v); if (p) toggleAttrStep(p[0], p[1]); },
+    'attr-remove': v => { const p = uiAttr(v); if (p) removeAttrFromLayer(p[0], p[1]); },
+    'attr-duplicate': v => { const p = uiAttr(v); if (p) shallowDuplicateAttr(p[0], p[1]); },
+    // Apply 只折最左边那一枚：这一判据今天就在 applyAttrToLayer 自己嘴里（不是第 0 步就报错并说为什么），
+    // 菜单只是把它翻译成"这条目只在最左那枚上出现"。所以这里不再补第二道闸。
+    'attr-apply': v => { const p = uiAttr(v); if (p) applyAttrToLayer(p[0], p[1]); },
+    'attr-add': v => {
+        const o = uiRow(v);
+        const l = getLayer(Number(o.layerId));
+        const type = String(o.type);
+        if (l && ATTR_TYPES[type]) addAttrToLayer(l, type);
+    },
+    // 条带上的一步换位置：同层换缝与跨层搬家报的不是同一句话，分流在 moveAttrStep 那一句里（三个落点
+    // —— chip 两侧、条带尾缝、`+` 那颗 —— 今天共用它）。beforeAttrId 为空 = 追加为最后一步。
+    'attr-move': v => {
+        const o = uiRow(v);
+        moveAttrStep(String(o.attrId), Number(o.fromLayerId), Number(o.toLayerId),
+            o.beforeAttrId ? String(o.beforeAttrId) : null, !!o.after);
+    },
+    // ---- 链里的每一步：结构的三件事 ----
+    // 启用 / 摘掉 / 换位置。落点索引是宿主量出来的（链竖着排、越靠下越早，与条带那根轴同一套缝位算法）。
+    // 参数编辑（展开的那一格子旋钮）还整块住在页面这一侧：25 号那一岔还没拍，所以宿主现在只摆 chip、
+    // 不摆参数面 —— 这一句不是"已经决定不搬"，是"还没问"。
+    'fx-step-toggle': v => { const p = uiFxStep(v); if (p) setFxStepEnabled(p[0], p[2], !p[2].enabled); },
+    'fx-step-remove': v => { const p = uiFxStep(v); if (p) removeFxStep(p[0], p[1], p[2]); },
+    'fx-step-move': v => {
+        const o = uiRow(v);
+        const dst = getLayer(Number(o.toLayerId));
+        const r = dst ? attrRecord(String(o.toAttrId)) : null;
+        if (!dst || !r) return;
+        // fxAdoptEffect 认的就是那条拖拽描述（源层 / 源记录 / 那一步），跨记录、跨层、同链原地不动
+        // 全是它自己判的 —— 魔棒 chip 那颗落点今天给的也是同一份形状。那一步的 id 是数字（fx/core.js
+        // 的 ++fxSeq），这里必须原样给它数字，`e.id === drag.ref` 那句才认得出。
+        fxAdoptEffect({ layerId: Number(o.layerId), rec: String(o.attrId), ref: Number(o.stepId) },
+            dst, r, Math.max(0, Number(o.index) || 0));
+    },
+    'fx-bypass': () => toggleEffectsBypass(),
+    // ---- 链里那一步的参数面（拍板 25「都改成组件」）----
+    // 每一句的落点都是 DOM 那颗控件原来那一句：展开/收起走 fxOpenId，写入走 fxParamWrite（live 不记账、
+    // commit 才算一步撤销，与 input/change 的分工一字不差），折叠走 fxFoldState，曲线走 fxCurveOp，
+    // 网格三颗钮走 fxLatticeAction。坐标三样（哪一层 / 哪一枚容器 / 第几步）一律先过 uiFxStep 那道闸：
+    // 那一步已经被摘掉时，这里就当这一行还没重画 —— 静默不写，不往别的步上落。
+    'fx-step-open': v => {
+        const p = uiFxStep(v); if (!p) return;
+        fxOpenId = fxOpenId === p[2].id ? null : p[2].id;
+        refreshLayerPanels();
+    },
+    'fx-param-live': v => {
+        const p = uiFxStep(v); if (!p) return;
+        fxParamWrite(p[0], p[2], String(uiRow(v).key), uiRow(v).value, false);
+    },
+    'fx-param-commit': v => {
+        const p = uiFxStep(v); if (!p) return;
+        fxParamWrite(p[0], p[2], String(uiRow(v).key), uiRow(v).value, true);
+    },
+    'fx-fold-toggle': v => {
+        const o = uiRow(v); const p = uiFxStep(v); if (!p) return;
+        const key = String(o.key);
+        const def = (EFFECT_TYPES[p[2].type].params || []).find(d => d.key === key && d.kind === 'fold');
+        if (!def) return;
+        fxFoldState.set(p[2].id + '|' + key, !fxFoldOpen(p[2], def));
+        fxPublishRows();
+    },
+    // 贴图那一行的两个入口：开选图器（此刻仍是页面那口 modal —— picker 搬进宿主是同一趟里的下一格），
+    // 和行尾那枚 ×。× 是唯一"清空"的入口，所以历史那句话照 × 原来那句写，不写 modal 那句同义的话。
+    'fx-map-pick': v => { const p = uiFxStep(v); if (p) openFxMapModal(p[0], p[2], String(uiRow(v).key)); },
+    'fx-map-bind': v => {
+        const o = uiRow(v); const p = uiFxStep(v); if (!p) return;
+        const key = String(o.key);
+        const r = o.ref;
+        // 载荷里的引用只认这两样（key 是图池/本地池的编号，name 是那张卡上短名）；其余一概当没说。
+        const ref = (r && typeof r === 'object' && r.key) ? { key: String(r.key), name: String(r.name || '') } : null;
+        if (!p[2].params) p[2].params = {};
+        p[2].params[key] = ref;
+        fxStructuralChange(p[0], ref ? 'Bound a map image' : 'Map slot cleared');
+        setStatus(ref ? `Bound「${ref.name}」as the ${fxMapRole(p[2], key)} map`
+            : `Unbound the ${fxMapRole(p[2], key)} map`, 'success');
+    },
+    // 方向那一行同一套：检索全项目的那口 modal + 行尾那枚 ×。
+    'fx-dir-pick': v => {
+        const o = uiRow(v); const p = uiFxStep(v); if (!p) return;
+        const key = String(o.key);
+        const def = (EFFECT_TYPES[p[2].type].params || []).find(d => d.key === key);
+        if (!def) return;
+        openFxDirModal(p[0], p[2], key, def.types);
+    },
+    'fx-dir-bind': v => {
+        const o = uiRow(v); const p = uiFxStep(v); if (!p) return;
+        const key = String(o.key);
+        const ref = o.ref ? String(o.ref) : null;
+        if (!p[2].params) p[2].params = {};
+        p[2].params[key] = ref;
+        fxStructuralChange(p[0], ref ? 'Bound a direction reference' : 'Direction reference cleared');
+        const where = ref ? fxDirSourceName(ref) : null;
+        setStatus(ref ? `「${where}」's Direction now drives this step`
+            : 'Unbound — the step is back on its own knobs', 'success');
+    },
+    // 扭曲网格那一行的三颗钮（摊开 / 收起 / 丢掉）。网格本身摊在主画布上，那一套手势本来就不在面板里。
+    'fx-lattice': v => { const p = uiFxStep(v); if (p) fxLatticeAction(p[0], p[2], String(uiRow(v).which)); },
+    // 曲线那一格的全部手势：换焦点通道、点空白加控制点、拖点、拖底边两个输入黑白点、alt 删点、
+    // 松手记账（settle）、整条重置。夹 x 的那道闸与"范围外不加"那条判据都住在 fx/curves.js，
+    // 宿主只交归一化坐标 —— 那条三次插值的形状由页面采样后回播，两边不可能各画一条曲线。
+    'fx-curve': v => { const p = uiFxStep(v); if (p) fxCurveOp(p[0], p[2], uiRow(v)); },
+    // ---- History 那一格 ----
+    // undo/redo 那两句本来就是页面那两颗按钮的落点，手势途中不 rewind 那一道守卫一个字没改。跳到第 i 步
+    // = 把这两句原语走 |i - 现在| 次（jumpHistory 只数步子），清空 = resetHistory 那一句：装载文档时
+    // 走的也是它 —— "从这一步重新开始记账"，不是第二份语义。
+    'history-undo': () => undoAction(),
+    'history-redo': () => redoAction(),
+    'history-jump': v => jumpHistory(Number(v)),
+    'history-clear': () => resetHistory('Cleared the history'),
+    // ---- 工作区那一格与两摞之间 ----
+    // 行拖进图池 = 把这一层此刻的合成结果交出去存一张（exportLayerToStaging 今天就是行拖出去那颗 data
+    // 载荷的落点，它自己会把 PNG 发给宿主并报那一句"staged"）；图池条目拖进某一摞 = 以智能图层加入。
+    // 图池权威在宿主那一侧，所以条目删除、Extra Prompt 里插引用都不经过这条边界。
+    'stage-layer': v => { const l = uiLayer(v); if (l) exportLayerToStaging(l.id); },
+    'layer-from-staging': v => {
+        const o = uiRow(v);
+        // 新的图层必须落进某一摞：说不清的时候照今天画布那一口 drop 的读法进工作摞。
+        addStagingAsLayer(String(o.id), uiStack(o.stack) || WORK_STACK);
+    },
 };
 importFileInput.addEventListener('change', () => {
     // Snapshot the FileList before clearing the input — clearing it empties the live list too.
@@ -14148,9 +13594,9 @@ function finishProcessorRun(d) {
                 const rec = paintRecord(l, 'mask', true);
                 rec.surface = cov;
                 markAttrPainted(rec);
-                renderLayerList();
+                refreshLayerPanels();
                 render();
-                pushHistory();
+                pushHistory(null, 'Processor wrote a mask onto 「' + l.name + '」');
             }, () => setStatus('Could not load a processor result', 'error'));
         } else if (isMask && dst === 'selected_layer') {
             replaceLayerImage(l.id, { src: r.src, name: l.name });
@@ -14359,8 +13805,7 @@ updateBrushCursorSize();
 sizeOverlay();
 layoutCanvas();
 setMode('transform');
-syncFxBypassBtn();
-renderLayerList();
+refreshLayerPanels();
 updateCanvasReadout();
 render();
 syncActionButtons();

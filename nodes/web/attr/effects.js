@@ -22,7 +22,4 @@ defineAttrType({
             + (n ? ' · click to add a step at the top of this chain, it runs last' : ' · click to put the first effect in');
     },
     addTitle: `Add an Effects container as this layer's last step — it starts empty (clicking the chip puts the first effect in), and it runs its own chain on whatever the steps to its left leave.`,
-    // 链摊在图层行上方的那块容器 (fx/ui.js 的 fxChainEl)。条带的 lane 循环读的是注册表,Effects
-    // 在这里报一句自己的 lane —— 生成器三兄弟 (文字/方向/3D) 也是同一套摆法。
-    lane: (l, r) => fxChainEl(l, r),
 });

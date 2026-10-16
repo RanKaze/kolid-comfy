@@ -79,7 +79,7 @@ function patchPoseTarget(t, patch, opts) {
     markAttrPainted(t.r);
     if (!(opts && opts.silent)) {
         render();
-        if (!(opts && opts.live)) renderLayerList();
+        if (!(opts && opts.live)) refreshLayerPanels();
     }
     poseMarkDirty();
 }
@@ -91,7 +91,7 @@ function poseCommitRigPose(baseline) {
     const pose = rig.getPose();
     if (baseline && JSON.stringify(pose) === baseline) return;
     patchPoseTarget(t, { pose });
-    pushHistory('pose-' + poseHistoryKey(pose));
+    pushHistory('pose-' + poseHistoryKey(pose), 'Pose bones dragged');
     setStatus('Pose — ' + poseSummary(pose));
 }
 function poseHistoryKey(pose) {
@@ -397,8 +397,8 @@ for (const s of POSE_SLIDERS) {
     });
     s.input.addEventListener('change', () => {
         if (!poseGizmoTarget()) return;
-        renderLayerList();
-        pushHistory('pose-' + s.key);
+        refreshLayerPanels();
+        pushHistory('pose-' + s.key, 'Pose ' + s.key + ' slider set');
     });
 }
 
@@ -408,7 +408,7 @@ for (const b of POSE_SKIN_BUTTONS) {
         const t = poseGizmoTarget();
         if (!t || t.r.desc.skin === b.key) return;
         patchPoseTarget(t, { skin: b.key });
-        pushHistory('pose-skin');
+        pushHistory('pose-skin', 'Pose skin: ' + b.key);
     });
 }
 
@@ -420,7 +420,7 @@ if (poseColorInputEl) {
         if (poseColorValueEl) poseColorValueEl.textContent = poseColorInputEl.value.toUpperCase();
     });
     poseColorInputEl.addEventListener('change', () => {
-        if (poseGizmoTarget()) pushHistory('pose-color');
+        if (poseGizmoTarget()) pushHistory('pose-color', 'Pose color picked');
     });
 }
 
@@ -430,7 +430,7 @@ if (poseBgTransparentEl) {
         if (!t) return;
         const bg = poseBgTransparentEl.checked ? null : poseRgbFromHex(poseBgInputEl?.value);
         patchPoseTarget(t, { bg });
-        pushHistory('pose-bg');
+        pushHistory('pose-bg', 'Pose transparent background set');
     });
 }
 if (poseBgInputEl) {
@@ -440,7 +440,7 @@ if (poseBgInputEl) {
         patchPoseTarget(t, { bg: poseRgbFromHex(poseBgInputEl.value) }, { live: true });
     });
     poseBgInputEl.addEventListener('change', () => {
-        if (poseGizmoTarget() && !poseBgTransparentEl?.checked) pushHistory('pose-bg');
+        if (poseGizmoTarget() && !poseBgTransparentEl?.checked) pushHistory('pose-bg', 'Pose background color picked');
     });
 }
 
@@ -457,8 +457,8 @@ for (const f of POSE_CAM_FIELDS) {
         const t = poseGizmoTarget();
         if (!t) return;
         f.input.value = poseFieldText(t.r.desc.cam[f.key], f.fmt);   // 回读 sanitize 之后的实际读数
-        renderLayerList();
-        pushHistory('pose-cam');
+        refreshLayerPanels();
+        pushHistory('pose-cam', 'Pose camera ' + f.key + ' set');
     });
 }
 
@@ -467,7 +467,7 @@ if (poseResetPoseBtn) {
         const t = poseGizmoTarget();
         if (!t) return;
         patchPoseTarget(t, { pose: { bones: {}, bonePositions: {}, modelRotation: [0, 0, 0] } });
-        pushHistory('pose-reset-pose');
+        pushHistory('pose-reset-pose', 'Pose reset (bones)');
         setStatus('Pose reset to rest — the mesh and framing stay');
     });
 }
@@ -476,7 +476,7 @@ if (poseResetAllBtn) {
         const t = poseGizmoTarget();
         if (!t) return;
         patchPoseTarget(t, Object.assign({}, ATTR_TYPES.pose.defaults));
-        pushHistory('pose-reset');
+        pushHistory('pose-reset', 'Pose reset (all)');
         setStatus('Pose step reset to its defaults');
     });
 }
@@ -558,7 +558,7 @@ async function poseFromImage(ref) {
         if (!pose || !Object.keys(pose.bones).length) throw new Error('those keypoints mapped to no bone');
         // 整只替换 (8.a): 老姿态不留一根骨头, bonePositions 一并清空 —— 一次 undo。
         patchPoseTarget(t, { pose });
-        pushHistory('pose-from-image');
+        pushHistory('pose-from-image', 'Pose taken from image');
         setStatus(`Pose from「${ref.name}」— ${poseSummary(pose)}, ${parsed.numKeypoints} keypoints (${js.ms || 0}ms)`, 'success');
     } catch (err) {
         setStatus('Pose estimate: ' + (err && err.message ? err.message : err), 'error');
@@ -581,7 +581,7 @@ if (poseFromImageBtn) {
     });
 }
 
-// ---- 面板总更新 (renderLayerList 那一趟喊的) ----
+// ---- 面板总更新 (refreshLayerPanels 那一趟喊的) ----
 function updatePosePanel() {
     const section = document.getElementById('poseSection');
     if (!section) return;

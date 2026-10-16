@@ -19,7 +19,7 @@ const FX_TONE_MODE_INDEX = { neutral: 0, aces: 1, custom: 2, external: 3 };
 // 只有该模式要用的行由 when 挡住;模式切换时由编辑面重建剩下这些行 (Unity 的 inspector 也是这么收起
 // 无关字段的)。key 'map' 是绑定贴图的固定名 —— 解析与 .cud 资产都认这个键,见 fx/maps.js。
 const FX_TONE_PARAMS = [
-    { key: 'mode', label: 'Mode', kind: 'enum', options: FX_TONE_MODES, def: 'neutral' },
+    { key: 'mode', label: 'Mode', kind: 'enum', options: FX_TONE_MODES, labels: FX_TONE_MODE_LABELS, def: 'neutral' },
     { key: 'toeStrength', label: 'Toe Str', min: 0, max: 100, step: 1, def: 50, unit: '%', when: p => p.mode === 'custom' },
     { key: 'toeLength', label: 'Toe Len', min: 0, max: 50, step: 1, def: 25, unit: '%', when: p => p.mode === 'custom' },
     { key: 'shoulderStrength', label: 'Shldr Str', min: 0, max: 100, step: 1, def: 50, unit: '%', when: p => p.mode === 'custom' },
@@ -247,57 +247,6 @@ function fxglTone(col, p, effect) {
     col.slot = 1 - col.slot;
 }
 
-// 模式一换,要用的参数行就换一批 —— 所以这行是本特效自己出的 select (四个长名字挤不进分段按钮),
-// 其余行仍交给通用的 fxControlRow,默认值/读数/undo 语义跟其它特效完全一致。
-function toneEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-tone';
-    const head = document.createElement('div');
-    head.className = 'control-row';
-    const label = document.createElement('label');
-    label.textContent = 'Mode';
-    const sel = document.createElement('select');
-    for (const m of FX_TONE_MODES) {
-        const o = document.createElement('option');
-        o.value = m;
-        o.textContent = FX_TONE_MODE_LABELS[m];
-        sel.appendChild(o);
-    }
-    head.appendChild(label);
-    head.appendChild(sel);
-    const tail = document.createElement('div');
-    tail.className = 'fx-tone-tail';
-    box.appendChild(head);
-    box.appendChild(tail);
-
-    const show = () => {
-        const v = effect.params && effect.params.mode;
-        sel.value = FX_TONE_MODES.includes(v) ? v : 'neutral';
-    };
-    updaters.push(show);
-    show();
-
-    const build = () => {
-        const p = effectParams(effect);
-        const rows = FX_TONE_PARAMS
-            .filter(d => d.key !== 'mode' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters));
-        tail.replaceChildren(...rows);
-    };
-
-    sel.addEventListener('change', () => {
-        // 整体替换参数对象里这一个字段,和通用行完全一致;重建行要先于 syncRead,读数才跟得上。
-        if (!effect.params) effect.params = {};
-        effect.params.mode = sel.value;
-        build();
-        syncRead();
-        fxLiveUpdate(l);
-        pushHistory();
-    });
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'tone',
     label: 'Tone Map',
@@ -307,7 +256,6 @@ defineEffect({
     needsMapWhen: p => p.mode === 'external',
     desc: 'Compress a wide tonal range into 0..1 with one monotone curve. Neutral is the Khronos PBR Neutral mapper, ACES is the fitted filmic approximation, Custom exposes the toe (strength/length), the shoulder (strength/length/angle) and a midtone gamma, and External applies a bound 3D lookup table (unrolled strip or tile) blended back over the original by Contribution. The three operators run in linear light; the lookup table is read on display values, the way a .cube is authored. Colour only \u2014 nothing moves, alpha untouched.',
     params: FX_TONE_PARAMS,
-    editor: toneEditorEl,
     shaders: { tone: FX_FS_TONE },
     run: fxglTone,
     readout(p, n, effect) {

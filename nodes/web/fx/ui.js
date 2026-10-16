@@ -5,10 +5,8 @@
 // 上那枚 Effects chip 的魔棒上 —— 行头上那颗已经收掉了,一个动作只留一个可见入口;同一种挂了两枚容器
 // 时,魔棒开的是**被点那枚**的选择器,而这两块容器谁管哪一步由竖排次序说,不另写一行说明。
 let fxOpenId = null;        // 哪条特效正展开参数(按特效 id 记,列表重建后仍能展开)
-let dragFx = null;          // {layerId, rec, ref} —— 进行中的特效拖拽 (ref = 特效 id, rec = 源链的容器 guid)
 const fxModalEl = document.getElementById('fxModal');
 const fxGroupsEl = document.getElementById('fxGroups');
-const fxBypassBtn = document.getElementById('fxBypassBtn');
 
 function fxIconSvg(icon) {
     if (icon === 'shadow') {
@@ -184,96 +182,28 @@ function fxLiveUpdate(l) {
     render();
 }
 
-function fxStructuralChange(l) {
+function fxStructuralChange(l, label) {
     l.fxCache = null;
-    renderLayerList();
+    refreshLayerPanels();
     render();
-    pushHistory();
+    pushHistory(null, label);
 }
 
-// 一步特效 = 容器里的一行 chip (勾选 + 图标 + 名字 + 读数 + 移除),展开时另交一块参数区,由
-// fxChainEl 摆在这颗 chip 的**下方**。读数照旧是可见文本,不折进 tooltip。
-function fxStepEl(l, r, effect) {
-    const spec = EFFECT_TYPES[effect.type];
-    const updaters = [];
+// 链里某一步的启用开关：写状态、让折叠缓存知道结果变了、记一步历史。DOM 那颗 checkbox 和宿主 dock
+// 发回来的动作键走的都是这一句；chip 的类名与 tooltip 是画它的人自己的事，不住在这里。
+function setFxStepEnabled(l, effect, on) {
+    effect.enabled = !!on;
+    fxLiveUpdate(l);
+    pushHistory(null, (on ? 'Enabled ' : 'Disabled ') + ((EFFECT_TYPES[effect.type] || {}).label || 'Effect') + ' step');
+}
 
-    const chip = document.createElement('div');
-    chip.className = 'fx-chip' + (effect.enabled ? '' : ' disabled') + (fxOpenId === effect.id ? ' open' : '');
-    chip.draggable = true;
-    chip.dataset.fx = effect.id;
-
-    const read = document.createElement('div');
-    read.className = 'fx-read';
-    const syncRead = () => {
-        read.textContent = describeEffect(effect);
-        for (const fn of updaters) fn();
-    };
-
-    const chk = document.createElement('input');
-    chk.type = 'checkbox';
-    chk.checked = effect.enabled;
-    chk.setAttribute('aria-label', 'Enable this effect');
-    chk.title = effect.enabled ? 'Bypass this effect' : 'Enable this effect';
-    chk.addEventListener('click', ev => ev.stopPropagation());
-    chk.addEventListener('change', ev => {
-        ev.stopPropagation();
-        effect.enabled = chk.checked;
-        chip.classList.toggle('disabled', !effect.enabled);
-        chk.title = effect.enabled ? 'Bypass this effect' : 'Enable this effect';
-        fxLiveUpdate(l);
-        pushHistory();
-    });
-
-    const icon = document.createElement('span');
-    icon.className = 'fx-icon';
-    icon.innerHTML = fxIconSvg(spec.icon);
-
-    const name = document.createElement('span');
-    name.className = 'fx-name';
-    name.textContent = spec.label;
-
-    const del = document.createElement('button');
-    del.className = 'icon-btn';
-    del.textContent = '×';
-    del.style.fontSize = '14px';
-    del.style.lineHeight = '1';
-    del.title = 'Remove this effect';
-    del.addEventListener('click', ev => {
-        ev.stopPropagation();
-        const i = r.chain.findIndex(e => e.id === effect.id);
-        if (i >= 0) r.chain.splice(i, 1);
-        if (fxOpenId === effect.id) fxOpenId = null;
-        fxStructuralChange(l);
-    });
-
-    chip.appendChild(chk);
-    chip.appendChild(icon);
-    chip.appendChild(name);
-    chip.appendChild(read);
-    chip.appendChild(del);
-    chip.addEventListener('click', ev => {
-        ev.stopPropagation();
-        fxOpenId = fxOpenId === effect.id ? null : effect.id;
-        renderLayerList();
-    });
-
-    // 这一枚就是拖拽源:链内重排列、换个容器、搬到别的图层,都是同一个手势 —— 落点判定不在
-    // chip 上,在**整块链容器**上 (fxChainEl),因为"拖去的那条链"可能连 chip 都没有 (空链不
-    // 占位)。dragstart 必须停在这里,否则图层行的重排序会跟着一起启动。
-    chip.addEventListener('dragstart', ev => {
-        dragFx = { layerId: l.id, rec: r.id, ref: effect.id };
-        chip.classList.add('dragging');
-        ev.dataTransfer.effectAllowed = 'move';
-        ev.dataTransfer.setData('text/plain', 'fx:' + effect.id);
-        ev.stopPropagation();
-    });
-    chip.addEventListener('dragend', () => {
-        chip.classList.remove('dragging', 'drop-before', 'drop-after');
-        dragFx = null;
-    });
-
-    syncRead();
-    return { chip, params: fxOpenId === effect.id ? fxParamsEl(l, effect, spec, syncRead, updaters) : null };
+// 从这条链里摘掉一步。开着的参数面板 (fxOpenId) 指的是这一步自己时得跟着收起来，否则下一次重画会把
+// 一个已经不存在的 effect 摊在行里。
+function removeFxStep(l, r, effect) {
+    const i = r.chain.findIndex(e => e.id === effect.id);
+    if (i >= 0) r.chain.splice(i, 1);
+    if (fxOpenId === effect.id) fxOpenId = null;
+    fxStructuralChange(l, ((EFFECT_TYPES[effect.type] || {}).label || 'Effect') + ' step removed');
 }
 
 // 折叠组 (kind:'fold' 的参数行) 的开合,按 effect id + 组 key 记在内存里 —— 纯 UI 状态,不进存档、
@@ -284,286 +214,189 @@ function fxFoldOpen(effect, d) {
     return fxFoldState.has(k) ? fxFoldState.get(k) : d.open !== false;
 }
 
-function fxParamsEl(l, effect, spec, syncRead, updaters) {
-    const body = document.createElement('div');
-    body.className = 'fx-params';
-    // 有专用编辑面的特效自己出整块面板(曲线就是这样);其余按注册表逐行铺控件。
-    if (spec.editor) body.appendChild(spec.editor(l, effect, syncRead, updaters));
-    else {
-        // 开关/模式专属的旋钮只在条件成立时出现 —— 这条过滤各编辑面都在走 (见 fx/corrosion.js),
-        // 通用面板以前漏了,所以光照那 8 行阴影旋钮在 Shadow=0 时照样铺满一排,而读数行早就不报它们了。
-        // 折叠头 (kind:'fold') 把它后面的行划成一组:组收起时那些行整个不进列表,头自己永远在,
-        // 一组参数在哪儿读一行头就知道。
-        const visible = () => {
-            const p = effectParams(effect);
-            const rows = [];
-            let open = true;
-            for (const d of spec.params) {
-                if (d.when && !d.when(p)) continue;
-                if (d.kind === 'fold') { rows.push(d); open = fxFoldOpen(effect, d); }
-                else if (open) rows.push(d);
-            }
-            return rows;
-        };
-        // 重铺只认「这一批行换没换」,而且只挂在**提交**上:拖动途中每个 input 都会同步读数,
-        // 那时候换掉 DOM 等于把正在拖的滑块从指头底下拆走 (与 fxLiveUpdate 同一理由)。
-        // 键里带上每枚折叠头的开合:翻一枚空组 (行全被 when 藏掉了) 时键也要动,
-        // 不然头上的箭头不重画。
-        let shown = '';
-        const pump = () => {
-            const rows = visible();
-            const key = rows.map(d => d.key + (d.kind === 'fold' ? (fxFoldOpen(effect, d) ? '+' : '-') : '')).join(',');
-            if (key === shown) return;
-            shown = key;
-            body.replaceChildren(...rows.map(d => fxControlRow(l, effect, d, syncRead, updaters, pump)));
-        };
-        pump();
+// 参数面是**数据**，不是这一页的 DOM（拍板 25「都改成组件」）。这一句就是行的去留与读数的唯一作者，
+// 宿主 dock 照着这里编出来的那一批行画控件，判据一个字都不外渗：
+//   * 去留由 spec.params 的声明序 + 每行自己的 when + kind:'fold' 的组说；
+//   * 读数仍是 def.fmt 或 值+unit，贴图行首那个名字仍是注册表 fxMapSlots 答出来的 role；
+//   * 每一行自带画它要的全部事实（值、读数、选项、绑定与否、绑的那张图此刻还在不在），宿主不回过来问
+//     页面 —— 一回问，判据就在 React 里长出第二份。
+// 「整块面板被某个特效接管」那个 spec.editor 口子连同九个专用编辑面一起废了：那六家「模式行 + 其余行
+// 按 when 重铺」的写法，when 过滤本来就是同一句话；tone 的下拉换成枚举行（显示文本走 def.labels，
+// FX_TONE_MODE_LABELS 还是唯一那份）；warp 的网格行与 curves 的图各自变成一个 kind。
+// 于是这里没有「这一格被谁画了」那一岔 —— 只有 kind。
+function fxParamsModel(l, effect) {
+    const spec = EFFECT_TYPES[effect.type];
+    const p = effectParams(effect);
+    const rows = [];
+    let open = true;
+    for (const d of (spec.params || [])) {
+        if (d.when && !d.when(p)) continue;
+        if (d.kind === 'fold') { rows.push(fxParamRow(l, effect, d, p)); open = fxFoldOpen(effect, d); continue; }
+        if (open) rows.push(fxParamRow(l, effect, d, p));
     }
-    // 参数区里的任何点击都不该顺带选中图层(那会重建列表)。
-    body.addEventListener('click', ev => ev.stopPropagation());
-    // 图层行是 draggable 的,滑块就压在它里面:从 handle 上起手按住再动,浏览器会往上找最近
-    // 的可拖祖先 —— 也就是图层行 —— 把调参变成图层重排序。所以参数区自己得先成为那个最近
-    // 祖先 (draggable=true),再取消它自己的 dragstart:两步缺一,拖拽都会漏到图层行上。
-    body.draggable = true;
-    body.addEventListener('dragstart', ev => { ev.preventDefault(); ev.stopPropagation(); });
-    return body;
+    return rows;
 }
 
-// 参数行的读数一律可见(值直接写在滑块右边),不是 tooltip。
-// `onCommit` 只有通用面板会传:某个旋钮落定后问一句「可见的那批行换了吗」。它挂在 undoable 那一支
-// (松手/点定)而不是每次 input,原因见 fxParamsEl。
-function fxControlRow(l, effect, def, syncRead, updaters, onCommit) {
-    const row = document.createElement('div');
-    row.className = 'control-row';
-    // 贴图那一行叫什么不写死在控件数据里:这行的 key 去问注册表 (needsMap / needsMap2.role),
-    // 答出来的是「Depth」「Normal」「Noise」「Lookup」—— 一颗写着 "Map" 的按钮等于没回答
-    // 「我该喂哪张图」。同一个 slot 下面还要用一次 (清除按钮的 title、按钮上的提示)。
-    const mapSlot = def.kind === 'map'
-        ? (fxMapSlots(effect).find(s => s.key === def.key) || { key: def.key, role: 'Map' })
-        : null;
-    if (def.kind === 'fold') {
-        // 折叠组头:整行一颗按钮,箭头 + 组名 + 一条淡线。开合是纯 UI 状态,不进撤销;
-        // 点下去重铺参数区 (onCommit = 通用面板的 pump),组下的行由 visible() 的行走决定去留。
-        row.className = 'fx-fold';
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'fx-fold-head';
-        const chev = document.createElement('span');
-        chev.className = 'fx-fold-chev';
-        const nm = document.createElement('span');
-        nm.textContent = def.label;
-        btn.appendChild(chev);
-        btn.appendChild(nm);
-        if (def.tip) btn.title = def.tip;
-        const open = fxFoldOpen(effect, def);
-        chev.textContent = open ? '\u25BE' : '\u25B8';
-        btn.addEventListener('click', ev => {
-            ev.stopPropagation();
-            fxFoldState.set(effect.id + '|' + def.key, !fxFoldOpen(effect, def));
-            if (onCommit) onCommit();
-        });
-        row.appendChild(btn);
-        return row;
-    }
-    const label = document.createElement('label');
-    label.textContent = mapSlot ? mapSlot.role : def.label;
-    row.appendChild(label);
-    // 代价/模式这类说明性的一句话挂在行首那个名字上:读数那格永远只写效果,账单进 tooltip。
-    // 分段钮自己那颗 title 已经在报「哪个选项被选中」,所以这里不跟它抢。
-    if (def.tip) label.title = def.tip;
-    const get = () => {
-        const v = effect.params && effect.params[def.key];
-        return v === undefined || v === null ? def.def : v;
-    };
-    // 拖动途中只重算画布(input),松手才算一步撤销(change)。
-    const set = (v, undoable) => {
-        if (!effect.params) effect.params = {};
-        effect.params[def.key] = v;
-        syncRead();
-        fxLiveUpdate(l);
-        if (undoable) pushHistory();
-        if (undoable && onCommit) onCommit();
-    };
+const r3 = v => Number(Number(v).toFixed(3));   // 曲线那种归一化坐标：三位小数在 150px 的图上落不到别的像素上
 
-    if (def.kind === 'check') {
-        // 布尔开关行（如马赛克的 Anti-aliasing）：勾选 = def.def 的缺省语义不变。
-        const inp = document.createElement('input');
-        inp.type = 'checkbox';
-        inp.checked = !!get();
-        updaters.push(() => { inp.checked = !!get(); });
-        inp.addEventListener('change', () => set(inp.checked, true));
-        row.appendChild(inp);
+function fxParamRow(l, effect, def, p) {
+    const raw = effect.params && effect.params[def.key];
+    const v = (raw === undefined || raw === null) ? def.def : raw;
+    const row = { key: def.key, kind: def.kind || 'range', label: def.label || '', tip: def.tip || '', readout: '' };
+    if (row.kind === 'check') { row.flag = !!v; return row; }
+    if (row.kind === 'flag') {
+        // 双态按钮：值是真参数（进存档、进 fxSignature），所以按钮上那句 ON/OFF 就是可见读数。
+        row.flag = !!v;
+        row.onText = def.onText || 'ON';
+        row.offText = def.offText || 'OFF';
+        row.readout = row.flag ? row.onText : row.offText;
         return row;
     }
-    if (def.kind === 'color') {
-        const inp = document.createElement('input');
-        inp.type = 'color';
-        inp.value = get();
-        const span = document.createElement('span');
-        const show = () => { span.textContent = inp.value.toUpperCase(); };
-        updaters.push(show);
-        inp.addEventListener('input', () => { show(); set(inp.value, false); });
-        inp.addEventListener('change', () => set(inp.value, true));
-        row.appendChild(inp);
-        row.appendChild(span);
-        show();
+    if (row.kind === 'fold') {
+        row.open = fxFoldOpen(effect, def);
         return row;
     }
-    if (def.kind === 'enum') {
-        const seg = document.createElement('div');
-        seg.className = 'fx-seg';
-        const btns = [];
-        const show = () => {
-            const cur = get();
-            for (let i = 0; i < btns.length; i++) btns[i].classList.toggle('on', def.options[i] === cur);
-        };
-        updaters.push(show);
-        for (const opt of def.options) {
-            const b = document.createElement('button');
-            b.textContent = opt === 'trailing' ? 'trail' : opt;
-            b.title = `${def.label}: ${opt}`;
-            b.addEventListener('click', () => set(opt, true));
-            btns.push(b);
-            seg.appendChild(b);
+    if (row.kind === 'color') {
+        row.value = String(v || '');
+        row.readout = row.value.toUpperCase();
+        return row;
+    }
+    if (row.kind === 'enum') {
+        row.options = (def.options || []).map(String);
+        // 显示文本仍由这一格说一次：def.labels 是注册表那份（Tone Map 的四个模式名），'trailing' →
+        // 'trail' 是原来分段钮上的短写。两个都不是新事实，是 DOM 那两颗钮本来就写的字。
+        row.labels = row.options.map(o => (def.labels && def.labels[o]) || (o === 'trailing' ? 'trail' : o));
+        row.value = String(v);
+        row.readout = row.value;
+        return row;
+    }
+    if (row.kind === 'map') {
+        // 这一行叫什么不由控件数据写死：那行 key 去问注册表，答出来的是 Depth / Normal / Noise /
+        // Lookup —— 一颗写着 "Map" 的按钮等于没回答「我该喂哪张图」。解析不到像素时按钮转红，
+        // 链上也会写出跳过原因，静默降级是最难发现的那种 bug。
+        const slot = fxMapSlots(effect).find(s => s.key === def.key) || { key: def.key, role: 'Map' };
+        const ref = fxMapRef(effect, slot.key);
+        row.label = slot.role;
+        row.role = slot.role;
+        row.optional = !!slot.optional;
+        row.bound = !!ref;
+        row.missing = !!ref && !fxMapSource(ref);
+        row.readout = ref ? fxMapShort(effect, slot.key) : 'not bound';
+        row.title = ref ? `${ref.name || ref.key} — click to pick another`
+            : `Pick a ${slot.role.toLowerCase()} map${slot.optional ? ' (optional)' : ''}`;
+        return row;
+    }
+    if (row.kind === 'dir') {
+        // 形状与贴图槽同一套（按钮写当前绑定 + 行尾 × 清除），绑的是一枚 attribute 的 guid。悬空时
+        // 按钮转红，与缺图的读法同词。def.types 是那一口选择器要检索的类型名单。
+        const ref = v ? String(v) : '';
+        const where = ref ? fxDirSourceName(ref) : null;
+        row.bound = !!ref;
+        row.missing = !!ref && !where;
+        row.types = (def.types || ['direction']).map(String);
+        row.readout = ref ? (where || 'missing attribute') : 'not bound';
+        row.title = ref ? (where ? `${where} — click to pick another`
+                                : 'The bound attribute is gone — click to pick another')
+                        : (def.tip || 'Pick an attribute from the project');
+        return row;
+    }
+    if (row.kind === 'lattice') {
+        // 两枚各指一个目的地的钮（摊开 / 收起）+ 一枚 Drop，与原来那一行三个按钮一字不差；网格本身
+        // 摊在主画布上（beginWarpEdit 那一套手势），面板只说它现在摊没摊开。
+        const lat = warpLatticeOf(p.lattice);
+        row.hasGrid = !!lat;
+        row.active = warpEditActive(l, effect);
+        row.editLabel = lat ? 'Edit the grid' : 'Add a grid';
+        row.readout = lat ? `${lat.cols}\u00d7${lat.rows} quads` : 'no grid';
+        row.hint = 'drag a handle \u00b7 click an edge to split across';
+        return row;
+    }
+    if (row.kind === 'curve') {
+        // 曲线那格：折线由**这里**按 curveValueAt 现采样，React 只连点 —— 那条三次 Hermite 插值
+        // 只有一个作者，两边各画一次形状迟早会漂开，而漂开的那一侧只是不再等于画面。
+        // 采 64 段是画法的分辨率（150px 的图上落不到别的像素），不是插值算式的一部分。
+        const set = curveSetOf(p);
+        const focus = (curveFocus[effect.id] && CURVE_CHANNELS.includes(curveFocus[effect.id]))
+            ? curveFocus[effect.id] : 'rgb';
+        const pts = set[focus];
+        const lut = [];
+        for (let i = 0; i <= 64; i++) {
+            const x = i / 64;
+            lut.push([r3(x), r3(curveValueAt(pts, x))]);
         }
-        row.appendChild(seg);
-        show();
+        row.channels = CURVE_CHANNELS.map(c => ({ value: c, label: CURVE_CHANNEL_LABELS[c] }));
+        row.channel = focus;
+        row.points = pts.map(q => [r3(q[0]), r3(q[1])]);
+        row.lut = lut;
+        row.minGap = CURVE_MIN_GAP;
+        row.readout = '';
         return row;
     }
-    if (def.kind === 'map') {
-        // 这一行绑的是一张外部图,种类已经写进行首那个 label 上 (上面那次查表)。一条特效可以占两个
-        // 槽 (几何 warp 读「深度 + 法线」),两行长得一模一样、各写各的 params[def.key]。
-        // 名字直接写在按钮上 = 可见文本,不塞 tooltip;解析不到像素时按钮转红,链上也会写出跳过
-        // 原因 —— 静默降级是最难发现的那种 bug。
-        const slot = mapSlot;
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'fx-map-btn';
-        const clr = document.createElement('button');
-        clr.className = 'icon-btn';
-        clr.textContent = '×';
-        clr.style.fontSize = '14px';
-        clr.style.lineHeight = '1';
-        clr.title = `Unbind this ${slot.role.toLowerCase()} map`;
-        const show = () => {
-            const ref = fxMapRef(effect, slot.key);
-            btn.textContent = ref ? fxMapShort(effect, slot.key) : 'not bound';
-            btn.classList.toggle('unset', !ref);
-            btn.classList.toggle('gone', !!ref && !fxMapSource(ref));
-            // 按钮上那截名字被截断过,所以 title 补全名 —— 行首已经写着这张图的种类,不必再说一遍。
-            btn.title = ref ? `${ref.name || ref.key} — click to pick another`
-                : `Pick a ${slot.role.toLowerCase()} map${slot.optional ? ' (optional)' : ''}`;
-            clr.style.display = ref ? '' : 'none';
-        };
-        updaters.push(show);
-        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxMapModal(l, effect, slot.key); });
-        clr.addEventListener('click', ev => {
-            ev.stopPropagation();
-            // 整体替换,不原地改 —— 那个对象在 undo 快照之间是共享引用。
-            effect.params[slot.key] = null;
-            fxStructuralChange(l);
-        });
-        row.appendChild(btn);
-        row.appendChild(clr);
-        show();
-        return row;
-    }
-    if (def.kind === 'dir') {
-        // 这一行的形状与贴图槽同一套 (按钮写当前绑定 + 行尾 × 清除),绑的是一枚 Direction attribute
-        // 的 guid —— openFxDirModal 全项目检索后点名。悬空时按钮转红,与缺图的读法同词。
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'fx-map-btn';
-        const clr = document.createElement('button');
-        clr.className = 'icon-btn';
-        clr.textContent = '×';
-        clr.style.fontSize = '14px';
-        clr.style.lineHeight = '1';
-        clr.title = 'Unbind this attribute';
-        const show = () => {
-            const ref = get();
-            const where = ref ? fxDirSourceName(ref) : null;
-            btn.textContent = ref ? (where || 'missing attribute') : 'not bound';
-            btn.classList.toggle('unset', !ref);
-            btn.classList.toggle('gone', !!ref && !where);
-            btn.title = ref ? (where ? `${where} — click to pick another` : 'The bound attribute is gone — click to pick another')
-                : (def.tip || 'Pick an attribute from the project');
-            clr.style.display = ref ? '' : 'none';
-        };
-        updaters.push(show);
-        btn.addEventListener('click', ev => { ev.stopPropagation(); openFxDirModal(l, effect, def.key, def.types); });
-        clr.addEventListener('click', ev => {
-            ev.stopPropagation();
-            effect.params[def.key] = null;
-            fxStructuralChange(l);
-        });
-        row.appendChild(btn);
-        row.appendChild(clr);
-        show();
-        return row;
-    }
-    if (def.kind === 'flag') {
-        // 双态按钮 (预览/模式开关): 值是真参数 —— 进存档、进 fxSignature (翻转即脏、当场重算)。
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'fx-map-btn';
-        const show = () => {
-            const on = !!get();
-            btn.textContent = on ? (def.onText || 'ON') : (def.offText || 'OFF');
-            btn.classList.toggle('unset', !on);
-        };
-        updaters.push(show);
-        btn.addEventListener('click', ev => {
-            ev.stopPropagation();
-            effect.params[def.key] = !get();
-            fxStructuralChange(l);
-        });
-        row.appendChild(btn);
-        show();
-        return row;
-    }
-    const inp = document.createElement('input');
-    inp.type = 'range';
-    inp.min = def.min;
-    inp.max = def.max;
-    inp.step = def.step;
-    inp.value = get();
-    const span = document.createElement('span');
-    // def.fmt 可选:自己格式化读数(指数旋钮要显示 2ⁿ 这种「值不是面值」的数),给了就不走 值+unit。
-    const show = () => {
-        span.textContent = def.fmt ? def.fmt(Number(inp.value)) : `${inp.value}${def.unit || ''}`;
-    };
-    updaters.push(show);
-    inp.addEventListener('input', () => { show(); set(Number(inp.value), false); });
-    inp.addEventListener('change', () => set(Number(inp.value), true));
-    row.appendChild(inp);
-    row.appendChild(span);
-    show();
+    // 剩下的一律是滑块：min/max/step 原样交出去，读数照原句。
+    row.min = Number(def.min);
+    row.max = Number(def.max);
+    row.step = Number(def.step);
+    row.value = Number(v);
+    row.readout = def.fmt ? def.fmt(Number(v)) : `${v}${def.unit || ''}`;
     return row;
 }
 
-// ---- 特效拖拽的落点 (整个容器共用一份) ----
-// 指针在链容器里的落槽:数"中点在指针下方"的 chip —— 从下往上读,下方 = 更早,数出来的就是插入
-// 下标 k (0 = 最下 = 最先跑)。chip 上/下半与旧的半高判定同解 (上半 → k = i+1 = 插到它后面),
-// 而缝隙与参数区也各有明确的槽。链内重排、换容器、搬图层三种落法都读这一处 —— 缝位不写第二遍。
-function fxChainSlot(steps, clientY) {
-    let k = 0;
-    for (const c of steps.querySelectorAll('.fx-chip')) {
-        const rc = c.getBoundingClientRect();
-        if (rc.top + rc.height / 2 > clientY) k++;
+// 此刻展开参数的那一步。fxOpenId 记的是那一步自己的 id（列表重建后仍能展开），坐标三样（哪一层、
+// 哪一枚容器、第几步）由这里现查 —— 宿主回发时也带这三样，两边因此不可能各认一套坐标。
+function fxOpenStepRef() {
+    if (fxOpenId === null) return null;
+    for (const l of layers) {
+        const r = chainOwnerRecord(l, fxOpenId);
+        if (!r) continue;
+        const e = (r.chain || []).find(x => x && x.id === fxOpenId);
+        if (e) return { l, r, e };
     }
-    return k;
+    return null;
 }
 
-// 槽 k 的插入线画在第 k 颗 chip 的下沿 (= 它前面那道缝);插到末尾 (k 到顶) 画在最后一步的上沿。
-// k 传 -1 = 全清 (指针离开容器)。
-function fxSlotPaint(steps, k) {
-    const chips = steps.querySelectorAll('.fx-chip');
-    const n = chips.length;
-    for (let i = 0; i < n; i++) {
-        chips[i].classList.toggle('drop-before', i === k && k < n);
-        chips[i].classList.toggle('drop-after', k >= n && i === n - 1);
-    }
+function fxOpenStepModel() {
+    const p = fxOpenStepRef();
+    if (!p) return null;
+    const spec = EFFECT_TYPES[p.e.type];
+    return {
+        layerId: p.l.id, attrId: p.r.id, stepId: p.e.id,
+        type: p.e.type, label: spec ? spec.label : String(p.e.type),
+        readout: describeEffect(p.e),
+        rows: fxParamsModel(p.l, p.e),
+    };
+}
+
+// 通用面板上那一句「这一批行换没换」：滑块落定（松手/点定）之后重问一遍 when。这里没有 DOM 可铺，
+// 换行的代价就是快照里多出来的那几句描述符 —— 播报走 queueBlendUi 的等值去重，没换就一个字都不发。
+// 落定那一趟走 refreshLayerPanels（链的结构可能跟着 when 换，页面那几块面板的读数也认这一句）；拖动途中
+// 只重排行模型 + 播报（DOM 时代连图层列表都不重建，理由同 fxLiveUpdate：那一趟里正在拖的东西会被拆掉，
+// 如今拆不掉，但也没必要为它重建六块面板）。
+function fxPublishRows() { syncStackRows(); queueBlendUi(); }
+function fxRefreshParams() { refreshLayerPanels(); }
+
+// 参数面被宿主按下以后。每一句都是"那颗控件原来那一句"：拖途中只清缓存重画布（不记历史），松手才算
+// 一步撤销；模式/枚举这类一落定就换整摞行的，仍旧当场记一步。
+// 值按那一行的 kind 归，第三种形状一概不收 —— 载荷是从另一个文档递过来的，一个字都不能信。
+function fxParamValue(def, raw) {
+    const kind = def.kind || 'range';
+    if (kind === 'check' || kind === 'flag') return !!raw;
+    if (kind === 'range') return Number(raw);
+    return String(raw);
+}
+
+function fxParamWrite(l, e, key, raw, undoable) {
+    const def = (EFFECT_TYPES[e.type].params || []).find(d => d.key === key);
+    if (!def || def.kind === 'fold' || def.kind === 'curve' || def.kind === 'lattice') return false;
+    if (!e.params) e.params = {};
+    e.params[key] = fxParamValue(def, raw);
+    // 双态按钮那一行落定时换的是**整批可见行**（模式开关就是它的语义），所以走结构变更那一句，历史里
+    // 那句也说「switched」—— 与 DOM 那颗钮原来那两句一字不差，不跟旋钮行的「changed」混写。
+    if (def.kind === 'flag') { fxStructuralChange(l, '「' + (def.label || key) + '」 switched'); return true; }
+    fxLiveUpdate(l);
+    if (!undoable) { fxPublishRows(); return true; }
+    pushHistory(null, '「' + (def.label || key) + '」 changed');
+    fxRefreshParams();
+    return true;
 }
 
 // 把正在拖着的那枚特效放进 (l, r) 这条链的第 k 槽。k 按**摘之前**的数组说 (与 listSlot 同一条
@@ -592,63 +425,8 @@ function fxAdoptEffect(drag, l, r, k) {
         setStatus(`「${label}」moved from「${srcLayer.name}」to「${l.name}」— it is now step ${at + 1} of ${r.chain.length} in its Effects chain`);
     }
     if (srcLayer !== l) srcLayer.fxCache = null;
-    fxStructuralChange(l);
+    fxStructuralChange(l, 'Effect step reordered');
     return true;
-}
-
-// 一枚 Effects 记录 = 它自己那块容器,摊在图层行的上方,一步一行、**从下往上**读就是执行序 (紧挨着
-// 图层行那一步最先跑)。链里没有步就不占位 (空容器由条带上那枚 chip 自己说话)。展开参数的那一步,
-// 参数区排在它自己那颗 chip 的**下方** (= 朝图层行那一侧)。
-function fxChainEl(l, r) {
-    if (!layerTakesEffects(l) || !r || !r.chain || !r.chain.length) return null;
-    const box = document.createElement('div');
-    box.className = 'fx-chain' + (effectsBypass ? ' bypassed' : '');
-    box.dataset.fxLane = r.id;   // 这块容器是谁的链,按 guid 认 —— 数它是行里第几块答不了这个问题
-    const steps = document.createElement('div');
-    steps.className = 'fx-steps';
-    box.appendChild(steps);
-    for (const effect of r.chain) {
-        const step = fxStepEl(l, r, effect);
-        // 那一块是这一步的参数,不是整条链的,所以跟着它自己那一步走。column-reverse 把后写的往**上**画,
-        // 于是想落在 chip 下方就得先写出去 —— 链序仍然只由 chip 的先后说。
-        if (step.params) steps.appendChild(step.params);
-        steps.appendChild(step.chip);
-    }
-    // 内核跳过整链时把原因写在容器上 —— 读数用可见文本,不塞 tooltip,更不能静默。读的是**这条记录
-    // 自己**那份原因:全局 fxgl.skip 是所有图层、所有容器共用的"最近一次跑链"读数,直接拿它说话,
-    // 绑好了图的那块容器也会挂上别处那句"no depth map bound"。
-    const why = fxChainSkipReason(r);
-    if (why) {
-        const warn = document.createElement('div');
-        warn.className = 'fx-warn';
-        warn.textContent = `Chain skipped — ${why}`;
-        box.appendChild(warn);
-    }
-    // 整块容器都收拖拽:拖起一枚特效后,链内重排、换个容器、搬到别的图层,收下的都是这里 ——
-    // 落槽现算 (fxChainSlot),插入线现画 (fxSlotPaint)。判定只写这一份:chip 不各自接一半,
-    // 因为"拖去别条链"这件事本来就没有 chip 可依 (空链连 lane 都不占,那条路落在条带的魔棒
-    // chip 上,见 blend_node 的 attrChip)。
-    box.addEventListener('dragover', ev => {
-        if (!dragFx) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        ev.dataTransfer.dropEffect = 'move';
-        fxSlotPaint(steps, fxChainSlot(steps, ev.clientY));
-    });
-    box.addEventListener('dragleave', ev => {
-        if (ev.relatedTarget && box.contains(ev.relatedTarget)) return;   // 进出子元素不算离开
-        fxSlotPaint(steps, -1);
-    });
-    box.addEventListener('drop', ev => {
-        if (!dragFx) return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        fxSlotPaint(steps, -1);
-        const move = dragFx;
-        dragFx = null;
-        fxAdoptEffect(move, l, r, fxChainSlot(steps, ev.clientY));
-    });
-    return box;
 }
 
 // `ref` 是那枚被点了魔棒的 Effects 记录:一步追加到**它**的链尾 (= 执行序末尾,画在这一摞的最上面)。
@@ -662,7 +440,7 @@ function addEffectToLayer(layerId, ref, type) {
     const e = makeEffect(type);
     r.chain.push(e);
     fxOpenId = e.id;
-    fxStructuralChange(l);
+    fxStructuralChange(l, 'Added ' + EFFECT_TYPES[type].label + ' to the chain');
     setStatus(`Added ${EFFECT_TYPES[type].label} to「${l.name}」as step ${r.chain.length} of its chain`);
 }
 
@@ -811,7 +589,7 @@ function openFxMapModal(l, effect, slotKey, opts) {
                 if (!e) return;
                 // 整体替换,不原地改:cloneEffects 深拷贝只到 params 这一层,槽对象在 undo 快照之间是共享的。
                 e.params[slot.key] = ref;
-                fxStructuralChange(layer);
+                fxStructuralChange(layer, ref ? 'Bound a map image' : 'Cleared a map image');
                 setStatus(ref ? `Bound「${ref.name}」as the ${fxMapRole(e, slot.key)} map`
                     : `Unbound the ${fxMapRole(e, slot.key)} map`, 'success');
             },
@@ -927,7 +705,7 @@ function bindFxDir(ref) {
     // 键由发起绑定的那行参数带来 (Lighting 的 dirRef、雾的 gravRef/sunRef 都是同一扇窗的客人)。
     e.params[t.key || 'dirRef'] = ref || null;
     closeFxDirModal();
-    fxStructuralChange(l);
+    fxStructuralChange(l, ref ? 'Bound a direction reference' : 'Cleared a direction reference');
     const where = ref ? fxDirSourceName(ref) : null;
     setStatus(ref ? `「${where}」's Direction now drives this step`
         : 'Unbound — the step is back on its own knobs', 'success');
@@ -997,16 +775,10 @@ fxDirModalEl.addEventListener('keydown', e => {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFxDirModal(); }
 });
 
-function syncFxBypassBtn() {
-    fxBypassBtn.innerHTML = fxWandSvg();
-    fxBypassBtn.classList.toggle('fx-bypassed', effectsBypass);
-    fxBypassBtn.title = effectsBypass
-        ? 'Resume every layer effect chain (currently suspended)'
-        : 'Suspend every layer effect chain — the chains stay on their layers, nothing is deleted';
+// 「看加特效前原样」这颗总开关：翻状态（setEffectsBypass 自己会落盘并作废所有折叠缓存）、
+// 报一句。唯一的入口是宿主 dock 头部那颗按钮（回发的 'fx-bypass'），页面这边只剩这一句落点。
+function toggleEffectsBypass() {
+    setEffectsBypass(!effectsBypass);
+    setStatus(effectsBypass ? 'Effects suspended — the chains are still on their layers' : 'Effects resumed');
 }
 
-fxBypassBtn.addEventListener('click', () => {
-    setEffectsBypass(!effectsBypass);
-    syncFxBypassBtn();
-    setStatus(effectsBypass ? 'Effects suspended — the chains are still on their layers' : 'Effects resumed');
-});

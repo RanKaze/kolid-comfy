@@ -316,9 +316,16 @@ export const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
 // row fixed and moves the scrolling inside it. Only slots carry a size — a split is measured by
 // whatever its own parent says.
 // A unit with nothing to size itself by (a workbench, a popped-out window) always takes a share of its
-// split rather than `0 0 auto`, which would collapse it to a strip.
-export const flexOf = (axis: 'v' | 'h', sz?: number, grow?: boolean): string =>
-  sz ? `0 0 ${sz}px` : axis === 'h' ? '1 1 0' : grow ? '1 1 0' : '0 0 auto';
+// split rather than `0 0 auto`, which would collapse it to a strip. `open` = false is the box folded:
+// a folded one is a bar and gives its share back, or a folded layers list would keep its half of the
+// column as an empty box (the fold itself hides only the body).
+export const flexOf = (axis: 'v' | 'h', sz?: number, grow?: boolean, open = true): string =>
+  sz ? `0 0 ${sz}px` : axis === 'h' ? '1 1 0' : grow ? (open ? '1 1 0' : '0 0 auto') : '0 0 auto';
+// The floor under an open grow box: `1 1 0` shares only what is LEFT, and a column whose other panels
+// alone already overflow has nothing left — the fallback layout opens every tool panel, and without
+// this the two lists under them resolve to 0 (a 0.5px-bordered hairline). Sized boxes are the user's
+// own drag and need no floor.
+export const DOCK_GROW_MIN_H = 160;
 // Whether a node - a box, or a whole nest - has anything in it that needs a share of the space.
 export const hasGrowth = (n: DockNode, rules: DockRules): boolean =>
   dockUnits(n).some(u => rules.grows(u));

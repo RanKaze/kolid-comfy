@@ -473,7 +473,7 @@ const WARP_PARAMS = [
     { key: 'amount', label: 'Amount', min: 0, max: 128, step: 1, def: 10, unit: 'px', when: p => p.mode === 'Noise' },
     { key: 'octaves', label: 'Oct', min: 1, max: 4, step: 1, def: 2, when: p => p.mode === 'Noise' },
     { key: 'seed', label: 'Seed', min: 0, max: 999, step: 1, def: 0, when: p => p.mode === 'Noise' },
-    { key: 'lattice', label: 'Grid', def: null, when: p => p.mode === 'Lattice' },
+    { key: 'lattice', label: 'Grid', kind: 'lattice', def: null, when: p => p.mode === 'Lattice' },
     { key: 'map', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
     { key: 'normal', kind: 'map', def: null, when: p => p.mode === 'Geometry' },
     { key: 'align', label: 'Align', kind: 'enum', options: ['Canvas', 'Local'], def: 'Canvas', when: p => p.mode === 'Geometry' },
@@ -486,85 +486,30 @@ const WARP_PARAMS = [
     { key: 'steps', label: 'Steps', min: 4, max: 32, step: 1, def: 16, when: p => p.mode === 'Geometry' },
 ];
 
-// 两枚各指一个目的地的钮 (摊开 / 收起),不是一枚读当前状态的翻转钮 —— 见「一键一语义」。
-// 摊开那颗还兼「没有网格就先铺一个四边形」:那是同一次落点 (网格出现在画布上),不是第二个语义。
-function warpLatticeRowEl(l, effect) {
-    const row = document.createElement('div');
-    row.className = 'control-row';
-    const edit = document.createElement('button');
-    edit.type = 'button';
-    edit.className = 'fx-map-btn';
-    edit.textContent = 'Edit the grid';
-    edit.title = 'Lay the grid on the canvas: drag a handle to warp, click an edge to split the grid all the way across';
-    const hide = document.createElement('button');
-    hide.type = 'button';
-    hide.className = 'fx-map-btn tight';
-    hide.textContent = 'Hide';
-    hide.title = 'Take the grid off the canvas (the warp itself stays)';
-    const clr = document.createElement('button');
-    clr.type = 'button';
-    clr.className = 'fx-map-btn tight';
-    clr.textContent = '\u00d7 Drop';
-    clr.title = 'Drop the grid (every handle and its displacement)';
-    const show = () => {
-        const lat = warpLatticeOf(effectParams(effect).lattice);
-        edit.textContent = lat ? 'Edit the grid' : 'Add a grid';
-        edit.classList.toggle('active', warpEditActive(l, effect));
-        hide.style.display = warpEditActive(l, effect) ? '' : 'none';
-        clr.style.display = lat ? '' : 'none';
-    };
-    edit.addEventListener('click', ev => {
-        ev.stopPropagation();
-        // 先进编辑态再造网格:顺序反过来,重建的那一行还不认识 warpEdit,按钮的高亮会停在「没摊开」。
+// 参数面归宿主 dock 以后,网格那一行的三颗按钮落在这里 —— 每一句都是 DOM 那一行原来那一句：
+// 先进编辑态再造网格（顺序反过来,重建的那一行还不认识 warpEdit,按钮的高亮会停在「没摊开」）；
+// Hide 只把网格从画布上摘掉,warp 本身留着；Drop 连编辑态带网格一起收。
+function fxLatticeAction(l, effect, which) {
+    const op = String(which || '');
+    if (op === 'edit') {
         beginWarpEdit(l, effect);
         if (!warpLatticeOf(effectParams(effect).lattice)) {
             warpSetLattice(effect, warpLatticeStart());
-            fxStructuralChange(l);
+            fxStructuralChange(l, 'Warp grid created');
+            return true;
         }
-    });
-    hide.addEventListener('click', ev => { ev.stopPropagation(); endWarpEdit(); });
-    clr.addEventListener('click', ev => {
-        ev.stopPropagation();
+        fxPublishRows();       // 网格本来就在：摊开这一件事只换了编辑态，播报一次让那颗钮亮起来
+        return true;
+    }
+    if (op === 'hide') { endWarpEdit(); fxPublishRows(); return true; }
+    if (op === 'drop') {
         if (warpEditActive(l, effect)) endWarpEdit();
         if (!effect.params) effect.params = {};
         effect.params.lattice = null;
-        fxStructuralChange(l);
-    });
-    row.appendChild(edit);
-    row.appendChild(hide);
-    row.appendChild(clr);
-    show();
-    return row;
-}
-
-function warpEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-warp';
-    const tail = document.createElement('div');
-    tail.className = 'fx-warp-tail';
-    const foot = document.createElement('div');
-    foot.className = 'fx-warp-foot';
-    const hint = document.createElement('span');
-    foot.appendChild(hint);
-
-    function build() {
-        const p = effectParams(effect);
-        const rows = WARP_PARAMS
-            .filter(d => d.key !== 'mode' && d.key !== 'lattice' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters));
-        if (p.mode === 'Lattice') rows.push(warpLatticeRowEl(l, effect));
-        tail.replaceChildren(...rows);
-        hint.textContent = p.mode === 'Lattice' ? 'drag a handle \u00b7 click an edge to split across' : '';
-        foot.style.display = hint.textContent ? '' : 'none';
-        syncRead();
+        fxStructuralChange(l, 'Warp grid cleared');
+        return true;
     }
-    // 模式是这张面板的第一行。它照旧走通用的分段钮 (词汇不动),只多接一句「换完模式重铺剩下的
-    // 行」—— 包在 syncRead 里递下去,而不是自己再搭一份钮,理由同 fx/tone_map.js。
-    box.appendChild(fxControlRow(l, effect, WARP_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    box.appendChild(foot);
-    build();
-    return box;
+    return false;
 }
 
 defineEffect({
@@ -578,7 +523,6 @@ defineEffect({
     needsMap2When: p => p.mode === 'Geometry',
     desc: 'Move pixels around inside the layer\u2019s own grid. Noise pushes them through a procedural value-noise field (Scale = how big a wrinkle, Amount = how far it pushes). Lattice lays a quadrilateral grid over the layer: drag a handle to bend the picture, click an edge to run a split straight through the grid \u2014 every quad it crosses becomes two quads, so the mesh stays all-quads. That is how artwork gets printed onto a shape. Geometry reads a bound depth map as a relief and re-projects the picture onto it. Every pixel gets its **own** line of sight, opening out from a view axis that runs through the middle of this layer: a face standing toward you spreads the picture outward, a face turned away packs it tighter, and a tall shape hides what sits behind it \u2014 that is what makes the picture lie over the form rather than slide across it. Bulge = how wide those sight lines open (how far the rim of the layer is pushed at full depth). Angle and Slide add one lean that every sight line shares, so the whole relief appears to be viewed from off to the side. Bind a normal map too and the crossing is solved exactly instead of by successive refinement. Anchor says which depth level stays put. Near says which end of the map is the near one \u2014 a depth *estimate* is usually bright-up-close, a raw distance pass is dark-up-close, and reading the wrong end turns the relief inside out. Align says whether the maps are measured against the whole canvas or against this layer alone. Displacement only: where the picture moves off the grid there is nothing left to pull in, so it goes transparent.',
     params: WARP_PARAMS,
-    editor: warpEditorEl,
     shaders: { warpNoise: FX_FS_WARP_NOISE, warpLattice: FX_FS_WARP_LATTICE, warpGeometry: FX_FS_WARP_GEOMETRY },
     run: fxglWarp,
     // 参数换形状:旧存档里的 Depth 模式读成 Geometry。绑定的深度图本来就是 params.map,一个字不用

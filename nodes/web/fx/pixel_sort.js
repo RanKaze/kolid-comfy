@@ -246,25 +246,6 @@ const PS_PARAMS = [
     { key: 'cut', label: 'Cut', min: 0, max: 100, step: 1, def: 50, unit: '%', when: p => p.where === 'By map' },
 ];
 
-function psEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-sort';
-    const tail = document.createElement('div');
-    tail.className = 'fx-sort-tail';
-    const build = () => {
-        const p = effectParams(effect);
-        tail.replaceChildren(...PS_PARAMS
-            .filter(d => d.key !== 'axis' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        syncRead();
-    };
-    // 模式行只多接一句「换完轴重铺剩下的行」—— 与 fx/warp.js、fx/chromatic_aberration.js 同一包法。
-    box.appendChild(fxControlRow(l, effect, PS_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'pixel_sort',
     label: 'Pixel Sort',
@@ -274,7 +255,6 @@ defineEffect({
     needsMapWhen: p => p.where === 'By map',
     desc: 'Takes the pixels that run brighter than Thresh along one direction \u2014 Along (each row), Across (each column) or Radial (each ray out of the middle of this layer) \u2014 and rewrites that stretch ordered by Key, so a bright streak drags its pixels into a ramp. Length is the longest run one pass orders; a longer stretch is cut into blocks of that length, each sorted on its own \u2014 which is what the staircase in the middle of a long streak is. Skip leaves runs shorter than itself alone, Jitter slides the block borders row by row so the cut stops lining up, and Passes re-order the result with a fresh phase, which walks values across the block border at three times the taps. On edges sorts only where the Key changes fast (the usual reading of the family), By map lets a bound map say which pixels may join a run at all. Whole pixels move, so opacity is dragged along with colour \u2014 a text layer sorts its own shape away.',
     params: PS_PARAMS,
-    editor: psEditorEl,
     shaders: { psProbe: FX_FS_PS_PROBE, psSort: FX_FS_PS_SORT },
     run: fxglPixelSort,
     readout(p, n, effect) {

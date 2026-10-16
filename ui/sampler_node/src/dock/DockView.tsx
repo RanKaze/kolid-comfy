@@ -1,7 +1,7 @@
 import React, { useRef } from 'react';
 import {
   type Dock, type DockFloat, type DockNode, type DockRules, type DockSlot, type UnitId, type Zone,
-  FLOAT_MIN_W, FLOAT_MIN_H,
+  FLOAT_MIN_W, FLOAT_MIN_H, DOCK_GROW_MIN_H,
   dockBackDock, defaultDock, docUidOf, dropInDock, flexOf, hasGrowth, popOutDock,
   resizeDock, rewriteHolder, setFloatDock, zoneOf,
 } from './model';
@@ -138,6 +138,8 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
   // A unit the page says is not foldable has no choice to read: it is always open, so its body is never
   // hidden and its frame button never appears.
   const open = ctx.rules.foldable(id) ? ctx.isOpen(id) : true;
+  const grow = ids.some(u => ctx.rules.grows(u));
+  const minH = !float && open && axis === 'v' && grow && !node.sz ? DOCK_GROW_MIN_H : undefined;
   const isOver = !!ctx.drag && ctx.drag !== id && !float && ctx.over?.id === id;
   // A window is not a place a unit can land in — it is already somewhere. Re-docking happens by
   // dragging ITS grip onto a column box, which is the same gesture as any other move.
@@ -251,7 +253,8 @@ const DockBox: React.FC<{ node: DockSlot; ctx: DockCtx; axis: 'v' | 'h'; float?:
   return (
     <div style={{
       ...(float ? dockStyles.dockFloatBox : dockStyles.dockBox),
-      flex: float ? undefined : flexOf(axis, node.sz, ids.some(u => ctx.rules.grows(u))),
+      flex: float ? undefined : flexOf(axis, node.sz, grow, open),
+      minHeight: minH,
       position: float ? 'fixed' : 'relative',
       left: float ? float.x : undefined, top: float ? float.y : undefined,
       width: float ? float.w : undefined, height: float && open ? float.h : undefined,

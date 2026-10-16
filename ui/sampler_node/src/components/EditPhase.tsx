@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction } from '../types';
+import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
@@ -70,7 +70,9 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     // bar already has a job — it says which project the workbench is running.
     foldable: (id: UnitId) => !isDoc(id),
     fullBleed: (id: UnitId) => isDoc(id) || id === 'toolbar',
-    grows: isDoc,
+    // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：拍板 1.a 要它们把工具列剩下的
+    // 高度按 1:1 平分，所以在 dock 里也得跟着文档窗格长。其余面板照旧按内容占高。
+    grows: (id: UnitId) => isDoc(id) || id === 'layers' || id === 'guidances',
     top: 'toolbar',
     column: COLUMN_IDS,
     columnW: COLUMN_W,
@@ -372,7 +374,7 @@ interface EditPhaseProps {
   /** 文档动作的唯一出口：File 栏的六个按钮、点标题条激活、tab 上的 ✕ 关闭，全走这条消息。 */
   onDocCommand: (action: BlendDocCommand, uid?: number) => void;
   /** 工作台面板搬进宿主之后，控件按下的那一下走这条消息回到页面 —— 页面里那张 UI_COMMANDS 表是它唯一的落点。 */
-  onBlendUiCommand: (action: BlendUiAction, value?: number | boolean | string) => void;
+  onBlendUiCommand: BlendUiSend;
 }
 
 const EditPhase: React.FC<EditPhaseProps> = ({
@@ -807,6 +809,178 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         .ios-val::-webkit-outer-spin-button, .ios-val::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         .ios-val { -moz-appearance: textfield; appearance: textfield; }
         .ios-val:focus { border-bottom-color: #0a84ff; }
+        /* ---- Layers / Guidances 两格 ----
+           这一族规则是从 blend_node.html 那一页搬过来的，选择器名与声明块都照原文（门禁比这两段）。
+           必要的不一样只有三处，每一处都写在这里，门禁也照这三处放行：
+           ① 面如今是一张 PNG，不再是页面就地重画的那块 canvas 元素，所以原来挂在 canvas 上的四条尺寸
+              规则改挂在 img 上。84×56 与 36×24 是同一个 3:2，所以摆法不需要 object-fit —— 裁与留边那张
+              决定已经由 paintOrigFace / paintCanvasThumb 烘进像素里了。
+           ② 头部那颗 Add 弹卡：页面那条 .io-menu 是绝对定位挂在 .mini-group 下面的，dock 的正文有自己的
+              scroller，绝对定位会被剪掉 —— 改成固定坐标摆（见下面那一条）。
+           ③ 停用那一步的暗淡：页面把魔棒直接 innerHTML 进 chip，所以那条规矩写的是「直接子 svg」；React
+              里同一颗元素不能既塞 innerHTML 又放兄弟节点（角标必须活着），所以画法包了一层 .attr-visual，
+              那一条因此多认 .attr-visual 下面的 svg。 */
+        /* 头部那一组按钮的容器（页面 .mini-group 那一条原样搬来：dock 的正文用它摆 Clear All / Add 那一排）。 */
+        .mini-group { position: relative; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+        .layer-list { display: flex; flex-direction: column; gap: 4px; }
+        .layer-list.drop-target { outline: 1px dashed rgba(0,122,255,0.75); outline-offset: 2px; border-radius: 8px; }
+        .layer-empty { flex: 1 0 auto; display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(255,255,255,0.25); padding: 10px 4px; text-align: center; border: 1px dashed rgba(255,255,255,0.1); border-radius: 8px; }
+        .layer-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 5px; border-radius: 8px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
+        .layer-row-main { display: flex; align-items: center; gap: 5px; min-width: 0; }
+        .layer-row-thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+        .layer-row:hover { background: rgba(255,255,255,0.08); }
+        .layer-row.selected { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
+        .layer-row.dragging { opacity: 0.4; }
+        .layer-row.drop-above { box-shadow: inset 0 2px 0 rgba(0,122,255,0.9); }
+        .layer-row.drop-below { box-shadow: inset 0 -2px 0 rgba(0,122,255,0.9); }
+        .layer-row.hidden-layer .layer-thumb, .layer-row.hidden-layer .layer-name { opacity: 0.35; }
+        .layer-row-thumbs.drop-tail { box-shadow: inset 0 0 0 1px rgba(0,122,255,0.6); border-radius: 6px; }
+        .layer-thumb { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
+        .layer-thumb img { width: 100%; height: 100%; display: block; }
+        .layer-thumb.no-image { background: #1c1113; box-shadow: inset 0 0 0 1px rgba(255,59,48,0.35); }
+        .layer-thumb.no-image svg { width: 14px; height: 14px; display: block; }
+        .layer-thumb.mask-thumb { background: #000; cursor: pointer; }
+        .layer-thumb.canvas-thumb { background: #0a0a0a; }
+        .layer-thumb.decal-thumb { cursor: pointer; background-color: #2a2a2a;
+            background-image: linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%),
+                              linear-gradient(45deg, #1c1c1c 25%, transparent 25%, transparent 75%, #1c1c1c 75%);
+            background-size: 8px 8px; background-position: 0 0, 4px 4px; }
+        .layer-thumb.active { box-shadow: inset 0 0 0 2px #fff; }
+        .layer-thumb.attr-chip { cursor: pointer; }
+        .layer-thumb.effects-thumb { background: #171717; color: rgba(255,255,255,0.72); }
+        .layer-thumb.effects-thumb svg { width: 15px; height: 15px; display: block; }
+        .layer-thumb.attr-chip.dragging { opacity: 0.4; }
+        .layer-thumb.attr-chip.drop-before::before, .layer-thumb.attr-chip.drop-after::after { content: ''; position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(0,122,255,0.95); }
+        .layer-thumb.attr-chip.drop-before::before { left: 0; }
+        .layer-thumb.attr-chip.drop-after::after { right: 0; }
+        .layer-thumb.attr-chip.drop-into { box-shadow: inset 0 0 0 2px rgba(0,122,255,0.9); }
+        .layer-thumb.attr-chip .attr-badge { display: none; pointer-events: none; }
+        .layer-thumb.attr-chip.attr-off .attr-badge { display: block; position: absolute; inset: 0; }
+        .layer-thumb.attr-chip.attr-off .attr-badge::before,
+        .layer-thumb.attr-chip.attr-off .attr-badge::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 2px; border-radius: 1px; background: #ff453a; transform: translate(-50%, -50%) rotate(45deg); }
+        .layer-thumb.attr-chip.attr-off .attr-badge::after { transform: translate(-50%, -50%) rotate(-45deg); }
+        .layer-thumb.attr-chip.attr-off img, .layer-thumb.attr-chip.attr-off > svg, .layer-thumb.attr-chip.attr-off .attr-visual > svg { opacity: 0.32; }
+        .attr-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
+        .attr-type-badge svg { width: 9px; height: 9px; display: block; }
+        .attr-type-badge.decal { color: #ffb86e; }
+        .attr-type-badge.mask { color: #9ecbff; }
+        .attr-type-badge.effects { color: #ffd76e; }
+        .attr-type-badge.text { color: #d9b8ff; }
+        .attr-type-badge.direction { color: #ff9ec4; }
+        .attr-type-badge.plane { color: #f5c542; }
+        .attr-type-badge.point { color: #19e0bc; }
+        .attr-type-badge.ray { color: #ff7ab0; }
+        .attr-type-badge.model { color: #7ee0d0; }
+        .attr-type-badge.pose { color: #a8e06e; }
+        .layer-thumb.text-attr-thumb, .layer-thumb.direction-attr-thumb, .layer-thumb.scene3d-attr-thumb,
+        .layer-thumb.plane-attr-thumb, .layer-thumb.point-attr-thumb, .layer-thumb.ray-attr-thumb,
+        .layer-thumb.pose-attr-thumb { cursor: pointer; background-color: #1b1d24; }
+        .attr-add { width: 36px; height: 24px; flex-shrink: 0; border-radius: 5px; border: 1px dashed rgba(255,255,255,0.22); background: transparent; color: rgba(255,255,255,0.55); display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+        .attr-add:hover { border-color: rgba(0,122,255,0.9); color: #fff; background: rgba(0,122,255,0.16); }
+        .layer-type-badge { position: absolute; right: 1px; bottom: 1px; width: 12px; height: 12px; border-radius: 3px; background: rgba(0,0,0,0.66); display: flex; align-items: center; justify-content: center; pointer-events: none; }
+        .layer-type-badge svg { width: 9px; height: 9px; display: block; }
+        .layer-type-badge.smart { color: #9ecbff; }
+        .layer-type-badge.raster { color: #ffcf6e; }
+        .layer-type-badge.cud { color: #8be3b6; }
+        .layer-type-badge.cud.unlinked { color: #ff9d5c; }
+        .layer-type-badge.text { color: #d9b8ff; }
+        .layer-type-badge.direction { color: #ff9ec4; }
+        .layer-type-badge.model { color: #7ee0d0; }
+        .layer-type-badge.stash { color: #e3d17a; }
+        .layer-name { flex: 1; min-width: 0; font-size: 12px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+        /* 双击行名就地改名（拍板 7.a：编辑归宿主，提交发 layer-rename）。这一条与页面同文。 */
+        .layer-rename { width: 100%; min-width: 0; box-sizing: border-box; font-size: 12px; color: #fff; background: #1b1b1f; border: 1px solid rgba(255,255,255,0.35); border-radius: 4px; padding: 1px 4px; outline: none; }
+        .icon-btn { background: transparent; border: none; color: rgba(255,255,255,0.45); cursor: pointer; padding: 2px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .icon-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+        .icon-btn:disabled { opacity: 0.35; cursor: default; }
+        .icon-btn:disabled:hover { background: transparent; color: rgba(255,255,255,0.45); }
+        .icon-btn svg { display: block; width: 14px; height: 14px; }
+        .fx-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; margin: 0 2px 1px 5px;
+            padding-left: 8px; border-left: 1px solid rgba(255,255,255,0.18); }
+        .fx-chain.bypassed { border-left-color: rgba(255,159,10,0.55); }
+        .fx-steps { display: flex; flex-direction: column-reverse; gap: 3px; min-width: 0; }
+        .fx-chip { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 3px; border-radius: 6px;
+            background: rgba(255,255,255,0.05); cursor: pointer; user-select: none; position: relative; }
+        .fx-chip:hover { background: rgba(255,255,255,0.09); }
+        .fx-chip.disabled { opacity: 0.42; }
+        .fx-chip.dragging { opacity: 0.4; }
+        .fx-chain.bypassed > .fx-steps > .fx-chip { opacity: 0.5; }
+        .fx-chip.drop-before::after, .fx-chip.drop-after::before { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: rgba(0,122,255,0.95); }
+        .fx-chip.drop-before::after { bottom: 0; }
+        .fx-chip.drop-after::before { top: 0; }
+        .fx-chip input[type="checkbox"] { width: 13px; height: 13px; margin: 0; flex-shrink: 0; accent-color: #0a84ff; cursor: pointer; }
+        .fx-icon { width: 14px; height: 14px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #9ecbff; }
+        .fx-icon svg { width: 14px; height: 14px; display: block; }
+        .fx-name { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.85); white-space: nowrap; }
+        .fx-read { flex: 1; min-width: 0; font-size: 10.5px; color: rgba(255,255,255,0.55);
+            font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .fx-chain.bypassed .fx-read { color: rgba(255,159,10,0.75); }
+        .fx-warn { font-size: 10px; font-weight: 700; color: #ff9f0a; padding: 1px 3px; }
+        /* 参数面那一格（Effect Parameters）。取值照页面 .fx-params / .fx-fold-head / .fx-map-btn /
+           .fx-curve-* 那几条，换的是宿主：这些类现在住在 dock 的正文里，页面那套 .control-row 骨架
+           已经不跟着过来了，所以名字宽度、读数右对齐这些由 wbStyles 说，这里只留形状与颜色。
+           .fx-chip.open 是新的一层：参数面从链里搬出来住进宿主以后，"哪一颗 chip 摊着"这件事必须仍然
+           看得见，点亮的是那一枚 chip 自己（与页面当年那条 .fx-chip.open 同一个读法）。 */
+        .fx-chip.open { background: rgba(10,132,255,0.16); box-shadow: inset 0 0 0 1px rgba(10,132,255,0.6); }
+        .fx-params { max-height: 340px; overflow-y: auto; overflow-x: hidden; }
+        .fx-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; background: none; border: none;
+            color: rgba(255,255,255,0.55); font-size: 10.5px; font-weight: 700; cursor: pointer; padding: 2px 0; }
+        .fx-fold-head:hover { color: rgba(255,255,255,0.72); }
+        .fx-fold-head::after { content: ''; flex: 1; height: 0.5px; background: rgba(255,255,255,0.14); }
+        .fx-bind.unset { color: #ff9f0a; }
+        .fx-bind.gone { color: #ff453a; }
+        .fx-curve-svg { width: 150px; height: 150px; flex-shrink: 0; border-radius: 4px; display: block;
+            cursor: crosshair; touch-action: none; }
+        .fx-curve-svg polygon:hover { filter: brightness(1.5); }
+        .layer-menu { position: fixed; z-index: 300; display: flex; flex-direction: column; gap: 2px; min-width: 168px;
+            padding: 5px; border-radius: 10px; background: rgba(28,28,30,0.94);
+            backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);
+            border: 0.5px solid rgba(255,255,255,0.14); box-shadow: 0 8px 28px rgba(0,0,0,0.5); }
+        .layer-menu-item { display: block; width: 100%; text-align: left; background: transparent; border: none;
+            border-radius: 7px; padding: 7px 10px; color: rgba(255,255,255,0.9); font-size: 12.5px; font-weight: 600;
+            cursor: pointer; transition: background 0.12s ease; }
+        .layer-menu-item:hover { background: rgba(255,255,255,0.12); }
+        .layer-menu-item:disabled { opacity: 0.4; cursor: default; }
+        .layer-menu-item:disabled:hover { background: transparent; }
+        /* 头部那颗 Add 弹卡：页面那一条 .io-menu 是绝对定位挂在 .mini-group 下面的，dock 的正文
+           有自己的 scroller，绝对定位会被剪掉 —— 所以这一张改按固定坐标摆（由那颗按钮的矩形算出来，
+           往上翻、贴按钮右缘、216 宽），卡片本身一条规矩没改。 */
+        .io-menu { position: fixed; z-index: 95; width: 216px; display: flex; flex-direction: column;
+            gap: 3px; padding: 5px; border-radius: 11px; background: #1c1c1e; border: 0.5px solid rgba(255,255,255,0.12);
+            box-shadow: 0 14px 40px rgba(0,0,0,0.55); }
+        .io-menu-item { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; width: 100%; text-align: left;
+            background: transparent; border: none; border-radius: 8px; padding: 7px 9px; cursor: pointer; transition: background 0.12s ease; }
+        .io-menu-item:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+        .io-menu-item:disabled { opacity: 0.45; cursor: default; }
+        .io-menu-title { font-size: 12px; font-weight: 700; color: #fff; }
+        .io-menu-sub { font-size: 10.5px; line-height: 1.35; color: rgba(255,255,255,0.45); white-space: normal; }
+        .add-caret { font-size: 8px; line-height: 1; opacity: 0.7; margin-left: 3px; }
+        .mini-btn { background: rgba(255,255,255,0.08); border: none; border-radius: 7px; padding: 4px 9px; color: rgba(255,255,255,0.85); font-size: 11px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }
+        .mini-btn:hover { background: rgba(255,255,255,0.16); }
+        .mini-btn:disabled { opacity: 0.35; cursor: default; background: rgba(255,255,255,0.05); }
+        .mini-btn.ico-btn { min-width: 26px; padding: 4px 7px; font-size: 13px; font-weight: 700; line-height: 1; }
+        .mini-btn.ico-btn svg { display: block; width: 14px; height: 14px; }
+        .mini-btn.ico-btn.fx-bypassed { background: rgba(255,159,10,0.22); color: #ff9f0a; }
+        /* ---- History 这一格（拍板 24.a：右栏、紧贴 Layers 下面）----
+           头部三颗复用兄弟格的 .mini-group / .mini-btn（禁用那颗的暗淡是同一条 .mini-btn:disabled），
+           行自己这一族三条的写法照 .layer-row 那一族：高亮 = 蓝描边 + 蓝底、hover 提亮、名字一行截断。
+           颗子摆法有两处与图层行不同，都是这一格的画法等出来的：
+           ① 42×28 而不是 36×24 —— 步子的预览是整幅画面按长边 ≤108 编的一张，不像 orig/canvas 那两张
+              已经被 paintOrigFace 烘成固定 3:2，所以这里既不裁也不拉伸：img 用 max-width/max-height
+              在这颗盒子里居中，画布是竖的它就竖着。
+           ② 那一格有自己的 scroller（max-height 264），且不是第三格 grows 单元 —— 1.a 定的是
+              Layers / Guidances 平分工具列余高，History 再长也不能去动那一刀。 */
+        .hist-list { display: flex; flex-direction: column; gap: 3px; max-height: 264px; overflow-y: auto; overflow-x: hidden; }
+        .hist-row { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 3px 4px; border-radius: 7px; background: rgba(255,255,255,0.04); border: 1px solid transparent; cursor: pointer; user-select: none; }
+        .hist-row:hover { background: rgba(255,255,255,0.08); }
+        .hist-row.current { border-color: rgba(0,122,255,0.85); background: rgba(0,122,255,0.14); }
+        .hist-thumb { width: 42px; height: 28px; flex-shrink: 0; border-radius: 5px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+        .hist-thumb img { max-width: 100%; max-height: 100%; display: block; }
+        .hist-name { flex: 1; min-width: 0; font-size: 11.5px; color: rgba(255,255,255,0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        /* Alt+悬浮那张放大预览（页面的 #hoverPreview 那两条）。浮层永远不吃指针，所以它挡不住行上的
+           拖动与点击；原来里面是一块 <canvas>，如今是一张按需编好的 PNG —— 圆角跟着换到 img 上。 */
+        .hover-preview { position: fixed; left: 0; top: 0; z-index: 300; padding: 6px; border-radius: 10px; background: rgba(28,28,30,0.92); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 0.5px solid rgba(255,255,255,0.18); box-shadow: 0 10px 32px rgba(0,0,0,0.5); pointer-events: none; }
+        .hover-preview img { display: block; border-radius: 6px; }
         /* The handle is always there; only its volume is hover's. The grip and the two actions sit
            at a quarter strength until the pointer is over the bar, so a column of units reads as
            content first and as chrome second. */

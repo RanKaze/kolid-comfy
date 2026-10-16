@@ -1,11 +1,109 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import EditPhase from './components/EditPhase';
-import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendPen } from './types';
+import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockParams, InterfaceBlockParams, StagingItem, InterfaceInfo, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, InterfaceMeta, ArchSettings, ArchRule, OverrideKey, BlendDoc, BlendDocs, BlendDocCommand, BlendUiAction, BlendUiPayloads, BlendUiSend, BlendPen } from './types';
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
-import { setBlendUi } from './workbench/store';
+import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow } from './types';
+import { getBlendUi, setBlendUi } from './workbench/store';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
+
+/** 行描述符过界的形状闸：读不出数组就当这一摞是空的。其余字段交给单元自己判（每一个都写了默认值），
+ *  这里不替页面重述一遍它的契约 —— 那才是第二份真相。唯一例外是菜单那一格：它的六个字段决定条目
+ *  出现还是灰掉，"缺字段"必须回成"这一条办不了"那一组值，而不是让 React 把 undefined 当假、摆出一灰排
+ *  却没人说得清为什么。 */
+/** 一条行描述符里菜单那一格。缺字段回的是"什么都办不了"那一组值（没有 buffer、画布没定、没成组、
+ *  文档没开），而不是让 React 读一个 undefined 就当假 —— 少一格字段与那一格真是假在界面上必须不同形。 */
+const rowMenu = (v: unknown): BlendRowMenu => {
+  const m = (v && typeof v === 'object' ? v : {}) as Partial<BlendRowMenu>;
+  return {
+    genHasImg: m.genHasImg === true, hasBuffer: m.hasBuffer === true, canvasReady: m.canvasReady === true,
+    groupSize: typeof m.groupSize === 'number' && Number.isFinite(m.groupSize) ? Math.max(0, Math.round(m.groupSize)) : 0,
+    hasText: m.hasText === true, cudDocOpen: m.cudDocOpen === true,
+  };
+};
+const rowList = (v: unknown): BlendLayerRow[] => (Array.isArray(v) ? v as Array<Record<string, unknown>> : [])
+  .map(r => ({ ...(r as unknown as BlendLayerRow), menu: rowMenu(r.menu) }));
+/** `+` 菜单的条目：不是数组回空表，条目里非字符串的两段丢掉（那一类摆不出名字就没法报它做什么）。 */
+const kindList = (v: unknown): BlendAttrKind[] => (Array.isArray(v) ? (v as BlendAttrKind[]) : [])
+  .filter(k => !!k && typeof k.type === 'string' && typeof k.label === 'string');
+
+/** 一条快照里的面是增量：非字符串的值、以及页面那句"这张面没了"的空串都不算新面。 */
+const faceDelta = (v: unknown): Record<string, string> => {
+  if (!v || typeof v !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const [k, url] of Object.entries(v as Record<string, unknown>)) if (typeof url === 'string') out[k] = url;
+  return out;
+};
+
+const mergeFaces = (prev: Record<string, string>, delta: Record<string, string>): Record<string, string> => {
+  const keys = Object.keys(delta);
+  if (!keys.length) return prev;
+  const next = { ...prev };
+  for (const k of keys) {
+    // 空串 = 墓碑（页面把这张面的键从行描述符里去掉的那一帧发过来的）；有内容才是这一张的新像素。
+    if (delta[k]) next[k] = delta[k];
+    else delete next[k];
+  }
+  return next;
+};
+
+/** 特效参数面那一格过界的形状闸。十种 kind 各自要读的字段不同，但每一行都得先报出 key 和一种认得出的
+ *  kind —— 摆一根没有控件的行比少一根行更糟，所以这一格丢行不丢整摞。字段级的取值交给控件自己判
+ *  （每一颗都写了默认），这里不替注册表重述它的契约。 */
+const fxStr = (v: unknown): string => (typeof v === 'string' ? v : '');
+const fxNum = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const fxStrList = (v: unknown): string[] => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : []);
+const fxPairs = (v: unknown): [number, number][] => (Array.isArray(v) ? v : [])
+  .filter(p => Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+  .map(p => [p[0], p[1]] as [number, number]);
+
+const fxRowOf = (r: unknown): BlendFxRow | null => {
+  if (!r || typeof r !== 'object') return null;
+  const x = r as Record<string, unknown>;
+  const key = fxStr(x.key);
+  if (!key) return null;
+  const base = { key, label: fxStr(x.label), tip: fxStr(x.tip), readout: fxStr(x.readout) };
+  switch (x.kind) {
+    case 'fold': return { ...base, kind: 'fold', open: x.open === true };
+    case 'range': return { ...base, kind: 'range', value: fxNum(x.value), min: fxNum(x.min), max: fxNum(x.max), step: fxNum(x.step) };
+    case 'check': return { ...base, kind: 'check', flag: x.flag === true };
+    case 'flag': return { ...base, kind: 'flag', flag: x.flag === true, onText: fxStr(x.onText), offText: fxStr(x.offText) };
+    case 'color': return { ...base, kind: 'color', value: fxStr(x.value) };
+    case 'enum': return { ...base, kind: 'enum', value: fxStr(x.value), options: fxStrList(x.options), labels: fxStrList(x.labels) };
+    case 'map': return { ...base, kind: 'map', role: fxStr(x.role), optional: x.optional === true, bound: x.bound === true, missing: x.missing === true, title: fxStr(x.title) };
+    case 'dir': return { ...base, kind: 'dir', bound: x.bound === true, missing: x.missing === true, title: fxStr(x.title), types: fxStrList(x.types) };
+    case 'lattice': return { ...base, kind: 'lattice', hasGrid: x.hasGrid === true, active: x.active === true, editLabel: fxStr(x.editLabel), hint: fxStr(x.hint) };
+    case 'curve': return {
+      ...base, kind: 'curve',
+      channels: (Array.isArray(x.channels) ? x.channels : []).flatMap((c: unknown) => {
+        const cc = (c || {}) as Record<string, unknown>;
+        return cc.value ? [{ value: fxStr(cc.value), label: fxStr(cc.label) }] : [];
+      }),
+      channel: fxStr(x.channel), points: fxPairs(x.points), lut: fxPairs(x.lut), minGap: fxNum(x.minGap),
+    };
+    default: return null;
+  }
+};
+
+/** 坐标三样（哪一层、哪一枚容器、第几步）落不齐就当"此刻没有展开的那一步"：宿主那一格整块不摆，
+ *  而不是摆出一个回发时找不到主人的面板。 */
+const fxOpenOf = (v: unknown): BlendFxOpenStep | null => {
+  if (!v || typeof v !== 'object') return null;
+  const x = v as Record<string, unknown>;
+  const layerId = fxNum(x.layerId);
+  const stepId = fxNum(x.stepId);
+  const attrId = fxStr(x.attrId);
+  if (!layerId || !stepId || !attrId) return null;
+  return {
+    layerId, attrId, stepId,
+    type: fxStr(x.type), label: fxStr(x.label), readout: fxStr(x.readout),
+    rows: (Array.isArray(x.rows) ? x.rows : []).flatMap((r: unknown) => {
+      const row = fxRowOf(r);
+      return row ? [row] : [];
+    }),
+  };
+};
 
 const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>('draw');
@@ -93,9 +191,10 @@ const App: React.FC = () => {
       { type: 'blend-doc-command', action, uid: uid === undefined ? null : uid }, '*');
   }, []);
   // 图层 / 工具 / 属性面板搬进宿主之后，控件按下的那一下发这一条；页面里那张 UI_COMMANDS 表是它唯一
-  // 的落点 —— 一个动作仍然只有一个执行处，只是按下的人换了地方。旋钮多带一个取值：滑到哪就是哪，
-  // 页面对它做的和被删掉的那颗 <input> 做的是同一行调用。
-  const sendBlendUiCommand = useCallback((action: BlendUiAction, value?: number | boolean | string) => {
+  // 的落点 —— 一个动作仍然只有一个执行处，只是按下的人换了地方。载荷由 `BlendUiSend` 那个泛型绑死：
+  // 旋钮是一个数、档位是一个词、行上的一下是一枚坐标（哪一层、哪一枚 chip、落在谁的哪一侧）、可见区是
+  // 一串键。页面对它做的和被删掉的那颗 <input> 做的是同一行调用。
+  const sendBlendUiCommand: BlendUiSend = useCallback(<A extends BlendUiAction,>(action: A, value?: BlendUiPayloads[A]) => {
     blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-ui-command', action, value }, '*');
   }, []);
   const stagingRef = useRef<StagingItem[]>([]);
@@ -908,6 +1007,37 @@ const App: React.FC = () => {
             visible: ui.mask ? ui.mask.visible !== false : base.mask.visible,
             still: str(ui.mask?.still),
           },
+          // 两摞行 + 那些缩略图。行的形状由页面那一侧的描述符说话（它才是图层、attribute 和链的
+          // 持有者），这里只兜住"读不出来就当没有"：不是数组回空摞。字段级的默认留给单元自己判。
+          stacks: { layers: rowList(ui.stacks?.layers), guidances: rowList(ui.stacks?.guidances) },
+          // 特效总开关那颗按钮的读数：读不出来就当没说过，回 false（默认不旁路），而不是把 undefined 当成按下。
+          // `wand` 是这颗按钮的画法等值 —— 魔棒那串 SVG 只有页面画得对，所以它进快照、这里只搬运。
+          // `open` 是此刻摊开的那一步的参数面：那一摞行由注册表编好递过来（when 过滤、折叠分组、贴图槽
+          // 绑没绑，判据全在页面），这一侧只按 kind 画控件。读不出坐标就当没摊开 —— 头部那颗按钮不该
+          // 亮着，而一块没有主人的面板比一块不摆的面板更糟。
+          fx: { bypass: ui.fx?.bypass === true, wand: str(ui.fx?.wand), open: fxOpenOf(ui.fx?.open) },
+          // Add 菜单里那条 raster 偏好的勾：同一句读法 —— 缺字段就是没翻开过，不是翻开。
+          rasterDrop: ui.rasterDrop === true,
+          // `+` 那口菜单的条目表：读不出数组就是空表（那一格菜单一条都不摆），条目里少了名字或那句说明
+          // 就丢掉那一类 —— 摆一条没名字的条目比少一条条目更糟。
+          attrKinds: kindList(ui.attrKinds),
+          // History 那一列：读不出数组就是空列（那一格只报"还没有记账"），一步里少了下标或那句名字
+          // 就丢掉那一步 —— 列子里排错顺序比少一行更糟。limit/两颗开关的取值同样"读不出来回默认"。
+          history: {
+            limit: dec(ui.history?.limit, 0),
+            canUndo: ui.history?.canUndo === true,
+            canRedo: ui.history?.canRedo === true,
+            steps: (Array.isArray(ui.history?.steps) ? ui.history.steps : []).flatMap((s: unknown) => {
+              const st = (s || {}) as Record<string, unknown>;
+              return typeof st.i === 'number' && Number.isFinite(st.i)
+                ? [{ i: Math.max(0, Math.floor(st.i)), label: str(st.label), face: str(st.face), current: st.current === true }]
+                : [];
+            }),
+          },
+          // `faces` 是**增量**（页面发完就清），所以这一份 store 是累加的：合并这一帧新给的那几张，
+          // 空串那一句是页面发来的"这张面不存在了"，跟着删 —— 删过的层不能一直占着一张没人读的 PNG。
+          // 没有新面时回同一个对象引用：否则一条只动了读数的快照也要把整张表复制一遍、惊动每一格。
+          faces: mergeFaces(getBlendUi().faces, faceDelta(ui.faces)),
         });
       }
     };

@@ -137,7 +137,7 @@ function poseFastBake(entry, r, w, h) {
 
 function poseRefresh() {
     if (typeof render === 'function') render();
-    if (typeof renderLayerList === 'function') renderLayerList();
+    if (typeof refreshLayerPanels === 'function') refreshLayerPanels();
 }
 
 // 异步装配/重解。includeStatic 只在第一次要 (拓扑+uv+skin 一次带齐)。完成即 null 掉 bakeKey,
@@ -145,7 +145,7 @@ function poseRefresh() {
 function poseKickBuild(entry, r) {
     if (entry.building) return;
     const meshKey = JSON.stringify(r.desc.mesh);
-    // 失败过就不在同一份形态上重敲 —— 每次 render/renderLayerList 都来一趟的话, 每次都是一枚
+    // 失败过就不在同一份形态上重敲 —— 每次 render/refreshLayerPanels 都来一趟的话, 每次都是一枚
     // 立刻 reject 的 promise。资产 404 这类失败 PoseMorph.failed 是 false (worker 本身活着),
     // 所以另按"失败时的形态"记一份 failKey; 形态真变了 (拖了滑块) 才值得再试一趟。
     // 警告只发一次 (warned), 烘好一趟就整体复位 —— 下一场失败重新算新事。

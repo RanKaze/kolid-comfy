@@ -59,7 +59,9 @@
 //     (只有真要它的那种模式才回字符串, 其余一律空串, 不给别的图层添开销)
 //   readout(p, n, effect) / thumb(g, box) —— 子行读数与 picker 缩略图 (取景框由 UI 备好)
 //   migrate(raw, out) —— 参数换形状时把旧 raw 读成等价的 out, 只写 out 不动 raw (undo 共享它)
-//   editor(l, effect, syncRead, updaters) —— 有它就整块接管参数区 (点曲线这类非滑块编辑面)
+//   params 里每一行的 kind 就是它的全部画法 (range/check/flag/color/enum/map/dir/lattice/curve/fold)。
+//     参数面是数据不是 DOM:fx/ui.js 的 fxParamsModel 按声明序 + when + fold 编出那一批行,宿主 dock
+//     照着 kind 画控件 —— 「整块面板被某个特效接管」那个 editor 口子和九个专用编辑面一起废掉了。
 const EFFECT_TYPES = {};
 
 function defineEffect(spec) {

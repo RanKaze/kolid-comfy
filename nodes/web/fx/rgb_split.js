@@ -198,25 +198,6 @@ const RS_PARAMS = [
     { key: 'cut', label: 'Cut', min: 0, max: 100, step: 1, def: 50, unit: '%', when: p => p.where === 'By map' },
 ];
 
-function rsEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-split';
-    const tail = document.createElement('div');
-    tail.className = 'fx-split-tail';
-    const build = () => {
-        const p = effectParams(effect);
-        tail.replaceChildren(...RS_PARAMS
-            .filter(d => d.key !== 'mode' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        syncRead();
-    };
-    // 模式行只多接一句「换完模式重铺剩下的行」—— 与 fx/warp.js、fx/chromatic_aberration.js 同一包法。
-    box.appendChild(fxControlRow(l, effect, RS_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'rgb_split',
     label: 'RGB Split',
@@ -226,7 +207,6 @@ defineEffect({
     needsMapWhen: p => p.where === 'By map',
     desc: 'Sends the three channels to three different places \u2014 but only where a screen says they may go, which is what keeps this apart from Chromatic Aberration\u2019s smooth fringe. Dot lays a halftone screen over the layer: each dot belongs to one channel and only that channel is read from the shifted position, so an edge breaks into coloured dots instead of a rainbow line (Cell is the pitch, Dot the size, Stagger offsets odd rows half a cell to turn the square screen triangular, and Plate keeps only that channel\u2019s ink inside the dot instead of mixing it in). Dither quantizes how far a pixel is pushed into Steps levels driven by brightness, with an 8\u00d78 Bayer threshold scattering the borders between them \u2014 separation bands with a dithered edge, not a gradient. Split chooses which channel goes its own way: Triad sends R, G and B 120\u00b0 apart (something a lens\u2019s two-channel fringe cannot do), R/G/B vs sets one channel against the other two. Colour only: alpha is this pixel\u2019s own, and a channel whose source leaves the grid comes back empty.',
     params: RS_PARAMS,
-    editor: rsEditorEl,
     shaders: { rsDot: FX_FS_RS_DOT, rsDither: FX_FS_RS_DITHER },
     run: fxglRgbSplit,
     readout(p, n, effect) {

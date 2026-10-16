@@ -359,31 +359,10 @@ function setAttrChain(l, list) {
     return list;
 }
 
-// ---- 记录身上的三笔账 ----
-// · chips:同一枚 attribute 可以被两层引用,于是它的面同时画在两颗 chip 上。"谁的缩略图"记在
-//   记录身上而不是图层身上 —— 图层只该管它自己那串引用,而落笔要重画的正是这一枚。每颗 chip 连它
-//   所属的图层一起存:比例是**那个图层**的网格,共享面在两层上摆的大小可以不同。
+// ---- 记录身上的两笔账 ----
 // · paintGen:面是**就地改写**的 (落笔在同一个 canvas 上画),身份不变,折叠缓存只看身份就看不见新墨。
 //   图层那个 l.paintGen 只说图层自己的像素;共享面被 A 改一笔时 B 的缓存也必须脏,所以这一笔记在记录上。
 // · 顺序归图层:拖完改的是图层的 `l.attrs`,不是记录 (见 moveAttr)。
-function attrChips(r) { return r.chips || (r.chips = []); }
-function bindAttrChip(el, r, l) {
-    const chips = attrChips(r);
-    for (let i = chips.length - 1; i >= 0; i--) if (!chips[i].el.isConnected) chips.splice(i, 1);
-    chips.push({ el, l });
-    ATTR_TYPES[r.type].chip(el, r, l);
-}
-// 把这一层身上某一 kinds 的 chip 全部重画 (type 省略 = 全部)。落一笔之后要喊的是这一句,不是"那一颗":
-// 同一种装了两枚时,点名哪一枚是 paintRecord 的事,而共享的那张面在两颗 chip 上都得显出这滴墨。
-function refreshAttrChips(l, type) {
-    // Mask 层没有条带 (attachAttrView 不给它装 attribute),它那一颗覆盖率缩略图归 blend_node 画。
-    // 认在这里而不是让每个调用点各判一次,是因为"这层有没有 chip"本来就是同一个问题。
-    if (!l || l.isMaskLayer) return;
-    for (const r of attrRecordsOf(l)) {
-        if (type && r.type !== type) continue;
-        for (const c of attrChips(r)) if (c.l === l && c.el.isConnected) ATTR_TYPES[r.type].chip(c.el, r, l);
-    }
-}
 // 缓存的落笔判据:每枚记录自己的代次,按条带顺序串成一个键。图层那个 paintGen 只说自己那份像素,
 // 它盖不住"共享面被别的层改了一笔"这件事 —— 那必须是这一串里的某一格变了。
 function attrPaintGens(l) {
@@ -411,10 +390,10 @@ function attrStepNote(label, r, l) {
 }
 
 // 拖拽重排的那一份**缝位**算法:落在第 k 颗的哪一侧 = 插到它的位置,还是它后面。下标一律按**摘之前**
-// 那个数组说,所以调用方不必知道自己会不会被摘掉 (摘掉之后它左边那道缝还是同一条)。这一句与摆向无
-// 关 —— 横着排的条带和竖着排的特效链都是"数组序 = 执行序",差别只在下面 `dropSide` 认哪个轴。列表里
-// 存的不是 id 本身 (链存的是特效对象) 就交一个 `idOf` 读出它的 id。落不到同一列表里 (拖的是被拖的
-// 那颗自己、或者目标根本不在这条里) 就回 -1,一行都不动。
+// 那个数组说,所以调用方不必知道自己会不会被摘掉 (摘掉之后它左边那道缝还是同一条)。两种排法
+// (条带的横排、链的竖排)都是"数组序 = 执行序"。列表里存的不是 id 本身 (链存的是特效对象) 就交一个
+// `idOf` 读出它的 id。落不到同一列表里 (拖的是被拖的那颗自己、或者目标根本不在这条里) 就回 -1,
+// 一行都不动。
 function listSlot(refs, dragId, targetId, after, idOf) {
     const key = idOf || (v => v);
     const from = refs.findIndex(v => key(v) === dragId);
@@ -426,20 +405,7 @@ function listSlot(refs, dragId, targetId, after, idOf) {
     return refs.findIndex(v => key(v) === dragId);
 }
 
-// 一条列表的落点:横排 (条带) 认左右 —— 第 k 颗的左半边 = 'before'、右半边 = 'after'。`axis` 交 'y'
-// 就是竖排**且越靠下越早** (特效容器从下往上读),于是上半 = 'after'、下半 = 'before'。跨层也放行:
-// 落点层与源层不同时回的是同一套缝位,搬层是 drop 处理的事,缝位算法只认"这一条里有没有这枚"。
-// 唯一拦下的是 `drag.ref === ownId`:一枚被两层共享时,把它从 A 拖到自己 B 那颗引用上没有可落的缝。
-// 不是这一条里的、或者就是自己拖自己,回空串 —— 别的事件 (图层重排序) 因此照常接管。
-function dropSide(ev, el, drag, ownId, axis) {
-    if (!drag || drag.ref === ownId) return '';
-    const r = el.getBoundingClientRect();
-    if (axis === 'y') return (ev.clientY - r.top) < r.height / 2 ? 'after' : 'before';
-    return (ev.clientX - r.left) < r.width / 2 ? 'before' : 'after';
-}
-
-// 拖拽重排:把 `dragRef` 插到同一条里 `targetRef` 那一颗的左边还是右边。缝位算法住在 `listSlot`，
-// 特效容器排它自己那条链走的是同一句。
+// 拖拽重排:把 `dragRef` 插到同一条里 `targetRef` 那一颗的左边还是右边。缝位算法住在 `listSlot`。
 function moveAttr(l, dragRef, targetRef, after) {
     return listSlot(attrRefList(l), dragRef, targetRef, after) >= 0;
 }

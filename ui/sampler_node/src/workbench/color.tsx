@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { wbStyles } from './skin';
 import { useBlendUi } from './store';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
-import type { BlendUi, BlendUiAction } from '../types';
+import type { BlendUi } from '../types';
 import {
   RGBA_WHEEL, PAINT_MODES, drawRgbaFields, hexOf, hsvToRgb, paintModeValues, parseHex, rgbToHsv,
 } from './colour';
@@ -83,8 +83,6 @@ const ColorBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
     const v = Math.max(0, Math.min(1, Number.isFinite(a) ? a : 1));
     send('paint-alpha', v); setLocal({ ...local, fgAlpha: v });
   };
-  const act = (a: BlendUiAction, v?: number | boolean | string) => send(a, v);
-
   const rgb = parseHex(local.fg);
   const hsv = rgbToHsv(rgb);
   const back = parseHex(local.bg);
@@ -175,7 +173,7 @@ const ColorBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
           </span>
           <button type="button" style={{ ...chip, left: 21, top: 6, width: 25, height: 20 }}
             title="Background — the parked colour. Click to bring it forward, same as X."
-            onClick={() => act('paint-swap')}>
+            onClick={() => send('paint-swap')}>
             <span style={{ position: 'absolute', inset: 2, borderRadius: 4, display: 'block',
               background: `rgba(${back[0]}, ${back[1]}, ${back[2]}, ${local.bgAlpha})` }} />
           </button>
@@ -187,7 +185,7 @@ const ColorBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
               title={m === 'rgba'
                 ? 'RGBA — the plate is Saturation × Brightness at the hue on the bar next to it; the four fields below read Red / Green / Blue (0..255) and Alpha %.'
                 : 'HSBA — a colour wheel: angle is Hue, radius is Saturation, and the bar beside it dims the whole wheel to Brightness. The fields read Hue (0..360) / Saturation / Brightness (0..100) and Alpha %.'}
-              onClick={() => { act('paint-mode', m); setLocal({ ...local, mode: m }); }}>{m === 'rgba' ? 'RGBA' : 'HSBA'}</button>
+              onClick={() => { send('paint-mode', m); setLocal({ ...local, mode: m }); }}>{m === 'rgba' ? 'RGBA' : 'HSBA'}</button>
           ))}
         </span>
       </div>

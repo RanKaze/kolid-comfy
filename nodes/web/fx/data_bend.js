@@ -176,25 +176,6 @@ const DB_PARAMS = [
     { key: 'map', kind: 'map', def: null, when: p => p.where === 'By map' },
 ];
 
-function dbEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-bend';
-    const tail = document.createElement('div');
-    tail.className = 'fx-bend-tail';
-    const build = () => {
-        const p = effectParams(effect);
-        tail.replaceChildren(...DB_PARAMS
-            .filter(d => d.key !== 'model' && (!d.when || d.when(p)))
-            .map(d => fxControlRow(l, effect, d, syncRead, updaters)));
-        syncRead();
-    };
-    // 模式行只多接一句「换完模型重铺剩下的行」—— 与 fx/warp.js、fx/chromatic_aberration.js 同一包法。
-    box.appendChild(fxControlRow(l, effect, DB_PARAMS[0], () => { build(); }, updaters));
-    box.appendChild(tail);
-    build();
-    return box;
-}
-
 defineEffect({
     type: 'data_bend',
     label: 'Data Bending',
@@ -204,7 +185,6 @@ defineEffect({
     needsMapWhen: p => p.where === 'By map',
     desc: 'Corrupts the picture the way a decoder does when a file\u2019s bytes are edited before it reads them \u2014 four corruption models, one per format: Raw shifts a whole line of an uncompressed stream around and rotates the four planes by whatever is left over 4, so colour and opacity both slide out of place; JPEG copies 8\u00b7ish-pixel blocks in from elsewhere while chroma lands on a further block than luma (Skew) and the whole thing is re-quantised to Levels steps; PNG adds this row to the wrong reference row, which ghosts the image and drags each channel to a different row; Xor flips one plane (Red, Green, Blue or Alpha) inside each Block of bytes, so alpha can be punched straight through. Bands cuts the file that many ways across the stream, Shift is how far a corrupted run slides, Chance is how many of those bands get hit at all, and By map lets a bound map say which pixels may be bent. Raw and Xor move or flip opacity because that is what they do to the byte stream; JPEG and PNG leave this pixel\u2019s own opacity alone.',
     params: DB_PARAMS,
-    editor: dbEditorEl,
     shaders: { dataBend: FX_FS_BEND },
     run: fxglDataBend,
     readout(p, n, effect) {

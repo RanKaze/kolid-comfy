@@ -42,7 +42,7 @@
                 Scene3D.syncObject(o);
                 Scene3D.renderPanel();
                 Scene3D.invalidate();
-                pushHistory();
+                pushHistory(null, 'Show / hide a scene object');
             });
             row.appendChild(icon); row.appendChild(name); row.appendChild(eye);
             row.addEventListener('click', () => Scene3D.select(o.id));
@@ -147,7 +147,7 @@
                 o.trs[part][i] = v;
                 Scene3D.syncObject(o);
                 Scene3D.invalidate();
-                if (commit) pushHistory();
+                if (commit) pushHistory(null, label + ' ' + axis + ' set');
             };
             input.addEventListener('input', () => write(false));
             input.addEventListener('change', () => write(true));
@@ -190,19 +190,19 @@
                 if (live && live.parent) live.parent.remove(live);
                 Scene3D.nodes.delete(o.id); Scene3D.objects.delete(o.id);
                 Scene3D.build(o); Scene3D.syncGizmo();
-                Scene3D.renderPanel(); Scene3D.invalidate(); pushHistory();
+                Scene3D.renderPanel(); Scene3D.invalidate(); pushHistory(null, 'Light type changed');
             }));
             host.appendChild(colorField(o, 'Color'));
             host.appendChild(num('Intensity', o.intensity, (v, commit) => {
                 o.intensity = Number(v) || 0;
                 Scene3D.syncObject(o); Scene3D.invalidate();
-                if (commit) pushHistory();
+                if (commit) pushHistory(null, 'Light intensity set');
             }, { range: true, min: 0, max: 8, step: 0.05, readout: v => Number(v).toFixed(2) }));
             if (o.lightType === 'point') {
                 host.appendChild(num('Range', o.distance, (v, commit) => {
                     o.distance = Math.max(0, Number(v) || 0);
                     Scene3D.syncObject(o); Scene3D.invalidate();
-                    if (commit) pushHistory();
+                    if (commit) pushHistory(null, 'Light range set');
                 }, { range: true, min: 0, max: 100, step: 0.5, readout: v => `${Number(v).toFixed(1)} u` }));
             }
             host.appendChild(trsBlock(o, 'p', 'Position', 0.05));
@@ -214,7 +214,7 @@
             host.appendChild(num('FOV', o.fov, (v, commit) => {
                 o.fov = Math.min(170, Math.max(1, Number(v) || 60));
                 Scene3D.invalidate();
-                if (commit) pushHistory();
+                if (commit) pushHistory(null, 'Camera FOV set');
             }, { range: true, min: 1, max: 170, step: 1, readout: v => `${Math.round(v)}°` }));
             host.appendChild(trsBlock(o, 'p', 'Position', 0.05));
             host.appendChild(trsBlock(o, 'r', 'Rotation', 1));
@@ -228,7 +228,7 @@
         host.appendChild(num('Opacity', o.opacity === undefined ? 1 : o.opacity, (v, commit) => {
             o.opacity = Math.min(1, Math.max(0, Number(v)));
             Scene3D.syncObject(o); Scene3D.invalidate();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, 'Opacity set');
         }, { range: true, min: 0, max: 1, step: 0.01, readout: v => `${Math.round(v * 100)}%` }));
         if (o.kind === 'primitive') {
             host.appendChild(segment('Shape', [
@@ -237,18 +237,18 @@
                 o.shape = v;
                 const live = Scene3D.nodes.get(o.id);
                 if (live) { live.geometry && live.geometry.dispose(); live.geometry = shapeGeometry(v); }
-                Scene3D.invalidate(); Scene3D.renderPanel(); pushHistory();
+                Scene3D.invalidate(); Scene3D.renderPanel(); pushHistory(null, 'Shape changed');
             }));
         }
         host.appendChild(num('Roughness', o.roughness === undefined ? 0.75 : o.roughness, (v, commit) => {
             o.roughness = Number(v);
             Scene3D.syncObject(o); Scene3D.invalidate();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, 'Roughness set');
         }, { range: true, min: 0, max: 1, step: 0.01 }));
         host.appendChild(num('Metalness', o.metalness === undefined ? 0 : o.metalness, (v, commit) => {
             o.metalness = Number(v);
             Scene3D.syncObject(o); Scene3D.invalidate();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, 'Metalness set');
         }, { range: true, min: 0, max: 1, step: 0.01 }));
         if (o.kind === 'model') {
             const src = document.createElement('div');
@@ -274,7 +274,7 @@
         return num(label, (o.color || '#ffffff').slice(0, 7), (v, commit) => {
             o.color = v;
             Scene3D.syncObject(o); Scene3D.invalidate();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, label + ' set');
         }, { color: true });
     }
 
@@ -284,12 +284,12 @@
         host.appendChild(num('Ambient', Scene3D.rec.ambient.color, (v, commit) => {
             Scene3D.rec.ambient.color = v;
             Scene3D.applyAmbient();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, 'Ambient color set');
         }, { color: true }));
         host.appendChild(num('Intensity', Scene3D.rec.ambient.intensity, (v, commit) => {
             Scene3D.rec.ambient.intensity = Number(v) || 0;
             Scene3D.applyAmbient();
-            if (commit) pushHistory();
+            if (commit) pushHistory(null, 'Ambient intensity set');
         }, { range: true, min: 0, max: 2, step: 0.05, readout: v => Number(v).toFixed(2) }));
     }
 

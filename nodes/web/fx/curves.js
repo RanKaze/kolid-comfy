@@ -173,273 +173,109 @@ function fxglCurves(col, p) {
     col.slot = 1 - col.slot;
 }
 
-// ---- 编辑面 ----
-// 内嵌在曲线卡里,替掉那一排滑块:通道下拉 + 曲线图 + Input/Output 读数 + 底边输入黑白点三角
-// + 复位。点击加控制点、拖动塑形、Alt-点击删除,和 PS 的 Curves 面板一一对应。
-function curvesEditorEl(l, effect, syncRead, updaters) {
-    const box = document.createElement('div');
-    box.className = 'fx-curves';
-    const PAD = 7;
-    const SIZE = 150;
-    const inner = SIZE - 2 * PAD;
-    let picked = -1;
+// ---- 参数面归宿主 dock 以后,曲线这一格的落点 ----
+// 图上的手势由宿主量出归一化坐标发回来,这里只做页面原来那三件事：按 CURVE_MIN_GAP 夹住 x、整体换掉
+// curves 对象（连同一串新点列,那串数组在 undo 快照之间是共享引用）、把旧的解析旋钮清掉（它们已被点列
+// 取代,留在参数里只会被 fxSignature 当成改动记进缓存键）。
+// 编辑哪条通道仍是页面这一侧的 curveFocus —— 换焦点不改像素,所以那一句不走 fxLiveUpdate。
+// 「刚结束的是哪一种拖动」也留在这里:历史那句话说的是**这一次手势**,不能由下一次按的东西代它说话。
+let fxCurveGesture = '';
 
-    const ch = () => (curveFocus[effect.id] && CURVE_CHANNELS.includes(curveFocus[effect.id]) ? curveFocus[effect.id] : 'rgb');
-    const pointsOf = c => curveChannelPoints(effectParams(effect).curves, c || ch());
+function fxCurveChannel(effect) {
+    return (curveFocus[effect.id] && CURVE_CHANNELS.includes(curveFocus[effect.id]))
+        ? curveFocus[effect.id] : 'rgb';
+}
+function fxCurvePoints(effect) {
+    return curveChannelPoints(effectParams(effect).curves, fxCurveChannel(effect));
+}
+// 首末点各自只有一侧的邻居;夹在两个邻居之间,所以点列永远是 x 升序、不会重合成一对。
+function fxCurveClampX(pts, i, x) {
+    const lo = i === 0 ? 0 : pts[i - 1][0] + CURVE_MIN_GAP;
+    const hi = i === pts.length - 1 ? 1 : pts[i + 1][0] - CURVE_MIN_GAP;
+    return Math.max(lo, Math.min(hi, x));
+}
+function fxCurveWrite(l, effect, channel, pts) {
+    const set = curveSetOf(effectParams(effect));
+    set[channel] = pts;
+    if (!effect.params) effect.params = {};
+    effect.params.curves = set;
+    for (const k of CURVE_RETIRED_KEYS) delete effect.params[k];
+    fxLiveUpdate(l);
+    fxPublishRows();
+}
 
-    const rowSel = document.createElement('div');
-    rowSel.className = 'control-row';
-    const lab = document.createElement('label');
-    lab.textContent = 'Channel';
-    const sel = document.createElement('select');
-    for (const c of CURVE_CHANNELS) {
-        const opt = document.createElement('option');
-        opt.value = c;
-        opt.textContent = CURVE_CHANNEL_LABELS[c];
-        sel.appendChild(opt);
+function fxCurveOp(l, effect, o) {
+    const op = String((o && o.op) || '');
+    const ch = fxCurveChannel(effect);
+    const pts = fxCurvePoints(effect);
+    if (op === 'focus') {
+        const c = String((o && o.channel) || '');
+        if (!CURVE_CHANNELS.includes(c)) return false;
+        curveFocus[effect.id] = c;
+        fxPublishRows();
+        return true;
     }
-    sel.value = ch();
-    // 下拉只换编辑焦点,不改像素,所以不走 fxLiveUpdate(那会清缓存重画布)。
-    sel.addEventListener('change', () => {
-        curveFocus[effect.id] = sel.value;
-        picked = -1;
-        paint();
-    });
-    rowSel.appendChild(lab);
-    rowSel.appendChild(sel);
-    box.appendChild(rowSel);
-
-    const graph = document.createElement('div');
-    graph.className = 'fx-curve-box';
-    const cv = document.createElement('canvas');
-    cv.className = 'fx-curve-canvas';
-    cv.width = Math.round(SIZE * (window.devicePixelRatio || 1));
-    cv.height = cv.width;
-    graph.appendChild(cv);
-
-    const mkTri = key => {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'fx-curve-tri ' + key;
-        b.title = key === 'black' ? 'Drag for the input black point' : 'Drag for the input white point';
-        graph.appendChild(b);
-        return b;
-    };
-    const triBlack = mkTri('black');
-    const triWhite = mkTri('white');
-
-    const readCol = document.createElement('div');
-    readCol.className = 'fx-curve-read';
-    const mkNum = name => {
-        const line = document.createElement('div');
-        const t = document.createElement('span');
-        t.textContent = name;
-        const v = document.createElement('b');
-        line.appendChild(t);
-        line.appendChild(v);
-        readCol.appendChild(line);
-        return v;
-    };
-    const numIn = mkNum('Input');
-    const numOut = mkNum('Output');
-    // 图 + 读数并排:PS 的 Curves 面板就是曲线在左、Input/Output 数值在右。
-    const cols = document.createElement('div');
-    cols.className = 'fx-curve-row';
-    cols.appendChild(graph);
-    cols.appendChild(readCol);
-    box.appendChild(cols);
-
-    const toPx = (x, y) => [PAD + x * inner, PAD + (1 - y) * inner];
-    const toXY = (px, py) => [curveClamp01((px - PAD) / inner), curveClamp01(1 - (py - PAD) / inner)];
-
-    function paint() {
-        const dpr = window.devicePixelRatio || 1;
-        const css = cv.clientWidth || SIZE;
-        const side = Math.round(css * dpr);
-        if (cv.width !== side) { cv.width = side; cv.height = side; }
-        const g = cv.getContext('2d');
-        resetCtx(g);
-        g.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const k = css / SIZE;
-        const ox = PAD * k, iy = inner * k;
-        g.clearRect(0, 0, css, css);
-        g.fillStyle = '#0e0e11';
-        g.fillRect(ox, ox, iy, iy);
-        g.strokeStyle = 'rgba(255,255,255,0.09)';
-        g.lineWidth = 1;
-        g.beginPath();
-        for (let i = 1; i < 4; i++) {
-            const p = (iy * i) / 4;
-            g.moveTo(ox, ox + p); g.lineTo(ox + iy, ox + p);
-            g.moveTo(ox + p, ox); g.lineTo(ox + p, ox + iy);
-        }
-        g.stroke();
-        // 恒等参考线画在曲线下层:PS 的图里它就是那条对角虚线。
-        g.setLineDash([3, 3]);
-        g.strokeStyle = 'rgba(255,255,255,0.22)';
-        g.beginPath();
-        g.moveTo(ox, ox + iy);
-        g.lineTo(ox + iy, ox);
-        g.stroke();
-        g.setLineDash([]);
-        const pts = pointsOf();
-        g.strokeStyle = '#6f8cff';
-        g.lineWidth = 1.8;
-        g.beginPath();
-        for (let i = 0; i < CURVE_LUT_STEPS; i++) {
-            // toPx 给的是 SIZE 空间(含 PAD),乘 k 才是 css 像素。
-            const x = i / (CURVE_LUT_STEPS - 1);
-            const q = toPx(x, curveValueAt(pts, x));
-            if (i) g.lineTo(q[0] * k, q[1] * k); else g.moveTo(q[0] * k, q[1] * k);
-        }
-        g.stroke();
-        for (let i = 0; i < pts.length; i++) {
-            const q = toPx(pts[i][0], pts[i][1]);
-            const X = q[0] * k, Y = q[1] * k;
-            const r = i === picked ? 3.6 : 2.8;
-            g.fillStyle = i === picked ? '#fff' : '#0e0e11';
-            g.strokeStyle = '#6f8cff';
-            g.lineWidth = 1.4;
-            g.beginPath();
-            g.rect(X - r, Y - r, r * 2, r * 2);
-            g.fill();
-            g.stroke();
-        }
-        // 三角贴在底边上,位置 = 首末点的 x —— 它就是输入黑/白点,PS 里也是这么摆的。
-        triBlack.style.left = `${ox + pts[0][0] * iy - 6}px`;
-        triWhite.style.left = `${ox + pts[pts.length - 1][0] * iy - 6}px`;
-        const p = picked >= 0 && pts[picked] ? pts[picked] : null;
-        numIn.textContent = p ? String(Math.round(p[0] * 255)) : '\u2014';
-        numOut.textContent = p ? String(Math.round(p[1] * 255)) : '\u2014';
+    if (op === 'add') {
+        const x = Number(o.x), y = Number(o.y);
+        // 和 PS 一样:点空白处就在那儿加一个控制点,落点 y 就是它的输出电平。范围外不加 ——
+        // 输入黑白点外侧是被截平的死区,在那里落点只会造出一对重合的 x。
+        const lo = pts[0][0] + CURVE_MIN_GAP, hi = pts[pts.length - 1][0] - CURVE_MIN_GAP;
+        if (!(x > lo && x < hi)) return false;
+        const at = pts.findIndex(p => p[0] > x);
+        pts.splice(at, 0, [curveClamp01(x), curveClamp01(y)]);
+        fxCurveGesture = 'point';
+        fxCurveWrite(l, effect, ch, pts);
+        return true;
     }
-    updaters.push(paint);
-
-    // 整体换掉 curves 对象(连同一串新点列),并把旧的解析旋钮清掉:它们已被点列取代,留在参数里
-    // 只会被 fxSignature 当成改动记进缓存键。
-    function writePoints(channel, pts, undoable) {
-        const set = curveSetOf(effectParams(effect));
-        set[channel] = pts;
-        if (!effect.params) effect.params = {};
-        effect.params.curves = set;
-        for (const k of CURVE_RETIRED_KEYS) delete effect.params[k];
-        syncRead();
-        fxLiveUpdate(l);
-        if (undoable) pushHistory();
+    if (op === 'move') {
+        const i = Number(o.index);
+        if (!(i >= 0 && i < pts.length)) return false;
+        pts[i] = [fxCurveClampX(pts, i, Number(o.x)), curveClamp01(Number(o.y))];
+        fxCurveGesture = 'point';
+        fxCurveWrite(l, effect, ch, pts);
+        return true;
     }
-
-    function movePoint(index, x, y) {
-        const pts = pointsOf();
-        const lo = index === 0 ? 0 : pts[index - 1][0] + CURVE_MIN_GAP;
-        const hi = index === pts.length - 1 ? 1 : pts[index + 1][0] - CURVE_MIN_GAP;
-        pts[index] = [Math.max(lo, Math.min(hi, x)), y];
-        writePoints(ch(), pts, false);
+    if (op === 'input') {
+        // 底边两个三角 = 首末点的 x。纵向不动,拖的就是输入黑/白点。
+        const which = o.which === 'white' ? 'white' : 'black';
+        const i = which === 'black' ? 0 : pts.length - 1;
+        pts[i] = [fxCurveClampX(pts, i, Number(o.x)), pts[i][1]];
+        fxCurveGesture = which;
+        fxCurveWrite(l, effect, ch, pts);
+        return true;
     }
-
-    function beginDrag(index) {
-        const move = mv => {
-            const r = cv.getBoundingClientRect();
-            const q = toXY(mv.clientX - r.left, mv.clientY - r.top);
-            movePoint(index, q[0], q[1]);
-        };
-        const up = () => {
-            window.removeEventListener('pointermove', move);
-            window.removeEventListener('pointerup', up);
-            pushHistory();
-        };
-        window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', up);
+    if (op === 'remove') {
+        const i = Number(o.index);
+        if (!(i > 0 && i < pts.length - 1)) return false;    // 首末点是输入黑/白,删了曲线就没边界了
+        pts.splice(i, 1);
+        fxCurveWrite(l, effect, ch, pts);
+        fxCurveGesture = '';
+        pushHistory(null, 'Curves — point removed');
+        fxRefreshParams();
+        return true;
     }
-
-    // 命中判定用归一化距离:点和空白都在同一把尺子上。
-    function nearest(pts, x, y) {
-        let best = -1, bd = 0.07 * 0.07;
-        for (let i = 0; i < pts.length; i++) {
-            const dx = pts[i][0] - x, dy = pts[i][1] - y;
-            const d = dx * dx + dy * dy;
-            if (d < bd) { bd = d; best = i; }
-        }
-        return best;
+    if (op === 'settle') {
+        if (!fxCurveGesture) return false;
+        const label = fxCurveGesture === 'point' ? 'Curves — point moved'
+            : 'Curves — input ' + fxCurveGesture + ' point moved';
+        fxCurveGesture = '';
+        pushHistory(null, label);
+        fxRefreshParams();
+        return true;
     }
-
-    cv.addEventListener('pointerdown', ev => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        const r = cv.getBoundingClientRect();
-        const q = toXY(ev.clientX - r.left, ev.clientY - r.top);
-        const pts = pointsOf();
-        let i = nearest(pts, q[0], q[1]);
-        if (i >= 0 && ev.altKey) {
-            if (i > 0 && i < pts.length - 1) {
-                pts.splice(i, 1);
-                picked = -1;
-                writePoints(ch(), pts, true);
-            }
-            return;
-        }
-        if (i < 0) {
-            // 和 PS 一样:点空白处就在那儿加一个控制点,落点 y 就是它的输出电平。范围外不加 ——
-            // 输入黑白点外侧是被截平的死区,在那里落点只会造出一对重合的 x。
-            const lo = pts[0][0] + CURVE_MIN_GAP;
-            const hi = pts[pts.length - 1][0] - CURVE_MIN_GAP;
-            if (q[0] <= lo || q[0] >= hi) return;
-            const at = pts.findIndex(p => p[0] > q[0]);
-            pts.splice(at, 0, [q[0], q[1]]);
-            writePoints(ch(), pts, false);
-            i = at;
-        }
-        picked = i;
-        beginDrag(i);
-        paint();
-    });
-
-    // 底边两个三角 = 首末点的 x。纵向不动,拖的就是输入黑/白点。
-    function triDrag(key, ev) {
-        const pts = pointsOf();
-        const index = key === 'black' ? 0 : pts.length - 1;
-        const keepY = pts[index][1];
-        const move = mv => {
-            const r = cv.getBoundingClientRect();
-            movePoint(index, toXY(mv.clientX - r.left, 0)[0], keepY);
-        };
-        const up = () => {
-            window.removeEventListener('pointermove', move);
-            window.removeEventListener('pointerup', up);
-            pushHistory();
-        };
-        ev.preventDefault();
-        ev.stopPropagation();
-        window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', up);
-    }
-    triBlack.addEventListener('pointerdown', ev => triDrag('black', ev));
-    triWhite.addEventListener('pointerdown', ev => triDrag('white', ev));
-
-    const foot = document.createElement('div');
-    foot.className = 'fx-curve-foot';
-    const hint = document.createElement('span');
-    hint.textContent = 'click add · drag shape · alt-click remove';
-    const rst = document.createElement('button');
-    rst.type = 'button';
-    rst.className = 'icon-btn fx-curve-reset';
-    rst.title = 'Reset all channel curves';
-    rst.innerHTML = fxIconSvg('reset');
-    rst.addEventListener('click', ev => {
-        ev.stopPropagation();
+    if (op === 'reset') {
         const set = {};
         for (const c of CURVE_CHANNELS) set[c] = identityCurvePoints();
         if (!effect.params) effect.params = {};
         effect.params.curves = set;
         for (const k of CURVE_RETIRED_KEYS) delete effect.params[k];
-        picked = -1;
-        syncRead();
+        fxCurveGesture = '';
         fxLiveUpdate(l);
-        pushHistory();
-    });
-    foot.appendChild(hint);
-    foot.appendChild(rst);
-    box.appendChild(foot);
-    paint();
-    return box;
+        pushHistory(null, 'Curves — all channels reset');
+        fxRefreshParams();
+        return true;
+    }
+    return false;
 }
 
 defineEffect({
@@ -451,10 +287,9 @@ defineEffect({
     params: [
         // 只剩数据本身:四条点列。「编辑哪条曲线」是面板焦点,不是作用域参数,所以它不进 params
         // (否则每次换通道都会白白清一次 fx 缓存)。
-        { key: 'curves', label: 'Curve', def: null },
+        { key: 'curves', label: 'Curve', kind: 'curve', def: null },
     ],
     migrate: migrateLegacyCurves,
-    editor: curvesEditorEl,
     shaders: { curves: FX_FS_CURVES },
     run: fxglCurves,
     readout: curveChainReadout,
