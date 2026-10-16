@@ -12772,6 +12772,13 @@ window.addEventListener('message', event => {
         syncProcessorUI();          // staging 输入的下拉跟着图池走
         return;
     }
+    if (d.type === 'blend-guidance-republish') {
+        // 宿主说图池里那张 Guidance 卡不是我们的了（被别的实例顶掉，或整池换水时被清掉）：
+        // 去重的记忆清掉，立刻重发一张自己的。
+        guidanceCardLast = null;
+        publishGuidanceCard();
+        return;
+    }
     if (d.type === 'blend-processors') {
         // Interface tab 的 Processor 开关变了：重填 interface 枚举与端口行。
         processorList = Array.isArray(d.processors) ? d.processors : [];

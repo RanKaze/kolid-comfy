@@ -1739,28 +1739,23 @@ class SnapshotDetailerSamplerServer:
         def do_GET(self):
             inst = self.server_instance
 
-            if self.path in ('/', '/sampler_node.html'):
-                file_path = web_file('sampler_node.html')
+            # 两个页面都是**单文件**构建产物(js/css 全内联),前端 build 一次就该刷新即生效 —— 所以和下面
+            # js/fx/attr 同款发 no-store,别让浏览器/WebView 的缓存把新版挡在门外。禁缓存是开发回路的
+            # 命门,这条路由偏偏漏了:页面不带验证器(无 ETag/Last-Modified),一旦被缓存就只能等它自己过期。
+            # 路径按 urlparse 取:URL 上挂 `?v=` 这类缓存参数不该把这条精确匹配顶成 404。
+            page = urlparse(self.path).path
+            if page in ('/', '/sampler_node.html', '/blend_node.html'):
+                name = 'blend_node.html' if page == '/blend_node.html' else 'sampler_node.html'
+                file_path = web_file(name)
                 if os.path.exists(file_path):
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html')
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
                     self.end_headers()
                     with open(file_path, 'rb') as f:
                         self.wfile.write(f.read())
                 else:
-                    self.send_error(404, "sampler_node.html not found")
-                return
-
-            if self.path == '/blend_node.html':
-                file_path = web_file('blend_node.html')
-                if os.path.exists(file_path):
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/html')
-                    self.end_headers()
-                    with open(file_path, 'rb') as f:
-                        self.wfile.write(f.read())
-                else:
-                    self.send_error(404, "blend_node.html not found")
+                    self.send_error(404, "%s not found" % name)
                 return
 
             # 图层特效链按特效拆在 web/fx/ 下,图层 attribute 拆在 web/attr/ 下,3D 图层的 three.js

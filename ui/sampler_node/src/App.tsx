@@ -1111,7 +1111,15 @@ const App: React.FC = () => {
             ...(replace ? { replace: true } : {}),
             name: 'Loaded',
           }),
-        }).then(() => refreshStaging()));
+        }).then(() => {
+          void refreshStaging();
+          // 整池换水（载入 .cud）会把 staging_guidance 一并清掉（这张卡故意不随文档走），而
+          // iframe 端只在「自己算出来的图变了」时才重发 —— 换一张长得一样的文档就会永久缺卡。
+          // 这里点名让它重发一次（显示本来就吃本地那份，这条是给 run 的取图兜底）。
+          if (replace) {
+            blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-guidance-republish' }, '*');
+          }
+        }));
       } else if (event.data?.type === 'blend-guidance-card') {
         // Guidances 栈的那一张总卡（Layers 合成 + 整个 guidance 栈）。后端按保留 id
         // staging_guidance 原地换像素 —— 工作区永远只有这一张；image 为空 = 撤回它

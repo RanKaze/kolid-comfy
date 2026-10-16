@@ -28,6 +28,9 @@ import { stagingUnit } from './staging';
 export type WorkbenchHostCtx = {
   staging: StagingItem[];
   blendPreview: { image: string; size: string } | null;
+  /** Guidances 那张总卡的**本客户端**版本：iframe 每次合成完就发一张过来，与图池无关。
+   *  null = 这一页还没收到过（回落到图池里那条）；'' = 收到过且现在是空的（栈被清空 / 全隐藏）。 */
+  guidanceCard: string | null;
   stageUpload: (images: string[], names: string[]) => void;
   stageRemove: (id: string) => void;
 };

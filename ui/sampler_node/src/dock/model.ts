@@ -1,8 +1,18 @@
 // ── THE DOCK ────────────────────────────────────────────────────────────────────────────────
-// Where a unit sits is the user's call: stacked in a column, side by side, several units sharing one
-// slot behind a tab strip, or popped out as a window over the workbench. The tree answers only
-// "who lives where and how big"; what a unit contains stays with the page — which is also why these
-// operations are plain functions over a Dock and can be exercised without a DOM.
+// Where a unit sits is the user's call. Since the Block rework the page is a TILING: the area is cut
+// into BLOCKS, a block is sized by the FRAME around it and never by its content, and the user drags
+// the boundary between two blocks to resize them. There is no per-window handle any more: a window
+// does not decide how big it is, the block it lives in does.
+//
+// What a block CONTAINS depends on its MODE:
+//   * `default` — one dock window. Its units share it behind a tab strip (that is the tab mechanism,
+//     and it stays: a window with several units is one title bar, and a switch moves nothing);
+//   * `v` / `h` — a CONTAINER. One dock window per unit, stacked in that direction, each sizing to its
+//     own content; the block scrolls when they do not fit, and a member folds to give its space back
+//     to the others. That is the ONLY place a fold exists.
+// Alt+P (held) is the mode editor — the one place a block changes mode. A drop lands on a BLOCK and the
+// block decides: the centre adds the unit to it (another tab in `default`, another stacked window in
+// `v`/`h`), an edge splits a fresh block off.
 //
 // A unit is named by an id, and there are two kinds of name:
 //   * a PANEL is one of a fixed set the page always has, so a saved layout that
@@ -20,6 +30,9 @@ export const docUnit = (uid: string | number): UnitId => DOC_UNIT_PREFIX + uid;
 export const docUidOf = (id: UnitId): string | null =>
   id.startsWith(DOC_UNIT_PREFIX) ? id.slice(DOC_UNIT_PREFIX.length) : null;
 
+// A block's mode. `default` = one window, `v`/`h` = a container stacking one window per unit.
+export type DockMode = 'default' | 'v' | 'h';
+
 export type DockRules = {
   // localStorage key this layout lives under.
   store: string;
@@ -31,21 +44,26 @@ export type DockRules = {
   title: (id: UnitId) => string;
   // May this unit be folded to its title bar? Only a unit with a permanent name — a fold is stored under
   // the unit's id, and an id that comes back pointing at something else (a document uid the workbench
-  // hands out again from 1) must not carry an old choice onto the new owner.
+  // hands out again from 1) must not carry an old choice onto the new owner. A fold only has anywhere
+  // to go inside a container block, so this is asked of members of one.
   foldable: (id: UnitId) => boolean;
-  // The unit's body IS live state rather than a view of state: a fold or a tab switch hides it with
-  // display:none instead of unmounting it, because unmounting throws the state away.
+  // The unit's body IS live state rather than a view of state: a tab switch hides it with display:none
+  // instead of unmounting it, because unmounting throws the state away.
   keepMounted: (id: UnitId) => boolean;
   // The unit's content owns its box — no card inset and no scroller of the dock's. A workbench and a
   // toolbar are both like this; what sets them apart is `grows`.
   fullBleed: (id: UnitId) => boolean;
-  // The unit has no content height to size itself by, so it takes a share of its split instead of
-  // `0 0 auto` — which for a workbench is the difference between a canvas and a collapsed strip.
-  // A toolbar is the opposite: full-bleed skin, but it is exactly as tall as its row of buttons.
+  // The unit has no content height to size itself by, so INSIDE A CONTAINER it takes a share of the
+  // block instead of sizing to its content — which for a workbench is the difference between a canvas
+  // and a collapsed strip. Everything else in a container is exactly as tall as its content, and the
+  // block scrolls when that adds up to more than the block has.
   grows: (id: UnitId) => boolean;
   // The shape the page opens with, and the shape "Reset layout" puts back: this row across the top
-  // (if the page has one), then this column at this width with the work area beside it.
+  // (if the page has one), then this column at this width with the work area beside it. The top row is
+  // the one block whose height the page states instead of dragging — it is a strip of buttons, and a
+  // share of the page would make it half the page.
   top: UnitId | null;
+  topH: number;
   column: readonly UnitId[];
   columnW: number;
   // A page with panels on both sides of the work area names the far side here: a second column, stacked
@@ -55,11 +73,14 @@ export type DockRules = {
 };
 
 // `sz` is the size the user dragged this node to along its PARENT split's axis; absent means
-// "take what is left". A nest carries one too — that is how the settings column keeps a width, since
-// a nest has no box of its own to grab and is sized by the edge of whatever sits beside it.
-export type DockSlot = { t: 'u'; id: UnitId; sz?: number }
-  | { t: 'g'; ids: UnitId[]; sel: number; sz?: number };
-export type DockNode = DockSlot | { t: 's'; d: 'v' | 'h'; ks: DockNode[]; sz?: number; work?: true };
+// "take what is left". Only the boundary between two nodes is draggable, so only a node that sits in a
+// split — a block, or a nest — carries one.
+//
+// A BLOCK is one rectangle of the page: one dock window in `default` mode, or a container of several in
+// `v`/`h`. A node with no size is `1 1 0` — it shares what its siblings leave, which is what makes the
+// tree tile the page with no dead space anywhere. Nothing in the tree sizes to its content.
+export type DockBlock = { t: 'b'; ids: UnitId[]; sel: number; mode: DockMode; sz?: number };
+export type DockNode = DockBlock | { t: 's'; d: 'v' | 'h'; ks: DockNode[]; sz?: number; work?: true };
 // A popped-out unit lives in viewport coordinates: it has to be able to sit on top of the workbench,
 // which is not inside any column.
 export type DockFloat = { id: UnitId; x: number; y: number; w: number; h: number };
@@ -70,36 +91,43 @@ export const DOCK_MIN_SZ = 96, DOCK_MAX_SZ = 1200;
 export const FLOAT_W = 300, FLOAT_MIN_W = 220, FLOAT_MIN_H = 60;
 export const clampSz = (n: number) => Math.min(DOCK_MAX_SZ, Math.max(DOCK_MIN_SZ, Math.round(n)));
 
-// The page opens as a split: the panel column on the left at its own width and the work area taking
-// everything else, with the toolbar row above both if the page has one. Documents arrive into the work
-// area through syncDocUnits — a reset can't name them, because which documents are open is not the
-// layout's decision.
+// The width of the gap between two blocks — and the gap IS the handle: the strip the user grabs to move
+// the boundary is the same strip they see between the cards, so aiming at it needs no extra chrome.
+export const DOCK_SPLIT = 8;
+
+// One block around a unit, for the places that need a leaf and the page does not care how it looks.
+const block = (id: UnitId, mode: DockMode = 'default', sz?: number): DockBlock => ({ t: 'b', ids: [id], sel: 0, mode, sz });
+
+// The page opens as a tiling: the toolbar strip across the top (if the page has one), then the settings
+// column at its own width, the work area taking everything else, and the panel column on the far side.
+// Each column is ONE container block — the same look the page always had (the panels stacked in their
+// column, the column scrolling), except that the column's width is now the user's to drag. Documents
+// arrive into the work area through syncDocUnits — a reset can't name them, because which documents are
+// open is not the layout's decision.
 export const defaultDock = (r: DockRules): Dock => {
-  const column: DockNode = { t: 's', d: 'v', sz: r.columnW, ks: r.column.map(id => ({ t: 'u', id }) as DockNode) };
-  const ks: DockNode[] = [column];
+  const ks: DockNode[] = [{ t: 'b', ids: [...r.column], sel: 0, mode: 'v', sz: r.columnW }];
   if (r.right?.length) {
     // Panels on both sides need a middle, and the middle has to survive a document closing: `work` is
     // how the page says "a document with no window goes HERE", so pruneDocs and detach leave this nest
     // empty instead of folding it away and letting the next document land at the far end of the row.
     ks.push({ t: 's', d: 'h', ks: [], work: true });
-    ks.push({ t: 's', d: 'v', sz: r.rightW, ks: r.right.map(id => ({ t: 'u', id }) as DockNode) });
+    ks.push({ t: 'b', ids: [...r.right], sel: 0, mode: 'v', sz: r.rightW });
   }
   const row: DockNode = { t: 's', d: 'h', ks };
-  return { tree: r.top ? { t: 's', d: 'v', ks: [{ t: 'u', id: r.top }, row] } : row, floats: [] };
+  return { tree: r.top ? { t: 's', d: 'v', ks: [block(r.top, 'default', r.topH), row] } : row, floats: [] };
 };
 
-export const dockUnits = (n: DockNode): UnitId[] =>
-  n.t === 'u' ? [n.id] : n.t === 'g' ? n.ids : n.ks.flatMap(dockUnits);
+export const dockUnits = (n: DockNode): UnitId[] => (n.t === 'b' ? n.ids : n.ks.flatMap(dockUnits));
 
 // Take the nodes that name a document the page does not have. A panel name is left alone here — an
 // unknown panel is a broken layout, not a closed document, and the caller resets for that.
 function pruneDocs(n: DockNode, isAlive: (id: UnitId) => boolean): DockNode | null {
   const alive = (id: UnitId) => !docUidOf(id) || isAlive(id);
-  if (n.t === 'u') return alive(n.id) ? n : null;
-  if (n.t === 'g') {
+  if (n.t === 'b') {
     const ids = n.ids.filter(alive);
     if (!ids.length) return null;
-    if (ids.length === 1) return { t: 'u', id: ids[0] };
+    // A block keeps its MODE through a document closing: a `v` block that happened to hold one is still
+    // a container, and collapsing it to a plain window would silently undo the user's choice.
     return { ...n, ids, sel: Math.min(n.sel, ids.length - 1) };
   }
   const kept = n.ks.map(k => pruneDocs(k, isAlive)).filter((k): k is DockNode => !!k);
@@ -114,6 +142,20 @@ function pruneDocs(n: DockNode, isAlive: (id: UnitId) => boolean): DockNode | nu
   return { ...n, ks: kept };
 }
 
+// A saved layout is a plausible file, not a trusted one: a store written by an older page has `u`/`g`
+// nodes this model no longer knows, and a hand-edited one can hold anything at all. Both are read as
+// untyped data, so the shape is checked before the arithmetic gets to walk it.
+function isNode(n: unknown): n is DockNode {
+  const x = n as DockNode & { ids?: unknown; ks?: unknown };
+  if (!x || typeof x !== 'object') return false;
+  if (x.t === 'b') {
+    return Array.isArray(x.ids) && x.ids.length > 0 && x.ids.every(i => typeof i === 'string')
+      && (x.mode === 'default' || x.mode === 'v' || x.mode === 'h');
+  }
+  if (x.t === 's') return (x.d === 'v' || x.d === 'h') && Array.isArray(x.ks) && x.ks.length > 0 && x.ks.every(isNode);
+  return false;
+}
+
 // A layout is only a layout if every panel appears exactly once somewhere — tree or floating — and
 // nothing else is in there. Documents are allowed to be missing (they were closed) but never twice:
 // two boxes on one document is two viewports on one mutable layer stack.
@@ -122,13 +164,15 @@ export function loadDock(rules: DockRules): Dock {
   try {
     const raw = localStorage.getItem(rules.store);
     if (!raw) return fallback;
-    // Whatever is in there is untyped until it has been read as a Dock, so the shape is checked, not
-    // trusted — a store written by an older page is a plausible file, not a guaranteed one.
-    const saved: { tree?: DockNode; floats?: DockFloat[] } = JSON.parse(raw);
-    const tree = pruneDocs(saved.tree as DockNode, id => rules.known(id));
+    const saved: { tree?: unknown; floats?: DockFloat[] } = JSON.parse(raw);
+    // The shape first, and BEFORE pruneDocs: pruning an old node would read `ks` off something that has
+    // none. An old layout therefore resets rather than half-loading — which is the honest answer, since
+    // every block in it would be missing the mode this model is built on.
+    if (!isNode(saved.tree)) return fallback;
+    const tree = pruneDocs(saved.tree, id => rules.known(id));
     if (!tree) return fallback;
     const floats = (Array.isArray(saved.floats) ? saved.floats : [])
-      .filter(f => !docUidOf(f.id) || rules.known(f.id));
+      .filter(f => f && typeof f.id === 'string' && (!docUidOf(f.id) || rules.known(f.id)));
     const ids = dockUnits(tree).concat(floats.map(f => f.id));
     if (ids.some(id => !rules.known(id))) return fallback;
     if (rules.panels.some(u => ids.filter(i => i === u).length !== 1)) return fallback;
@@ -142,7 +186,7 @@ const heldDocs = (dock: Dock): UnitId[] =>
   dockUnits(dock.tree).concat(dock.floats.map(f => f.id)).filter(id => !!docUidOf(id));
 
 // A document with no window yet gets one where documents already live: tabbed into the box that shows
-// one, so a second one does not halve the work area — they share a slot behind a strip until the user
+// one, so a second one does not halve the work area — they share a window behind a strip until the user
 // drags one out. With none in the tree the work area is the nest the page marked for it; a page that
 // marked none has one row, so the document joins that row.
 function appendToWork(n: DockNode, leaf: DockNode): DockNode | null {
@@ -154,10 +198,34 @@ function appendToWork(n: DockNode, leaf: DockNode): DockNode | null {
   }
   return null;
 }
+// Add a unit to the block that already owns `id`, as another member — which the block renders as
+// another tab (`default`) or another stacked window (`v`/`h`). That is the whole of a centre drop.
+const addToBlock = (n: DockNode, id: UnitId, add: UnitId): DockNode =>
+  rewriteHolder(n, id, h => (h.t === 'b' ? { ...h, ids: [...h.ids, add] } : h));
+// The mirror of appendToRow: a container, so the unit lands stacked with its kind rather than beside the
+// whole column. Children are searched before the node itself, so an inner container wins over an outer.
+function appendToContainer(n: DockNode, id: UnitId): DockNode | null {
+  if (n.t === 'b') return n.mode !== 'default' ? { ...n, ids: [...n.ids, id] } : null;
+  for (let i = 0; i < n.ks.length; i++) {
+    const r = appendToContainer(n.ks[i], id);
+    if (r) return { ...n, ks: n.ks.map((k, j) => j === i ? r : k) };
+  }
+  return null;
+}
+// The longest block in the tree — the fallback home for a unit with nowhere better to go: a page whose
+// every block is `default` has no container to stack into, and the busiest block is the one the user
+// thinks of as "the column".
+function biggestBlock(n: DockNode): DockBlock | null {
+  if (n.t === 'b') return n;
+  return n.ks.reduce<DockBlock | null>((best, k) => {
+    const b = biggestBlock(k);
+    return b && (!best || b.ids.length > best.ids.length) ? b : best;
+  }, null);
+}
 function placeDoc(dock: Dock, id: UnitId): Dock {
   const shown = dockUnits(dock.tree).find(u => !!docUidOf(u));
   if (shown) return dropInDock(dock, id, shown, 'center');
-  const leaf: DockNode = { t: 'u', id };
+  const leaf: DockNode = block(id);
   return { ...dock, tree: appendToWork(dock.tree, leaf) || appendToRow(dock.tree, leaf) || { t: 's', d: 'h', ks: [dock.tree, leaf] } };
 }
 
@@ -175,19 +243,16 @@ export function syncDocUnits(dock: Dock, open: readonly UnitId[]): Dock {
   return missing.reduce((acc, id) => placeDoc(acc, id), pruned);
 }
 
-export const holds = (n: DockNode, id: UnitId): boolean =>
-  (n.t === 'u' && n.id === id) || (n.t === 'g' && n.ids.includes(id));
+export const holds = (n: DockNode, id: UnitId): boolean => n.t === 'b' && n.ids.includes(id);
 // Take a unit out of the tree. Removing a child is what collapses what it leaves behind (an empty
-// branch, or a split down to one child); a pass that removes nothing restructures nothing, so the same
-// rule pruneDocs follows applies here too — the row a page opens with must survive being touched by an
-// operation about a unit that is not in it.
+// branch, or a split down to one child) — but NOT a block down to one unit: a block keeps its mode, and
+// a `v` block that was just emptied of everything but one unit is still the container the user made.
+// A pass that removes nothing restructures nothing, so the same rule pruneDocs follows applies here too
+// — the row a page opens with must survive being touched by an operation about a unit that is not in it.
 export function detach(n: DockNode, id: UnitId): DockNode | null {
-  if (n.t === 'u') return n.id === id ? null : n;
-  if (n.t === 'g') {
+  if (n.t === 'b') {
     const ids = n.ids.filter(i => i !== id);
-    if (!ids.length) return null;
-    if (ids.length === 1) return { t: 'u', id: ids[0] };
-    return { ...n, ids, sel: Math.min(n.sel, ids.length - 1) };
+    return ids.length ? { ...n, ids, sel: Math.min(n.sel, ids.length - 1) } : null;
   }
   const kept = n.ks.map(k => detach(k, id)).filter((k): k is DockNode => !!k);
   if (!kept.length) return n.work ? { ...n, ks: kept } : null;
@@ -195,15 +260,51 @@ export function detach(n: DockNode, id: UnitId): DockNode | null {
   if (kept.length === 1) return kept[0];
   return { ...n, ks: kept };
 }
-// Rewrite the node that directly owns `id` (a leaf, or the tab group it belongs to).
+// Rewrite the node that directly owns `id` (the block the unit is a member of).
 export function rewriteHolder(n: DockNode, id: UnitId, fn: (holder: DockNode) => DockNode): DockNode {
   if (holds(n, id)) return fn(n);
   if (n.t === 's') return { ...n, ks: n.ks.map(k => rewriteHolder(k, id, fn)) };
   return n;
 }
-// Drop `dragged` on the unit `targetId` at `zone`. Edges split (reusing the nearest ancestor split
-// that already runs that way, so repeated drops make a flat row rather than a spiral of nesting);
-// the centre tabs it in beside the target.
+// What a container's windows are showing at this instant, measured by the view: the box they are sharing,
+// and the size each of them took. Only the view can know it — inside a container a window is exactly as
+// big as its own content, so the model has nothing to write down until the user asks for them to spread.
+export type SpreadSizes = { box: number; members: readonly number[] };
+
+// Alt+P's only write: the block that owns `id` changes mode.
+//   * `v`/`h` gather the block's units into one container — one window each;
+//   * `default` SPREADS a container the other way: every window becomes a block of its own, and the space
+//     they were sharing is handed to them in the proportions they were showing (`spread`).
+// A block that is already `default` keeps its window and its tab strip: one window holding several units
+// is a tab group, which is a shape to keep, not something to spread.
+export const setBlockMode = (dock: Dock, id: UnitId, mode: DockMode, spread?: SpreadSizes): Dock => ({
+  ...dock, tree: rewriteHolder(dock.tree, id, h => (h.t === 'b' ? switchMode(h, mode, spread) : h)),
+});
+const switchMode = (h: DockBlock, mode: DockMode, spread?: SpreadSizes): DockNode => {
+  if (mode !== 'default' || h.ids.length < 2) return { ...h, mode };
+  const shares = spreadShares(h.ids.length, spread);
+  const d: 'v' | 'h' = h.mode === 'h' ? 'h' : 'v';
+  return { t: 's', d, ks: h.ids.map((u, i) => block(u, 'default', shares[i])) };
+};
+// The space the container was handing out, replayed as sizes: each window keeps its share of the box the
+// blocks now tile by (a container whose content was taller than its box was scrolled, so the measured
+// sizes are scaled to fit it). The LAST block is left free, which is the same "one side takes the rest"
+// rule the split drags obey — so the tiling still adds up. Nothing to scale by means every block stays
+// free, and free blocks split the box evenly.
+const spreadShares = (n: number, spread?: SpreadSizes): (number | undefined)[] => {
+  const free = new Array<number | undefined>(n).fill(undefined);
+  if (!spread || spread.members.length < n) return free;
+  const room = spread.box - (n - 1) * DOCK_SPLIT;
+  const seen = spread.members.slice(0, n).map(x => (x > 0 ? x : 0));
+  const sum = seen.reduce((a, b) => a + b, 0);
+  if (!(room > 0) || !(sum > 0)) return free;
+  const out = seen.map(x => Math.max(DOCK_MIN_SZ, Math.round((x * room) / sum)));
+  out[n - 1] = undefined;
+  return out;
+};
+// Drop `dragged` on the block that owns `targetId`, at `zone`. Edges split (reusing the nearest ancestor
+// split that already runs that way, so repeated drops make a flat row rather than a spiral of nesting);
+// the centre adds it to the block — another tab, or another window in a container.
 export const zoneAxis = (z: Zone): 'v' | 'h' => (z === 'left' || z === 'right' ? 'h' : 'v');
 export function placeInTree(n: DockNode, id: UnitId, axis: 'v' | 'h', before: boolean, leaf: DockNode): DockNode {
   if (holds(n, id)) return { t: 's', d: axis, ks: before ? [leaf, n] : [n, leaf] };
@@ -223,12 +324,9 @@ export function placeInTree(n: DockNode, id: UnitId, axis: 'v' | 'h', before: bo
 export const dropInDock = (dock: Dock, dragged: UnitId, targetId: UnitId, zone: Zone): Dock => {
   if (dragged === targetId) return dock;
   const rest: Dock = { tree: detach(dock.tree, dragged) || dock.tree, floats: dock.floats.filter(f => f.id !== dragged) };
-  if (zone === 'center') {
-    const g: DockNode = { t: 'g', ids: [targetId, dragged], sel: 1 };
-    return { ...rest, tree: rewriteHolder(rest.tree, targetId, n => n.t === 'g' ? { ...n, ids: [...n.ids, dragged], sel: n.ids.length } : g) };
-  }
+  if (zone === 'center') return { ...rest, tree: addToBlock(rest.tree, targetId, dragged) };
   const axis = zoneAxis(zone);
-  return { ...rest, tree: placeInTree(rest.tree, targetId, axis, zone === 'top' || zone === 'left', { t: 'u', id: dragged }) };
+  return { ...rest, tree: placeInTree(rest.tree, targetId, axis, zone === 'top' || zone === 'left', block(dragged)) };
 };
 export const floatOf = (dock: Dock, id: UnitId) => dock.floats.find(f => f.id === id);
 // The first pop-out lands to the right of the column; each further one cascades so several windows
@@ -249,19 +347,7 @@ export const setFloatDock = (dock: Dock, id: UnitId, patch: Partial<DockFloat>):
   ...dock,
   floats: dock.floats.map(f => f.id === id ? { ...f, ...patch } : f),
 });
-// Putting a unit back means the panel column: the stacked nest in the tree, which is where stacked
-// units live and the place the user can see it from. Children are searched BEFORE the node itself,
-// because the outermost split of a page is the page — a unit put "back in the column" belongs in the
-// innermost stack, not beside the toolbar row. A tree with no column left grows one.
-export function appendToColumn(n: DockNode, leaf: DockNode): DockNode | null {
-  if (n.t !== 's') return null;
-  for (let i = 0; i < n.ks.length; i++) {
-    const r = appendToColumn(n.ks[i], leaf);
-    if (r) return { ...n, ks: n.ks.map((k, j) => j === i ? r : k) };
-  }
-  return n.d === 'v' ? { ...n, ks: [...n.ks, leaf] } : null;
-}
-// The mirror of appendToColumn, and the reason a document does not land in the settings column when it
+// The mirror of appendToRow, and the reason a document does not land in the settings column when it
 // is put back from a window: the work area is the row, not the stack.
 export function appendToRow(n: DockNode, leaf: DockNode): DockNode | null {
   if (n.t !== 's') return null;
@@ -271,39 +357,45 @@ export function appendToRow(n: DockNode, leaf: DockNode): DockNode | null {
   }
   return n.d === 'h' ? { ...n, ks: [...n.ks, leaf] } : null;
 }
+// Putting a unit back means the place the user can see it from: a container is where stacked units live,
+// so a panel joins the first one it can find — another stacked window there, or another tab. A document
+// goes back to the work area, and never into the settings column.
 export const dockBackDock = (dock: Dock, id: UnitId): Dock => {
   const floats = dock.floats.filter(f => f.id !== id);
-  const leaf: DockNode = { t: 'u', id };
+  const leaf: DockBlock = block(id);
   // Detach BEFORE appending, not after: the point of the detach is that a unit already in the tree
   // cannot end up in it twice, but appending first means the detach removes the node just added —
   // which is how "dock this window back" used to make the unit vanish instead of dock it.
   const rest = detach(dock.tree, id) || dock.tree;
-  // A document goes back to the work area, everything else to the stack.
+  const busiest = biggestBlock(rest);
+  const home = busiest ? () => addToBlock(rest, busiest.ids[0], id) : () => (leaf as DockNode);
   const tree = docUidOf(id)
-    ? appendToWork(rest, leaf) || appendToRow(rest, leaf) || { t: 's', d: 'h', ks: [rest, leaf] }
-    : appendToColumn(rest, leaf) || { t: 's', d: 'v', ks: [rest, leaf] };
+    ? appendToWork(rest, leaf) || appendToRow(rest, leaf) || home()
+    : appendToContainer(rest, id) || home();
   return { tree, floats };
 };
-// Dragging a box's edge fixes THAT box along the axis its split is measured on. Whatever has no size
-// takes the rest — which is why sizing a box clears the size off the nests it sits beside: a sized box
-// next to a sized nest adds up to a row either wider or narrower than the page, and there is no
-// leftover scroller in a horizontal split to absorb the difference.
-export function sizeHolder(n: DockNode, id: UnitId, sz: number | undefined): DockNode {
-  if (n.t === 's') {
-    if (!n.ks.some(k => holds(k, id))) return { ...n, ks: n.ks.map(k => sizeHolder(k, id, sz)) };
-    return { ...n, ks: n.ks.map(k => holds(k, id)
-      ? sizeHolder(k, id, sz)
-      : (k.t === 's' && k.sz !== undefined ? { ...k, sz: undefined } : k)) };
-  }
-  return holds(n, id) ? { ...n, sz: sz === undefined ? undefined : clampSz(sz) } : n;
-}
-export const resizeDock = (dock: Dock, id: UnitId, sz: number | undefined): Dock => ({
-  ...dock, tree: sizeHolder(dock.tree, id, sz),
+// Set (or clear) the size of the node at `path`, counted in child indices from the root. The split
+// handles address boxes this way — by position, not by unit — because the empty work area has no unit
+// in it to be named by, and because a boundary between two nests is a boundary like any other.
+export const sizeAt = (n: DockNode, path: readonly number[], sz: number | undefined): DockNode =>
+  path.length === 0
+    ? { ...n, sz: sz === undefined ? undefined : clampSz(sz) }
+    : n.t === 's'
+      ? { ...n, ks: n.ks.map((k, i) => (i === path[0] ? sizeAt(k, path.slice(1), sz) : k)) }
+      : n;
+// Dragging the boundary between two siblings PINS the one before it and hands the one after its size
+// back to "take the rest". Keeping exactly one side free is what makes a split honest: the row adds up
+// to the page no matter what the pointer does (the dirty alternative — sizing both — drifts, and leaves
+// nothing to absorb a window resize), and the pointer lands where it is because the free side is
+// measured from the page, not from its own old size.
+export const dragSplit = (dock: Dock, prev: readonly number[], next: readonly number[], sz: number): Dock => ({
+  ...dock,
+  tree: sizeAt(sizeAt(dock.tree, next, undefined), prev, sz),
 });
 
-// How far into a unit's box the pointer has to be for that edge to count as a split. Kept well under
-// half so the middle of a unit stays the "tab me in beside it" zone, which is where a pointer aimed
-// at a unit usually lands.
+// How far into a block's box the pointer has to be for that edge to count as a split. Kept well under
+// half so the middle of a block stays the "put it in this block" zone, which is where a pointer aimed
+// at a block usually lands.
 export const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
   const vt = Math.min(34, r.height * 0.32), hl = Math.min(46, r.width * 0.34);
   if (y - r.top < vt) return 'top';
@@ -312,32 +404,12 @@ export const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
   if (r.right - x < hl) return 'right';
   return 'center';
 };
-// Content-sized rows by default so the panel scrolls as one; a size the user dragged in makes that
-// row fixed and moves the scrolling inside it. Only slots carry a size — a split is measured by
-// whatever its own parent says.
-// A unit with nothing to size itself by (a workbench, a popped-out window) always takes a share of its
-// split rather than `0 0 auto`, which would collapse it to a strip. `open` = false is the box folded:
-// a folded one is a bar and gives its share back, or a folded layers list would keep its half of the
-// column as an empty box (the fold itself hides only the body). A size the user dragged is no
-// exception — a folded 400px panel that kept a 400px box would just be an empty half-screen under its
-// own title bar. Along `h` a box is measured by its WIDTH, and folding hides the body, not the column,
-// so a fold leaves that width alone.
-export const flexOf = (axis: 'v' | 'h', sz?: number, grow?: boolean, open = true): string =>
-  axis === 'h' ? (sz ? `0 0 ${sz}px` : '1 1 0')
-    : !open ? '0 0 auto'
-      : sz ? `0 0 ${sz}px`
-        : grow ? '1 1 0' : '0 0 auto';
-// The height a tab GROUP falls back to when the user has never dragged one. A slot holding more than
-// one unit has no single content height to size itself by: whichever tab is showing would set it, and
-// the box would jump every time the user switched. So a group is sized like a box the user dragged,
-// and switching tabs never moves it (the body scrolls instead). Grow units are exempt — they already
-// take a share of the column.
-export const DOCK_GROUP_H = 220;
-// The floor under an open grow box: `1 1 0` shares only what is LEFT, and a column whose other panels
-// alone already overflow has nothing left — the fallback layout opens every tool panel, and without
-// this the two lists under them resolve to 0 (a 0.5px-bordered hairline). Sized boxes are the user's
-// own drag and need no floor.
+// A block's size along its parent's axis: the one the user dragged, or a share of what is left. NOTHING
+// sizes to its content — the frame divides the page and the content scrolls inside its block. (A window
+// inside a container is the exception, and it is measured in DockView: it is `0 0 auto`, and the block
+// scrolls.)
+export const flexOf = (sz?: number): string => (typeof sz === 'number' && sz > 0 ? `0 0 ${sz}px` : '1 1 0');
+// The floor under a share inside a container: `1 1 0` shares only what is LEFT, and a container whose
+// other members alone already overflow has nothing left — without this the workbench resolves to 0 and
+// the frame has nowhere to be.
 export const DOCK_GROW_MIN_H = 160;
-// Whether a node - a box, or a whole nest - has anything in it that needs a share of the space.
-export const hasGrowth = (n: DockNode, rules: DockRules): boolean =>
-  dockUnits(n).some(u => rules.grows(u));

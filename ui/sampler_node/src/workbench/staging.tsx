@@ -146,7 +146,12 @@ const StagingBody: React.FC<WorkbenchUnitProps> = ({ send, host }) => {
 
   const staging = host.staging;
   const contextSrc = host.blendPreview?.image || '';
-  const guidanceSrc = staging.find(x => x.id === GUIDANCE_ID)?.src || '';
+  // 显示只认宿主手里这份（iframe 直接发来的）：图池里那条 staging_guidance 是全局一格，
+  // 任何别的实例一写就会顶掉，而 iframe 端去重让它不会自己修回来 —— 于是那张卡会显示成
+  // 别人画布上的图。只有「这一页还没收到过」才回落到池子里那条。
+  const guidanceSrc = host.guidanceCard !== null
+    ? host.guidanceCard
+    : (staging.find(x => x.id === GUIDANCE_ID)?.src || '');
   const items = staging.filter(x => x.id !== GUIDANCE_ID);
 
   const srcFor = useCallback<SrcFor>((id) => {

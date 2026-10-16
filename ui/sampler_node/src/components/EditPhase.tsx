@@ -3,7 +3,7 @@ import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockP
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
-import { type DockRules, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, syncDocUnits } from '../dock/model';
+import { type DockMode, type DockRules, type SpreadSizes, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
 import { DockPanel } from '../dock/DockView';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 
@@ -68,12 +68,16 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     // A document window never folds: its fold would be stored under a uid the workbench re-issues from
     // 1 on its next boot, and a collapsed canvas box leaves the live frame with nowhere to be. Its title
     // bar already has a job — it says which project the workbench is running.
+    // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDoc(id),
     fullBleed: (id: UnitId) => isDoc(id) || id === 'toolbar',
-    // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：拍板 1.a 要它们把工具列剩下的
-    // 高度按 1:1 平分，所以在 dock 里也得跟着文档窗格长。其余面板照旧按内容占高。
+    // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
+    // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
     grows: (id: UnitId) => isDoc(id) || id === 'layers' || id === 'guidances',
     top: 'toolbar',
+    // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
+    // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
+    topH: 60,
     column: COLUMN_IDS,
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里。
@@ -405,6 +409,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [showLog, setShowLog] = useState(false);
   // Live thumbnail of the workbench composite — that composite *is* the Context Image.
   const [blendPreview, setBlendPreview] = useState<{ image: string; size: string } | null>(null);
+  // Guidances 那张总卡的本客户端副本（与 blendPreview 同一条消息通道来）。图池里的
+  // staging_guidance 是**全局一格**：别的实例（另开的浏览器标签页、第二只壳）一写就会顶掉它，
+  // 而 iframe 端只在「自己算出来的图变了」时才重发 —— 所以池里那条只当 run 的取图用，
+  // STAGING 的显示只认这一份本地副本。
+  const [guidanceCard, setGuidanceCard] = useState<string | null>(null);
   // Mask tint of that thumbnail, 0..1. Its own slider: the workbench's Mask layer has a separate
   // one that only tints the canvas. The tinting itself happens in the iframe, so we forward it.
   const [previewTint, setPreviewTint] = useState(0.3);
@@ -424,13 +433,12 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   // The Pipeline Presets "Add +" dropdown — same control, same behaviour as the Blocks one.
   const [presetAddMenu, setPresetAddMenu] = useState<{ x: number; y: number } | null>(null);
-  // 四块面板的折叠状态（默认全展开，改动落 localStorage）。折叠是**那一格**（dock 的一个盒子 =
-  // 一条标题条）的事，不是某一个 tab 的事：所以这里收的是一串 id —— 同一个盒子里的单元一起折、一起开，
-  // 切 tab 不会换一个展开状态。
+  // 面板的折叠状态（默认全展开，改动落 localStorage）。折叠只在**容器 Block**（Vertical/Horizontal）里
+  // 的窗口上存在：那里一个单元一个窗口，折起一个就是把它占的高度还给同块的其他窗口。Default 模式的块里
+  // 没有折叠 —— 一个窗口撑满整块，没有可折的余地。所以这里收的是一颗 id。
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>(loadSections);
-  const setFold = (ids: UnitId[], open: boolean) => setOpenSections(prev => {
-    const next = { ...prev };
-    for (const id of ids) next[id] = open;
+  const setFold = (id: UnitId, open: boolean) => setOpenSections(prev => {
+    const next = { ...prev, [id]: open };
     try { localStorage.setItem(SECTIONS_STORE, JSON.stringify(next)); } catch { /* in-memory only */ }
     return next;
   });
@@ -438,8 +446,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
   const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
   // 工作台那几格能碰到的宿主事实：图池镜像、画布合成预览、图池的两个后端写口。正文与动作条共用同一份。
-  const wbHost = useMemo(() => ({ staging, blendPreview, stageUpload, stageRemove }),
-    [staging, blendPreview, stageUpload, stageRemove]);
+  const wbHost = useMemo(() => ({ staging, blendPreview, guidanceCard, stageUpload, stageRemove }),
+    [staging, blendPreview, guidanceCard, stageUpload, stageRemove]);
   const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
   const applyDock = useCallback((next: Dock, persist = true) => {
     setDockState(next);
@@ -458,11 +466,49 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<UnitId | null>(null);
   const [dockOver, setDockOver] = useState<{ id: UnitId; zone: Zone } | null>(null);
+  // ── BLOCK 编辑模式 ── 按住 Alt+P 才在，松开（或窗口失焦）就退出。所以模式控件平时完全不在页面上：
+  // 一块怎么排是装修，不是日常操作，Alt+P 就是那道暗门。它唯一的写口是 setMode。
+  const [blockEdit, setBlockEdit] = useState(false);
+  useEffect(() => {
+    const keyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'KeyP') return;
+      if (e.altKey) { e.preventDefault(); setBlockEdit(true); }
+      else setBlockEdit(false);
+    };
+    const keyUp = (e: KeyboardEvent) => { if (e.code === 'KeyP' || e.key === 'Alt') setBlockEdit(false); };
+    const blur = () => setBlockEdit(false);
+    window.addEventListener('keydown', keyDown);
+    window.addEventListener('keyup', keyUp);
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('keydown', keyDown);
+      window.removeEventListener('keyup', keyUp);
+      window.removeEventListener('blur', blur);
+    };
+  }, []);
+  // Alt+P 唯一的写口：把拥有 `id` 的那一块换成这个模式（Default 收成一行 tab，Vertical/Horizontal
+  // 摊成一个单元一个窗口）。块本身没变，变的是它怎么摆它的成员。
+  const setMode = (id: UnitId, mode: DockMode, spread?: SpreadSizes) => applyDock(setBlockMode(dock, id, mode, spread));
   useEffect(() => {
     const end = () => { setDockDrag(null); setDockOver(null); };
-    window.addEventListener('dragend', end);
-    window.addEventListener('drop', end);
-    return () => { window.removeEventListener('dragend', end); window.removeEventListener('drop', end); };
+    // CAPTURE, on purpose, on all three. A drop is handled by React at the root container, which calls
+    // stopPropagation — a bubbling listener here never hears about it. And `dragend` fires at the
+    // SOURCE element: a drop that moves a unit out of its own block deletes that grip from the DOM, and
+    // an event dispatched at a node no longer in the document does not reach `window` at all. A drag
+    // nobody ended leaves the page believing one is still running — the landing bands stay up and the
+    // live workbench stays faded out behind an iframe that no longer takes the pointer, which reads as
+    // "this canvas window stopped rendering". The browser suppresses the mouse for the whole of a drag,
+    // so the next release is proof that none is left: that is the backstop for the cases where both the
+    // drop and the dragend went somewhere this page cannot see.
+    const on = { capture: true } as const;
+    window.addEventListener('dragend', end, on);
+    window.addEventListener('drop', end, on);
+    window.addEventListener('mouseup', end, on);
+    return () => {
+      window.removeEventListener('dragend', end, on);
+      window.removeEventListener('drop', end, on);
+      window.removeEventListener('mouseup', end, on);
+    };
   }, []);
   // ── THE LIVE WORKBENCH ──
   // One frame for the whole page, because it owns every open project: an <iframe> moved in the DOM
@@ -661,6 +707,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     };
     window.addEventListener('message', onPreview);
     return () => window.removeEventListener('message', onPreview);
+  }, []);
+
+  // Guidances 那张总卡：iframe 合成好就发一张（空栈 / 全隐藏时 image 为空 = 撤回那张卡）。
+  // 显示只认这一份，不再从图池读 —— 池子那格会被别的实例覆盖，也不会自己修回来。
+  useEffect(() => {
+    const onGuidance = (event: MessageEvent) => {
+      if (event.data?.type !== 'blend-guidance-card') return;
+      setGuidanceCard(typeof event.data.image === 'string' ? event.data.image : '');
+    };
+    window.addEventListener('message', onGuidance);
+    return () => window.removeEventListener('message', onGuidance);
   }, []);
 
   const applyPreviewTint = useCallback((v: number) => {
@@ -997,7 +1054,10 @@ const EditPhase: React.FC<EditPhaseProps> = ({
            content first and as chrome second. */
         .dock-bar .dock-h { opacity: 0.28; }
         .dock-bar:hover .dock-h { opacity: 1; }
-        .dock-edge:hover { background: rgba(10,132,255,0.22); }
+        /* 块与块之间那条 8px 的缝**就是**把手：它平时是空的（看起来只是间隙），hover 才亮。
+           Alt+P 的编辑模式里它常亮，因为那时候用户就是在找它。 */
+        .dock-split:hover { background: rgba(10,132,255,0.25); }
+        .dock-split-edit { background: rgba(10,132,255,0.22); }
         .dock-corner:hover { filter: brightness(1.6); }
       `}</style>
       {/* Sidebar — vertical icon tabs */}
@@ -1044,7 +1104,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               user restacks, not a panel bolted beside a frame. */}
           <DockPanel ctx={{
                 rules: dockRules,
-                isOpen: (id: UnitId) => openSections[id] !== false, setFold,
+                isOpen: (id: UnitId) => openSections[id] !== false, fold: setFold,
+                edit: blockEdit, setMode,
                 dock, setDock: applyDock,
                 drag: dockDrag, setDrag: setDockDrag,
                 over: dockOver, setOver: setDockOver,
