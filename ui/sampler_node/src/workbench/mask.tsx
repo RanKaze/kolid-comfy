@@ -3,10 +3,10 @@ import { wbStyles } from './skin';
 import { useBlendUi } from './store';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 
-// Mask 这一格是页面原来的 #maskSection 与 #maskDock 合成的那一格（拍板 6.a）：上面一行说"这一笔落在
-// 哪一面"，下面一行是那张覆盖面自己。两枚 Invert 不是重复入口 —— 一枚反的是笔尖那一步的面（点过哪枚
-// chip 就反那颗），一枚反 Mask 层整张（不问此刻选中谁）。页面原来就是这么分的，措辞各报各的目标，
-// 合并以后照旧各留一枚。
+// Mask 这一格就是页面原来的 #maskDock 合成的那一格（拍板 6.a）：那张覆盖面自己。
+// 曾经上面还有一行"笔落在哪一面"（键帽徽章 + 目标名 + 笔尖那枚 Invert）。用户拍板全撤：键帽是
+// 快捷键提示；目标名那串字不留；笔尖 Invert 是重复入口 —— 整层的 Invert / Full / Clear 就在
+// 下面这一行里。撤完以后这一格只剩覆盖面本体：缩略图 + 三颗整层动作 + 眼睛。
 // 缩略图这一格是这一列里第一个真要传像素的面：那张覆盖面住在本页绘制引擎里（maskLayer.decal 是一块活
 // canvas），宿主页画不出它。页面把它按原来那颗 thumb 的 84×56 编成一帧 PNG 交过来，所以这里的 <img>
 // 看到的就是原来 canvas 上的那一份像素；它只在面真的换过之后才重编（见 blend_node.html 的 syncMaskStill）。
@@ -28,45 +28,12 @@ const LAYER_ACTIONS: { action: 'mask-layer-invert' | 'mask-layer-full' | 'mask-l
   { action: 'mask-layer-clear', label: 'Clear', title: 'Clear the Mask layer — nothing covered, so the actions run on the whole image' },
 ];
 
-// 目标名与它那句话说的是"笔现在落在谁身上"。原来这一段写在被删掉的小节标题上，标题会被程序改写，
-// 所以徽章另有内层 span —— 搬进 dock 以后名字由正文拼，标题条归宿主，可观察差别一个都不少。
-const targetName = (maskLayer: boolean) => (maskLayer ? 'Mask Layer' : 'Mask / Decal');
-const KEY_NOTE = 'Tab paints the last Decal step, ` the last Mask step';
-const targetSentence = (maskLayer: boolean, decal: boolean) => maskLayer
-  ? 'The Mask layer: a canvas-sized coverage channel sent to the backend. The brush covers, the eraser uncovers. '
-    + 'The Mask row in Layers carries Invert / Full / Clear for the whole layer. It has one surface, so neither Tab nor ` has anywhere to put it.'
-  : decal
-    ? `Paint the decal (${KEY_NOTE}): colour sits on top of the image and under the mask. Left-drag paints with the active tool `
-      + '— the right button does nothing. The wheel resizes the tool, Alt + right-drag scrubs its size. The Decal chips on this '
-      + "layer's strip are the same switch, and clicking one names WHICH decal the brush lands on."
-    : `Paint the mask (coverage) (${KEY_NOTE}): white shows the image, black hides it. The Color's Alpha caps how much coverage `
-      + 'one pass can pour. Left-drag applies the active tool — the right button does nothing. The wheel resizes the tool, '
-      + "Alt + right-drag scrubs its size. The Mask chips on this layer's strip are the same switch, and clicking one names "
-      + 'WHICH mask the brush lands on.';
-
 const MaskBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
   const armed = ui.mode === 'mask';
-  const decal = ui.paint.decal && !ui.paint.maskLayer;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: 4,
       ...(armed ? wbStyles.armed : null) }}>
-      {/* 笔落在哪一面：两枚键徽章 + 目标名，右边那枚 Invert 反的是这一面。decal 面上没有覆盖率可反，
-          所以那一格干脆不出现 —— 页面原来用 style.display 藏它，现在是没人渲染这一颗。 */}
-      <div style={wbStyles.row}>
-        <span style={{ ...wbStyles.key, ...(armed ? wbStyles.keyOn : null) }}
-          title="The key for the mask: always paints the mask">`</span>
-        <span style={{ ...wbStyles.key, ...(armed ? wbStyles.keyOn : null) }}
-          title="The key for the decal: always paints the decal">Tab</span>
-        <span style={{ ...wbStyles.ctrlLabel, width: 'auto', fontWeight: 600, color: 'rgba(255,255,255,0.92)' }}
-          title={targetSentence(ui.paint.maskLayer, decal)}>{targetName(ui.paint.maskLayer)}</span>
-        {!decal && (
-          <button style={{ ...wbStyles.btn, marginLeft: 'auto' }}
-            title={'Invert the mask the brush is on — the Mask chip you clicked, or the last Mask step after `'
-              + ': hidden areas become visible and the other way round'}
-            onClick={() => send('mask-invert')}>Invert</button>
-        )}
-      </div>
       {/* 覆盖面自己：整行点一下就是把笔交给它（页面那行 row.addEventListener('click', selectMaskLayer)）。 */}
       <div style={{ ...wbStyles.row, padding: 5, borderRadius: 8, cursor: 'pointer',
         background: ui.paint.maskLayer ? 'rgba(255,59,48,0.2)' : 'rgba(255,59,48,0.10)',
@@ -97,7 +64,7 @@ const MaskBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
 export const maskUnit: WorkbenchUnit = {
   id: 'mask',
   title: 'Mask',
-  hint: 'Mask / Decal — which face this brush paints, and the coverage channel the backend gets. '
-    + '` arms the mask, Tab the decal; the row underneath is the Mask layer itself, with Invert / Full / Clear for the whole layer.',
+  hint: 'The coverage channel the backend gets — a canvas-sized alpha, never composited into the Context Image. '
+    + 'This row is the Mask layer itself: Invert / Full / Clear act on the whole layer.',
   Body: MaskBody,
 };

@@ -4,7 +4,7 @@ import {
   type ZonePoint, type ZoneRect,
   DOCK_GROW_MIN_H, DOCK_MIN_SZ, DOCK_SPLIT, FLOAT_MIN_H, FLOAT_MIN_W,
   defaultDock, dead, clampSz, dockBackDock, dockFloor, docUidOf, dragOutUnits, dragSplit, dropUnits, flexOf, floorPct, freezeAt, nodeAt, popOutDock,
-  rewriteHolder, setFloatDock, sizeAt, moveCell, mergeIntoMember, insertCellAt, pullOutAt, cellsOf, zoneAxis, zoneOf, zonePoly, zoneRect,
+  rewriteHolder, setFloatDock, sizeAt, mergeIntoMember, insertCellAt, pullOutAt, cellsOf, zoneAxis, zoneOf, zonePoly, zoneRect,
 } from './model';
 // 探针的轨迹钩子。这里只发"发生了什么"，不做判断、不读布局 —— 判断留在探针那边，
 // 免得把排查规则散进渲染层（那才是第二份真相）。
@@ -27,13 +27,6 @@ const dockStyles: Record<string, React.CSSProperties> = {
   // 标题条是一条会长的行：一格里塞进来一堆单元时，那一排 tab 换行，而不是挤成一行被剪掉。
   dockBar: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 26, padding: '0 4px', flexShrink: 0, background: '#232325', borderBottom: '0.5px solid rgba(84,84,88,0.55)', userSelect: 'none' },
   dockGrip: { flexShrink: 0, display: 'flex', alignItems: 'center', cursor: 'grab', color: '#8e8e93' },
-  // 容器成员的 reorder 把手：比动作按钮窄一点，免得和折叠/弹出抢点击区。`touchAction:none` 是因为
-  // 它走指针拖拽 —— 在触摸屏上先滚起来，这一趟就再也收不到 pointermove 了。
-  //
-  // 光标不是 `grab`：旁边那颗六点才是"抓住搬家"，这一颗只在本块里换位。两个都写 `grab` 的话，
-  // 用户伸手抓到哪一颗都以为是在搬窗口 —— 抓到这一颗时窗口当然一动不动，这就是"拖不走"的来源。
-  // `ns-resize` / `ew-resize` 说的正是它真做的事：沿这条轴挪个位置。
-  dockOrder: { flexShrink: 0, width: 13, height: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'none', border: 'none', borderRadius: 4, color: '#6f6f74', padding: 0, touchAction: 'none' },
   // 拖动中的插入线：它回答的是"松手之后插在哪"，所以画在成员之间的**空隙**上，不画在成员身上。
   dockOrderLine: { position: 'fixed', zIndex: 69, pointerEvents: 'none', background: '#0a84ff', borderRadius: 1, boxShadow: '0 0 6px rgba(10,132,255,0.75)' },
   dockName: { flex: 1, minWidth: 0, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase', color: '#8e8e93', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -212,18 +205,13 @@ const DockBackIcon: React.FC = () => (
     <path d="M12 2H8.5M12 2v3.5M2 12h3.5M2 12V8.5" />
   </svg>
 );
-// 容器块里每个窗口的 **reorder 把手**。它和旁边那颗六点把手是两件不同的事，所以不能长一个样：
-//   * 六点 = 把这个窗口整个搬走（停到别处 / 浮出来），走 dock 的 HTML5 drag，会产生落点预览；
-//   * 这一颗 = 只改它在**这个块里**的名次，走指针拖拽，只画一条插入线，不会把窗口搬到别的块去。
-// 图标本身就是方向的答案：竖着叠的块给上下箭头，横着排的给左右箭头 —— 用户不用先读 tooltip。
-const OrderIcon: React.FC<{ axis: 'v' | 'h' }> = ({ axis }) => (
-  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.25"
-    strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
-    {axis === 'v'
-      ? <><path d="M6 1.6v8.8M3.5 4 6 1.6 8.5 4M3.5 8 6 10.4 8.5 8" /></>
-      : <><path d="M1.6 6h8.8M4 3.5 1.6 6 4 8.5M8 3.5 10.4 6 8 8.5" /></>}
-  </svg>
-);
+// 容器块里每个窗口的 **reorder 把手**已撤掉（拍板：重排并进最原本的拖拽）。
+// 抓手只剩六点那一颗，它同时做三件事，按落点分流：
+//   * 停到别的块的边/中 = 分割或并入（HTML5 拖拽 + 落点预览）；
+//   * 停到**本块**成员与成员之间的缝上 = 在这一格里换名次（同一条插入线，见 gapIndexAt）；
+//   * 拖出这一块放手 = 浮成独立小窗。
+// 曾经另有一颗 ⇕ 把手专管"只在本块内重排"，把手那一套（指针拖拽 + ro 状态）整条删除 ——
+// 两条手势做同一件事，留两颗抓处只会让人先猜该抓哪颗。
 
 const ZoneArrow: React.FC<{ zone: Zone }> = ({ zone }) => {
   if (zone === 'center') return null;
@@ -334,24 +322,12 @@ const stackStyle = (mode: 'v' | 'h'): React.CSSProperties => ({
   overflowX: mode === 'h' ? 'auto' : 'hidden',
 });
 
-// 一次块内重排的把手接口。把手长在**成员**的标题栏上（用户已经知道那里能抓东西），但"现在算第几位"
-// 是**整块**的判断：成员之间的缝、折叠后的高度、块的滚动，只有块这一层才看得全。所以把手只负责把
-// 指针交上去，由块决定目标下标、由块画那条插入线。
-export type OrderApi = {
-  index: number;
-  axis: 'v' | 'h';
-  down: (e: React.PointerEvent<HTMLButtonElement>) => void;
-  move: (e: React.PointerEvent<HTMLButtonElement>) => void;
-  up: () => void;
-};
-
 // ONE DOCK WINDOW — a title bar, a body, and the unit's action row under it. A block in `default` mode
 // IS this window (and hands it its own card); a block in `v`/`h` mode is a stack of them, each drawing
 // its own card. A floated unit is one of these too, pinned to the viewport.
 const DockWindow: React.FC<{
   node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; stacked?: boolean; float?: DockFloat; solo?: boolean;
-  order?: OrderApi;
-}> = ({ node, ctx, axis, stacked, float, solo, order }) => {
+}> = ({ node, ctx, axis, stacked, float, solo }) => {
   const ids = node.ids;
   // 工作台播报前，树里存档的 doc:* 尚未验证（rules.known 为 false）：sel 指着它时就先显示这一格
   // 第一个已验证的单元 —— 既不闪一扇标题为 "doc:1" 的空窗，也不让整格无端消失；播报一到，sel 指的
@@ -445,21 +421,9 @@ const DockWindow: React.FC<{
           tabs opposite are the items' own titles, and a drag on one of those takes that item ALONE out
           of the group — which is the whole difference between the two gestures (see DockDrag). */}
       <span className="dock-h" data-dock-grip {...grab(ctx, ids)}
-        title={'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.'}
+        title={'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
         onClick={e => e.stopPropagation()}
         style={dockStyles.dockGrip}><GripDots /></span>
-      {/* 第二颗把手：只改它在这个容器块里的名次。没有它，容器里唯一的"抓处"就是上面那颗 —— 拖它
-          只能把窗口搬到别的块去，"往上挪一格"这个最常见的动作反而没有手势可做。
-          只有容器成员、且块里不止一个成员时才出现：一格没有第二条可排。 */}
-      {order && (
-        <button className="dock-h" data-dock-order={order.axis}
-          title={`拖动改它在这个块里的顺序（现在是第 ${order.index + 1} 位）—— 只在本块内重排，不会搬去别的块；要搬走请拖左边的六点或标题栏`}
-          style={{ ...dockStyles.dockOrder, cursor: order.axis === 'v' ? 'ns-resize' : 'ew-resize' }}
-          onPointerDown={order.down} onPointerMove={order.move} onPointerUp={order.up} onPointerCancel={order.up}
-          onClick={e => e.stopPropagation()}>
-          <OrderIcon axis={order.axis} />
-        </button>
-      )}
       {ids.length > 1 ? (
         <div style={dockStyles.dockTabs}>
           {/* 播报前存档的 doc:* 还没验证：不出现在 tab 条上（它此刻的标题只是内部 id）。下标仍按
@@ -688,7 +652,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
         return;
       }
       // 缝（`stackStyle` 的 gap，flex 里没有 DOM 的那 6px）是谁的落点：
-      //   * 手里是本块自己的成员 → 整格搬到那一位（`moveCell`，组跟着格走）；
+      //   * 手里是本块自己的成员 → 整格搬到那一位（`pullOutAt`，整格在手时等价 moveCell，组跟着格走）；
       //   * 手里是别处的窗口   → 作为新的一格插到那一位（`insertCellAt`，容器不拆）。
       // 按在格子上仍然各有各的地盘（上面合并 / 下面 zone 四分），缝不抢 —— 一次拖拽两种目标，
       // 各占一块地，互不抢（见 gapIndexAt）。
@@ -816,24 +780,18 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     });
   };
   // ── 容器成员的**重排** ────────────────────────────────────────────────────────────────────────
-  // 把手长在成员身上，判断却只能在块身上：成员之间没有 DOM 节点（它们是 flex 的 gap），折叠之后
-  // 只剩一条标题栏、块的 scroller 也在这里 —— "现在算第几位"只有块量得全。所以把手把指针交上来。
+  // 一颗抓处做全部的事：抓住六点/标题栏拖，落点决定它是什么动作 —— 别的块的边/中是分割或并入，
+  // **本块成员之间的缝**是换名次，dock 的空背景是浮成小窗。所以判断必须做在块身上：成员之间没有
+  // DOM 节点（它们是 flex 的 gap），折叠之后只剩一条标题栏、块的 scroller 也在这里。
   //
   // 拖动期间**不动树**：每帧改一次就要每帧写一次 localStorage，成员还会在指针底下跳着换位。松手时
   // 才搬一次 —— 过程里用户看到的是那条插入线，落定才看到结果，和停靠预览是同一套节奏。
   //
   // 这里说的"第几位"是**格**的下标：一格可能就是一条 tab 组（Alt 合并），整格一起搬，组不拆。
   const cells = cellsOf(node);
-  const many = cells.length > 1;
-  // 重排按格给：容器里不止一格就给。格子里有没有 tab 组不影响 —— 搬的是整格，组跟着走，
-  // 既没有两套下标要换算，也不会出现"把组里的某一个挪走"这种拆组动作。
-  const canOrder = many;
-  const [ro, setRo] = useState<{ from: number; to: number; out: boolean; line: { x: number; y: number; w: number; h: number } | null } | null>(null);
-  // 拖拽（不是把手）指着**格与格之间的缝**时的落点预览。和 `ro` 分开存，是因为两者的手分手不合的时
-  // 候不同：把手那一路全程没有 ctx.drag，而拖拽那一路要在拖拽结束（Esc / 拖出后松手）时由下面那个
-  // effect 收掉线 —— 共用一份状态会把把手那路的线在它还没开始的瞬间就擦掉。
-  // `partial` = 手里是 tab 组里的某几个 tab：松手时源格收缩、这几个 tab 自立门户（pullOutAt），
-  // 不是"整格搬到那一位"（moveCell）。
+  // 拖拽指着**格与格之间的缝**时的落点预览。`partial` = 手里是 tab 组里的某几个 tab：松手时源格
+  // 收缩、这几个 tab 自立门户（pullOutAt），不是"整格搬到那一位"（整格在手时 pullOutAt 即等价
+  // moveCell，见 model.ts）。
   const [gap, setGap] = useState<{ from: number; to: number; partial: boolean; line: { x: number; y: number; w: number; h: number } } | null>(null);
   useEffect(() => { if (!ctx.drag && gap) setGap(null); }, [ctx.drag, gap]);
   // 只要"这一落点不再承诺插队"，线就得收回去 —— 换到某格去合并、拖出这一块、松手、拖拽被取消，
@@ -859,8 +817,15 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     const kids = [...el.querySelectorAll<HTMLElement>(':scope > [data-dock-member]')];
     if (!kids.length) return null;
     const to = Math.max(0, Math.min(kids.length - 1, partial ? k : (k > from ? k - 1 : k)));
-    // 线的位置按**原序列**的边界算：往自己前面插就在 kids[to] 前面，往后面插就在 kids[to+1] 前面。
-    const edge = to < from ? to : to + 1;
+    // 线画在哪一刀，要看 `to` 是哪个口径的下标 —— 两种拖法不能共用一个公式：
+    //   * 整格搬移：`to` 是**移除后**的下标。落在身后（to >= from）时，移除让后面的成员各前移了
+    //     一位，这一刀后面那个成员在原序列里是 to+1，线画在 kids[to] 与 kids[to+1] 之间；落在身前
+    //     （to < from）时没人前移，线画在 kids[to-1] 与 kids[to] 之间。
+    //   * 从组里拆 tab：源格还在（只是少了几个 tab），没人前移，`to` 就是**原序列**下标 —— 线永远
+    //     画在 kids[to-1] 与 kids[to] 之间，即 `to` 这一刀。
+    // 混用一个公式（`to < from ? to : to + 1`）时，partial 的线会比落点低一条缝：用户瞄的是这一刀，
+    // 松手却落在上一刀 —— 报上来的"拖到 i 却落到 i+1"正是这个（落点一直跟着光标走，是线在骗人）。
+    const edge = partial ? to : (to < from ? to : to + 1);
     const el0 = el.getBoundingClientRect();
     const rs = kids.map(x => x.getBoundingClientRect());
     // 落在**缝的正中间**：取这一刀两侧那两个成员各自对着它的那条边的中点。以前是贴着后一个成员的
@@ -871,20 +836,6 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
       ? { x: el0.left, y: seamMid(prev?.bottom, next?.top, el0.top, el0.bottom) - 1, w: el0.width, h: 2 }
       : { x: seamMid(prev?.right, next?.left, el0.left, el0.right) - 1, y: el0.top, w: 2, h: el0.height };
     return { to, line };
-  };
-  // 插入位置：越过几个成员的"中线"，就是插在第几个前面。用中线而不是边缘，是因为这样两半都归它 ——
-  // 指针落在成员的**任何地方**都能说清楚"就放这儿"，不必瞄准那两个成员之间 6px 的缝。
-  const slotAt = (el: HTMLElement, x: number, y: number, from: number) => {
-    const kids = [...el.querySelectorAll<HTMLElement>(':scope > [data-dock-member]')];
-    if (!kids.length) return null;
-    const p = dir === 'v' ? y : x;
-    let k = kids.length;
-    for (let i = 0; i < kids.length; i++) {
-      const r = kids[i].getBoundingClientRect();
-      const mid = dir === 'v' ? r.top + r.height / 2 : r.left + r.width / 2;
-      if (p < mid) { k = i; break; }
-    }
-    return slotFor(el, k, from);
   };
   // 指针是不是落在两个成员**之间**那道缝上 —— 容器是 flex-gap 排版，缝里没有 DOM，`memberUnder`
   // 两种命中都够不到它。返回"插在第几个前面"（原序列下标），不在缝上返回 null。
@@ -909,51 +860,6 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     }
     return null;
   };
-  const orderDown = (index: number) => (e: React.PointerEvent<HTMLButtonElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault(); e.stopPropagation();
-    // 按下时先不画线：手还没动，一条"你要插在这里"的线是在回答一个还没问的问题。
-    setRo({ from: index, to: index, out: false, line: null });
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* 合成事件没有真指针，靠冒泡也收得到 */ }
-  };
-  const orderMove = (e: React.PointerEvent<HTMLButtonElement>) => {
-    const el = boxRef.current;
-    if (!el || !ro) return;
-    // 拖出这一块 = 这个手势结束了。夹到首/尾会假装"你要插在最后一位"，可用户真正想做的是把它
-    // 搬到别的块去 —— 那是六点/标题栏的事。这里宁可不做事，也不能给一个错的结果。留 20px 余量：
-    // 想把窗口拖到末尾的人会在边缘附近松手，那不算"出去"。
-    //
-    // "这一块"的范围取自**成员的并集**，不是块的 clientRect：横排容器里的成员常常比块本身宽
-    // （块是 overflowX:auto 的 scroller，成员按内容定宽），用 clientRect 判会把指针还在成员身上
-    // 的那一段当成"出去了"。
-    const kids = [...el.querySelectorAll<HTMLElement>(':scope > [data-dock-member]')];
-    if (!kids.length) return;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const k of kids) {
-      const r = k.getBoundingClientRect();
-      if (r.left < minX) minX = r.left;
-      if (r.right > maxX) maxX = r.right;
-      if (r.top < minY) minY = r.top;
-      if (r.bottom > maxY) maxY = r.bottom;
-    }
-    const out = e.clientX < minX - 20 || e.clientX > maxX + 20 || e.clientY < minY - 20 || e.clientY > maxY + 20;
-    if (out) {
-      if (ro.line || !ro.out) setRo({ from: ro.from, to: ro.from, out: true, line: null });
-      return;
-    }
-    const at = slotAt(el, e.clientX, e.clientY, ro.from);
-    if (at && (at.to !== ro.to || !ro.line || ro.out)) setRo({ from: ro.from, to: at.to, out: false, line: at.line });
-  };
-  const orderUp = () => {
-    const s = ro;
-    setRo(null);
-    if (!s || s.out || s.to === s.from) return;
-    // 按格搬：拿这一格的首个单元当"这一格"的名字，tab 组整格跟着走。
-    const id = cells[s.from]?.[0];
-    if (!id) return;
-    note('reorder', { block: target, unit: id, from: s.from, to: s.to });
-    ctx.setDock(moveCell(ctx.dock, id, s.to));
-  };
   // A block with no dragged size shares what its siblings leave, and that share has a floor — the
   // frame's, never the content's. It is what lets a split drag promise the neighbour keeps DOCK_MIN_SZ
   // (see SplitHandle): without it a free block can be starved under the floor and the boundary stops
@@ -974,7 +880,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     ? { outline: '1px dashed rgba(10,132,255,0.75)', outlineOffset: -1 }
     : undefined;
   const picker = ctx.edit ? <ModePicker node={node} ctx={ctx} /> : null;
-  const dropLine = ro?.line ?? gap?.line ?? null;
+  const dropLine = gap?.line ?? null;
   // `dragenter` 与 `dragover` 共用一套判定，这不是冗余：按拖拽规范，指针**进入**一个新元素时只派发
   // `dragenter`，在同一元素内继续移动才派发 `dragover`，而松手时是否派发 `drop` 取决于最后一次
   // `dragover`/`dragenter` 有没有被取消。只接 `dragover` 的那一版，"最后一移刚好跨过一个元素
@@ -994,23 +900,20 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     );
   }
   // 容器真正的成员是**格**，不是单元：一格可能挂着一条 tab 条（Alt 合并，见 mergeIntoMember）。
-  // 一格一个时它和 ids 一一对应，和老行为完全一致。cells/many/canOrder 在重排区上面算好了。
+  // 一格一个时它和 ids 一一对应，和老行为完全一致。
   return (
     <div className="dark-scroll" data-dock-block={target} ref={boxRef}
-      style={{ ...stackStyle(dir), ...chrome, ...edit, ...(ro ? { userSelect: 'none' } : null) }}
+      style={{ ...stackStyle(dir), ...chrome, ...edit }}
       onDragEnterCapture={onDragIn} onDragOverCapture={onDragOver} onDragLeaveCapture={onDragLeaveCapture} onDropCapture={onDrop}>
-      {cells.map((cell, i) => (
+      {cells.map(cell => (
         <DockWindow key={cell[0]} ctx={ctx} axis={dir} stacked solo={cells.length === 1}
-          order={canOrder
-            ? { index: i, axis: dir, down: orderDown(i), move: orderMove, up: orderUp }
-            : undefined}
           node={{ t: 'b', ids: cell, sel: shownSel(node, cell), mode: 'default' }} />
       ))}
       {/* 插入线画在 dock 的**根**坐标系里（fixed + 视口坐标），不画在块里：块自己是滚动容器，
           绝对定位的子节点会被 scrollTop 顶着走，线就会落在错误的两个人之间。
           四个方向要显式写成 left/top/width/height —— `x`/`y`/`w`/`h` 不是 CSS 属性，
           React 会把它们当未知属性丢掉，元素就退回静态位置、尺寸为 0。
-          两路来源同一条线：把手重排（`ro`）与拖到格缝上（`gap`），用户看到的都是"就插在这儿"。 */}
+          它只有一个来源：抓住窗口拖到本块成员之间的缝上（`gap`）——"松手就插在这儿"。 */}
       {dropLine && (
         <div data-dock-order-line="" style={{
           ...dockStyles.dockOrderLine,

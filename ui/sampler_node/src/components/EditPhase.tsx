@@ -136,14 +136,19 @@ function loadSections(): Record<SectionKey, boolean> {
 // Right-click actions for one preset row. The full-screen backdrop is what dismisses it (click or a
 // second right-click anywhere), which beats wiring window listeners inside an iframe.
 const ContextMenu: React.FC<{
-  x: number; y: number; items: { label: string; color?: string; hint?: string; onClick: () => void }[];
+  x: number; y: number; up?: boolean; items: { label: string; color?: string; hint?: string; onClick: () => void }[];
   onClose: () => void;
-}> = ({ x, y, items, onClose }) => (
+}> = ({ x, y, up, items, onClose }) => (
   <div style={{ position: 'fixed', inset: 0, zIndex: 80 }}
     onClick={onClose}
     onContextMenu={e => { e.preventDefault(); onClose(); }}>
     <div style={{
-      position: 'absolute', top: y, left: Math.min(x, window.innerWidth - 150),
+      position: 'absolute',
+      // `up` = 从一颗按钮**往上**翻（正文下面那条动作条上的 Add，Layers 那一格的口径：
+      // 菜单贴着按钮上沿展开，不会盖住刚点它的那根手指，也不会被块的 scroller 剪掉）。
+      // 传进来的 `y` 是锚点的上沿；往下翻时它就是卡片的上沿。
+      ...(up ? { bottom: window.innerHeight - y + 4 } : { top: y }),
+      left: Math.min(x, window.innerWidth - 150),
       minWidth: 132, display: 'flex', flexDirection: 'column', gap: 2, padding: 4,
       background: 'rgba(40,40,44,0.96)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)',
       border: '0.5px solid rgba(255,255,255,0.14)', borderRadius: 9,
@@ -1189,24 +1194,6 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                       onClick={() => setShowDebug(true)}
                     ><DbgIcon name="bug" size={15} /> Debug</button>
                   </>),
-                  blocks: (<>
-                    {/* The menu is anchored to the viewport (ContextMenu), not to this pill: the title
-                        bar is 26px inside a box that clips, so an in-flow menu would be cut off — and
-                        with the unit collapsed there would be nothing to cut it back to. */}
-                    <button
-                      title="Append a block to this preset"
-                      onClick={e => {
-                        const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                        setAddMenu(addMenu ? null : { x: r.left, y: r.bottom + 4 });
-                      }}
-                      style={addPillStyle(!!addMenu)}>Add +</button>
-                    {addMenu && (
-                      <ContextMenu x={addMenu.x} y={addMenu.y} onClose={() => setAddMenu(null)}
-                        items={ADD_BLOCK_KINDS.map(opt => ({
-                          label: opt.label, color: opt.color, hint: opt.hint, onClick: () => onAddBlock(opt.kind),
-                        }))} />
-                    )}
-                  </>),
                 },
                 bodies: {
               // 顶栏那一排就是原来 File 菜单的六项，一项一个入口，说明全在 tooltip 里。
@@ -1883,7 +1870,32 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               </>),
             },
             // 几格自带的动作条（Clear All / Add / Undo / Redo）：dock 把它们画在各自正文下面、滚动条之外。
-            foots: workbenchFoots(onBlendUiCommand, wbHost),
+            foots: {
+              ...workbenchFoots(onBlendUiCommand, wbHost),
+              // Pipeline Blocks 的 Add：住进正文下面的动作条，和 Layers 那一格同一个范式（见 MEMORY
+              // 的"动作条范式"）—— 标题条是窗口级动作的地方（关窗/浮出/折叠），往链里加块是**内容**
+              // 动作，挤在 26px 的标题条里既和 ✕/⤢ 抢点击区，菜单还只能往下翻、被块的圆角剪掉。
+              // 摆法照抄 Layers 的 StackHead：右对齐一颗 mini-btn，菜单从它**往上**翻。
+              blocks: (
+                <div className="mini-group">
+                  <button type="button" className="mini-btn" aria-haspopup="menu" aria-expanded={!!addMenu}
+                    title="Append a block to this chain — Detailer / Interface / Prompt / Query / Tagger / Scale"
+                    onClick={e => {
+                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      // 与 Layers 头部那颗 Add 同两句：右缘对齐 216px 的菜单、从锚点上沿往上翻。
+                      setAddMenu(addMenu ? null : { x: r.right - 216, y: r.top });
+                    }}>
+                    Add<span className="add-caret">▾</span>
+                  </button>
+                  {addMenu && (
+                    <ContextMenu x={addMenu.x} y={addMenu.y} up onClose={() => setAddMenu(null)}
+                      items={ADD_BLOCK_KINDS.map(opt => ({
+                        label: opt.label, color: opt.color, hint: opt.hint, onClick: () => onAddBlock(opt.kind),
+                      }))} />
+                  )}
+                </div>
+              ),
+            },
           }} />
 
           {/* ── the live workbench ──
