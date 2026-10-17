@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>界面探针 · 快照查看器</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #141416; color: #f2f2f7; font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+           padding: 10px 14px; background: rgba(28,28,30,0.94); backdrop-filter: blur(10px); border-bottom: 1px solid rgba(255,255,255,0.09); }
+  h1 { font-size: 14px; margin: 0 8px 0 0; font-weight: 600; }
+  button, select { font: inherit; padding: 4px 9px; border-radius: 6px; color: #f2f2f7;
+                   background: #2c2c2e; border: 1px solid rgba(255,255,255,0.12); cursor: pointer; }
+  button:hover { background: #3a3a3c; }
+  main { padding: 14px; max-width: 1500px; }
+  .muted { color: #98989d; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .chip { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px;
+          font-family: ui-monospace, monospace; border: 1px solid currentColor; }
+  .err { color: #ff453a; } .warn { color: #ff9f0a; } .info { color: #64d2ff; } .ok { color: #30d158; } .accent { color: #0a84ff; }
+  h2 { font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: #98989d;
+       margin: 18px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.09); }
+  .card { border-left: 2px solid #444; padding: 6px 10px; margin-bottom: 6px; background: rgba(255,255,255,0.028); border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  th { color: #98989d; font-weight: 500; }
+  td.num { text-align: right; width: 70px; }
+  .bad { color: #ff9f0a; } .zero { color: #ff453a; } .del { color: #ff453a; } .add { color: #30d158; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  textarea { width: 100%; height: 120px; background: #1c1c1e; color: #f2f2f7; border: 1px solid rgba(255,255,255,0.12);
+             border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12px; }
+  #drop { border: 1px dashed rgba(255,255,255,0.24); border-radius: 8px; padding: 10px 14px; color: #98989d; }
+  #drop.hot { border-color: #0a84ff; color: #0a84ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>界面探针 · 快照查看器</h1>
+  <button id="latest">读最新</button>
+  <select id="list"><option value="">— 历史快照 —</option></select>
+  <button id="pick">选择文件</button>
+  <input id="file" type="file" accept="application/json" style="display:none" />
+  <button id="diffBtn" title="与上一次载入的快照对比">对比上一份</button>
+  <span id="status" class="muted">未载入</span>
+</header>
+<main>
+  <div id="drop">把窗口里的探针 JSON 拖到这里，或点“读最新”。</div>
+  <div id="head"></div>
+  <div id="compare"></div>
+  <div id="problems"></div>
+  <div id="nodes"></div>
+  <div id="trace"></div>
+  <div id="store"></div>
+</main>
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const LV = { error: ['err', '错误'], warn: ['warn', '警告'], info: ['info', '提示'] };
+let cur = null, prev = null;
+
+const setStatus = t => { $('#status').textContent = t; };
+
+function render() {
+  if (!cur) return;
+  const p = cur.page || {}, rows = (cur.dock && cur.dock.rows) || [];
+  const over = (p.body.bodyW || 0) - (p.body.innerW || 0);
+  const errs = cur.problems.filter(x => x.level === 'error').length;
+  const warns = cur.problems.filter(x => x.level === 'warn').length;
+  const cls = errs ? 'err' : warns ? 'warn' : 'ok';
+  const say = errs ? errs + ' 个错误' : warns ? warns + ' 个警告' : '未发现布局问题';
+
+  $('#head').innerHTML =
+    '<h2>概览</h2>' +
+    '<div>' +
+      '<span class="chip accent">' + esc((cur.build || 'dev')) + '</span> ' +
+      '<span class="muted">视口 ' + p.viewport.w + '×' + p.viewport.h + '@' + p.viewport.dpr + 'x · dock ' + p.body.dockW + 'px · ' +
+      (over > 1 ? '<span class="err">页面横向溢出 ' + over + 'px</span>' : '页面无溢出') + ' · edit=' + (cur.host ? cur.host.edit : '?') +
+      ' · 单位 ' + (cur.host ? cur.host.units : '?') + '</span>' +
+    '</div>' +
+    '<div class="mono muted" style="margin-top:4px;word-break:break-all">' + esc(cur.outline) + '</div>' +
+    '<div style="margin-top:4px"><b class="' + cls + '">' + say + '</b> <span class="muted">' + esc(cur.at || '') + '</span></div>';
+
+  $('#problems').innerHTML = '<h2>问题（' + cur.problems.length + '）</h2>' + (cur.problems.length ? cur.problems.map((x, i) => {
+    const lv = LV[x.level] || ['info', x.level];
+    const nums = x.numbers ? '<div class="mono muted" style="font-size:11px;margin-top:2px">' +
+      Object.keys(x.numbers).map(k => esc(k) + '=' + esc(x.numbers[k])).join('  ') + '</div>' : '';
+    return '<div class="card" style="border-left-color:' + ({ error: '#ff453a', warn: '#ff9f0a', info: '#64d2ff' }[x.level]) + '">' +
+      '<div><span class="chip ' + lv[0] + '">' + esc(x.code) + '</span> <span class="muted">' + lv[1] + ' · ' + esc(x.where) + '</span></div>' +
+      '<div>' + esc(x.message) + '</div>' + nums + '</div>';
+  }).join('') : '<div class="ok">没有违反任何不变量。</div>');
+
+  $('#nodes').innerHTML = '<h2>布局事实（' + rows.length + ' 节点）</h2>' +
+    '<table><thead><tr><th>节点</th><th class="num">声明</th><th class="num">显示</th><th>flex</th>' +
+    '<th class="num">lo</th><th class="num">hi</th><th>floor</th><th>备注</th></tr></thead><tbody>' +
+    rows.map(r => {
+      const off = r.declared !== null && r.rendered !== null && Math.abs(r.declared - r.rendered) > 2;
+      const frozen = r.travel && (r.travel.hi - r.travel.lo) < 1;
+      const notes = [];
+      if (r.dead) notes.push('dead');
+      if (r.work) notes.push('work');
+      if (off) notes.push('<span class="bad">差' + (r.declared - r.rendered) + '</span>');
+      if (frozen) notes.push('<span class="bad">把手冻结</span>');
+      if (r.scroll && (r.scroll.w > r.scroll.cw + 2 || r.scroll.h > r.scroll.ch + 2)) notes.push('内容溢出');
+      if (r.rect && (r.rect.w <= 0 || r.rect.h <= 0)) notes.push('<span class="zero">零面积</span>');
+      const name = (r.kind === 'b' ? esc(r.block) : esc(r.dir + '[' + (r.path.join('.') || '/') + ']'));
+      return '<tr><td style="padding-left:' + (r.depth * 12 + 6) + 'px">' + name +
+        (r.mode && r.mode !== 'default' ? ' <span class="muted">' + esc(r.mode) + '</span>' : '') + '</td>' +
+        '<td class="num">' + (r.declared === null ? '<span class="muted">free</span>' : r.declared) + '</td>' +
+        '<td class="num' + (off ? ' bad' : '') + '">' + (r.rendered === null ? '—' : r.rendered) + '</td>' +
+        '<td class="muted">' + esc(r.flex || '—') + '</td>' +
+        '<td class="num muted">' + (r.travel ? Math.round(r.travel.lo) : '—') + '</td>' +
+        '<td class="num muted">' + (r.travel ? Math.round(r.travel.hi) : '—') + '</td>' +
+        '<td class="muted">' + (r.travel ? r.travel.floor : '—') + '</td>' +
+        '<td>' + notes.join(' ') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+
+  const tr = (cur.trace || []).slice();
+  $('#trace').innerHTML = '<h2>轨迹（' + tr.length + '）</h2>' +
+    '<table><thead><tr><th>kind</th><th>字段</th></tr></thead><tbody>' + tr.slice(-60).reverse().map(e => {
+      const rest = Object.keys(e).filter(k => !['kind', 't', 'n', 'mark'].includes(k))
+        .map(k => esc(k) + '=' + esc(typeof e[k] === 'object' ? JSON.stringify(e[k]) : e[k])).join('  ');
+      return '<tr><td class="mono">' + esc(e.kind) + '</td><td class="mono muted">' + rest + '</td></tr>';
+    }).join('') + '</tbody></table>';
+
+  $('#store').innerHTML = cur.store && cur.store.raw
+    ? '<h2>保存的布局（' + esc(cur.store.key) + ' · ' + cur.store.bytes + 'B）</h2>' +
+      '<textarea readonly>' + esc(JSON.stringify(JSON.parse(cur.store.raw), null, 2)) + '</textarea>'
+    : '';
+  setStatus('已载入 ' + (cur.id || ''));
+}
+
+function diff() {
+  if (!cur || !prev) { $('#compare').innerHTML = '<h2>对比</h2><div class="muted">先载入两份快照（第二份会用第一份当基准）。</div>'; return; }
+  const key = r => (r.kind === 'b' ? 'b:' + r.block : 's:' + r.path.join('.') + ':' + r.dir);
+  const a = new Map(((prev.dock && prev.dock.rows) || []).map(r => [key(r), r]));
+  const b = new Map(((cur.dock && cur.dock.rows) || []).map(r => [key(r), r]));
+  const names = [...new Set([...a.keys(), ...b.keys()])];
+  const lines = [];
+  for (const n of names) {
+    const x = a.get(n), y = b.get(n);
+    if (!x) { lines.push('<tr><td class="add">+' + esc(n) + '</td><td colspan="4" class="muted">新增节点</td></tr>'); continue; }
+    if (!y) { lines.push('<tr><td class="del">-' + esc(n) + '</td><td colspan="4" class="muted">已移除</td></tr>'); continue; }
+    const dd = (y.declared ?? 0) - (x.declared ?? 0);
+    const dr = (y.rendered ?? 0) - (x.rendered ?? 0);
+    if (dd || dr) lines.push('<tr><td>' + esc(n) + '</td>' +
+      '<td class="num">' + (x.declared ?? 'free') + ' → ' + (y.declared ?? 'free') + (dd ? ' <b class="' + (dd > 0 ? 'add' : 'del') + '">' + (dd > 0 ? '+' : '') + dd + '</b>' : '') + '</td>' +
+      '<td class="num">' + (x.rendered ?? '—') + ' → ' + (y.rendered ?? '—') + (dr ? ' <b class="' + (dr > 0 ? 'add' : 'del') + '">' + (dr > 0 ? '+' : '') + dr + '</b>' : '') + '</td>' +
+      '<td class="muted">' + esc(y.flex || '—') + '</td><td class="muted">' + (y.travel ? Math.round(y.travel.lo) + '–' + Math.round(y.travel.hi) : '—') + '</td></tr>');
+  }
+  const pd = cur.problems.length - prev.problems.length;
+  $('#compare').innerHTML = '<h2>对比（' + esc(prev.id || '') + ' → ' + esc(cur.id || '') + '）</h2>' +
+    '<div class="muted">问题数 ' + prev.problems.length + ' → ' + cur.problems.length +
+    '（<b class="' + (pd > 0 ? 'del' : pd < 0 ? 'add' : '') + '">' + (pd > 0 ? '+' : '') + pd + '</b>）· 视口 ' +
+    prev.page.viewport.w + '×' + prev.page.viewport.h + ' → ' + cur.page.viewport.w + '×' + cur.page.viewport.h + '</div>' +
+    (lines.length ? '<table><thead><tr><th>节点</th><th class="num">声明</th><th class="num">显示</th><th>flex</th><th>可拖</th></tr></thead><tbody>' +
+      lines.join('') + '</tbody></table>' : '<div class="muted">没有节点的尺寸发生变化。</div>');
+}
+
+function load(snap) {
+  prev = cur; cur = snap;
+  render(); diff();
+}
+
+async function loadLatest() {
+  try {
+    const r = await fetch('/api/ui_probe/latest', { cache: 'no-store' });
+    if (!r.ok) { setStatus('读最新失败：HTTP ' + r.status + '（后端没起？改用“选择文件”）'); return; }
+    const listR = await fetch('/api/ui_probe/list', { cache: 'no-store' }).catch(() => null);
+    if (listR && listR.ok) {
+      const l = await listR.json();
+      const sel = $('#list');
+      sel.innerHTML = '<option value="">— 历史快照 —</option>' + (l.files || []).map(f =>
+        '<option value="' + esc(f.name) + '">' + esc(f.name) + ' · ' + esc(f.at || '') + '</option>').join('');
+    }
+    load(await r.json());
+  } catch (e) { setStatus('读最新失败：' + e.message); }
+}
+async function loadFile(name) {
+  try {
+    const r = await fetch('/api/ui_probe/get?name=' + encodeURIComponent(name), { cache: 'no-store' });
+    if (!r.ok) { setStatus('读 ' + name + ' 失败：HTTP ' + r.status); return; }
+    load(await r.json());
+  } catch (e) { setStatus('读 ' + name + ' 失败：' + e.message); }
+}
+
+$('#latest').onclick = loadLatest;
+$('#pick').onclick = () => $('#file').click();
+$('#diffBtn').onclick = () => { diff(); };
+$('#list').onchange = e => { if (e.target.value) loadFile(e.target.value); };
+$('#file').onchange = e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { try { load(JSON.parse(String(rd.result))); } catch (err) { setStatus('不是合法的 JSON：' + err.message); } };
+  rd.readAsText(f);
+};
+const drop = $('#drop');
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hot'); };
+drop.ondragleave = () => drop.classList.remove('hot');
+drop.ondrop = e => {
+  e.preventDefault(); drop.classList.remove('hot');
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => { try { load(JSON.parse(String(rd.result))); } catch (err) { setStatus('不是合法的 JSON：' + err.message); } };
+  rd.readAsText(f);
+};
+loadLatest();
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import type { Tab, ServerConfig, StatusResponse, PipelineBlock, DetailerBlockPar
 import { EMPTY_PIPELINE_SETTINGS, EMPTY_ARCH_SETTINGS, EMPTY_BLEND_DOCS, EMPTY_BLEND_UI, firstDetailerFlag } from './types';
 import type { BlendLayerRow, BlendRowMenu, BlendAttrKind, BlendFxOpenStep, BlendFxRow, BlendProcessorUi, BlendProcChoice, BlendProcInRow, BlendProcOutRow, BlendProcParamRow, BlendGeometryUi, BlendGeometryDesc, BlendPoseUi, BlendPoseDesc, BlendStaging } from './types';
 import { getBlendUi, setBlendUi } from './workbench/store';
+import { ProbePanel } from './debug';
 
 const POLL_INTERVAL = 500;
 const PROMPT_POLL_INTERVAL = 1500;
@@ -1822,6 +1823,9 @@ const App: React.FC = () => {
           {error}
         </div>
       )}
+
+      {/* 界面探针：常驻的角标 + Alt+D 拉开的面板。关着的时候只画那颗小角标。 */}
+      <ProbePanel />
     </div>
   );
 };

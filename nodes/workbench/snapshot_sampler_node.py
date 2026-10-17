@@ -195,6 +195,19 @@ def dataurl_to_tensor(image_b64):
 _POSE_ESTIMATOR = None
 _POSE_ESTIMATOR_LOCK = threading.Lock()
 
+# 界面探针的"拉一下"标志。页面每三秒来问一次，want 比 done 新就抓一份送上来 ——
+# 于是"看一眼现场"由发起的这一端决定，不必让页面上的人按键。只存在内存里：这是
+# 一次请求，不是状态，落成文件会留下"上次没人消费"的残渣，让下一次心跳莫名抓一份。
+_UI_PROBE_PULL = {'want': 0.0, 'done': 0.0}
+
+# 界面探针的**实时通道**（与 temporary/ui_probe_sink.py 同一套语义）：页面长轮询 `/cmd` 取一条
+# 表达式，就地求值后 `POST /res` 回传；这一端 `POST /eval` 就同步拿到活页面里的值。
+# 之所以要它：快照与重放只能回答"这份拷贝里是否也有"，而排查 UI 要的是"读我现在眼前这个状态"。
+_UI_PROBE_INBOX = queue.Queue()
+_UI_PROBE_CV = threading.Condition()
+_UI_PROBE_RES = {}
+_UI_PROBE_SESS = {}
+
 
 def pose_estimator():
     global _POSE_ESTIMATOR
@@ -1869,6 +1882,86 @@ class SnapshotDetailerSamplerServer:
                 self._send_json(dbg.debug_trace_snapshot())
                 return
 
+            # ── 界面探针 ─────────────────────────────────────────────────────────
+            # 布局问题的快照存取。前端 Alt+D / 角标点一下就把"当时的模型 + 实际渲染 + 问题清单
+            # + 操作轨迹"发到这里；存成 temporary/ui_probe/ 下的一个 .json（外加一份 .md 摘要），
+            # 于是**谁都能直接读文件**，不必经过这一层。
+            probe_path = urlparse(self.path).path
+            if probe_path.startswith('/api/ui_probe'):
+                from ...libs import ui_probe_store as ups
+                tail = probe_path[len('/api/ui_probe'):]
+                if tail in ('', '/'):
+                    self._send_json({'ok': True,
+                                     'count': len(ups.listing()),
+                                     'dir': ups.DIR,
+                                     'files': ups.listing()[:20]})
+                    return
+                if tail == '/list':
+                    self._send_json({'ok': True, 'dir': ups.DIR, 'files': ups.listing()})
+                    return
+                if tail == '/latest':
+                    snap = ups.latest()
+                    if snap is None:
+                        self._send_json({'ok': False, 'error': 'no snapshot yet'}, 404)
+                    else:
+                        self._send_json(snap)
+                    return
+                if tail == '/get':
+                    name = urlparse(self.path).query
+                    name = parse_qs(name).get('name', [''])[0]
+                    snap = ups.load(name)
+                    if snap is None:
+                        self._send_json({'ok': False, 'error': 'not found: %r' % name}, 404)
+                    else:
+                        self._send_json(snap)
+                    return
+                if tail == '/build':
+                    # "页面上的 build 是不是当前源码构建的" —— 排查的第一个问题，直接给答案。
+                    self._send_json({'ok': True, 'build': ups.build_info()})
+                    return
+                if tail == '/pull':
+                    want = _UI_PROBE_PULL['want'] if _UI_PROBE_PULL['want'] > _UI_PROBE_PULL['done'] else 0
+                    self._send_json({'ok': True, 'want': want})
+                    return
+                if tail == '/cmd':
+                    # 页面在这里挂着等指令（长轮询）。服务端是多线程的（见 ThreadingMixIn），
+                    # 挂住一个连接不会挡住别的请求。
+                    pqs = parse_qs(urlparse(self.path).query)
+                    try:
+                        wait = float(pqs.get('wait', ['0'])[0] or 0)
+                    except ValueError:
+                        wait = 0.0
+                    sid = pqs.get('sid', [''])[0]
+                    if sid:
+                        _UI_PROBE_SESS[sid] = {'sid': sid, 'url': pqs.get('url', [''])[0],
+                                               'build': pqs.get('build', [''])[0],
+                                               'vp': pqs.get('vp', [''])[0], 'at': time.time()}
+                    try:
+                        cmd = _UI_PROBE_INBOX.get(timeout=max(0.0, min(wait, 30)))
+                    except queue.Empty:
+                        cmd = None
+                    self._send_json({'ok': True, 'cmd': cmd})
+                    return
+                if tail == '/sessions':
+                    now = time.time()
+                    self._send_json({'ok': True, 'sessions': [
+                        dict(v, age=round(now - v['at'], 1)) for v in list(_UI_PROBE_SESS.values())]})
+                    return
+                if tail == '/view':
+                    file_path = web_file('probe_viewer.html')
+                    if os.path.exists(file_path):
+                        self.send_response(200)
+                        self.send_header('Content-type', 'text/html; charset=utf-8')
+                        self.send_header('Cache-Control', 'no-store')
+                        self.end_headers()
+                        with open(file_path, 'rb') as f:
+                            self.wfile.write(f.read())
+                    else:
+                        self.send_error(404, 'probe_viewer.html not found (rebuild the ui)')
+                    return
+                self._send_json({'ok': False, 'error': 'unknown ui_probe path: %s' % tail}, 404)
+                return
+
             if self.path == '/api/package':
                 if not inst or not inst.interface_packages:
                     self._send_json({'interfaces': []})
@@ -2084,6 +2177,74 @@ class SnapshotDetailerSamplerServer:
 
         def do_POST(self):
             inst = self.server_instance
+
+            # 界面探针的"拉一下"：把 want 立起来，页面下一次心跳就会自己抓一份送上来。
+            probe_post = urlparse(self.path).path
+            if probe_post == '/api/ui_probe/pull':
+                _UI_PROBE_PULL['want'] = time.time()
+                self._send_json({'ok': True, 'want': _UI_PROBE_PULL['want']})
+                return
+            if probe_post == '/api/ui_probe/ack':
+                _UI_PROBE_PULL['done'] = time.time()
+                self._send_json({'ok': True})
+                return
+            if probe_post == '/api/ui_probe/res':
+                # 页面把表达式的求值结果交回来，唤醒正在 /eval 上等着的那个人。
+                _len = int(self.headers.get('Content-Length', 0))
+                _data = json.loads(self.rfile.read(_len)) if _len else {}
+                with _UI_PROBE_CV:
+                    _UI_PROBE_RES[str(_data.get('id') or '')] = {
+                        'ok': bool(_data.get('ok')), 'value': _data.get('value'), 'error': _data.get('error')}
+                    _UI_PROBE_CV.notify_all()
+                self._send_json({'ok': True})
+                return
+            if probe_post == '/api/ui_probe/eval':
+                _len = int(self.headers.get('Content-Length', 0))
+                _data = json.loads(self.rfile.read(_len)) if _len else {}
+                expr = str(_data.get('expr') or '')
+                try:
+                    wait_s = float(_data.get('timeout') or 20)
+                except (TypeError, ValueError):
+                    wait_s = 20.0
+                if not expr:
+                    self._send_json({'ok': False, 'error': 'empty expr'}, 400)
+                    return
+                if not _UI_PROBE_SESS:
+                    self._send_json({'ok': False,
+                                     'error': '没有页面接上来：页面要加载带巡检回路的产物（刷新一次）'}, 409)
+                    return
+                cid = '%x%x' % (int(time.time() * 1000) & 0xffffffff, id(_data) & 0xffff)
+                _UI_PROBE_INBOX.put({'id': cid, 'expr': expr, 'at': time.time()})
+                deadline = time.time() + max(1.0, min(wait_s, 60))
+                with _UI_PROBE_CV:
+                    while cid not in _UI_PROBE_RES and time.time() < deadline:
+                        _UI_PROBE_CV.wait(timeout=max(0.05, deadline - time.time()))
+                    res = _UI_PROBE_RES.pop(cid, None)
+                if res is None:
+                    self._send_json({'ok': False, 'error': '超时：指令发出去了，没有页面回来'}, 504)
+                else:
+                    self._send_json(res)
+                return
+
+            # 界面探针收到一份快照：落盘 + 回文件名。前端拿到文件名就够说清"存在哪了"。
+            if probe_post == '/api/ui_probe':
+                try:
+                    from ...libs import ui_probe_store as ups
+                    length = int(self.headers.get('Content-Length', 0))
+                    snap = json.loads(self.rfile.read(length)) if length else {}
+                    info = ups.save(snap)
+                    build = ups.build_info()
+                    problems = snap.get('problems') or []
+                    print('[UIProbe] saved %s (%dKB, %d problems: %s) build=%s stale=%s'
+                          % (info['file'], info['bytes'] // 1024, len(problems),
+                             ','.join(sorted({str(p.get('code')) for p in problems}))[:200],
+                             (snap.get('build') or '?'), build.get('stale')))
+                    self._send_json({'ok': True, 'file': info['file'], 'dir': info['dir'],
+                                     'bytes': info['bytes'], 'build': build})
+                except Exception as e:
+                    print('[UIProbe] rejected snapshot: %s' % e)
+                    self._send_json({'ok': False, 'error': str(e)}, 400)
+                return
 
             if self.path == '/api/update_config':
                 length = int(self.headers.get('Content-Length', 0))

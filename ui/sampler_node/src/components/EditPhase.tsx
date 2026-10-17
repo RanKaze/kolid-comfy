@@ -3,8 +3,9 @@ import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockP
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
-import { type DockMode, type DockRules, type SpreadSizes, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
-import { DockPanel } from '../dock/DockView';
+import { type DockMode, type DockRules, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
+import { type DockDrag, DockPanel } from '../dock/DockView';
+import { registerProbe, note } from '../debug/probe';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 
 // The rename field of a preset row.
@@ -39,10 +40,19 @@ const UNIT_TITLES: Record<string, string> = {
 const COLUMN_W = 340;
 // 工作台那一列原来就是 280 宽（页面的 `SIDE_W_DEFAULT`），搬过来照抄这颗数。
 const RIGHT_W = 280;
+const TOP_H = 60;
 const DOCK_STORE = 'sampler.drawDock';
 // A canvas window pops out at a working size. A settings card gets the dock's default 300px strip;
 // a project the user dragged out of the tab strip wants to be painted on.
 const DOC_POP_W = 760, DOC_POP_H = 560;
+// How much room a NEW block takes when a unit is dropped into the layout as one. A block that does not
+// exist yet has no size, and "take the rest" is not an answer to it: the rest of a column is the WHOLE
+// column, which is how appending one small window used to produce a block several times the size of the
+// one it was dropped on. Only the page can answer — the frame measures nothing, and a column of cards
+// that scrolls has no height of its own — so it answers per unit and per axis, the way popSize already
+// answers for a popped-out window: a project is painted on and wants a canvas, a settings panel is a
+// column of cards and wants a column's width.
+const PANEL_BLOCK_W = 340, PANEL_BLOCK_H = 320, DOC_BLOCK_W = 620, DOC_BLOCK_H = 460;
 // What the dock knows about the page, rebuilt whenever the workbench announces a different set of
 // documents: the panels — the host's five and every workbench unit lifted out of the page — are fixed,
 // a document unit (`doc:<uid>`) is known only while that .cud is open. A document window is the same
@@ -77,12 +87,20 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
-    topH: 60,
+    topH: TOP_H,
     column: COLUMN_IDS,
     columnW: COLUMN_W,
     // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里。
     right: WORKBENCH_PANEL_IDS,
     rightW: RIGHT_W,
+    // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
+    // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
+    // is a width). It is a preference: the frame caps it so the block it is taken from keeps its floor.
+    blockSize: (id: UnitId, axis: 'v' | 'h') => {
+      if (id === 'toolbar') return axis === 'v' ? TOP_H : 240;
+      if (isDoc(id)) return axis === 'v' ? DOC_BLOCK_H : DOC_BLOCK_W;
+      return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
+    },
   };
 };
 // The document actions, in the order the retired `#fileMenu` listed them. Their tooltips are that
@@ -464,7 +482,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   }, [dock, openDocUnits, applyDock]);
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
-  const [dockDrag, setDockDrag] = useState<UnitId | null>(null);
+  const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);
   const [dockOver, setDockOver] = useState<{ id: UnitId; zone: Zone } | null>(null);
   // ── BLOCK 编辑模式 ── 按住 Alt+P 才在，松开（或窗口失焦）就退出。所以模式控件平时完全不在页面上：
   // 一块怎么排是装修，不是日常操作，Alt+P 就是那道暗门。它唯一的写口是 setMode。
@@ -487,8 +505,19 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     };
   }, []);
   // Alt+P 唯一的写口：把拥有 `id` 的那一块换成这个模式（Default 收成一行 tab，Vertical/Horizontal
-  // 摊成一个单元一个窗口）。块本身没变，变的是它怎么摆它的成员。
-  const setMode = (id: UnitId, mode: DockMode, spread?: SpreadSizes) => applyDock(setBlockMode(dock, id, mode, spread));
+  // 摊成一个单元一个窗口）。块本身没变，变的是它怎么摆它的成员。摊开是纯框架动作：新 split 继承
+  // 容器的尺寸、里面的块全部 free 平分，内容占多大不参与（见 model.ts 的 switchMode）。
+  const setMode = (id: UnitId, mode: DockMode) => {
+    // 改模式是纯布局动作，而且它会就地重排整块（见 switchMode），所以它是轨迹里必须有的一笔。
+    note('block.mode', { id, mode });
+    applyDock(setBlockMode(dock, id, mode));
+  };
+  // 界面探针的登记口：把"活的 dock"交出去，探针只读它。放在这里是因为这一层同时握着三样它需要
+  // 的东西 —— 树、规则（尺寸偏好与 store key）、编辑模式 —— 而探针不该顺着组件树去猜它们。
+  useEffect(() => {
+    registerProbe({ dock, rules: dockRules, edit: blockEdit });
+    return () => registerProbe(null);
+  }, [dock, dockRules, blockEdit]);
   useEffect(() => {
     const end = () => { setDockDrag(null); setDockOver(null); };
     // CAPTURE, on purpose, on all three. A drop is handled by React at the root container, which calls
@@ -2680,7 +2709,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   // Content area
-  content: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
+  content: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
 
   // iframe wrapper — no border, clean
   iframeWrap: { flex: 1, minHeight: 0, background: '#0d0d0d' },
@@ -2694,7 +2723,10 @@ const styles: Record<string, React.CSSProperties> = {
   // Draw tab layout: ONE dock, edge to edge. The column, the canvas and every popped-out window are
   // placed by the dock's own tree, so there is no panel width, no separator and no side of the page
   // the layout model does not know about.
-  drawLayout: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row', padding: 10, position: 'relative' },
+  // `minWidth: 0` is not decoration: a flex item defaults to a minimum of its CONTENT's minimum, so
+  // without it the dock's blocks can push the whole page wider than the window instead of being cut to
+  // the box the frame gave them — which is exactly what the dock promises never happens.
+  drawLayout: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'row', padding: 10, position: 'relative' },
   blendFrame: { width: '100%', height: '100%', border: 'none', background: '#0d0d0d', display: 'block' },
   // The single live workbench, pinned over the window that holds the active document. The layer is the
   // size of that box (the frame can never be moved INTO the box — reparenting an iframe reloads it),
