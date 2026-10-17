@@ -101,7 +101,14 @@ export type DockRules = {
 // A BLOCK is one rectangle of the page: one dock window in `default` mode, or a container of several in
 // `v`/`h`. A node with no size is `1 1 0` — it shares what its siblings leave, which is what makes the
 // tree tile the page with no dead space anywhere. Nothing in the tree sizes to its content.
-export type DockBlock = { t: 'b'; ids: UnitId[]; sel: number; mode: DockMode; sz?: number };
+// 容器的一格只有一个单元，这是此前全部的形状。`groups` 把"某一格是 tab 组"这件事记进同一块里：
+// 它是一串**每格几个单元**的计数（和 `ids` 顺序一一对应，加起来等于 ids.length），所以容器还是
+// 那个容器、mode 还是 'v'/'h'，只是其中一格的窗口上多了一条 tab 条。没有 groups 就是默认形状
+// （一格一个），旧布局不用迁移。
+//
+// `shown` 记"这一格里用户点过要显示的是哪一个"：一条 tab 组里切换 tab 的选中项。它只是一个标记
+// 列表（找得到就用，找不到就用组首），所以单元被拿走时只要过滤掉它，不会留下指向空处的东西。
+export type DockBlock = { t: 'b'; ids: UnitId[]; sel: number; mode: DockMode; sz?: number; groups?: number[]; shown?: UnitId[] };
 export type DockNode = DockBlock | { t: 's'; d: 'v' | 'h'; ks: DockNode[]; sz?: number; work?: true };
 // A popped-out unit lives in viewport coordinates: it has to be able to sit on top of the workbench,
 // which is not inside any column.
@@ -159,6 +166,26 @@ const blockOf = (ids: readonly UnitId[], mode: DockMode = 'default', sz?: number
 const block = (id: UnitId, mode: DockMode = 'default', sz?: number): DockBlock =>
   blockOf([id], mode, sz);
 
+// 一格的划分。`groups` 不合规（长度对不上、有 0、加起来不等于 ids）就退回"一格一个"，绝不拿一个
+// 半信半疑的数组去切 ids —— 那个后果是某几个单元凭空消失。
+export const groupsOf = (b: DockBlock): number[] => {
+  const g = b.groups;
+  if (Array.isArray(g) && g.length && g.length <= b.ids.length
+    && g.every(n => Number.isInteger(n) && n > 0)
+    && g.reduce((a, n) => a + n, 0) === b.ids.length) return [...g];
+  return b.ids.map(() => 1);
+};
+// 容器真正的成员：一格一组（一组一个 id 就是老形状，一组多个就是那格的 tab 条）。
+export const cellsOf = (b: DockBlock): UnitId[][] => {
+  const out: UnitId[][] = [];
+  let at = 0;
+  for (const n of groupsOf(b)) { out.push(b.ids.slice(at, at + n)); at += n; }
+  return out;
+};
+// 第 i 格的首个单元在 `ids` 里的下标 —— 重排、插入都在 ids 这个坐标系里说话，而格子是另一套下标。
+export const cellStart = (b: DockBlock, i: number): number =>
+  groupsOf(b).slice(0, i).reduce((a, n) => a + n, 0);
+
 // The page opens as a tiling: the toolbar strip across the top (if the page has one), then the settings
 // column at its own width, the work area taking everything else, and the panel column on the far side.
 // Each column is ONE container block — the same look the page always had (the panels stacked in their
@@ -213,7 +240,11 @@ function isNode(n: unknown): n is DockNode {
     return Array.isArray(x.ids) && x.ids.length > 0 && x.ids.every(i => typeof i === 'string')
       && (x.mode === 'default' || x.mode === 'v' || x.mode === 'h');
   }
-  if (x.t === 's') return (x.d === 'v' || x.d === 'h') && Array.isArray(x.ks) && x.ks.length > 0 && x.ks.every(isNode);
+  // `ks` 允许为空：工作台那条标记为 work 的 nest，**在没有文档时就该是空的** —— defaultDock 自己也带
+  // 一条空的（`ks: []`，下一个文档就落在那儿）。画布一旦被拖走存档里就会留这么一条，此前要求
+  // `ks.length > 0` 会把整份存档判成不认识、回退默认布局 —— 用户给画布挑的位置每次刷新都丢，
+  // 而且丢的是**整棵树**（其余面板看着"还行"，只是默认布局恰好长得一样）。
+  if (x.t === 's') return (x.d === 'v' || x.d === 'h') && Array.isArray(x.ks) && x.ks.every(isNode);
   return false;
 }
 
@@ -226,16 +257,20 @@ export function loadDock(rules: DockRules): Dock {
     const raw = localStorage.getItem(rules.store);
     if (!raw) return fallback;
     const saved: { tree?: unknown; floats?: DockFloat[] } = JSON.parse(raw);
-    // The shape first, and BEFORE pruneDocs: pruning an old node would read `ks` off something that has
-    // none. An old layout therefore resets rather than half-loading — which is the honest answer, since
-    // every block in it would be missing the mode this model is built on.
+    // The shape first, and BEFORE anything walks the tree: an old layout resets rather than
+    // half-loading — which is the honest answer, since every block in it would be missing the mode
+    // this model is built on.
     if (!isNode(saved.tree)) return fallback;
-    const tree = pruneDocs(saved.tree, id => rules.known(id));
-    if (!tree) return fallback;
+    // 文档单元**原样读入**，不在这里剪。刷新时工作台自己也刚加载，它还一份文档都没播报过；此刻把
+    // doc:* 剪掉，等播报到来就只能按"新来的文档"安放 —— 画布窗口每次刷新都跳回默认位置，用户给它
+    // 挪的窝永远存不住（其它面板本来就留得住，因为加载时就认得它们）。剪掉的活儿交给 syncDocUnits：
+    // 播报说哪份文档没开，那时候剪才作数（见 EditPhase 里的 announced 闸门）。
+    const tree = saved.tree;
     const floats = (Array.isArray(saved.floats) ? saved.floats : [])
-      .filter(f => f && typeof f.id === 'string' && (!docUidOf(f.id) || rules.known(f.id)));
+      .filter(f => f && typeof f.id === 'string' && (rules.known(f.id) || !!docUidOf(f.id)));
     const ids = dockUnits(tree).concat(floats.map(f => f.id));
-    if (ids.some(id => !rules.known(id))) return fallback;
+    // 不认识的单元一律不接受，doc:* 除外：它的 uid 由工作台发放，加载时还无从核对，只要求形状对。
+    if (ids.some(id => !rules.known(id) && !docUidOf(id))) return fallback;
     if (rules.panels.some(u => ids.filter(i => i === u).length !== 1)) return fallback;
     if (ids.some((id, i) => ids.indexOf(id) !== i)) return fallback;
     return { tree, floats };
@@ -261,13 +296,22 @@ function appendToWork(n: DockNode, leaf: DockNode): DockNode | null {
 }
 // Add units to the block that already owns `id`, as further members — which the block renders as
 // further tabs (`default`) or further stacked windows (`v`/`h`). That is the whole of a centre drop.
+// 往一个块里接单元。`default` 是加 tab；容器是**多一格**：带着 tab 组（groups）的容器必须显式
+// 记下这一格多出来的那一个，否则 sum 对不上，`groupsOf` 会整体退回"一格一个"，用户刚叠好的
+// tab 组就散开了。
+const appendToBlock = (h: DockBlock, add: readonly UnitId[]): DockBlock => {
+  const ids = [...h.ids, ...add];
+  if (h.mode === 'default' || !h.groups) return { ...h, ids };
+  const g = groupsOf(h);
+  return { ...h, ids, groups: [...g, ...add.map(() => 1)] };
+};
 const addAllToBlock = (n: DockNode, id: UnitId, add: readonly UnitId[]): DockNode =>
-  rewriteHolder(n, id, h => (h.t === 'b' ? { ...h, ids: [...h.ids, ...add] } : h));
+  rewriteHolder(n, id, h => (h.t === 'b' ? appendToBlock(h, add) : h));
 const addToBlock = (n: DockNode, id: UnitId, add: UnitId): DockNode => addAllToBlock(n, id, [add]);
 // The mirror of appendToRow: a container, so the unit lands stacked with its kind rather than beside the
 // whole column. Children are searched before the node itself, so an inner container wins over an outer.
 function appendToContainer(n: DockNode, id: UnitId): DockNode | null {
-  if (n.t === 'b') return n.mode !== 'default' ? { ...n, ids: [...n.ids, id] } : null;
+  if (n.t === 'b') return n.mode !== 'default' ? appendToBlock(n, [id]) : null;
   for (let i = 0; i < n.ks.length; i++) {
     const r = appendToContainer(n.ks[i], id);
     if (r) return { ...n, ks: n.ks.map((k, j) => j === i ? r : k) };
@@ -313,8 +357,24 @@ export const holds = (n: DockNode, id: UnitId): boolean => n.t === 'b' && n.ids.
 // — the row a page opens with must survive being touched by an operation about a unit that is not in it.
 export function detach(n: DockNode, id: UnitId): DockNode | null {
   if (n.t === 'b') {
-    const ids = n.ids.filter(i => i !== id);
-    return ids.length ? { ...n, ids, sel: Math.min(n.sel, ids.length - 1) } : null;
+    const i = n.ids.indexOf(id);
+    const ids = n.ids.filter(x => x !== id);
+    if (!ids.length) return null;
+    // 分组跟着一起收拾：那格少一个；空了就整格消失；退化成"一格一个"时把 groups 丢掉，
+    // 让老形状重新成为老形状（少存一个字段，也少一处会出错的地方）。
+    let groups = n.groups;
+    if (groups && i >= 0) {
+      const g = groupsOf(n);
+      let at = 0, gi = 0;
+      for (; gi < g.length; gi++) { if (i < at + g[gi]) break; at += g[gi]; }
+      g[gi] -= 1;
+      if (g[gi] <= 0) g.splice(gi, 1);
+      groups = g.length === ids.length && g.every(k => k === 1) ? undefined : g;
+    }
+    return {
+      ...n, ids, sel: Math.min(n.sel, ids.length - 1), groups,
+      shown: n.shown?.filter(u => u !== id),
+    };
   }
   const kept = n.ks.map(k => detach(k, id)).filter((k): k is DockNode => !!k);
   if (!kept.length) return n.work ? { ...n, ks: kept } : null;
@@ -351,11 +411,128 @@ export const setBlockMode = (dock: Dock, id: UnitId, mode: DockMode): Dock => ({
   ...dock, tree: rewriteHolder(dock.tree, id, h => (h.t === 'b' ? switchMode(h, mode) : h)),
 });
 const switchMode = (h: DockBlock, mode: DockMode): DockNode => {
-  if (mode !== 'default' || h.ids.length < 2) return { ...h, mode };
+  // 变成容器：一格一个。分组与选中留在身后 —— 容器的每一格本来就是一个窗口。
+  if (mode !== 'default') return { ...h, mode, groups: undefined, shown: undefined };
+  const cells = cellsOf(h);
+  if (cells.length < 2) return { ...h, mode: 'default', groups: undefined, shown: undefined };
   const d: 'v' | 'h' = h.mode === 'h' ? 'h' : 'v';
-  return { t: 's', d, sz: h.sz, ks: h.ids.map(u => block(u, 'default')) };
+  // 摊开时**按格摊**：一格一个块。带着 tab 组的那一格摊出来仍是一个 tab 组（两个 tab 占一个块），
+  // 而不是把组拆散成两个窗口 —— 用户点的是"摊开容器"，不是"拆散我的 tab"。
+  return { t: 's', d, sz: h.sz, ks: cells.map(c => ({ t: 'b', ids: c, sel: 0, mode: 'default' })) };
 };
+
+// 块内重排：把 `id` 挪到它所在块的 `to` 位。`to` 是**移除它之后**的目标下标 —— 拖到最末尾就是
+// `ids.length - 1`，这样"第几位"与指针停下时数出来的位置是同一个数，中间不用再换算一次。
+//
+// 一件容易被忘掉的事：`sel` 是这块**正在显示**的那个单元的下标，而它是个下标。顺序一变它就指向了
+// 别人 —— 用户只是把一个窗口往上挪了一格，正在看的正文却被换掉了。所以 `sel` 跟着它原来指的那个
+// 单元走，而不是原地不动。
+//
+// 这也是"顺序"唯一诚实的存处：块里成员的顺序就是 `ids` 的顺序，DOM 只是照着画。改 DOM 不改 `ids`
+// 就是一次重排，下次渲染还会按 `ids` 站回去。
+export const moveUnit = (dock: Dock, id: UnitId, to: number): Dock => ({
+  ...dock,
+  tree: rewriteHolder(dock.tree, id, h => {
+    if (h.t !== 'b') return h;
+    const from = h.ids.indexOf(id);
+    if (from < 0) return h;
+    const at = Math.max(0, Math.min(h.ids.length - 1, Math.round(to)));
+    if (at === from) return h;
+    const ids = h.ids.filter(u => u !== id);
+    ids.splice(at, 0, id);
+    const shown = h.ids[h.sel] ?? h.ids[0];
+    return { ...h, ids, sel: Math.max(0, ids.indexOf(shown)) };
+  }),
+});
+// 块内重排的**格**版本：把 `id` 所在的**整格**（一格可能就是一条 tab 组）搬到第 `to` 格。
+// `to` 是**移除这一格之后**的目标下标，和 moveUnit 的口径一致 —— 拖到最末尾就是 cells.length - 1。
+//
+// 为什么重排要说格而不是单元：Alt 合并之后，容器里一格可能挂着几个单元，"第几位"于是有了两套
+// 下标（格的下标、ids 的下标）。让用户在 ids 上数位置，就得先在心里把 tab 组的人数扣掉 —— 而
+// 把组里的某一个单独挪走等于拆组，那不是抓着箭头的人想做的事。整格搬动，组还是组，只是换了个
+// 位置；groups/shown 跟着一起搬，块还是那个块。
+export const moveCell = (dock: Dock, id: UnitId, to: number): Dock => ({
+  ...dock,
+  tree: rewriteHolder(dock.tree, id, h => {
+    if (h.t !== 'b') return h;
+    const cells = cellsOf(h);
+    const from = cells.findIndex(c => c.includes(id));
+    if (from < 0) return h;
+    const at = Math.max(0, Math.min(cells.length - 1, Math.round(to)));
+    if (at === from) return h;
+    // 组（groups）与单元（ids）一起搬：格还是那一格，只是换了位置。
+    const gs = groupsOf(h);
+    const cell = gs.splice(from, 1)[0];
+    gs.splice(at, 0, cell);
+    const rest = cells.filter((_, i) => i !== from);
+    const offset = rest.slice(0, at).reduce((a, c) => a + c.length, 0);
+    const ids = rest.flatMap(c => c);
+    ids.splice(offset, 0, ...cells[from]);
+    const shown = h.ids[h.sel] ?? h.ids[0];
+    return { ...h, ids, groups: gs, sel: Math.max(0, ids.indexOf(shown)) };
+  }),
+});
+// 把拖来的单元从它们所在的**格子里拉出来**，作为新的一格插到第 `k` 格前面（`k` 是**原序列**的格
+// 下标，含源格自身）。这是"tab 组里拖出一个 tab"的唯一正确形态：整格搬移（moveCell）假设"这一格
+// 整个就是我"，而这里源格**还在** —— 它只是少了几个 tab。
+//
+// 两种拖法在这里合成一条：
+//   * 拖的是整格（组里每一个单元都在手里）→ 等于 moveCell：这一格连组一起搬走；
+//   * 拖的是组里的某几个 tab      → 源格收缩，这几个 tab 自立门户，插到第 `k` 位。
+// `k === from`（插在自己那一格前面）对第二种拖法是**有意义的**：从组里拆出来排到最前面。
+// 其余格的计数、块的 mode/sz 一概不动 —— 容器还是那个容器。
+export const pullOutAt = (dock: Dock, ids: readonly UnitId[], k: number): Dock => ({
+  ...dock,
+  tree: rewriteHolder(dock.tree, ids[0], h => {
+    if (h.t !== 'b') return h;
+    const cells = cellsOf(h);
+    const gi = cells.findIndex(c => ids.some(u => c.includes(u)));
+    if (gi < 0) return h;
+    // `k` 是**移除之后**的下标（slotFor 的口径，和 moveCell 一致），所以这里直接用它 —— 再按
+    // "源格在前面就减一"调整一次会把整格搬移差出一位。
+    // 整格搬走时源格从序列里消失，后面的人各前移一位，`rest` 因此比原序列短一格；从组里拆出几个
+    // tab 时源格还在（只是少了几个 tab），`rest` 的长度和下标都与原序列一致 —— 两种拖法在 `rest`
+    // 上自动对齐，不需要在这里分辨。
+    const rest = cells.map((c, i) => (i === gi ? c.filter(u => !ids.includes(u)) : c)).filter(c => c.length);
+    const at = Math.max(0, Math.min(rest.length, Math.round(k)));
+    const next = [...rest.slice(0, at), [...ids], ...rest.slice(at)];
+    const idsNext = next.flat();
+    const shown = h.ids[h.sel] ?? h.ids[0];
+    return { ...h, ids: idsNext, groups: next.map(c => c.length), sel: Math.max(0, idsNext.indexOf(shown)) };
+  }),
+});
 export const zoneAxis = (z: Zone): 'v' | 'h' => (z === 'left' || z === 'right' ? 'h' : 'v');
+// 别处的窗口拖到容器**两格之间的缝**上：作为**新的一格**插到第 `k` 格前面。和 mergeIntoMember 同一个
+// 原则 —— 只动 `ids`/`groups` 的插入点，块的 mode、sz、其余格的计数全不动，容器仍是同一个容器。
+// `k` 是**原序列**的格下标（gapIndexAt 的口径：落在第 i、i+1 格之间就是 i+1），不存在"原位放回"
+// 的问题 —— 手里的是别处的窗口，插哪儿都是新位置。
+export const insertCellAt = (dock: Dock, ids: readonly UnitId[], memberId: UnitId, k: number): Dock => {
+  if (!ids.length || ids.includes(memberId)) return dock;
+  const rest: Dock = {
+    tree: detachAll(dock.tree, ids) || dock.tree,
+    floats: dock.floats.filter(f => !ids.includes(f.id)),
+  };
+  return {
+    ...rest,
+    tree: rewriteHolder(rest.tree, memberId, h => {
+      if (h.t !== 'b') return h;
+      const cells = cellsOf(h);
+      if (!cells.length) return h;
+      // `default` 块没有"第几格"可言：接着往里加 tab 就是全部语义。
+      if (h.mode === 'default') return { ...h, ids: [...h.ids, ...ids], sel: h.sel };
+      const gi = Math.max(0, Math.min(cells.length, Math.round(k)));
+      const at = cellStart(h, gi);
+      const groups = groupsOf(h);
+      groups.splice(gi, 0, ids.length);
+      return {
+        ...h,
+        ids: [...h.ids.slice(0, at), ...ids, ...h.ids.slice(at)],
+        groups,
+        sel: h.sel >= at ? h.sel + ids.length : h.sel,
+      };
+    }),
+  };
+};
 // What a drop has to say about SIZE, which is everything a block does not already know about itself.
 // `pref` is the room the page wants for the arriving window (rules.blockSize, along the axis the new
 // block will be measured on); `room` is what the block it lands beside is showing along that axis,
@@ -445,6 +622,49 @@ export const dropUnits = (dock: Dock, ids: readonly UnitId[], targetId: UnitId, 
 };
 export const dropInDock = (dock: Dock, dragged: UnitId, targetId: UnitId, zone: Zone, fit?: DockFit): Dock =>
   dropUnits(dock, [dragged], targetId, zone, fit);
+
+// 把拖来的单元并进**容器里的某一格**，和那一格合成一条 tab 条（Alt 拖拽）。
+//
+// 关键在"不改变这个块是什么"。早期版本是把容器炸成 split（像 setBlockMode 的 default 分支那样），
+// 再往那一格的块里加 id —— 结果是用户按住 Alt 丢一个窗口，整列的 Vertical 模式就没了，其余每一格
+// 也被拆成各自的块。那不是"合并两个窗口"，那是"重排整列"。
+//
+// 所以这里只改**这一格**：`groups` 里那一格多算几个，`ids` 里把新单元接在它后面。块的 mode 不变、
+// sz 不变、其余格的计数不变 —— 容器仍是容器，只是其中一格的标题条上多了几个 tab。
+export const mergeIntoMember = (
+  dock: Dock,
+  ids: readonly UnitId[],
+  memberId: UnitId,
+): Dock => {
+  // 合到自己身上没有意义（它已经在那个 tab 组里了），宁可不做事也不给一个错的结果。
+  if (!ids.length || ids.includes(memberId)) return dock;
+  const rest: Dock = {
+    tree: detachAll(dock.tree, ids) || dock.tree,
+    floats: dock.floats.filter(f => !ids.includes(f.id)),
+  };
+  return {
+    ...rest,
+    tree: rewriteHolder(rest.tree, memberId, h => {
+      if (h.t !== 'b') return h;
+      // `default` 块本来就是一条 tab 条：接着往里加就是。
+      if (h.mode === 'default') return { ...h, ids: [...h.ids, ...ids], sel: h.sel };
+      // 容器：插到**那一格的末尾**，并让那一格多算几个。块本身、mode、其余格全不动。
+      const cells = cellsOf(h);
+      const gi = cells.findIndex(c => c.includes(memberId));
+      if (gi < 0) return h;
+      const at = cellStart(h, gi) + cells[gi].length;
+      const groups = groupsOf(h);
+      groups[gi] += ids.length;
+      return {
+        ...h,
+        ids: [...h.ids.slice(0, at), ...ids, ...h.ids.slice(at)],
+        groups,
+        // `sel` 是 ids 的下标：插在它前面时，正在显示的那个单元整体后移。
+        sel: h.sel >= at ? h.sel + ids.length : h.sel,
+      };
+    }),
+  };
+};
 // Take units OUT of their own block and give them a block of their own beside it — the "pull this out
 // into a window of its own" gesture, aimed at the EDGE of the very block they live in (the centre is
 // "put it back", and is a no-op). `anchor` is a member that stays: the block survives the detach
@@ -623,7 +843,14 @@ export const zoneOf = (r: DOMRect, x: number, y: number, edge: number = ZONE_EDG
 // the frame draws only what has something in it, so a nest that empties out folds away and stops
 // reserving its share of the page. Exported because the probe has to make the same judgement from the
 // model side when it lines a saved tree up against what is drawn.
-export const dead = (n: DockNode): boolean => n.t === 's' && !n.ks.some(k => !dead(k));
+//
+// `known` 是页面当下"拿得出这份单元"的判断（DockRules.known）。带上它时，一整块全都尚未验证的
+// 文档单元的块也算空：刷新后工作台播报前的半秒里，存档里画布窗口的位置在模型里留着，屏幕上却不画
+// 一扇标题为 "doc:1" 的空窗占地方 —— 播报一到，块自然回来。探针不带这个参数，口径不变。
+export const dead = (n: DockNode, known?: (id: UnitId) => boolean): boolean => {
+  if (n.t === 's') return !n.ks.some(k => !dead(k, known));
+  return !!known && !n.ids.some(known);
+};
 
 // A block's size along its parent's axis: the one the user dragged, or a share of what is left. NOTHING
 // sizes to its content — the frame divides the page and the content scrolls inside its block. (A window

@@ -65,6 +65,10 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
   const owners = new Set(docs.map(d => docUnit(d.uid)));
   const byUnit = new Map(docs.map(d => [docUnit(d.uid), d] as const));
   const isDoc = (id: UnitId) => owners.has(id);
+  // 这几条问的是"这个单元是不是一扇文档窗"，不是"这份文档开没开"：刷新后播报前的半秒里 isDoc 还是
+  // false，而树里存档的画布窗口已经要按文档窗对待（不折叠、按份额长、满幅）—— 否则播报一到，尺寸
+  // 和折叠行为会当场跳一遍。docUidOf 只看形状，正好是这个口径。
+  const isDocUnit = (id: UnitId) => docUidOf(id) !== null;
   return {
     store: DOCK_STORE,
     panels: PANEL_IDS,
@@ -75,16 +79,16 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
       const d = byUnit.get(id);
       return d ? d.name + (d.dirty ? ' ●' : '') : UNIT_TITLES[id] ?? id;
     },
-    keepMounted: isDoc,
+    keepMounted: isDocUnit,
     // A document window never folds: its fold would be stored under a uid the workbench re-issues from
     // 1 on its next boot, and a collapsed canvas box leaves the live frame with nowhere to be. Its title
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
-    foldable: (id: UnitId) => !isDoc(id),
-    fullBleed: (id: UnitId) => isDoc(id) || id === 'toolbar',
+    foldable: (id: UnitId) => !isDocUnit(id),
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
-    grows: (id: UnitId) => isDoc(id) || id === 'layers' || id === 'guidances',
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
@@ -477,10 +481,22 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // The workbench is the only thing that knows which projects exist, so this is where that knowledge
   // enters the layout — the dock model itself never learns what a .cud is.
   const openDocUnits = useMemo(() => blendDocs.docs.map(d => docUnit(d.uid)), [blendDocs]);
+  // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
+  // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
+  // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。
+  const settledDocs = useRef(false);
   useEffect(() => {
+    // 播报前（它自己也刚加载），开文档集是"未知"而不是"空"。此刻按空集会先把存档里画布窗口的位置
+    // 剪掉，等播报到来只能按新文档安放 —— 画布每次刷新都跳回默认位置，而其它面板本来就留得住（加载
+    // 时就认得它们）。所以头一份带文档的播报到达前不动树；之后对得上号的文档窗口原地留用，
+    // 对不上的才剪、新来的才放。
+    if (!blendDocs.announced) return;
+    const sawDoc = openDocUnits.length > 0;
+    if (!sawDoc && !settledDocs.current) return;
+    settledDocs.current = true;
     const next = syncDocUnits(dock, openDocUnits);
     if (next !== dock) applyDock(next);
-  }, [dock, openDocUnits, applyDock]);
+  }, [dock, openDocUnits, applyDock, blendDocs.announced]);
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);

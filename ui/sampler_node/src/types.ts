@@ -470,10 +470,12 @@ export function firstDetailerFlag(
 export type BlendDoc = { uid: number; name: string; kind: string | null; dirty: boolean; path: string | null };
 
 /** 一次播报的全量快照：开着的文档、哪一份是当前活动文档、以及有没有一个 IO 动作把文档锁住
- *  （锁住 = File 的六个动作全灰）。 */
-export type BlendDocs = { activeUid: number | null; busy: boolean; docs: BlendDoc[] };
+ *  （锁住 = File 的六个动作全灰）。`announced` 是"这是不是第一份播报"：宿主页面加载后、工作台
+ *  第一次播报前，开文档集是**未知**而不是空 —— 布局要按未知对待（画布窗口的位置留在存档里），
+ *  按空集处理会在刷新时把画布每次都对回默认位置。 */
+export type BlendDocs = { activeUid: number | null; busy: boolean; docs: BlendDoc[]; announced: boolean };
 
-export const EMPTY_BLEND_DOCS: BlendDocs = { activeUid: null, busy: false, docs: [] };
+export const EMPTY_BLEND_DOCS: BlendDocs = { activeUid: null, busy: false, docs: [], announced: false };
 
 /** 宿主顶栏与文档窗口 tab 发回工作台的文档动作 —— 与 iframe 里 DOC_COMMANDS 的八个键一一对应。 */
 export type BlendDocCommand = 'new' | 'load' | 'save' | 'save-as' | 'export-png' | 'import' | 'activate' | 'close';

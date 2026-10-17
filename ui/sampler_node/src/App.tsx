@@ -1152,6 +1152,8 @@ const App: React.FC = () => {
           activeUid: typeof event.data.activeUid === 'number' ? event.data.activeUid : null,
           busy: event.data.busy === true,
           docs,
+          // 第一份播报（哪怕是空的）说明"未知"结束了：此后开文档集说什么就是什么，布局照此对账。
+          announced: true,
         });
         // A closed document's kept frame goes with it: the workbench hands its uids out again from 1
         // when its page reloads, and a fresh window must not open on some other project's last frame.
