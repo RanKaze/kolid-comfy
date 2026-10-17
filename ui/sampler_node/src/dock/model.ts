@@ -10,7 +10,8 @@
 //   * `v` / `h` — a CONTAINER. One dock window per unit, stacked in that direction, each sizing to its
 //     own content; the block scrolls when they do not fit, and a member folds to give its space back
 //     to the others. That is the ONLY place a fold exists.
-// Alt+P (held) is the mode editor — the one place a block changes mode. A drop lands on a BLOCK and the
+// Alt+P (toggled — press to enter, press again or Esc to leave) is the mode editor, the one place a
+// block changes mode. A drop lands on a BLOCK and the
 // block decides: the centre adds what arrived to it (more tabs in `default`, more stacked windows in
 // `v`/`h`), an edge splits a fresh block off.
 //
@@ -556,16 +557,66 @@ export const dragSplit = (dock: Dock, prev: readonly number[], next: readonly nu
   tree: sizeAt(sizeAt(dock.tree, next, undefined), prev, sz, max),
 });
 
-// How far into a block's box the pointer has to be for that edge to count as a split. Kept well under
-// half so the middle of a block stays the "put it in this block" zone, which is where a pointer aimed
-// at a block usually lands.
-export const zoneOf = (r: DOMRect, x: number, y: number): Zone => {
-  const vt = Math.min(34, r.height * 0.32), hl = Math.min(46, r.width * 0.34);
-  if (y - r.top < vt) return 'top';
-  if (r.bottom - y < vt) return 'bottom';
-  if (x - r.left < hl) return 'left';
-  if (r.right - x < hl) return 'right';
-  return 'center';
+// ── 落点 ────────────────────────────────────────────────────────────────────────────────────
+// 一个块按四条边切成四带 + 中间一块：边带各占这块自己的 1/4，中间剩下的 1/2 见方是"放进这一块"。
+// 判定（zoneOf）和预览（zoneRect）用的是同一组比例，因为它们回答的是同一个问题：
+// **亮起来的那一块，就是松手后会出现的那一块。**
+//
+// 这两件事一旦分家，就会出现"框亮着、松手却落在中间"。上一版正是如此：判定按 34px/46px 的像素带，
+// 预览却按 38%/34% 的比例画 —— 两个数字永远对不上，于是用户看到的框比真正算数的区域大得多，
+// 读作"只有贴着边才认"。比例还顺手解决了窗口尺寸的问题：同一块在宽屏和窄屏上，四条带都是
+// 它自己的四分之一，永远够得着，也永远不需要重新标定。
+//
+// 角落由"哪个方向的比例更小"决定 —— 一个点只属于一个 zone。这条规则有个几何后果：角落那 1/4 见方
+// 被对角线切成两半，各归相邻的两条带。所以**每条边带的形状是梯形，不是矩形**：左边带占满左边缘，
+// 但只有中间那一半高度能伸到 1/4 深，上下两头是被上/下带斜着切掉的。
+//
+// 预览必须画这个梯形。画成矩形就等于承诺了一块松手后拿不到的三角：指针停在那个角上，框还说
+// "左侧分割"，判定其实已经是"上方分割"了。一个角上两句话，用户只会学到"这提示不准"。
+export const ZONE_EDGE = 0.25;
+
+// 一个 zone 在块里的**形状**，0..1 的比例，顶点顺时针。判定（zoneOf）与预览（zonePoly）同源，
+// 所以"亮起来的那块面积"和"会响应落点的那块面积"是同一块，不是近似。
+export type ZonePoint = readonly [number, number];
+
+export const zonePoly = (z: Zone, edge: number = ZONE_EDGE): ZonePoint[] => {
+  const e = Math.min(0.45, Math.max(0.05, edge));
+  const f = 1 - e;
+  if (z === 'left') return [[0, 0], [e, e], [e, f], [0, 1]];
+  if (z === 'right') return [[1, 0], [f, e], [f, f], [1, 1]];
+  if (z === 'top') return [[0, 0], [1, 0], [f, e], [e, e]];
+  if (z === 'bottom') return [[0, 1], [1, 1], [f, f], [e, f]];
+  return [[e, e], [f, e], [f, f], [e, f]];
+};
+
+// 形状的外接矩形。CSS 的 left/top/width/height 只认矩形，所以定位用它、形状用 zonePoly。
+// 中心块的外接矩形就是它自己；四条边带的外接矩形比形状大出一对三角 —— 这一点是用它的前提：
+// 容器的角上可能没有填充，那里的指针属于相邻的带。
+export type ZoneRect = { left: number; top: number; width: number; height: number };
+
+export const zoneRect = (z: Zone, edge: number = ZONE_EDGE): ZoneRect => {
+  const pts = zonePoly(z, edge);
+  const xs = pts.map(p => p[0]);
+  const ys = pts.map(p => p[1]);
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  return { left, top, width: Math.max(...xs) - left, height: Math.max(...ys) - top };
+};
+
+// 指针落在哪个 zone。距离按块自身的长宽归一化后再比：宽块的左右带在像素上很宽、上下带很窄，
+// 但那正是"把这块四分"的含义 —— 用像素比就会在宽块上把上下两条带挤成一条够不着的细边。
+export const zoneOf = (r: DOMRect, x: number, y: number, edge: number = ZONE_EDGE): Zone => {
+  if (!(r.width > 0) || !(r.height > 0)) return 'center';
+  const arms: [Zone, number][] = [
+    ['left', (x - r.left) / r.width],
+    ['right', (r.right - x) / r.width],
+    ['top', (y - r.top) / r.height],
+    ['bottom', (r.bottom - y) / r.height],
+  ];
+  let best: Zone = 'center';
+  let bestD = edge;
+  for (const [z, d] of arms) if (d < bestD) { bestD = d; best = z; }
+  return best;
 };
 // A node with nothing left to show: a nest whose every descendant is empty. It stays in the MODEL —
 // that is where the next document lands, between the columns rather than at the end of the row — but

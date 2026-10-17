@@ -3,9 +3,10 @@ import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockP
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
-import { type DockMode, type DockRules, type UnitId, type Dock, type Zone, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
-import { type DockDrag, DockPanel } from '../dock/DockView';
+import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, loadDock, setBlockMode, syncDocUnits } from '../dock/model';
+import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
+import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 
 // The rename field of a preset row.
@@ -483,27 +484,27 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // dataTransfer payloads are not readable during dragover, so the unit being dragged and the box
   // being hovered are mirrored in state — that is what the landing bands and the iframe shield key off.
   const [dockDrag, setDockDrag] = useState<DockDrag | null>(null);
-  const [dockOver, setDockOver] = useState<{ id: UnitId; zone: Zone } | null>(null);
-  // ── BLOCK 编辑模式 ── 按住 Alt+P 才在，松开（或窗口失焦）就退出。所以模式控件平时完全不在页面上：
-  // 一块怎么排是装修，不是日常操作，Alt+P 就是那道暗门。它唯一的写口是 setMode。
+  const [dockOver, setDockOver] = useState<DockOver | null>(null);
+  // ── BLOCK 编辑模式 ── Alt+P 是**切换**，不是按住：按一下开、再按一下（或 Esc）关。
+  // 模式控件平时完全不在页面上（一块怎么排是装修，不是日常操作，Alt+P 就是那道暗门），
+  // 而暗门一旦打开就得站得住：装修一趟要连着点几个模式按钮、拖几条分界线，按住一个键是做不完的。
+  // 它唯一的写口是 setMode。
+  //
+  // 按键必须走 onGlobalKey 而不是 window.addEventListener：鼠标一进画布，焦点就被工作台 iframe 拿走
+  // （frame layer 主动 focus 它），键盘事件全在 iframe 的 document 里发生，宿主这边连 keydown 都收不到
+  // —— 这正是"鼠标在画布上时 Alt+P 没反应"。见 hotkeys.ts。
   const [blockEdit, setBlockEdit] = useState(false);
-  useEffect(() => {
-    const keyDown = (e: KeyboardEvent) => {
-      if (e.code !== 'KeyP') return;
-      if (e.altKey) { e.preventDefault(); setBlockEdit(true); }
-      else setBlockEdit(false);
-    };
-    const keyUp = (e: KeyboardEvent) => { if (e.code === 'KeyP' || e.key === 'Alt') setBlockEdit(false); };
-    const blur = () => setBlockEdit(false);
-    window.addEventListener('keydown', keyDown);
-    window.addEventListener('keyup', keyUp);
-    window.addEventListener('blur', blur);
-    return () => {
-      window.removeEventListener('keydown', keyDown);
-      window.removeEventListener('keyup', keyUp);
-      window.removeEventListener('blur', blur);
-    };
-  }, []);
+  useEffect(() => onGlobalKey(e => {
+    // 按住不放会连发 keydown，切换制下那就是一路翻转。只认每次按下后的第一发。
+    if (e.repeat) return;
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && keyIs(e, 'p')) {
+      e.preventDefault(); e.stopPropagation();
+      setBlockEdit(v => !v);
+      return;
+    }
+    // Esc 只负责关闭，不拦事件：弹窗、改名输入框、画布自己的 Esc 都还要用它。
+    if (e.key === 'Escape') setBlockEdit(false);
+  }), []);
   // Alt+P 唯一的写口：把拥有 `id` 的那一块换成这个模式（Default 收成一行 tab，Vertical/Horizontal
   // 摊成一个单元一个窗口）。块本身没变，变的是它怎么摆它的成员。摊开是纯框架动作：新 split 继承
   // 容器的尺寸、里面的块全部 free 平分，内容占多大不参与（见 model.ts 的 switchMode）。

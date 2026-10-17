@@ -1,9 +1,10 @@
 import React, { useRef } from 'react';
 import {
   type Dock, type DockBlock, type DockFit, type DockFloat, type DockMode, type DockNode, type DockRules, type UnitId, type Zone,
+  type ZonePoint, type ZoneRect,
   DOCK_GROW_MIN_H, DOCK_MIN_SZ, DOCK_SPLIT, FLOAT_MIN_H, FLOAT_MIN_W,
   defaultDock, dead, clampSz, dockBackDock, dockFloor, docUidOf, dragOutUnits, dragSplit, dropUnits, flexOf, floorPct, freezeAt, nodeAt, popOutDock,
-  rewriteHolder, setFloatDock, sizeAt, zoneAxis, zoneOf,
+  rewriteHolder, setFloatDock, sizeAt, zoneAxis, zoneOf, zonePoly, zoneRect,
 } from './model';
 // 探针的轨迹钩子。这里只发"发生了什么"，不做判断、不读布局 —— 判断留在探针那边，
 // 免得把排查规则散进渲染层（那才是第二份真相）。
@@ -38,13 +39,13 @@ const dockStyles: Record<string, React.CSSProperties> = {
   dockBodyFull: { flex: '1 1 auto', minHeight: 0, overflow: 'hidden', padding: 0, display: 'flex', flexDirection: 'column' },
   // 浮窗右下角那颗：浮窗不在任何 split 里，没有块的分界线可拖，所以它自己留一颗改大小的角。
   dockCorner: { position: 'absolute', right: 1, bottom: 1, width: 12, height: 12, cursor: 'nwse-resize', background: 'linear-gradient(135deg, transparent 50%, rgba(255,255,255,0.26) 50%)' },
-  dockNoteBox: { position: 'absolute', inset: 0, zIndex: 3, boxShadow: 'inset 0 0 0 2px #0a84ff', borderRadius: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
-  dockNote: { fontSize: 10, fontWeight: 700, color: '#0a84ff', background: 'rgba(10,132,255,0.14)', padding: '2px 8px', borderRadius: 999 },
+  // 落点预览的那一层：线框 + 一层薄填充，不遮内容，但边界清清楚楚。
+  zoneNote: { fontSize: 10, fontWeight: 700, color: '#d7eaff', background: 'rgba(10,132,255,0.28)', border: '0.5px solid rgba(10,132,255,0.6)', borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' },
   // The dock fills the page and tiles it: the root is one column, the tree takes every pixel of it and
   // nothing here scrolls as a whole. Every scroller belongs to a container block (see BlockBox) or to a
   // window's own body.
   dockRoot: { flex: 1, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', paddingRight: 2, position: 'relative' },
-  // Alt+P 那颗浮标：只有按住 Alt+P 时才出现，平时块完全是内容本身。
+  // Alt+P 那颗浮标：Alt+P 是切换键（再按一次或 Esc 退出），打开期间它一直在，关掉就整页干净。
   dockEditBar: { position: 'absolute', left: '50%', bottom: 10, transform: 'translateX(-50%)', zIndex: 70, display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px 5px 12px', background: 'rgba(40,40,44,0.96)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '0.5px solid rgba(10,132,255,0.55)', borderRadius: 999, boxShadow: '0 10px 30px rgba(0,0,0,0.55)' },
   dockEditHint: { fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.7)', whiteSpace: 'nowrap' },
   dockResetBtn: { background: 'none', border: '0.5px solid rgba(255,255,255,0.12)', borderRadius: 999, color: 'rgba(255,255,255,0.62)', fontSize: 10, fontWeight: 600, padding: '3px 12px', cursor: 'pointer' },
@@ -63,6 +64,16 @@ const dockStyles: Record<string, React.CSSProperties> = {
 //     tab group and all, because a window is one thing and the user grabbed the thing, not a tab.
 export type DockDrag = { ids: readonly UnitId[] };
 
+// The landing preview: which block, which band of it, the block's box in VIEWPORT coordinates, and the
+// sentence that says what the drop will do.
+//
+// The box is carried here instead of being measured at draw time for one reason: the preview is drawn
+// at the dock's root, not inside the block. A container block is a SCROLLER, and an absolutely
+// positioned child of a scroller is offset by its scrollTop — dragging onto the settings column after
+// scrolling it down would light up a band that had slid out of the block. Anchoring to the viewport is
+// also what lets the label escape a 96px block instead of being clipped by its overflow.
+export type DockOver = { id: UnitId; zone: Zone; box: { x: number; y: number; w: number; h: number }; label: string };
+
 // Everything the dock chrome needs, passed down as one object so a box and a branch take the same
 // three props (the node they render, the axis their parent measures them on, this context).
 export type DockCtx = {
@@ -76,7 +87,7 @@ export type DockCtx = {
   // member of a container is ever asked: a window that fills its block has nothing to fold away from.
   isOpen: (id: UnitId) => boolean;
   fold: (id: UnitId, open: boolean) => void;
-  // 按住 Alt+P 的 **Block 编辑模式**：平时页面上没有模式控件，因为一块怎么排是装修，不是日常。
+  // 切换开的 **Block 编辑模式**：平时页面上没有模式控件，因为一块怎么排是装修，不是日常。
   edit: boolean;
   // The mode of the block owning this unit — the only write Alt+P makes.
   setMode: (id: UnitId, mode: DockMode) => void;
@@ -86,8 +97,8 @@ export type DockCtx = {
   setDock: (next: Dock, persist?: boolean) => void;
   drag: DockDrag | null;
   setDrag: (d: DockDrag | null) => void;
-  over: { id: UnitId; zone: Zone } | null;
-  setOver: (v: { id: UnitId; zone: Zone } | null) => void;
+  over: DockOver | null;
+  setOver: (v: DockOver | null) => void;
   // A document unit is not folded by clicking its bar, it is ACTIVATED: one project at a time owns
   // the workbench, and the bar is where the user says which. Panels keep the old gesture.
   activate?: (id: UnitId) => void;
@@ -192,13 +203,64 @@ const dockTabStyle = (on: boolean): React.CSSProperties => ({
   textOverflow: 'ellipsis', maxWidth: 148, flexShrink: 0,
 });
 
-const zoneBand = (z: Zone): React.CSSProperties => {
-  const base: React.CSSProperties = { position: 'absolute', pointerEvents: 'none', borderRadius: 10, background: 'rgba(10,132,255,0.18)' };
-  if (z === 'top') return { ...base, top: 0, left: 0, right: 0, height: '38%' };
-  if (z === 'bottom') return { ...base, bottom: 0, left: 0, right: 0, height: '38%' };
-  if (z === 'left') return { ...base, top: 0, bottom: 0, left: 0, width: '34%' };
-  return { ...base, top: 0, bottom: 0, right: 0, width: '34%' };
+// 落点预览 —— 位置来自 `zoneRect`，**形状**来自 `zonePoly`，判定用的 `zoneOf` 是同一套规则，
+// 所以"亮在哪就落在哪"，连面积的边角都对得上。
+//
+// 为什么边带是梯形：角落只能归一个方向，规则是"最近的那条边"胜，于是两条对角斜线把四个角各切给
+// 相邻的带（判定在 model.ts 的 zoneOf，形状在 zonePoly）。画成矩形就等于承诺了一块松手后拿不到
+// 的三角 —— 指针停在那个角上，框还说"左侧分割"，判定其实已经是"上方分割"。
+//
+// 用 SVG 而不是 CSS 盒子：梯形有两条斜边，`border-radius` 表达不了；`clip-path` 能裁形状，但裁掉
+// 的恰好是描边要画的地方。polygon 的描边自己就是形状。
+//
+// 画在 dock 根上、用视口坐标（`position: fixed`），不画进块里：块可能是滚动容器（设置列就是），
+// 绝对定位的子节点会被 scrollTop 顶跑；块也可能只有 96px 宽，标签会被它的 overflow 裁掉。
+const zoneBoxStyle = (box: DockOver['box'], r: ZoneRect): React.CSSProperties => ({
+  position: 'fixed', zIndex: 68, pointerEvents: 'none',
+  left: box.x + r.left * box.w, top: box.y + r.top * box.h,
+  width: r.width * box.w, height: r.height * box.h,
+  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  // 90ms 只够把"跳一下"变成"移过去"：换带的时候能看清它跟到了哪一条，又不至于拖泥带水。
+  transition: 'left 90ms ease, top 90ms ease, width 90ms ease, height 90ms ease',
+});
+
+const ZonePreview: React.FC<{ zone: Zone; box: DockOver['box']; label: string }> = ({ zone, box, label }) => {
+  const r = zoneRect(zone);
+  const W = r.width * box.w, H = r.height * box.h;
+  // 块内比例 → 外接矩形内的像素。外接矩形只用来定位，形状仍然是整块的四分。
+  const px = ([u, v]: ZonePoint): string =>
+    `${(((u - r.left) / r.width) * W).toFixed(1)},${(((v - r.top) / r.height) * H).toFixed(1)}`;
+  const pts = zonePoly(zone).map(px).join(' ');
+  return (
+    // `data-dock-zone-poly` 是形状本身（bbox 内的像素顶点）。探针和拖放测试拿它做"这个点在不在
+    // 这个 zone 里"的判断 —— 只看 `data-dock-zone` 的话，"框是矩形还是梯形"就验不了。
+    <div data-dock-zone={zone} data-dock-zone-poly={pts} style={zoneBoxStyle(box, r)}>
+      {/* viewBox 与元素同尺寸，所以没有缩放、描边不会被拉成粗细不匀的一条。 */}
+      <svg width="100%" height="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none"
+        style={{ position: 'absolute', inset: 0, display: 'block', overflow: 'visible' }}>
+        <polygon points={pts} fill="rgba(10,132,255,0.14)" stroke="rgba(10,132,255,0.95)"
+          strokeWidth={1.5} strokeLinejoin="round" />
+      </svg>
+      {/* 箭头 + 文字竖着排：窄带（96px 宽的块，一条竖带只有 24px）横向是排不下的。
+          外接矩形的中心一定落在梯形里（斜边从四角切，中心在两条斜边之间），所以居中就够。 */}
+      <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+        <ZoneArrow zone={zone} />
+        <span style={dockStyles.zoneNote}>{label}</span>
+      </div>
+    </div>
+  );
 };
+
+// 每个落点是什么意思，一句话说清。用户不必先记住规则再拖 —— 拖的时候它自己讲。
+const ZONE_WORD: Record<Zone, string> = {
+  top: '上方分割', bottom: '下方分割', left: '左侧分割', right: '右侧分割', center: '放入此块',
+};
+
+// 两个落点是不是同一件事：块、带、框、话。框也算，因为块的盒子会随布局/滚动变。
+const sameOver = (a: DockOver | null, b: DockOver): boolean =>
+  !!a && a.id === b.id && a.zone === b.zone && a.label === b.label
+  && Math.round(a.box.x) === Math.round(b.box.x) && Math.round(a.box.y) === Math.round(b.box.y)
+  && Math.round(a.box.w) === Math.round(b.box.w) && Math.round(a.box.h) === Math.round(b.box.h);
 
 // A settings unit's body is a column of cards with its own scroller. A full-bleed unit's body IS the
 // region — no card inset, and the content (a canvas) decides its own scrolling and its own background.
@@ -429,14 +491,24 @@ const ModePicker: React.FC<{ node: DockBlock; ctx: DockCtx }> = ({ node, ctx }) 
 const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count: number }> = ({ node, ctx, axis, count }) => {
   const container = node.mode !== 'default';
   const target = node.ids[0];
+  // 预览只在"这一落点真的会做事"时出现。三种话，一句一个意思：
+  //   * 边带 + 手里是别处的单元 → 在这里**分割**出一个新块（区间框就是新块的地盘）；
+  //   * 边带 + 手里是本块自己的成员 → **拖出**去变成自己的块（同一个 zone，两种含义，所以得说清）；
+  //   * 中间 → 并进这块：`default` 是加一行 tab，容器是多一个窗口。
+  //
+  // 这里只**判定并上报**，画由 DockPanel 在根上画：块本身可能是滚动容器，也可能只有 96px 宽，
+  // 预览跟着块走就会被顶跑、被裁掉。判定与绘制分家，但两者用的是同一个 `zoneRect`。
+  const wordOf = (z: Zone, ids: readonly UnitId[]): string => z === 'center'
+    ? (container ? '并入这个容器' : '并入 tab 组')
+    : ((node.ids.some(i => ids.includes(i)) ? '拖出为新块 · ' : '') + ZONE_WORD[z]);
   // Hovering with a member of this very block counts too: its edge is the "drag it out to a block of
   // its own" target, and the preview should say so. `over` is only ever set for a zone this block
   // accepts, so the centre of one's own block (a no-op) sets none and shows none.
-  const isOver = !!ctx.drag && ctx.over?.id === target;
   const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     const ids = ctx.drag?.ids;
     if (!ids) return;
-    const zone = zoneOf(e.currentTarget.getBoundingClientRect(), e.clientX, e.clientY);
+    const box = e.currentTarget.getBoundingClientRect();
+    const zone = zoneOf(box, e.clientX, e.clientY);
     // Units of THIS block under the pointer have two destinations, and they are the two halves of the
     // block: the centre puts them back where they already are (a no-op the user makes constantly — a
     // drag that misses its target lands home), an edge pulls them OUT beside the block. That is refused
@@ -452,7 +524,11 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     }
     e.preventDefault(); e.stopPropagation();
     e.dataTransfer.dropEffect = 'move';
-    if (ctx.over?.id !== target || ctx.over?.zone !== zone) ctx.setOver({ id: target, zone });
+    const next: DockOver = {
+      id: target, zone, label: wordOf(zone, ids),
+      box: { x: box.left, y: box.top, w: box.width, h: box.height },
+    };
+    if (!sameOver(ctx.over, next)) ctx.setOver(next);
   };
   // A drop that makes a block is the one place a window arrives with NO size of its own, and "take the
   // rest" is not an answer to it — the rest of a column is the whole column, which is how appending a
@@ -503,13 +579,6 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
       pref: fit ? Math.round(fit.pref) : null, room: fit ? Math.round(fit.room) : null,
     });
   };
-  const overlay = !isOver ? null : ctx.over!.zone === 'center' ? (
-    <div style={dockStyles.dockNoteBox}><span style={dockStyles.dockNote}>{container ? 'add a window' : 'tab group'}</span></div>
-  ) : (
-    <div style={{ ...zoneBand(ctx.over!.zone), display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <ZoneArrow zone={ctx.over!.zone} />
-    </div>
-  );
   // A block with no dragged size shares what its siblings leave, and that share has a floor — the
   // frame's, never the content's. It is what lets a split drag promise the neighbour keeps DOCK_MIN_SZ
   // (see SplitHandle): without it a free block can be starved under the floor and the boundary stops
@@ -537,7 +606,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
     return (
       <div data-dock-block={target} style={{ ...dockStyles.dockBox, ...chrome, ...edit }} onDragOver={onDragOver} onDrop={onDrop}>
         <DockWindow node={node} ctx={ctx} axis={axis} />
-        {overlay}{picker}
+        {picker}
       </div>
     );
   }
@@ -549,7 +618,7 @@ const BlockBox: React.FC<{ node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; count
         <DockWindow key={u} ctx={ctx} axis={node.mode === 'h' ? 'h' : 'v'} stacked solo={node.ids.length === 1}
           node={{ t: 'b', ids: [u], sel: 0, mode: 'default' }} />
       ))}
-      {overlay}{picker}
+      {picker}
     </div>
   );
 };
@@ -833,6 +902,10 @@ const DockBranch: React.FC<{ node: DockNode; ctx: DockCtx; axis: 'v' | 'h'; path
 // beside the ⤢ button and needs no aiming. Alt+P adds the mode pickers and the reset, and nothing else.
 export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
   const onDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    // 走到这里就说明指针**不在任何一个会接它的块上**（块接住或主动拒绝时都会 stopPropagation），
+    // 所以先收掉残留的落点预览。以前这一句写在多单元判断之后，拖着一个窗口掠过块与块之间的缝时，
+    // 上一块的线框会一直亮着 —— 一个永远等不到松手的承诺，比不画更糟。
+    if (ctx.over) ctx.setOver(null);
     // The dock's own background takes ONE unit, and pops it out as a window. A whole window dropped
     // here has nowhere to go — a float holds one unit, and quietly keeping some of them would lose the
     // rest — so the gesture is refused (leaving `preventDefault` uncalled is what shows the pointer a
@@ -840,7 +913,6 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
     if (!ctx.drag || ctx.drag.ids.length > 1) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    if (ctx.over) ctx.setOver(null);
   };
   const onDrop = (e: React.DragEvent<HTMLDivElement>) => {
     const ids = carried(ctx, e);
@@ -857,9 +929,14 @@ export const DockPanel: React.FC<{ ctx: DockCtx }> = ({ ctx }) => {
       {ctx.dock.floats.map(f => (
         <DockWindow key={f.id} ctx={ctx} axis="v" float={f} node={{ t: 'b', ids: [f.id], sel: 0, mode: 'default' }} />
       ))}
+      {/* 落点预览：整页只有这一块。它按**视口坐标**画（见 DockOver），所以块的滚动、裁剪、圆角
+          都影响不到它 —— 用户看到的形状，就是松手后会出现的那块地方。 */}
+      {ctx.drag && ctx.over && (
+        <ZonePreview zone={ctx.over.zone} box={ctx.over.box} label={ctx.over.label} />
+      )}
       {ctx.edit && (
-        <div style={dockStyles.dockEditBar}>
-          <span style={dockStyles.dockEditHint}>Block 编辑 · 顶上的三选一改模式 · 拖分界线改大小</span>
+        <div data-dock-edit="" style={dockStyles.dockEditBar}>
+          <span style={dockStyles.dockEditHint}>Block 编辑 · 顶上三选一改模式 · 拖分界线改大小 · 再按 Alt+P 或 Esc 退出</span>
           <button style={dockStyles.dockResetBtn} title="Put every unit back in its column, in order"
             onClick={() => ctx.setDock(defaultDock(ctx.rules))}>Reset layout</button>
         </div>

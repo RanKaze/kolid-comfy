@@ -4,6 +4,7 @@ import {
   type ProbeSendResult, type ProbeSnapshot,
 } from './probe';
 import { installLive, liveHelpers, liveNow, liveReport } from './live';
+import { onGlobalKey, keyIs } from '../hotkeys';
 
 /**
  * 探针的装配层：把上面那些零件挂到全局，并给出两个入口 —— 热键与 `window.__uiProbe`。
@@ -67,18 +68,21 @@ export function installProbe(): void {
   // ── 热键 ───────────────────────────────────────────────────────────────────
   const onKey = (e: KeyboardEvent): void => {
     if (!e.altKey || e.metaKey || e.ctrlKey) return;
-    const k = e.key.toLowerCase();
-    if (k === 'd' && !e.shiftKey) {
+    // `keyIs` 同时认物理键位：macOS 上 Option 会把 `key` 变成符号（Alt+D → ∂），只认 key 会漏。
+    if (!keyIs(e, 'd')) return;
+    if (!e.shiftKey) {
       e.preventDefault(); e.stopPropagation();
       toggleProbePanel();
       note('probe.panel', { open: probePanelOpen() });
-    } else if (k === 'd' && e.shiftKey) {
+    } else {
       // Alt+Shift+D：抓一份直接送后端，面板不弹 —— "一键存档"。
       e.preventDefault(); e.stopPropagation();
       void probeSend('hotkey').then(r => note('probe.sent', { ok: r.ok, file: r.file ?? null, error: r.error ?? null }));
     }
   };
-  window.addEventListener('keydown', onKey, true);
+  // 走 hotkeys 的入口而不是裸 window 监听：鼠标停在画布上时焦点在工作台 iframe 里，
+  // 宿主 window 收不到 keydown —— 那会让"看得见问题却打不开探针"成为常态。见 hotkeys.ts。
+  onGlobalKey(onKey);
 
   // ── 让"报错"和"窗口变了"也进轨迹 ─────────────────────────────────────────
   // 这两类事件往往是布局问题的起点，而它们发生时用户不会记得去抓快照。
