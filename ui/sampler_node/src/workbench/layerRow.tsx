@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { BlendAttrChip, BlendChainLane, BlendLayerRow, BlendStack, BlendUiSend } from '../types';
 import { useBlendUi } from './store';
+import { useLayerEditBlocked } from './editGate';
 
 // Layers / Guidances 两格的正文。两格用的是同一套行代码（页面那一句 renderStackList 也是），
 // 区别只有头部那几颗按钮和空态那句话，所以这里交出来的是一块 `LayerListView`，两格各摆一份。
@@ -797,13 +798,17 @@ export const StackHead = ({ stack, entries, withBypass, send }:
   const ui = useBlendUi();
   const st = useRowUi();
   const groupRef = useRef<HTMLDivElement | null>(null);
+  // 视频模式下没有选中 Layer 段时，这两格不知道该往哪写 —— 动作条整排变灰（Guidances 同一条闸）。
+  const blocked = useLayerEditBlocked();
+  const off = blocked ? { opacity: 0.35, cursor: 'default' as const } : null;
   const mine = st.menu && st.menu.kind === 'add' && st.menu.stack === stack ? st.menu : null;
   return (
-    <div ref={groupRef} className="mini-group">
+    <div ref={groupRef} className="mini-group" title={blocked ? 'Select a Layer segment in the Tracks window first — layers and guidances are written into the selected segment' : undefined}>
       {withBypass && (
         // 那颗「看加特效前的原样」总开关。画法不能在这里抄第二根魔棒 —— 快照里那句 fx.wand 就是
         // 页面 fxWandSvg() 的原串，条带上那枚链 chip 认的是同一个作者。
-        <button type="button" className={'mini-btn ico-btn' + (ui.fx.bypass ? ' fx-bypassed' : '')}
+        <button type="button" disabled={blocked} style={off ?? undefined}
+          className={'mini-btn ico-btn' + (ui.fx.bypass ? ' fx-bypassed' : '')}
           title={ui.fx.bypass
             ? 'Resume every layer effect chain (currently suspended)'
             : 'Suspend every layer effect chain — the chains stay on their layers, nothing is deleted'}
@@ -811,11 +816,14 @@ export const StackHead = ({ stack, entries, withBypass, send }:
           <span className="attr-visual" dangerouslySetInnerHTML={{ __html: ui.fx.wand }} />
         </button>
       )}
-      <button type="button" className="mini-btn"
-        title={stack === 'guidance' ? 'Remove every guidance layer' : 'Remove every layer (guidances stay)'}
+      <button type="button" className="mini-btn" disabled={blocked} style={off ?? undefined}
+        title={blocked
+          ? 'Select a Layer segment in the Tracks window first'
+          : (stack === 'guidance' ? 'Remove every guidance layer' : 'Remove every layer (guidances stay)')}
         onClick={() => send('layer-clear', { stack })}>Clear All</button>
-      <button type="button" className="mini-btn" aria-haspopup="menu" aria-expanded={!!mine}
-        title={stack === 'guidance'
+      <button type="button" className="mini-btn" disabled={blocked} style={off ?? undefined}
+        aria-haspopup="menu" aria-expanded={!!mine}
+        title={blocked ? 'Select a Layer segment in the Tracks window first' : stack === 'guidance'
           ? 'Add a guidance: composited over the layers image, and what the workspace Guidance card publishes'
           : 'Add a layer: one the size of the canvas, or one you draw out at any resolution'}
         onClick={() => {

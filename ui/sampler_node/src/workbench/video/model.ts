@@ -14,7 +14,12 @@
 import type { StagingItem } from '../../types';
 import type { MediaInfo } from './audio';
 
-export type VidTrackKind = 'video' | 'audio';
+// 三种轨：
+//  * video / audio —— 素材轨，帧与声直接来自源文件；
+//  * layer —— **合成轨**。它自己不装素材，只装"Layer 段"：每一段绑定一套独立图层
+//    （在 Layers 窗里编辑），并把下方视频轨的当前帧当作底图叠上去。
+//    **只有它排在所有视频轨之上时才会生效**（渲染按轨道序找第一条命中的轨，先命中先赢）。
+export type VidTrackKind = 'video' | 'audio' | 'layer';
 export type VidTrack = { id: string; kind: VidTrackKind; name: string };
 
 /** 资产库的一件货：视频/音频源，URL 收藏在这里，时间线上的片段按 src/资产来引用 ——
@@ -37,8 +42,11 @@ export type VidClip = {
   trackId: string;
   kind: VidTrackKind;
   name: string;
-  /** 播放源：图池/资产条目的 URL（可持久）或本地文件的 objectURL（刷新即失效）。 */
+  /** 播放源：图池/资产条目的 URL（可持久）或本地文件的 objectURL（刷新即失效）。
+   *  Layer 段没有播放源（它是合成的容器，不是素材），这里留空串。 */
   src: string;
+  /** Layer 段绑定的图层集 key（= 这一段的 id）。切到某一段时，Layers 窗换成这一套。 */
+  layerKey?: string;
   origin: 'staging' | 'file' | 'asset';
   /** 时间线位置（s）。 */
   start: number;
@@ -63,7 +71,15 @@ export type VidProject = {
   inPoint: number;
   /** 播放范围的出点（s）；<= inPoint 视为"没设"，播放范围就是整条时间线。 */
   outPoint: number;
+  /** 输出帧率。预览/取帧的时间栅格按它走；Layer Track 逐帧合成也用它对齐
+   *  （"执行到该帧"就是 t = n / fps）。旧档里没有这个字段 → 30。 */
+  fps: number;
 };
+
+/** 帧率的合理区间：低于 1 没有意义，高过 120 只会让逐帧取帧变慢。 */
+export const FPS_MIN = 1, FPS_MAX = 120;
+export const clampFps = (v: number): number =>
+  Math.max(FPS_MIN, Math.min(FPS_MAX, Math.round(Number(v) || 30)));
 
 // ── 播放头外置 ── 播放头每帧都在走；走 React state 会把宿主整页拖着每秒重渲几十次 ——
 // scrub 卡顿的根子就在这。它改住这颗外置小仓库：set 只改数字并敲订阅者（订阅者自己直改
@@ -120,6 +136,8 @@ export type VidController = {
   /** 改工程。`label` 是这一步在 History 里显示的名字，也是**合并键** —— 拖动时每帧都会调一次，
    *  同一个 label 连着来的那些会并成一步（一次拖动 = 一步撤销），见 EditPhase 的 pushVidHist。 */
   update: (fn: (p: VidProject) => VidProject, label?: string) => void;
+  /** 选中/取消一段。Layer 段用它切图层集 —— Layers 窗换成这一段自己那一套。 */
+  focusClip: (clip: VidClip | null) => void;
   seek: (t: number) => void;
   setPlaying: (v: boolean) => void;
   setPps: (v: number) => void;
@@ -243,10 +261,26 @@ export const removeAsset = (p: VidProject, id: string): VidProject =>
 
 export const addTrack = (p: VidProject, kind: VidTrackKind): VidProject => {
   const n = p.tracks.filter(t => t.kind === kind).length + 1;
-  const track: VidTrack = { id: newVidId('trk'), kind, name: kind === 'video' ? `Video ${n}` : `Audio ${n}` };
-  // 视频轨插到最上面（序 = 数组序），音频轨排到所有音频轨的最后。
-  const tracks = kind === 'video' ? [track, ...p.tracks] : [...p.tracks, track];
+  const name = kind === 'video' ? `Video ${n}` : kind === 'layer' ? `Layer ${n}` : `Audio ${n}`;
+  const track: VidTrack = { id: newVidId('trk'), kind, name };
+  // 视频轨 / Layer 轨插到最上面（序 = 数组序，也是渲染的上下序），音频轨排到所有音频轨的最后。
+  const tracks = kind === 'audio' ? [...p.tracks, track] : [track, ...p.tracks];
   return { ...p, tracks };
+};
+
+/** 在 Layer 轨上造一段。段 = 一段时间区间 + 一套独立图层（key 就是它自己的 id）。
+ *  `at` 会被 snapPlace 吸到该轨的空位上，所以连点两次不会叠在一起。 */
+export const addLayerClip = (p: VidProject, trackId: string, at: number, duration = 5): VidProject => {
+  const track = trackOf(p, trackId);
+  if (!track || track.kind !== 'layer') return p;
+  const id = newVidId('lcl');
+  const start = snapPlace(p, trackId, at);
+  const clip: VidClip = {
+    id, trackId, kind: 'layer', name: 'Layer ' + (p.clips.filter(c => c.kind === 'layer' && c.trackId === trackId).length + 1),
+    src: '', origin: 'asset', start, duration: Math.max(0.1, duration), offset: 0, srcDuration: duration,
+    hasAudio: false, layerKey: id,
+  };
+  return { ...p, clips: [...p.clips, clip] };
 };
 
 export const removeTrack = (p: VidProject, trackId: string): VidProject => ({
@@ -353,6 +387,7 @@ export const defaultVidProject = (): VidProject => ({
   assets: [],
   inPoint: 0,
   outPoint: 0,
+  fps: 30,
 });
 
 export const loadVidProject = (): VidProject => {
@@ -372,11 +407,20 @@ export const normalizeVidProject = (raw: unknown): VidProject => {
     if (!p || !Array.isArray(p.tracks) || !Array.isArray(p.clips)) return base;
     const trackIds = new Set(p.tracks.map(t => t.id));
     // blob: 的 objectURL 活不过刷新 —— 那些片段/资产当场蒸发；挂在不存在的轨道上的也一样。
-    const clips = p.clips.filter(c => c && c.src && !c.src.startsWith('blob:') && trackIds.has(c.trackId)
-      && Number.isFinite(c.start) && Number.isFinite(c.duration) && c.duration > 0);
+    // Layer 段没有 src（它装的是图层，不是素材），所以"必须有 src"那条只对素材段成立。
+    const clips = p.clips.filter(c => {
+      if (!c || !trackIds.has(c.trackId)) return false;
+      if (!Number.isFinite(c.start) || !Number.isFinite(c.duration) || !(c.duration > 0)) return false;
+      if (c.kind === 'layer') return c.src === '' || !c.src;
+      return !!c.src && !c.src.startsWith('blob:');
+    }).map(c => (c.kind === 'layer' ? { ...c, src: '', layerKey: c.layerKey || c.id } : c));
     const assets = (Array.isArray(p.assets) ? p.assets : []).filter(a => a && a.src && !a.src.startsWith('blob:')
       && Number.isFinite(a.duration) && a.duration > 0);
-    return { tracks: p.tracks, clips, assets, inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0) };
+    return {
+      tracks: p.tracks, clips, assets,
+      inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0),
+      fps: clampFps(Number(p.fps)),
+    };
   } catch { return base; }
 };
 

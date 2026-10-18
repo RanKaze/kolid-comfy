@@ -4302,6 +4302,49 @@ function pushHistory(key, label) {
     syncHistoryUI();
 }
 
+// ── Layer 集（Video 模式的 Layer 段）──────────────────────────────────────────────────────
+// 每个 Layer 段一套**独立图层**。这里不引入 group 字段（那要改几十处遍历），而是**整组换入换出**：
+// `layers` 永远只装"当前这一套"，渲染 / 列表 / 历史都不认识"组"这回事；切段 = 存回当前、装上目标。
+// 画布尺寸不跟着换 —— 它就是视频的输出栅格，所有段共用。
+const layerSets = new Map();
+let activeLayerSet = '';
+
+function captureLayerSet() {
+    return {
+        layers, selectedId,
+        decal: maskLayer.decal, decalCtx: maskLayer.decalCtx,
+        undoStack, redoStack, lastActionKey,
+    };
+}
+
+function switchLayerSet(key) {
+    const k = String(key || '');
+    if (k === activeLayerSet) return;
+    layerSets.set(activeLayerSet, captureLayerSet());
+    activeLayerSet = k;
+    const s = layerSets.get(k);
+    if (s) {
+        layers = s.layers;
+        selectedId = layers.some(l => l.id === s.selectedId) ? s.selectedId : null;
+        maskLayer.decal = s.decal;
+        maskLayer.decalCtx = s.decalCtx;
+        undoStack = s.undoStack;
+        redoStack = s.redoStack;
+        lastActionKey = s.lastActionKey;
+    } else {
+        // 这一套还没人建过：空图层 + 一条基线快照（撤销不会空转到别的段的内容上）。
+        layers = [];
+        selectedId = null;
+        redoStack = [];
+        lastActionKey = null;
+        undoStack = [tagHistoryStep(snapshotState(), null, 'Layer segment opened')];
+    }
+    render();
+    syncStackRows();
+    syncHistoryUI();
+    setStatus(k ? 'Layer segment — this segment owns its own layers' : 'Document layers');
+}
+
 function resetHistory(label) {
     undoStack = [tagHistoryStep(snapshotState(), null, label === undefined ? 'Document opened' : label)];
     redoStack = [];
@@ -12023,6 +12066,20 @@ const uiStack = v => { const s = String(v); return s === GUIDANCE_STACK || s ===
 const UI_COMMANDS = {
     'canvas-size': () => openCanvasModal(),
     'canvas-modify': () => startCanvasModify(),
+    // 带值的尺寸写口：Video 模式下活画布被挪到视口外，弹窗看不见 —— 宿主那两颗输入框
+    // 直接走这条，落地仍是同一个 setCanvasSize（尺寸/上限校验也共用）。
+    'layer-set': v => switchLayerSet(v && v.key),
+    'canvas-resize': v => {
+        const w = Math.max(1, Math.round(Number(v && v.w) || 0));
+        const h = Math.max(1, Math.round(Number(v && v.h) || 0));
+        if (!w || !h) return;
+        if (w * h > MAX_CANVAS_PIXELS || w > MAX_CANVAS_SIDE || h > MAX_CANVAS_SIDE) {
+            setStatus(`Canvas too large (max ${MAX_CANVAS_SIDE} px per side, ${MAX_CANVAS_PIXELS / 1e6} MP)`, 'error');
+            return;
+        }
+        setCanvasSize(w, h, false);
+        render();
+    },
     'transform-adjust': () => {
         if (mode !== 'transform' && !getSelected()) { setStatus('Select a layer first', 'error'); return; }
         if (isMaskLayerTarget()) { setStatus('The Mask layer is canvas-locked — there is nothing to transform', 'error'); return; }

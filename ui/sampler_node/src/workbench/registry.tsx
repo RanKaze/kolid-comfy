@@ -37,6 +37,9 @@ export type WorkbenchHostCtx = {
    *  `rules` 是校验的同一套口径 —— 一份旧布局里谁还认得、谁不认得，跟页面自己读档时一模一样；
    *  `openDocs` 是此刻开着的那几份文档窗口，载入时按它收一遍（关掉的剪走、新开的补进来）。 */
   layout: { dock: Dock; rules: DockRules; openDocs: UnitId[]; apply: (next: Dock) => void };
+  /** Video 模式给 Canvas 那一格的两样：模式本身（决定画哪一版正文）与**输出帧率**。
+   *  帧率住在 Video 工程里（宿主 state），不是页面快照 —— 所以从这里递进去，写法同 `layout`。 */
+  video: { mode: 'image' | 'video'; fps: number; setFps: (v: number) => void };
 };
 
 /** 每一格正文拿到的出口：`send` 泛型把动作键和它的载荷绑死（见 types 的 BlendUiPayloads），

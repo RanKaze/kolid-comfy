@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   type VidClip, type VidController,
-  addTrack, clipAt, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, placeAsset, removeClip, removeTrack,
+  addLayerClip, addTrack, clipAt, fmtTime, importToTrack, isAudioName, isVideoName, moveClip, placeAsset, removeClip, removeTrack,
   splitClip, trackOf, trimClip, unlinkGroup, vidDuration,
 } from './model';
 import { keyIs, onGlobalKey, onGlobalKeyUp } from '../../hotkeys';
@@ -50,7 +50,7 @@ const MARK_TOP = RULER_H - MARK_H;   // 24：范围标记的顶边
 const TICK_TOP = PLAY_H;             // 10：刻度带的上沿
 const TICK_BOTTOM = MARK_H;          // 10：刻度带的下沿（给底部三角让位）
 const HEADER_W = 118;
-const TRACK_H: Record<'video' | 'audio', number> = { video: 52, audio: 42 };
+const TRACK_H: Record<'video' | 'audio' | 'layer', number> = { video: 52, audio: 42, layer: 44 };
 const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
 
 // 最近一次**裁剪**拖动的时间戳。Clip 用它决定"静态预览能不能拿半成品条顶位"：只有正在裁
@@ -77,6 +77,14 @@ const IconTrash: React.FC = () => (
   <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor"
     strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
     <path d="M3 4.5h10M6.2 4.5V3.2h3.6v1.3M4.4 4.5l.7 8.2h5.8l.7-8.2" />
+  </svg>
+);
+const IconLayers: React.FC = () => (
+  <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 2.4 14 5.6 8 8.8 2 5.6z" />
+    <path d="M2.6 8.4 8 11.3l5.4-2.9" />
+    <path d="M2.6 11.2 8 14.1l5.4-2.9" />
   </svg>
 );
 const IconLink: React.FC = () => (
@@ -107,6 +115,10 @@ const KIND_UI = {
   audio: { fg: '#30d158', chipBg: 'rgba(48,209,88,0.16)', bandA: 'rgba(48,209,88,0.030)',
     bandB: 'rgba(48,209,88,0.012)', clipA: 'rgba(48,209,88,0.40)', clipB: 'rgba(48,209,88,0.22)',
     edge: 'rgba(48,209,88,0.72)', accent: '#30d158' },
+  // Layer 轨用图层系统那套紫：它装的不是素材，是"一段合成"。
+  layer: { fg: '#bf5af2', chipBg: 'rgba(191,90,242,0.16)', bandA: 'rgba(191,90,242,0.030)',
+    bandB: 'rgba(191,90,242,0.012)', clipA: 'rgba(191,90,242,0.40)', clipB: 'rgba(191,90,242,0.22)',
+    edge: 'rgba(191,90,242,0.72)', accent: '#bf5af2' },
 } as const;
 
 
@@ -226,7 +238,7 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
       vid.update(proj => splitClip(proj, clip.id, timeAt(e.clientX), !e.altKey), 'Split clip');
       return;
     }
-    if (mode === 'move') setSel(clip.id);
+    if (mode === 'move') { setSel(clip.id); vid.focusClip(clip); }
     try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* 指针已失活/合成事件：不挡手势 */ }
     dragRef.current = { mode, id: clip.id, x0: e.clientX, start0: clip.start };
   };
@@ -433,6 +445,9 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
       {/* 头一条：增删轨道、缩放、时间读数。 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', borderBottom: '0.5px solid rgba(255,255,255,0.08)', flexShrink: 0, flexWrap: 'wrap' }}>
         <button style={btn} title="Add a video track on top" onClick={() => vid.update(p2 => addTrack(p2, 'video'), 'Add track')}>+ Video Track</button>
+        <button style={{ ...btn, color: '#d7a6ff' }}
+          title="Add a Layer track on top — it holds Layer segments, each with its own set of layers, composited over the video below. Only a Layer track that sits above every video track takes effect."
+          onClick={() => vid.update(p2 => addTrack(p2, 'layer'), 'Add track')}>+ Layer Track</button>
         <button style={btn} title="Add an audio track at the bottom" onClick={() => vid.update(p2 => addTrack(p2, 'audio'), 'Add track')}>+ Audio Track</button>
         <div style={{ flex: 1 }} />
         {blade && (
@@ -515,7 +530,7 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                   颜色说类型，形状说用途，名字让位给省略号。 */}
               <div style={{ position: 'sticky', left: 0, width: HEADER_W, flexShrink: 0, zIndex: 4, background: '#1b1b1e', borderRight: '0.5px solid rgba(255,255,255,0.10)', display: 'flex', alignItems: 'center', gap: 6, padding: '0 7px' }}>
                 <span style={{ width: 18, height: 18, borderRadius: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: KIND_UI[tr.kind].chipBg, color: KIND_UI[tr.kind].fg }}>
-                  {tr.kind === 'video' ? <IconFilm /> : <IconWave />}
+                  {tr.kind === 'video' ? <IconFilm /> : tr.kind === 'layer' ? <IconLayers /> : <IconWave />}
                 </span>
                 <span style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.8)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tr.name}</span>
                 <button
@@ -526,13 +541,25 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                   <IconTrash />
                 </button>
               </div>
-              {/* lane：片段落在这里。 */}
+              {/* lane：片段落在这里。Layer 轨不接素材（它装的是图层，不是文件），
+                  所以拖放一律回绝，双击空白处造一段。 */}
               <div
                 data-vid-track={tr.id}
-                onDragOver={e => { const ts = e.dataTransfer.types; if (ts.includes(ASSET_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setDropLane(tr.id); } }}
+                onDragOver={e => {
+                  if (tr.kind === 'layer') return;      // 合成轨不收素材
+                  const ts = e.dataTransfer.types;
+                  if (ts.includes(ASSET_ITEM_TYPE) || ts.includes(STAGING_ITEM_TYPE) || Array.from(ts).includes('Files')) { e.preventDefault(); setDropLane(tr.id); }
+                }}
                 onDragLeave={() => setDropLane(l => (l === tr.id ? null : l))}
-                onDrop={e => laneDrop(e, tr.id)}
-                onClick={() => setSel(null)}
+                onDrop={e => { if (tr.kind !== 'layer') laneDrop(e, tr.id); }}
+                onClick={() => { setSel(null); vid.focusClip(null); }}
+                onDoubleClick={e => {
+                  // 双击 Layer 轨 = 在指针处造一段（默认 5s）。段之间由 snapPlace 吸附，不会叠。
+                  if (tr.kind !== 'layer') return;
+                  e.stopPropagation();
+                  vid.update(proj => addLayerClip(proj, tr.id, timeAt(e.clientX)), 'Add layer segment');
+                }}
+                title={tr.kind === 'layer' ? 'Layer track — double-click to add a Layer segment. Each segment owns its own layers; it composites over the video below and only takes effect while this track sits above every video track.' : undefined}
                 style={{ position: 'relative', flex: 1, minWidth: 0, background: dropLane === tr.id ? 'rgba(10,132,255,0.08)' : 'transparent' }}
               >
                 {p.clips.filter(c => c.trackId === tr.id).map(c => {
@@ -542,7 +569,7 @@ export const VidTimeline: React.FC<{ vid: VidController }> = ({ vid }) => {
                       wave={assetBySrc.get(c.src)?.waveform}
                       mediaFile={c.src.startsWith('/api/vid_media/') ? c.src.split('/').pop() : undefined}
                       onStartDrag={startClipDrag} onPointerMove={onClipPointerMove} onPointerUp={endClipDrag}
-                      onDelete={() => { vid.update(proj => removeClip(proj, c.id), 'Delete clip'); setSel(s => (s === c.id ? null : s)); }}
+                      onDelete={() => { vid.update(proj => removeClip(proj, c.id), 'Delete clip'); setSel(s => (s === c.id ? null : s)); vid.focusClip(null); }}
                       onUnlink={() => { if (gid) vid.update(proj => unlinkGroup(proj, gid), 'Unlink'); }} />
                   );
                 })}
@@ -608,6 +635,8 @@ const Clip: React.FC<{
   onUnlink: () => void;
 }> = ({ clip: c, pps, selected, blade, wave, mediaFile, onStartDrag, onPointerMove, onPointerUp, onDelete, onUnlink }) => {
   const isAudio = c.kind === 'audio';
+  // Layer 段没有源文件：不抽条、不取首尾帧，只画一块"合成区间"。
+  const isLayer = c.kind === 'layer';
   const K = KIND_UI[c.kind];
   const hideImg = (e: React.SyntheticEvent<HTMLImageElement>) => { e.currentTarget.style.display = 'none'; };
   // 视频段头/尾帧：t 是**片段自己的**第一帧/最后一帧（源内 offset 与 offset+duration 处）——
@@ -620,7 +649,7 @@ const Clip: React.FC<{
   // 拖动裁剪时**立刻**要有画面：先从缩略条上取最靠近的那一格（同步、零 seek），
   // 停手后再由下面的 effect 换成精确帧。两层合起来 = 跟手且准。
   // 音频段不给它抽条：条是视频帧，纯音频源（mp3/wav）咬不动，白占队列十几秒。
-  useStrip(isAudio ? '' : c.src, c.srcDuration);
+  useStrip(isAudio || isLayer ? '' : c.src, c.srcDuration);
   // 静态预览的门槛：**正在裁**（需要逐帧跟手）或**这条源的条已经抽完**（索引稳定）。
   // 半成品只给拖动顶位用 —— 拿它当静态预览，抽条每发布一批画面就跳一次。
   const quickOk = performance.now() - lastTrimAt < 200 || stripComplete(c.src);
@@ -646,7 +675,7 @@ const Clip: React.FC<{
   const [headFrame, setHeadFrame] = useState<{ t: number; url: string } | null>(
     () => (mediaFile ? { t: headT, url: backendFrame(headT) } : null));
   useEffect(() => {
-    if (isAudio) return;
+    if (isAudio || isLayer) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -655,11 +684,11 @@ const Clip: React.FC<{
       })();
     }, 120);
     return () => { alive = false; clearTimeout(timer); };
-  }, [isAudio, mediaFile, c.src, headT]);
+  }, [isAudio, isLayer, mediaFile, c.src, headT]);
 
   const [tailFrame, setTailFrame] = useState<{ t: number; url: string } | null>(null);
   useEffect(() => {
-    if (isAudio || !wide) return;
+    if (isAudio || isLayer || !wide) return;
     let alive = true;
     const timer = setTimeout(() => {
       void (async () => {
@@ -695,11 +724,11 @@ const Clip: React.FC<{
       {/* 顶部 2px 高亮条：颜色即类型，一眼分得出这条是画面还是声音。 */}
       <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 2, background: K.accent, opacity: 0.85, pointerEvents: 'none' }} />
       {/* 预览层：视频段 = 头帧 + 尾帧；音频段 = 全段波形裁出本片段的窗。 */}
-      {!isAudio && headSrc && (
+      {!isAudio && !isLayer && headSrc && (
         <img src={headSrc} onError={hideImg} decoding="async"
           style={{ position: 'absolute', top: 0, bottom: 0, left: 0, height: '100%', width: 'auto', maxWidth: 64, objectFit: 'cover', opacity: 0.42, pointerEvents: 'none' }} />
       )}
-      {!isAudio && tailSrc && (
+      {!isAudio && !isLayer && tailSrc && (
         <img src={tailSrc} onError={hideImg} decoding="async"
           style={{ position: 'absolute', top: 0, bottom: 0, right: 0, height: '100%', width: 'auto', maxWidth: 64, objectFit: 'cover', opacity: 0.42, pointerEvents: 'none' }} />
       )}
@@ -709,6 +738,9 @@ const Clip: React.FC<{
           width: `${(c.srcDuration / Math.max(c.duration, 0.001)) * 100}%`,
           marginLeft: `${-(c.offset / Math.max(c.duration, 0.001)) * 100}%`,
           objectFit: 'fill', opacity: 0.5, pointerEvents: 'none' }} />
+      )}
+      {isLayer && (
+        <span style={{ display: 'flex', alignItems: 'center', color: '#e2c2ff', flexShrink: 0, position: 'relative', pointerEvents: 'none' }}><IconLayers /></span>
       )}
       <span style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,0.94)', textShadow: '0 1px 2px rgba(0,0,0,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pointerEvents: 'none', position: 'relative' }}>{c.name}</span>
       <span style={{ fontSize: 9, color: 'rgba(255,255,255,0.72)', flexShrink: 0, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums', pointerEvents: 'none', position: 'relative', background: 'rgba(0,0,0,0.38)', padding: '1px 5px', borderRadius: 4, textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>{fmtTime(c.duration)}</span>

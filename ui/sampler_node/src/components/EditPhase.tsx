@@ -10,8 +10,9 @@ import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type VidController, type VidProject, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
+import { type VidController, type VidProject, clampFps, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
 import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
+import { setLayerEditBlocked } from '../workbench/editGate';
 import { getBlendUi } from '../workbench/store';
 import { ingestFile } from '../workbench/video/ingest';
 import { VidTimeline } from '../workbench/video/Timeline';
@@ -580,6 +581,8 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
+  /** 视频模式下选中的 Layer 段 key（'' = 没选中，图层集是文档主图层）。 */
+  const [vidLayerKey, setVidLayerKey] = useState('');
   const vidByDoc = useRef(new Map<number, VidProject>());
   const activeUid = blendDocs.activeUid;
   const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
@@ -819,10 +822,26 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
     onBlendUiCommand(action, value);
   }, [onBlendUiCommand, vidOwnsUndo, vidUndo, vidRedo, vidJump]);
+  // 视频模式下没选中 Layer 段 → Layers / Guidances 不知道该往哪写，动作条整排变灰。
+  // 切回 Image 模式时把图层集还给文档主图层（否则画布还停在某个段的那一套上）。
+  useEffect(() => {
+    setLayerEditBlocked(vidMode === 'video' && !vidLayerKey);
+    if (vidMode !== 'video' && vidLayerKey) {
+      setVidLayerKey('');
+      onBlendUiCommand('layer-set', { key: '' });
+    }
+  }, [vidMode, vidLayerKey, onBlendUiCommand]);
   const vidCtl: VidController = useMemo(() => ({
     project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
     staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek]);
+    // 选中 Layer 段 = 把 Layers 窗切成这一段自己那一套（主文档是 ''）。页面侧整组换入换出，
+    // 所以这里只要把 key 递过去 —— 图层的增删改仍然全走页面那套命令。
+    focusClip: clip => {
+      const key = clip && clip.kind === 'layer' ? (clip.layerKey || clip.id) : '';
+      setVidLayerKey(key);
+      onBlendUiCommand('layer-set', { key });
+    },
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek, onBlendUiCommand]);
   // 页面存档照旧跟活跃文档的那份走（刷新后的起手工程；.cud 才是随文档走的正身）。
   useEffect(() => {
     const t = setTimeout(() => saveVidProject(vidProject), 400);
@@ -851,10 +870,16 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 工作台那几格能碰到的宿主事实：图池镜像、画布合成预览、图池的两个后端写口。正文与动作条共用同一份。
   // `layout` 是 Layout 那一格要的两样 —— 现在的布局（存下去的就是它）和写口（载入就是把它交回来）、
   // 外加校验口径 `rules` 与此刻开着的文档（载入的布局要按它收一遍）。
+  // 输出帧率的写口：住在 Video 工程里，所以走 vidUpdate —— 一次改动 = 一步撤销、置脏、随 .cud 走。
+  const setVidFps = useCallback((v: number) => {
+    vidUpdate(proj => (proj.fps === clampFps(v) ? proj : { ...proj, fps: clampFps(v) }), 'Set frame rate');
+  }, [vidUpdate]);
   const wbHost = useMemo(() => ({
     staging, blendPreview, guidanceCard, stageUpload, stageRemove,
     layout: { dock, rules: dockRules, openDocs: openDocUnits, apply: applyDock },
-  }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock]);
+    video: { mode: vidMode, fps: vidProject.fps, setFps: setVidFps },
+  }), [staging, blendPreview, guidanceCard, stageUpload, stageRemove, dock, dockRules, openDocUnits, applyDock,
+    vidMode, vidProject.fps, setVidFps]);
   // 工作台 iframe 启动时先播一份空的 `docs: []`（它还没恢复上一次的工程），紧接着才播真正恢复出来
   // 的那份。头一份空播报不是"文档都被关了"，把它当真就等于每次刷新都把存档里的画布位置剪掉。
   // 所以：**空列表在启动期是歧义的**，要等它至少说过一次"我有文档"，此后再说空才算关闭。

@@ -811,7 +811,7 @@ export const EMPTY_BLEND_UI: BlendUi = {
  *  `'visible-faces'` 仍压在最末：它是一条通道而不是一颗按钮，而且门禁钉的就是"`| 'visible-faces';`"这一句
  *  在联合类型的最末 —— 顺序没有语义，动了它反而要重钉一条本来就成立的判据。 */
 export type BlendUiAction =
-  | 'canvas-size' | 'canvas-modify'
+  | 'canvas-size' | 'canvas-modify' | 'canvas-resize' | 'layer-set'
   | 'transform-adjust' | 'transform-fill'
   | 'select-rect' | 'select-lasso' | 'select-all' | 'select-none'
   | 'view-pan' | 'view-zoom' | 'view-rotate' | 'view-fit' | 'view-reset'
@@ -850,6 +850,11 @@ export type BlendUiAction =
 export type BlendUiPayloads = {
   'canvas-size': undefined;
   'canvas-modify': undefined;
+  /** 直接设画布尺寸（宿主侧那两颗输入框用）：Video 模式下活画布的弹窗看不见窗口外，
+   *  所以给一条带值的路，落地仍是页面同一个 setCanvasSize。 */
+  'canvas-resize': { w: number; h: number };
+  /** 切到某套图层（Video 的 Layer 段）。`key: ''` = 回到文档主图层。 */
+  'layer-set': { key: string };
   'transform-adjust': undefined;
   'transform-fill': undefined;
   'select-rect': undefined;
