@@ -52,6 +52,12 @@ export type DockRules = {
   // A unit the page has no body for is a hole in the panel: the drop payload and a saved tree are both
   // checked against this before they are believed.
   known: (id: UnitId) => boolean;
+  // 这一格**此刻要不要挂出名字**（标题条 / tab 条）。缺省同 `known`：认识就画。
+  // 文档格是唯一的例外 —— 它可能只是个**保留位**：最后一份工程关掉后留下的空位，窗连同用户
+  // 摆的位置都还留着，可一份工程都没有。这时候什么都不写 —— 挂 "Untitled" 会让人以为那儿
+  // 开着一份叫 Untitled 的工程，写内部 id（doc:1）更像界面坏了。
+  // 两件事由此分开：树里留着它（known 按形状放行，窗才不会蒸发），名字条上不列它。
+  listed?: (id: UnitId) => boolean;
   title: (id: UnitId) => string;
   // toolbar 模式把 tab 换成一排图标，所以每一格都得有一个记号。记号归页面（它才知道这一格是什么），
   // 框架只负责在条子上把它画出来 —— 一颗没有记号的按钮，在一条只有按钮的 bar 上等于不存在。

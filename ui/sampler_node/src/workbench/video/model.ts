@@ -28,6 +28,8 @@ export type VidAsset = {
   /** 源长（s），导入时探测一次就记下。 */
   duration: number;
   hasAudio: boolean;
+  /** 整段源的波形 PNG（/api/vid_media/...，入库时 ffmpeg 生成）。片段按 offset/duration 裁窗。 */
+  waveform?: string;
 };
 
 export type VidClip = {
@@ -66,23 +68,42 @@ export type VidProject = {
 // ── 播放头外置 ── 播放头每帧都在走；走 React state 会把宿主整页拖着每秒重渲几十次 ——
 // scrub 卡顿的根子就在这。它改住这颗外置小仓库：set 只改数字并敲订阅者（订阅者自己直改
 // DOM：播放头线、读数），React 的重渲染只留给低频的事（工程改动、播放开关、缩放）。
+// 订阅者拿到的 `interactive` 说的是"这次移动是谁干的"：用户拖 scrub / 点标尺 = true，
+// 播放循环按时钟推进 = false。监视器据此决定画面怎么跟 —— 拖动时走缩略条（换索引，不动
+// 解码器，所以全程跟手），播放时走 <video> 自己的时钟。
 export type VidTransport = {
   get: () => number;
-  set: (t: number) => void;
-  subscribe: (fn: () => void) => () => void;
+  set: (t: number, interactive?: boolean) => void;
+  subscribe: (fn: (interactive?: boolean) => void) => () => void;
 };
 export const createVidTransport = (): VidTransport => {
   let t = 0;
-  const subs = new Set<() => void>();
+  const subs = new Set<(interactive?: boolean) => void>();
   return {
     get: () => t,
-    set: v => {
+    set: (v, interactive) => {
       const nv = Math.max(0, v);
       if (nv === t) return;
       t = nv;
-      subs.forEach(fn => fn());
+      subs.forEach(fn => fn(interactive));
     },
     subscribe: fn => { subs.add(fn); return () => { subs.delete(fn); }; },
+  };
+};
+
+// ── seek 合流 ── 指针事件一秒能来几百上千发（高刷鼠标更凶），而订阅者里有 layout 读写
+// （跟随滚动要读 scrollLeft）。每发都跑一遍就是白烧 —— 合并到 rAF：一帧最多落一次，
+// 视觉零差别，开销封顶。seek 永远是"用户在拖"，interactive 一并带上。
+export const createSeekCoalescer = (transport: VidTransport) => {
+  let raf = 0;
+  let want = 0;
+  return (t: number) => {
+    want = Math.max(0, t);
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      transport.set(want, true);
+    });
   };
 };
 
@@ -96,7 +117,9 @@ export type VidController = {
   pps: number;
   /** 图池镜像 —— 拖进轨道的图池条目按 id 在这里认领。 */
   staging: StagingItem[];
-  update: (fn: (p: VidProject) => VidProject) => void;
+  /** 改工程。`label` 是这一步在 History 里显示的名字，也是**合并键** —— 拖动时每帧都会调一次，
+   *  同一个 label 连着来的那些会并成一步（一次拖动 = 一步撤销），见 EditPhase 的 pushVidHist。 */
+  update: (fn: (p: VidProject) => VidProject, label?: string) => void;
   seek: (t: number) => void;
   setPlaying: (v: boolean) => void;
   setPps: (v: number) => void;
@@ -178,6 +201,31 @@ export const trimClip = (p: VidProject, id: string, edge: 'l' | 'r', t: number, 
 export const removeClip = (p: VidProject, id: string): VidProject =>
   ({ ...p, clips: p.clips.filter(c => c.id !== id && c.groupId !== id) });
 
+/** 在时间线 `t` 处**剪开**一段（按住 C 左键片段 —— 剃刀）。默认联动组的另一侧一起剪，
+ *  两边切口对齐、各自 offset 推进同样的量，剪完仍是一个组（还能一起拖）；`linked=false`
+ *  （按住 Alt）只剪按到的那一段。
+ *  切口离任一端不足 MIN_CLIP 就是不动 —— 不产生选不中、拖不动的零长碎片。 */
+export const splitClip = (p: VidProject, id: string, t: number, linked = true): VidProject => {
+  const target = p.clips.find(c => c.id === id);
+  if (!target) return p;
+  const ids = new Set((linked && target.groupId ? p.clips.filter(c => c.groupId === target.groupId) : [target]).map(c => c.id));
+  // **剪开 = 组也剪开**：剪完左半与右半各自成组（视频段与它的音频段仍是一对），
+  // 否则两半共享原 groupId —— 之后不动 Alt 裁右半，左半会跟着一起被裁。
+  const gLeft = target.groupId ? newVidId('grp') : undefined;
+  const gRight = target.groupId ? newVidId('grp') : undefined;
+  let changed = false;
+  const clips: VidClip[] = [];
+  for (const c of p.clips) {
+    if (!ids.has(c.id)) { clips.push(c); continue; }
+    const cut = t - c.start;
+    if (cut < MIN_CLIP || c.duration - cut < MIN_CLIP) { clips.push(c); continue; }   // 这一员切不了，原样留下
+    changed = true;
+    clips.push({ ...c, groupId: gLeft, duration: cut });
+    clips.push({ ...c, id: newVidId('clip'), groupId: gRight, start: c.start + cut, duration: c.duration - cut, offset: c.offset + cut });
+  }
+  return changed ? { ...p, clips } : p;
+};
+
 /** 解绑：联动组全体摘掉 groupId —— 此后各自拖各自裁（音画错开的正式手续）。 */
 export const unlinkGroup = (p: VidProject, groupId: string): VidProject =>
   ({ ...p, clips: p.clips.map(c => (c.groupId === groupId ? { ...c, groupId: undefined } : c)) });
@@ -219,7 +267,13 @@ export const placeImport = (
   at: number,
 ): VidProject => {
   let track = (trackId ? trackOf(p, trackId) : null) ?? p.tracks.find(t => t.kind === 'video') ?? null;
-  if (!track) return p;
+  // 落进一个**还没有视频轨**的工程（新工程 / 用户把视频轨删光了）：当场建一条，插在最上面 ——
+  // 与 addTrack 的口径一致（视频插头、音频追尾）。没有这一手，拖进来的视频会静默消失，
+  // 只在 Assets 里剩一件没人用的资产。
+  if (!track && !info.audioOnly) {
+    track = { id: newVidId('trk'), kind: 'video', name: `Video ${p.tracks.filter(t => t.kind === 'video').length + 1}` };
+    p = { ...p, tracks: [track, ...p.tracks] };
+  }
   if (info.audioOnly) {
     track = p.tracks.find(t => t.kind === 'audio') ?? null;
     if (!track) {
@@ -227,6 +281,7 @@ export const placeImport = (
       p = { ...p, tracks: [...p.tracks, track] };
     }
   }
+  if (!track) return p;
   const groupId = newVidId('grp');
   const start = snapPlace(p, track.id, at);
   const clip: VidClip = {
@@ -304,8 +359,17 @@ export const loadVidProject = (): VidProject => {
   try {
     const raw = localStorage.getItem(VID_PROJECT_STORE);
     if (!raw) return defaultVidProject();
-    const p = JSON.parse(raw) as VidProject;
-    if (!Array.isArray(p.tracks) || !Array.isArray(p.clips)) return defaultVidProject();
+    return normalizeVidProject(JSON.parse(raw));
+  } catch { return defaultVidProject(); }
+};
+
+/** 任何来源（localStorage / .cud 的 header.video / 宿主消息）的工程数据都过这里：
+ *  形状不对的部分当场剪掉 —— 一份坏数据不该把时间线整个掀了。 */
+export const normalizeVidProject = (raw: unknown): VidProject => {
+  const base = defaultVidProject();
+  try {
+    const p = raw as VidProject;
+    if (!p || !Array.isArray(p.tracks) || !Array.isArray(p.clips)) return base;
     const trackIds = new Set(p.tracks.map(t => t.id));
     // blob: 的 objectURL 活不过刷新 —— 那些片段/资产当场蒸发；挂在不存在的轨道上的也一样。
     const clips = p.clips.filter(c => c && c.src && !c.src.startsWith('blob:') && trackIds.has(c.trackId)
@@ -313,7 +377,7 @@ export const loadVidProject = (): VidProject => {
     const assets = (Array.isArray(p.assets) ? p.assets : []).filter(a => a && a.src && !a.src.startsWith('blob:')
       && Number.isFinite(a.duration) && a.duration > 0);
     return { tracks: p.tracks, clips, assets, inPoint: Math.max(0, +p.inPoint || 0), outPoint: Math.max(0, +p.outPoint || 0) };
-  } catch { return defaultVidProject(); }
+  } catch { return base; }
 };
 
 export const saveVidProject = (p: VidProject): void => {

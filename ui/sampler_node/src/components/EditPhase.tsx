@@ -1,16 +1,19 @@
-import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
 import type { PipelineBlock, DetailerBlockParams, PromptBlockParams, QueryBlockParams, TaggerBlockParams, ScaleBlockParams, PromptPreset, Tab, StagingItem, InterfaceInfo, InterfacePort, InterfaceMeta, PipelinePackageInfo, BlockSet, PendingQuery, ActionLogEntry, PipelineSettings, ArchSettings, ArchRule, OverrideKey, ParamOverride, ProcessorDst, ProcessorSrc, BlendDoc, BlendDocs, BlendDocCommand, BlendUiSend } from '../types';
 import { PIPELINE_DEFAULT, PIPELINE_CURRENT_SELECT, OVERRIDE_KEYS, firstDetailerFlag } from '../types';
 import DebugModal, { DbgIcon } from './DebugModal';
 import LogModal from './LogModal';
-import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
+import { type DockMode, type DockRules, type UnitId, type Dock, docUnit, docUidOf, dockUnits, fitLayout, loadDock, revealDoc, setBlockMode, setToolbarDock, setToolbarDirDock, syncDocUnits } from '../dock/model';
 import { fetchLayouts } from '../dock/layoutStore';
 import { type DockDrag, type DockOver, DockPanel } from '../dock/DockView';
 import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
-import { type VidController, type VidProject, createVidTransport, loadVidProject, saveVidProject } from '../workbench/video/model';
+import { type VidController, type VidProject, createSeekCoalescer, createVidTransport, defaultVidProject, importToTrack, isAudioName, isVideoName, loadVidProject, normalizeVidProject, saveVidProject } from '../workbench/video/model';
+import { setVidHistoryJump, setVidHistoryView } from '../workbench/vidHistoryStore';
+import { getBlendUi } from '../workbench/store';
+import { ingestFile } from '../workbench/video/ingest';
 import { VidTimeline } from '../workbench/video/Timeline';
 import { VidAssets } from '../workbench/video/Assets';
 import { VidPlayer } from '../workbench/video/Player';
@@ -78,7 +81,7 @@ const PANEL_BLOCK_W = 340, PANEL_BLOCK_H = 320, DOC_BLOCK_W = 620, DOC_BLOCK_H =
 // them — so it wears the canvas skin (its content owns the box), takes a share of its split instead of
 // collapsing to a content height it does not have, and is hidden with display:none rather than
 // unmounted, because its body IS the document the user is working on.
-const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
+const dockRulesFor = (docs: readonly BlendDoc[], vidDirty?: ReadonlySet<number>): DockRules => {
   const owners = new Set(docs.map(d => docUnit(d.uid)));
   const byUnit = new Map(docs.map(d => [docUnit(d.uid), d] as const));
   const isDoc = (id: UnitId) => owners.has(id);
@@ -90,14 +93,23 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     store: DOCK_STORE,
     panels: PANEL_IDS,
     known: (id: UnitId) => PANEL_IDS.includes(id) || isDocUnit(id),
+    // 名字条只列**此刻真有工程认领它**的文档格。关掉最后一份后那格成了保留位 —— 窗留着
+    // （用户摆的位置不动），但一条 tab 都不挂，上面什么也不写。
+    listed: (id: UnitId) => PANEL_IDS.includes(id) || byUnit.has(id),
     // The trailing dot is the unsaved mark: a window has to say whether what is on screen is what is
     // on disk, and the tab strip shows the same string as the single-unit title bar.
     title: (id: UnitId) => {
       const d = byUnit.get(id);
-      if (d) return d.name + (d.dirty ? ' ●' : '');
-      // 没人认领的文档格（刷新后、工程重开前）：窗口留着，标题先挂个占位名 —— 等真的文档进来，
-      // 这一格原地改姓。写 "doc:1" 这种内部 id 会让用户以为界面坏了。
-      if (isDocUnit(id)) return 'Untitled';
+      if (d) {
+        // 未存盘 = 工作台说脏 **或** 这一份文档的 Video 工程被改过。工作台只认得图层，
+        // 有人动过 Assets/Tracks 它不会知道 —— 那一半的脏由宿主自己记（见 vidDirty）。
+        const vd = !!vidDirty && vidDirty.has(d.uid);
+        return d.name + ((d.dirty || vd) ? ' ●' : '');
+      }
+      // 没人认领的文档格 = 保留位：窗口留着，标题上**什么都不写**。等真的文档进来，这一格
+      // 原地改姓。挂 "Untitled" 会让人以为这儿开着一份叫 Untitled 的工程，而写内部 id
+      // （doc:1）更像界面坏了 —— 两种都不要。
+      if (isDocUnit(id)) return '';
       return UNIT_TITLES[id] ?? id;
     },
     // toolbar 条上一格一颗的记号。页面才知道"这一格是什么"，所以图和标题一样由这里给：
@@ -217,6 +229,18 @@ const BLOCK_TINT: Record<string, string> = ADD_BLOCK_KINDS.reduce(
 // What a Query block does — hover the card's type label for it. It used to be a paragraph inside the
 // card, which pushed the real parameters down for information you read once.
 const QUERY_BLOCK_HINT = '执行到这一块会暂停并弹出 prompt 选择；Confirm 后按 prompt 块的规则合并（全局在前、本次选择在后），只影响其后的 detailer。关掉弹窗 = 中止整条链。';
+
+// Pipeline Blocks 重排的 dragover/dragenter 授权：整张块卡都是落点（见使用处的注释）。
+// 载荷走**专属 MIME**（BLOCK_DND_MIME）：真实拖拽里 Chrome 会自动附加内部类型
+// （chromium/x-drag-id），"types 只有 text/plain 一种"的判别在真机上永远不成立 —— 合成
+// 事件里没有那个内部类型，单测会骗人。专属类型只有块重排写，dock 搬窗口、块套、文件、
+// 视频资产都绝不会带它，不需要排除法。
+const BLOCK_DND_MIME = 'application/x-block-idx';
+const acceptBlockDrop = (e: React.DragEvent) => {
+  if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
+  e.preventDefault(); e.stopPropagation();
+  e.dataTransfer.dropEffect = 'move';
+};
 
 // The nine numeric knobs of the Settings tab, in UI order — the same order as OVERRIDE_KEYS
 // (frontend) and ARCH_OVERRIDE_KEYS (backend). ONE table serves both surfaces: the Default Setting
@@ -518,7 +542,13 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   const [vidMode, setVidModeState] = useState<VidMode>(vidMode0);
   const vidModeRef = useRef(vidMode);
   vidModeRef.current = vidMode;
-  const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
+  // Video 工程的"脏"记在宿主：工程随 .cud 走，而工作台的 dirty 只看图层，
+  // 光动 Assets/Tracks 它不会亮 —— 所以这一份要宿主自己记，存盘后清掉。
+  const vidDirty = useRef(new Set<number>());
+  const [vidDirtyTick, bumpVidDirty] = useReducer((x: number) => x + 1, 0);
+  const dockRules = useMemo(
+    () => dockRulesFor(blendDocs.docs, vidDirty.current), [blendDocs, vidDirtyTick],
+  );
   const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
   // 「此刻的布局」的 ref：开机那一次写档要用它（见下面 `?nolayout` 那一支），而它不该成为那个
   // effect 的依赖 —— 那会让它每次动一下布局就跑一遍。
@@ -540,19 +570,264 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // 改动防抖落盘 localStorage（blob: 的本地图活不过刷新，读档时自会剪掉）。
   // 播放头不住这里：它每帧都在走，走 React state 会把整页拖着每秒重渲几十次（scrub 卡顿的根子）。
   // 它住外置 transport —— Player/Timeline 订阅它直改 DOM，React 只管低频的事。
+  // **按文档分桶**：Video 工程随 .cud 走（保存时 iframe 来要快照、读档时送回来），桶键 = 文档
+  // uid；写入落进活跃文档的桶，切文档 = 换一份工程。
   const [vidProject, setVidProject] = useState<VidProject>(loadVidProject);
+  const vidProjectRef = useRef(vidProject); vidProjectRef.current = vidProject;
   const [vidTransport] = useState(createVidTransport);
+  // seek 走合流器：标尺拖动每发指针事件都进这里，合到 rAF 一帧一落（见 createSeekCoalescer）。
+  // interactive 也在这一并带上 —— 上一版在这里丢了标记，拖标尺完全不走缩略条路径。
+  const [vidSeek] = useState(() => createSeekCoalescer(vidTransport));
   const [vidPlaying, setVidPlaying] = useState(false);
   const [vidPps, setVidPps] = useState(60);
-  const vidUpdate = useCallback((fn: (p: VidProject) => VidProject) => setVidProject(fn), []);
+  const vidByDoc = useRef(new Map<number, VidProject>());
+  const activeUid = blendDocs.activeUid;
+  const activeUidRef = useRef(activeUid); activeUidRef.current = activeUid;
+
+  // ── Video 的撤销摞 ── 工程住在宿主，工作台那两支摞（undoStack/redoStack）只认识图层，
+  //  所以视频这一半得宿主自己记：Ctrl+Z 才撤得动片段、轨道、范围。
+  //   * 每个文档一支（与 vidByDoc 同键、同生同死）。
+  //   * 存的是**修改前**的快照：撤销 = 弹一份回去，把当前这份压进 redo（与页面同一读法）。
+  //   * 拖动（trim / move / 范围）每帧都会 update 一次 —— 靠 label + 650ms 窗并成一步，
+  //     一次拖动 = 一步撤销（否则撤一次只退一帧，等于没撤）。
+  type VidHistRec = { p: VidProject; label: string; at: number };
+  const vidHist = useRef(new Map<number, { undo: VidHistRec[]; redo: VidHistRec[] }>());
+  const [vidHistTick, bumpVidHist] = useReducer((x: number) => x + 1, 0);
+  // 谁更近：视频这一步 vs 图层那一笔。Ctrl+Z 只撤"最近动过的那个" —— 两边各撤各的，
+  // 不会出现"刚刷了一笔图层，一按 Ctrl+Z 却先把视频片段撤了"。
+  // 图层那边由页面在每次 pushHistory / undo / redo 时发一条 blend-edited 报时（见下面的监听）。
+  const vidEditAt = useRef(0);
+  const layerEditAt = useRef(0);
+  const VID_HIST_MAX = 80;
+  const VID_COALESCE_MS = 650;
+  const histOf = useCallback((uid: number) => {
+    const m = vidHist.current;
+    let h = m.get(uid);
+    if (!h) { h = { undo: [], redo: [] }; m.set(uid, h); }
+    return h;
+  }, []);
+  const pushVidHist = useCallback((uid: number, prev: VidProject, label: string) => {
+    const h = histOf(uid);
+    const now = Date.now();
+    const top = h.undo[h.undo.length - 1];
+    if (top && top.label === label && now - top.at < VID_COALESCE_MS) {
+      top.at = now;              // 同一次拖动的后续帧：并进栈顶那一步（prev 保留最早那份）
+    } else {
+      h.undo.push({ p: prev, label, at: now });
+      while (h.undo.length > VID_HIST_MAX) h.undo.shift();
+    }
+    h.redo.length = 0;           // 新动作作废"重做"那一支
+    vidEditAt.current = now;
+    bumpVidHist();
+  }, [histOf]);
+  // 把一份工程装回活跃文档。撤销/重做**也是一种修改**：脏标记要亮 —— 否则撤完直接关 tab，
+  // 会以为"和盘上一致"而丢掉这次撤销。
+  const applyVidState = useCallback((uid: number, proj: VidProject) => {
+    vidByDoc.current.set(uid, proj);
+    vidProjectRef.current = proj;
+    if (uid === activeUidRef.current) setVidProject(proj);
+    if (!vidDirty.current.has(uid)) { vidDirty.current.add(uid); bumpVidDirty(); }
+    vidEditAt.current = Date.now();
+    bumpVidHist();
+  }, []);
+  const vidUndo = useCallback((): boolean => {
+    const uid = activeUidRef.current;
+    if (uid == null) return false;
+    const h = histOf(uid);
+    if (!h.undo.length) return false;
+    const rec = h.undo.pop()!;
+    h.redo.push({ p: vidProjectRef.current, label: rec.label, at: Date.now() });
+    applyVidState(uid, rec.p);
+    return true;
+  }, [histOf, applyVidState]);
+  const vidRedo = useCallback((): boolean => {
+    const uid = activeUidRef.current;
+    if (uid == null) return false;
+    const h = histOf(uid);
+    if (!h.redo.length) return false;
+    const rec = h.redo.pop()!;
+    h.undo.push({ p: vidProjectRef.current, label: rec.label, at: Date.now() });
+    applyVidState(uid, rec.p);
+    return true;
+  }, [histOf, applyVidState]);
+  // 跳到视频段第 k 行 = 回到"第 k 步之前"那一份；中间那些压进 redo（与页面 jumpHistory 同一读法）。
+  const vidJump = useCallback((k: number) => {
+    const uid = activeUidRef.current;
+    if (uid == null) return;
+    const h = histOf(uid);
+    if (!Number.isFinite(k) || k < 0 || k >= h.undo.length) return;
+    let cur = vidProjectRef.current;
+    while (h.undo.length > k) {
+      const rec = h.undo.pop()!;
+      h.redo.push({ p: cur, label: rec.label, at: Date.now() });
+      cur = rec.p;
+    }
+    applyVidState(uid, cur);
+  }, [histOf, applyVidState]);
+  // 按键/按钮该由视频这边接手吗：栈里有步，且最近一次动的是视频。
+  const vidOwnsUndo = useCallback((isRedo: boolean): boolean => {
+    const uid = activeUidRef.current;
+    if (uid == null) return false;
+    const h = vidHist.current.get(uid);
+    if (!h) return false;
+    if (!(isRedo ? h.redo.length : h.undo.length)) return false;
+    return vidEditAt.current > layerEditAt.current;
+  }, []);
+  // 改工程。**不用 setState 的 updater 来算**：历史入栈是副作用，塞进 updater 里会被
+  // 严格模式/并发渲染重放（多出一步空历史）。这里用 ref 当"当前值"，同一事件里连续调两次
+  // 也能链得上（每次立刻把 ref 换掉），渲染仍然只由 setVidProject 驱动。
+  const vidUpdate = useCallback((fn: (p: VidProject) => VidProject, label?: string) => {
+    const uid = activeUidRef.current;
+    const prev = vidProjectRef.current;
+    const next = fn(prev);
+    if (next === prev) return;                 // 没变：不进历史、不置脏
+    vidProjectRef.current = next;
+    setVidProject(next);
+    if (uid != null) {
+      vidByDoc.current.set(uid, next);
+      pushVidHist(uid, prev, label || 'Video edit');
+      if (!vidDirty.current.has(uid)) {
+        vidDirty.current.add(uid);
+        bumpVidDirty();                        // tab / 标题条上的 ● 要跟着亮
+      }
+    }
+  }, [pushVidHist]);
+  // 文档切换 = 换一份 Video 工程：第一次见到的文档，头一份继承页面存档，之后的从空白起手。
+  useEffect(() => {
+    const uid = blendDocs.activeUid;
+    if (uid == null) return;
+    const map = vidByDoc.current;
+    if (!map.has(uid)) map.set(uid, map.size === 0 ? vidProjectRef.current : defaultVidProject());
+    setVidProject(map.get(uid)!);
+  }, [blendDocs.activeUid]);
+  // 文档关掉了 → 它那一桶（工程 + 脏标记）跟着走。uid 是工作台**每次开机从 1 重新发**的，
+  // 留着旧的会在下一次复用同一个 uid 时串台（新文档凭空多出上一位的片段）。
+  useEffect(() => {
+    const live = new Set(blendDocs.docs.map(d => d.uid));
+    for (const uid of [...vidByDoc.current.keys()]) {
+      if (!live.has(uid)) {
+        vidByDoc.current.delete(uid);
+        vidDirty.current.delete(uid);
+        vidHist.current.delete(uid);       // uid 会被复用：旧步留着就会串到下一份文档上
+      }
+    }
+    bumpVidHist();
+  }, [blendDocs.docs]);
+  // iframe 的两条 Video 消息：保存时按 uid 来要快照；读档/重开时把文件里那份送回桶里。
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const d = e.data as { type?: string; uid?: number; project?: unknown; files?: unknown; at?: number } | null;
+      if (!d || typeof d.type !== 'string') return;
+      if (d.type === 'blend-edited') {
+        // 页面刚提交了一步图层动作（或刚撤销/重做了一步）：Ctrl+Z 从此归它，直到视频又被改动。
+        layerEditAt.current = Number(d.at) || Date.now();
+        return;
+      }
+      if (d.type === 'blend-request-vid') {
+        const uid = Math.round(Number(d.uid) || 0);
+        const project = vidByDoc.current.get(uid)
+          ?? (uid === (activeUidRef.current ?? -1) ? vidProjectRef.current : null);
+        (e.source as Window | null)?.postMessage({ type: 'blend-vid', uid, project }, '*');
+      } else if (d.type === 'blend-vid-restore') {
+        const uid = Math.round(Number(d.uid) || 0);
+        const proj = normalizeVidProject(d.project);
+        vidByDoc.current.set(uid, proj);
+        vidDirty.current.delete(uid);      // 刚从文件里读出来的 = 与盘上一致
+        // 从文件里读出来的这份是**新基线**：之前那支撤销摞属于另一份内容，留着就能
+        // "撤销到上一个工程"，那是没有人想要的结果。
+        vidHist.current.delete(uid);
+        vidEditAt.current = 0;
+        bumpVidHist();
+        if (uid === activeUidRef.current) setVidProject(proj);
+      } else if (d.type === 'blend-saved') {
+        // 工作台把 .cud 落盘了 —— Video 工程就在这份文件里，这一桶可以清脏了。
+        const uid = Math.round(Number(d.uid) || 0);
+        if (vidDirty.current.delete(uid)) bumpVidDirty();
+      } else if (d.type === 'blend-vid-file') {
+        // 拖视频/音频进工作台、或 Load 里选了媒体文件：入库 + 落片段 + **自动切 Video 模式**
+        //（已在 Video 就不动）。图片同理切回 Image 模式 —— setVidMode 对同值早退，无谓的重渲
+        // 不发生。File 走 structured clone 直达宿主，入库复用 ingestFile（后端 ffmpeg 落持久
+        // URL，与时间线拖放完全同一条路）。
+        const files: File[] = Array.isArray(d.files)
+          ? (d.files as unknown[]).filter((f): f is File => f instanceof File)
+          : [];
+        if (!files.length) return;
+        const isMedia = (f: File) => /^video\//.test(f.type) || /^audio\//.test(f.type)
+          || isVideoName(f.name) || isAudioName(f.name);
+        const media = files.filter(isMedia);
+        if (files.some(f => !isMedia(f))) setVidMode('image');
+        if (!media.length) return;
+        setVidMode('video');
+        void (async () => {
+          for (const f of media) {
+            const ing = await ingestFile(f);
+            if (!ing) continue;       // 后端没 ffmpeg 且本地也解不动：放弃这一件
+            // 落在播放头处、轨自动挑（placeImport：null trackId = 第一条视频轨，纯音频自动进音频轨）
+            vidUpdate(proj => importToTrack(proj,
+              { src: ing.src, name: ing.name, origin: 'file' },
+              { duration: ing.duration, hasAudio: ing.hasAudio, audioOnly: ing.audioOnly },
+              null, vidTransport.get()), 'Add clip');
+          }
+        })();
+      }
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+  // History 那一格读的是**只读投影**：图层步（页面播报的）在前、视频步接在后面。
+  // 视频的工程快照留在上面的摞里，这里只交名字 —— 面板不该为了显示一行字拿一份几十兆的工程。
+  useEffect(() => {
+    const h = activeUid != null ? vidHist.current.get(activeUid) : undefined;
+    setVidHistoryView({
+      steps: (h ? h.undo : []).map(r => ({ label: r.label })),
+      canUndo: !!h && h.undo.length > 0,
+      canRedo: !!h && h.redo.length > 0,
+    });
+  }, [activeUid, vidHistTick]);
+  useEffect(() => {
+    setVidHistoryJump(k => vidJump(k));
+    return () => setVidHistoryJump(null);
+  }, [vidJump]);
+  // ── Ctrl+Z / Ctrl+Y：视频与图层**各撤各的** ──
+  // 页面在 iframe 的 window 上（bubble）处理同一组键；这里是 document 的 capture（见 hotkeys.ts），
+  // 先跑一步。只有"最近动的是视频、且视频栈里确实有步"时才拦下来，其余原样放行给工作台 ——
+  // 所以刚刷了一笔图层时按 Ctrl+Z，撤的是那一笔，而不是前面改过的片段。
+  useEffect(() => onGlobalKey(e => {
+    const ctrl = (e.ctrlKey || e.metaKey) && !e.altKey;
+    if (!ctrl) return;
+    const k = e.key.toLowerCase();
+    if (k !== 'z' && k !== 'y') return;
+    const t = e.target as HTMLElement | null;
+    const tag = (t && t.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+    const isRedo = k === 'y' || e.shiftKey;
+    if (!vidOwnsUndo(isRedo)) return;
+    e.preventDefault(); e.stopPropagation();
+    if (isRedo) vidRedo(); else vidUndo();
+  }), [vidOwnsUndo, vidUndo, vidRedo]);
+  // 工作台那几格的 send 先过宿主这一道 —— History 格的 Undo / Redo / 点某一行，
+  // 要能落到视频那一半（页面的下标空间里没有它）。
+  const uiSend: BlendUiSend = useCallback((action, value) => {
+    if (action === 'history-undo') {
+      if (vidOwnsUndo(false)) { vidUndo(); return; }
+    } else if (action === 'history-redo') {
+      if (vidOwnsUndo(true)) { vidRedo(); return; }
+    } else if (action === 'history-jump') {
+      const base = getBlendUi().history.steps.length;
+      const n = Number(value);
+      if (Number.isFinite(n) && n >= base) { vidJump(n - base); return; }
+    }
+    onBlendUiCommand(action, value);
+  }, [onBlendUiCommand, vidOwnsUndo, vidUndo, vidRedo, vidJump]);
+  const vidCtl: VidController = useMemo(() => ({
+    project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
+    staging, update: vidUpdate, seek: vidSeek, setPlaying: setVidPlaying, setPps: setVidPps,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate, vidSeek]);
+  // 页面存档照旧跟活跃文档的那份走（刷新后的起手工程；.cud 才是随文档走的正身）。
   useEffect(() => {
     const t = setTimeout(() => saveVidProject(vidProject), 400);
     return () => clearTimeout(t);
   }, [vidProject]);
-  const vidCtl: VidController = useMemo(() => ({
-    project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
-    staging, update: vidUpdate, seek: t => vidTransport.set(t), setPlaying: setVidPlaying, setPps: setVidPps,
-  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate]);
   // 切回 Image 模式就停播（Player 对 visible 也停了一遍，这里兜底 —— 两扇窗那时已不在树里）。
   useEffect(() => {
     if (vidMode !== 'video') setVidPlaying(false);
@@ -600,7 +875,11 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // 新到的文档：选中项拨过去（revealDoc），并让工作台把它当活跃工程画 —— 不然 Load 完一份
     // .cud，屏幕上还停在上一份（tab 条不动、画布也不换人）。
     const fresh = openDocUnits.filter(u => !prev.includes(u));
-    let next = syncDocUnits(dock, openDocUnits);
+    // **关掉最后一份工程时留保留位**（keepSlots）：树里的 doc 格还活着（标题回落 Untitled），
+    // 那扇 Workbench 窗连同用户摆的位置一起保住 —— 不然删掉唯一的 cud tab，整扇窗当场蒸发。
+    // 之后 New / Load 的新工程由 syncDocUnits 的配对（renameUnit）原地认领这个空位，布局不动。
+    // 还有别的文档开着时照旧剪：关掉其中一份，它自己的窗该走就走。
+    let next = syncDocUnits(dock, openDocUnits, openDocUnits.length === 0);
     if (fresh.length) {
       next = fresh.reduce(revealDoc, next);
       for (const u of fresh) {
@@ -678,7 +957,21 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     }
     // Esc 只负责关闭，不拦事件：弹窗、改名输入框、画布自己的 Esc 都还要用它。
     if (e.key === 'Escape') setBlockEdit(false);
-  }), []);
+    // ── Ctrl+S：存 .cud（视频工程随 header 一起进去）──
+    // Video 模式下焦点通常在宿主这一侧（时间线/播放器在宿主渲染），iframe 收不到这个键 ——
+    // 所以由宿主统一转交，工作台那条 `blend-save` 直接走它自己的 saveCud，两条路径汇成一处。
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && keyIs(e, 's')) {
+      const t = e.target as HTMLElement | null;
+      const tag = (t && t.tagName || '').toLowerCase();
+      // 文本框里让浏览器自己来（页面侧同样在文本框里放行，但 Ctrl+S 在那边是显式保存，
+      // 所以这里只挡 textarea / contenteditable 这类"文字优先"的地方）。
+      if (tag !== 'textarea' && !(t && t.isContentEditable)) {
+        e.preventDefault(); e.stopPropagation();
+        blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-save' }, '*');
+        return;
+      }
+    }
+  }), [blendIframeRef]);
   // Alt+P 唯一的写口：把拥有 `id` 的那一块换成这个模式（Default 收成一行 tab，Vertical/Horizontal
   // 摊成一个单元一个窗口）。块本身没变，变的是它怎么摆它的成员。摊开是纯框架动作：新 split 继承
   // 容器的尺寸、里面的块全部 free 平分，内容占多大不参与（见 model.ts 的 switchMode）。
@@ -768,6 +1061,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
         ? <img src={still} alt={d.name} style={styles.docStill} />
         : <div style={styles.docVoid} />;
   }
+  // 保留位（关掉最后一份工程后留下的空窗）也给正文：一句引导，别让用户对着一扇黑窗发愣。
+  // 新工程打开时会原地认领这一格，正文自动换成真的画布。
+  for (const u of dockUnits(dock.tree)) {
+    if (docUidOf(u) !== null && !docBodies[u]) {
+      docBodies[u] = (
+        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, color: 'rgba(255,255,255,0.35)', fontSize: 12, textAlign: 'center' }}>
+          No project open — use File ▸ New / Load in the top bar.
+        </div>
+      );
+    }
+  }
   // 关掉一份工程的那颗 ✕ **跟着它自己的名字走**（DockCtx.tabOps）：一扇窗的标题条是"窗"的，那条
   // 栏上的键对整扇窗说话（折叠 / 浮出 / 收成条）；而"关掉这一份"是一个 tab 的事 —— 所以它站在那
   // 颗 tab 的右边；窗口里只有一份时，它就贴在名字右边，不飘到整条栏的最右端去。
@@ -776,7 +1080,15 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   for (const d of blendDocs.docs) {
     docTabOps[docUnit(d.uid)] = (
       <button style={styles.docCloseTab} data-dock-doc-close={d.uid} title={'Close 「' + d.name + '」'}
-        onClick={e => { e.stopPropagation(); onDocCommand('close', d.uid); }}>
+        onClick={e => {
+          e.stopPropagation();
+          // 只有 Video 被动过的时候，工作台那份账还是干净的 —— 而"关之前要不要问一句"
+          // 是它在管。先把这笔脏递过去，再把 close 这条命令递过去（postMessage 保序）。
+          if (vidDirty.current.has(d.uid)) {
+            blendIframeRef.current?.contentWindow?.postMessage({ type: 'blend-vid-dirty', uid: d.uid }, '*');
+          }
+          onDocCommand('close', d.uid);
+        }}>
         <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor"
           strokeWidth="1.7" strokeLinecap="round"><path d="M3 3l6 6M9 3l-6 6" /></svg>
       </button>
@@ -1382,7 +1694,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               ...docBodies,
               // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。Staging 那一格还要
               // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
-              ...workbenchBodies(onBlendUiCommand, wbHost),
+              ...workbenchBodies(uiSend, wbHost),
               // Tracks / Assets 是常驻的普通窗：Video 模式显示各自正文，Image 模式正文留空。树一概不动。
               vtracks: vidMode === 'video' ? <VidTimeline vid={vidCtl} /> : null,
               vassets: vidMode === 'video' ? <VidAssets vid={vidCtl} /> : null,
@@ -1674,7 +1986,24 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               blocks: (<>
                 <div style={styles.dockCard}>
               {blocks.map((block, blockIdx) => (
-                <div key={block.id} style={{
+                <div key={block.id}
+                  // 整张卡都是落点，不是只有那颗 28px 的六点把手：把手是**拖起处**，人把块拖到
+                  // 目标卡片上松手时压的是卡身 —— 只有把手接 drop 的那一版，松手落在卡身上就是
+                  // "未授权的拖拽"（最后一次 dragenter/dragover 没被取消），浏览器直接取消整个
+                  // 手势，drop 不派发，看上去就是"重排序失效"。dragenter 与 dragover 同判，
+                  // 进入即授权（与 dock 的 BlockBox 同一条经验，见 DockView 的 onDragIn）。
+                  // 载荷认**纯 text/plain**：块重排的 dragstart 只写这一种 MIME。dock 搬窗口
+                  // （application/x-dock-units + text/plain）、块套拖动（x-blockset）、文件、
+                  // 视频资产都带着别的类型 —— types 不止一种就原样放行，不抢它们的地盘。
+                  onDragEnter={acceptBlockDrop}
+                  onDragOver={acceptBlockDrop}
+                  onDrop={(e) => {
+                    if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
+                    e.preventDefault(); e.stopPropagation();
+                    const from = parseInt(e.dataTransfer.getData(BLOCK_DND_MIME));
+                    if (!isNaN(from)) onReorderBlocks(from, blockIdx);
+                  }}
+                  style={{
                   background: 'rgba(255,255,255,0.03)',
                   borderRadius: 10,
                   marginBottom: 8,
@@ -1689,9 +2018,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                     {/* Drag handle */}
                     <div
                       draggable
-                      onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(blockIdx)); e.dataTransfer.effectAllowed = 'move'; }}
-                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-                      onDrop={(e) => { e.preventDefault(); const from = parseInt(e.dataTransfer.getData('text/plain')); if (!isNaN(from)) onReorderBlocks(from, blockIdx); }}
+                      onDragStart={(e) => { e.dataTransfer.setData(BLOCK_DND_MIME, String(blockIdx)); e.dataTransfer.effectAllowed = 'move'; }}
+                      onDragOver={acceptBlockDrop}
+                      onDrop={(e) => {
+                        if (!e.dataTransfer.types.includes(BLOCK_DND_MIME)) return;
+                        e.preventDefault(); e.stopPropagation();
+                        const from = parseInt(e.dataTransfer.getData(BLOCK_DND_MIME));
+                        if (!isNaN(from)) onReorderBlocks(from, blockIdx);
+                      }}
                       title="Drag to reorder"
                       style={{
                         width: 28, height: '100%', flexShrink: 0,
@@ -2046,7 +2380,7 @@ const EditPhase: React.FC<EditPhaseProps> = ({
             },
             // 几格自带的动作条（Clear All / Add / Undo / Redo）：dock 把它们画在各自正文下面、滚动条之外。
             foots: {
-              ...workbenchFoots(onBlendUiCommand, wbHost),
+              ...workbenchFoots(uiSend, wbHost),
               // Pipeline Blocks 的 Add：住进正文下面的动作条，和 Layers 那一格同一个范式（见 MEMORY
               // 的"动作条范式"）—— 标题条是窗口级动作的地方（关窗/浮出/折叠），往链里加块是**内容**
               // 动作，挤在 26px 的标题条里既和 ✕/⤢ 抢点击区，菜单还只能往下翻、被块的圆角剪掉。

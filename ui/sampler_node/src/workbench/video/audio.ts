@@ -63,7 +63,9 @@ export async function probeMedia(src: string, hint: 'video' | 'audio'): Promise<
   };
 }
 
-type Voice = { node: AudioBufferSourceNode; gain: GainNode };
+/** 一路声源。`into` = 起播时 buffer 内的秒；`at` = 起播那一刻的 ctx 时钟 —— 两者一减就知道
+ *  「现在播到 buffer 的哪一秒」，播放循环拿它跟游标该在的位置对表。 */
+type Voice = { node: AudioBufferSourceNode; gain: GainNode; into: number; at: number };
 
 export class VidAudio {
   private master: GainNode | null = null;
@@ -88,11 +90,20 @@ export class VidAudio {
     const gain = c.createGain();
     node.connect(gain);
     gain.connect(this.ensure());
-    node.start(0, Math.max(0, Math.min(into, buffer.duration - 0.01)));
-    this.voices.set(id, { node, gain });
+    const at = Math.max(0, Math.min(into, Math.max(buffer.duration - 0.01, 0)));
+    node.start(0, at);
+    this.voices.set(id, { node, gain, into: at, at: c.currentTime });
   }
 
   has(id: string): boolean { return this.voices.has(id); }
+
+  /** 这路声源现在播到 buffer 内的第几秒（未播 = null）。播放循环拿它跟游标该在的位置对表，
+   *  差得多了就重新起播 —— 回绕、拖动、片段被搬动，全都是「想听的位置变了」这一种病。 */
+  pos(id: string): number | null {
+    const v = this.voices.get(id);
+    if (!v) return null;
+    return v.into + (audioCtx().currentTime - v.at);
+  }
   stop(id: string): void {
     const v = this.voices.get(id);
     if (v) {

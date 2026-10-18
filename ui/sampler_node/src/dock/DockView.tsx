@@ -516,7 +516,7 @@ const ToolbarStrip: React.FC<{
         <div style={V ? dockStyles.tbUnitsV : dockStyles.tbUnitsH}>
           {ids.map((u, i) => (
             <button key={u} data-dock-tb-icon={u} style={{ ...dockStyles.tbUnit, ...(open === u ? dockStyles.tbUnitOn : null) }}
-              title={ctx.rules.title(u) + ' — click for its panel beside this strip'}
+              title={nameTip(ctx, u) + ' — click for its panel beside this strip'}
               onClick={e => { e.stopPropagation(); pick(u, i, e.currentTarget); }}>
               {ctx.rules.icon(u)}
             </button>
@@ -581,6 +581,10 @@ const DirIcon: React.FC<{ dir: 'h' | 'v' }> = ({ dir }) => (
 // ONE DOCK WINDOW — a title bar, a body, and the unit's action row under it. A block in `default` mode
 // IS this window (and hands it its own card); a block in `v`/`h` mode is a stack of them, each drawing
 // its own card. A floated unit is one of these too, pinned to the viewport.
+/** 这一格在悬停提示里该怎么称呼。保留位（没人认领的文档格）没有名字 —— 就说它是空位，
+ *  别在句子里留一段空白（"Show  in this block"）。 */
+const nameTip = (ctx: DockCtx, id: UnitId): string => ctx.rules.title(id) || 'Empty slot';
+
 const DockWindow: React.FC<{
   node: DockBlock; ctx: DockCtx; axis: 'v' | 'h'; stacked?: boolean; float?: DockFloat; solo?: boolean;
 }> = ({ node, ctx, axis, stacked, float, solo }) => {
@@ -590,6 +594,11 @@ const DockWindow: React.FC<{
   // 文档验证通过，显示自然回到它身上。
   const picked = ids[Math.min(node.sel, Math.max(0, ids.length - 1))];
   const id = ctx.rules.known(picked) ? picked : (ids.find(u => ctx.rules.known(u)) ?? picked);
+  // 名字条上要列出哪些单元（口径见 DockRules.listed）。树里照样留着保留位（窗不蒸发），
+  // 但那一条上什么都不列 —— 一份工程都没有的时候，上面就该是空的。
+  const named = ctx.rules.listed ?? ctx.rules.known;
+  const shown = ids.map((u, i) => ({ u, i })).filter(({ u }) => named(u));
+  const nameOf = (u: UnitId) => nameTip(ctx, u);
   // A fold only has somewhere to go inside a container: a window that fills its block (a `default`
   // block, a float) hides its body and there would be nothing left to show for it, so it is always open
   // and has no fold button at all.
@@ -688,15 +697,16 @@ const DockWindow: React.FC<{
         title={'Drag to move this whole window.\nAn edge splits a new block off, the centre puts it in that block.\nDropped on the seam between two members of its own block = take that slot instead.'}
         onClick={e => e.stopPropagation()}
         style={dockStyles.dockGrip}><GripDots /></span>
-      {/* cud tab 只有一份时也走 tab 条（用户要求的口径一致）：✕ 跟着 tab 走、点 tab 就是激活，
-          和多份工程那一扇窗完全同一种长相与手势。普通面板没有 tab 这回事，孤单位仍是光杆名字。 */}
-      {ids.length > 1 || docUidOf(ids[0]) !== null ? (
+      {/* 名字条：cud 一份起就走 tab 条（口径与多份一致），普通面板孤单位只是光杆名字。
+          一个都不用挂的时候（典型：最后一份工程关掉后留的**保留位**）整条都不画 ——
+          窗和位置留着，上面干干净净。 */}
+      {shown.length ? (shown.length > 1 || ids.length > 1 || docUidOf(shown[0].u) !== null ? (
         <div style={dockStyles.dockTabs}>
           {/* 播报前存档的 doc:* 还没验证：不出现在 tab 条上（它此刻的标题只是内部 id）。下标仍按
               `ids` 算，pick 用的还是原下标。 */}
-          {ids.map((u, i) => ({ u, i })).filter(({ u }) => ctx.rules.known(u)).map(({ u, i }) => (
+          {shown.map(({ u, i }) => (
             <span key={u} data-dock-unit={u} style={dockTabStyle(u === id)}
-              title={'Show ' + ctx.rules.title(u) + ' in this block — drag the title to pull just this one out into a window of its own'}
+              title={'Show ' + nameOf(u) + ' in this block — drag the title to pull just this one out into a window of its own'}
               {...grab(ctx, [u])} onClick={() => pick(i)}>
               {/* Each tab carries its own mark: in a strip of documents, the dot is the only thing that
                   can say which one the workbench is actually running on. */}
@@ -716,7 +726,7 @@ const DockWindow: React.FC<{
           <span style={dockStyles.dockName} title={ctx.hint?.(id)}>{ctx.badge?.(id)}{ctx.rules.title(id)}</span>
           {ctx.tabOps?.(id)}
         </span>
-      )}
+      )) : null}
       {/* A unit's own actions are part of its body, not of its frame: a collapsed unit must not keep
           an action that works on what the user just hid (Log, Debug, Add +). */}
       {open && ctx.heads[id] && <span style={dockStyles.dockHeadSlot}>{ctx.heads[id]}</span>}

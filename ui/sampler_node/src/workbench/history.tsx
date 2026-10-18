@@ -1,6 +1,7 @@
 import React, { useRef } from 'react';
 import { useBlendUi } from './store';
 import { useFaceChannel, useFaceVisible } from './layerRow';
+import { useVidHistory } from './vidHistoryStore';
 import type { BlendHistoryStep, BlendUiSend } from '../types';
 import type { WorkbenchUnit, WorkbenchUnitProps } from './registry';
 
@@ -53,11 +54,13 @@ const HistRow = ({ step, send }: { step: BlendHistoryStep; send: BlendUiSend }) 
 const HistoryFoot: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
   const h = ui.history;
+  // 视频那一半（Video 工程的撤销摞住在宿主）也要让这两颗按钮亮起来。
+  const v = useVidHistory();
   return (
     <div className="mini-group">
-      <button type="button" className="mini-btn ico-btn" disabled={!h.canUndo}
+      <button type="button" className="mini-btn ico-btn" disabled={!h.canUndo && !v.canUndo}
         title="Undo (Ctrl+Z)" onClick={() => send('history-undo')}><Undo /></button>
-      <button type="button" className="mini-btn ico-btn" disabled={!h.canRedo}
+      <button type="button" className="mini-btn ico-btn" disabled={!h.canRedo && !v.canRedo}
         title="Redo (Ctrl+Y or Ctrl+Shift+Z)" onClick={() => send('history-redo')}><Redo /></button>
       <button type="button" className="mini-btn" disabled={!h.steps.length}
         title={`Forget every step — the picture does not change, only this list (it holds the last ${h.limit})`}
@@ -70,10 +73,17 @@ const HistoryBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
   const ui = useBlendUi();
   useFaceChannel(send);
   const h = ui.history;
+  // 视频步接在图层步后面，下标从 h.steps.length 起（页面那套 history-jump 只认一个数，
+  // 宿主按这个分界把落在视频段的那些接回去，见 EditPhase 的 uiSend）。
+  const v = useVidHistory();
+  const base = h.steps.length;
   return (
     <div className="hist-list dark-scroll">
-      {!h.steps.length && <div className="layer-empty">No steps yet — they appear as you edit</div>}
+      {!h.steps.length && !v.steps.length && <div className="layer-empty">No steps yet — they appear as you edit</div>}
       {h.steps.map(s => <HistRow key={s.i} step={s} send={send} />)}
+      {v.steps.map((s, k) => (
+        <HistRow key={'v' + k} step={{ i: base + k, label: 'Video · ' + s.label, face: '', current: false }} send={send} />
+      ))}
     </div>
   );
 };

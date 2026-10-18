@@ -331,7 +331,7 @@ input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance
 <body>
 <div id="mainArea">
     <div id="canvasColumn">
-        <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg,.psd" multiple hidden>
+        <input type="file" id="importFile" accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tif,.tiff,.avif,.svg,.psd,video/*,.mp4,.m4v,.mov,.webm,.mkv,.avi,audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" multiple hidden>
         <!-- Only used where the File System Access API is missing; a document picked this way
              has no handle to write back to, so Save turns into Save As. -->
         <input type="file" id="cudFile" accept=".cud" hidden>
@@ -4277,6 +4277,14 @@ function adoptMaskSurface(decal) {
 // undo step rather than sixty.
 // `label` is this step's one line in the History panel. It travels on the snapshot record (see
 // tagHistoryStep), so nothing else has to be kept in index-sync with the two stacks.
+// 告诉宿主"最近一步动的是图层"：Ctrl+Z 的归属靠这条报时决定 —— 宿主那边还有一份 Video 工程
+// 的撤销摞（片段/轨道），两边各撤各的，谁离得近撤谁。没有这条，刚刷完一笔图层再按 Ctrl+Z
+// 就会先把视频片段撤掉（见 sampler 的 EditPhase）。
+function announceEdited() {
+    if (window.parent === window) return;
+    window.parent.postMessage({ type: 'blend-edited', at: Date.now() }, '*');
+}
+
 function pushHistory(key, label) {
     // ANY committed action kills a pending Shift-connect chain: an anchor is only ever valid
     // for the immediately previous painting gesture (bucket fills, transform drags, generated
@@ -4284,6 +4292,7 @@ function pushHistory(key, label) {
     shiftAnchor = null;
     if (historyReplaying) return;
     markDocumentDirty();
+    announceEdited();
     const coalesce = key && key === lastActionKey && undoStack.length > 1;
     if (coalesce) undoStack[undoStack.length - 1] = tagHistoryStep(snapshotState(), undoStack[undoStack.length - 1], label);
     else undoStack.push(tagHistoryStep(snapshotState(), null, label));
@@ -4369,6 +4378,7 @@ function undoAction() {
     const s = undoStack[undoStack.length - 1];
     historyReplaying = true;
     try { restoreState(s); } finally { historyReplaying = false; }
+    announceEdited();
     setStatus('Undo');
 }
 
@@ -4381,6 +4391,7 @@ function redoAction() {
     undoStack.push(s);
     historyReplaying = true;
     try { restoreState(s); } finally { historyReplaying = false; }
+    announceEdited();
     setStatus('Redo');
 }
 
@@ -10303,6 +10314,14 @@ function createDocument(name, doc, ctx, activate, opts) {
         // 它是从哪个工程跳过来的(烘焙的像素要交回那边)。
         kind: o.kind || null, hostUid: o.hostUid || null };
     documents.push(entry);
+    // 文件里带来的 Video 工程（Assets/Tracks）：交给宿主按 uid 入桶。只在文件真带了这一段时
+    // 发（会话内的文档切换不走这里 —— 宿主的桶自己记着，别拿 null 把人家冲了）。
+    if (ctx && ctx.videoFromCud) {
+        ctx.videoFromCud = false;
+        if (window.parent !== window) {
+            window.parent.postMessage({ type: 'blend-vid-restore', uid: entry.uid, project: ctx.video || null }, '*');
+        }
+    }
     if (activate) activateDocument(entry);
     else syncDocList();
     return entry;
@@ -10426,6 +10445,15 @@ function markDocumentClean() {
     if (!activeDoc || !activeDoc.dirty) return;
     activeDoc.dirty = false;
     syncDocList();
+}
+
+// 一份 .cud 写出去之后敲一下宿主：Video 工程就住在这个文件的 header 里，
+// 于是它那一桶可以清脏了。老宿主不认识这条消息，无副作用。
+// 注意：不能挂在 markDocumentClean 里 —— 那份早退（文档本来就不脏）恰好是
+// “只改了 Video” 的情形，挂在里面就永远发不出去。
+function announceSaved() {
+    if (window.parent === window || !activeDoc) return;
+    window.parent.postMessage({ type: 'blend-saved', uid: activeDoc.uid | 0 }, '*');
 }
 
 // ==================== 3D 图层 ====================
@@ -10789,6 +10817,26 @@ async function exportPng() {
 // Assembles the whole .cud in memory. The sink belongs to the caller: Save writes through the
 // handle the document came from, Save As writes wherever the picker points, and where no handle API
 // exists the bytes simply download.
+// 宿主的 Video 工程（Assets/Tracks）是页面级状态，住在宿主：组装 header 前按 uid 向宿主要当前
+// 文档那一份。老宿主不认识这条消息 → 超时拿 null → 文件里就不带 video 字段（读端缺席 = 无
+// Video 工程，一切照旧）。
+function requestHostVid(uid) {
+    return new Promise(resolve => {
+        if (window.parent === window) { resolve(null); return; }
+        const onMsg = e => {
+            const d = e.data || {};
+            if (d.type === 'blend-vid' && (d.uid | 0) === (uid | 0)) {
+                clearTimeout(timer);
+                window.removeEventListener('message', onMsg);
+                resolve(d.project && typeof d.project === 'object' ? d.project : null);
+            }
+        };
+        const timer = setTimeout(() => { window.removeEventListener('message', onMsg); resolve(null); }, 600);
+        window.addEventListener('message', onMsg);
+        window.parent.postMessage({ type: 'blend-request-vid', uid: uid | 0 }, '*');
+    });
+}
+
 async function buildCudBlob() {
     if (!layers.length || !canvasW || !canvasH) throw new Error('nothing to save — add a layer first');
     // A file writes a raster layer at the identity (its buffer IS its picture), so a released
@@ -10941,6 +10989,7 @@ async function buildCudBlob() {
     const compositeAsset = addAsset('composite', blendCanvas, canvasW, canvasH);
     // 所有编码落地后 entry.length 与 payload 才齐, header 才能序列化。
     await Promise.all(encodes);
+    const hostVid = await requestHostVid(activeDoc ? activeDoc.uid : 0);
     const header = {
         format: 'cud',
         version: CUD_VERSION,
@@ -10950,6 +10999,8 @@ async function buildCudBlob() {
         view: { zoom: view.zoom, rotation: view.rotation, flipX: view.flipX, panX: view.panX, panY: view.panY, autoFit: view.autoFit },
         selection: { selectedId, selectedIds: [...activeGroup()], mode, paintTarget },
         tools: captureCudTools(),
+        // Video 工程（Assets/Tracks）随文档走 —— 快照是组装前向宿主现要的（见 requestHostVid）。
+        video: hostVid || undefined,
         maskLayer: { visible: maskLayer.visible, surface: maskSurface },
         composite: compositeAsset,
         layers: records,
@@ -11011,6 +11062,7 @@ async function saveCudAs() {
             setCurrentDocument(null, name);
         }
         markDocumentClean();      // whatever the sink, the work is on disk from here
+        announceSaved();
         // Only now may a linked row elsewhere repaint: the refresh can leave a host project dirty,
         // and this one's own clean mark must not wipe that behind it.
         const links = await refreshCudLinks(target, blob);
@@ -11042,6 +11094,7 @@ async function saveCud() {
         const { blob, count } = await buildCudBlob();
         await writeDocTo(currentCudHandle, blob);
         markDocumentClean();
+        announceSaved();
         // The save is the event a linked layer follows: these bytes repaint every row in every open
         // project that points at this file. After the clean mark on purpose — a host project that
         // changed underneath has to stay dirty.
@@ -11344,8 +11397,22 @@ function routeImportFiles(files, stack) {
         requestImportCud(docs[0]);
         return;
     }
-    const images = list.filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg|psd)$/i.test(f.name));
-    if (!images.length) { setStatus('Import takes image files — a .cud document belongs to Load', 'error'); return; }
+    const media = list.filter(f => /^video\//.test(f.type) || /^audio\//.test(f.type)
+        || /\.(mp4|m4v|mov|webm|mkv|avi|mp3|wav|m4a|aac|ogg|flac)$/i.test(f.name));
+    if (media.length) {
+        // 视频/音频不进图池：转交宿主的 Video 工程（宿主负责 ffmpeg 入库、落片段、
+        // 自动切到 Video 模式）。File 走 structured clone 直达，宿主拿到的就是磁盘引用。
+        if (window.parent !== window) {
+            window.parent.postMessage({ type: 'blend-vid-file', files: media }, '*');
+        }
+        if (media.length === list.length) return;
+    }
+    const images = list.filter(f => !media.includes(f)
+        && (/^image\//.test(f.type) || /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|svg|psd)$/i.test(f.name)));
+    if (!images.length) {
+        if (!media.length) setStatus('Import takes image files — a .cud document belongs to Load', 'error');
+        return;
+    }
     addImageFiles(images, stack);
 }
 
@@ -11425,6 +11492,11 @@ function cudContext(header, records, maskSurface) {
             panX: Number.isFinite(v.panX) ? v.panX : 0, panY: Number.isFinite(v.panY) ? v.panY : 0,
             autoFit: !!v.autoFit },
         tools: header.tools || {},
+        // Video 工程（Assets/Tracks）：页面级状态住在宿主。文件带了就带进来（videoFromCud 记
+        // "这一份是从文件里来的"，createDocument 据此给宿主发一次 restore —— 会话内的文档
+        // 切换不发，宿主的桶自己记着）。
+        video: header.video && typeof header.video === 'object' ? header.video : null,
+        videoFromCud: !!(header.video && typeof header.video === 'object'),
     };
 }
 
@@ -12255,7 +12327,11 @@ const UI_COMMANDS = {
     // 再重拼一次描述符播出去 —— 换源可能带出或收起 staging 子行，所以每一次都要重拼。
     'processor-interface': v => {
         const n = Number(v);
-        if (Number.isFinite(n) && n >= 0 && n < processorList.length) { processorChoice = n; syncProcessorUI(); }
+        if (Number.isFinite(n) && n >= 0 && n < processorList.length) {
+            processorChoice = n;
+            processorChoiceName = processorList[n].name;   // 名字才是真值，序号只是这一版列表的派生
+            syncProcessorUI();
+        }
     },
     'processor-pick': v => {
         const p = processorCurrent(); if (!p) return;
@@ -12422,7 +12498,10 @@ function addStagingAsLayer(id, stack) {
 // 宿主）、按每行枚举摆放结果（宿主跑完 blend-processor-result 发回来）。真正的执行与轮询都在
 // 宿主（sampler App）。
 let processorList = [];            // [{name, index, start_ports, end_ports}] —— 宿主推送
-let processorChoice = -1;          // processorList 下标，-1 = 还没有可选的
+let processorChoice = -1;          // processorList 下标（派生值），-1 = 还没有可选的
+// 选中项**按名字记**：这份列表的成员会随 Interface 页的 Processor 开关随时增删，
+// 按序号记的话成员一变下标就漂到别的接口上 —— 用户看到的就是"选了这个却跑那个 / 切不过去"。
+let processorChoiceName = '';
 let processorSel = new Map();      // '<ifaceIndex>:in|out:<port>' -> 枚举值（跨重渲染记住）
 let processorBusy = false;         // 一次 run 在飞，blend-processor-result 收尾
 let processorRunIdx = -1;          // 在飞这次用的 interface（结果按它找目的枚举）
@@ -12521,11 +12600,15 @@ function processorCoverageUrl(surface) {
 // 落值仍是宿主发回来的动作键（见 UI_COMMANDS 那几条），真值源（processorChoice / processorSel /
 // stagingItems）一个字没动 —— 这一句只是把原来那一串 createElement 换成等价的纯数据。
 function syncProcessorUI() {
-    // interface 枚举那一段原来在 renderProcessorPick 里：空表 → -1，越界 → 回到第一枚。
+    // interface 枚举那一段原来在 renderProcessorPick 里：空表 → -1；否则**按名字认回**选中的那枚，
+    // 名字不在了（那个接口的 Processor 模式被关掉 / 改了名）才回到第一枚。
     if (!processorList.length) {
         processorChoice = -1;
-    } else if (processorChoice < 0 || processorChoice >= processorList.length) {
-        processorChoice = 0;
+        processorChoiceName = '';
+    } else {
+        const byName = processorList.findIndex(p => p.name === processorChoiceName);
+        processorChoice = byName >= 0 ? byName : 0;
+        processorChoiceName = processorList[processorChoice].name;
     }
     const p = processorCurrent();
     const inputs = [], params = [], outputs = [];
@@ -12785,6 +12868,19 @@ window.addEventListener('message', event => {
     if (d.type === 'blend-staging') {
         stagingItems = Array.isArray(d.items) ? d.items : [];
         syncProcessorUI();          // staging 输入的下拉跟着图池走
+        return;
+    }
+    if (d.type === 'blend-save') {
+        // 宿主替我们按了 Ctrl+S（Video 模式下焦点在宿主那侧，页面根本收不到这个键）。
+        // 保存的还是同一份 .cud：header 里的 Video 工程由 requestHostVid 在组装时向宿主要。
+        saveCud();
+        return;
+    }
+    if (d.type === 'blend-vid-dirty') {
+        // 宿主说：这一份文档的 Video 工程被改过，还没落盘。工作台是唯一知道"值不值得先存
+        // 一下"的地方（关闭时那句问话在它那儿），所以把脏记到它自己的账上。
+        const entry = documents.find(x => x.uid === (d.uid | 0));
+        if (entry && !entry.dirty) { entry.dirty = true; syncDocList(); }
         return;
     }
     if (d.type === 'blend-guidance-republish') {

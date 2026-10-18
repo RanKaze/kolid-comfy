@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 import io
 import copy
 import shutil
+import subprocess
 import numpy as np
 from PIL import Image
 import torch
@@ -445,6 +446,213 @@ def _layouts_apply(action, name, dock=None):
         store = {'v': 1, 'default': default, 'items': items}
         _layouts_write(store)
     return store, None
+
+
+# =============================================================================
+# Video 资产入库（Assets 是 Video 工程所有数据的来源）：ffprobe 探测 + 按需转码代理。
+#
+# 浏览器的时间线（<video> + WebAudio）只咬得动它认识的容器/编码；ComfyUI 世界里的素材
+# 什么都有（HEVC、ProRes、MPEG-4 Part 2、怪封装…）。本地文件拖进 Assets / Tracks 时走这里：
+#   1. 文件字节按内容哈希落盘（data/sampler/media/vid/）—— 同一文件只存一份，拖几次都是
+#      同一条 URL，刷新/换端口都活着（blob: 活不过刷新的时代到此为止）；
+#   2. ffprobe 读时长/有无音轨/编码；浏览器可解（mp4/webm/m4v/mov + h264/vp8/vp9/av1 +
+#      aac/mp3/opus）就原样伺候；咬不动就转一条 H.264+AAC faststart 的代理片；
+#   3. 纯音频（无视频流）原样伺候 —— 前端只拿 audioOnly 决定改派音频轨。
+# ffmpeg 找不到时（PATH / KOLID_FFMPEG_DIR 环境变量）整条路降级：前端自己回退旧的
+# <video> 探测 + blob: 路径。逻辑全在模块级函数里，ComfyUI 之外可单测（路由只读 body）。
+_VID_VC_OK = {'h264', 'vp8', 'vp9', 'av1'}
+_VID_AC_OK = {'aac', 'mp3', 'opus', 'vorbis', 'flac'}
+_VID_CONT_OK = {'.mp4', '.m4v', '.webm', '.mov'}
+
+
+def _vid_media_dir():
+    """资产媒体库的落点：data/sampler/media/vid/。"""
+    return os.path.join(data_dir(), 'sampler', 'media', 'vid')
+
+
+def _ff_bin(name):
+    """ffmpeg / ffprobe 可执行文件：先看 PATH，再试 KOLID_FFMPEG_DIR（指到 bin 目录）。"""
+    exe = shutil.which(name)
+    if exe:
+        return exe
+    env_dir = os.environ.get('KOLID_FFMPEG_DIR')
+    if env_dir:
+        cand = os.path.join(env_dir, name + ('.exe' if os.name == 'nt' else ''))
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _vid_ffprobe(path):
+    """ffprobe -show_format -show_streams 的瘦封装。attached_pic（专辑封面）不算视频流。"""
+    fp = _ff_bin('ffprobe')
+    if not fp:
+        return None
+    try:
+        out = subprocess.run([fp, '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', path],
+                             capture_output=True, timeout=60)
+        data = json.loads(out.stdout.decode('utf-8', 'replace'))
+    except Exception:
+        return None
+    vcodec = acodec = None
+    for s in (data.get('streams') or []):
+        t = s.get('codec_type')
+        if t == 'video' and vcodec is None and not (s.get('disposition') or {}).get('attached_pic'):
+            vcodec = s.get('codec_name') or ''
+        elif t == 'audio' and acodec is None:
+            acodec = s.get('codec_name') or ''
+    try:
+        dur = float((data.get('format') or {}).get('duration') or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    return {'duration': dur, 'vcodec': vcodec, 'acodec': acodec}
+
+
+def _vid_browser_ok(ext, probe):
+    """这套容器+编码 <video> 能不能直接咬。纯音频不在这里判（一律原样伺候）。"""
+    if probe is None or ext not in _VID_CONT_OK:
+        return False
+    if probe['vcodec']:
+        return (probe['vcodec'].lower() in _VID_VC_OK
+                and (not probe['acodec'] or probe['acodec'].lower() in _VID_AC_OK))
+    return False
+
+
+def _vid_previews(path, probe, d):
+    """给已入库的媒体生成时间线预览。波形（有音轨才有）在入库时一次生成 —— 整段源的波形
+    PNG，前端按片段自己的 offset/duration 线性裁窗，裁剪天然跟随。视频的首帧/尾帧不在这里
+    生成：片段会被裁剪，帧位置跟着 offset/duration 走，走按需的 /api/vid_frame（见 _vid_frame）。
+    预览是锦上添花，任何一步失败都静默跳过。返回 {'waveform': URL}（或空 dict）。"""
+    out = {}
+    if not probe.get('acodec'):
+        return out
+    ff = _ff_bin('ffmpeg')
+    if not ff:
+        return out
+    base = os.path.splitext(os.path.basename(path))[0]
+    wave = os.path.join(d, base + '_wave.png')
+    if not os.path.exists(wave):
+        subprocess.run([ff, '-y', '-i', path, '-filter_complex',
+                        'aformat=channel_layouts=mono,showwavespic=s=1600x128:colors=#30d158',
+                        '-frames:v', '1', wave], capture_output=True, timeout=180)
+    if os.path.exists(wave):
+        out['waveform'] = '/api/vid_media/' + os.path.basename(wave)
+    return out
+
+
+def _vid_frame(path, t):
+    """提取源内 t 秒处的一帧小图（时间线片段的头/尾帧用）。按 (文件, 秒两位小数) 落盘缓存。
+    t 越出源尾（裁剪后片段贴着源尾是常态）就退回 -sseof 抓最后一帧。返回 jpg 路径或 None。"""
+    ff = _ff_bin('ffmpeg')
+    if not ff or not os.path.isfile(path):
+        return None
+    try:
+        t = max(0.0, round(float(t or 0), 2))
+    except (TypeError, ValueError):
+        return None
+    base = os.path.splitext(os.path.basename(path))[0]
+    out = os.path.join(_vid_media_dir(), f'{base}_f{t:.2f}.jpg')
+    if not os.path.exists(out):
+        r = subprocess.run([ff, '-y', '-ss', f'{t:.2f}', '-i', path, '-vf', 'scale=160:-2',
+                            '-frames:v', '1', '-update', '1', out], capture_output=True, timeout=60)
+        if r.returncode != 0 or not os.path.exists(out):
+            r = subprocess.run([ff, '-y', '-sseof', '-0.3', '-i', path, '-vf', 'scale=160:-2',
+                                '-frames:v', '1', '-update', '1', out], capture_output=True, timeout=60)
+            if r.returncode != 0 or not os.path.exists(out):
+                return None
+    return out
+
+
+def _vid_strip(path, n):
+    """一次抽出 n 张均匀铺满全片的缩略帧 —— 时间线拖动/裁剪时那张"跟手"的预览图取的就是
+    它们。按 (文件, 张数) 落盘缓存为 `<stem>_s<NN>.jpg`，换端口、重开浏览器都还在。
+    返回 URL 列表；ffmpeg 不在或这不是能解的媒体就返回 None。"""
+    ff = _ff_bin('ffmpeg')
+    if not ff or not os.path.isfile(path):
+        return None
+    try:
+        n = max(2, min(160, int(n or 16)))
+    except (TypeError, ValueError):
+        n = 16
+    stem = os.path.splitext(os.path.basename(path))[0]
+    d = os.path.dirname(path) or _vid_media_dir()
+    outs = [os.path.join(d, f'{stem}_s{i:03d}.jpg') for i in range(n)]
+    if not all(os.path.exists(p) for p in outs):
+        probe = _vid_ffprobe(path) or {}
+        total = probe.get('duration') or 0
+        # fps = n/时长：让 ffmpeg 自己把 n 张铺到整片上（首尾都给到）。
+        fps = (n / total) if total > 0 else 1
+        # -start_number 0：image2 默认从 1 开始编号，而上面的文件名是 _s000 起算的。
+        # scale 288：监视器替身图要放大到整窗，160 太糊；288 宽的 jpeg 仍在几 KB 量级。
+        subprocess.run([ff, '-y', '-i', path, '-vf', f'fps={fps:.4f},scale=288:-2',
+                           '-frames:v', str(n), '-start_number', '0',
+                           os.path.join(d, f'{stem}_s%03d.jpg')],
+                       capture_output=True, timeout=300)
+    # 抽不满时（片子太短 / 尾帧被 GOP 吞掉）缺的那几格用前一格顶上 —— 缩略条宁可重复，
+    # 也不能有洞：拖动扫过空洞会闪黑。
+    made: list[str] = []
+    for p in outs:
+        if not os.path.exists(p) and made:
+            try:
+                shutil.copyfile(made[-1], p)
+            except OSError:
+                continue
+        if os.path.exists(p):
+            made.append(p)
+    if len(made) < 2:
+        return None
+    return ['/api/vid_media/' + os.path.basename(p) for p in outs]
+
+
+def _vid_ingest(raw, name):
+    """入库主体。`raw` = 文件字节，`name` = 原文件名（只取盘名和扩展名）。
+    返回 {'ok': True, src, name, duration, hasAudio, audioOnly, transcoded} 或 {'ok': False, error}。"""
+    if not raw:
+        return {'ok': False, 'error': 'empty upload'}
+    ff = _ff_bin('ffmpeg')
+    fp = _ff_bin('ffprobe')
+    if not ff or not fp:
+        return {'ok': False, 'error': 'ffmpeg not available on the server'}
+    base = os.path.basename(name or 'media').strip() or 'media'
+    stem, ext = os.path.splitext(base)
+    ext = ext.lower() or '.mp4'
+    stem = re.sub(r'[^\w\-. ]+', '_', stem)[:60] or 'media'
+    h = hashlib.sha1(raw).hexdigest()[:16]
+    d = _vid_media_dir()
+    os.makedirs(d, exist_ok=True)
+    inbox = os.path.join(d, f'{h}_{stem}{ext}')
+    if not os.path.exists(inbox):
+        tmp = inbox + '.part'
+        with open(tmp, 'wb') as f:
+            f.write(raw)
+        os.replace(tmp, inbox)
+    probe = _vid_ffprobe(inbox)
+    if probe is None or (not probe['vcodec'] and not probe['acodec']):
+        return {'ok': False, 'error': 'not decodable media (ffprobe found no streams)'}
+    audio_only = not probe['vcodec']
+    src = inbox
+    transcoded = False
+    if not audio_only and not _vid_browser_ok(ext, probe):
+        out = os.path.join(d, f'{h}_{stem}_proxy.mp4')
+        if not os.path.exists(out):
+            r = subprocess.run(
+                [ff, '-y', '-i', inbox, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20',
+                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', out],
+                capture_output=True, timeout=600)
+            if r.returncode != 0 or not os.path.exists(out):
+                tail = r.stderr.decode('utf-8', 'replace')[-300:] if r.stderr else 'unknown'
+                return {'ok': False, 'error': 'transcode failed: ' + tail}
+        src = out
+        transcoded = True
+    previews = _vid_previews(src, probe, d)
+    return {'ok': True,
+            'src': '/api/vid_media/' + os.path.basename(src),
+            'name': base,
+            'duration': probe['duration'],
+            'hasAudio': bool(probe['acodec']),
+            'audioOnly': audio_only,
+            'transcoded': transcoded,
+            'waveform': previews.get('waveform')}
 
 
 class DocumentIo:
@@ -2320,6 +2528,80 @@ class SnapshotDetailerSamplerServer:
                 self._send_json({'ok': True, 'docs': doc_io.restore_open_cuds()})
                 return
 
+            # 资产媒体库：Video 工程 Assets 的文件伺服（带 Range —— <video> 的 seek 靠它）。
+            if self.path.startswith('/api/vid_media/'):
+                fname = os.path.basename(self.path[len('/api/vid_media/'):])
+                path = os.path.join(_vid_media_dir(), fname)
+                if not os.path.isfile(path):
+                    self.send_error(404)
+                    return
+                size = os.path.getsize(path)
+                mime = mimetypes.guess_type(fname)[0] or 'application/octet-stream'
+                start, end, code = 0, size - 1, 200
+                rng = self.headers.get('Range') or ''
+                if rng.startswith('bytes='):
+                    try:
+                        a, b = rng.split('=', 1)[1].split('-', 1)
+                        start = int(a) if a else 0
+                        end = min(int(b), size - 1) if b else size - 1
+                        code = 206
+                    except (ValueError, IndexError):
+                        start, end, code = 0, size - 1, 200
+                length = max(0, end - start + 1)
+                self.send_response(code)
+                self.send_header('Content-type', mime)
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Cache-Control', 'max-age=31536000, immutable')
+                if code == 206:
+                    self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+                self.send_header('Content-Length', str(length))
+                self.end_headers()
+                if length:
+                    with open(path, 'rb') as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk = f.read(min(1 << 20, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                return
+
+            # 按需帧提取：片段的头/尾帧（t 跟着片段的 offset/duration 走，裁剪即新帧）。
+            if self.path.startswith('/api/vid_frame'):
+                qs = parse_qs(urlparse(self.path).query)
+                fname = os.path.basename((qs.get('f') or [''])[0])
+                path = os.path.join(_vid_media_dir(), fname)
+                try:
+                    t = float((qs.get('t') or ['0'])[0])
+                except ValueError:
+                    t = 0.0
+                jpg = _vid_frame(path, t)
+                if not jpg:
+                    self.send_error(404)
+                    return
+                data = open(jpg, 'rb').read()
+                self.send_response(200)
+                self.send_header('Content-type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'max-age=31536000, immutable')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            # 整条缩略帧：一次抽 n 张铺满全片，供时间线拖动/裁剪时跟手预览。
+            if self.path.startswith('/api/vid_strip'):
+                qs = parse_qs(urlparse(self.path).query)
+                fname = os.path.basename((qs.get('f') or [''])[0])
+                try:
+                    n = int((qs.get('n') or ['16'])[0])
+                except ValueError:
+                    n = 16
+                urls = _vid_strip(os.path.join(_vid_media_dir(), fname), n)
+                self._send_json({'ok': bool(urls), 'urls': urls or []})
+                return
+
             self.send_error(404)
 
         def do_POST(self):
@@ -2446,8 +2728,7 @@ class SnapshotDetailerSamplerServer:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return
 
-            # 布局档案的写口。action:
-            #   save    —— `{name, dock}`：同名覆盖（同一个槽位更新），新的排最前，最多 40 份；
+            # 布局档案的写口。action:            #   save    —— `{name, dock}`：同名覆盖（同一个槽位更新），新的排最前，最多 40 份；
             #   delete  —— `{name}`：只删档案，屏幕上那份布局不动；删掉的若是默认，默认一起清掉；
             #   default —— `{name}`：把这一份设成默认（空 = 取消默认）。页面每次打开从这里起手。
             # 回的还是**整份**档案，前端拿它当唯一真相：不用自己猜"刚才那次写到底成没成"。
@@ -2462,6 +2743,20 @@ class SnapshotDetailerSamplerServer:
                         return
                     self._send_json({'ok': True, 'kind': 'layouts',
                                      'default': store['default'], 'items': store['items']})
+                except Exception as e:
+                    self._send_json({'ok': False, 'error': str(e)}, 500)
+                return
+
+            # Video 资产入库：body = 文件字节，?name= 原文件名。后端落盘 + ffprobe + 按需转
+            # H.264 代理（见 _vid_ingest 顶上的说明）。前端拿回持久 src 喂给 Assets / Tracks。
+            if self.path.startswith('/api/vid_ingest'):
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                    name = (qs.get('name') or ['media'])[0]
+                    length = int(self.headers.get('Content-Length', 0))
+                    raw = self.rfile.read(length) if length else b''
+                    res = _vid_ingest(raw, name)
+                    self._send_json(res, 200 if res.get('ok') else 500)
                 except Exception as e:
                     self._send_json({'ok': False, 'error': str(e)}, 500)
                 return

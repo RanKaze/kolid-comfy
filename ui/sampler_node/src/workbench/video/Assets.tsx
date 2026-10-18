@@ -3,6 +3,7 @@ import {
   type VidController, fmtTime, isAudioName, isVideoName, addAsset, newVidId, removeAsset,
 } from './model';
 import { probeMedia } from './audio';
+import { ingestFile } from './ingest';
 
 // ── Assets 窗（资产库）───────────────────────────────────────────────────────────────────────
 // 时间线的素材都住这里：拖图池条目 / 本地文件进来 = 收一件资产（同 src 只留一份）；把资产行
@@ -20,13 +21,35 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
   const { project: p } = vid;
   const [over, setOver] = useState(false);
 
-  // 收一件资产：探测是异步的 —— 量时长、辨音视频，同 src 的货只留一份。
-  const collect = async (src: string, name: string, origin: 'staging' | 'file') => {
+  // 收一件资产。本地文件：字节 POST 给后端 ffmpeg 入库（持久 URL，见 ingest.ts）——
+  // 后端没有 ffmpeg 时回退前端探测 + blob:（活不过刷新，读档自会剪掉）。
+  // 图池条目：src 是 base64 图片，走前端探测（图片咬不动 = no-op）。
+  const collectFile = async (f: File) => {
+    const ing = await ingestFile(f);
+    if (ing) {
+      vid.update(proj => addAsset(proj, {
+        id: newVidId('as'), name: ing.name, src: ing.src, origin: 'file',
+        kind: ing.audioOnly ? 'audio' : 'video',
+        duration: ing.duration, hasAudio: ing.hasAudio,
+        waveform: ing.waveform,
+      }));
+      return;
+    }
+    const url = URL.createObjectURL(f);
+    const info = await probeMedia(url, isAudioName(f.name) ? 'audio' : 'video');
+    if (!info) return;
+    vid.update(proj => addAsset(proj, {
+      id: newVidId('as'), name: f.name, src: url, origin: 'file',
+      kind: info.audioOnly ? 'audio' : 'video',
+      duration: info.duration, hasAudio: info.hasAudio,
+    }));
+  };
+
+  const collectSource = async (src: string, name: string) => {
     const info = await probeMedia(src, isAudioName(name) ? 'audio' : 'video');
     if (!info) return;
     vid.update(proj => addAsset(proj, {
-      id: newVidId('as'),
-      name, src, origin,
+      id: newVidId('as'), name, src, origin: 'staging',
       kind: info.audioOnly ? 'audio' : 'video',
       duration: info.duration, hasAudio: info.hasAudio,
     }));
@@ -38,12 +61,12 @@ export const VidAssets: React.FC<{ vid: VidController }> = ({ vid }) => {
     const sid = e.dataTransfer.getData(STAGING_ITEM_TYPE);
     if (sid) {
       const item = vid.staging.find(s => s.id === sid);
-      if (item) { void collect(item.src, item.name || sid, 'staging'); return; }
+      if (item) { void collectSource(item.src, item.name || sid); return; }
     }
     for (const f of Array.from(e.dataTransfer.files || [])) {
       const ok = f.type.startsWith('video/') || f.type.startsWith('audio/') || isVideoName(f.name) || isAudioName(f.name);
       if (!ok) continue;
-      void collect(URL.createObjectURL(f), f.name, 'file');
+      void collectFile(f);
     }
   };
 

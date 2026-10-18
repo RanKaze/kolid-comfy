@@ -17,6 +17,7 @@
 export type GlobalKeyHandler = (e: KeyboardEvent) => void;
 
 const handlers = new Set<GlobalKeyHandler>();
+const handlersUp = new Set<GlobalKeyHandler>();
 // 每一帧已经桥过的 document。换页会换掉 document（about:blank → 真页面），所以记的是 doc 而不是帧。
 const bridged = new WeakMap<HTMLIFrameElement, Document>();
 const loadBound = new WeakSet<HTMLIFrameElement>();
@@ -28,6 +29,11 @@ const dispatch = (e: KeyboardEvent): void => {
   // 拷贝一份再遍历：监听里注册/注销自己（比如切换模式时重建）不该让这一轮少听一个人。
   for (const h of [...handlers]) {
     try { h(e); } catch { /* 一个监听炸了，不该让其他热键跟着哑掉 */ }
+  }
+};
+const dispatchUp = (e: KeyboardEvent): void => {
+  for (const h of [...handlersUp]) {
+    try { h(e); } catch { /* 同上 */ }
   }
 };
 
@@ -42,6 +48,9 @@ const bridge = (f: HTMLIFrameElement): void => {
   if (!doc || bridged.get(f) === doc) return;
   bridged.set(f, doc);
   doc.addEventListener('keydown', dispatch, true);
+  // keyup 也要桥 —— "按住某键"的手势（C = 剃刀）必须知道松手；焦点在画布里时它同样只到
+  // iframe 的 document。
+  doc.addEventListener('keyup', dispatchUp, true);
 };
 
 const scan = (): void => {
@@ -58,6 +67,7 @@ const bind = (): void => {
   if (bound) return;
   bound = true;
   document.addEventListener('keydown', dispatch, true);
+  document.addEventListener('keyup', dispatchUp, true);
   scan();
   window.addEventListener('load', scan);
   // iframe 是随页面长出来的（prompt 编辑器、preset 编辑器各一扇），长出一层就补一次桥。
@@ -75,6 +85,14 @@ export function onGlobalKey(handler: GlobalKeyHandler): () => void {
   handlers.add(handler);
   bind();
   return () => { handlers.delete(handler); };
+}
+
+/** 松开键的回程（"按住某键"的手势要 `onGlobalKey` + 这个配对用）。窗口失焦时不会有 keyup ——
+ *  调用方自己再挂一个 blur 兜底，别让状态卡在"按住"。 */
+export function onGlobalKeyUp(handler: GlobalKeyHandler): () => void {
+  handlersUp.add(handler);
+  bind();
+  return () => { handlersUp.delete(handler); };
 }
 
 /** `e.key` 或物理键位任一命中就算按下（macOS 的 Option 会把 key 变成符号，见文件头）。 */

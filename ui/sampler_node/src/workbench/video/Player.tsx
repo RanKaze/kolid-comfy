@@ -3,6 +3,7 @@ import {
   type VidController, clipAt, fmtTime, vidDuration,
 } from './model';
 import { decodeAudio, vidAudio } from './audio';
+import { ensureStrip, holdDecoder, markScrubActivity, releaseDecoder, stripFrame } from './previews';
 
 // ── Player 窗（监视器）───────────────────────────────────────────────────────────────────────
 // 播放头落在哪，画面就是最上层视频轨命中的那一段（合成口径"最上层优先"）。声音不走 <video>：
@@ -19,7 +20,6 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   const { project: p, transport, playing } = vid;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const readRef = useRef<HTMLSpanElement | null>(null);
-  const rangeRef = useRef<HTMLInputElement | null>(null);
   const projectRef = useRef(p);
   projectRef.current = p;
   const playingRef = useRef(playing);
@@ -33,47 +33,112 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   const activeIdRef = useRef(activeId);
   const active = useMemo(() => (activeId ? p.clips.find(c => c.id === activeId) ?? null : null), [p, activeId]);
 
-  // scrub 合帧：高频 seek 不直接捅 currentTime，攒到下一帧 rAF 一次 —— 消抖且省解码器。
-  const pendingScrub = useRef<number | null>(null);
-  const scrubRaf = useRef(0);
-
+  // 拖动中盖在 <video> 上的那一格缩略条 —— **补位图**，真帧 seek 落定前的瞬间替身。
+  // 常驻 <img>，ref 直改 src 与显隐：拖动路径上一个 setState 都不发（React 渲染本身
+  // 也是每帧的开销，高刷鼠标下每 move 重渲一次 Player 一样能把帧率拖垮）。
+  const stripImgRef = useRef<HTMLImageElement | null>(null);
+  const stripRef = useRef<string | undefined>(undefined);
+  const lastScrubAt = useRef(0);              // 最近一次交互 tick（拖动刚停就不急着撤图）
+  const pendingTarget = useRef<number | null>(null);  // 在途 seek 的目标（源内时刻）
+  const showStrip = useCallback((u: string) => {
+    const img = stripImgRef.current;
+    if (!img) return;
+    if (stripRef.current !== u) { stripRef.current = u; img.src = u; }
+    img.style.display = 'block';
+    const v = videoRef.current;
+    if (v) v.style.opacity = '0';
+  }, []);
+  const hideStrip = useCallback(() => {
+    stripRef.current = undefined;
+    pendingTarget.current = null;
+    const img = stripImgRef.current;
+    if (img) { img.style.display = 'none'; img.removeAttribute('src'); }
+    const v = videoRef.current;
+    if (v) v.style.opacity = '1';
+  }, []);
   const seek = useCallback((t: number) => {
-    vidAudio.stopAll();
-    transport.set(Math.max(0, t));
+    // 播放中不去动声源：播放循环每帧都会按游标校正（跳跃 = 大偏差 = 自动重起），
+    // 让它自己接手，比这儿每帧 stop 再 start 顺得多。暂停态才立刻消声。
+    if (!playingRef.current) vidAudio.stopAll();
+    // vid.seek 是合流版（rAF 一帧一落 + interactive 标记），scrub 条与按钮都从这走。
+    vid.seek(Math.max(0, t));
+  }, [vid]);
+
+  // 起播一段音频：buffer 解码是异步的，等它回来游标早走了 —— 用**回来那一刻**的游标算源内
+  // 位置；那一段要是不再覆盖游标就作罢（下一帧自会接手）。
+  const startVoice = useCallback(async (id: string, src: string) => {
+    const buf = await decodeAudio(src);
+    if (!buf || !playingRef.current) return;
+    const c = projectRef.current.clips.find(x => x.id === id);
+    if (!c) return;
+    const cur = transport.get();
+    if (!(cur >= c.start && cur < c.start + c.duration)) return;
+    vidAudio.start(id, buf, c.offset + (cur - c.start));
   }, [transport]);
 
   // ── transport 订阅 ── 读数/scrub 条直改；活片段只在换段时走 React；暂停态的画面跟手。
   useEffect(() => {
-    const onTick = () => {
+    const onTick = (interactive?: boolean) => {
       const t = transport.get();
       if (readRef.current) readRef.current.textContent = fmtTime(t);
-      if (rangeRef.current) rangeRef.current.value = String(Math.min(t, durRef.current));
       const c = clipAt(projectRef.current, t, 'video');
       const cid = c?.id ?? null;
       if (cid !== activeIdRef.current) {
         activeIdRef.current = cid;
         setActiveId(cid);
       }
-      if (!playingRef.current) {
-        pendingScrub.current = t;
-        if (!scrubRaf.current) {
-          scrubRaf.current = requestAnimationFrame(() => {
-            scrubRaf.current = 0;
-            const tt = pendingScrub.current;
-            const v = videoRef.current;
-            if (v == null || tt == null) return;
-            const c2 = clipAt(projectRef.current, tt, 'video');
-            // 同段：直接对准源内时刻；换段交给下面的换段 effect。
-            if (v.dataset.clipId === c2?.id && c2 && v.readyState >= 2) {
-              try { v.currentTime = Math.max(0, c2.offset + (tt - c2.start)); } catch { /* not seekable */ }
-            }
-          });
+      if (!playingRef.current && c && interactive) {
+        // 交互跳转（拖标尺 / 拖 scrub 条）＝ PR 式跟手，两层配合：
+        //  * 缩略条那一格**先**盖上去 —— 零延迟的正确画面，seek 落定前的替身；
+        //  * 同时把真 <video> 的 currentTime 直接落过去。合流器保证一帧最多一发，
+        //    且 Chrome 对"seek 在途又设新值"的处理就是中止旧的改追新的 —— 在途延迟
+        //    不累积，画面是**真帧**（全分辨率），不是缩略图的粗步进。
+        markScrubActivity();               // 后台抽条让路：解码器此刻归主 <video>
+        lastScrubAt.current = performance.now();
+        const want = Math.max(0, c.offset + (t - c.start));
+        const u = stripFrame(c.src, c.srcDuration, want);
+        if (u) showStrip(u);
+        const v = videoRef.current;
+        if (v && v.dataset.clipId === c.id && v.readyState >= 1) {
+          const end = c.offset + Math.max(c.duration - 0.02, 0.02);
+          const target = Math.min(Math.max(c.offset, want), end);
+          if (Math.abs(v.currentTime - target) > 0.033) {
+            pendingTarget.current = target;
+            try { v.currentTime = target; } catch { /* not seekable yet */ }
+          }
         }
       }
     };
+    // seek 落定 = 真帧已上屏：撤掉缩略条替身。两个守卫防止拖动中闪替身——
+    //  * 在途 seek 的目标仍是"游标此刻该在的位置"（中途完成的旧 seek 不算数）；
+    //  * 且最近 100ms 内没有新的交互 tick（连续拖动时真帧中途落定也不闪）。
+    //  快 seek 落得太快被守卫拦下时，150ms 后补查一次 —— 别让替身图挂着不走。
+    const tryHideStrip = () => {
+      if (!stripRef.current) return;
+      const t = transport.get();
+      const c2 = clipAt(projectRef.current, t, 'video');
+      const want2 = c2
+        ? Math.min(Math.max(c2.offset, c2.offset + (t - c2.start)), c2.offset + Math.max(c2.duration - 0.02, 0.02))
+        : null;
+      if (pendingTarget.current != null && want2 != null
+        && Math.abs(pendingTarget.current - want2) < 0.06) hideStrip();
+    };
+    const onSeeked = () => {
+      if (!stripRef.current) return;
+      if (performance.now() - lastScrubAt.current < 100) setTimeout(tryHideStrip, 150);
+      else tryHideStrip();
+    };
+    const v0 = videoRef.current;
+    v0?.addEventListener('seeked', onSeeked);
     onTick();
-    return transport.subscribe(onTick);
-  }, [transport]);
+    const un = transport.subscribe(onTick);
+    return () => { un(); v0?.removeEventListener('seeked', onSeeked); };
+  }, [transport, showStrip, hideStrip]);
+
+  // ── 缩略条预热 ── 当前片段一就位就后台抽条，等用户真拖起来时图已经在手上了。
+  useEffect(() => {
+    if (active && active.srcDuration > 0) void ensureStrip(active.src, active.srcDuration);
+  }, [active]);
 
   // ── 换段：换源 + 对准源内时刻。 ──
   useEffect(() => {
@@ -94,12 +159,18 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   }, [activeId]);
 
   // ── 播 / 停 ──
+  const graceRef = useRef(0);   // 纠偏宽限期（performance.now 截止）：起播/换段/纠偏后给解码器追赶的时间
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (playing) { void v.play().catch(() => { /* autoplay guards */ }); }
-    else { v.pause(); vidAudio.stopAll(); }
-  }, [playing, activeId]);
+    if (playing) {
+      // 起播：撤掉拖动时盖着的那一格缩略条 —— 播放循环自己会用 <video> 的画面对上游标。
+      hideStrip();
+      graceRef.current = performance.now() + 900;   // 起跑宽限：解码器热身期不纠偏
+      holdDecoder();                                 // 播放期间后台抽条全程挂起 —— 解码器是正播的
+      void v.play().catch(() => { /* autoplay guards */ });
+    } else { v.pause(); vidAudio.stopAll(); releaseDecoder(); }
+  }, [playing, activeId, hideStrip]);
 
   // ── 播放循环 ── 墙上时钟推进播放头（transport.set，不碰 React）；每帧对音频与画面。
   useEffect(() => {
@@ -114,33 +185,41 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
       const inP = proj.inPoint;
       const outP = proj.outPoint > proj.inPoint ? proj.outPoint : total;
       let np = transport.get() + dt;
-      if (outP > inP && np >= outP) np = inP;            // 范围内循环
-      else if (np >= total) {                            // 片尾停
+      let jumped = false;
+      if (outP > inP && np >= outP) { np = inP; jumped = true; }   // 范围内回绕
+      else if (np >= total) {                                     // 片尾停
         vidAudio.stopAll();
         transport.set(total);
         vid.setPlaying(false);
         return;
       }
       transport.set(np);
-      // 音频：扫进来的起播、扫出去的停。
+      // 音频：覆盖游标的段要播在**游标对应的源内位置**上。已经在播的也要每帧对表 ——
+      // 回绕、拖动、片段被搬动/裁剪，全都是"该听的位置变了"，偏差超 80ms 就重新起播。
       for (const c of proj.clips) {
         if (c.kind !== 'audio') continue;
         const covers = np >= c.start && np < c.start + c.duration;
-        if (covers && !vidAudio.has(c.id)) {
-          void decodeAudio(c.src).then(buf => {
-            const cur = transport.get();
-            if (!buf || !playingRef.current) return;
-            if (!(cur >= c.start && cur < c.start + c.duration)) return;
-            vidAudio.start(c.id, buf, cur - c.start + c.offset);
-          });
-        } else if (!covers && vidAudio.has(c.id)) vidAudio.stop(c.id);
+        if (!covers) { if (vidAudio.has(c.id)) vidAudio.stop(c.id); continue; }
+        if (!vidAudio.has(c.id)) { void startVoice(c.id, c.src); continue; }
+        const got = vidAudio.pos(c.id);
+        if (jumped || got == null || Math.abs(got - (c.offset + (np - c.start))) > 0.08) {
+          void startVoice(c.id, c.src);
+        }
       }
-      // 画面漂移：>0.25s 才纠。
+      // 画面：只在片段自己的范围内跟。越过片段尾就停在末帧 —— 否则 <video> 会顺着源继续往下
+      // 放，画面播的是这段之外的内容，声音却按片段停了，看着就是"声画对不上"。
+      // 纠偏只认**精确 currentTime**（fastSeek 在播放中会拽回一个 GOP，越拽越落后），
+      // 且必须过宽限期 + 偏差够大才动手 —— 起播/跳转头几百毫秒解码器本来就在追赶，
+      // 这时纠偏 = 打断追赶 = 从关键帧重来 = "跳过去之后卡着播几秒"的元凶。
       const v = videoRef.current;
       const av = clipAt(proj, np, 'video');
       if (v && av && v.dataset.clipId === av.id && v.readyState >= 2) {
-        const expected = av.offset + (np - av.start);
-        if (Math.abs(v.currentTime - expected) > 0.25) {
+        const endT = av.offset + Math.max(av.duration - 0.02, 0.02);
+        const expected = Math.min(av.offset + (np - av.start), endT);
+        if (v.currentTime >= endT - 0.03) { if (!v.paused) v.pause(); }
+        else if (v.paused) { void v.play().catch(() => { /* autoplay guards */ }); }
+        if (jumped || (performance.now() >= graceRef.current && Math.abs(v.currentTime - expected) > 0.3)) {
+          graceRef.current = performance.now() + 600;   // 纠一次给一次宽限，别连环纠
           try { v.currentTime = expected; } catch { /* not seekable */ }
         }
       }
@@ -149,7 +228,7 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing]);
+  }, [playing, startVoice]);
 
   // ── 收摊：这扇窗被藏起来（切模式 / 切 tab）就停干净。 ──
   useEffect(() => {
@@ -169,9 +248,14 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', background: '#0d0d0d', minWidth: 0, overflow: 'hidden' }}>
       {/* 画面。 */}
-      <div style={{ flex: 1, minHeight: 0, position: 'relative', background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div data-vid-screen="" style={{ flex: 1, minHeight: 0, position: 'relative', background: '#0d0d0d', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <video ref={videoRef} muted playsInline
           style={{ width: '100%', height: '100%', objectFit: 'contain', display: active ? 'block' : 'none' }} />
+        {/* 拖动途中的画面：缩略条上的一格，盖住 <video> —— 换索引而已，解码器不动。
+            常驻节点，src/显隐由 transport 订阅者按 ref 直改（见 showStrip/hideStrip），
+            停手对齐完成后撤掉，露出全分辨率的那一帧。 */}
+        <img ref={stripImgRef} data-vid-strip="" alt="" decoding="async"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none', display: 'none' }} />
         {!active && (
           <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'rgba(255,255,255,0.28)', fontSize: 12, textAlign: 'center', padding: 20 }}>
             No clip under the playhead.<br />Drop videos onto the Tracks window below.
@@ -196,16 +280,12 @@ export const VidPlayer: React.FC<{ vid: VidController; visible: boolean }> = ({ 
           {playing ? '⏸' : '▶'}
         </button>
         <button style={tCtrl} title="Stop — pause and return to the In point" onClick={() => { seek(inSet ? p.inPoint : 0); vid.setPlaying(false); }}>⏹</button>
-        <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.65)', fontVariantNumeric: 'tabular-nums', marginLeft: 4 }}>
+        {/* 读数靠右：右边原来那条进度条撤掉了 —— 拖游标在时间线的标尺上做（那里才是它的家），
+            监视器下面再放一条重复的进度条只会让人以为它是另一个控件。 */}
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'rgba(255,255,255,0.65)', fontVariantNumeric: 'tabular-nums' }}>
           <span ref={readRef}>{fmtTime(transport.get())}</span>
           <span style={{ color: 'rgba(255,255,255,0.3)' }}> / {fmtTime(dur)}</span>
         </span>
-        <div style={{ flex: 1 }} />
-        {/* scrub 条：与播放头双向绑定（value 由 transport 订阅者直改，不走 React）。 */}
-        <input ref={rangeRef} type="range" min={0} max={Math.max(dur, 0.1)} step={0.01}
-          defaultValue={Math.min(transport.get(), Math.max(dur, 0.1))}
-          onChange={e => seek(parseFloat(e.target.value))}
-          style={{ flex: 1, minWidth: 60, accentColor: '#ff453a' }} title="Scrub" />
       </div>
     </div>
   );
