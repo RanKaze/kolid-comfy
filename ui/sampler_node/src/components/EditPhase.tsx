@@ -10,6 +10,10 @@ import { registerProbe, note } from '../debug/probe';
 import { onGlobalKey, keyIs } from '../hotkeys';
 import { WORKBENCH_PANEL_IDS, WORKBENCH_TITLES, WORKBENCH_HINTS, workbenchBodies, workbenchFoots } from '../workbench/registry';
 import { unitIcon } from '../workbench/icons';
+import { type VidController, type VidProject, createVidTransport, loadVidProject, saveVidProject } from '../workbench/video/model';
+import { VidTimeline } from '../workbench/video/Timeline';
+import { VidAssets } from '../workbench/video/Assets';
+import { VidPlayer } from '../workbench/video/Player';
 
 // The rename field of a preset row.
 const tabInputStyle: React.CSSProperties = {
@@ -33,11 +37,14 @@ const tabInputStyle: React.CSSProperties = {
 type SectionKey = UnitId;
 // 宿主自己的五格 + 工作台搬过来的那些格（一块一个文件，由注册表点名）合成这一页的固定集。
 const HOST_PANEL_IDS: UnitId[] = ['toolbar', 'context', 'pipeline', 'preprocess', 'blocks'];
-const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS];
+// vtracks 是**默认提供**的常驻窗（Image 模式=空态卡，Video 模式=时间线）。播放器不单独占窗：
+// Video 模式下 Workbench 窗（id 'canvas'）的正文整个换成播放器 —— 全页只有 Workbench 窗的
+// 标题条上有一颗 Image/Video 切换（见 heads）。
+const PANEL_IDS: UnitId[] = [...HOST_PANEL_IDS, ...WORKBENCH_PANEL_IDS, 'vtracks', 'vassets'];
 const COLUMN_IDS: UnitId[] = ['context', 'pipeline', 'preprocess', 'blocks'];
 const UNIT_TITLES: Record<string, string> = {
   toolbar: 'File', context: 'Context', pipeline: 'Pipeline & Presets', preprocess: 'Preprocess',
-  blocks: 'Pipeline Blocks',
+  blocks: 'Pipeline Blocks', vtracks: 'Tracks', vassets: 'Assets',
   ...WORKBENCH_TITLES,
 };
 const COLUMN_W = 340;
@@ -45,6 +52,12 @@ const COLUMN_W = 340;
 const RIGHT_W = 280;
 const TOP_H = 60;
 const DOCK_STORE = 'sampler.drawDock';
+// ── Video 模式 ── **同一棵 dock 树**的第二种活法：切过去时只动两处 —— Workbench 那格
+// （id 'canvas'）的正文换成播放器，'vtracks'（时间线）缺了就补进树里（插在 canvas 窗下面）。
+// **其它每一扇窗原地不动。** vtracks 一旦进树就不再被剪：切回 Image 时它的正文换成空态卡，
+// 位置保留，来回切换不重排任何东西。
+const VID_MODE_STORE = 'sampler.vidMode';
+export type VidMode = 'image' | 'video';
 // A canvas window pops out at a working size. A settings card gets the dock's default 300px strip;
 // a project the user dragged out of the tab strip wants to be painted on.
 const DOC_POP_W = 760, DOC_POP_H = 560;
@@ -73,7 +86,7 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
   // false，而树里存档的画布窗口已经要按文档窗对待（不折叠、按份额长、满幅）—— 否则播报一到，尺寸
   // 和折叠行为会当场跳一遍。docUidOf 只看形状，正好是这个口径。
   const isDocUnit = (id: UnitId) => docUidOf(id) !== null;
-  return {
+  const rules: DockRules = {
     store: DOCK_STORE,
     panels: PANEL_IDS,
     known: (id: UnitId) => PANEL_IDS.includes(id) || isDocUnit(id),
@@ -99,18 +112,20 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     // bar already has a job — it says which project the workbench is running.
     // (Folding only exists inside a container block, so a document there — like anywhere — has no fold.)
     foldable: (id: UnitId) => !isDocUnit(id),
-    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar',
+    fullBleed: (id: UnitId) => isDocUnit(id) || id === 'toolbar' || id === 'vtracks' || id === 'vassets',
     // Layers 与 Guidances 是这一列里唯二两格「行会一直长」的面板：它们没有可用来定高的内容，所以放进
     // 容器（Vertical/Horizontal 的 Block）里时按份额分块的余量，而不是把整份列表高度顶出去让块滚到天边。
-    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances',
+    // 时间线与资产库同理：两份会一直长的列表。
+    grows: (id: UnitId) => isDocUnit(id) || id === 'layers' || id === 'guidances' || id === 'vtracks' || id === 'vassets',
     top: 'toolbar',
     // 顶栏那一块的高度是页面写死的：它是**唯一**一块由内容高度（一排按钮 32px + 自己的标题条）定尺寸的
     // 地方，而布局本身不再看内容。其余每一块都由份额或用户拖出来的像素说话。
     topH: TOP_H,
     column: COLUMN_IDS,
     columnW: COLUMN_W,
-    // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里。
-    right: WORKBENCH_PANEL_IDS,
+    // 画布右边那一列：工作台搬出来的面板按注册表的序叠在这里，Assets / Tracks 是普通成员
+    // （默认窗，不靠任何切换逻辑出现）。
+    right: [...WORKBENCH_PANEL_IDS, 'vassets', 'vtracks'],
     rightW: RIGHT_W,
     // The size a NEW block opens at — asked per unit and per axis, because which axis the block will be
     // measured on is decided by the side it was dropped on (under a block it is a height, beside one it
@@ -118,9 +133,12 @@ const dockRulesFor = (docs: readonly BlendDoc[]): DockRules => {
     blockSize: (id: UnitId, axis: 'v' | 'h') => {
       if (id === 'toolbar') return axis === 'v' ? TOP_H : 240;
       if (isDoc(id)) return axis === 'v' ? DOC_BLOCK_H : DOC_BLOCK_W;
+      if (id === 'vtracks') return axis === 'v' ? 320 : 900;
+      if (id === 'vassets') return axis === 'v' ? 260 : PANEL_BLOCK_W;
       return axis === 'v' ? PANEL_BLOCK_H : PANEL_BLOCK_W;
     },
   };
+  return rules;
 };
 // The document actions, in the order the retired `#fileMenu` listed them. Their tooltips are that
 // menu's, carried over word for word — only Load's had to change, because a .cud no longer opens as a
@@ -492,6 +510,14 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   });
   // Where each unit sits — stacked, side by side, tabbed together, or popped out over the workbench —
   // is the user's layout call and lives in its own key; which are collapsed is a separate one.
+  // ── Video 模式 ── 页面级的第二形态，刷新后留在上次的模式里（localStorage 一位）。
+  // 只改两处：canvas 格正文换播放器（见 bodies）、'vtracks' 缺了补进树 —— 树与存档都是同一份。
+  const vidMode0: VidMode = (() => {
+    try { return localStorage.getItem(VID_MODE_STORE) === 'video' ? 'video' : 'image'; } catch { return 'image'; }
+  })();
+  const [vidMode, setVidModeState] = useState<VidMode>(vidMode0);
+  const vidModeRef = useRef(vidMode);
+  vidModeRef.current = vidMode;
   const dockRules = useMemo(() => dockRulesFor(blendDocs.docs), [blendDocs]);
   const [dock, setDockState] = useState<Dock>(() => loadDock(dockRulesFor([])));
   // 「此刻的布局」的 ref：开机那一次写档要用它（见下面 `?nolayout` 那一支），而它不该成为那个
@@ -502,6 +528,46 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     setDockState(next);
     if (persist) { try { localStorage.setItem(DOCK_STORE, JSON.stringify(next)); } catch { /* in-memory only */ } }
   }, []);
+  // 模式切换不动树：vtracks 本来就是默认提供的窗（起手树 / fitLayout 补缺都保证它在）。
+  // 切换只换两格的正文 —— canvas ↔ 播放器、vtracks ↔ 时间线/空态卡 —— 其它每一扇窗原地不动。
+  const setVidMode = useCallback((m: VidMode) => {
+    if (m === vidModeRef.current) return;
+    try { localStorage.setItem(VID_MODE_STORE, m); } catch { /* in-memory only */ }
+    vidModeRef.current = m;
+    setVidModeState(m);
+  }, []);
+  // ── Video 工程状态 ── 权威在宿主：Player / Tracks 两扇窗都从这里拿快照（VidController），
+  // 改动防抖落盘 localStorage（blob: 的本地图活不过刷新，读档时自会剪掉）。
+  // 播放头不住这里：它每帧都在走，走 React state 会把整页拖着每秒重渲几十次（scrub 卡顿的根子）。
+  // 它住外置 transport —— Player/Timeline 订阅它直改 DOM，React 只管低频的事。
+  const [vidProject, setVidProject] = useState<VidProject>(loadVidProject);
+  const [vidTransport] = useState(createVidTransport);
+  const [vidPlaying, setVidPlaying] = useState(false);
+  const [vidPps, setVidPps] = useState(60);
+  const vidUpdate = useCallback((fn: (p: VidProject) => VidProject) => setVidProject(fn), []);
+  useEffect(() => {
+    const t = setTimeout(() => saveVidProject(vidProject), 400);
+    return () => clearTimeout(t);
+  }, [vidProject]);
+  const vidCtl: VidController = useMemo(() => ({
+    project: vidProject, transport: vidTransport, playing: vidPlaying, pps: vidPps,
+    staging, update: vidUpdate, seek: t => vidTransport.set(t), setPlaying: setVidPlaying, setPps: setVidPps,
+  }), [vidProject, vidTransport, vidPlaying, vidPps, staging, vidUpdate]);
+  // 切回 Image 模式就停播（Player 对 visible 也停了一遍，这里兜底 —— 两扇窗那时已不在树里）。
+  useEffect(() => {
+    if (vidMode !== 'video') setVidPlaying(false);
+  }, [vidMode]);
+  // 模式切换的分段控件：**只钉在工程画布大窗（文档窗）标题条右上**、toolbar 化按钮的左边 ——
+  // 那扇窗就是 Video 模式的播放器宿主。其它任何窗上都不出现。
+  const vidModeSeg = (
+    <div style={styles.modeSeg} role="tablist" title="Workbench mode">
+      {(['image', 'video'] as VidMode[]).map(m => (
+        <button key={m} style={{ ...styles.modeSegBtn, ...(vidMode === m ? styles.modeSegOn : null) }}
+          title={m === 'image' ? 'Image — the canvas workbench' : 'Video — player & timeline'}
+          onClick={e => { e.stopPropagation(); setVidMode(m); }}>{m === 'image' ? 'Image' : 'Video'}</button>
+      ))}
+    </div>
+  );
   // The dock holds a window for every document the workbench has open and nothing more: a closed one
   // loses its node, a newly loaded one gets a window, one the user already placed keeps its place.
   // The workbench is the only thing that knows which projects exist, so this is where that knowledge
@@ -664,7 +730,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
     // No box, or a box that is folded away (display:none measures zero): the frame stays mounted, it
     // just has nowhere to be. Unmounting it here would reload the workbench.
     let next: { x: number; y: number; w: number; h: number } | null = null;
-    if (host && body && body.clientWidth > 0 && body.clientHeight > 0) {
+    // Video 模式：活跃文档窗的正文是播放器，活画布 iframe 让位 —— 停在屏外（不卸载，不重载），
+    // 切回 Image 模式这一帧量回原位，工作台接着用。
+    if (host && body && vidModeRef.current !== 'video' && body.clientWidth > 0 && body.clientHeight > 0) {
       const a = body.getBoundingClientRect(), b = host.getBoundingClientRect();
       next = { x: Math.round(a.left - b.left), y: Math.round(a.top - b.top), w: Math.round(a.width), h: Math.round(a.height) };
     }
@@ -688,12 +756,17 @@ const EditPhase: React.FC<EditPhaseProps> = ({
   // its own box is only the dark ground beneath it; every other window holds the last frame that
   // project painted before the workbench switched away from it. A document the workbench never showed
   // — a 3D scene, whose canvas is not a composite this page can flatten — is simply dark.
+  // Video 模式下例外：**活跃文档窗的正文整个换成播放器**（那扇大窗就是 Video 的监视器），
+  // 其余文档窗照旧显示各自的静帧。
   const docBodies: Record<UnitId, React.ReactNode> = {};
   for (const d of blendDocs.docs) {
-    const still = d.uid === blendDocs.activeUid ? null : docStills[d.uid];
-    docBodies[docUnit(d.uid)] = still
-      ? <img src={still} alt={d.name} style={styles.docStill} />
-      : <div style={styles.docVoid} />;
+    const active = d.uid === blendDocs.activeUid;
+    const still = active ? null : docStills[d.uid];
+    docBodies[docUnit(d.uid)] = active && vidMode === 'video'
+      ? <VidPlayer vid={vidCtl} visible={tab === 'draw'} />
+      : still
+        ? <img src={still} alt={d.name} style={styles.docStill} />
+        : <div style={styles.docVoid} />;
   }
   // 关掉一份工程的那颗 ✕ **跟着它自己的名字走**（DockCtx.tabOps）：一扇窗的标题条是"窗"的，那条
   // 栏上的键对整扇窗说话（折叠 / 浮出 / 收成条）；而"关掉这一份"是一个 tab 的事 —— 所以它站在那
@@ -1274,6 +1347,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
                 // 文档的 ✕ 不在这条栏上 —— 它跟着 tab 走（见 docTabOps / tabOps）。
                 tabOps: (u: UnitId) => docTabOps[u] ?? null,
                 heads: {
+                  // 模式切换**只住这一处**：工程画布大窗（文档窗，doc:*）标题条右上、toolbar 化
+                  // 按钮左边 —— 那扇窗就是 Video 模式的播放器宿主，别的窗一概不给。
+                  ...Object.fromEntries(blendDocs.docs.map(d => [docUnit(d.uid), vidModeSeg])),
                   context: (<>
                     {/* Log：画布上那颗常显状态药丸撤掉后，工作台的每一句反馈都攒在这里
                         （工作台 setStatus + 宿主自身动作，最近 32 条）。 */}
@@ -1307,6 +1383,9 @@ const EditPhase: React.FC<EditPhaseProps> = ({
               // 工作台搬出来的那几格：宿主只发指令，正文每格自己读那份快照。Staging 那一格还要
               // 一小把宿主事实 —— 图池镜像、画布合成预览、以及图池的两个后端写口（`wbHost`）。
               ...workbenchBodies(onBlendUiCommand, wbHost),
+              // Tracks / Assets 是常驻的普通窗：Video 模式显示各自正文，Image 模式正文留空。树一概不动。
+              vtracks: vidMode === 'video' ? <VidTimeline vid={vidCtl} /> : null,
+              vassets: vidMode === 'video' ? <VidAssets vid={vidCtl} /> : null,
               context: (<>
                 <div style={styles.dockCard}>
                   <div style={styles.contextPreviewWrap}>
@@ -2894,6 +2973,10 @@ const styles: Record<string, React.CSSProperties> = {
   // The toolbar unit is a row of the File actions — the same pill vocabulary as the sibling units'
   // head buttons, laid out left to right instead of hanging off a title.
   fileBar: { display: 'flex', alignItems: 'center', gap: 5, padding: '5px 6px', flexWrap: 'wrap' },
+  // 模式切换（Image / Video）：一枚 iOS 式小分段控件，贴在 File 那一排的最左。
+  modeSeg: { display: 'flex', padding: 2, borderRadius: 999, background: 'rgba(255,255,255,0.08)', flexShrink: 0, gap: 2 },
+  modeSegBtn: { fontSize: 10.5, fontWeight: 600, padding: '2px 10px', borderRadius: 999, cursor: 'pointer', background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.55)', lineHeight: 1.5 },
+  modeSegOn: { background: 'rgba(10,132,255,0.85)', color: '#fff' },
   fileBtn: {
     fontSize: 10.5, fontWeight: 600, padding: '3px 10px', borderRadius: 999, cursor: 'pointer',
     background: 'rgba(255,255,255,0.07)', border: '0.5px solid rgba(255,255,255,0.16)',

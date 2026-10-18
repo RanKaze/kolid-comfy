@@ -111,6 +111,24 @@ const FxParams: UnitIcon = p => <Svg {...p}>
   <circle cx="14.1" cy="9.1" r="1" fill="currentColor" stroke="none" />
 </Svg>;
 
+// ── Video 模式的两格 ──
+// Player：一块幕布 + 播放角。Tracks：三条轨，其中一条上摆着一段片段。
+const VPlayer: UnitIcon = p => <Svg {...p}>
+  <rect x="1.9" y="2.9" width="12.2" height="9.4" rx="1.6" />
+  <path d="M6.7 5.6 10.4 7.6 6.7 9.6z" fill="currentColor" stroke="none" />
+  <path d="M5.2 13.6h5.6" />
+</Svg>;
+const VTracks: UnitIcon = p => <Svg {...p}>
+  <path d="M1.9 3.9h12.2M1.9 12.2h12.2M1.9 8.1h12.2" opacity="0.55" />
+  <rect x="4.1" y="6.7" width="6.4" height="2.8" rx="0.7" fill="currentColor" stroke="none" />
+</Svg>;
+const VAssets: UnitIcon = p => <Svg {...p}>
+  {/* 资产库：一只素材箱，箱口叠着一帧片子。 */}
+  <rect x="2.4" y="6.4" width="11.2" height="7.2" rx="1.4" />
+  <path d="M5.4 6.4V3.4h5.2v3" />
+  <path d="M7 9.1 9.7 10.5 7 11.9z" fill="currentColor" stroke="none" />
+</Svg>;
+
 // 一格分栏：外框里一条竖缝、一条横缝。它是一份**摆法**的记号，不是任何一扇窗的。
 const Layout: UnitIcon = p => <Svg {...p}>
   <rect x="1.9" y="2.4" width="12.2" height="11.2" rx="1.6" />
@@ -163,6 +181,8 @@ export const UNIT_ICONS: Record<string, UnitIcon> = {
   text: Text, geometry: Geometry, scene3d: Scene3d, pose: Pose, detector: Detector,
   processor: Processor, guidances: Guidances, layers: Layers, history: History, fxParams: FxParams,
   layout: Layout,
+  // Video 模式
+  vplayer: VPlayer, vtracks: VTracks, vassets: VAssets,
   // 宿主
   toolbar: File, context: Context, pipeline: Pipeline, preprocess: Preprocess, blocks: Blocks,
 };

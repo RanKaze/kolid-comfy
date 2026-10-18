@@ -96,6 +96,9 @@ export type DockRules = {
   // Only the page can answer: a window of cards that scrolls has no height of its own, and the frame
   // measures nothing. This is the same question `popSize` answers for a popped-out window.
   blockSize: (id: UnitId, axis: 'v' | 'h') => number;
+  // 这页自己的默认树。缺省走 `defaultDock`（top + column + work + right 那套）—— 那套假设页面
+  // 至少有一根 column；像 Video 模式这种"几扇窗平铺"的页面得自己答。
+  fallback?: () => Dock;
 };
 
 // `sz` is the size the user dragged this node to along its PARENT split's axis; absent means
@@ -308,7 +311,7 @@ const RETIRED_UNITS: UnitId[] = ['mask'];
 // 文档都没播报过；此刻把 doc:* 剪掉，等播报到来就只能按"新来的文档"安放 —— 画布窗口每次刷新都
 // 跳回默认位置。剪掉的活儿交给 syncDocUnits，那一侧才知道"哪份文档真的没开"。
 export function loadDock(rules: DockRules): Dock {
-  const fallback = defaultDock(rules);
+  const fallback = rules.fallback ? rules.fallback() : defaultDock(rules);
   try {
     const raw = localStorage.getItem(rules.store);
     if (!raw) return fallback;
@@ -333,6 +336,7 @@ export type LayoutFit = {
 };
 
 export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
+  const fallbackTree = () => (rules.fallback ? rules.fallback().tree : defaultDock(rules).tree);
   const saved = value as { tree?: unknown; floats?: unknown } | null;
   if (!saved || typeof saved !== 'object' || !isNode(saved.tree)) return null;
   const ok = (id: UnitId) => !RETIRED_UNITS.includes(id) && (rules.known(id) || !!docUidOf(id));
@@ -346,7 +350,7 @@ export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
   };
   walk(saved.tree);
   // 整棵树都被剪空（一份全是老面板的存档）时退回默认的那棵树，而不是硬留一棵认不出的树。
-  let tree = keepOnly(saved.tree, ok) ?? defaultDock(rules).tree;
+  let tree = keepOnly(saved.tree, ok) ?? fallbackTree();
 
   // 浮窗：同一个筛子，另加"一扇窗不能有两条记录"—— 两条记录就是两个视口压在同一份可变状态上。
   // 坐标也顺手夹一道：存档里一个 NaN 能把这扇窗丢到画布外，用户看到的是"布局丢了"。
@@ -372,7 +376,7 @@ export function fitLayout(rules: DockRules, value: unknown): LayoutFit | null {
   // 一块"有。
   const all = dockUnits(tree).concat(floats.map(f => f.id));
   const dupes = all.filter((id, i) => all.indexOf(id) !== i);
-  if (dupes.length) tree = detachAll(tree, dupes) ?? defaultDock(rules).tree;
+  if (dupes.length) tree = detachAll(tree, dupes) ?? fallbackTree();
 
   // 缺的面板进"最长的那个块"：一块里单元最多的地方就是用户心里的那一列，而"它当初放哪儿"这份
   // 布局并没有说（那正是它缺着的原因）。

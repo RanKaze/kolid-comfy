@@ -24,6 +24,7 @@ const CanvasBody: React.FC<WorkbenchUnitProps> = ({ send }) => {
 };
 
 export const canvasUnit: WorkbenchUnit = {
+  // 这扇窗与 Video 模式**无关**：两种模式下都是画布设置本体（播放器住文档窗里，见 EditPhase）。
   id: 'canvas',
   title: 'Canvas',
   hint: 'The canvas keeps its resolution while layers come and go. Until you set one by hand it grows '
